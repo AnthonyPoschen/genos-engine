@@ -7,6 +7,7 @@ mod camera;
 mod codimation;
 mod debug_settings;
 mod event_loop;
+mod fog;
 mod fps_counter;
 mod lighting;
 mod menu;
@@ -21,6 +22,11 @@ pub use camera::{
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
 pub use event_loop::EventLoopSettings;
+pub use fog::{
+    apply_fog_arg, check_fog_arg, fog_flag_needs_value, parse_fog_count, parse_fog_grid,
+    parse_fog_number, parse_fog_switch,
+    FogCli, FogEnv, FogInspect, FogSettings, FogShape, FogVolume,
+};
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{

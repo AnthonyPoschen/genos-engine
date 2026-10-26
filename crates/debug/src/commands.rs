@@ -112,8 +112,26 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(fog_specs())
     .chain(host_specs())
     .collect()
+}
+
+fn fog_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_fog_settings",
+            "The fog settings in force (text form): enabled, density, height, thickness, albedo, phase_g, gi, history, grid_width, grid_height, grid_slices, samples, and volume lines. Zero on a grid axis keeps the preset axis. Zero samples dispatches that grid whole. view is the debug page (extinction, inscatter, transmittance, history, age, budget, volumes) and is not in the text. --fog and the other fog flags win over GENOS_FOG and the other mirrors, which win over the scene value. History is stored and is not blended.",
+        ),
+        spec(
+            "set_fog_settings",
+            "Partial fog update. Keys match the settings text, plus view and clear_volumes. A text field overlays key=value lines. Writes the scene. Launch flags and their mirrors overlay the fields they set on the next frame.",
+        ),
+        spec(
+            "get_fog_stats",
+            "Fog counters: dispatches, samples_used, samples_capped, grid_width, grid_height, grid_slices, dispatched_width, dispatched_height, dispatched_slices, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. samples_used is the samples setting (0 keeps every cell). The dispatched_* fields are the grid the frame runs. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not graded against an RTX 4070 ceiling.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {

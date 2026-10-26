@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, Light,
+    LightingPreset, LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -1300,6 +1300,12 @@ impl Tools {
                 apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
                 reply(event_loop_value(&ctx.host.scene().event_loop))
             }
+            "get_fog_settings" => reply(fog_settings_value(&ctx.host.scene().fog)),
+            "set_fog_settings" => {
+                apply_fog_update(&mut ctx.host.scene().fog, args.0)?;
+                reply(fog_settings_value(&ctx.host.scene().fog))
+            }
+            "get_fog_stats" => reply(fog_stats_value(ctx.host.scene(), ctx.renderer)),
             "get_menu_settings" => reply(menu_value(&ctx.host.scene().menu.effective())),
             "set_menu_settings" => {
                 apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
@@ -1806,6 +1812,97 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn fog_settings_value(settings: &FogSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("density", num(f64::from(settings.density))),
+        ("height", num(f64::from(settings.height))),
+        ("thickness", num(f64::from(settings.thickness))),
+        ("albedo", num(f64::from(settings.albedo))),
+        ("phase_g", num(f64::from(settings.phase_g))),
+        ("gi", Value::Bool(settings.gi)),
+        ("history", Value::Bool(settings.history)),
+        ("grid_width", num(f64::from(settings.grid_width))),
+        ("grid_height", num(f64::from(settings.grid_height))),
+        ("grid_slices", num(f64::from(settings.grid_slices))),
+        ("samples", num(f64::from(settings.samples))),
+        ("view", text(settings.inspect.name())),
+        ("view_line", text(settings.inspect_line())),
+    ])
+}
+
+fn apply_fog_update(settings: &mut FogSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("fog settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("fog line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fog_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn fog_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{n:.0}"));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("a fog value is a string, number, or bool".into())
+}
+
+fn fog_stats_value(scene: &Scene, renderer: &Renderer) -> Value {
+    let probe = renderer.fog_frame_probe(&scene.fog, scene.lighting.preset);
+    let bytes = u32::try_from(probe.vram_bytes).unwrap_or(u32::MAX);
+    obj(vec![
+        ("dispatches", num(f64::from(probe.dispatches))),
+        ("samples_used", num(f64::from(probe.samples_used))),
+        ("samples_capped", num(f64::from(probe.samples_capped))),
+        ("grid_width", num(f64::from(probe.grid_width))),
+        ("grid_height", num(f64::from(probe.grid_height))),
+        ("grid_slices", num(f64::from(probe.grid_slices))),
+        ("dispatched_width", num(f64::from(probe.dispatched_width))),
+        ("dispatched_height", num(f64::from(probe.dispatched_height))),
+        (
+            "dispatched_slices",
+            num(f64::from(probe.dispatched_slices)),
+        ),
+        ("history_accepts", num(f64::from(probe.history_accepts))),
+        ("history_rejects", num(f64::from(probe.history_rejects))),
+        ("vram_bytes", num(f64::from(bytes))),
+        ("pass_ms", num(probe.pass_ms)),
+        (
+            "pass_ms_label",
+            text("last frame lavapipe timestamp when fog dispatched; 0 before that frame. Not graded against an RTX 4070 ceiling. History stays off."),
+        ),
+        ("view", text(scene.fog.inspect.name())),
+        ("view_line", text(scene.fog.inspect_line())),
+        ("history_weight", num(0.0)),
+    ])
 }
 
 fn fps_counter_value(settings: &FpsCounterSettings) -> Value {

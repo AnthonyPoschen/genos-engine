@@ -219,14 +219,20 @@ Role: SAMPLE · Literature: Henyey and Greenstein 1941; Hillaire 2015 · More de
 **Froxel**: one cell of the frustum-aligned volume grid.
 Role: STORE · Literature: Hillaire 2015 (frustum voxel); Wronski, SIGGRAPH 2014 · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
 
-**Froxel grid**: the 3D grid of froxels. Its size is a preset, not the picture size.
+**Froxel grid**: the 3D grid of froxels. Zero width, height, or slices keeps that axis of the lighting preset (Low 64×36×24, Medium 96×54×32, High 160×90×48). A set axis replaces it. The size is not the picture size.
 Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Froxel sample count**: the cell budget for that grid. Zero dispatches every cell. A positive count drops slices, then rows, then columns until the grid fits, so a later auto-tune can write it.
+Role: TOOL · Literature: Hillaire 2015 (froxel resolution) · More detail: [fog design §13](../systems/fog-and-volumetric-lighting-design.md)
 
 **Height fog**: extinction that depends only on world height.
 Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: `density * exp(-(y - height) / thickness)`
 
 **Local fog volume**: a box or a sphere of analytic density added into the froxel grid.
 Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**View-aligned volume sample**: a local-volume in-scatter tap moved onto the line parallel to the view through that volume's screen position. Extinction stays on the view ray.
+Role: SAMPLE · Literature: departure from Hillaire 2015, who samples the view ray · More detail: `froxel_align` in [`froxel_common.glsl`](../../crates/render/shaders/froxel_common.glsl)
 
 **Light shaft**: a beam made visible by shadowed direct light in the medium.
 Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)

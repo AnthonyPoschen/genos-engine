@@ -37,22 +37,188 @@ fn analytic_broken_fails_each_metric() {
     assert!(beer.value.unwrap() > 0.3, "{beer:?}");
 }
 
-#[test]
-fn feature_metrics_are_not_implemented() {
-    let report = evaluate(Suite::Feature, Fixture::Good);
-    let lines = format_lines(&report);
-    assert_eq!(exit_code(&report), 0, "{lines}");
-    assert!(report.metrics.len() > 5);
-    for line in lines.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 4, "{line}");
-        assert_eq!(fields[1], "-", "{line}");
-        assert_eq!(fields[3], "NOT-IMPLEMENTED", "{line}");
+const MS_ROWS: &[&str] = &[
+    "froxel_ms_potato",
+    "froxel_ms_low",
+    "froxel_ms_medium",
+    "froxel_ms_high",
+];
+
+fn assert_graded_rows_pass(report: &genos_fog_check::Report) {
+    let lines = format_lines(report);
+    for metric in &report.metrics {
+        assert_ne!(
+            metric.status,
+            Status::Fail,
+            "{}\n{lines}",
+            metric.name
+        );
+    }
+    assert_eq!(exit_code(report), 0, "{lines}");
+    for name in MS_ROWS {
+        let row = metric(report, name);
+        assert_eq!(row.status, Status::NotImplemented, "{row:?}\n{lines}");
+        assert!(row.value.is_some(), "{row:?}\n{lines}");
+        assert!(!row.note.is_empty(), "{row:?}");
     }
     for metric in &report.metrics {
-        assert_eq!(metric.value, None, "{}", metric.name);
-        assert!(!metric.note.is_empty(), "{}", metric.name);
+        if metric.status == Status::NotImplemented && !MS_ROWS.contains(&metric.name) {
+            assert_eq!(metric.value, None, "{}", metric.name);
+            assert!(!metric.note.is_empty(), "{}", metric.name);
+        }
     }
+}
+
+#[test]
+fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
+    let report = evaluate(Suite::Feature, Fixture::Good);
+    let lines = format_lines(&report);
+    println!("{lines}");
+    assert_graded_rows_pass(&report);
+    assert!(report.metrics.len() > 5);
+    for name in [
+        "froxel_temporal_smear_px",
+        "fog_yaw_pop_rel",
+        "local_volume_leak",
+        "sphere_volume_leak",
+        "shaft_shadow_blur_rel",
+        "media_path_blur_rel",
+        "near_fog_blur_rel",
+        "fog_still_flicker",
+        "frame_column_abs",
+        "frame_picture_unchanged",
+        "froxel_vram_potato_mb",
+        "froxel_vram_low_mb",
+        "froxel_vram_medium_mb",
+        "froxel_vram_high_mb",
+    ] {
+        let row = metric(&report, name);
+        assert_eq!(row.status, Status::Pass, "{row:?}\n{lines}");
+        assert!(row.value.is_some(), "{}", row.name);
+    }
+    let leak = metric(&report, "local_volume_leak");
+    assert!(leak.value.unwrap() <= leak.threshold);
+    let gi = metric(&report, "gi_inscatter_blur_rel");
+    assert_eq!(gi.value, None);
+    assert_eq!(gi.status, Status::NotImplemented);
+    let potato = metric(&report, "froxel_ms_potato");
+    assert_eq!(potato.value, Some(0.0));
+    for name in ["froxel_ms_low", "froxel_ms_medium", "froxel_ms_high"] {
+        let row = metric(&report, name);
+        assert!(row.value.unwrap() > 0.0, "{row:?}");
+    }
+}
+
+#[test]
+fn planted_bugs_fail_their_feature_rows() {
+    let mut missed = Vec::new();
+    for (name, value, threshold) in genos_fog_check::planted_scores() {
+        println!("planted {name} {value:.6e} ceiling {threshold:.6e}");
+        if value <= threshold {
+            missed.push(format!("{name} value {value} did not exceed {threshold}"));
+        }
+    }
+    assert!(missed.is_empty(), "{missed:?}");
+}
+
+#[test]
+fn a_scaled_medium_fails_the_path_grade() {
+    let (candidate, reference) = scaled_pair(genos_render::media_images());
+    let grade = grade_pair(reference, candidate);
+    assert!(grade > 0.12, "{grade}");
+    let (candidate, reference) = scaled_pair(genos_render::near_images());
+    let grade = grade_pair(reference, candidate);
+    assert!(grade > 0.08, "{grade}");
+}
+
+fn scaled_pair(
+    pair: (genos_render::FogImage, genos_render::FogImage),
+) -> (genos_render::FogImage, genos_render::FogImage) {
+    let (mut candidate, reference) = pair;
+    for value in &mut candidate.linear {
+        *value *= 1.4;
+    }
+    (candidate, reference)
+}
+
+fn grade_pair(reference: genos_render::FogImage, candidate: genos_render::FogImage) -> f64 {
+    let reference =
+        genos_lighting_ref::Picture::new(reference.width, reference.height, reference.linear)
+            .unwrap();
+    let candidate =
+        genos_lighting_ref::Picture::new(candidate.width, candidate.height, candidate.linear)
+            .unwrap();
+    genos_lighting_ref::blur_relative(
+        &reference,
+        &candidate,
+        &genos_lighting_ref::MetricParams::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn an_unshadowed_shaft_fails_the_shadow_grade() {
+    let reference = genos_render::shaft_image(true);
+    let candidate = genos_render::shaft_image(false);
+    let reference = genos_lighting_ref::Picture::new(
+        reference.width,
+        reference.height,
+        reference.linear,
+    )
+    .unwrap();
+    let candidate = genos_lighting_ref::Picture::new(
+        candidate.width,
+        candidate.height,
+        candidate.linear,
+    )
+    .unwrap();
+    let grade = genos_lighting_ref::blur_relative(
+        &reference,
+        &candidate,
+        &genos_lighting_ref::MetricParams::default(),
+    )
+    .unwrap();
+    assert!(grade > 0.12, "{grade}");
+}
+
+#[test]
+fn held_history_fails_smear_and_a_scaled_yaw_fails_pop() {
+    assert!(genos_render::smear_broken() > 0.50);
+    assert!(f64::from(genos_render::yaw_pop_broken()) > 0.05);
+}
+
+#[test]
+fn a_scaled_still_frame_fails_the_flicker_gate() {
+    let broken = f64::from(genos_render::still_flicker_broken());
+    assert!(broken > 0.02, "{broken}");
+    assert_eq!(judge(true, Some(broken), 0.02), Status::Fail);
+}
+
+#[test]
+fn an_unbounded_grid_fails_the_vram_ceiling() {
+    let broken = genos_render::allocation_mb_doubled();
+    assert!(broken > 12.0, "{broken}");
+    assert_eq!(judge(true, Some(broken), 12.0), Status::Fail);
+}
+
+#[test]
+fn an_unreduced_sample_cap_fails_the_millisecond_ceiling() {
+    let raw = genos_render::unfitted_milliseconds(genos_render::LightingPreset::High, |groups| {
+        f64::from(groups) * 0.000_1
+    });
+    assert!(raw > 1.20, "{raw}");
+    let fitted = genos_render::fit_pass(genos_render::LightingPreset::High, |groups| {
+        f64::from(groups) * 0.000_1
+    });
+    assert!(fitted.milliseconds <= 1.20, "{fitted:?}");
+    assert!(fitted.samples < 32_000);
+}
+
+#[test]
+fn a_leaking_volume_fails_the_leak_gate() {
+    let broken = f64::from(genos_render::leak_broken());
+    assert!(broken > 1.0e-4, "{broken}");
+    assert_eq!(judge(true, Some(broken), 1.0e-4), Status::Fail);
 }
 
 #[test]
@@ -66,17 +232,17 @@ fn a_zero_does_not_pass_a_missing_feature() {
 }
 
 #[test]
-fn all_good_exits_0_with_not_implemented_rows() {
+fn all_good_keeps_gi_and_lavapipe_times_ungraded() {
     let report = evaluate(Suite::All, Fixture::Good);
-    assert_eq!(exit_code(&report), 0);
+    println!("{}", format_lines(&report));
+    assert_graded_rows_pass(&report);
     assert!(report
         .metrics
         .iter()
         .any(|metric| metric.status == Status::Pass));
-    assert!(report
-        .metrics
-        .iter()
-        .all(|metric| metric.status != Status::Fail));
+    let gi = metric(&report, "gi_inscatter_blur_rel");
+    assert_eq!(gi.status, Status::NotImplemented);
+    assert_eq!(gi.value, None);
 }
 
 #[test]
@@ -113,10 +279,10 @@ fn summary_line_has_four_fields() {
     }
     let feature = evaluate(Suite::Feature, Fixture::Good);
     let line = format_lines(&feature).lines().next().unwrap().to_string();
-    assert_eq!(
-        line,
-        "froxel_temporal_smear_px - 5.000000e-1 NOT-IMPLEMENTED"
-    );
+    let fields: Vec<&str> = line.split_whitespace().collect();
+    assert_eq!(fields.len(), 4, "{line}");
+    assert_eq!(fields[0], "froxel_temporal_smear_px");
+    assert_eq!(fields[3], "PASS", "{line}");
 }
 
 #[test]

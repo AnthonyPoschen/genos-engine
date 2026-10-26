@@ -24,7 +24,9 @@
 //! bounce limit: every pixel's primary hit gathers next-event direct light at each
 //! vertex and continues along cosine-sampled paths, ended by Russian roulette after
 //! three bounces (capped at `max_bounces`). It runs on the CPU, so it is exact up to
-//! its noise, whatever the GPU path does. Not traced: fog and particle cards.
+//! its noise, whatever the GPU path does. The camera ray carries fog when the
+//! scene dispatches it. Surface bounces do not march the medium. Not traced:
+//! particle cards.
 //! A hit's albedo is the shared shade's diffuse albedo (`genos_load::ShadeSample`).
 //! Analytic paint is that shade with metallic 0. A glTF hit passes the textured shade.
 
@@ -326,6 +328,23 @@ pub fn render(setup: &RefSetup) -> Reference {
                                         setup.max_bounces,
                                         stratum,
                                         &mut rng,
+                                    );
+                                    let l = genos_render::compose_pixel_medium(
+                                        &setup.scene.fog,
+                                        &genos_render::PixelRay {
+                                            eye: setup.eye,
+                                            forward,
+                                            right,
+                                            up,
+                                            tan_half_y: tan_y,
+                                            aspect,
+                                            x: u32::try_from(x).unwrap_or(u32::MAX),
+                                            y: u32::try_from(y).unwrap_or(u32::MAX),
+                                            width: u32::try_from(w).unwrap_or(u32::MAX),
+                                            height: u32::try_from(h).unwrap_or(u32::MAX),
+                                        },
+                                        first.point,
+                                        l,
                                     );
                                     let y = luma(l) as f64;
                                     row_sq[x] += y * y;
@@ -801,6 +820,7 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         }
     }
@@ -832,6 +852,7 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         }
     }
