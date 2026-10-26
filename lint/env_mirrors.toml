@@ -43,6 +43,11 @@ kind = "mirror"
 detail = "--bounces"
 
 [[var]]
+name = "GENOS_LIGHTING_BUDGET_SCALE"
+kind = "mirror"
+detail = "--lighting-budget-scale"
+
+[[var]]
 name = "GENOS_LIGHTING_COMPOSE_ALL"
 kind = "mirror"
 detail = "--full-effort"
@@ -68,9 +73,19 @@ kind = "mirror"
 detail = "--lighting-full-effort"
 
 [[var]]
+name = "GENOS_LIGHTING_GUARD_EDGE"
+kind = "mirror"
+detail = "--guard-edge"
+
+[[var]]
 name = "GENOS_LIGHTING_PRESET"
 kind = "mirror"
 detail = "--preset"
+
+[[var]]
+name = "GENOS_LIGHTING_SCHEDULE"
+kind = "mirror"
+detail = "--lighting-schedule"
 
 [[var]]
 name = "GENOS_LIGHTING_SUN"

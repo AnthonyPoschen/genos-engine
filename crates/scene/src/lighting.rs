@@ -2103,6 +2103,29 @@ mod launch_tests {
         LightingMirrors::default()
     }
 
+    #[test]
+    fn schedule_arguments_win_over_the_env_mirrors() {
+        let mut env = empty();
+        env.schedule = Some("budget");
+        env.budget_scale = Some("1");
+        env.guard_edge = Some("0.2");
+        let launch = resolve_lighting_launch(
+            &[
+                "--lighting-schedule",
+                "global",
+                "--lighting-budget-scale",
+                "2",
+                "--guard-edge",
+                "0.1",
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(launch.schedule, Some(ScheduleMode::Global));
+        assert_eq!(launch.budget_scale, Some(2.0));
+        assert_eq!(launch.guard_edge, Some(0.1));
+    }
+
     fn hours_near(value: f32, hours: f32) {
         assert!((value - hours).abs() < 1.0e-4, "{value} is not {hours}");
     }

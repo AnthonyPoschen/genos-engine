@@ -90,6 +90,14 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          uses screen. The other presets keep hash. This flag and the
                          variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
+  --lighting-schedule budget|global
+                         work caps, or the uncapped frame. GENOS_LIGHTING_SCHEDULE
+                         applies only when this argument is omitted
+  --lighting-budget-scale F
+                         multiply every work cap, from 1/64 to 4.
+                         GENOS_LIGHTING_BUDGET_SCALE applies only when this is omitted
+  --guard-edge F         guard band as a fraction of the display, 0 to 0.35.
+                         GENOS_LIGHTING_GUARD_EDGE applies only when this is omitted
   --headless             proof window, no panel
   --display NAME         Wayland display name. Omit it to use the session compositor.
   --frames N             quit after N frames. The last frame PNG leaves out
@@ -2654,6 +2662,12 @@ mod tests {
         assert!(super::USAGE.contains("--gi-metrics"));
         assert!(super::USAGE.contains("--script"));
         assert!(super::USAGE.contains("GENOS_GI_METRICS"));
+        assert!(super::USAGE.contains("--lighting-schedule"));
+        assert!(super::USAGE.contains("--lighting-budget-scale"));
+        assert!(super::USAGE.contains("--guard-edge"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_SCHEDULE"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_BUDGET_SCALE"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_GUARD_EDGE"));
     }
 
     #[test]

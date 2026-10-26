@@ -154,7 +154,7 @@ Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [
 Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete parents of one lattice) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md) and [§16](../systems/lighting/localized-invalidation-design.md)
 
 **Guard band**: extra pixels around the display. Lighting renders that larger picture and the window shows the crop. The eye stays put. The band is wider toward the turn. High starts at 15% of the display on each edge. A zero edge, or global mode, stays on the display size.
-Role: SCHED · More detail: `lit_target`; `--lighting-guard-edge`
+Role: SCHED · More detail: `lit_target`; `--guard-edge`
 
 ### Lamps and shadows
 **Lamp**: a point light. The sun is not a lamp.
