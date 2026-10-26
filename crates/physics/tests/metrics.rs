@@ -8,11 +8,13 @@
 //! overhang, breaks its seam, and scores `bonds_broken`, `debris_alive`,
 //! and `floor_penetration_m`. Those rows are not printed for the ship fixtures.
 //! `spin` is a long thin box that turns a quarter-circle in one step beside a
-//! block. `tunnel_count` is the block still at rest.
+//! block. `tunnel_count` is the block still at rest. `wide` is the swept ships
+//! 40 m apart, one step, so a time-of-impact cap of one advance fails
+//! `tunnel_count`.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad|discrete|loss|broken|spin
+//! --fixture proof|good|bad|discrete|loss|broken|spin|wide
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -107,6 +109,39 @@ const SPIN_METRICS: &[Spec] = &[
     },
 ];
 
+const WIDE_METRICS: &[Spec] = &[
+    Spec {
+        name: "tunnel_count",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "penetration_m",
+        bound: Bound::AtMost,
+        threshold: PENETRATION_LIMIT,
+        threshold_text: "<=0.01",
+    },
+    Spec {
+        name: "contacts_stored",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "toi_deferred",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
 const BROKEN_METRICS: &[Spec] = &[
     Spec {
         name: "bonds_broken",
@@ -165,6 +200,7 @@ enum Fixture {
     Loss,
     Broken,
     Spin,
+    Wide,
 }
 
 impl Fixture {
@@ -177,6 +213,7 @@ impl Fixture {
             Self::Loss => "loss",
             Self::Broken => "broken",
             Self::Spin => "spin",
+            Self::Wide => "wide",
         }
     }
 }
@@ -263,6 +300,14 @@ fn run() -> Result<i32, String> {
             let reading = measure_spin()?;
             let rows = judge_spin(&reading);
             write_report(&args.out, "spin", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Wide => {
+            let reading = measure_wide()?;
+            let rows = judge_wide(&reading);
+            write_report(&args.out, "wide", &reading, &rows)?;
             print_scene(&reading);
             print_rows(&rows);
             Ok(exit_code(&rows))
@@ -400,6 +445,7 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "loss" => Ok(Fixture::Loss),
         "broken" => Ok(Fixture::Broken),
         "spin" => Ok(Fixture::Spin),
+        "wide" => Ok(Fixture::Wide),
         other => Err(format!("unknown fixture {other}")),
     }
 }
@@ -430,7 +476,7 @@ fn setup(fixture: &Fixture) -> Result<Setup, String> {
             protect: false,
             full_energy: true,
         }),
-        Fixture::Proof | Fixture::Broken | Fixture::Spin => {
+        Fixture::Proof | Fixture::Broken | Fixture::Spin | Fixture::Wide => {
             Err("proof does not score itself".into())
         }
     }
@@ -442,8 +488,8 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad|discrete|loss|broken|spin
-    proof runs the ship fixtures, the broken overhang, and the spinning pair. Default proof.
+--fixture proof|good|bad|discrete|loss|broken|spin|wide
+    proof runs the ship fixtures, the broken overhang, the spinning pair, and the 40 m ships. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
     good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
@@ -453,6 +499,8 @@ loss is the discrete scene scored from start to end, so an inelastic drop fails.
 broken cooks an overhang, breaks the seam at step {DAMAGE_STEP}, and steps {BROKEN_STEPS} times.
 spin is one step: a long thin swept box turns a quarter-circle beside a block.
     tunnel_count is 1 when that block is still at rest.
+wide is one step: swept ships start 40 m apart at {TUNNEL_SPEED} m/s.
+    A time-of-impact cap of one advance leaves a gap and fails tunnel_count.
 Ship fixtures call step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
@@ -595,6 +643,94 @@ fn run_spin() -> Result<(World, f64, bool), String> {
 fn judge_spin(reading: &Reading) -> Vec<Row> {
     let values = [reading.tunnel_count, reading.determinism_hash_match];
     SPIN_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
+}
+
+fn measure_wide() -> Result<Reading, String> {
+    let first = run_wide()?;
+    let second = run_wide()?;
+    let match_bit = u8::from(hash_state(&first.world) == hash_state(&second.world));
+    Ok(Reading {
+        tunnel_count: first.tunnel_count,
+        penetration_m: first.penetration_m,
+        energy_drift: 0.0,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: first.contacts_stored,
+        toi_deferred: first.toi_deferred,
+        ship_speed: TUNNEL_SPEED,
+        bullet_speed: 0.0,
+        protect: true,
+        full_energy: false,
+        ccd_in_step: first.ccd_in_step,
+        steps: 1,
+    })
+}
+
+struct WideRun {
+    world: World,
+    tunnel_count: f64,
+    penetration_m: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
+    ccd_in_step: bool,
+}
+
+/// Centres 40 m apart. The gap along X is 36 m, so the radius slice needs more
+/// than one advance. Capping advances at 1 clamps the pair and counts a tunnel.
+fn run_wide() -> Result<WideRun, String> {
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let mut left = Body::cuboid(
+        genos_math::Vec3::new(0.0, 2.0, 0.0),
+        1_000.0,
+        genos_math::Vec3::new(2.0, 1.0, 1.0),
+    );
+    left.velocity = genos_math::Vec3::new(TUNNEL_SPEED, 0.0, 0.0);
+    left.motion = MotionQuality::Swept;
+    let mut right = Body::cuboid(
+        genos_math::Vec3::new(40.0, 2.0, 0.0),
+        1_000.0,
+        genos_math::Vec3::new(2.0, 1.0, 1.0),
+    );
+    right.velocity = genos_math::Vec3::new(-TUNNEL_SPEED, 0.0, 0.0);
+    right.motion = MotionQuality::Swept;
+    let left_index = world.insert(left);
+    let right_index = world.insert(right);
+    genos_physics::step(&mut world, DT);
+    let left_body = world
+        .bodies
+        .get(left_index)
+        .ok_or_else(|| "wide left ship missing".to_string())?;
+    let right_body = world
+        .bodies
+        .get(right_index)
+        .ok_or_else(|| "wide right ship missing".to_string())?;
+    let exchanged = u32::from(left_body.position.x > right_body.position.x);
+    let tunnels = exchanged.saturating_add(world.step_stats.toi_failed);
+    let gap = (left_body.position.x - right_body.position.x).abs() - 4.0;
+    let penetration = if gap < 0.0 { -gap } else { 0.0 };
+    let stored = u8::from(left_body.normal_impulse > 0.0 && right_body.normal_impulse > 0.0);
+    Ok(WideRun {
+        ccd_in_step: world.step_stats.ccd_applied,
+        toi_deferred: f64::from(world.step_stats.toi_deferred),
+        tunnel_count: f64::from(tunnels),
+        penetration_m: f64::from(penetration),
+        contacts_stored: f64::from(stored),
+        world,
+    })
+}
+
+fn judge_wide(reading: &Reading) -> Vec<Row> {
+    let values = [
+        reading.tunnel_count,
+        reading.penetration_m,
+        reading.contacts_stored,
+        reading.toi_deferred,
+        reading.determinism_hash_match,
+    ];
+    WIDE_METRICS
         .iter()
         .zip(values)
         .map(|(spec, value)| judge(spec, value))
@@ -1046,6 +1182,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     let loss = run_child(&exe, out, "loss")?;
     let broken = run_child(&exe, out, "broken")?;
     let spin = run_child(&exe, out, "spin")?;
+    let wide = run_child(&exe, out, "wide")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
@@ -1058,16 +1195,19 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", broken.stdout);
     println!("# spin");
     print!("{}", spin.stdout);
+    println!("# wide");
+    print!("{}", wide.stdout);
     if good.code != 0
         || bad.code != 1
         || discrete.code != 0
         || loss.code != 1
         || broken.code != 0
         || spin.code != 0
+        || wide.code != 0
     {
         return Err(format!(
-            "proof exits good {} bad {} discrete {} loss {} broken {} spin {}",
-            good.code, bad.code, discrete.code, loss.code, broken.code, spin.code
+            "proof exits good {} bad {} discrete {} loss {} broken {} spin {} wide {}",
+            good.code, bad.code, discrete.code, loss.code, broken.code, spin.code, wide.code
         ));
     }
     expect_protected(&good.stdout)?;
@@ -1076,12 +1216,14 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_loss(&loss.stdout)?;
     expect_broken(&broken.stdout)?;
     expect_spin(&spin.stdout)?;
+    expect_wide(&wide.stdout)?;
     expect_file(out, "good", true, 0, "free-flight", true)?;
     expect_file(out, "bad", false, 2, "free-flight", false)?;
     expect_file(out, "discrete", false, 0, "free-flight", false)?;
     expect_file(out, "loss", false, 1, "full", false)?;
     expect_file(out, "broken", false, 0, "free-flight", false)?;
     expect_file(out, "spin", true, 0, "free-flight", true)?;
+    expect_file(out, "wide", true, 0, "free-flight", true)?;
     Ok(0)
 }
 
@@ -1270,6 +1412,24 @@ fn expect_loss(text: &str) -> Result<(), String> {
     }
     if !energy_failed {
         return Err("loss run has no energy_drift".into());
+    }
+    Ok(())
+}
+
+fn expect_wide(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
+        || !text.contains("steps=1")
+        || !text.contains("ccd_in_step=true")
+    {
+        return Err("wide scene is not the 40 m swept step".into());
+    }
+    for row in printed_against(text, WIDE_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the wide scene", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
     }
     Ok(())
 }
