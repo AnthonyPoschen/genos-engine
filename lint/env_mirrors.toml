@@ -1210,6 +1210,16 @@ kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
 
 [[var]]
+name = "GENOS_MATERIALS_GATE_CASE"
+kind = "mirror"
+detail = "--case on materials_gate"
+
+[[var]]
+name = "GENOS_MATERIALS_GATE_OUT"
+kind = "mirror"
+detail = "--out on materials_gate"
+
+[[var]]
 name = "GENOS_REFLECTIONS"
 kind = "mirror"
 detail = "--reflections"
