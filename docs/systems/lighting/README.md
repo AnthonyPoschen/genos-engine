@@ -83,6 +83,7 @@ The surface light cache and the world cache are one cache ([glossary](../../ligh
 - ADR 0012's deterministic 16×16 light-tree cut, with no radiance history, is not built here and this does not amend that ADR. A GTX 1060 scales by lowering candidates and rays. There is no minimum candidate count.
 - Mode off binds a 64-byte reservoir. Reuse with radius 0 allocates one 32-byte record per pixel (reservoir plus depth, normal, kind, and shaded direct). A radius above 0 allocates the previous frame as well (64 bytes per pixel). `direct.max_lights` stays a separate hard cap.
 - Networking: replicated state is none (the reservoir stays in that frame's GPU buffer). Authority is the machine that shades the picture. Prediction / rollback is none. The pick is deterministic for a mode, a seed, and a frame. A headless server does not shade.
+- Planned, not in the shaders: fog and volumetric lighting ([design](../fog-and-volumetric-lighting-design.md), [ADR 0018](../../adr/0018-fog-and-volumetric-lighting.md), proposed). Departures from Hillaire, SIGGRAPH 2015, are listed there. This bullet does not change the frame.
 
 ## Experiment index
 

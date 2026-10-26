@@ -39,8 +39,10 @@ Each record uses these headings:
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
+- [PBR materials design](pbr-materials-design.md): glTF metallic-roughness, the shared shade, textures, and emissive lights ([ADR 0014](../adr/0014-pbr-materials.md)). Proposed. It does not copy the mesh-loading parsers.
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 - [Renderer performance review](rendering/perf-review.md): the 1920×1080 moving stress frame against a 5 ms budget, ranked by the lighting passes that close the gap.
+- [Fog and volumetric lighting](fog-and-volumetric-lighting-design.md): a budgeted froxel volume, height fog, local volumes, shadowed shafts, and a world-cache read. [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md) is proposed. Not built. `fog-check` grades the closed forms.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.

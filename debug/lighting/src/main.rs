@@ -287,7 +287,7 @@ fn run() -> Result<(), String> {
     let load_world = loading_world();
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
     let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
-    let _server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
+    let mut server = Some(genos_mcp::Server::start_on(mcp_host, mcp_port)?);
     let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
@@ -298,7 +298,7 @@ fn run() -> Result<(), String> {
     if opts.frames.is_some() || opts.script.is_some() {
         tools.set_fixed_step(Some(STEP));
     }
-    let script_thread = opts.script.clone().map(|run| {
+    let mut script_thread = opts.script.clone().map(|run| {
         let _ = writeln!(log, "script {}", run.script.display());
         genos_debug::script::spawn(run)
     });
@@ -354,7 +354,14 @@ fn run() -> Result<(), String> {
             }
         }
         if frame.closing {
-            finish(window, renderer, tools.quit_code().unwrap_or(0));
+            finish(
+                window,
+                renderer,
+                script_thread.take(),
+                server.take(),
+                tools.quit_code().is_some(),
+                tools.quit_code().unwrap_or(0),
+            );
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -577,16 +584,49 @@ fn run() -> Result<(), String> {
             }
         }
         if last || tools.quit_code().is_some() {
-            finish(window, renderer, tools.quit_code().unwrap_or(0));
+            finish(
+                window,
+                renderer,
+                script_thread.take(),
+                server.take(),
+                tools.quit_code().is_some(),
+                tools.quit_code().unwrap_or(0),
+            );
         }
     }
 }
 
-fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
+/// Stop the script and MCP threads, then destroy the device, then the window.
+///
+/// `quitting` means `quit` was already answered, so the script thread will
+/// leave `command::call` and exit. Joining it first is required. A script
+/// still blocked on the command queue is not joined: that wait is the frame
+/// thread, and joining here would deadlock. The device is destroyed while the
+/// window is mapped, so the seat pump can answer pings during the idle.
+/// `process::exit` then has no live script thread and no Vulkan device for
+/// the driver to reclaim.
+fn finish(
+    window: Window,
+    renderer: Renderer,
+    mut script: Option<std::thread::JoinHandle<bool>>,
+    server: Option<genos_mcp::Server>,
+    quitting: bool,
+    code: i32,
+) -> ! {
+    if !quitting {
+        if let Some(script) = script.take() {
+            if script.is_finished() {
+                let _ = script.join();
+            }
+        }
+    }
+    genos_debug::script::join_then(script, || {
+        drop(server);
+        drop(renderer);
+    });
     Renderer::clear_blocker();
     window.clear_seat_pump();
     drop(window);
-    renderer.abandon();
     std::process::exit(code);
 }
 
@@ -675,8 +715,10 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     }
     let summary = check_summary(&passed, &skipped, &failed);
     let _ = writeln!(log, "{summary}");
+    drop(renderer);
+    Renderer::clear_blocker();
+    window.clear_seat_pump();
     drop(window);
-    renderer.abandon();
     if failed.is_empty() {
         eprintln!("genos-lighting: {summary}");
         Ok(())
