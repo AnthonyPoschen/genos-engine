@@ -23,7 +23,7 @@ fn run(flag: &str, fixture: &str, out: &std::path::Path) -> (u8, String) {
 }
 
 #[test]
-fn reflections_good_passes_bad_fails_and_live_is_unimplemented() {
+fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     let root = std::env::temp_dir().join(format!("genos-reflections-bin-{}", std::process::id()));
     let good_dir = root.join("good");
     let bad_dir = root.join("bad");
@@ -63,8 +63,13 @@ fn reflections_good_passes_bad_fails_and_live_is_unimplemented() {
         "snell_rad",
         "ggx_energy",
         "mirror_view_frac",
+        "portal_leak",
         "portal_point_m",
         "beer_rel",
+        "shoreline_ratio",
+        "near_weighted_rel",
+        "flicker_reversal",
+        "low_reflection_rays",
     ] {
         assert!(
             live_text
@@ -76,12 +81,7 @@ fn reflections_good_passes_bad_fails_and_live_is_unimplemented() {
     for name in [
         "ssr_depth_rel",
         "denoise_lag_frames",
-        "portal_leak",
-        "shoreline_ratio",
         "caustic_rel",
-        "near_weighted_rel",
-        "flicker_reversal",
-        "low_reflection_rays",
         "ms_frac",
         "vram_frac",
     ] {

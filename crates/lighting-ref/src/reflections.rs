@@ -1,10 +1,11 @@
 //! Analytic gates for specular reflections, mirrors, portals, and water.
 //!
 //! Module rows call [`genos_math::optics`] (the GLSL mirror is
-//! `crates/render/shaders/reflections.glsl`) and [`Fixture::Live`] grades them.
-//! Comparator rows stay `NOT-IMPLEMENTED` on live: good and bad only prove the
-//! comparison. `denoise_lag_frames` stays `NOT-IMPLEMENTED` on every fixture
-//! until a reflection denoiser exists.
+//! `crates/render/shaders/reflections.glsl`) or the CPU picture, and
+//! [`Fixture::Live`] grades them. The picture rows compare that picture with
+//! [`crate::reflections_trace`], which does not call the shade. Comparator
+//! rows stay `NOT-IMPLEMENTED` on live. `denoise_lag_frames` stays
+//! `NOT-IMPLEMENTED` on every fixture until a reflection denoiser exists.
 //!
 //! Thresholds are the gates in `docs/systems/reflections-design.md`. A metric passes
 //! when its value is finite and `value <= threshold`.
@@ -13,6 +14,9 @@ use std::path::{Path, PathBuf};
 
 use genos_math::optics::{self, PortalLink, MIRROR_FRESNEL_CUTOFF};
 use genos_math::{Mat3, Vec3};
+use genos_render::PictureFault;
+
+use crate::reflections_trace;
 
 /// Which candidate the checker grades.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,33 +236,28 @@ fn measure(kind: Kind) -> Vec<Metric> {
         gate("ssr_depth_rel", ssr_depth_rel(kind), 0.02, Row::Comparator),
         absent("denoise_lag_frames", 2.0),
         gate("mirror_view_frac", mirror_view_frac(kind), 0.0, Row::Module),
-        gate("portal_leak", portal_leak(kind), 0.0, Row::Comparator),
+        gate("portal_leak", portal_leak(kind), 0.0, Row::Module),
         gate("portal_point_m", portal_point_m(kind), 1.0e-5, Row::Module),
         gate("beer_rel", beer_rel(kind), 0.02, Row::Module),
-        gate(
-            "shoreline_ratio",
-            shoreline_ratio(kind),
-            0.75,
-            Row::Comparator,
-        ),
+        gate("shoreline_ratio", shoreline_ratio(kind), 0.75, Row::Module),
         gate("caustic_rel", caustic_rel(kind), 0.05, Row::Comparator),
         gate(
             "near_weighted_rel",
             near_weighted_rel(kind),
             0.03,
-            Row::Comparator,
+            Row::Module,
         ),
         gate(
             "flicker_reversal",
             flicker_reversal(kind),
             0.002,
-            Row::Comparator,
+            Row::Module,
         ),
         gate(
             "low_reflection_rays",
             low_reflection_rays(kind),
             0.0,
-            Row::Comparator,
+            Row::Module,
         ),
         gate("ms_frac", ms_frac(kind), 1.0, Row::Comparator),
         gate("vram_frac", vram_frac(kind), 1.0, Row::Comparator),
@@ -551,17 +550,15 @@ fn view_mismatch(emitted: u32, expected: u32, cap: u32) -> f64 {
     }
 }
 
-fn portal_leak(kind: Kind) -> f64 {
-    let samples = [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0];
-    let mut wrong = 0u32;
-    for z in samples {
-        let behind = z < 0.0;
-        let drawn = if kind == Kind::Good { !behind } else { true };
-        if behind == drawn {
-            wrong += 1;
-        }
+fn fault_of(kind: Kind) -> PictureFault {
+    match kind {
+        Kind::Good => PictureFault::default(),
+        Kind::Bad => PictureFault::all(),
     }
-    f64::from(wrong) / f64::from(u32::try_from(samples.len()).unwrap_or(1))
+}
+
+fn portal_leak(kind: Kind) -> f64 {
+    genos_render::portal_leak(fault_of(kind))
 }
 
 fn axis_portal() -> PortalLink {
@@ -613,19 +610,7 @@ fn beer_rel(kind: Kind) -> f64 {
 }
 
 fn shoreline_ratio(kind: Kind) -> f64 {
-    let deep: f64 = 0.4;
-    let cap = 0.75;
-    let depths = [0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0];
-    let mut max_ratio: f64 = 0.0;
-    for depth in depths {
-        let height = if kind == Kind::Good {
-            deep.min(cap * depth)
-        } else {
-            deep
-        };
-        max_ratio = max_ratio.max(height / depth);
-    }
-    max_ratio
+    genos_render::shoreline_ratio(fault_of(kind))
 }
 
 fn caustic_rel(kind: Kind) -> f64 {
@@ -644,38 +629,52 @@ fn caustic_rel(kind: Kind) -> f64 {
 }
 
 fn near_weighted_rel(kind: Kind) -> f64 {
-    let (near_err, far_err) = if kind == Kind::Good {
-        (0.0, 0.25)
-    } else {
-        (0.4, 0.0)
-    };
-    let samples: [(f64, f64); 8] = [
-        (0.5, near_err),
-        (0.5, near_err),
-        (0.5, near_err),
-        (0.5, near_err),
-        (20.0, far_err),
-        (20.0, far_err),
-        (20.0, far_err),
-        (20.0, far_err),
-    ];
+    let engine = genos_render::shade_picture(0, fault_of(kind));
+    let reference = reflections_trace::trace();
+    if engine.color.len() != reference.color.len() || reference.depth.len() != engine.color.len() {
+        return f64::INFINITY;
+    }
     let mut num: f64 = 0.0;
     let mut den: f64 = 0.0;
-    for (depth, err) in samples {
+    for (index, pixel) in engine.color.iter().enumerate() {
+        let rel = pixel_rel(*pixel, reference.color[index]);
+        let depth = f64::from(reference.depth[index]);
         let weight = 1.0 / depth.max(0.25);
-        num += weight * err;
+        num += weight * rel;
         den += weight;
     }
     if den <= 0.0 {
-        return f64::INFINITY;
+        f64::INFINITY
+    } else {
+        num / den
     }
-    num / den
+}
+
+fn pixel_rel(engine: [f32; 3], reference: [f32; 3]) -> f64 {
+    let mut sum = 0.0;
+    for channel in 0..3 {
+        let err = f64::from((engine[channel] - reference[channel]).abs());
+        let scale = f64::from(reference[channel].abs()).max(1.0e-3);
+        sum += err / scale;
+    }
+    sum / 3.0
 }
 
 fn flicker_reversal(kind: Kind) -> f64 {
-    let steady: [f64; 8] = [0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4, 0.4];
-    let blink: [f64; 8] = [0.5, 0.3, 0.5, 0.3, 0.5, 0.3, 0.5, 0.3];
-    let samples = if kind == Kind::Good { &steady } else { &blink };
+    let index = still_index();
+    let reference = reflections_trace::still_pixel(index);
+    let mut samples = [0.0; 8];
+    for (frame, sample) in samples.iter_mut().enumerate() {
+        let frame_u = u32::try_from(frame).unwrap_or(0);
+        let picture = genos_render::shade_picture(frame_u, fault_of(kind));
+        let pixel = picture.color.get(index).copied().unwrap_or([0.0; 3]);
+        let mean = f64::from(pixel[0] + pixel[1] + pixel[2]) / 3.0;
+        *sample = mean - reference;
+    }
+    reversal(&samples)
+}
+
+fn reversal(samples: &[f64]) -> f64 {
     let mut sum: f64 = 0.0;
     let mut reversals = 0u32;
     let mut i = 0;
@@ -695,12 +694,14 @@ fn flicker_reversal(kind: Kind) -> f64 {
     }
 }
 
+fn still_index() -> usize {
+    let tile = usize::try_from(genos_render::TILE).unwrap_or(8);
+    let mid = tile / 2;
+    mid * tile + mid
+}
+
 fn low_reflection_rays(kind: Kind) -> f64 {
-    if kind == Kind::Good {
-        0.0
-    } else {
-        64.0
-    }
+    f64::from(genos_render::scheduled_low_rays(fault_of(kind)))
 }
 
 struct BudgetRow {
@@ -818,6 +819,24 @@ fn trim_zeros(raw: String) -> String {
 #[expect(clippy::panic, reason = "a failed fixture aborts the test")]
 mod tests {
     use super::{grade, resolve_out, write_report, Fixture, Row, Status};
+
+    #[test]
+    fn the_path_tracer_matches_the_faithful_picture() {
+        let engine = genos_render::shade_picture(0, genos_render::PictureFault::default());
+        let reference = crate::reflections_trace::trace();
+        assert_eq!(engine.color.len(), reference.color.len());
+        let mut max_err: f64 = 0.0;
+        for (got, truth) in engine.color.iter().zip(reference.color.iter()) {
+            for channel in 0..3 {
+                max_err = max_err.max(f64::from((got[channel] - truth[channel]).abs()));
+            }
+        }
+        assert!(max_err < 1.0e-4, "{max_err}");
+        assert!(
+            crate::reflections_trace::still_pixel(super::still_index()).abs() > 0.1,
+            "the still pixel must be lit so a blink can fail"
+        );
+    }
 
     #[test]
     fn good_passes_every_implemented_gate() {

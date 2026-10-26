@@ -184,6 +184,7 @@ name = "genos-lighting-ref"
 version = "0.1.0"
 dependencies = [
  "genos-math",
+ "genos-render",
 ]
 
 [[package]]

@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 genos-math = { path = "../math" }
+genos-render = { path = "../render" }
