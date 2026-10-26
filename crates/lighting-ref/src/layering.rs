@@ -328,8 +328,10 @@ pub fn summary_line(metric: &Metric) -> String {
 #[must_use]
 pub fn to_json(report: &Report) -> String {
     let mut body = String::from("{\n");
-    body.push_str(&format!("  \"case\": \"{}\",\n", report.case_name));
-    body.push_str(&format!("  \"source\": \"{}\",\n", report.source));
+    let case = format!("  \"case\": \"{}\",\n", report.case_name);
+    body.push_str(&case);
+    let source = format!("  \"source\": \"{}\",\n", report.source);
+    body.push_str(&source);
     body.push_str("  \"preset\": \"high\",\n");
     body.push_str("  \"metrics\": [\n");
     for (index, metric) in report.metrics.iter().enumerate() {
@@ -339,17 +341,20 @@ pub fn to_json(report: &Report) -> String {
             ","
         };
         body.push_str("    {");
-        body.push_str(&format!("\"name\": \"{}\"", metric.name));
-        body.push_str(&format!(", \"value\": {}", value_json(&metric.value)));
-        body.push_str(&format!(
-            ", \"threshold\": {}",
-            value_json(&metric.threshold)
-        ));
-        body.push_str(&format!(", \"status\": \"{}\"", metric.status.as_str()));
+        let name = format!("\"name\": \"{}\"", metric.name);
+        body.push_str(&name);
+        let value = format!(", \"value\": {}", value_json(&metric.value));
+        body.push_str(&value);
+        let threshold = format!(", \"threshold\": {}", value_json(&metric.threshold));
+        body.push_str(&threshold);
+        let status = format!(", \"status\": \"{}\"", metric.status.as_str());
+        body.push_str(&status);
         if let Some(detail) = metric.detail {
-            body.push_str(&format!(", \"detail\": \"{detail}\""));
+            let detail_field = format!(", \"detail\": \"{detail}\"");
+            body.push_str(&detail_field);
         }
-        body.push_str(&format!("}}{comma}\n"));
+        let end = format!("}}{comma}\n");
+        body.push_str(&end);
     }
     body.push_str("  ]\n}\n");
     body
