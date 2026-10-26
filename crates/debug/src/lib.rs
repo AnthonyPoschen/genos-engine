@@ -10,6 +10,7 @@ pub mod commands;
 pub mod gi_metrics;
 pub mod image;
 pub mod knobs;
+pub mod noise_gate;
 pub mod png;
 pub mod reference;
 pub mod script;

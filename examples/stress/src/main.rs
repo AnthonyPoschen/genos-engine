@@ -51,6 +51,8 @@ use building::{Layout, LightMix, View};
 use stage::{Scale, Stage};
 
 const USAGE: &str = "genos-stress [options]
+genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME] [--out DIR]
+                          s7 direct-light noise grade. noise-gate --help lists it.
   --scale small|big|N|NxM   building size: small = 1 section (25 m), big = 4x4 (100 m)
   --lights N                lamps in the whole building (panel: 5/25/50/100)
   --dynamic PCT             share of lamps that move, 0-100 (panel: 0/25/50/75/100)
@@ -737,6 +739,17 @@ fn run() -> Result<(), String> {
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
         return match genos_stress::lighting_ref::run(std::env::args().skip(2)) {
+            Ok(code) => {
+                std::process::exit(code);
+            }
+            Err(err) => Err(err),
+        };
+    }
+    if std::env::args().nth(1).as_deref() == Some("noise-gate") {
+        // The settle check reads the lamp-pick diag counters. The argument is
+        // this subcommand; the variable is how the renderer already publishes them.
+        std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+        return match genos_stress::noise_gate::run_args(std::env::args().skip(2)) {
             Ok(code) => {
                 std::process::exit(code);
             }

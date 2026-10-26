@@ -25,3 +25,31 @@ jobs:
         run: pip install semgrep
       - name: lint
         run: ./scripts/lint.sh
+
+  noise-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+      - name: s7 at 96x54
+        run: |
+          runtime="${RUNNER_TEMP}/genos-runtime"
+          mkdir -p "$runtime"
+          chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR="$runtime"
+          weston --backend=headless --socket=genos-test >/tmp/weston.log 2>&1 &
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -S "$runtime/genos-test" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+          test -S "$runtime/genos-test"
+          export WAYLAND_DISPLAY=genos-test
+          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+          cargo test --locked -p genos-stress --test noise_gate -- --test-threads=1
