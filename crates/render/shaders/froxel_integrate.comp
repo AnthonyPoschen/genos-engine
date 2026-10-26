@@ -1,0 +1,147 @@
+#version 450
+// Column integral. Reads the extinction image and the resident scene. One shadow
+// ray per shaded cell uses scene_occluded (the same occluder grid as the picture).
+// The integral is T * (S / σ) * (1 - exp(-σ Δs)). The tail past 64 m is height
+// fog only. History is not read. World-cache in-scattering is zero.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "scene_data.glsl"
+#include "media.glsl"
+#include "froxel_common.glsl"
+#include "scene_rays.glsl"
+
+bool lighting_sky_enabled() {
+    return false;
+}
+
+layout(r32f, set = 0, binding = 2) uniform readonly image3D froxel_ext;
+
+layout(std430, set = 0, binding = 3) buffer FroxelColumns {
+    vec4 col[];
+} froxel_out;
+
+const float FROXEL_LAMP_UNIT = 72.0;
+
+float froxel_visibility(vec3 from, vec3 to) {
+    if ((fog.size.w & 2u) != 0u) {
+        return 1.0;
+    }
+    if (scene_occluded(from, to)) {
+        return 0.0;
+    }
+    return 1.0;
+}
+
+float froxel_scatter(float sigma_height, vec3 centre, float mu) {
+    float albedo = clamp(fog.sun_color.w, 0.0, 1.0);
+    float scatter = sigma_height * albedo * media_phase_hg(froxel_phase_g(fog.medium.w), mu);
+    uint n = min(fog.counts.x, 8u);
+    [[dont_unroll]] for (uint i = 0u; i < n; i++) {
+        FroxelVolume volume = fog.volumes[i];
+        float local = max(volume.extents.w, 0.0) * froxel_falloff(volume, centre);
+        float local_albedo = clamp(volume.shade.x, 0.0, 1.0);
+        scatter += local * local_albedo * media_phase_hg(froxel_phase_g(volume.shade.y), mu);
+    }
+    return scatter;
+}
+
+vec3 froxel_source(float sigma_height, vec3 centre, vec3 dir) {
+    vec3 source = vec3(0.0);
+    float sun_mu = clamp(dot(dir, fog.sun_toward.xyz), -1.0, 1.0);
+    float sun_v = froxel_visibility(centre, centre + fog.sun_toward.xyz * 48.0);
+    source += fog.sun_color.rgb * froxel_scatter(sigma_height, centre, sun_mu) * sun_v;
+    uint n = min(fog.counts.y, 8u);
+    [[dont_unroll]] for (uint i = 0u; i < n; i++) {
+        vec3 offset = fog.lamps[i].position.xyz - centre;
+        float dist2 = max(dot(offset, offset), 0.25);
+        vec3 toward = normalize(offset);
+        float mu = clamp(dot(dir, toward), -1.0, 1.0);
+        float lamp_v = froxel_visibility(centre, fog.lamps[i].position.xyz);
+        float coeff = froxel_scatter(sigma_height, centre, mu) * (FROXEL_LAMP_UNIT / dist2) * lamp_v;
+        source += fog.lamps[i].color.rgb * coeff;
+    }
+    return source;
+}
+
+float froxel_tail_tau(float y0, float cos_theta) {
+    if (fog.medium.x <= 0.0) {
+        return 0.0;
+    }
+    float sigma = media_height_density(fog.medium.x, fog.medium.z, y0, fog.medium.y);
+    if (sigma <= 0.0) {
+        return 0.0;
+    }
+    if (abs(cos_theta) < 1.0e-4 || fog.medium.z <= 0.0 || cos_theta <= 0.0) {
+        return 1.0e8;
+    }
+    return sigma * fog.medium.z / cos_theta;
+}
+
+void main() {
+    uvec2 c = gl_GlobalInvocationID.xy;
+    if (c.x >= fog.size.x || c.y >= fog.size.y) {
+        return;
+    }
+    vec3 dir = normalize(froxel_offset(c));
+    float transmittance = 1.0;
+    vec3 inscatter = vec3(0.0);
+    uint slices = fog.size.z;
+    uint stop = fog.counts.z == 0u ? slices : min(fog.counts.z, slices);
+    [[dont_unroll]] for (uint z = 0u; z < stop; z++) {
+        float z0 = froxel_slice_edge(z, slices);
+        float z1 = froxel_slice_edge(z + 1u, slices);
+        vec3 p0 = froxel_point(c, z0);
+        vec3 p1 = froxel_point(c, z1);
+        vec3 delta = p1 - p0;
+        float distance = length(delta);
+        vec3 centre = froxel_point(c, 0.5 * (z0 + z1));
+        float sigma_height = 0.0;
+        if (distance > 1.0e-8 && fog.medium.x > 0.0) {
+            float optical = media_height_optical_depth(
+                fog.medium.x,
+                fog.medium.z,
+                fog.medium.y,
+                p0.y,
+                delta.y,
+                dir.y,
+                distance
+            );
+            sigma_height = optical / distance;
+        }
+        vec3 source = distance <= 1.0e-8 ? vec3(0.0) : froxel_source(sigma_height, centre, dir);
+        float sigma = imageLoad(froxel_ext, ivec3(c, z)).r;
+        if ((fog.size.w & 1u) != 0u) {
+            sigma = 0.0;
+        }
+        float step_t = media_transmittance(sigma * distance);
+        vec3 added;
+        if (sigma > 1.0e-8) {
+            added = transmittance * vec3(
+                media_homogeneous_inscatter(sigma, source.r, distance),
+                media_homogeneous_inscatter(sigma, source.g, distance),
+                media_homogeneous_inscatter(sigma, source.b, distance)
+            );
+        } else {
+            added = transmittance * source * distance;
+        }
+        inscatter += added;
+        transmittance *= step_t;
+    }
+    if (fog.counts.z == 0u) {
+        vec3 far = froxel_point(c, 64.0);
+        float mu = clamp(dot(dir, fog.sun_toward.xyz), -1.0, 1.0);
+        float tau = froxel_tail_tau(far.y, dir.y);
+        float absorb = tau >= 1.0e6 ? 1.0 : 1.0 - media_transmittance(tau);
+        float tail_t = tau >= 1.0e6 ? 0.0 : media_transmittance(tau);
+        float visible = froxel_visibility(far, far + fog.sun_toward.xyz * 48.0);
+        float phase = media_phase_hg(froxel_phase_g(fog.medium.w), mu);
+        float albedo = clamp(fog.sun_color.w, 0.0, 1.0);
+        vec3 ratio = fog.sun_color.rgb * (albedo * phase * visible);
+        inscatter += transmittance * ratio * absorb;
+        transmittance *= tail_t;
+    }
+    uint index = c.y * fog.size.x + c.x;
+    froxel_out.col[index] = vec4(inscatter, transmittance);
+}

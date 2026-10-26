@@ -22,7 +22,8 @@ mod world;
 pub use aa::Antialias;
 pub use fog_pass::{
     media_images, near_images, shaft_image, smear_broken, smear_fixture, yaw_pop_broken,
-    yaw_pop_fixture, FogImage, FogPointLamp,
+    yaw_pop_fixture, FogDispatch, FogGpu, FogImage, FogPointLamp, FOG_FLIP_G,
+    FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
 };
 pub use fog_budget::{
     allocation_bytes, allocation_mb, allocation_mb_doubled, fit_pass, fog_probe,

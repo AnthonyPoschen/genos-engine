@@ -24,6 +24,11 @@ fn main() {
     let _lighting_check =
         compile("shaders/lighting_check.comp", &out.join("lighting_check.comp.spv"));
     let media_check = compile("shaders/media_check.comp", &out.join("media_check.comp.spv"));
+    let froxel_inject = compile("shaders/froxel_inject.comp", &out.join("froxel_inject.comp.spv"));
+    let froxel_integrate = compile(
+        "shaders/froxel_integrate.comp",
+        &out.join("froxel_integrate.comp.spv"),
+    );
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
@@ -71,7 +76,7 @@ fn main() {
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\n",
             vert.display(),
             frag.display(),
             depth_mask.display(),
@@ -79,7 +84,9 @@ fn main() {
             wire.display(),
             audio.display(),
             fxaa.display(),
-            media_check.display()
+            media_check.display(),
+            froxel_inject.display(),
+            froxel_integrate.display()
         ),
     )
     .unwrap();
@@ -109,6 +116,10 @@ fn main() {
         "lighting_screen.comp",
         "media.glsl",
         "media_check.comp",
+        "froxel_common.glsl",
+        "froxel_inject.comp",
+        "froxel_integrate.comp",
+        "froxel_compose.glsl",
         "lighting_check.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");

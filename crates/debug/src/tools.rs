@@ -1305,7 +1305,7 @@ impl Tools {
                 apply_fog_update(&mut ctx.host.scene().fog, args.0)?;
                 reply(fog_settings_value(&ctx.host.scene().fog))
             }
-            "get_fog_stats" => reply(fog_stats_value(ctx.host.scene())),
+            "get_fog_stats" => reply(fog_stats_value(ctx.host.scene(), ctx.renderer)),
             "get_menu_settings" => reply(menu_value(&ctx.host.scene().menu.effective())),
             "set_menu_settings" => {
                 apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
@@ -1871,8 +1871,8 @@ fn fog_value_text(value: &Value) -> Result<String, String> {
     Err("a fog value is a string, number, or bool".into())
 }
 
-fn fog_stats_value(scene: &Scene) -> Value {
-    let probe = genos_render::fog_probe(&scene.fog, scene.lighting.preset);
+fn fog_stats_value(scene: &Scene, renderer: &Renderer) -> Value {
+    let probe = renderer.fog_frame_probe(&scene.fog, scene.lighting.preset);
     let bytes = u32::try_from(probe.vram_bytes).unwrap_or(u32::MAX);
     obj(vec![
         ("dispatches", num(f64::from(probe.dispatches))),
@@ -1884,7 +1884,7 @@ fn fog_stats_value(scene: &Scene) -> Value {
         ("pass_ms", num(probe.pass_ms)),
         (
             "pass_ms_label",
-            text("frame pass is not dispatched; lavapipe timestamps are fog-check"),
+            text("last frame lavapipe timestamp when fog dispatched; 0 before that frame. Not an RTX 4070 time. History stays off."),
         ),
         ("view", text(scene.fog.inspect.name())),
         ("view_line", text(scene.fog.inspect_line())),

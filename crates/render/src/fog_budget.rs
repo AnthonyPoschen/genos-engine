@@ -115,16 +115,17 @@ pub fn allocation_bytes(preset: LightingPreset) -> u64 {
 
 /// Counters the debug page and `get_fog_stats` share.
 ///
-/// `pass_ms` stays 0. The lighting frame does not dispatch the froxel.
-/// Lavapipe timestamps live on `fog-check`, and they are labelled as lavapipe.
+/// [`fog_probe`] leaves `pass_ms` at 0. `Renderer::fog_frame_probe` writes the
+/// last frame's lavapipe timestamp when the froxel dispatched. That number is
+/// not an RTX 4070 measurement.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FogProbe {
     /// 1 when the pass would run, otherwise 0.
     pub dispatches: u32,
     /// Sample cap when the pass runs, otherwise 0.
     pub samples_used: u32,
-    /// Samples dropped by the controller. The frame path does not time a pass,
-    /// so this stays 0.
+    /// Samples dropped by the controller. The frame dispatches the full preset
+    /// grid, so this stays 0. The millisecond gate fits a separate count.
     pub samples_capped: u32,
     /// History accepts. History is off, so this stays 0.
     pub history_accepts: u32,
@@ -132,7 +133,7 @@ pub struct FogProbe {
     pub history_rejects: u32,
     /// Grid plus column bytes when the pass runs, otherwise 0.
     pub vram_bytes: u64,
-    /// Frame pass time. The frame path does not dispatch, so this stays 0.
+    /// Last frame's froxel timestamp, milliseconds. [`fog_probe`] leaves this 0.
     pub pass_ms: f64,
 }
 

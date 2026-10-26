@@ -19,6 +19,53 @@ const LAMP_UNIT: f32 = 72.0;
 const YAW_FRAMES: u32 = 320;
 const PICTURE_WIDTH: f64 = 2560.0;
 
+/// Planted-bug bits. The integrate shader reads the same values.
+pub const FOG_SKIP_EXTINCTION: u32 = 1;
+/// Visibility is 1. The shadow ray is not traced.
+pub const FOG_SKIP_SHADOW: u32 = 2;
+/// A sphere's bound is ignored, so its density is written everywhere.
+pub const FOG_IGNORE_SPHERE: u32 = 4;
+/// Slice edges are linear in the index instead of exponential.
+pub const FOG_LINEAR_SLICE: u32 = 8;
+/// Henyey-Greenstein `g` is negated.
+pub const FOG_FLIP_G: u32 = 16;
+
+/// One GPU froxel dispatch. `scene` None forces [`FOG_SKIP_SHADOW`].
+#[derive(Clone, Debug)]
+pub struct FogDispatch {
+    /// Height fog and local volumes.
+    pub settings: FogSettings,
+    /// Frustum the grid is built in.
+    pub view: FogView,
+    /// Column and slice counts.
+    pub size: GridSize,
+    /// Directional sun.
+    pub sun: DirectSun,
+    /// Point lamps. The pass keeps the first eight.
+    pub lamps: Vec<FogPointLamp>,
+    /// Packed into the resident scene when shadows are on.
+    pub scene: Option<Scene>,
+    /// [`FOG_SKIP_EXTINCTION`] and the other planted-bug bits.
+    pub flags: u32,
+    /// Near slices only, with no tail. Zero keeps every slice and the tail.
+    pub stop_slices: u32,
+    /// Copy the extinction image back. The leak rows need it.
+    pub read_extinction: bool,
+}
+
+/// Columns, and the extinction image when it was requested.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FogGpu {
+    /// One entry per column, row-major.
+    pub columns: Vec<FogColumn>,
+    /// Extinction, or empty when the dispatch did not read it back.
+    pub extinction: Vec<f32>,
+    /// Device timestamp span of inject plus integrate, milliseconds.
+    pub pass_ms: f64,
+    /// Extinction image, column buffer, and the history reserve.
+    pub vram_bytes: u64,
+}
+
 /// A lit point lamp. Colour is multiplied by `LAMP_UNIT / distance²`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FogPointLamp {

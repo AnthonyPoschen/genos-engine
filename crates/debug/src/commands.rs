@@ -129,7 +129,7 @@ fn fog_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_fog_stats",
-            "Fog counters: dispatches, samples_used, samples_capped, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. Accepts, rejects, and pass_ms stay 0: history is off, and the frame does not dispatch the froxel. Lavapipe timestamps are fog-check.",
+            "Fog counters: dispatches, samples_used, samples_capped, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not an RTX 4070 time.",
         ),
     ]
 }
