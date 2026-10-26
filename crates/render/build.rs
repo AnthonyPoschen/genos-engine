@@ -36,12 +36,7 @@ fn main() {
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
     // Not embedded: catches errors in pieces no pass includes yet.
-    // reflections_check is the lavapipe parity dispatch for reflections.glsl.
-    for file in [
-        "lighting_check.comp",
-        "media_check.comp",
-        "reflections_check.comp",
-    ] {
+    for file in ["lighting_check.comp", "media_check.comp", "reflections_check.comp"] {
         let src = format!("shaders/{file}");
         println!("cargo:rerun-if-changed={src}");
         compile(&src, &out.join(format!("{file}.spv")));
