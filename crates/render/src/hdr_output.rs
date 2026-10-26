@@ -448,8 +448,19 @@ pub fn histogram_counts(samples: &[f64], bins: usize) -> Vec<u32> {
 #[must_use]
 pub fn histogram_ev100_bins(samples: &[f64], bins: usize) -> f64 {
     let bins = bins.clamp(1, 4096);
-    let counts = histogram_counts(samples, bins);
-    let total: u32 = counts.iter().copied().sum();
+    histogram_ev100_from_counts(&histogram_counts(samples, bins))
+}
+
+/// Clip the outer 10% of bin counts and return EV100. The GPU meter writes the counts.
+/// An empty histogram is EV100 0.
+#[must_use]
+pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
+    if counts.is_empty() {
+        return 0.0;
+    }
+    let bins = counts.len().min(4096);
+    let counts = &counts[..bins];
+    let total = counts.iter().fold(0_u32, |acc, count| acc.saturating_add(*count));
     if total == 0 {
         return 0.0;
     }
@@ -1529,5 +1540,17 @@ mod tests {
         assert_eq!(pack_f32(1.0 / 60.0).to_bits(), 0x3c88_8889);
         assert!(pack_f32(f64::NAN).is_nan());
         assert_eq!(pack_f32(f64::INFINITY).to_bits(), 0x7f80_0000);
+    }
+
+    #[test]
+    fn histogram_ev100_from_counts_matches_the_sample_meter() {
+        let samples = [0.18_f64, 0.18, 0.01, 12.5, 0.0, 4.0];
+        for bins in [1_usize, 64, 128, 256, 4096] {
+            let from_samples = histogram_ev100_bins(&samples, bins);
+            let from_counts = histogram_ev100_from_counts(&histogram_counts(&samples, bins));
+            assert!((from_samples - from_counts).abs() < 1.0e-12);
+        }
+        assert_eq!(histogram_ev100_from_counts(&[]), 0.0);
+        assert_eq!(histogram_ev100_from_counts(&[0, 0, 0]), 0.0);
     }
 }

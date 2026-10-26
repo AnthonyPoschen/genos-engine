@@ -1,0 +1,83 @@
+#version 450
+// Log-luminance histogram of every scene pixel, plus a stride-32 still check.
+// The CPU reads the header after the fence and clips the tails. Luma stays here.
+layout(local_size_x = 64) in;
+
+layout(push_constant) uniform Push {
+    uvec4 dims;
+    uvec4 params;
+    uvec4 lamp;
+} pc;
+
+layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
+    vec4 px[];
+} scene_lin;
+
+// counts[4096], moved, total, pad0, pad1, then two luma halves. 16400 header bytes.
+layout(std430, set = 0, binding = 18) buffer HdrMeter {
+    uint counts[4096];
+    uint moved;
+    uint total;
+    uint pad0;
+    uint pad1;
+    float luma[];
+} meter;
+
+const float REC709_R = 0.2126;
+const float REC709_G = 0.7152;
+const float REC709_B = 0.0722;
+const float LOG_LO = -16.0;
+const float LOG_HI = 15.999;
+const float LOG_SPAN = 32.0;
+const float STILL_MOVE = 0.01;
+
+float scene_y(vec3 c) {
+    return dot(c, vec3(REC709_R, REC709_G, REC709_B));
+}
+
+uint bin_of(float y, uint bins) {
+    float log_l = clamp(log2(y), LOG_LO, LOG_HI);
+    float scaled = (log_l - LOG_LO) / LOG_SPAN * float(bins);
+    uint index = uint(floor(scaled));
+    if (index >= bins) {
+        index = bins - 1u;
+    }
+    return index;
+}
+
+void main() {
+    uint width = pc.dims.x;
+    uint height = pc.dims.y;
+    uint pixels = width * height;
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pixels) {
+        return;
+    }
+    float y = scene_y(scene_lin.px[i].rgb);
+    uint bins = pc.dims.z;
+    if (pc.params.w != 0u && y > 0.0 && bins > 0u) {
+        if (bins > 4096u) {
+            bins = 4096u;
+        }
+        atomicAdd(meter.counts[bin_of(y, bins)], 1u);
+    }
+    uint stride = pc.params.z;
+    if (stride == 0u || (i % stride) != 0u) {
+        return;
+    }
+    uint slot = i / stride;
+    uint slots = pc.dims.w;
+    if (slot >= slots) {
+        return;
+    }
+    uint ping = pc.params.y & 1u;
+    uint next = 1u - ping;
+    if (pc.params.x != 0u) {
+        float prev = meter.luma[ping * slots + slot];
+        atomicAdd(meter.total, 1u);
+        if (abs(prev - y) > STILL_MOVE) {
+            atomicAdd(meter.moved, 1u);
+        }
+    }
+    meter.luma[next * slots + slot] = y;
+}

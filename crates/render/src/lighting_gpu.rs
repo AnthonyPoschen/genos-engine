@@ -46,6 +46,20 @@ const LIGHTING_CACHE_RAYS: u32 = 16;
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
+/// `hdr_meter.comp` header: 4096 bin counts plus moved, total, and two pads.
+const METER_HEADER_BYTES: u64 = 16_400;
+const METER_BIN_CAP: usize = 4096;
+/// Still-check stride. The histogram counts every pixel. This stride does not.
+const STILL_STRIDE: u32 = 32;
+
+fn still_sample_slots(pixels: u64) -> u64 {
+    let stride = u64::from(STILL_STRIDE);
+    if pixels == 0 {
+        1
+    } else {
+        pixels.saturating_add(stride - 1) / stride
+    }
+}
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -120,10 +134,20 @@ pub(crate) struct Lighting {
     /// Full-resolution bloom, then the mip chain. The GPU pyramid writes it.
     /// The intensity scale is not in the texels.
     bloom: Buffer,
-    /// Last `still_pop_share` of subsampled scene luma. Zero until two copies exist.
+    /// Last still-check share from the GPU meter. Zero until a comparison exists.
     still_pop: f64,
-    /// Previous subsampled scene luma.
-    prev_luma: Vec<f64>,
+    /// GPU histogram and the stride-32 luma halves. The header is the bin counts.
+    meter_dev: Buffer,
+    /// Host copy of the meter header. Read after the fence, one frame late.
+    meter_host: Buffer,
+    /// A meter dispatch is in the frame the fence just waited for.
+    meter_pending: bool,
+    /// The meter has stored one luma half, so the next pass can compare.
+    meter_has_prev: bool,
+    /// Which luma half holds the previous frame. The dispatch flips it.
+    meter_ping: u32,
+    /// EV100 from the last GPU histogram. Empty until a frame had samples.
+    meter_ev: Option<f64>,
     hdr: genos_scene::HdrSettings,
     /// Last scale written. Legacy bytes stay at 1.
     exposure_scale: f32,
@@ -133,8 +157,6 @@ pub(crate) struct Lighting {
     exposure_log: Vec<f64>,
     /// Last histogram bin counts. The dump under `hdr-output/` is the same vector.
     histogram_counts: Vec<u32>,
-    /// The previous frame copied `scene_lin` into `scene_host`.
-    hdr_copied: bool,
     cache_keys: Buffer,
     cache: Buffer,
     /// The cache buffers are new and get zeroed before the next frame's passes.
@@ -267,6 +289,8 @@ pub(crate) struct Lighting {
     agx_pipe: Handle,
     /// Same-frame bloom pyramid. Built the first frame that asks for bloom.
     bloom_pipe: Handle,
+    /// Histogram and still check. Built the first frame that stores scene radiance.
+    meter_pipe: Handle,
     /// Compose with the scene image and bloom. The plain pipe stays free of them.
     compose_hdr_pipe: Handle,
     /// Sun compose with the scene image and bloom.
@@ -394,13 +418,17 @@ impl Default for Lighting {
             agx_lut: Buffer::empty(),
             bloom: Buffer::empty(),
             still_pop: 0.0,
-            prev_luma: Vec::new(),
+            meter_dev: Buffer::empty(),
+            meter_host: Buffer::empty(),
+            meter_pending: false,
+            meter_has_prev: false,
+            meter_ping: 0,
+            meter_ev: None,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
             last_ev100: 0.0,
             exposure_log: Vec::new(),
             histogram_counts: Vec::new(),
-            hdr_copied: false,
             cache_keys: Buffer::empty(),
             cache: Buffer::empty(),
             cache_clear: false,
@@ -476,6 +504,7 @@ impl Default for Lighting {
             sun_pipe: std::ptr::null_mut(),
             agx_pipe: std::ptr::null_mut(),
             bloom_pipe: std::ptr::null_mut(),
+            meter_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
@@ -592,7 +621,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -681,7 +710,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 42 };
+            let size = Size { kind: 7, count: 45 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -960,6 +989,8 @@ impl Gpu {
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
+        let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
+        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
@@ -969,6 +1000,8 @@ impl Gpu {
         self.destroy_buffer(&mut hdr_encode);
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
+        self.destroy_buffer(&mut meter_dev);
+        self.destroy_buffer(&mut meter_host);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -1064,9 +1097,18 @@ impl Gpu {
         self.write_agx_lut();
         // The second half holds the mip chain and two upsample scratches.
         self.lighting.bloom = self.make_buffer(scene_bytes.saturating_mul(2), 0x20, Memory::Upload)?;
-        self.lighting.prev_luma.clear();
+        let meter_slots = still_sample_slots(pixels);
+        let meter_bytes = METER_HEADER_BYTES.saturating_add(meter_slots.saturating_mul(8));
+        // Storage for the histogram, transfer so the header can be cleared and copied.
+        self.lighting.meter_dev =
+            self.make_buffer(meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.meter_host = self.make_buffer(METER_HEADER_BYTES, 0x2, Memory::Readback)?;
+        self.lighting.meter_pending = false;
+        self.lighting.meter_has_prev = false;
+        self.lighting.meter_ping = 0;
+        self.lighting.meter_ev = None;
         self.lighting.still_pop = 0.0;
-        self.lighting.hdr_copied = false;
+        self.lighting.histogram_counts.clear();
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
@@ -1132,6 +1174,7 @@ impl Gpu {
                 (15, self.lighting.agx_lut.buffer),
                 (16, self.lighting.bloom.buffer),
                 (17, self.lighting.hdr_encode.buffer),
+                (18, self.lighting.meter_dev.buffer),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
@@ -1290,6 +1333,17 @@ impl Gpu {
         self.lighting.agx_pipe =
             self.make_compute_pipe(HDR_AGX_SPV, self.lighting.layout, "hdr agx")?;
         self.note_pipeline_time("hdr agx", start);
+        Ok(())
+    }
+
+    fn ensure_meter_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.meter_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.meter_pipe =
+            self.make_compute_pipe(HDR_METER_SPV, self.lighting.layout, "hdr meter")?;
+        self.note_pipeline_time("hdr meter", start);
         Ok(())
     }
 
@@ -2129,15 +2183,7 @@ impl Gpu {
             genos_scene::ExposureMode::Camera => {
                 crate::hdr_output::camera_ev100(settings.aperture, settings.shutter, settings.iso)
             }
-            genos_scene::ExposureMode::Auto => {
-                if let Some((ev, counts)) = self.meter_scene(settings.histogram_bins) {
-                    self.write_histogram_dump(&counts);
-                    self.lighting.histogram_counts = counts;
-                    ev
-                } else {
-                    self.lighting.last_ev100
-                }
-            }
+            genos_scene::ExposureMode::Auto => self.lighting.meter_ev.unwrap_or(self.lighting.last_ev100),
         };
         self.lighting.last_ev100 = ev;
         let target = crate::hdr_output::exposure_with_compensation(ev, settings.compensation);
@@ -2151,56 +2197,59 @@ impl Gpu {
         crate::hdr_output::pack_f32(next)
     }
 
-    fn meter_scene(&self, bins: u32) -> Option<(f64, Vec<u32>)> {
-        if !self.lighting.hdr_copied || self.lighting.scene_host.memory.is_null() {
-            return None;
+    /// Header from the previous frame's meter. The fence has already waited.
+    fn take_meter(&mut self) {
+        if !self.lighting.meter_pending || self.lighting.meter_host.memory.is_null() {
+            return;
         }
-        let width = self.extent_w as usize;
-        let height = self.extent_h as usize;
-        let pixels = width.saturating_mul(height);
-        let bytes = pixels.saturating_mul(16);
-        if pixels == 0 || self.lighting.scene_host.size < bytes as u64 {
-            return None;
-        }
-        let mut samples = Vec::new();
+        self.lighting.meter_pending = false;
+        let words = METER_BIN_CAP + 4;
+        let mut raw = vec![0_u32; words];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
                 self.device,
-                self.lighting.scene_host.memory,
+                self.lighting.meter_host.memory,
                 0,
-                bytes as u64,
+                METER_HEADER_BYTES,
                 0,
                 &mut mapped,
             ) != 0
             {
-                return None;
+                return;
             }
-            let ptr = mapped as *const f32;
-            let mut index = 0usize;
-            while index < pixels {
-                let base = index.saturating_mul(4);
-                let rgb = [
-                    f64::from(*ptr.add(base)),
-                    f64::from(*ptr.add(base + 1)),
-                    f64::from(*ptr.add(base + 2)),
-                ];
-                let y = crate::hdr_output::scene_luma(rgb);
-                if y > 0.0 {
-                    samples.push(y);
-                }
-                index = index.saturating_add(32);
-            }
-            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), raw.as_mut_ptr(), words);
+            (self.fns.unmap_mem)(self.device, self.lighting.meter_host.memory);
         }
-        if samples.is_empty() {
-            None
+        let had_prev = self.lighting.meter_has_prev;
+        let moved = raw.get(METER_BIN_CAP).copied().unwrap_or(0);
+        let total = raw.get(METER_BIN_CAP + 1).copied().unwrap_or(0);
+        if had_prev {
+            self.lighting.still_pop = if total == 0 {
+                1.0
+            } else {
+                f64::from(moved) / f64::from(total)
+            };
         } else {
-            let bins = usize::try_from(bins).unwrap_or(256);
-            let counts = crate::hdr_output::histogram_counts(&samples, bins);
-            let ev = crate::hdr_output::histogram_ev100_bins(&samples, bins);
-            Some((ev, counts))
+            self.lighting.still_pop = 0.0;
         }
+        self.lighting.meter_has_prev = true;
+        if self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto {
+            return;
+        }
+        let bins = usize::try_from(self.lighting.hdr.histogram_bins)
+            .unwrap_or(256)
+            .clamp(1, METER_BIN_CAP);
+        let counts = raw[..bins].to_vec();
+        let occupied = counts
+            .iter()
+            .fold(0_u32, |acc, count| acc.saturating_add(*count));
+        if occupied == 0 {
+            return;
+        }
+        self.lighting.meter_ev = Some(crate::hdr_output::histogram_ev100_from_counts(&counts));
+        self.write_histogram_dump(&counts);
+        self.lighting.histogram_counts = counts;
     }
 
     fn write_histogram_dump(&self, counts: &[u32]) {
@@ -2242,36 +2291,6 @@ impl Gpu {
     fn bloom_active(&self) -> bool {
         let hdr = &self.lighting.hdr;
         !hdr.legacy_bytes && hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0
-    }
-
-    /// Subsampled scene luma. `still_pop_share` is the gate's still-frame check.
-    fn note_still_pop(&mut self) {
-        if self.lighting.hdr.legacy_bytes {
-            return;
-        }
-        let Some(rgba) = self.read_scene_rgba() else {
-            return;
-        };
-        let pixels = rgba.len() / 4;
-        let mut luma = Vec::new();
-        let mut index = 0usize;
-        while index < pixels {
-            let base = index.saturating_mul(4);
-            let rgb = [
-                f64::from(*rgba.get(base).unwrap_or(&0.0)),
-                f64::from(*rgba.get(base.saturating_add(1)).unwrap_or(&0.0)),
-                f64::from(*rgba.get(base.saturating_add(2)).unwrap_or(&0.0)),
-            ];
-            luma.push(crate::hdr_output::scene_luma(rgb));
-            index = index.saturating_add(32);
-        }
-        let before = if self.lighting.prev_luma.is_empty() {
-            luma.clone()
-        } else {
-            self.lighting.prev_luma.clone()
-        };
-        self.lighting.still_pop = crate::hdr_output::still_pop_share(&before, &luma);
-        self.lighting.prev_luma = luma;
     }
 
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
@@ -2381,37 +2400,6 @@ impl Gpu {
         self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
     }
 
-    fn read_scene_rgba(&self) -> Option<Vec<f32>> {
-        if !self.lighting.hdr_copied || self.lighting.scene_host.memory.is_null() {
-            return None;
-        }
-        let width = self.extent_w as usize;
-        let height = self.extent_h as usize;
-        let pixels = width.saturating_mul(height);
-        let bytes = pixels.saturating_mul(16);
-        if pixels == 0 || self.lighting.scene_host.size < bytes as u64 {
-            return None;
-        }
-        let mut rgba = vec![0.0_f32; pixels.saturating_mul(4)];
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            if (self.fns.map_mem)(
-                self.device,
-                self.lighting.scene_host.memory,
-                0,
-                bytes as u64,
-                0,
-                &mut mapped,
-            ) != 0
-            {
-                return None;
-            }
-            std::ptr::copy_nonoverlapping(mapped.cast::<f32>(), rgba.as_mut_ptr(), rgba.len());
-            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
-        }
-        Some(rgba)
-    }
-
     /// Host view of the encode buffer: RGBA32F PQ or scRGB, one texel per pixel.
     fn read_hdr_encode_host(&self) -> Result<Vec<f32>, String> {
         let width = usize::try_from(self.extent_w).unwrap_or(0);
@@ -2478,7 +2466,7 @@ impl Gpu {
     }
 
     fn write_hdr_exposure(&mut self) {
-        self.note_still_pop();
+        self.take_meter();
         if self.lighting.hdr_params.memory.is_null() {
             return;
         }
@@ -2554,38 +2542,87 @@ impl Gpu {
         }
     }
 
-    fn copy_scene_for_meter(&mut self) {
-        let hdr = &self.lighting.hdr;
-        let bloom = hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0;
-        if hdr.legacy_bytes || (hdr.exposure_mode != genos_scene::ExposureMode::Auto && !bloom) {
+    /// Histogram of every pixel, and a stride-32 still check. The header is copied
+    /// for the next frame. Luma halves stay on the device.
+    fn record_gpu_meter(&mut self, width: u32, height: u32) {
+        if self.lighting.hdr.legacy_bytes
+            || self.lighting.meter_pipe.is_null()
+            || self.lighting.meter_dev.buffer.is_null()
+            || self.lighting.meter_host.buffer.is_null()
+            || width == 0
+            || height == 0
+        {
             return;
         }
-        let src = self.lighting.scene_lin.buffer;
-        let dst = self.lighting.scene_host.buffer;
-        if src.is_null() || dst.is_null() {
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        if pixels == 0 || self.lighting.meter_dev.size < METER_HEADER_BYTES {
             return;
         }
-        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
-        if size == 0 {
-            return;
+        unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.meter_dev.buffer,
+                0,
+                METER_HEADER_BYTES,
+                0,
+            );
         }
+        self.memory_barrier(0x800 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
+        let bins = self.lighting.hdr.histogram_bins.clamp(1, 4096);
+        let do_hist = u32::from(
+            self.lighting.hdr.exposure_mode == genos_scene::ExposureMode::Auto,
+        );
+        let slots = u32::try_from(still_sample_slots(pixels)).unwrap_or(u32::MAX);
+        let pc = [
+            width,
+            height,
+            bins,
+            slots,
+            u32::from(self.lighting.meter_has_prev),
+            self.lighting.meter_ping & 1,
+            STILL_STRIDE,
+            do_hist,
+            0,
+            0,
+            0,
+            0,
+        ];
+        let groups = u32::try_from(pixels.div_ceil(64)).unwrap_or(u32::MAX).max(1);
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.meter_pipe);
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<c_void>(),
+            );
+            (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+        }
+        self.memory_barrier(0x800, 0x1000, 0x40, 0x1000);
         #[repr(C)]
         struct Region {
             src: u64,
             dst: u64,
             size: u64,
         }
-        let region = Region { src: 0, dst: 0, size };
+        let region = Region {
+            src: 0,
+            dst: 0,
+            size: METER_HEADER_BYTES,
+        };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
-                src,
-                dst,
+                self.lighting.meter_dev.buffer,
+                self.lighting.meter_host.buffer,
                 1,
                 &region as *const Region as *const u8,
             );
         }
-        self.lighting.hdr_copied = true;
+        self.lighting.meter_pending = true;
+        self.lighting.meter_ping ^= 1;
     }
 
     fn lighting_passes(&mut self, slot: usize) {
@@ -3388,7 +3425,13 @@ impl Gpu {
                 &region as *const Region as *const u8,
             );
         }
-        self.copy_scene_for_meter();
+        if hdr_compose {
+            if let Err(err) = self.ensure_meter_pipe() {
+                eprintln!("lighting: gpu meter off: {err}");
+            } else {
+                self.record_gpu_meter(w, h);
+            }
+        }
         self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
         self.lighting_dump_copy();
     }
@@ -3555,6 +3598,8 @@ impl Gpu {
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
+        let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
+        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -3573,6 +3618,8 @@ impl Gpu {
         self.destroy_buffer(&mut hdr_encode);
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
+        self.destroy_buffer(&mut meter_dev);
+        self.destroy_buffer(&mut meter_host);
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
@@ -3587,6 +3634,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
                 .chain(std::iter::once(&mut self.lighting.agx_pipe))
                 .chain(std::iter::once(&mut self.lighting.bloom_pipe))
+                .chain(std::iter::once(&mut self.lighting.meter_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {

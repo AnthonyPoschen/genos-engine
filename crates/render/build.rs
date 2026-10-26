@@ -63,6 +63,7 @@ fn main() {
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
         ("HDR_AGX_SPV", "hdr_agx.comp"),
         ("HDR_BLOOM_SPV", "hdr_bloom.comp"),
+        ("HDR_METER_SPV", "hdr_meter.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -127,6 +128,7 @@ fn rerun_shader_pieces() {
         "scene_data.glsl",
         "dither.glsl",
         "hdr_shoulder.glsl",
+        "hdr_meter.comp",
         "hdr_display.glsl",
         "hdr_agx.comp",
         "transmit.comp",

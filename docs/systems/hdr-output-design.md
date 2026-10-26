@@ -232,6 +232,8 @@ e += (target − e) × (1 − exp(−dt / τ))
 
 The one-frame latency of the histogram is a departure from a textbook meter that finishes inside the frame. It is how the draw stays free of a fence wait, which [renderer.md](renderer.md) already requires.
 
+`hdr_meter.comp` counts every pixel whose luma is above 0, and it compares stride-32 luma for `still_pop`. The CPU does not map the scene image for either check. It reads the bin counts after the fence and clips them with `histogram_ev100_from_counts`. Potato keeps a fixed exposure, so that pass skips the histogram atomics. `legacy_bytes` does not dispatch the pass.
+
 ## 6. Presets
 
 | | Potato | Low | Medium | High |
@@ -321,7 +323,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
 | `scrgb_code` | = 2.5375 | `scrgb_code(203)` against the literal 2.5375. The expected code is not recomputed as `203/80` | PASS. An 80-nit paper white (`80/80`) fails |
 | `post_ms_device` | ≤ 1.50 on the 4070 | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. Lavapipe prints the timestamp and passes when the query returned. It does not apply the 1.50 ceiling | PASS when the timestamp is finite and positive. A missing timestamp fails |
-| `post_vram_device` | ≤ 96 | post buffers in MiB: scene image, host copy, bloom, encode, lattice, params | PASS. The sum is the allocation |
+| `post_vram_device` | ≤ 96 | post buffers in MiB: scene image, host copy, bloom, encode, lattice, params, meter | PASS. The sum is the allocation |
 
 The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
 
@@ -341,7 +343,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 | The histogram fence stalls the frame | `get_hdr` returns `hdr_ms` and `post_ms_device`, the bloom and display timestamp, one frame behind. Zero when the device has no timestamps. The read stays after the fence. `post_vram_device` is the post buffers in MiB |
 | A sun pixel pins the meter | histogram dump, 256 counts, under `./genos-debug/hdr-output/`. `exposure_ev` |
 | A one-pixel firefly flickers in bloom | bloom level 1 dump. `bloom_firefly` |
-| Bloom pops | `still_pop_share` on subsampled scene luma, reported by `get_hdr`. The gate does not compare two equal flats |
+| Bloom pops | `still_pop` from the GPU stride-32 check, reported by `get_hdr`. The gate does not compare two equal flats |
 | The grade ran on a display image | `gpu_agx` grades the picture against `agx_rec709` of the scene image. `get_hdr` records `grade=scene` |
 | HDR was asked and the surface is SDR | `get_hdr` lists every `(format, color_space)` and the chosen mode |
 | The legacy bytes moved | `legacy_shader`. The stored picture is the plain compose of the shipped hall |
@@ -410,7 +412,7 @@ The path tracer stays the GI reference. Bloom and the display transform are grad
 - **Replicated state:** `HdrSettings` only. The scene image, the pyramid, the histogram, and the swapchain stay on the client that presents.
 - **Authority:** that client. A server does not choose the display transform.
 - **Prediction / rollback:** none. Exposure is presentation. A rollback does not replay the histogram.
-- **Determinism:** the same settings and the same scene-referred image select the same EV100 on the CPU meter. The GPU histogram is not cross-device deterministic. The analytic gate is deterministic. Pixels are not.
+- **Determinism:** the CPU clip of the GPU bin counts is deterministic. The GPU binning is not cross-device deterministic. The analytic gate is deterministic. Pixels are not.
 - **Headless server:** no swapchain, no pyramid, no histogram. It can store the struct and forward it.
 
 ## 11. Papers and departures

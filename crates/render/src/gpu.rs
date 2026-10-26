@@ -309,7 +309,7 @@ impl Renderer {
         self.hdr_ms()
     }
 
-    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params.
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting
@@ -319,7 +319,9 @@ impl Renderer {
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
             .saturating_add(lighting.agx_lut.size)
-            .saturating_add(lighting.hdr_params.size);
+            .saturating_add(lighting.hdr_params.size)
+            .saturating_add(lighting.meter_dev.size)
+            .saturating_add(lighting.meter_host.size);
         bytes as f64
     }
 
