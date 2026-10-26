@@ -10,6 +10,7 @@ mod occ_grid;
 mod pack;
 mod particles;
 mod pool;
+mod reflections;
 mod scene_mesh;
 mod trace;
 mod unfilled;
@@ -29,6 +30,10 @@ pub use gpu::{
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
+pub use reflections::{
+    portal_leak, scheduled_low_rays, shade_picture, shoreline_ratio, PictureFault,
+    ReflectionPicture, TILE,
+};
 pub use particles::{
     card_quad, compose_fog, fire_radiance, fog_along, frame_at, image_from_map, image_from_texture,
     medium, object_cards, shade_lit, Card, Emitter, FireLight, FogHit, FogLamp, Kind, LiveParticle,
