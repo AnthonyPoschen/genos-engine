@@ -1270,11 +1270,12 @@ bool lighting_sc_local_change(uint slot, out bool mover) {
     return false;
 }
 // The lamps' change at slot relative to the light it shows (0 when none).
+// A real lamp change (delta above zero) counts while the rest of GI is quiet,
+// so texels inside the reach stay due. A zero delta is the first sight of a
+// lamp and only counts while the light is not quiet. Texels outside the reach
+// keep their finished schedule.
 float lighting_lamp_delta(vec3 p, uint updated);
 float lighting_sc_lamp_change(uint slot) {
-    if (lighting_sc_light_quiet()) {
-        return 0.0;
-    }
     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
     float d = lighting_lamp_delta(lighting_sc_texel_pos(slot), upd);
     if (d <= 0.0) {
@@ -1287,7 +1288,11 @@ float lighting_sc_lamp_change(uint slot) {
 }
 bool lighting_sc_lamp_touched(uint slot) {
     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
-    return !lighting_sc_light_quiet() && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), upd);
+    float d = lighting_lamp_delta(lighting_sc_texel_pos(slot), upd);
+    if (d > 0.0) {
+        return true;
+    }
+    return !lighting_sc_light_quiet() && d >= 0.0;
 }
 bool lighting_sc_asvgf_on();
 float lighting_sc_count(uint slot) {
@@ -3985,8 +3990,8 @@ void lighting_sc_grad_take(uint slot, float l_now) {
 // Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
 // hit's shadow ray to a lamp is kept per 12.5 cm cell, facing axis and lamp, with
 // the lamp's epoch; the epoch moves when the lamp moves or changes, or when a
-// change of the traced world (this frame's change list, old and new bounds, or
-// a whole-world change) falls within its range (suns: anywhere). A moving lamp
+// change of the traced world (this frame's change list) falls within its range
+// (suns: anywhere). The host does not set a whole-world flag. A moving lamp
 // moves its epoch every frame, so it re-shadows as before.
 const bool LIGHTING_SHADOW_CACHE = true;
 const uint LIGHTING_SHADOW_AT = 13u * LIGHTING_CACHE_SLOTS;

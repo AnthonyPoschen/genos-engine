@@ -1,6 +1,6 @@
 # 0013: Lighting cost is budgeted and reuses a world-space cache
 
-Status: **accepted** (Anthony Poschen, 2026-10-26). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
+Status: **accepted** (Anthony, 26 Oct 2026). The first code slice is local change tracking. Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md). Departures are in the lighting system record, section Local change tracking.
 
 ## Context
 
@@ -29,3 +29,9 @@ Finished values only, blended once. Stored light never depends on the camera (AD
 ## Consequences
 
 `--lighting-schedule global` stays as the A/B reference until P6. Each phase lands with its own A/B and gameplay gates (spin, strafe, approach, many movers, A→B→A, settle). A phase that misses its gate is dropped under the standing drop rule.
+
+## Code (26 Oct 2026)
+
+Local change tracking is in the engine. Movers and point lamps emit change records. Those records dirty world-cache cells (swept bounds, lamp reach). The global full-frame drop is deleted. There is no full recompute fallback.
+
+Not in this slice: the priority scheduler, per-pass work caps, cache LOD, and `--lighting-schedule`. Screen passes still run while a change record is in flight. The departures are listed in `docs/systems/lighting/README.md` under Local change tracking.

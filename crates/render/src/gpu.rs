@@ -567,6 +567,11 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Change records, frames since the last one, and spheres waiting on the GPU list.
+    pub fn gi_region_stats(&self) -> crate::lighting_regions::GiRegionStats {
+        self.gpu.gi_region_stats()
+    }
+
     /// One compute pass over the resident occluders. This does not present and does not upload them.
     pub fn transmission_gains(
         &mut self,
@@ -593,9 +598,8 @@ impl Renderer {
         self.gpu.antialias
     }
 
-    /// Frames in a row GI has seen the same scene (camera, lights, objects): its
-    /// screen probes average that many frames' rays (up to 32), and any change
-    /// starts the count, and so the average, over at 0.
+    /// Frames since the last change record. A camera move does not reset it.
+    /// Screen probes average that many frames' rays (up to 32).
     pub fn lighting_still_frames(&self) -> u32 {
         self.gpu.lighting_still_frames()
     }
@@ -3853,6 +3857,7 @@ impl Gpu {
         let bytes = pack::scene_bytes(pack);
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
+        self.lighting.static_light = lighting_static_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
         self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);

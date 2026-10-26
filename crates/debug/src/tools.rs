@@ -773,6 +773,7 @@ impl Tools {
         match name {
             "status" => {
                 let stats = ctx.renderer.settle_stats();
+                let regions = ctx.renderer.gi_region_stats();
                 reply(obj(vec![
                     ("frame", num(self.frame as f64)),
                     ("paused", Value::Bool(self.paused)),
@@ -791,6 +792,8 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                     ("stable", Value::Bool(stats.settled)),
                     ("still_frames", num(stats.still_frames as f64)),
+                    ("change_records", num(regions.change_records as f64)),
+                    ("deferred_spheres", num(regions.deferred_spheres as f64)),
                     (
                         "picture_settled",
                         Value::Bool(ctx.renderer.picture_settled()),

@@ -366,11 +366,10 @@ fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
     assert!(held < 0.25 * 512.0, "turning round keeps few ({held})");
 }
 
-/// The traced world changing as a whole (here the floor's colour, which kept hits
-/// hold) drops every kept ray: each probe is back to this frame's 64 rays, then
-/// refills one stratum a frame.
+/// A floor recolour is not a mover. Kept probe rays stay. The quiet schedule
+/// resets from the static light key; the change list does not drop the room.
 #[test]
-fn lighting_floor_change_drops_all_kept_rays() {
+fn lighting_floor_recolour_keeps_rays_outside_the_change() {
     let (_gpu, mut window, mut renderer) = open();
     let base: Scene = shipped_hall().scene;
     let camera = Camera::opening();
@@ -382,15 +381,19 @@ fn lighting_floor_change_drops_all_kept_rays() {
         &World::from_scene(base),
         &camera,
     );
+    let filled = samples_per_probe(&mut renderer);
     let changed = World::from_scene(floor);
     let _ = draw(&mut window, &mut renderer, &changed, &camera);
     let held = samples_per_probe(&mut renderer);
-    assert!(held <= 64.5, "only this frame's rays are left ({held})");
+    assert!(
+        held > filled - 14.0,
+        "a floor recolour does not drop kept rays ({filled} -> {held})"
+    );
     let _ = draw(&mut window, &mut renderer, &changed, &camera);
     let held = samples_per_probe(&mut renderer);
     assert!(
-        held > 64.5 && held <= 128.5,
-        "the next frame keeps the first and adds its own ({held})"
+        held > filled - 14.0,
+        "the next frame still holds them ({filled} -> {held})"
     );
 }
 

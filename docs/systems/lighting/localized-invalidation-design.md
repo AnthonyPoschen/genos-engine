@@ -1,6 +1,6 @@
 # Bounded lighting: world-cache reuse, fixed budgets, priority scheduling
 
-Status: **approved** by Anthony Poschen, 26 Oct 2026. ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md), status accepted. Phase 0 records pass times and work counters and does not change the picture. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
+Status: **accepted** by Anthony Poschen, 26 Oct 2026. ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). Phase 0 records pass times and work counters and does not change the picture. The first code slice is local change tracking: change records dirty world-cache cells, and the full-frame drop is deleted. Section 5's priority scheduler, and phases P1 and P6 in the table below, are not that slice. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
 
 Revision 2 follows Anthony's review of rev 1. Real play spins the camera while things move. A screen-tile design dirties most tiles on a turn, and its "> 40% dirty or camera cut → full recompute" fallback has no upper bound. Rev 2 therefore:
 - moves reuse into the persistent world-space surface light cache;
