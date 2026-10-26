@@ -311,6 +311,30 @@ impl Renderer {
         self.gpu.materials
     }
 
+    /// Atlases the frame registered, and the finest resident mip of the first.
+    ///
+    /// The colour atlas is index 0 when it is loaded. `None` is the coarsest
+    /// page only, or no texture at all when the count is 0.
+    #[must_use]
+    pub fn material_residency(&self) -> (usize, Option<u32>) {
+        let count = self.gpu.streamer.texture_count();
+        let finest = if count == 0 {
+            None
+        } else {
+            self.gpu.streamer.finest_resident(0)
+        };
+        (count, finest)
+    }
+
+    /// First colour texel the shader's storage buffer holds, for each flight.
+    #[must_use]
+    pub fn material_texel(&self) -> [u8; 2] {
+        [
+            self.gpu.atlas_texel(true, 0),
+            self.gpu.atlas_texel(true, 1),
+        ]
+    }
+
     /// Replace the material knobs. The next frame streams inside the new cap.
     pub fn set_material_settings(&mut self, settings: genos_load::MaterialSettings) {
         self.gpu.apply_material_settings(settings);
@@ -4323,6 +4347,28 @@ impl Gpu {
         let mut old = std::mem::replace(slot_buf, next);
         self.destroy_buffer(&mut old);
         Ok(())
+    }
+
+    fn atlas_texel(&self, color: bool, slot: usize) -> u8 {
+        let buffer = if color {
+            &self.material_color[slot]
+        } else {
+            &self.material_normal[slot]
+        };
+        if buffer.memory.is_null() || buffer.size < 20 {
+            return 0;
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 16, 4, 0, &mut mapped) != 0
+                || mapped.is_null()
+            {
+                return 0;
+            }
+            let byte = *mapped.cast::<u8>();
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+            byte
+        }
     }
 
     fn write_memory(&self, memory: Handle, bytes: &[u8]) -> Result<(), String> {

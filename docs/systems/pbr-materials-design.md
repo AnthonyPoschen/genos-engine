@@ -300,6 +300,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `thrash` | 0 | An A/B spin where the dwell is the only thing that stops a just-loaded mip from being evicted and loaded again. The level gap does not cover that mip, and the heap is over the texture target without being critical. |
 | `evict_order` | 0 | Mismatches against the victim sequence: lowest screen importance, then farthest distance, then the finer level. |
 | `fence` | 0 | Mips that become resident while `transfer_ready` is false. |
+| `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the storage buffer the shader samples is not that resident mip. `cargo test -p genos-render --test material_stream`. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
