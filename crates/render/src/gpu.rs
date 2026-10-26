@@ -272,9 +272,28 @@ impl Renderer {
         self.gpu.lighting.still_pop
     }
 
-    /// Swapchain format and color space in use. Color space stays sRGB until selection runs.
+    /// Swapchain format and color space in use.
     pub fn hdr_surface(&self) -> (i32, i32) {
-        (self.gpu.format, crate::hdr_output::COLOR_SPACE_SRGB)
+        (self.gpu.format, self.gpu.color_space)
+    }
+
+    /// HDR10 PQ code of graphics white, from `swapchain_nits`.
+    pub fn hdr_pq_white(&self) -> f64 {
+        self.gpu.pq_white
+    }
+
+    /// scRGB code of graphics white, from `swapchain_nits`.
+    pub fn hdr_scrgb_white(&self) -> f64 {
+        self.gpu.scrgb_white
+    }
+
+    /// Mode `resolve_swapchain` picked. The created image stays SDR until the pack writes it.
+    pub fn hdr_resolved(&self) -> &'static str {
+        match self.gpu.hdr_output {
+            crate::hdr_output::HdrSwapchain::Sdr => "sdr",
+            crate::hdr_output::HdrSwapchain::Hdr10 => "hdr10",
+            crate::hdr_output::HdrSwapchain::Scrgb => "scrgb",
+        }
     }
 
     /// The legacy shoulder is the display curve, so a missing scene image may undo it.
@@ -833,6 +852,13 @@ struct Gpu {
     surface: Handle,
     swapchain: Handle,
     format: i32,
+    /// Swapchain color space. sRGB nonlinear until an HDR pair is selected.
+    color_space: i32,
+    /// Resolved swapchain. SDR until `create_targets` runs.
+    hdr_output: crate::hdr_output::HdrSwapchain,
+    /// `swapchain_nits` of graphics white for HDR10 and for scRGB.
+    pq_white: f64,
+    scrgb_white: f64,
     extent_w: u32,
     extent_h: u32,
     /// Swapchain present mode: 0 immediate, 1 mailbox, 2 FIFO.
@@ -1232,10 +1258,23 @@ impl Gpu {
             )?;
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
-            let exts = [
+            let color_ext = b"VK_EXT_swapchain_colorspace\0";
+            let mut ext_bytes = vec![0u8; ext_count as usize * 260];
+            check(
+                enumerate_ext(std::ptr::null(), &mut ext_count, ext_bytes.as_mut_ptr()),
+                "extension list",
+            )?;
+            let has_color = ext_bytes.chunks(260).any(|chunk| {
+                let end = chunk.iter().position(|&byte| byte == 0).unwrap_or(256).min(256);
+                &chunk[..end] == b"VK_EXT_swapchain_colorspace"
+            });
+            let mut ext_ptrs = vec![
                 surface_ext.as_ptr() as *const c_char,
                 wayland_ext.as_ptr() as *const c_char,
             ];
+            if has_color {
+                ext_ptrs.push(color_ext.as_ptr() as *const c_char);
+            }
             let app_name = b"genos-camera\0";
             #[repr(C)]
             struct AppInfo {
@@ -1274,8 +1313,8 @@ impl Gpu {
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
-                enabled_exts: exts.len() as u32,
-                ext_names: exts.as_ptr(),
+                enabled_exts: ext_ptrs.len() as u32,
+                ext_names: ext_ptrs.as_ptr(),
             };
             let mut instance = std::ptr::null_mut();
             check(
@@ -1509,6 +1548,10 @@ impl Gpu {
                 surface: vk_surface,
                 swapchain: std::ptr::null_mut(),
                 format: 44,
+                color_space: crate::hdr_output::COLOR_SPACE_SRGB,
+                hdr_output: crate::hdr_output::HdrSwapchain::Sdr,
+                pq_white: 0.0,
+                scrgb_white: 0.0,
                 extent_w: width.max(1),
                 extent_h: height.max(1),
                 present_mode: 2,
@@ -1854,21 +1897,50 @@ impl Gpu {
                 ),
                 "format list",
             )?;
-            self.format = 44;
-            let mut found = false;
+            self.color_space = crate::hdr_output::COLOR_SPACE_SRGB;
+            let mut listed = Vec::new();
+            let mut sdr_format = 0i32;
             for chunk in formats.chunks(8) {
                 let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
-                if format == 44 || format == 37 {
-                    self.format = format;
-                    found = true;
-                    if format == 44 {
-                        break;
-                    }
+                let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
+                listed.push(crate::hdr_output::ListedFormat { format, color_space });
+                if color_space != crate::hdr_output::COLOR_SPACE_SRGB {
+                    continue;
+                }
+                if format == 44 || (format == 37 && sdr_format != 44) {
+                    sdr_format = format;
                 }
             }
-            if !found && format_count > 0 {
+            if sdr_format != 0 {
+                self.format = sdr_format;
+            } else if format_count > 0 {
                 self.format = i32::from_ne_bytes(formats[0..4].try_into().unwrap());
+            } else {
+                self.format = 44;
             }
+            let force_sdr = self.lighting.hdr.legacy_bytes
+                || matches!(
+                    self.lighting.settings.preset,
+                    genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+                );
+            let chosen = crate::hdr_output::resolve_swapchain(
+                crate::hdr_output::present_host(),
+                &listed,
+                self.lighting.hdr.output,
+                force_sdr,
+            );
+            self.hdr_output = chosen;
+            // The compose pack is 8-bit. Creating an HDR image here would present
+            // those bytes as PQ or scRGB. The pair stays SDR until that pack
+            // writes `swapchain_nits`. `hdr_output` records the resolved mode.
+            self.pq_white = crate::hdr_output::swapchain_nits(
+                crate::hdr_output::HdrSwapchain::Hdr10,
+                crate::hdr_output::GRAPHICS_WHITE_NITS,
+            );
+            self.scrgb_white = crate::hdr_output::swapchain_nits(
+                crate::hdr_output::HdrSwapchain::Scrgb,
+                crate::hdr_output::GRAPHICS_WHITE_NITS,
+            );
 
             #[repr(C)]
             struct SwapInfo {
@@ -1909,7 +1981,7 @@ impl Gpu {
                 surface: self.surface,
                 min_count: image_count,
                 format: self.format,
-                color_space: 0,
+                color_space: self.color_space,
                 width: self.extent_w,
                 height: self.extent_h,
                 layers: 1,
@@ -1953,7 +2025,12 @@ impl Gpu {
                 "image list",
             )?;
 
-            let bytes = self.extent_w as u64 * self.extent_h as u64 * 4;
+            let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
+                8
+            } else {
+                4
+            };
+            let bytes = self.extent_w as u64 * self.extent_h as u64 * bpp;
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
                     self.format,

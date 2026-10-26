@@ -1882,6 +1882,9 @@ fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
             ])]),
         ),
         ("chosen", text(chosen)),
+        ("resolved", text(renderer.hdr_resolved())),
+        ("pq_white", num(renderer.hdr_pq_white())),
+        ("scrgb_white", num(renderer.hdr_scrgb_white())),
     ])
 }
 

@@ -914,6 +914,81 @@ pub const fn aces2_rec709(_scene_linear_rec709: [f64; 3]) -> Option<[f64; 3]> {
     None
 }
 
+/// This process's present host. Linux and Wayland are [`PresentHost::Linux`].
+#[must_use]
+pub fn present_host() -> PresentHost {
+    if cfg!(target_os = "windows") {
+        PresentHost::Windows
+    } else if cfg!(target_os = "macos") {
+        PresentHost::Mac
+    } else {
+        PresentHost::Linux
+    }
+}
+
+/// Host preference, then the output mode. `force_sdr` is Potato, Low, and `legacy_bytes`.
+/// `Auto` calls [`pick_hdr_output`].
+#[must_use]
+pub fn resolve_swapchain(
+    host: PresentHost,
+    listed: &[ListedFormat],
+    output: genos_scene::OutputMode,
+    force_sdr: bool,
+) -> HdrSwapchain {
+    if force_sdr || matches!(output, genos_scene::OutputMode::Sdr) {
+        return HdrSwapchain::Sdr;
+    }
+    match output {
+        genos_scene::OutputMode::Hdr10 => {
+            if listed_mode(HdrSwapchain::Hdr10, listed) {
+                HdrSwapchain::Hdr10
+            } else {
+                HdrSwapchain::Sdr
+            }
+        }
+        genos_scene::OutputMode::Scrgb => {
+            if listed_mode(HdrSwapchain::Scrgb, listed) {
+                HdrSwapchain::Scrgb
+            } else {
+                HdrSwapchain::Sdr
+            }
+        }
+        genos_scene::OutputMode::Auto => pick_hdr_output(host, listed),
+        genos_scene::OutputMode::Sdr => HdrSwapchain::Sdr,
+    }
+}
+
+fn listed_mode(mode: HdrSwapchain, listed: &[ListedFormat]) -> bool {
+    listed.iter().copied().any(|item| matches_mode(mode, item))
+}
+
+/// Format and color space for a resolved mode. HDR10 prefers `A2B10G10R10`.
+#[must_use]
+pub fn swapchain_pair(mode: HdrSwapchain, listed: &[ListedFormat]) -> Option<(i32, i32)> {
+    if mode == HdrSwapchain::Hdr10 {
+        if let Some(item) = listed.iter().copied().find(|item| {
+            item.format == FORMAT_A2B10 && item.color_space == COLOR_SPACE_HDR10
+        }) {
+            return Some((item.format, item.color_space));
+        }
+    }
+    listed
+        .iter()
+        .copied()
+        .find(|item| matches_mode(mode, *item))
+        .map(|item| (item.format, item.color_space))
+}
+
+/// Display code for `nits` in the resolved swapchain. SDR is not a nit code.
+#[must_use]
+pub fn swapchain_nits(mode: HdrSwapchain, nits: f64) -> f64 {
+    match mode {
+        HdrSwapchain::Hdr10 => pq_st2084(nits),
+        HdrSwapchain::Scrgb => scrgb_code(nits),
+        HdrSwapchain::Sdr => 0.0,
+    }
+}
+
 /// Linux/Wayland prefers HDR10, then scRGB, then SDR.
 /// Windows prefers scRGB, then HDR10, then SDR.
 /// macOS takes the first HDR pair `MoltenVK` listed, else SDR.

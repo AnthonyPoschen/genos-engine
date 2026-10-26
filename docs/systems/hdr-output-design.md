@@ -306,7 +306,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `bloom_energy` | ≤ 1e−4 | downsample and upsample weights each sum to 1, and one pixel of energy 1 survives two down/up levels | PASS |
 | `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | PASS. `karis_firefly_response(1000)`, which calls `karis_weight`. A box filter (`1000 × 0.125`) fails |
 | `bloom_commute` | ≤ 0.01 | `\|bloom(k x) − k bloom(x)\|` for the linear 13-tap | PASS. `bloom_commute_error` calls `bloom_downsample`. A 0.125 residual fails |
-| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR | PASS. `pick_hdr_output` |
+| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. A picker that ignores the force and keeps HDR10 fails |
 | `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | PASS. `near_grade(0, 0.20)` |
 | `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | PASS. `still_pop_share` on two equal fields. A 10% pop fails. Compose calls the same function on subsampled scene luma |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |

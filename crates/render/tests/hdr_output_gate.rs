@@ -16,10 +16,13 @@ use genos_render::{
     bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
     exposure_adapt_outside, exposure_overshoot, exposure_still_change, grade_peak, grade_relative,
     histogram_ev100, karis_firefly_response, linear_from_display, near_grade, still_pop_share,
-    pick_hdr_output, pq_st2084, scene_peak_error, scene_referred, scrgb_code, tone, HdrSwapchain,
+    pick_hdr_output, pq_st2084, resolve_swapchain, scene_peak_error, scene_referred, scrgb_code,
+    swapchain_nits, tone, HdrSwapchain,
     ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
     FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
+
+use genos_scene::OutputMode;
 
 use std::path::{Path, PathBuf};
 
@@ -248,7 +251,7 @@ fn live_metrics() -> Vec<Metric> {
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
         at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
         at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
-        at_most("output_pick", pick_misses(pick_hdr_output), PICK_MAX),
+        at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("near_error", near_grade(0.0, 0.20), NEAR_MAX),
         at_most(
             "still_pop",
@@ -304,7 +307,7 @@ fn proof_good() -> Vec<Metric> {
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
         at_most("bloom_firefly", karis_firefly(1_000.0), FIREFLY_MAX),
         at_most("bloom_commute", 0.0, COMMUTE_MAX),
-        at_most("output_pick", pick_misses(pick_hdr_output), PICK_MAX),
+        at_most("output_pick", live_output_pick(), PICK_MAX),
         at_most("near_error", weighted(0.0, 0.20), NEAR_MAX),
         at_most(
             "still_pop",
@@ -364,7 +367,11 @@ fn proof_broken() -> Vec<Metric> {
         at_most("bloom_energy", 1.0, BLOOM_MAX),
         at_most("bloom_firefly", 1_000.0 * 0.125, FIREFLY_MAX),
         at_most("bloom_commute", 0.125, COMMUTE_MAX),
-        at_most("output_pick", pick_misses(pick_always_sdr), PICK_MAX),
+        at_most(
+            "output_pick",
+            pick_misses(pick_always_sdr) + force_sdr_misses(pick_ignores_force),
+            PICK_MAX,
+        ),
         at_most("near_error", weighted(0.20, 0.0), NEAR_MAX),
         at_most("still_pop", pop_share(&flat(100, 1.0), &popped()), POP_MAX),
         at_most("agx_de", agx_delta_e(|_scene| [1.0, 1.0, 1.0]), AGX_DE_MAX),
@@ -649,6 +656,71 @@ fn pick_misses(chooser: fn(PresentHost, &[ListedFormat]) -> HdrSwapchain) -> f64
 
 fn pick_always_sdr(_host: PresentHost, _list: &[ListedFormat]) -> HdrSwapchain {
     HdrSwapchain::Sdr
+}
+
+fn live_output_pick() -> f64 {
+    pick_misses(pick_hdr_output) + force_sdr_misses(resolve_swapchain)
+}
+
+fn force_sdr_misses(
+    chooser: fn(PresentHost, &[ListedFormat], OutputMode, bool) -> HdrSwapchain,
+) -> f64 {
+    let both = [
+        ListedFormat {
+            format: FORMAT_R16F,
+            color_space: COLOR_SPACE_SCRGB,
+        },
+        ListedFormat {
+            format: FORMAT_A2B10,
+            color_space: COLOR_SPACE_HDR10,
+        },
+        ListedFormat {
+            format: FORMAT_BGRA8,
+            color_space: COLOR_SPACE_SRGB,
+        },
+    ];
+    let mut wrong = 0.0;
+    let cases = [
+        (PresentHost::Linux, OutputMode::Auto, true, HdrSwapchain::Sdr),
+        (PresentHost::Linux, OutputMode::Auto, false, HdrSwapchain::Hdr10),
+        (
+            PresentHost::Windows,
+            OutputMode::Auto,
+            false,
+            HdrSwapchain::Scrgb,
+        ),
+        (PresentHost::Linux, OutputMode::Sdr, false, HdrSwapchain::Sdr),
+        (
+            PresentHost::Windows,
+            OutputMode::Hdr10,
+            true,
+            HdrSwapchain::Sdr,
+        ),
+    ];
+    for (host, output, force, want) in cases {
+        if chooser(host, &both, output, force) != want {
+            wrong += 1.0;
+        }
+    }
+    let white = swapchain_nits(HdrSwapchain::Scrgb, 203.0);
+    if white.to_bits() != scrgb_code(203.0).to_bits() {
+        wrong += 1.0;
+    }
+    let pq = swapchain_nits(HdrSwapchain::Hdr10, 203.0);
+    if pq.to_bits() != pq_st2084(203.0).to_bits() {
+        wrong += 1.0;
+    }
+    wrong
+}
+
+/// Mutation: Potato and Low keep the host HDR pair.
+fn pick_ignores_force(
+    host: PresentHost,
+    list: &[ListedFormat],
+    _output: OutputMode,
+    _force: bool,
+) -> HdrSwapchain {
+    pick_hdr_output(host, list)
 }
 
 fn peak_err(stored: f64) -> f64 {
