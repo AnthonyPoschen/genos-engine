@@ -905,9 +905,10 @@ struct Gpu {
     submit_pending: bool,
     /// The lifecycle is draining and destroying. Lighting waits must not block.
     lifecycle_release: bool,
-    /// `destroy_rest` has released the device.
+    /// The instance has been destroyed.
     torn_down: bool,
-    /// 0 yields, 1 destroys lighting, then the rest of the device.
+    /// 0 yields, 1 destroys lighting, 2 releases images and pipelines,
+    /// 3 destroys the device, 4 the surface, then the instance.
     teardown: u8,
     /// The drain submits have been queued.
     shutdown_armed: bool,
@@ -5374,20 +5375,19 @@ impl Buffer {
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        if self.torn_down || self.device.is_null() {
+        if self.torn_down {
             return;
         }
         if !self.lifecycle_release {
-            // Already unwinding. Leak the device. An idle wait here is the stall.
-            if std::thread::panicking() {
+            // A null device was never opened. Already unwinding: leak. An idle wait is the stall.
+            if self.device.is_null() || std::thread::panicking() {
                 return;
             }
             panic!("genos-render: the device was dropped outside the app lifecycle");
         }
-        if self.teardown < 2 {
-            self.destroy_lighting();
-        }
-        self.destroy_rest();
+        // The device pointer is cleared before the surface and the instance,
+        // so a null device here still has those two calls left.
+        self.finish_teardown();
     }
 }
 
@@ -5409,9 +5409,9 @@ impl Gpu {
             && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
     }
 
-    /// Destroy one group and return. `true` when the device is gone.
+    /// Destroy one group and return. `true` when the instance is gone.
     pub(crate) fn destroy_step(&mut self) -> bool {
-        if self.torn_down || self.device.is_null() {
+        if self.torn_down {
             return true;
         }
         self.lifecycle_release = true;
@@ -5425,11 +5425,46 @@ impl Gpu {
                 self.teardown = 2;
                 false
             }
+            2 => {
+                self.destroy_gpu_objects();
+                self.teardown = 3;
+                false
+            }
+            3 => {
+                self.destroy_device_handle();
+                self.teardown = 4;
+                false
+            }
+            4 => {
+                self.destroy_surface_handle();
+                self.teardown = 5;
+                false
+            }
             _ => {
-                self.destroy_rest();
+                self.destroy_instance_handle();
                 true
             }
         }
+    }
+
+    fn finish_teardown(&mut self) {
+        if self.teardown < 2 {
+            self.destroy_lighting();
+            self.teardown = 2;
+        }
+        if self.teardown < 3 {
+            self.destroy_gpu_objects();
+            self.teardown = 3;
+        }
+        if self.teardown < 4 {
+            self.destroy_device_handle();
+            self.teardown = 4;
+        }
+        if self.teardown < 5 {
+            self.destroy_surface_handle();
+            self.teardown = 5;
+        }
+        self.destroy_instance_handle();
     }
 
     fn fence_retired(&self, fence: Handle) -> bool {
@@ -5548,12 +5583,11 @@ impl Gpu {
         }
     }
 
-    fn destroy_rest(&mut self) {
-        if self.torn_down || self.device.is_null() {
-            self.torn_down = true;
+    /// Images, buffers, and pipelines. The device, surface, and instance stay.
+    fn destroy_gpu_objects(&mut self) {
+        if self.device.is_null() {
             return;
         }
-        self.torn_down = true;
         self.lifecycle_release = true;
         unsafe {
             self.destroy_targets();
@@ -5680,13 +5714,43 @@ impl Gpu {
                 (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
                 self.shutdown_compute = std::ptr::null_mut();
             }
-            (self.fns.destroy_device)(self.device, std::ptr::null());
-            self.device = std::ptr::null_mut();
-            if !self.surface.is_null() {
-                (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
-            }
-            (self.fns.destroy_instance)(self.instance, std::ptr::null());
         }
+    }
+
+    fn destroy_device_handle(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = self.device;
+        self.device = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_device)(device, std::ptr::null());
+        }
+    }
+
+    fn destroy_surface_handle(&mut self) {
+        if self.surface.is_null() || self.instance.is_null() {
+            self.surface = std::ptr::null_mut();
+            return;
+        }
+        let surface = self.surface;
+        self.surface = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_surface)(self.instance, surface, std::ptr::null());
+        }
+    }
+
+    fn destroy_instance_handle(&mut self) {
+        if self.instance.is_null() {
+            self.torn_down = true;
+            return;
+        }
+        let instance = self.instance;
+        self.instance = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_instance)(instance, std::ptr::null());
+        }
+        self.torn_down = true;
     }
 }
 
