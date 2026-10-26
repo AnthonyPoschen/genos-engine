@@ -7,19 +7,32 @@
 
 mod animation;
 mod bin;
+mod emitters;
 mod error;
+mod mips;
+mod pages;
 mod gltf;
 mod inflate;
 mod jpeg;
 mod material;
 mod mesh;
 mod png;
+mod shade;
 mod source;
 mod texture;
 mod ttf;
 mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
+pub use emitters::{
+    double_count, furnace_wall, settled_wall, should_promote, Enclosure, MaterialSettings,
+    PromoteBudget, PromotePreset, SettingEnv, CELL_EDGE_M,
+};
+pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
+pub use pages::{
+    miss_colour, mib_f32, plan_residency, resident_bytes, HotReload, ImageChain, MaterialWatch,
+    ResidencyPlan,
+};
 pub use error::LoadError;
 pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
@@ -28,6 +41,7 @@ pub use gltf::{
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
+pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
 pub use ttf::{Font, Glyph, OutlinePoint};
