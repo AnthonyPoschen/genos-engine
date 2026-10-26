@@ -43,15 +43,27 @@ layout(std430, set = 0, binding = 1) readonly buffer FroxelParams {
     FroxelLamp lamps[8];
 } fog;
 
+const float FROXEL_Z_NEAR = 0.10;
+const float FROXEL_Z_FAR = 64.0;
+const float FROXEL_HALF = 0.5;
+const float FROXEL_NDC = 2.0;
+const float FROXEL_DISTANCE_EPS = 1.0e-8;
+const float FROXEL_TAP_COUNT = 8.0;
+const float FROXEL_SUN_REACH = 48.0;
+const float FROXEL_LAMP_MIN_DIST2 = 0.25;
+const float FROXEL_TAIL_COS = 1.0e-4;
+const float FROXEL_TAIL_INF = 1.0e8;
+const float FROXEL_TAU_SAT = 1.0e6;
+
 float froxel_slice_edge(uint index, uint slices) {
     if (slices == 0u) {
-        return 64.0;
+        return FROXEL_Z_FAR;
     }
     float t = float(index) / float(slices);
     if ((fog.size.w & 8u) != 0u) {
-        return mix(0.10, 64.0, t);
+        return mix(FROXEL_Z_NEAR, FROXEL_Z_FAR, t);
     }
-    return 0.10 * pow(64.0 / 0.10, t);
+    return FROXEL_Z_NEAR * pow(FROXEL_Z_FAR / FROXEL_Z_NEAR, t);
 }
 
 float froxel_phase_g(float g) {
@@ -65,10 +77,10 @@ float froxel_phase_g(float g) {
 vec3 froxel_offset(uvec2 c) {
     float width = float(max(fog.size.x, 1u));
     float height = float(max(fog.size.y, 1u));
-    float u = (float(c.x) + 0.5) / width;
-    float v = (float(c.y) + 0.5) / height;
-    float nx = (u * 2.0 - 1.0) * fog.forward.w;
-    float ny = (1.0 - v * 2.0) * fog.right.w;
+    float u = (float(c.x) + FROXEL_HALF) / width;
+    float v = (float(c.y) + FROXEL_HALF) / height;
+    float nx = (u * FROXEL_NDC - 1.0) * fog.forward.w;
+    float ny = (1.0 - v * FROXEL_NDC) * fog.right.w;
     return fog.forward.xyz + fog.right.xyz * nx + fog.up.xyz * ny;
 }
 
@@ -95,7 +107,7 @@ float froxel_falloff(FroxelVolume volume, vec3 point) {
     if ((fog.size.w & 4u) != 0u) {
         return 1.0;
     }
-    if (volume.position.w > 0.5) {
+    if (volume.position.w > FROXEL_HALF) {
         float radius = volume.extents.x;
         float dist = length(point - volume.position.xyz);
         if (dist > radius) {
@@ -127,7 +139,7 @@ float froxel_local_density(vec3 point) {
 
 float froxel_sigma(vec3 p0, vec3 delta, float distance, vec3 centre) {
     float sigma = 0.0;
-    if (distance > 1.0e-8 && fog.medium.x > 0.0) {
+    if (distance > FROXEL_DISTANCE_EPS && fog.medium.x > 0.0) {
         float cos_theta = delta.y / distance;
         float optical = media_height_optical_depth(
             fog.medium.x,

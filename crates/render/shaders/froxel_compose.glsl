@@ -14,8 +14,9 @@ vec3 froxel_compose(vec3 linear, uvec2 p, uvec2 dims) {
     if (width < 1u || height < 1u || head.w == 0u) {
         return linear;
     }
-    float u = (float(p.x) + 0.5) / float(max(dims.x, 1u));
-    float v = (float(p.y) + 0.5) / float(max(dims.y, 1u));
+    const float half_texel = 0.5;
+    float u = (float(p.x) + half_texel) / float(max(dims.x, 1u));
+    float v = (float(p.y) + half_texel) / float(max(dims.y, 1u));
     uint x = min(uint(u * float(width)), width - 1u);
     uint y = min(uint(v * float(height)), height - 1u);
     vec4 fog = uintBitsToFloat(scene.tail[at + 1u + y * width + x]);

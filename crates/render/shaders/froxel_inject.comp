@@ -21,6 +21,6 @@ void main() {
     vec3 p1 = froxel_point(c.xy, z1);
     vec3 delta = p1 - p0;
     float distance = length(delta);
-    vec3 centre = froxel_point(c.xy, 0.5 * (z0 + z1));
+    vec3 centre = froxel_point(c.xy, FROXEL_HALF * (z0 + z1));
     imageStore(froxel_ext, ivec3(c), vec4(froxel_sigma(p0, delta, distance, centre), 0.0, 0.0, 0.0));
 }
