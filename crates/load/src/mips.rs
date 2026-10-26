@@ -3,6 +3,8 @@
 //! Open question 1 in the material design is unchosen, so the cook stays RGBA8.
 //! sRGB images are boxed in linear light and encoded back. Linear images are
 //! boxed in the stored values. Normals are averaged as vectors and renormalised.
+//! Byte 128 is the axis zero, and 0 and 255 are the two ends, so opposite X
+//! encodings cancel and the renormalised texel is (0, 0, 1).
 
 use crate::Image;
 
@@ -126,8 +128,9 @@ fn average_srgb(samples: &[[u8; 4]; 4]) -> [u8; 4] {
 fn average_normal(samples: &[[u8; 4]; 4]) -> [u8; 4] {
     let mut sum = [0.0_f32; 3];
     for sample in samples {
+        let normal = normal_from_bytes(*sample);
         for channel in 0..3 {
-            sum[channel] += unit(sample[channel]) * 2.0 - 1.0;
+            sum[channel] += normal[channel];
         }
     }
     let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
@@ -142,6 +145,25 @@ fn average_normal(samples: &[[u8; 4]; 4]) -> [u8; 4] {
         unit_to_byte(normal[2] * 0.5 + 0.5),
         255,
     ]
+}
+
+/// Decode one stored normal. 128 is zero on that axis. 255 is +1 and 0 is −1.
+#[must_use]
+pub fn normal_from_bytes(pixel: [u8; 4]) -> [f32; 3] {
+    [
+        decode_axis(pixel[0]),
+        decode_axis(pixel[1]),
+        decode_axis(pixel[2]),
+    ]
+}
+
+fn decode_axis(byte: u8) -> f32 {
+    let signed = i16::from(byte) - 128;
+    if signed >= 0 {
+        f32::from(signed) / 127.0
+    } else {
+        f32::from(signed) / 128.0
+    }
 }
 
 fn unit(byte: u8) -> f32 {
@@ -199,9 +221,9 @@ mod tests {
         };
         let chain = mip_chain(&image, MipSpace::Normal);
         let pixel = &chain[1].pixels;
-        // Byte 128 is 1/255 above zero, so +X and -X leave equal +Y and +Z.
-        assert_eq!(pixel[0], 128);
-        assert_eq!(pixel[1], 218);
-        assert_eq!(pixel[2], 218);
+        let normal = normal_from_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+        assert!(normal[0].abs() < 1.0e-6, "{normal:?}");
+        assert!(normal[1].abs() < 1.0e-6, "{normal:?}");
+        assert!((normal[2] - 1.0).abs() < 1.0e-6, "{normal:?}");
     }
 }

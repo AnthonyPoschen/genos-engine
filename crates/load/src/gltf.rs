@@ -28,6 +28,7 @@
 use genos_json::Value;
 
 use crate::error::LoadError;
+use crate::mips::{mip_chain, Mip, MipSpace};
 use crate::png::Image;
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
@@ -50,6 +51,9 @@ pub struct GltfScene {
     pub images: Vec<Image>,
     /// Every node with a mesh in the chosen scene, in depth-first node order.
     pub instances: Vec<MeshInstance>,
+    /// Mip chain for each image, finest first, down to 1×1. Parallel to
+    /// [`Self::images`] after a file load. A scene built by hand leaves this empty.
+    pub mips: Vec<Vec<Mip>>,
 }
 
 /// One glTF mesh: a list of primitives, each with one material.
@@ -349,12 +353,39 @@ pub(crate) fn decode_gltf(
             stack.push((index(c)?, world, depth + 1));
         }
     }
+    let mips = cook_mips(&images, &materials);
     Ok(GltfScene {
         meshes,
         materials,
         images,
         instances,
+        mips,
     })
+}
+
+fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
+    let mut spaces = vec![MipSpace::Linear; images.len()];
+    for material in materials {
+        paint_space(&mut spaces, material.metallic_roughness_texture, MipSpace::Linear);
+        paint_space(&mut spaces, material.occlusion_texture, MipSpace::Linear);
+        paint_space(&mut spaces, material.base_color_texture, MipSpace::Srgb);
+        paint_space(&mut spaces, material.emissive_texture, MipSpace::Srgb);
+        paint_space(&mut spaces, material.normal_texture, MipSpace::Normal);
+    }
+    images
+        .iter()
+        .zip(spaces)
+        .map(|(image, space)| mip_chain(image, space))
+        .collect()
+}
+
+fn paint_space(spaces: &mut [MipSpace], slot: Option<TextureSlot>, space: MipSpace) {
+    let Some(slot) = slot else {
+        return;
+    };
+    if let Some(entry) = spaces.get_mut(slot.image) {
+        *entry = space;
+    }
 }
 
 fn split_glb(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), LoadError> {

@@ -28,7 +28,7 @@ pub use emitters::{
     double_count, furnace_wall, settled_wall, should_promote, Enclosure, MaterialSettings,
     PromoteBudget, PromotePreset, SettingEnv, CELL_EDGE_M,
 };
-pub use mips::{mip_chain, Mip, MipSpace};
+pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
 pub use pages::{miss_colour, mib_f32, resident_bytes, ImageChain, MaterialWatch};
 pub use error::LoadError;
 pub use gltf::{

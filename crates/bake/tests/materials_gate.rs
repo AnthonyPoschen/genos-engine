@@ -35,8 +35,8 @@ use std::process::ExitCode;
 
 use genos_bake::BakeMesh;
 use genos_load::{
-    double_count as room_double_count, furnace_wall, load_gltf_file, mib_f32, resident_bytes,
-    GltfScene, ImageChain, MaterialWatch,
+    double_count as room_double_count, furnace_wall, load_gltf_file, mib_f32, normal_from_bytes,
+    resident_bytes, GltfScene, ImageChain, MaterialWatch, Mip,
 };
 
 const SHADE: f32 = 1.0 / 255.0;
@@ -83,7 +83,7 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 12] = [
+const MUST_FAIL: [&str; 13] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
@@ -92,6 +92,7 @@ const MUST_FAIL: [&str; 12] = [
     "mr_channels",
     "texcoord_sample",
     "roughness_from_g",
+    "mip_chain",
     "emissive_furnace",
     "double_count",
     "residency_mb",
@@ -347,6 +348,7 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
             furnace_outgoing(),
         ),
         measured("double_count", promoted_change(reader), RELATIVE),
+        measured("mip_chain", mip_chain_error(reader)?, 0.0),
         pending(
             "bc7_colour_rmse",
             BC7,
@@ -730,6 +732,95 @@ fn emissive_default(scene: &GltfScene) -> Result<f32, String> {
         .first()
         .ok_or("fixture has no shade material")?;
     Ok((shade.emissive_strength - 1.0).abs())
+}
+
+/// Wrong-chain count for the loader's mip chains.
+///
+/// The colour image is flat sRGB 188. The chain must reach 1×1 and stay 188.
+/// The normal image is opposite X encodings. The 1×1 texel must be (0, 0, 1).
+/// The broken reader keeps only the source level, which has no 1×1 texel.
+fn mip_chain_error(reader: Reader) -> Result<f32, String> {
+    let scene = load_mip_scene()?;
+    let material = scene
+        .materials
+        .first()
+        .ok_or("mip fixture has no material")?;
+    let colour_index = material
+        .base_color_texture
+        .ok_or("mip fixture has no base colour")?
+        .image;
+    let normal_index = material
+        .normal_texture
+        .ok_or("mip fixture has no normal")?
+        .image;
+    let (colour, normal) = match reader {
+        Reader::Bake => (
+            chain_at(&scene.mips, colour_index),
+            chain_at(&scene.mips, normal_index),
+        ),
+        Reader::Broken => (
+            source_only(scene.images.get(colour_index)),
+            source_only(scene.images.get(normal_index)),
+        ),
+    };
+    Ok(mip_mistakes(&colour, &normal))
+}
+
+fn load_mip_scene() -> Result<GltfScene, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/mips.gltf");
+    load_gltf_file(&path).map_err(|err| format!("load {}: {err}", path.display()))
+}
+
+fn chain_at(mips: &[Vec<Mip>], index: usize) -> Vec<Mip> {
+    mips.get(index).cloned().unwrap_or_default()
+}
+
+fn source_only(image: Option<&genos_load::Image>) -> Vec<Mip> {
+    let Some(image) = image else {
+        return Vec::new();
+    };
+    vec![Mip {
+        width: image.width,
+        height: image.height,
+        pixels: image.pixels.clone(),
+    }]
+}
+
+fn mip_mistakes(colour: &[Mip], normal: &[Mip]) -> f32 {
+    let mut mistakes = 0.0_f32;
+    if !colour_chain_ok(colour) {
+        mistakes += 1.0;
+    }
+    if !normal_chain_ok(normal) {
+        mistakes += 1.0;
+    }
+    mistakes
+}
+
+fn colour_chain_ok(chain: &[Mip]) -> bool {
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+        return false;
+    };
+    first.width == 2
+        && first.height == 2
+        && last.width == 1
+        && last.height == 1
+        && last.pixels.as_slice() == [188, 0, 0, 255]
+}
+
+fn normal_chain_ok(chain: &[Mip]) -> bool {
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+        return false;
+    };
+    if first.width != 2 || first.height != 2 || last.width != 1 || last.height != 1 {
+        return false;
+    }
+    let pixel = last.pixels.as_slice();
+    if pixel.len() < 4 {
+        return false;
+    }
+    let normal = normal_from_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+    normal[0].abs() <= 1.0e-6 && normal[1].abs() <= 1.0e-6 && (normal[2] - 1.0).abs() <= 1.0e-6
 }
 
 fn furnace_outgoing() -> f64 {

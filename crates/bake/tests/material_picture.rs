@@ -167,3 +167,66 @@ fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
     assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
     assert!(metal_after <= 1.0e-6);
 }
+
+#[test]
+fn the_loader_mip_reaches_one_texel_and_skipping_it_does_not() {
+    use std::path::PathBuf;
+
+    use genos_load::{load_gltf_file, Mip};
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/mips.gltf");
+    let scene = load_gltf_file(&path).unwrap();
+    let material = &scene.materials[0];
+    let colour = material.base_color_texture.unwrap().image;
+    let normal = material.normal_texture.unwrap().image;
+    let after = mip_score(&scene.mips[colour], &scene.mips[normal]);
+    let before = mip_score(
+        &[Mip {
+            width: scene.images[colour].width,
+            height: scene.images[colour].height,
+            pixels: scene.images[colour].pixels.clone(),
+        }],
+        &[Mip {
+            width: scene.images[normal].width,
+            height: scene.images[normal].height,
+            pixels: scene.images[normal].pixels.clone(),
+        }],
+    );
+    let (metal_before, metal_after) = score(0.25);
+    eprintln!(
+        "picture_mip before {before:.6} after {after:.6}\n\
+         picture_lambert before {metal_before:.6} after {metal_after:.6}"
+    );
+    assert!((before - 2.0).abs() < 1.0e-6, "skipped mips {before}");
+    assert!(after <= 1.0e-6, "loader mips {after}");
+    assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
+    assert!(metal_after <= 1.0e-6);
+}
+
+fn mip_score(colour: &[genos_load::Mip], normal: &[genos_load::Mip]) -> f32 {
+    let mut mistakes = 0.0_f32;
+    if colour.last().is_none_or(|mip| {
+        mip.width != 1 || mip.height != 1 || mip.pixels.as_slice() != [188, 0, 0, 255]
+    }) {
+        mistakes += 1.0;
+    }
+    if normal.last().is_none_or(|mip| {
+        mip.width != 1
+            || mip.height != 1
+            || mip.pixels.len() < 4
+            || {
+                let normal = genos_load::normal_from_bytes([
+                    mip.pixels[0],
+                    mip.pixels[1],
+                    mip.pixels[2],
+                    mip.pixels[3],
+                ]);
+                normal[0].abs() > 1.0e-6
+                    || normal[1].abs() > 1.0e-6
+                    || (normal[2] - 1.0).abs() > 1.0e-6
+            }
+    }) {
+        mistakes += 1.0;
+    }
+    mistakes
+}

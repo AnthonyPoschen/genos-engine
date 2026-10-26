@@ -260,6 +260,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `emissive_default` | 0 | Absolute error of the loaded strength against 1 on the material that omits `KHR_materials_emissive_strength`. |
 | `roughness_from_g` | 1/255 | Absolute error of roughness against `0.5 × 10/255`. The fixture stores roughness in G. Reading B is 0 at that texel and fails. |
 | `texel_alpha` | 1/255 | Absolute error of the base-colour texel alpha before the factor, at the three mask UVs (bytes 128, 255, and 0). The product with the mask factor 0.5 fails the first sample. |
+| `mip_chain` | 0 | Wrong-chain count through `load_gltf`. A 2×2 flat sRGB 188 image keeps a chain down to 1×1 that is still byte 188. A 2×2 normal map of opposite X encodings averages to (0, 0, 1). A chain with no 1×1 level fails. |
 | `draw_mean` | 1/255 | `surface_mean` against the same shade. The gate does not link `genos-render`. |
 | `occlusion_indirect` | 1/255 | Occlusion scales indirect only. The bake does not return occlusion. |
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |
