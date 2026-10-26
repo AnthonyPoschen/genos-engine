@@ -143,8 +143,10 @@ void main() {
         return;
     }
     uint index = p.y * pc.dims.x + p.x;
-    vec3 c = scene_lin.px[index].rgb;
-    c = add_bloom(c, index);
+    vec3 scene = scene_lin.px[index].rgb;
+    vec3 c = add_bloom(scene, index);
+    // The display pass's bloom add, before exposure. An HDR encode overwrites it.
+    vec3 bloom_added = c - scene;
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;
@@ -173,5 +175,11 @@ void main() {
             encode.words[base] = packHalf2x16(encoded.rg);
             encode.words[base + 1u] = packHalf2x16(vec2(encoded.b, 1.0));
         }
+    } else {
+        uint at = index * 4u;
+        encode.words[at] = floatBitsToUint(bloom_added.r);
+        encode.words[at + 1u] = floatBitsToUint(bloom_added.g);
+        encode.words[at + 2u] = floatBitsToUint(bloom_added.b);
+        encode.words[at + 3u] = 0u;
     }
 }

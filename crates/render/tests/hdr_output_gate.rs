@@ -1102,6 +1102,7 @@ struct Grab {
     scene: Vec<f64>,
     bloom_ref: Vec<f64>,
     bloom_buf: Vec<f32>,
+    bloom_add: Vec<f32>,
     exposure_got: f64,
     exposure_want: f64,
     gap_x4: f64,
@@ -1148,7 +1149,11 @@ fn capture_gpu() -> Grab {
         Ok(bloom) => bloom,
         Err(err) => return fail_grab(&err),
     };
-    let mut grab = finish_grab(&renderer, pixels, &scene2, bloom_buf);
+    let bloom_add = match renderer.read_hdr_encode() {
+        Ok(encoded) => encoded,
+        Err(err) => return fail_grab(&err),
+    };
+    let mut grab = finish_grab(&renderer, pixels, &scene2, bloom_buf, bloom_add);
     let mut post_ms = renderer.post_ms_device();
     if post_ms <= 0.0 {
         if draw_once(&mut window, &mut renderer, &world, &camera).is_err() {
@@ -1474,6 +1479,7 @@ fn fail_grab(why: &str) -> Grab {
         scene: Vec::new(),
         bloom_ref: Vec::new(),
         bloom_buf: Vec::new(),
+        bloom_add: Vec::new(),
         exposure_got: 0.0,
         exposure_want: wanted_exposure(),
         gap_x4: 0.0,
@@ -1487,6 +1493,7 @@ fn finish_grab(
     pixels: Vec<u8>,
     scene2: &genos_render::SceneRead,
     bloom_buf: Vec<f32>,
+    bloom_add: Vec<f32>,
 ) -> Grab {
     let width = usize::try_from(scene2.width).unwrap_or(0);
     let height = usize::try_from(scene2.height).unwrap_or(0);
@@ -1503,6 +1510,7 @@ fn finish_grab(
         scene: scene2.rgb.clone(),
         bloom_ref,
         bloom_buf,
+        bloom_add,
         exposure_got: renderer.hdr_exposure(),
         exposure_want,
         gap_x4,
@@ -1535,7 +1543,9 @@ fn gpu_bloom_error(broken: bool) -> f64 {
         return 1.0;
     }
     let scale = if broken { 2.0 } else { 1.0 };
-    bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale)
+    let pyramid = bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale);
+    let added = bloom_delta(&grab.bloom_add, &grab.bloom_ref, scale);
+    pyramid.max(added)
 }
 
 struct EncodeGrab {
