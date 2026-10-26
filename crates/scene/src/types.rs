@@ -1,8 +1,14 @@
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 use genos_math::Vec3;
 
-use crate::{DebugSettings, EventLoopSettings, FpsCounterSettings, LightingSettings, MenuSettings};
+use crate::{
+    DebugSettings, EventLoopSettings, FpsCounterSettings, LightingSettings, MenuSettings,
+    ReflectionSettings,
+};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -184,6 +190,8 @@ pub struct Scene {
     /// Longest gap between window pumps, in milliseconds. The frame writes it.
     /// A value of `0` clears the mark. See `docs/systems/window.md`.
     pub event_loop: EventLoopSettings,
+    /// Planar mirrors, portals, and water. The default is the High cap.
+    pub reflections: ReflectionSettings,
 }
 
 impl Scene {

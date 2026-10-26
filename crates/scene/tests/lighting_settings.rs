@@ -1,6 +1,18 @@
-#![cfg_attr(test, expect(clippy::expect_fun_call, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::expect_fun_call,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
@@ -61,12 +73,16 @@ fn surface_cache_blend_and_firefly_sigma_round_trip() {
         .set_key("surface_cache.firefly_sigma", "8")
         .unwrap();
     assert_eq!(settings.preset_label(), "high");
-    settings.set_key("surface_cache.ray_budget", "2048").unwrap();
+    settings
+        .set_key("surface_cache.ray_budget", "2048")
+        .unwrap();
     settings.set_key("surface_cache.dormant_rays", "4").unwrap();
     let budget = LightingSettings::parse(&settings.to_text()).unwrap();
     assert_eq!(budget.surface_cache.ray_budget, 2048);
     assert_eq!(budget.surface_cache.dormant_rays, 4);
-    settings.set_key("surface_cache.dormant_rays", "20").unwrap();
+    settings
+        .set_key("surface_cache.dormant_rays", "20")
+        .unwrap();
     assert_eq!(settings.surface_cache.dormant_rays, 16);
     assert_eq!(budget.preset_label(), "custom");
 }

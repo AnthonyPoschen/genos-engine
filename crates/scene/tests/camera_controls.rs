@@ -1,8 +1,11 @@
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 use genos_scene::{
-    transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, LightingSettings, Scene,
-    Vec3, CAMERA_HEIGHT, PITCH_LIMIT,
+    transform_point, update, view_proj, viewport_uv, Actions, Camera, Floor, LightingSettings,
+    Scene, Vec3, CAMERA_HEIGHT, PITCH_LIMIT,
 };
 use std::f32::consts::FRAC_PI_2;
 
@@ -23,6 +26,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     update(camera, &mut scene, actions, dt);

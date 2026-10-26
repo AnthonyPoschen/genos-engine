@@ -1,6 +1,15 @@
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Longest stretch the frame thread went without pumping the window.
 //!
@@ -62,9 +71,9 @@ impl EventLoopSettings {
         let value = value.trim();
         match key {
             "longest_stall_ms" | "stall_ms" => {
-                let ms = value
-                    .parse::<f64>()
-                    .map_err(|_| format!("longest_stall_ms is a number of milliseconds, got {value}"))?;
+                let ms = value.parse::<f64>().map_err(|_| {
+                    format!("longest_stall_ms is a number of milliseconds, got {value}")
+                })?;
                 if !ms.is_finite() || ms < 0.0 {
                     return Err(format!("longest_stall_ms is zero or more, got {value}"));
                 }
@@ -113,7 +122,9 @@ mod tests {
         settings.set_key("longest_stall_ms", "0").unwrap();
         assert_eq!(settings.longest_stall_ms, 0.0);
         assert_eq!(
-            EventLoopSettings::parse("stall_ms=3").unwrap().longest_stall_ms,
+            EventLoopSettings::parse("stall_ms=3")
+                .unwrap()
+                .longest_stall_ms,
             3.0
         );
     }

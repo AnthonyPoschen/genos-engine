@@ -112,8 +112,22 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(reflection_specs())
     .chain(host_specs())
     .collect()
+}
+
+fn reflection_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_reflection_settings",
+            "The reflection settings in force (text form): enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics, tracer, and water. --reflections, --reflection-rays, --mirror-views, --water, --caustics, and --reflection-tracer win over GENOS_REFLECTIONS, GENOS_REFLECTION_RAYS, GENOS_MIRROR_VIEWS, GENOS_WATER, GENOS_CAUSTICS, and GENOS_REFLECTION_TRACER, which win over the scene value.",
+        ),
+        spec(
+            "set_reflection_settings",
+            "Partial reflection update. Keys are enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics (off, image, cache), tracer (off, software, ray_query), and water. A text field overlays key=value lines. Writes the scene. The command-line arguments and GENOS_REFLECTION_* mirrors still overlay the value the picture uses.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {

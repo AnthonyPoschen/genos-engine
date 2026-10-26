@@ -14,7 +14,8 @@ use std::time::Instant;
 use genos_debug::png;
 use genos_render::{Renderer, World};
 use genos_scene::{
-    Camera, EventLoopSettings, Floor, FpsCounterSettings, Light, MenuSettings, Scene, Vec3,
+    Camera, EventLoopSettings, Floor, FpsCounterSettings, Light, MenuSettings, ReflectionSettings,
+    Scene, Vec3,
 };
 use genos_ui::FpsOverlay;
 use genos_window::Window;
@@ -43,6 +44,7 @@ fn room() -> World {
             rate_hz: 4.0,
         },
         event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
         menu: MenuSettings::default(),
     })
 }

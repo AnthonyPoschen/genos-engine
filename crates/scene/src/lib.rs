@@ -10,6 +10,7 @@ mod event_loop;
 mod fps_counter;
 mod lighting;
 mod menu;
+mod reflections;
 mod script;
 mod settings;
 mod types;
@@ -31,6 +32,10 @@ pub use lighting::{
     SurfaceCacheSettings, WorldCacheSettings, LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
+pub use reflections::{
+    check_reflection_arg, reflection_flag_needs_value, Caustics, ReflectionCli, ReflectionEnv,
+    ReflectionSettings, ReflectionTracer,
+};
 pub use script::{load_path, load_str};
 pub use settings::EngineSettings;
 pub use types::{

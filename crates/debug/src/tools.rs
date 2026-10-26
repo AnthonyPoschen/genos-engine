@@ -26,7 +26,7 @@ use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
+    LightingSettings, MenuSettings, ReflectionSettings, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -1291,6 +1291,13 @@ impl Tools {
             "get_fps_counter" => {
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
             }
+            "get_reflection_settings" => {
+                reply(reflection_value(&ctx.host.scene().reflections.effective()))
+            }
+            "set_reflection_settings" => {
+                apply_reflection_update(&mut ctx.host.scene().reflections, args.0)?;
+                reply(reflection_value(&ctx.host.scene().reflections.effective()))
+            }
             "set_fps_counter" => {
                 apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
@@ -1806,6 +1813,62 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn reflection_value(settings: &ReflectionSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("rough_cutoff", num(f64::from(settings.rough_cutoff))),
+        ("mirror_cutoff", num(f64::from(settings.mirror_cutoff))),
+        ("mirror_views", num(f64::from(settings.mirror_views))),
+        ("rays", num(f64::from(settings.rays))),
+        ("shore_cap", num(f64::from(settings.shore_cap))),
+        ("caustics", text(settings.caustics.as_str())),
+        ("tracer", text(settings.tracer.as_str())),
+        ("water", Value::Bool(settings.water)),
+    ])
+}
+
+fn apply_reflection_update(settings: &mut ReflectionSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("reflection settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("reflection line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &reflection_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn reflection_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on" } else { "off" }.to_string());
+    }
+    if let Some(number) = value.as_f64() {
+        if number.fract() == 0.0 && number.abs() < 1.0e7 {
+            return Ok(format!("{}", number.round() as i64));
+        }
+        return Ok(format!("{number:?}"));
+    }
+    Err("a reflection value is a string, number, or bool".into())
 }
 
 fn fps_counter_value(settings: &FpsCounterSettings) -> Value {

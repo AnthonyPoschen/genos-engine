@@ -32,6 +32,7 @@ use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, Vie
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
     DebugSettings, EventLoopSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings,
+    ReflectionSettings,
     Scene, Sky, Vec3,
     PITCH_LIMIT,
 };
@@ -96,6 +97,18 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          the debug menu, the menu tab, the frame-rate plate,
                          and tool overlays
   --ui                   keep those overlays in that PNG
+  --reflections on|off   mirrors, portals, and water (default on).
+                         GENOS_REFLECTIONS applies only when this is omitted
+  --reflection-rays N    ray cap for this run, 0 to 128000.
+                         GENOS_REFLECTION_RAYS applies only when this is omitted
+  --mirror-views N       extra mirror and portal views, 0 to 3.
+                         GENOS_MIRROR_VIEWS applies only when this is omitted
+  --water on|off         water pass (default on).
+                         GENOS_WATER applies only when this is omitted
+  --caustics off|image|cache
+                         caustic mode. GENOS_CAUSTICS applies only when this is omitted
+  --reflection-tracer off|software|ray_query
+                         tracer. GENOS_REFLECTION_TRACER applies only when this is omitted
   --fps-counter [on|off] frame-rate plate (default off). A bare flag turns it on.
                          GENOS_FPS_COUNTER applies only when this is omitted
   --fps-hz N             plate update rate in Hz (default 4, range 0.25 to 30).
@@ -155,6 +168,15 @@ const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
 const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
+const ID_REFL_ENABLED: u32 = 2900;
+const ID_REFL_WATER: u32 = 2901;
+const ID_REFL_ROUGH: u32 = 2902;
+const ID_REFL_MIRROR: u32 = 2903;
+const ID_REFL_VIEWS: u32 = 2904;
+const ID_REFL_RAYS: u32 = 2905;
+const ID_REFL_SHORE: u32 = 2906;
+const ID_REFL_CAUSTICS: u32 = 2907;
+const ID_REFL_TRACER: u32 = 2908;
 const ID_MENU_WHEEL: u32 = 2820;
 const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
@@ -991,6 +1013,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1066,6 +1089,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
                 event_loop: EventLoopSettings::default(),
+                reflections: ReflectionSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -1558,6 +1582,73 @@ fn setting_piece(
         )
         .map(Piece::Row),
         "fps" => Some(Piece::Row(fps_row(fps))),
+        "enabled" => Some(Piece::Row(reflection_check("enabled", ID_REFL_ENABLED, reflections(app).enabled))),
+        "water" => Some(Piece::Row(reflection_check("water", ID_REFL_WATER, reflections(app).water))),
+        "rough_cutoff" => Some(Piece::Row(reflection_slider(
+            "rough_cutoff",
+            ID_REFL_ROUGH,
+            f64::from(reflections(app).rough_cutoff),
+            0.0,
+            1.0,
+            0.01,
+        ))),
+        "mirror_cutoff" => Some(Piece::Row(reflection_slider(
+            "mirror_cutoff",
+            ID_REFL_MIRROR,
+            f64::from(reflections(app).mirror_cutoff),
+            0.0,
+            1.0,
+            0.001,
+        ))),
+        "mirror_views" => Some(Piece::Row(reflection_slider(
+            "mirror_views",
+            ID_REFL_VIEWS,
+            f64::from(reflections(app).mirror_views),
+            0.0,
+            3.0,
+            1.0,
+        ))),
+        "rays" => Some(Piece::Row(reflection_slider(
+            "rays",
+            ID_REFL_RAYS,
+            f64::from(reflections(app).rays),
+            0.0,
+            128_000.0,
+            1000.0,
+        ))),
+        "shore_cap" => Some(Piece::Row(reflection_slider(
+            "shore_cap",
+            ID_REFL_SHORE,
+            f64::from(reflections(app).shore_cap),
+            0.0,
+            1.0,
+            0.01,
+        ))),
+        "caustics" => drop_row(
+            "caustics",
+            ID_REFL_CAUSTICS,
+            match reflections(app).caustics {
+                genos_scene::Caustics::Off => 0.0,
+                genos_scene::Caustics::Image => 1.0,
+                genos_scene::Caustics::Cache => 2.0,
+            },
+            ["off", "image", "cache"].into_iter().map(str::to_string).collect(),
+        )
+        .map(Piece::Row),
+        "tracer" => drop_row(
+            "tracer",
+            ID_REFL_TRACER,
+            match reflections(app).tracer {
+                genos_scene::ReflectionTracer::Off => 0.0,
+                genos_scene::ReflectionTracer::Software => 1.0,
+                genos_scene::ReflectionTracer::RayQuery => 2.0,
+            },
+            ["off", "software", "ray_query"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .map(Piece::Row),
         "stall" => Some(Piece::Row(PanelRow {
             label: format!(
                 "Stall {:.0} ms",
@@ -1819,6 +1910,34 @@ fn menu_label(name: &str, fallback: &str) -> String {
     .to_string()
 }
 
+fn reflections(app: &App) -> genos_scene::ReflectionSettings {
+    app.scene_ref().reflections.effective()
+}
+
+fn reflection_check(label: &str, id: u32, on: bool) -> PanelRow {
+    PanelRow {
+        label: label.into(),
+        buttons: Vec::new(),
+        slider: None,
+        dropdown: None,
+        checks: vec![PanelCheck {
+            id,
+            text: label.into(),
+            on,
+        }],
+    }
+}
+
+fn reflection_slider(label: &str, id: u32, value: f64, min: f64, max: f64, step: f64) -> PanelRow {
+    PanelRow {
+        label: label.into(),
+        buttons: Vec::new(),
+        slider: Some(PanelSlider::range(id, value, min, max, step, format!("{value}"))),
+        dropdown: None,
+        checks: Vec::new(),
+    }
+}
+
 fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
     PanelRow {
         label: "FPS".into(),
@@ -1845,6 +1964,8 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene()
             .fps_counter
             .set_key("rate_hz", &format!("{value}"))?;
+    } else if let Some(key) = reflection_slider_key(id) {
+        app.scene().reflections.set_key(key, &format!("{value}"))?;
     } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
         let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
         app.set_knob(name, value)?;
@@ -1890,6 +2011,15 @@ fn select(
             .unwrap_or("hover");
         let key = if id == ID_MENU_WHEEL { "wheel" } else { "keys" };
         app.scene().menu.set_key(key, name)?;
+    } else if id == ID_REFL_CAUSTICS || id == ID_REFL_TRACER {
+        let names: &[&str] = if id == ID_REFL_CAUSTICS {
+            &["off", "image", "cache"]
+        } else {
+            &["off", "software", "ray_query"]
+        };
+        let key = if id == ID_REFL_CAUSTICS { "caustics" } else { "tracer" };
+        let name = names.get(index).copied().unwrap_or(names[0]);
+        app.scene().reflections.set_key(key, name)?;
     } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
         let name = DROP_KNOBS[(id - ID_DROP) as usize];
         app.set_knob(name, value)?;
@@ -1932,11 +2062,29 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
             .set_key("enabled", if on { "1" } else { "0" })?;
         return Ok(());
     }
+    if id == ID_REFL_ENABLED || id == ID_REFL_WATER {
+        let key = if id == ID_REFL_ENABLED { "enabled" } else { "water" };
+        app.scene()
+            .reflections
+            .set_key(key, if on { "on" } else { "off" })?;
+        return Ok(());
+    }
     let index = id.wrapping_sub(ID_SWITCH) as usize;
     if let Some(name) = switch_knobs(app).get(index).map(|knob| knob.name.clone()) {
         app.set_knob(&name, if on { 1.0 } else { 0.0 })?;
     }
     Ok(())
+}
+
+fn reflection_slider_key(id: u32) -> Option<&'static str> {
+    match id {
+        ID_REFL_ROUGH => Some("rough_cutoff"),
+        ID_REFL_MIRROR => Some("mirror_cutoff"),
+        ID_REFL_VIEWS => Some("mirror_views"),
+        ID_REFL_RAYS => Some("rays"),
+        ID_REFL_SHORE => Some("shore_cap"),
+        _ => None,
+    }
 }
 
 fn view_from_name(name: &str) -> ViewMode {
@@ -2137,6 +2285,10 @@ fn options() -> Result<Options, String> {
                     parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--mcp-port=") {
                     mcp_port = Some(parse_mcp_port(value)?);
+                } else if genos_scene::reflection_flag_needs_value(other).is_some() {
+                    let needs = genos_scene::reflection_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_scene::check_reflection_arg(other, next.as_deref())?;
                 } else if genos_scene::lighting_flag_needs_value(other).is_some() {
                     let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
