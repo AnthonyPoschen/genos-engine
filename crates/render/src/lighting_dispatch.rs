@@ -4,7 +4,9 @@
 // same group list the frame recorded before settings existed. Anything else
 // drops the dispatches the disabled feature owned.
 
-use genos_scene::{AmbientMode, LightingSettings, ShadowFilter, LIGHTING_BOUNCES_UNLIMITED};
+use genos_scene::{
+    AmbientMode, LampPickMode, LightingSettings, ShadowFilter, LIGHTING_BOUNCES_UNLIMITED,
+};
 
 pub(crate) const BUCKETS: usize = 12;
 pub(crate) const B_COMPACT: u8 = 0;
@@ -165,6 +167,29 @@ pub(crate) fn lamp_shade_bits(gate: LampShadeGate) -> u32 {
         LampShadeGate::Random => 1 << 18,
         // Hold off as well, or a still view would shade the exact sum and pass.
         LampShadeGate::Broken => (1 << 18) | (1 << 20),
+    }
+}
+
+/// Point lamps at or under this count shade the exact sum.
+///
+/// Matches `LAMP_PICK_EXACT_LIT` in `lighting_lamp_pick.glsl`.
+const DIRECT_PLAIN_LAMPS: u32 = 8;
+
+/// Bind the pre-reservoir direct shade.
+///
+/// Off traces every lamp. Reuse of at most [`DIRECT_PLAIN_LAMPS`] point lamps
+/// does too, then holds on a matching signature. The reservoir module's
+/// register file was the direct-pass cost on that path. The noise gate stays
+/// on the reservoir module so a still view can grade the random path. Hits,
+/// pixels, and both stay there: those modes are the lamp-pick tests.
+pub(crate) fn direct_shade_plain(mode: LampPickMode, point_lamps: u32, gate: LampShadeGate) -> bool {
+    if gate != LampShadeGate::Product {
+        return false;
+    }
+    match mode {
+        LampPickMode::Off => true,
+        LampPickMode::Reuse => point_lamps <= DIRECT_PLAIN_LAMPS,
+        LampPickMode::Hits | LampPickMode::Pixels | LampPickMode::Both => false,
     }
 }
 
@@ -788,5 +813,21 @@ mod probe_still_tests {
         assert_eq!(sample.cache_entries_refreshed, 9);
         assert_eq!(sample.lamps_shaded, 18);
         assert_eq!(sample.seq, 4);
+    }
+
+    #[test]
+    fn few_lamp_reuse_binds_the_pre_reservoir_shade() {
+        use genos_scene::LampPickMode;
+        assert!(direct_shade_plain(LampPickMode::Off, 5, LampShadeGate::Product));
+        assert!(direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Product));
+        assert!(direct_shade_plain(LampPickMode::Reuse, 8, LampShadeGate::Product));
+        assert!(!direct_shade_plain(LampPickMode::Reuse, 9, LampShadeGate::Product));
+        assert!(!direct_shade_plain(LampPickMode::Reuse, 16, LampShadeGate::Product));
+        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Random));
+        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Exact));
+        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Broken));
+        assert!(!direct_shade_plain(LampPickMode::Pixels, 3, LampShadeGate::Product));
+        assert!(!direct_shade_plain(LampPickMode::Both, 3, LampShadeGate::Product));
+        assert!(!direct_shade_plain(LampPickMode::Hits, 3, LampShadeGate::Product));
     }
 }

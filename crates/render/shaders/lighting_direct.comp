@@ -275,6 +275,12 @@ void main() {
             // A trusted copy is not frozen as the truth when the camera stops.
             // The copy goes into this frame's slot only. Writing the other slot
             // races the pixel that owns it. The next frame reads this slot.
+            // The plain variant is the pre-reservoir shade. A matching signature
+            // holds, the same test as before reservoirs. The reservoir variant
+            // holds only an exact sum, and only while the noise gate allows it.
+#ifdef LIGHTING_DIRECT_PLAIN
+            bool hold = true;
+#else
             bool hold = pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
@@ -287,6 +293,7 @@ void main() {
                     lamp_geo_store(idx, lamp_res_slot_now(), geo);
                 }
             }
+#endif
             if (hold) {
                 uint emitted = gbuf.px[idx].w;
                 uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
@@ -358,6 +365,7 @@ void main() {
     // Weighted point-lamp picking shares this loop's one trace. The sun stays
     // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
     // `pick` as it was, so today's shade is unchanged.
+#ifndef LIGHTING_DIRECT_PLAIN
     uint lamp_mode = pc.lamp.x;
     bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
     bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
@@ -365,6 +373,11 @@ void main() {
     if (lamp_new) {
         pick = false;
     }
+#else
+    // Reservoir code is not in this module. The shade loop below is the
+    // pre-reservoir sum: every lamp, then the signature hold above.
+    const bool lamp_new = false;
+#endif
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -420,6 +433,11 @@ void main() {
     // shade_exact walks every point lamp at scale 1 (the sum). copied skips
     // the trace and keeps a reprojected exact colour. Otherwise chosen_* is
     // one visibility sample.
+    uint view_only = LAMP_ALL;
+    if ((scene.grid_at.w & 255u) == 6u) {
+        view_only = (scene.grid_at.w >> 8u) & 0xFFFFu;
+    }
+#ifndef LIGHTING_DIRECT_PLAIN
     uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
     float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
     uint chosen_n = 0u;
@@ -428,10 +446,6 @@ void main() {
     vec3 copied_rgb = vec3(0.0);
     // Samples folded into the displayed colour while the exact-sum hold is off.
     uint mean_count = 0u;
-    uint view_only = LAMP_ALL;
-    if ((scene.grid_at.w & 255u) == 6u) {
-        view_only = (scene.grid_at.w >> 8u) & 0xFFFFu;
-    }
     if (lamp_new) {
         float point_total = 0.0;
         uint point_lit = 0u;
@@ -648,6 +662,14 @@ void main() {
             }
         }
     }
+#else
+    const uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
+    const float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    const uint chosen_n = 0u;
+    const bool shade_exact = false;
+    const bool copied = false;
+    const vec3 copied_rgb = vec3(0.0);
+#endif
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
@@ -809,6 +831,7 @@ void main() {
             cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
         }
     }
+#ifndef LIGHTING_DIRECT_PLAIN
     // Hold off: the displayed colour is the running mean of the unbiased sample
     // (`light * W * visibility`). Bitterli shows the current sample. This mean
     // is only while the noise gate has the exact-sum hold off, so a still
@@ -876,6 +899,7 @@ void main() {
             }
         }
     }
+#endif
     if (idx < pixels) {
         uint emitted = gbuf.px[idx].w;
         uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;

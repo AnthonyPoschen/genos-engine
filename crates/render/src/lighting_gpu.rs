@@ -101,6 +101,8 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
+    /// Pre-reservoir direct shade. Bound when reuse would only sum a few lamps.
+    direct_plain: Handle,
     screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
@@ -256,6 +258,8 @@ pub(crate) struct Lighting {
     lamp_res_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
+    /// Positive point lamps in the uploaded scene. The sun is not counted.
+    point_lamps: u32,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -349,6 +353,7 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
+            direct_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
@@ -438,6 +443,7 @@ impl Default for Lighting {
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             shade_gate: LampShadeGate::Product,
+            point_lamps: 0,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -691,6 +697,13 @@ impl Gpu {
             "atrous-plain",
         )?;
         self.note_pipeline_time("atrous-plain", start);
+        let start = Instant::now();
+        self.lighting.direct_plain = self.make_compute_pipe(
+            LIGHTING_DIRECT_PLAIN_SPV,
+            self.lighting.layout,
+            "direct-plain",
+        )?;
+        self.note_pipeline_time("direct-plain", start);
         let start = Instant::now();
         self.lighting.screen_pipe = self.make_compute_pipe(
             LIGHTING_SCREEN_SPV,
@@ -1194,6 +1207,10 @@ impl Gpu {
     /// arms the corner catch-up for the frame the lamps stop.
     pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
         self.lighting.view_content_key = lighting_view_content_key(pack);
+        self.lighting.point_lamps = u32::try_from(
+            pack.lamps.iter().filter(|lamp| !lamp.directional).count(),
+        )
+        .unwrap_or(u32::MAX);
         let (dir, light, n) = lighting_sun_live(pack);
         self.lighting.sun_live_dir = dir;
         self.lighting.sun_live_light = light;
@@ -1590,6 +1607,19 @@ impl Gpu {
         }
     }
 
+    /// Reservoir shade, or the pre-reservoir sum when that sum is what reuse would do.
+    fn direct_pipe(&self) -> Handle {
+        if direct_shade_plain(
+            self.lighting.settings.lamp_pick.mode,
+            self.lighting.point_lamps,
+            self.lighting.shade_gate,
+        ) {
+            self.lighting.direct_plain
+        } else {
+            self.lighting.pipes[3]
+        }
+    }
+
     /// Record and submit one light cache round on the async compute queue: list
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
@@ -1681,7 +1711,12 @@ impl Gpu {
             (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
             (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, pc.as_ptr() as *const c_void);
             for (k, (pass, gx)) in groups.into_iter().enumerate() {
-                (self.fns.cmd_bind_pipe)(cmd, 1, self.lighting.pipes[pass]);
+                let pipe = if pass == 3 {
+                    self.direct_pipe()
+                } else {
+                    self.lighting.pipes[pass]
+                };
+                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
                 self.barrier_on(cmd, 0x800, 0x800, 0x40, 0x20 | 0x40);
                 if !qp.is_null() {
@@ -2580,7 +2615,9 @@ impl Gpu {
                 // Pass 7 is compose: the sun path binds its own pipeline.
                 // Pass 8 is a-trous: the plain kernel has no adaptive branch.
                 // Adaptive uses the scalar shader that still reads the bit.
-                let pipe = if pass == 7 && sun_compose {
+                let pipe = if pass == 3 {
+                    self.direct_pipe()
+                } else if pass == 7 && sun_compose {
                     self.lighting.sun_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.screen {
                     self.lighting.screen_pipe
@@ -2864,6 +2901,7 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
+                .chain(std::iter::once(&mut self.lighting.direct_plain))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
