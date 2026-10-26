@@ -518,7 +518,12 @@ void main() {
                             }
                         }
                     } else {
-                    uint cand = hist_restir ? 1u : lamp_pick_candidates();
+                    // The gate's running mean is an average of fresh samples.
+                    // A temporal merge would lock one lamp, and the mean of that
+                    // lamp is 0 or the whole sum wherever it is shadowed.
+                    // Bitterli reuses. Production (the hold-off bit clear) still does.
+                    bool reuse_hist = hist_restir && !lamp_pick_hold_off();
+                    uint cand = reuse_hist ? 1u : lamp_pick_candidates();
                     float w_ris = 0.0;
                     uint win_k = ~0u;
                     float win_phat = 0.0;
@@ -546,7 +551,7 @@ void main() {
                         canonical.target = win_phat;
                         uvec2 pix = uvec2(idx % pc.dims.x, idx / pc.dims.x);
                         LampReservoir merged = canonical;
-                        if (hist_restir) {
+                        if (reuse_hist) {
                             LampReservoir history = lamp_res_load(hist_px, prev_slot);
                             vec3 hpos;
                             vec3 hn;
@@ -607,8 +612,8 @@ void main() {
                                 }
                             }
                         }
-                        lamp_res_store(idx, slot, hist_restir ? merged : canonical);
-                        LampReservoir shown = hist_restir ? merged : canonical;
+                        lamp_res_store(idx, slot, reuse_hist ? merged : canonical);
+                        LampReservoir shown = reuse_hist ? merged : canonical;
                         if (shown.lamp != LAMP_ALL && shown.m > 0u && shown.target > 0.0) {
                             uint kwin = lamp_pick_find(list, count, shown.lamp);
                             if (kwin != ~0u && kwin >= list.suns.y && chosen_n < 4u) {
