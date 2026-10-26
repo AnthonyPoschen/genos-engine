@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod fog;
+mod fog_budget;
 mod fog_pass;
 mod gltf_draw;
 mod gpu;
@@ -22,6 +23,10 @@ pub use aa::Antialias;
 pub use fog_pass::{
     shaft_image, smear_broken, smear_fixture, yaw_pop_broken, yaw_pop_fixture, FogImage,
     FogPointLamp,
+};
+pub use fog_budget::{
+    allocation_mb, allocation_mb_doubled, fit_pass, millisecond_ceiling, sample_cap,
+    unfitted_milliseconds, PassCost,
 };
 pub use fog::{
     apply_fog, grid_size, inject, integrate_samples, integrate_unshadowed, leak_broken,

@@ -2,7 +2,9 @@
 //! A zero is not substituted for a missing pass.
 
 use genos_lighting_ref::{blur_relative, MetricParams, Picture};
+use genos_render::LightingPreset;
 
+use crate::device::fitted_cost;
 use crate::report::{judge, Metric};
 
 const FROXEL_TEMPORAL_SMEAR_PX: f64 = 0.50;
@@ -26,8 +28,9 @@ const NO_FROXEL: &str = "froxel pass is not in the tree";
 const NO_MEDIA: &str = "path tracer does not trace participating media";
 const NO_GI: &str =
     "world-cache in-scattering waits for lighting phase 3 (cursor/lighting-p3-capped-refresh)";
-const NO_ALLOC: &str = "froxel buffers are not allocated";
-const NO_TIME: &str = "froxel pass is not timed";
+const NO_TIME: &str = "no lavapipe window for a fog timestamp";
+const LAVAPIPE_BYTES: &str = "lavapipe allocation, decimal MB";
+const LAVAPIPE_MS: &str = "lavapipe timestamp, not an RTX 4070 measurement";
 
 pub(crate) fn evaluate_feature() -> Vec<Metric> {
     vec![
@@ -59,14 +62,14 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
             f64::from(genos_render::still_flicker_fixture()),
             FOG_STILL_FLICKER,
         ),
-        absent("froxel_vram_potato_mb", FROXEL_VRAM_POTATO_MB, NO_ALLOC),
-        absent("froxel_vram_low_mb", FROXEL_VRAM_LOW_MB, NO_ALLOC),
-        absent("froxel_vram_medium_mb", FROXEL_VRAM_MEDIUM_MB, NO_ALLOC),
-        absent("froxel_vram_high_mb", FROXEL_VRAM_HIGH_MB, NO_ALLOC),
-        absent("froxel_ms_potato", FROXEL_MS_POTATO, NO_TIME),
-        absent("froxel_ms_low", FROXEL_MS_LOW, NO_TIME),
-        absent("froxel_ms_medium", FROXEL_MS_MEDIUM, NO_TIME),
-        absent("froxel_ms_high", FROXEL_MS_HIGH, NO_TIME),
+        vram("froxel_vram_potato_mb", LightingPreset::Potato, FROXEL_VRAM_POTATO_MB),
+        vram("froxel_vram_low_mb", LightingPreset::Low, FROXEL_VRAM_LOW_MB),
+        vram("froxel_vram_medium_mb", LightingPreset::Medium, FROXEL_VRAM_MEDIUM_MB),
+        vram("froxel_vram_high_mb", LightingPreset::High, FROXEL_VRAM_HIGH_MB),
+        milliseconds("froxel_ms_potato", LightingPreset::Potato, FROXEL_MS_POTATO),
+        milliseconds("froxel_ms_low", LightingPreset::Low, FROXEL_MS_LOW),
+        milliseconds("froxel_ms_medium", LightingPreset::Medium, FROXEL_MS_MEDIUM),
+        milliseconds("froxel_ms_high", LightingPreset::High, FROXEL_MS_HIGH),
     ]
 }
 
@@ -82,13 +85,33 @@ fn shaft_grade(traced_shadows: bool) -> f64 {
     blur_relative(&reference, &candidate, &MetricParams::default()).unwrap_or(1.0)
 }
 
+fn vram(name: &'static str, preset: LightingPreset, threshold: f64) -> Metric {
+    noted(
+        name,
+        Some(genos_render::allocation_mb(preset)),
+        threshold,
+        LAVAPIPE_BYTES,
+    )
+}
+
+fn milliseconds(name: &'static str, preset: LightingPreset, threshold: f64) -> Metric {
+    match fitted_cost(preset) {
+        Some(cost) => noted(name, Some(cost.milliseconds), threshold, LAVAPIPE_MS),
+        None => absent(name, threshold, NO_TIME),
+    }
+}
+
 fn present(name: &'static str, value: f64, threshold: f64) -> Metric {
+    noted(name, Some(value), threshold, "")
+}
+
+fn noted(name: &'static str, value: Option<f64>, threshold: f64, note: &'static str) -> Metric {
     Metric {
         name,
-        value: Some(value),
+        value,
         threshold,
-        status: judge(true, Some(value), threshold),
-        note: "",
+        status: judge(value.is_some(), value, threshold),
+        note,
     }
 }
 

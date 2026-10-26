@@ -274,14 +274,14 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |
 | `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | `NOT-IMPLEMENTED` |
 | `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded. History is off, so two still frames match. Scaling the second frame by 1.4 fails. |
-| `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_high_mb` | 12 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_ms_potato` | 0.05 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_low` | 0.40 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
+| `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
+| `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_vram_high_mb` | 12 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_ms_potato` | 0.05 | Fog pass time, 4070, 1440p | Graded when a lavapipe window exists. Potato does not dispatch, so the time is 0. The figure is a lavapipe timestamp, not an RTX 4070 measurement. |
+| `froxel_ms_low` | 0.40 | Fog pass time, 4070, 1440p | Graded on lavapipe, or `NOT-IMPLEMENTED` with no window. Samples drop before far slices. |
+| `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | Graded on lavapipe, or `NOT-IMPLEMENTED` with no window. |
+| `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | Graded on lavapipe, or `NOT-IMPLEMENTED` with no window. An unreduced cap that exceeds the ceiling fails. |
 
 Exit status: 0 when no selected metric failed, including a run whose rows are `NOT-IMPLEMENTED`. 1 when any metric failed. 2 when an argument is bad. `--suite analytic` is the closed forms plus the synthetic picture. `--suite feature` is the renderer metrics. `--suite all` is both. `--fixture good` and `--fixture broken` select the analytic inputs. The feature suite ignores the fixture.
 

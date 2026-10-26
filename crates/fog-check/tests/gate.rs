@@ -96,6 +96,26 @@ fn a_scaled_still_frame_fails_the_flicker_gate() {
 }
 
 #[test]
+fn an_unbounded_grid_fails_the_vram_ceiling() {
+    let broken = genos_render::allocation_mb_doubled();
+    assert!(broken > 12.0, "{broken}");
+    assert_eq!(judge(true, Some(broken), 12.0), Status::Fail);
+}
+
+#[test]
+fn an_unreduced_sample_cap_fails_the_millisecond_ceiling() {
+    let raw = genos_render::unfitted_milliseconds(genos_render::LightingPreset::High, |groups| {
+        f64::from(groups) * 0.000_1
+    });
+    assert!(raw > 1.20, "{raw}");
+    let fitted = genos_render::fit_pass(genos_render::LightingPreset::High, |groups| {
+        f64::from(groups) * 0.000_1
+    });
+    assert!(fitted.milliseconds <= 1.20, "{fitted:?}");
+    assert!(fitted.samples < 32_000);
+}
+
+#[test]
 fn a_leaking_volume_fails_the_leak_gate() {
     let broken = f64::from(genos_render::leak_broken());
     assert!(broken > 1.0e-4, "{broken}");

@@ -406,7 +406,9 @@ impl Gpu {
             );
             (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
             (self.fns.cmd_bind_set)(cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
-            (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
+            self.stamp_media(cmd, 0, 0x1);
+            (self.fns.cmd_dispatch)(cmd, self.media_groups.max(1), 1, 1);
+            self.stamp_media(cmd, 1, 0x2000);
             let back = MemBar {
                 s_type: 46,
                 next: std::ptr::null(),
@@ -461,11 +463,33 @@ impl Gpu {
             )?;
         }
         self.wait_fence(fence, "media done")?;
+        self.media_ms = self.read_span(0).ok().map(|duration| duration.as_secs_f64() * 1000.0);
         let values = read_f32s(self.fns.map_mem, self.fns.unmap_mem, self.device, memory, 5)?;
         let mut out = [0.0; 5];
         for (slot, value) in out.iter_mut().zip(values) {
             *slot = value;
         }
         Ok(out)
+    }
+
+    fn stamp_media(&self, cmd: Handle, query: u32, stage: u32) {
+        if self.query_pool.is_null() || self.timestamp_period <= 0.0 {
+            return;
+        }
+        unsafe {
+            if query == 0 {
+                (self.fns.cmd_reset_query)(cmd, self.query_pool, 0, 2);
+            }
+            (self.fns.cmd_write_timestamp)(cmd, stage, self.query_pool, query);
+        }
+    }
+
+    pub(super) fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
+        self.media_groups = groups.max(1);
+        let dispatched = self.media_closed_forms();
+        self.media_groups = 1;
+        let _ = dispatched?;
+        self.media_ms
+            .ok_or_else(|| "Vulkan timestamp queries are not available on this device".to_string())
     }
 }

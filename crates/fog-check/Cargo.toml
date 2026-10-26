@@ -3,7 +3,7 @@ name = "genos-fog-check"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Headless metric harness for fog. No window and no Vulkan."
+description = "Metric harness for fog. Milliseconds need a lavapipe window; the rest do not."
 
 [lints]
 workspace = true
@@ -16,3 +16,4 @@ path = "src/main.rs"
 genos-lighting-ref = { path = "../lighting-ref" }
 genos-math = { path = "../math" }
 genos-render = { path = "../render" }
+genos-window = { path = "../window" }

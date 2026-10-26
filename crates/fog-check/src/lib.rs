@@ -1,11 +1,12 @@
 //! Metric harness for fog and volumetric lighting.
 //!
-//! Closed-form fixtures are graded here. Renderer metrics stay
-//! `NOT-IMPLEMENTED` until the froxel pass and the media path tracer exist.
-//! This crate does not draw and does not allocate a froxel.
+//! Closed-form fixtures are graded here. Renderer rows become live as each
+//! pass lands. Millisecond rows need a lavapipe window and stay
+//! `NOT-IMPLEMENTED` without one.
 
 mod analytic;
 mod cli;
+mod device;
 mod feature;
 mod report;
 

@@ -578,6 +578,12 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
+    /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
+    /// The fog budget scales this span. Lavapipe is the cloud device.
+    pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
+        self.gpu.media_dispatch_ms(groups)
+    }
+
     /// One compute pass over the resident occluders. This does not present and does not upload them.
     pub fn transmission_gains(
         &mut self,
@@ -907,6 +913,10 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
+    media_ms: Option<f64>,
+    /// Workgroups for the next media dispatch. The parity check uses 1.
+    media_groups: u32,
     submit_pending: bool,
     /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
     abandon: bool,
@@ -1552,6 +1562,8 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                media_ms: None,
+                media_groups: 1,
                 submit_pending: false,
                 abandon: false,
                 timestamp_period,
