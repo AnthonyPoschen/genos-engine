@@ -302,13 +302,22 @@ cargo run -p genos-lighting-ref --bin layering-gate -- \
   --out genos-debug/gi/layering
 ```
 
-On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. The grade below is filled from that capture. The expected image is the path trace at the requested weight, not the held end of the engine frames and not `exp(−t / 50 ms)`.
+On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. The expected image is the path trace at the requested weight, not the held end of the engine frames and not `exp(−t / 50 ms)`.
+
+One lavapipe run (320×180, preset high, lamp 0 turned off, 37 frames) scored exit 1. The endpoints are path traces at 16 spp and 3 bounces. They stopped at `max_spp`, not the 40 s cap. Off noise was 0.255, on noise was 0.231.
 
 ```
-pending-lavapipe-capture
+toggle_settle_frames 37 12 FAIL
+pop_magnitude 0.7340 0.0500 FAIL
+fade_deviation 0.2813 0.0500 FAIL
+hold_flicker 0.0028 0.0200 PASS
+dim_error 0.6190 0.0500 FAIL
+layer_same_frame NOT-IMPLEMENTED 0.0500 NOT-IMPLEMENTED
+layer_bytes NOT-IMPLEMENTED 1048576 NOT-IMPLEMENTED
+finished_read NOT-IMPLEMENTED 0 NOT-IMPLEMENTED
 ```
 
-The layer rows have no lamp layer.
+`fade_deviation` is 0.2813, on the same scale as 0.05. Frame 0 still requests the lamp on. Its mean linear luma is 0.158 against the on trace at 0.220, and that ratio is the 0.2813. The 30-frame warmup is not a soak. Frame 1 requests the lamp off. Its mean miss against the off trace is 0.020. The mean then climbs: frame 36 is 0.161 against the off trace at 0.141. Blurred error never holds for four frames, so settle is the frame count, 37. The last frame's blurred error is 0.6190. The trace noise is part of that blurred error. The last four frames are calm. The layer rows have no lamp layer.
 
 Later phases add rhai gates under `debug/lighting/scripts/gates/`. The host cannot toggle a layer that does not exist, so those scripts wait. Each script soaks, records a settled frame, performs one change, and returns to the start, which is the existing test rule.
 
