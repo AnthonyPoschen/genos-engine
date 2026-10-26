@@ -297,7 +297,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `quality_cap` | 0 | Resident mips finer than `texture_quality`. |
 | `ultra_near` | 0 | Small VRAM, fast bus, Ultra: the visible near texture is at mip 0 and the far texture stays coarser, inside the target. |
 | `slow_bus` | 0 | An overrun halves the admit rate, a later in-budget frame grows it again, and every admit stays at or under `bytes_per_ms × leftover_ms`. That cap is the meter's bytes per millisecond times the leftover frame time, not the streamer's stored rate. |
-| `thrash` | 0 | An A/B spin where the dwell is the only thing that stops a just-loaded mip from being evicted and loaded again. The level gap does not cover that mip, and the heap is over the texture target without being critical. |
+| `thrash` | 0 | An A/B spin where the dwell is the only thing that stops a just-loaded mip from being evicted and loaded again. The level gap does not cover that mip. The heap is over the texture target without being critical. That mip is smaller than the other texture's finest, so it fits again only after the other finest leaves. |
 | `evict_order` | 0 | Mismatches against the victim sequence: lowest screen importance, then farthest distance, then the finer level. |
 | `fence` | 0 | Mips that become resident while `transfer_ready` is false. |
 | `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the storage buffer the shader samples is not that resident mip. `cargo test -p genos-render --test material_stream`. |

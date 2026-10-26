@@ -975,12 +975,16 @@ pub fn slow_bus() -> f32 {
 }
 
 /// Thrash count for an A/B spin that only the dwell can hold still.
+///
+/// Texture 0's finest mip is the only page the far view can drop, and it is
+/// smaller than the overshoot, so that drop leaves the heap over the target.
+/// Looking back makes texture 1's larger finest the victim, which frees enough
+/// room for texture 0's finest to be admitted again inside the dwell.
 #[must_use]
 pub fn spin_thrash() -> f32 {
     let mut stream = Streamer::new(0, 0.0, DEFAULT_DWELL);
-    let levels = [40, 8, 2, 1];
-    stream.add_texture(64, 64, &levels);
-    stream.add_texture(64, 64, &levels);
+    stream.add_texture(64, 64, &[8, 4, 1]);
+    stream.add_texture(64, 64, &[40, 4, 1]);
     flood(&mut stream);
     let wide = byte_budget(1_000, 0);
     let near = [
@@ -989,7 +993,7 @@ pub fn spin_thrash() -> f32 {
     ];
     stream.step(&wide, &near, BASE_MS, FRAME_BUDGET_MS);
     stream.step(&wide, &near, BASE_MS, FRAME_BUDGET_MS);
-    let tight = byte_budget(130, 40);
+    let tight = byte_budget(58, 18);
     if stream.committed() <= tight.texture_target() || tight.critical(stream.committed()) {
         return 1_000.0;
     }
