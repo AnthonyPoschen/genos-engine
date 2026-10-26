@@ -31,13 +31,14 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (good_code, good_text) = run("--fixture", "good", &good_dir);
     assert_eq!(good_code, 0, "{good_text}");
-    assert_eq!(good_text.lines().count(), 21);
+    assert_eq!(good_text.lines().count(), 22);
     assert!(good_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(good_text.lines().all(|line| {
         line.ends_with(" NOT-IMPLEMENTED")
             || line.ends_with(" presented frame")
             || line.ends_with(" GPU dispatch count")
             || line.ends_with(" wave oracle")
+            || line.ends_with(" rust optics")
     }));
     assert!(!good_text.contains("GPU frame readback"));
     assert!(!good_text.contains("CPU model check"));
@@ -54,13 +55,14 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (bad_code, bad_text) = run("--case", "bad", &bad_dir);
     assert_eq!(bad_code, 1, "{bad_text}");
-    assert_eq!(bad_text.lines().count(), 21);
+    assert_eq!(bad_text.lines().count(), 22);
     assert!(bad_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(bad_text.lines().all(|line| {
         line.ends_with(" NOT-IMPLEMENTED")
             || line.ends_with(" FAIL presented frame")
             || line.ends_with(" FAIL GPU dispatch count")
             || line.ends_with(" FAIL wave oracle")
+            || line.ends_with(" FAIL rust optics")
     }));
     let bad_json = std::fs::read_to_string(bad_dir.join("metrics.json")).unwrap();
     assert!(bad_json.contains("\"fixture\": \"bad\""));
@@ -68,7 +70,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (live_code, live_text) = run("--fixture", "live", &live_dir);
     assert_eq!(live_code, 0, "{live_text}");
-    assert_eq!(live_text.lines().count(), 21);
+    assert_eq!(live_text.lines().count(), 22);
     for name in [
         "mirror_reflect",
         "fresnel_abs",
@@ -85,13 +87,15 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
         "near_weighted_rel",
         "flicker_reversal",
         "low_reflection_rays",
+        "optics_parity",
     ] {
         assert!(
             live_text.lines().any(|line| {
                 line.starts_with(name)
                     && (line.ends_with(" presented frame")
                         || line.ends_with(" GPU dispatch count")
-                        || line.ends_with(" wave oracle"))
+                        || line.ends_with(" wave oracle")
+                        || line.ends_with(" rust optics"))
                     && line.contains(" PASS ")
             }),
             "{name}\n{live_text}"

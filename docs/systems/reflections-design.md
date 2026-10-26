@@ -57,7 +57,7 @@ Priority, when a budget is short, is the ADR 0013 score with the near-camera ter
 
 ## Optics
 
-These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. The frame composite (`reflections_frame.comp`) and the water fragment include that file. `reflections_check.comp` compiles it as well and is the lavapipe parity dispatch, not a draw. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
+These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. The frame composite (`reflections_frame.comp`) and the water fragment include that file. `reflections_check.comp` compiles it as well and is the lavapipe parity dispatch, not a draw. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against the f64 trace. `optics_parity` is that comparison inside `reflections-check`, with gate `1e-4`, so a Rust-only change fails even when the frame is unchanged. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
 
 **Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness reads the reflected colour of its own screen patch (`mirror_reflect`) and the mirror window (`mirror_point`). Both are presented-frame colour error, with a floor of `2/255`.
 
@@ -224,7 +224,7 @@ Live and good read the presented frame. The picture is the grade window: a mirro
 
 A channel that matches the quantised trace contributes 0. A one-code miss contributes 0 only when the f64 colour sits within 0.02 of a rounding boundary, which is the f32 store of that shade. Any larger miss is the row's value. The source label is `presented frame`. Nothing is labeled `GPU frame readback`.
 
-Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe and a device GPU can round a blend to opposite sides of a code, so a limit under two codes flakes. Fresnel (`0.02`), Beer (`0.02`), GGX (`0.03`), and `near_weighted_rel` (`0.03`) are already above that floor and keep those optical limits. `low_reflection_rays` is a dispatch count and stays at 0.
+Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe and a device GPU can round a blend to opposite sides of a code, so a limit under two codes flakes. Fresnel (`0.02`), Beer (`0.02`), GGX (`0.03`), and `near_weighted_rel` (`0.03`) are already above that floor and keep those optical limits. `low_reflection_rays` is a dispatch count and stays at 0. `optics_parity` compares `genos_math::optics` with the f64 trace and stays at `1e-4`.
 
 - `mirror_reflect` is the red reflection patch, x 0..32, y 20..44.
 - `fresnel_abs` is the incident-side water at x 8..80, y 0..16, clear of the GGX swatch.
@@ -264,6 +264,7 @@ Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe a
 | `near_weighted_rel` | 0.03 | depth-weighted relative error, weight `1 / max(depth, 0.25)` |
 | `flicker_reversal` | 2/255 | max mean-channel change across three still frames |
 | `low_reflection_rays` | 0 | reflection rays the Low preset schedules |
+| `optics_parity` | 1e-4 | max absolute error of `genos_math::optics` against the f64 trace: mirror direction, Fresnel from air and from water, the refracted direction, Beer–Lambert, the GGX distribution, flat-water transmittance, the grade portal map, the view budget, and the Low ray cap |
 | `ms_frac` | 1 | max of used milliseconds / cap |
 | `vram_frac` | 1 | max of used megabytes / cap |
 

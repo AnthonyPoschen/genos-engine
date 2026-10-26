@@ -2,7 +2,9 @@
 //!
 //! Rows that have a frame equivalent read the presented picture and compare it
 //! with [`crate::reflections_trace`], an f64 trace that does not call
-//! `genos_math::optics`. `low_reflection_rays` is the atomic dispatch count.
+//! `genos_math::optics`. `optics_parity` compares `genos_math::optics` with that
+//! trace, so a Rust-only change fails even when the frame is unchanged.
+//! `low_reflection_rays` is the atomic dispatch count.
 //! The shoreline rows are the absolute error against an independent wave oracle.
 //! `ssr_depth_rel`, `caustic_rel`, `ms_frac`, `vram_frac`, and `denoise_lag_frames`
 //! stay `NOT-IMPLEMENTED`. Lavapipe timestamps are not the 4070 or 1060 budget.
@@ -11,8 +13,8 @@
 //! when its value is finite and `value <= threshold`. A presented-frame threshold
 //! is at least two 8-bit codes (`2/255`). One code is `1/255`, and lavapipe and a
 //! device GPU can round a blend to opposite sides of that code. A gate tighter
-//! than two codes flakes. Dispatch counts and the wave oracle are not framebuffer
-//! values, and they keep their own limits.
+//! than two codes flakes. Dispatch counts, the wave oracle, and the optics row
+//! are not framebuffer values, and they keep their own limits.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -351,6 +353,8 @@ fn measure(kind: Kind) -> Vec<Metric> {
         ),
         absent("ms_frac", 1.0),
         absent("vram_frac", 1.0),
+        // f32 against the f64 trace. A formula change is far above an ulp.
+        gate("optics_parity", optics_parity(kind), 1.0e-4, "rust optics"),
     ]
 }
 
@@ -496,6 +500,54 @@ fn flicker_reversal(kind: Kind) -> f64 {
         Ok(shot) => shot.flicker,
         Err(_) => f64::INFINITY,
     })
+}
+
+fn optics_parity(kind: Kind) -> f64 {
+    broken(kind, 1.0, rust_optics_error)
+}
+
+fn rust_optics_error() -> f64 {
+    use genos_math::optics::{self, PortalLink, ReflectionPreset};
+    use genos_math::{Mat3, Vec3};
+    let expect = reflections_trace::optics_reference();
+    let incident = Vec3::new(0.6, -0.8, 0.0);
+    let normal = Vec3::new(0.0, 1.0, 0.0);
+    let reflected = optics::mirror_dir(incident, normal);
+    let transmitted = optics::refract_dir(incident, normal, 1.0 / optics::WATER_IOR)
+        .unwrap_or(Vec3::new(f32::NAN, f32::NAN, f32::NAN));
+    let link = PortalLink {
+        from_origin: Vec3::new(1.15, 1.5, 2.4),
+        from_basis: Mat3::from_cols([0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]),
+        to_origin: Vec3::new(10.0, 1.5, 0.0),
+        to_basis: Mat3::from_cols([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0]),
+    };
+    let eye = optics::portal_point(link, Vec3::new(0.0, 1.5, 4.0));
+    let views = optics::mirror_views(&[0.020_373_188, 0.06], 3, 0.02);
+    let rays = optics::reflection_ray_cap(ReflectionPreset::Low);
+    let got: [f64; reflections_trace::OPTICS_SAMPLES] = [
+        f64::from(reflected.x),
+        f64::from(reflected.y),
+        f64::from(reflected.z),
+        f64::from(optics::fresnel_dielectric(optics::WATER_IOR, 1.0)),
+        f64::from(optics::fresnel_dielectric(optics::WATER_IOR, 0.5)),
+        f64::from(optics::fresnel_dielectric(1.0 / optics::WATER_IOR, 0.2)),
+        f64::from(transmitted.x),
+        f64::from(transmitted.y),
+        f64::from(transmitted.z),
+        f64::from(optics::beer(0.55, 1.0)),
+        f64::from(optics::ggx_ndf(1.0, 0.35)),
+        f64::from(optics::flat_water_transmittance(optics::WATER_IOR)),
+        f64::from(eye.x),
+        f64::from(eye.y),
+        f64::from(eye.z),
+        f64::from(views),
+        f64::from(rays),
+    ];
+    let mut max = 0.0_f64;
+    for (got, expect) in got.iter().zip(expect.iter()) {
+        max = max.max((got - expect).abs());
+    }
+    max
 }
 
 fn low_reflection_rays(kind: Kind) -> f64 {
@@ -786,7 +838,7 @@ mod tests {
     #[test]
     fn good_passes_every_implemented_gate() {
         let report = grade(Fixture::Good);
-        assert_eq!(report.metrics.len(), 21);
+        assert_eq!(report.metrics.len(), 22);
         assert_eq!(report.exit_code(), 0);
         let mut absent = 0;
         for metric in &report.metrics {
@@ -801,12 +853,13 @@ mod tests {
         }
         assert_eq!(absent, 5, "ssr, denoise, caustic, ms, vram");
         let text = report.summary();
-        assert_eq!(text.lines().count(), 21);
+        assert_eq!(text.lines().count(), 22);
         assert!(!text.contains("FAIL"));
         assert!(!text.contains("GPU frame readback"));
         assert!(text.contains("presented frame"));
         assert!(text.contains("GPU dispatch count"));
         assert!(text.contains("wave oracle"));
+        assert!(text.contains("rust optics"));
     }
 
     #[test]

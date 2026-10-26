@@ -114,7 +114,7 @@ const HELP: &str = "\
 reflections-check — analytic gates for specular reflections, mirrors, portals, and water.
 
 The default fixture is live. Implemented rows read the presented frame, the
-ray dispatch counter, or the wave oracle. ssr_depth_rel, denoise_lag_frames,
+ray dispatch counter, the wave oracle, or the Rust optics parity. ssr_depth_rel, denoise_lag_frames,
 caustic_rel, ms_frac, and vram_frac are NOT-IMPLEMENTED. good grades the
 engine frame. bad grades a deliberately broken candidate and exits 1.
 

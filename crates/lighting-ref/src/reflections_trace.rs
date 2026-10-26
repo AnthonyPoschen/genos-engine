@@ -75,12 +75,66 @@ pub fn ggx_energy() -> f64 {
     ggx_integral(0.35, 4096)
 }
 
+/// Rust optics samples, in the order `optics_parity` reads them.
+///
+/// Mirror direction, Fresnel from air at cos 1 and cos 0.5, Fresnel from water
+/// at cos 0.2 (total internal reflection), the refracted direction, Beer–Lambert,
+/// the GGX normal distribution, flat-water transmittance, the grade portal map
+/// of the eye, the Fresnel view budget, and the Low ray cap.
+pub const OPTICS_SAMPLES: usize = 17;
+
+/// f64 values for [`OPTICS_SAMPLES`]. This does not call `genos_math::optics`.
+#[must_use]
+pub fn optics_reference() -> [f64; OPTICS_SAMPLES] {
+    let incident = [0.6, -0.8, 0.0];
+    let normal = [0.0, 1.0, 0.0];
+    let reflected = reflect(incident, normal);
+    let (_bent, transmitted) = refract(incident, normal, 1.0 / IOR);
+    let eye = portal_map([0.0, 1.5, 4.0]);
+    [
+        reflected[0],
+        reflected[1],
+        reflected[2],
+        fresnel_dielectric(IOR, 1.0),
+        fresnel_dielectric(IOR, 0.5),
+        fresnel_dielectric(1.0 / IOR, 0.2),
+        transmitted[0],
+        transmitted[1],
+        transmitted[2],
+        (-0.55_f64).exp(),
+        ggx_ndf(1.0, 0.35),
+        1.0 - fresnel_dielectric(IOR, 1.0),
+        eye[0],
+        eye[1],
+        eye[2],
+        view_budget(&[0.020_373_188, 0.06], 3, 0.02),
+        0.0,
+    ]
+}
+
+/// Fresnel product against a view cap. The design cutoff is 0.02.
+fn view_budget(fresnel: &[f64], cap: u32, cutoff: f64) -> f64 {
+    let mut weight = 1.0;
+    let mut emitted = 0.0;
+    for reflectance in fresnel {
+        if emitted >= f64::from(cap) {
+            break;
+        }
+        weight *= *reflectance;
+        if weight < cutoff {
+            break;
+        }
+        emitted += 1.0;
+    }
+    emitted
+}
+
 /// Breaking-limited wave height, and the crest in deep water.
 ///
-/// The crest is the Finch displacement at `(2, 0)`, time 0. McCowan
-/// (Philosophical Magazine 32, 1891, pp. 45–58) gives the solitary-wave
-/// breaking index `H / d = 0.78`. Returns `(max of min(crest, 0.78 × depth) / depth,
-/// crest / 4 m)`. The limit is that index.
+/// The crest is the Finch displacement at `(2, 0)`, time 0. The solitary-wave
+/// breaking index is `H / d = 0.78` (Philosophical Magazine 32, 1891, pp. 45–58).
+/// Returns `(max of min(crest, 0.78 × depth) / depth, crest / 4 m)`. The limit
+/// is that index.
 #[must_use]
 pub fn shore_oracle() -> (f64, f64) {
     let crest = gerstner_point([2.0, 0.0])[1].abs();
@@ -735,7 +789,7 @@ fn normalize(a: [f64; 3]) -> [f64; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{ggx_energy, shore_oracle, trace, HEIGHT, WIDTH};
+    use super::{ggx_energy, optics_reference, shore_oracle, trace, HEIGHT, IOR, WIDTH};
 
     #[test]
     fn the_trace_paints_the_grade_regions() {
@@ -762,6 +816,11 @@ mod tests {
         let (crest, deep) = shore_oracle();
         assert!((crest - 0.78).abs() < 1.0e-12, "{crest}");
         assert!((deep - 0.1).abs() < 1.0e-12, "{deep}");
+        let optics = optics_reference();
+        let f0 = ((IOR - 1.0) / (IOR + 1.0)).powi(2);
+        assert!((optics[3] - f0).abs() < 1.0e-12, "{}", optics[3]);
+        assert!((optics[5] - 1.0).abs() < 1.0e-12, "{}", optics[5]);
+        assert!(optics[16].abs() < 1.0e-12, "{}", optics[16]);
         let energy = ggx_energy();
         assert!((energy - 1.0).abs() < 1.0e-3, "{energy}");
     }
