@@ -1,12 +1,27 @@
-#![expect(clippy::expect_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
-#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::panic, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(
+    clippy::expect_used,
+    reason = "the build stops when a host tool or OUT_DIR is missing"
+)]
+#![expect(
+    clippy::format_push_string,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_assert,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::panic,
+    reason = "the build stops when a host tool or OUT_DIR is missing"
+)]
 #![allow(
     clippy::disallowed_methods,
     reason = "the build reads OUT_DIR from Cargo"
 )]
-#![expect(clippy::unwrap_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "the build stops when a host tool or OUT_DIR is missing"
+)]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,7 +36,12 @@ fn main() {
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
     // Not embedded: catches errors in pieces no pass includes yet.
-    for file in ["lighting_check.comp", "media_check.comp"] {
+    // reflections_check is the lavapipe parity dispatch for reflections.glsl.
+    for file in [
+        "lighting_check.comp",
+        "media_check.comp",
+        "reflections_check.comp",
+    ] {
         let src = format!("shaders/{file}");
         println!("cargo:rerun-if-changed={src}");
         compile(&src, &out.join(format!("{file}.spv")));
@@ -120,6 +140,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
     println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
+    println!("cargo:rerun-if-changed=shaders/reflections.glsl");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");

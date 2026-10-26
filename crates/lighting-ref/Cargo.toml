@@ -13,3 +13,4 @@ name = "layering-gate"
 path = "src/bin/layering_gate.rs"
 
 [dependencies]
+genos-math = { path = "../math" }

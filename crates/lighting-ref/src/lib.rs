@@ -13,6 +13,7 @@ pub mod layering;
 pub mod metrics;
 pub mod paths;
 pub mod picture;
+pub mod reflections;
 pub mod policy;
 pub mod report;
 pub mod selftest;

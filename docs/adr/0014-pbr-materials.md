@@ -14,7 +14,7 @@ The picture, the bake, and the path tracer do not read one material.
 - `load_gltf` accepts `KHR_materials_emissive_strength` and refuses every other required extension. There is no BC7 or ASTC cook, no texture page table, and no material hot reload.
 - OBJ+MTL and FBX already become `PbrMaterial` on `origin/mesh-loading` at `6ec390c`. Those files are not on this branch.
 
-GI stores irradiance in the world-space surface light cache and refreshes it under per-preset work caps ([ADR 0013](0013-lighting-invalidation-is-local.md)). [ADR 0012](0012-gi.md) already requires emissive surfaces, including a texture on part of a mesh, to light the scene, and it stores roughness and metallic for a later specular lobe. The lobe is still a non-goal.
+GI stores irradiance in the world-space surface light cache and refreshes it under per-preset work caps ([ADR 0013](0013-lighting-invalidation-is-local.md)). [ADR 0012](0012-gi.md) already requires emissive surfaces, including a texture on part of a mesh, to light the scene, and it stores roughness and metallic for a later specular lobe. This materials decision does not schedule that lobe. [ADR 0019](0019-reflections.md) (accepted 2026-10-26) is the specular path.
 
 ## Decision
 
