@@ -29,6 +29,7 @@
 //! The good case also runs the broken shade and exits 2 if that shade would
 //! pass a shade metric, or if a path that is not in the tree comes back as PASS.
 
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -471,10 +472,10 @@ fn metric_json(metric: &Metric) -> String {
         metric.status.text()
     );
     if let Some(note) = metric.note {
-        line.push_str(&format!(",\"note\":\"{note}\""));
+        let _ = write!(line, ",\"note\":\"{note}\"");
     }
     if let Some(reference) = metric.reference {
-        line.push_str(&format!(",\"reference\":{reference:.6}"));
+        let _ = write!(line, ",\"reference\":{reference:.6}");
     }
     line.push('}');
     line
