@@ -133,7 +133,7 @@ G-buffer channels this design adds, beside the roughness and metallic ADR 0012 a
 p' = origin_b + basis_b * flip_z * basis_a⁻¹ * (p - origin_a)
 ```
 
-`flip_z` reverses the source forward axis so the view looks out of the destination. The harness grades the axis-aligned case: origin A at 0, origin B at `(10, 0, 0)`, forward flipped. Gate: `portal_point_m` ≤ `1e-5`.
+`flip_z` reverses the source forward axis so the view looks out of the destination. The harness grades a quarter-turn about Y into a quarter-turn about X, origin B at `(10, 0, 0)`, forward flipped. The expected points are baked by hand. A map that applies `from_basis` instead of its inverse misses them. Gate: `portal_point_m` ≤ `1e-5`.
 
 **Water.** A mesh plus a uniform block of Gerstner components (direction, amplitude, wavelength, speed, steepness). The count is 0 / 4 / 6 / 8 for Potato / Low / Medium / High. Time is the scene clock. A frozen clock does not move the surface. The mesh writes the G-buffer (kind = water) and claims surface-cache texels the way any mesh does, so the room can pick up the water's colour. That replaces the extras-plan rule that water does not write the G-buffer, once this ADR is accepted.
 

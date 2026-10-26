@@ -561,27 +561,37 @@ fn portal_leak(kind: Kind) -> f64 {
     genos_render::portal_leak(fault_of(kind))
 }
 
-fn axis_portal() -> PortalLink {
+/// Quarter-turn about Y into a quarter-turn about X. Neither basis is identity,
+/// so dropping `transpose(from_basis)` moves the point.
+fn turned_portal() -> PortalLink {
     PortalLink {
         from_origin: Vec3::ZERO,
-        from_basis: Mat3::IDENTITY,
+        from_basis: Mat3::from_cols([0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]),
         to_origin: Vec3::new(10.0, 0.0, 0.0),
-        to_basis: Mat3::IDENTITY,
+        to_basis: Mat3::from_cols([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0]),
     }
 }
 
+/// The rigid map with `from_basis` applied instead of its inverse.
+fn portal_point_no_inverse(link: PortalLink, point: Vec3) -> Vec3 {
+    let local = link.from_basis.transform(point - link.from_origin);
+    let flipped = Vec3::new(local.x, local.y, -local.z);
+    link.to_origin + link.to_basis.transform(flipped)
+}
+
 fn portal_point_m(kind: Kind) -> f64 {
+    // Hand map: inverse quarter-turn Y, flip Z, quarter-turn X, then +(10, 0, 0).
     let cases = [
-        (Vec3::new(1.0, 2.0, 3.0), [11.0_f64, 2.0, -3.0]),
-        (Vec3::new(0.0, 0.0, 1.0), [10.0_f64, 0.0, -1.0]),
+        (Vec3::new(1.0, 2.0, 3.0), [7.0_f64, 1.0, 2.0]),
+        (Vec3::new(0.0, 0.0, 1.0), [9.0_f64, 0.0, 0.0]),
     ];
-    let link = axis_portal();
+    let link = turned_portal();
     let mut max_err: f64 = 0.0;
     for (point, baked) in cases {
         let got = if kind == Kind::Good {
             to64(optics::portal_point(link, point))
         } else {
-            to64(point)
+            to64(portal_point_no_inverse(link, point))
         };
         max_err = max_err.max(dist(got, baked));
     }
@@ -819,6 +829,26 @@ fn trim_zeros(raw: String) -> String {
 #[expect(clippy::panic, reason = "a failed fixture aborts the test")]
 mod tests {
     use super::{grade, resolve_out, write_report, Fixture, Row, Status};
+
+    #[test]
+    fn a_portal_without_the_inverse_misses_the_baked_turn() {
+        let report_good = grade(Fixture::Good);
+        let report_bad = grade(Fixture::Bad);
+        let good = report_good
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "portal_point_m")
+            .unwrap_or_else(|| panic!("portal_point_m"));
+        let bad = report_bad
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "portal_point_m")
+            .unwrap_or_else(|| panic!("portal_point_m"));
+        let good_value = good.value.unwrap_or_else(|| panic!("good value"));
+        let bad_value = bad.value.unwrap_or_else(|| panic!("bad value"));
+        assert!(good_value <= 1.0e-5, "{good_value}");
+        assert!(bad_value > 1.0e-5, "{bad_value}");
+    }
 
     #[test]
     fn the_path_tracer_matches_the_faithful_picture() {
