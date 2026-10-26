@@ -7,7 +7,7 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 22] = [
+const SHADERS: [&str; 25] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
@@ -30,6 +30,9 @@ const SHADERS: [&str; 22] = [
     "lighting_lamp_pick.glsl",
     "media.glsl",
     "media_check.comp",
+    "froxel_common.glsl",
+    "froxel_inject.comp",
+    "froxel_integrate.comp",
 ];
 
 /// Largest constant trip count a loop may have.

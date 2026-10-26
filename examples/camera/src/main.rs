@@ -25,7 +25,7 @@ use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 /// The flame, the smoke, and the flame lamp stay off.
 const SHOW_PARTICLES: bool = false;
 use genos_scene::{
-    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
+    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings, FogSettings,
     Floor, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
@@ -809,6 +809,7 @@ fn loading_world() -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }

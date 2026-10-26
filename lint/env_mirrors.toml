@@ -1284,3 +1284,89 @@ name = "GENOS_HDR_COMPOSE"
 kind = "build"
 detail = "glslang -D for the HDR compose compile; not a process environment variable"
 
+
+[[var]]
+name = "GENOS_FOG"
+kind = "mirror"
+detail = "--fog"
+
+[[var]]
+name = "GENOS_FOG_DENSITY"
+kind = "mirror"
+detail = "--fog-density"
+
+[[var]]
+name = "GENOS_FOG_HEIGHT"
+kind = "mirror"
+detail = "--fog-height"
+
+[[var]]
+name = "GENOS_FOG_THICKNESS"
+kind = "mirror"
+detail = "--fog-thickness"
+
+[[var]]
+name = "GENOS_FOG_ALBEDO"
+kind = "mirror"
+detail = "--fog-albedo"
+
+[[var]]
+name = "GENOS_FOG_PHASE"
+kind = "mirror"
+detail = "--fog-phase"
+
+[[var]]
+name = "GENOS_FOG_GI"
+kind = "mirror"
+detail = "--fog-gi"
+
+[[var]]
+name = "GENOS_FOG_HISTORY"
+kind = "mirror"
+detail = "--fog-history"
+
+[[var]]
+name = "GENOS_FOG_GRID"
+kind = "mirror"
+detail = "--fog-grid"
+
+[[var]]
+name = "GENOS_FOG_SAMPLES"
+kind = "mirror"
+detail = "--fog-samples"
+
+[[var]]
+name = "GENOS_FOG_SUITE"
+kind = "mirror"
+detail = "--suite"
+
+[[var]]
+name = "GENOS_FOG_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_FOG_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_MATERIALS_GATE_CASE"
+kind = "mirror"
+detail = "--case"
+
+[[var]]
+name = "GENOS_MATERIALS_GATE_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_OUT"
+kind = "mirror"
+detail = "--out"
+

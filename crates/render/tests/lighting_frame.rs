@@ -165,6 +165,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
             hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         });
         let mut lit = gltf.clone();
@@ -1231,6 +1232,7 @@ fn shadow_floor_world() -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
@@ -1473,6 +1475,7 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1830,6 +1833,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1890,6 +1894,7 @@ fn white_lamps(n: usize) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }

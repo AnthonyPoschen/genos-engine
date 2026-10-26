@@ -20,6 +20,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
 #include "dither.glsl"
+#include "froxel_compose.glsl"
 
 #ifdef GENOS_HDR_COMPOSE
 // Scene-referred radiance, before the display transform. w is eye distance in metres.
@@ -209,6 +210,7 @@ void main() {
         glow = vec3(0.0);
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+    c = froxel_compose(c, p, pc.dims.xy);
 #ifdef GENOS_HDR_COMPOSE
     scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
     c = add_bloom(c, index);

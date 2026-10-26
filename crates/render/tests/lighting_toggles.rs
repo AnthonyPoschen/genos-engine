@@ -59,6 +59,7 @@ fn room(settings: LightingSettings) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }
@@ -475,6 +476,7 @@ fn interior(settings: LightingSettings) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }
@@ -786,6 +788,7 @@ fn shadow_corner(settings: LightingSettings) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }

@@ -32,13 +32,12 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyB
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
-    DebugSettings, EventLoopSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings,
-    Scene, Sky, Vec3,
-    PITCH_LIMIT,
+    DebugSettings, EventLoopSettings, FogCli, FogEnv, FogSettings, Floor, FocusPolicy,
+    FpsCounterSettings, Light, MenuSettings, Scene, Sky, Vec3, PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
-use genos_stress::knobs::{apply_lighting_knob, lighting_knobs};
+use genos_stress::knobs::{apply_fog_knob, apply_lighting_knob, fog_knobs, lighting_knobs};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
     button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
@@ -81,6 +80,17 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          only when this is omitted
   --output auto|sdr|hdr10|scrgb
                          swapchain choice. GENOS_HDR_OUTPUT applies only when this is omitted
+  --fog on|off           height fog and local volumes (GENOS_FOG)
+  --fog-density N        extinction at the fog height (GENOS_FOG_DENSITY)
+  --fog-height N         world height of that extinction, metres (GENOS_FOG_HEIGHT)
+  --fog-thickness N      scale height, metres (GENOS_FOG_THICKNESS)
+  --fog-albedo N         single-scatter albedo (GENOS_FOG_ALBEDO)
+  --fog-phase N          Henyey-Greenstein g (GENOS_FOG_PHASE)
+  --fog-gi on|off        world-cache read (GENOS_FOG_GI)
+  --fog-history on|off   stored only; the pass does not blend (GENOS_FOG_HISTORY)
+  --fog-grid WxHxS       froxel columns, rows, and slices. 0 on an axis keeps
+                         the preset (GENOS_FOG_GRID)
+  --fog-samples N        cell budget. 0 dispatches the whole grid (GENOS_FOG_SAMPLES)
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
                          (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
@@ -222,6 +232,11 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_denoise_variance",
     "lighting_screen_verify",
     "lighting_world_verify",
+    "density",
+    "height",
+    "thickness",
+    "albedo",
+    "phase_g",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
 const DROP_KNOBS: &[&str] = &[
@@ -229,6 +244,7 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_ambient",
     "lighting_lamp_pick",
     "lighting_surface_cache_blend",
+    "fog_view",
 ];
 const VIEWS: [&str; 8] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
@@ -261,6 +277,10 @@ struct Options {
     check: bool,
     /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
     mcp_port: Option<u16>,
+    /// `--fog*`. Empty fields were omitted.
+    fog_cli: FogCli,
+    /// Mirrors for the fog flags this launch left empty.
+    fog_env: FogEnv,
 }
 
 /// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
@@ -297,6 +317,9 @@ fn run() -> Result<(), String> {
         root,
         log.try_clone().map_err(|err| err.to_string())?,
     )?;
+    app.fog_cli = opts.fog_cli.clone();
+    app.fog_env = opts.fog_env;
+    app.overlay_fog();
     if opts.check {
         return check_all(&mut app, &opts, &mut log);
     }
@@ -389,6 +412,7 @@ fn run() -> Result<(), String> {
                 renderer.reset_lighting_cache();
             }
         }
+        app.overlay_fog();
         if frame.closing {
             finish(
                 window,
@@ -803,6 +827,10 @@ struct App {
     gi_passes: String,
     /// Last GI work counters. Numbers only.
     gi_work: String,
+    /// Launch fog arguments. Reapplied over each loaded scene.
+    fog_cli: FogCli,
+    /// Mirrors for the fog arguments this launch left empty.
+    fog_env: FogEnv,
 }
 
 enum Show {
@@ -824,7 +852,18 @@ impl App {
             load: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
+            fog_cli: FogCli::default(),
+            fog_env: FogEnv::default(),
         })
+    }
+
+    /// Arguments win. An omitted argument keeps the scene value, or the mirror
+    /// when that variable was set.
+    fn overlay_fog(&mut self) {
+        let cli = self.fog_cli.clone();
+        let env = self.fog_env;
+        let scene = self.scene();
+        scene.fog = scene.fog.resolve(&cli, &env);
     }
 
     fn entry(&self) -> &Entry {
@@ -918,6 +957,7 @@ impl App {
         self.scene().event_loop = event_loop;
         genos_window::retire(old);
         adopt_show(&mut self.show);
+        self.overlay_fog();
         self.note(&format!("loaded {name}"));
     }
 }
@@ -951,7 +991,11 @@ impl Host for App {
     fn knobs(&self) -> Vec<Knob> {
         match &self.show {
             Show::Stress(stage) => Host::knobs(stage),
-            Show::Still(world) => lighting_knobs(&world.scene.lighting),
+            Show::Still(world) => {
+                let mut knobs = lighting_knobs(&world.scene.lighting);
+                knobs.extend(fog_knobs(&world.scene.fog));
+                knobs
+            }
         }
     }
 
@@ -959,7 +1003,9 @@ impl Host for App {
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
-                if apply_lighting_knob(&mut world.scene.lighting, name, value)? {
+                if apply_fog_knob(&mut world.scene.fog, name, value)?
+                    || apply_lighting_knob(&mut world.scene.lighting, name, value)?
+                {
                     Ok(())
                 } else {
                     Err(format!("unknown knob {name}"))
@@ -992,6 +1038,7 @@ impl Host for App {
         self.scene().debug = debug;
         self.scene().event_loop = event_loop;
         adopt_show(&mut self.show);
+        self.overlay_fog();
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -1049,6 +1096,7 @@ fn loading_world() -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1125,6 +1173,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 fps_counter: FpsCounterSettings::default(),
                 event_loop: EventLoopSettings::default(),
                 hdr: genos_scene::HdrSettings::legacy_bytes(),
+                fog: FogSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -1773,6 +1822,9 @@ fn setting_piece(
             )
             .map(Piece::Row)
         }
+        "fog_dispatches" | "fog_samples" | "fog_vram" | "fog_ms" | "fog_history_accepts" => {
+            Some(Piece::Row(fog_counter_row(app, setting)))
+        }
         name => {
             let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
             if knob.choices == ["off", "on"] {
@@ -1970,6 +2022,35 @@ fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
 }
 
 /// Panel text from `docs/lighting/GLOSSARY.md`. The knob name stays the config key.
+fn fog_counter_row(app: &App, setting: &str) -> PanelRow {
+    let scene = app.scene_ref();
+    let probe = genos_render::fog_probe(&scene.fog, scene.lighting.preset);
+    let label = match setting {
+        "fog_dispatches" => format!("fog_dispatches {}", probe.dispatches),
+        "fog_samples" => format!(
+            "fog_samples {} grid {}x{}x{}",
+            probe.samples_used,
+            probe.dispatched_width,
+            probe.dispatched_height,
+            probe.dispatched_slices
+        ),
+        "fog_vram" => format!("fog_vram {}", probe.vram_bytes),
+        "fog_ms" => format!("fog_ms {}", probe.pass_ms),
+        "fog_history_accepts" => format!(
+            "fog_history_accepts {} rejects {}",
+            probe.history_accepts, probe.history_rejects
+        ),
+        _ => setting.to_string(),
+    };
+    PanelRow {
+        label,
+        buttons: Vec::new(),
+        slider: None,
+        dropdown: None,
+        checks: Vec::new(),
+    }
+}
+
 fn menu_label(name: &str, fallback: &str) -> String {
     match name {
         "lighting_preset" => "Preset",
@@ -2328,6 +2409,7 @@ fn options() -> Result<Options, String> {
     let mut size = (1280u32, 720u32);
     let mut check = false;
     let mut mcp_port = None;
+    let mut fog_cli = FogCli::default();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
@@ -2400,6 +2482,11 @@ fn options() -> Result<Options, String> {
             "--mcp-port" => {
                 mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
             }
+            "--fog" | "--fog-density" | "--fog-height" | "--fog-thickness" | "--fog-albedo"
+            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid"
+            | "--fog-samples" => {
+                take_fog(&mut fog_cli, &arg, &mut args)?;
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -2424,6 +2511,8 @@ fn options() -> Result<Options, String> {
                     let needs = genos_render::gi_metrics_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
                     genos_render::check_gi_metrics_arg(other, next.as_deref())?;
+                } else if genos_scene::fog_flag_needs_value(other).is_some() {
+                    take_fog(&mut fog_cli, other, &mut args)?;
                 } else if genos_render::gpu_times_flag_needs_value(other).is_some() {
                     let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -2483,7 +2572,86 @@ fn options() -> Result<Options, String> {
         size,
         check,
         mcp_port,
+        fog_cli: fog_cli.clone(),
+        fog_env: fog_env_from_process(&fog_cli)?,
     })
+}
+
+fn take_fog(
+    cli: &mut FogCli,
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let needs = genos_scene::fog_flag_needs_value(arg).unwrap_or(false);
+    let next = needs.then(|| need_arg(args, arg)).transpose()?;
+    genos_scene::apply_fog_arg(cli, arg, next.as_deref())
+}
+
+fn fog_env_from_process(cli: &FogCli) -> Result<FogEnv, String> {
+    Ok(FogEnv {
+        enabled: mirror_switch(cli.enabled.is_some(), "GENOS_FOG")?,
+        density: mirror_number(cli.density.is_some(), "GENOS_FOG_DENSITY", "density")?,
+        height: mirror_number(cli.height.is_some(), "GENOS_FOG_HEIGHT", "height")?,
+        thickness: mirror_number(cli.thickness.is_some(), "GENOS_FOG_THICKNESS", "thickness")?,
+        albedo: mirror_number(cli.albedo.is_some(), "GENOS_FOG_ALBEDO", "albedo")?,
+        phase_g: mirror_number(cli.phase_g.is_some(), "GENOS_FOG_PHASE", "phase_g")?,
+        gi: mirror_switch(cli.gi.is_some(), "GENOS_FOG_GI")?,
+        history: mirror_switch(cli.history.is_some(), "GENOS_FOG_HISTORY")?,
+        grid: mirror_grid(cli.grid.is_some())?,
+        samples: mirror_count(cli.samples.is_some(), "GENOS_FOG_SAMPLES", "samples")?,
+    })
+}
+
+fn mirror_switch(argument_set: bool, name: &str) -> Result<Option<bool>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var(name) {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_switch(&value)
+            .map(Some)
+            .map_err(|err| format!("{name}: {err}")),
+    }
+}
+
+fn mirror_grid(argument_set: bool) -> Result<Option<(u32, u32, u32)>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var("GENOS_FOG_GRID") {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_grid(&value)
+            .map(Some)
+            .map_err(|err| format!("GENOS_FOG_GRID: {err}")),
+    }
+}
+
+fn mirror_count(argument_set: bool, name: &str, key: &str) -> Result<Option<u32>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var(name) {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_count(key, &value)
+            .map(Some)
+            .map_err(|err| format!("{name}: {err}")),
+    }
+}
+
+fn mirror_number(argument_set: bool, name: &str, key: &str) -> Result<Option<f32>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var(name) {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_number(key, &value)
+            .map(Some)
+            .map_err(|err| format!("{name}: {err}")),
+    }
 }
 
 fn parse_mcp_port(value: &str) -> Result<u16, String> {
@@ -2568,6 +2736,8 @@ mod tests {
             size: (320, 180),
             check: false,
             mcp_port: None,
+            fog_cli: genos_scene::FogCli::default(),
+            fog_env: genos_scene::FogEnv::default(),
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();
@@ -2860,6 +3030,7 @@ mod tests {
                 "Shadows",
                 "Perf",
                 "Output",
+                "Fog",
                 "Info"
             ]
         );
@@ -2974,6 +3145,14 @@ mod tests {
         assert_eq!(super::hdr_out_dir(None, Some("")), "genos-debug");
         assert_eq!(super::hdr_out_dir(None, None), "genos-debug");
         assert!(super::USAGE.contains("Output"));
+        assert!(super::USAGE.contains("--fog"));
+        assert!(super::USAGE.contains("--fog-density"));
+        assert!(super::USAGE.contains("GENOS_FOG"));
+        assert!(super::USAGE.contains("GENOS_FOG_HISTORY"));
+        assert!(super::USAGE.contains("--fog-grid"));
+        assert!(super::USAGE.contains("--fog-samples"));
+        assert!(super::USAGE.contains("GENOS_FOG_GRID"));
+        assert!(super::USAGE.contains("GENOS_FOG_SAMPLES"));
     }
 
     #[test]

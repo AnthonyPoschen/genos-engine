@@ -201,6 +201,7 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.4, -4.5, std::f32::consts::PI);
@@ -237,6 +238,7 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -3.0, std::f32::consts::PI);
@@ -265,6 +267,7 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
@@ -293,6 +296,7 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(-0.5, -4.0, 2.7);
@@ -332,6 +336,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut world = World::from_scene(scene);
