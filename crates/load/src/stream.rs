@@ -1128,6 +1128,36 @@ fn sequence_mismatches(got: &[(usize, u32)], expected: &[(usize, u32)]) -> u32 {
     count
 }
 
+/// Admit stays under a positive meter cap. A cap of 0 is a miss.
+///
+/// Eight frames at `base_ms` 1 let the rate climb to the wide sustainable
+/// cap. The scored frame uses `base_ms` 12, still under 16, so the leftover
+/// shrinks and the cap sits strictly below the stored rate. Dropping the
+/// sustainable min admits the stored rate and scores 1.
+#[must_use]
+pub fn admit_cap() -> f32 {
+    let mut stream = Streamer::new(0, 0.0, 0);
+    stream.add_texture(64, 64, &[4_000, 10]);
+    let per = 1_000u64;
+    stream.observe_disk(per, 1);
+    stream.observe_decode(per, 1);
+    stream.observe_transfer(per, 1);
+    let budget = budget_of(8192);
+    let views = [view_at(0, 1.0, near_derivatives(64))];
+    for _ in 0..8 {
+        stream.step(&budget, &views, 1.0, FRAME_BUDGET_MS);
+    }
+    let base_ms = 12.0;
+    stream.step(&budget, &views, base_ms, FRAME_BUDGET_MS);
+    let leftover = floor_nonneg(FRAME_BUDGET_MS - base_ms);
+    let cap = stream.bytes_per_ms().saturating_mul(u64::from(leftover));
+    if cap == 0 || stream.rate() <= cap || stream.last_admit() > cap {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// Streaming rows. They grade the streamer, not a shade.
 #[derive(Clone, Copy, Debug)]
 pub struct GateRows {
@@ -1141,6 +1171,7 @@ pub struct GateRows {
     pub thrash: f32,
     pub evict_order: f32,
     pub fence: f32,
+    pub admit_cap: f32,
 }
 
 #[must_use]
@@ -1156,6 +1187,7 @@ pub fn gate_rows() -> GateRows {
         thrash: spin_thrash(),
         evict_order: evict_order(),
         fence: fence(),
+        admit_cap: admit_cap(),
     }
 }
 
@@ -1184,6 +1216,7 @@ mod tests {
         assert!(zero(rows.thrash), "{}", rows.thrash);
         assert!(zero(rows.evict_order), "{}", rows.evict_order);
         assert!(zero(rows.fence), "{}", rows.fence);
+        assert!(zero(rows.admit_cap), "{}", rows.admit_cap);
     }
 
     #[test]

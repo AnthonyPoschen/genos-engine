@@ -228,19 +228,6 @@ fn flood_meter(renderer: &mut Renderer) {
     renderer.observe_material_decode(1_000_000_000, 1);
 }
 
-fn meter_cap(bytes_per_ms: u64, base_ms: f32) -> u64 {
-    if base_ms >= 16.0 {
-        return 0;
-    }
-    let mut ms = 0u64;
-    let mut mark = 1.0f32;
-    while mark <= 16.0 - base_ms {
-        ms = ms.saturating_add(1);
-        mark += 1.0;
-    }
-    bytes_per_ms.saturating_mul(ms)
-}
-
 fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> Vec<u8> {
     let _ = window.pump();
     renderer
@@ -455,38 +442,6 @@ fn eviction_order_on_real_textures_follows_importance() {
     assert!(
         value <= 0.0,
         "evict_order {value} victims {got:?} committed {committed}"
-    );
-}
-
-#[test]
-fn admit_stays_at_or_below_the_meter() {
-    let (_gpu, mut window, mut renderer) = open();
-    flood_meter(&mut renderer);
-    let world = large_world();
-    let camera = Camera::new(0.0, 4.0, 0.0);
-    let mut faults = 0u32;
-    let mut last_admit = 0u64;
-    let mut cap = 0u64;
-    let mut per = 0u64;
-    let mut base_ms = 0.0f32;
-    for _ in 0..8 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
-        per = renderer.material_bytes_per_ms();
-        base_ms = renderer.material_frame_ms();
-        last_admit = renderer.material_last_admit();
-        cap = meter_cap(per, base_ms);
-        if last_admit > cap {
-            faults = faults.saturating_add(1);
-        }
-    }
-    let value = faults as f32;
-    let status = if value <= 0.0 { "PASS" } else { "FAIL" };
-    eprintln!(
-        "admit_cap {value:.6} 0.000000 {status} admit {last_admit} cap {cap} per_ms {per} base_ms {base_ms:.3}"
-    );
-    assert!(
-        value <= 0.0,
-        "admit_cap {value} admit {last_admit} cap {cap}"
     );
 }
 

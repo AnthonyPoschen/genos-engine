@@ -96,7 +96,7 @@ const MUST_FAIL: [&str; 10] = [
 
 /// Streaming rows grade [`genos_load::gate_rows`]. The broken shade does not
 /// touch that code, so these pass on both readers. A logic change fails them.
-const STREAM_METRICS: [&str; 10] = [
+const STREAM_METRICS: [&str; 11] = [
     "budget_recover",
     "upload_refused",
     "oom_recover",
@@ -107,6 +107,7 @@ const STREAM_METRICS: [&str; 10] = [
     "thrash",
     "evict_order",
     "fence",
+    "admit_cap",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
@@ -397,6 +398,7 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
         measured("thrash", gates.thrash, 0.0),
         measured("evict_order", gates.evict_order, 0.0),
         measured("fence", gates.fence, 0.0),
+        measured("admit_cap", gates.admit_cap, 0.0),
         pending("gbuffer_ms", GBUFFER_MS, "no GPU timing in this gate"),
     ])
 }
