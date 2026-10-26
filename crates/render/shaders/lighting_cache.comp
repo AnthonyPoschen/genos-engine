@@ -107,10 +107,12 @@ void main() {
     // A held camera stops compose from restamping last-read; an on-screen texel
     // stays (lighting_sc_expired).
     if (lighting_sc_expired(last, shown)) {
-        atomicAdd(gstats.freed, 1u);
-        ckeys.key[slot] = 0u;
-        cache.v[3u * slot + 1u] = vec4(0.0);
-        cache.v[3u * slot + 2u] = vec4(0.0);
+        if (lighting_sc_may_free(slot, last, shown)) {
+            atomicAdd(gstats.freed, 1u);
+            ckeys.key[slot] = 0u;
+            cache.v[3u * slot + 1u] = vec4(0.0);
+            cache.v[3u * slot + 2u] = vec4(0.0);
+        }
         return;
     }
     vec3 tp;

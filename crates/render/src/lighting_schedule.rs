@@ -814,6 +814,8 @@ pub fn schedule_push(
         grant_u32(caps.cache_rays, scale),
     );
     let mut words = plan.words(lit.crop_x, lit.crop_y);
+    // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
+    words[0] |= 1 << 3;
     if plan.cache_ray_grant > 0 {
         words[0] |= plan.cache_ray_grant.min(0x00ff_ffff) << 8;
     }
@@ -1069,9 +1071,26 @@ mod tests {
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
         let push = schedule_push(&settings, 1.0, display(1280, 720), 16, 64, 0, 1);
         assert!(push.plan.gates_off());
-        assert_eq!(push.words[0], 0);
+        assert_eq!(push.words[0], 1 << 3);
         assert_eq!(push.tail[0], 1280);
         assert_eq!(push.tail[1], 720);
+    }
+
+    #[test]
+    fn budget_mode_pushes_detail_levels_and_the_coarse_cap() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let push = schedule_push(&settings, 1.0, display(1280, 720), 16, 64, 0, 1);
+        assert_eq!(push.words[0] & (1 << 3), 1 << 3);
+        assert_eq!(push.tail[2], 8_000);
+        assert_eq!(push.tail[3], 24 * 1024 * 1024 / 368);
+        let mut global = settings;
+        global.schedule = genos_scene::ScheduleMode::Global;
+        let off = schedule_push(&global, 1.0, display(1280, 720), 16, 64, 0, 1);
+        assert_eq!(off.words[0], 0);
+        let potato = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        let none = schedule_push(&potato, 1.0, display(1280, 720), 16, 64, 0, 1);
+        assert_eq!(none.tail[2], 0);
+        assert_eq!(none.words[0] & (1 << 3), 1 << 3);
     }
 
     #[test]

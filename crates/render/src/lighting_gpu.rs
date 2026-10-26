@@ -2409,6 +2409,15 @@ impl Gpu {
                         4,
                         &firefly_sigma as *const u32 as *const c_void,
                     );
+                    // Spawn permits this frame (detail levels). The coarse live
+                    // count sits in the next word and is not cleared.
+                    (self.fns.cmd_fill_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 14) * 4,
+                        4,
+                        0,
+                    );
                 }
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
             }

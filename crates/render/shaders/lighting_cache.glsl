@@ -115,6 +115,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.
 uint lighting_hit_kind = 0u;
+// Set by lighting_cache_find_sized when this invocation inserted the key.
+uint lighting_claim_new = 0u;
 bool lighting_gi_on() {
     return (gstats.ctrl_bits & 4u) != 0u;
 }
@@ -815,6 +817,7 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
 // second, unlit copy of that patch.
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
+    lighting_claim_new = 0u;
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     uint free_at = LIGHTING_CACHE_SEARCH;
@@ -836,6 +839,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
         if (prev == 0u) {
+            lighting_claim_new = 1u;
             atomicAdd(gstats.claimed, 1u);
             // Flag 16384 (surface cache): every texel and hit patch is lit from its
             // cell's centre on the claimer's plane, whoever claimed it, and never
@@ -905,10 +909,105 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     }
 }
 
+// Detail levels (schedule bit 3, world-cache mode 3): 25 cm, 50 cm, 1 m, 2 m, 4 m.
+// The 12.5 cm lattice stays the resident texel. These are its parents.
+// Words 14 and 15 of the dispatch-args header: spawns this frame, live coarse slots.
+const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+bool lighting_levels_on() {
+    return lighting_world_mode() == 3u && (pc.schedule.x & 8u) != 0u;
+}
+
+// One new parent this frame, up to pc.frame.z. Word 14 is cleared on the host.
+bool lighting_spawn_permit() {
+    uint cap = pc.frame.z;
+    if (cap == 0u) {
+        return false;
+    }
+    return atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 14u], 1u) < cap;
+}
+
+// 2 m and 4 m share the coarse-slot cap (pc.frame.w). Word 15 is the live count.
+bool lighting_coarse_permit(float size) {
+    if (size < 1.99) {
+        return true;
+    }
+    uint cap = pc.frame.w;
+    if (cap == 0u) {
+        return false;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+    if (prev < cap) {
+        return true;
+    }
+    atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    return false;
+}
+
+void lighting_coarse_undo(float size) {
+    if (size < 1.99) {
+        return;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    if (prev == 0u) {
+        atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+    }
+}
+
+// True when the slot should be dropped. A 2 m or 4 m entry stays while the
+// live coarse count is inside the cap, so a waiting pixel keeps that value.
+bool lighting_sc_may_free(uint slot, uint last, uint shown) {
+    if (!lighting_sc_expired(last, shown)) {
+        return false;
+    }
+    float size = cache.v[3u * slot + 1u].w;
+    if (!(lighting_levels_on() && size >= 1.99)) {
+        return true;
+    }
+    uint cap = pc.frame.w;
+    if (cap == 0u) {
+        return false;
+    }
+    uint live = ckeys.key[LIGHTING_ARGS_AT + 15u];
+    if (live <= cap) {
+        return false;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    if (prev == 0u) {
+        atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+        return false;
+    }
+    return true;
+}
+
+// Insert the parent at `size` when it is missing and the frame has room.
+// A resident cell is not a spawn. True only when this invocation inserted it.
+bool lighting_level_ensure(vec3 pos, vec3 n, float size) {
+    if (!lighting_levels_on() || !(size > 0.2)) {
+        return false;
+    }
+    if (lighting_cache_find_sized(pos, n, false, size, pos) != ~0u) {
+        return false;
+    }
+    if (!lighting_spawn_permit() || !lighting_coarse_permit(size)) {
+        return false;
+    }
+    uint s = lighting_cache_find_sized(pos, n, true, size, pos);
+    if (s == ~0u || lighting_claim_new == 0u) {
+        lighting_coarse_undo(size);
+        return false;
+    }
+    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+    cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+    return true;
+}
+
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
-// texel not lit yet); w 0 when there is none.
+// texel not lit yet); w 0 when there is none. With detail levels on, the walk
+// continues through 4 m, and at most one missing parent is claimed.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
+    uint steps = lighting_levels_on() ? 5u : 2u;
+    bool spawned = false;
+    [[dont_unroll]] for (uint l = 0u; l < steps; l++) {
         size *= 2.0;
         // The WRC cell (25 cm) is claimed if missing and marked as a seed a
         // pixel needs (the reveal burst, lighting_compact.comp).
@@ -917,6 +1016,12 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         if (s != ~0u && seed) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
             cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+        }
+        if (lighting_levels_on() && !spawned && l > 0u && s == ~0u) {
+            spawned = lighting_level_ensure(pos, n, size);
+            if (spawned) {
+                s = lighting_cache_find_sized(pos, n, false, size, pos);
+            }
         }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
@@ -1034,7 +1139,14 @@ vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
             cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
         }
     }
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
+    uint steps = lighting_levels_on() ? 5u : 2u;
+    bool spawned = false;
+    [[dont_unroll]] for (uint l = 0u; l < steps; l++) {
+        // One missing parent past the 25 cm seed, inside the spawn cap.
+        if (lighting_levels_on() && !spawned && l > 0u && lighting_cache_find_sized(pos, n, false, s2, pos) == ~0u) {
+            lighting_level_ensure(pos, n, s2);
+            spawned = true;
+        }
         vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
         if (r.w > -0.5) {
             return vec4(r.rgb, 1.0);
@@ -2193,7 +2305,6 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
-const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
 // the listing's 0.1 floor and still clamps. The hold path does not read this.
