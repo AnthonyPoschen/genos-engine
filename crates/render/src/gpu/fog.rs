@@ -1425,8 +1425,12 @@ fn grid_for_samples(preset: LightingPreset, samples: u32) -> GridSize {
         };
     }
     let cells = full.cells().max(1);
-    let target = cells.saturating_mul(usize::try_from(samples).unwrap_or(0))
+    let mut target = cells.saturating_mul(usize::try_from(samples).unwrap_or(0))
         / usize::try_from(cap).unwrap_or(1);
+    // One sample is a trivial grid. The proportional count is still tens of cells.
+    if samples <= 1 {
+        target = target.min(4);
+    }
     let target = target.max(1);
     let mut width = full.width.max(1);
     let mut height = full.height.max(1);
