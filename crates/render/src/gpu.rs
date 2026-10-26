@@ -60,6 +60,9 @@ mod debug_view;
 pub use crate::unfilled::{UnfilledControl, UnfilledStats};
 pub use debug_view::{DebugView, LampReport, ViewMode};
 
+/// Vulkan 1.0 (`VK_API_VERSION_1_0`). Every shader module has to be SPIR-V 1.0.
+/// The plain a-trous kernel is the one built by glslang; its target env stays
+/// `vulkan1.0` so it does not come out as SPIR-V 1.6.
 const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
 const VK_NOT_READY: i32 = 1;
@@ -5388,6 +5391,9 @@ impl Drop for Gpu {
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {
                     (self.fns.destroy_query_pool)(self.device, times.pool, std::ptr::null());
+                }
+                if !times.lighting_pool.is_null() {
+                    (self.fns.destroy_query_pool)(self.device, times.lighting_pool, std::ptr::null());
                 }
             }
             if !self.compute_pool.is_null() {

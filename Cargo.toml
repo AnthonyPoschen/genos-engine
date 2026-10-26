@@ -19,6 +19,7 @@ members = [
     "crates/load-check",
     "crates/audio",
     "crates/audio-check",
+    "crates/fog-check",
     "examples/camera",
     "examples/stress",
     "debug/scene-lib",
