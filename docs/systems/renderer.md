@@ -18,6 +18,8 @@ Particle image pixels stay in one resident buffer. The draw uploads those pixels
 
 Shape blocks and particle images share one byte budget. Required in-view geometry outranks unused blocks and optional particle images. A new admit that would pass the budget drops unused blocks first. It then shrinks or drops the particle image. Geometry that fits on its own stays resident.
 
+Texture mips use a second, shared account: `VramBudget` in `genos-load`, filled from `VK_EXT_memory_budget` on the device-local heaps every few frames (`Renderer::vram_budget`). The texture target is what remains after reported non-texture bytes and the headroom. Lighting does not read it yet. A texture upload that returns `VK_ERROR_OUT_OF_DEVICE_MEMORY` is an error string `out of device memory`, not an abort. Transfer submits use the dedicated transfer queue when the device has one, otherwise the graphics queue's transfer support, and the frame polls the fence instead of waiting.
+
 A profiled draw writes Vulkan timestamp queries around the GPU draw. The GPU time is that timestamp span. A fence wait is not the GPU time. `Renderer::draw` does not write timestamp queries. A stage with no GPU work has GPU time 0.
 
 `World::from_scene` makes one object for the floor, one for each wall, and one for each solid. Extra objects are meshes, particles, or shaders.

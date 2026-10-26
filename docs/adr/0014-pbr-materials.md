@@ -23,6 +23,7 @@ GI stores irradiance in the world-space surface light cache and refreshes it und
 3. Small or bright emissive regions are still extracted at import into the light tree (ADR 0012). A ray that hits a promoted region for indirect light reads only the emission that was not promoted.
 4. Textures are cooked to BC7 on desktop and ASTC 4×4 where BC7 is absent, inside the cook the [asset plan](../systems/assets/plan.md) already names. The runtime does not transcode. Normal maps stay RGBA8. A missing page reads the next coarser resident mip, or the factor colour when no mip is resident. The sample is never black and never a half-written page.
 5. The `mesh-loading` parsers are not copied and not edited by this decision. A later commit whose only job is that copy brings them unchanged. They already write `PbrMaterial`.
+6. Which mips are resident is decided every frame from the view, not once at load from the image's index in the file. The player cap is `texture_quality` (Ultra is the full mip, High one level coarser, Medium two, Low three). It does not shrink because the card is small. The byte target is the device-local `VK_EXT_memory_budget` after the engine's other allocations and a headroom of `max(5% of heapBudget, 256 MB)`. There is no fixed pool and no per-preset megabyte default. Loads prefer the nearest, most visible textures. Eviction runs only under budget pressure, lowest screen importance then farthest, and a mip that just arrived stays for a dwell unless the heap is over budget. Uploads go to a transfer queue, bounded by the measured disk, decode, and transfer rates, and a page flips only after that submit finishes. The frame does not wait on it.
 
 ## Departures
 
@@ -32,7 +33,9 @@ GI stores irradiance in the world-space surface light cache and refreshes it und
 - **glTF normal texture.** The spec requires a MikkTSpace tangent. The G-buffer uses a screen-space derivative. The cook stores the glTF tangent, or a Mikk tangent when the file has none. The derivative path is not the reference.
 - **glTF alpha mode `BLEND`.** The raster keeps today's cutoff of 0.5 until the transparent pass in the rendering extras plan. Reference pictures use opaque and mask materials.
 - **Basis Universal.** UASTC transcodes to ASTC 4×4 without loss and to BC7 nearly so. The runtime does not transcode. The cook writes the GPU format. `KHR_texture_basisu` stays unloaded until that cook accepts it.
-- **Mittring's virtual texture (SIGGRAPH 2008).** The page table is a buffer. Hardware sparse images are not required. This is the asset plan's departure, kept.
+- **Mittring's virtual texture (SIGGRAPH 2008).** The page table is a buffer. Hardware sparse images are not required. This is the asset plan's departure, kept. Eviction is not Mittring's least-recently-used list: while the budget has headroom the camera turning away does not drop a mip, and under pressure the order is screen importance then distance.
+- **Vulkan image LOD and `VK_EXT_sampler_feedback`.** The wanted mip is the specification's λ = log₂(ρ) from the draw's screen-space UV derivatives. The CPU computes ρ. Sampler feedback is not a required device feature on the GTX 1060, Polaris, or lavapipe.
+- **`VK_EXT_memory_budget`.** `heapBudget` and `heapUsage` on the device-local heaps are the budget. A device without the extension uses half of the device-local heap size. `VK_ERROR_OUT_OF_DEVICE_MEMORY` on a texture allocation evicts and retries.
 - **OBJ bump and FBX `Bump` on `6ec390c`.** Those parsers store the image as a tangent-space normal. This decision does not add a height-map reconstruction.
 
 ## Rejected
@@ -40,6 +43,7 @@ GI stores irradiance in the world-space surface light cache and refreshes it und
 - **OpenPBR 1.1 as the runtime model.** Coat, fuzz, subsurface, and transmission would be stored and ignored. The floor is a GTX 1060, and GI is diffuse.
 - **A split shade.** Lumen's cache albedo and a separate path-tracer material graph are the split this engine already has. Two formulas cannot match one reference.
 - **Copying `mesh-loading` in the materials work.** The parsers stay on that branch until their own commit.
+- **A fixed `residency_mb` or per-preset texture pool.** A 256 MB cap, and later fixed 1–4 GB presets, drop the wrong mips on a card that has room and still overflow a card that does not. The budget is the heap the device reports. `texture_quality` stays a player choice on a small card with a fast bus.
 
 ## Consequences
 

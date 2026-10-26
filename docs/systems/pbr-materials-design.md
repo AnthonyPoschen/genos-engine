@@ -82,6 +82,22 @@ The cook and the page table follow the asset plan: KTX 2.0 (<https://registry.kh
 
 **Departure from Basis.** The runtime does not transcode. The cook writes BC7 or ASTC. **Departure from Mittring, kept from the asset plan.** The page table is a buffer the shader indexes. `VK_EXT` sparse images are not a required feature on Pascal or Polaris. **Departure from "compress every map."** Normal maps stay RGBA8 on the BC7 path so the path tracer and the GPU read the same normal. BC7 on normals is a poor fit, and a bad normal is a near-camera error.
 
+## View-driven residency
+
+`load_gltf` keeps the mip chain and leaves only the coarsest level resident. The image index in the file is not a distance. Each frame the streamer estimates the mip each drawn texture needs and moves pages inside the VRAM budget.
+
+The estimate is the Vulkan image level of detail. ρ is the longer screen-space edge of one texel, from the draw's UV derivatives. λ = log₂(ρ) + `mip_bias`. The wanted mip is floor(λ). A texture that was not drawn keeps its last demand, so turning away does not by itself change what it needs. `texture_quality` then forbids anything finer than its cap: Ultra is mip 0, High is 1, Medium is 2, Low is 3. The cap does not move when free VRAM changes. On a small card with a fast bus the player can stay on Ultra; the streamer replaces mips constantly and drops the least important ones to make room.
+
+A load prefers the nearest texture, then the most visible. There is no preset byte cap per frame. The admit is what the measured disk read, decode, and transfer queue can finish in the time the frame has left. A graphics frame that runs past its budget halves the next admit. A frame with headroom ramps the admit up to that measured rate. The submit is on a transfer queue and returns without waiting. The page flips only after the transfer fence is signaled. Until then the sample is the finest coarser resident mip, or the factor colour. It is never black and never the in-flight page.
+
+The budget is one helper, not a texture-only number. Every few frames the renderer reads `VK_EXT_memory_budget` (`heapBudget` and `heapUsage`) for the device-local heaps. The texture target is `heapBudget` minus the other engine allocations that were reported (lighting, render targets, meshes) minus headroom. Headroom is `max(percent of heapBudget, floor)`, default 5% and 256 MB, and both knobs are settings. Lighting does not change in this commit; it can read the same helper later. If the extension is missing, the budget is half the device-local heap size.
+
+An upload that would pass the target is not started. If `heapBudget` shrinks, or `heapUsage` rises past it, the streamer evicts lowest screen importance, then farthest, a bounded count per frame, until usage is back under `heapBudget` − headroom. While usage is inside that line, eviction does not run, so a spin in place uploads nothing new. A mip that just became resident cannot be evicted for `dwell_frames` (default 8) unless usage is over `heapBudget`. `VK_ERROR_OUT_OF_DEVICE_MEMORY` on a texture allocation evicts and retries. It does not abort the process.
+
+`residency_mb`, `--material-residency-mb`, and `GENOS_MATERIAL_RESIDENCY_MB` remain as deprecated aliases. Each logs one warning and does not set a pool.
+
+**Departure from Vulkan sampler feedback.** ρ is computed on the CPU from the draw. `VK_EXT_sampler_feedback` is not required. **Departure from Mittring's LRU.** Eviction is priority and dwell, not age, and it waits for budget pressure.
+
 ## Extensions
 
 | Extension or map | Shade | Import note until that phase |
@@ -147,21 +163,25 @@ Two keys, as the asset plan already split them. This design does not merge them.
 - Source bytes: SHA-256, `<cache>/objects/<hex>`. A second import of the same bytes hits the object.
 - Bake: FNV-1a `content_key`. Old `.gbake` files stay valid. Do not rehash them with SHA-256.
 
-A reload watches a path given with `--watch`. `GENOS_MATERIAL_WATCH` applies only when `--watch` was omitted. A new hash is a new object. The previous object stays under the old id. The atlas or page table keeps the old pages until the new pages are fully uploaded, then flips. `hot_reload_frames` counts frames from that flip to the G-buffer sampling the new page. Threshold 1. The upload itself may take many frames. That wait is the upload cap, not this metric. A reload does not read the picture back and does not stall the submit.
+A reload watches a path given with `--watch`. `GENOS_MATERIAL_WATCH` applies only when `--watch` was omitted. A new hash is a new object. The previous object stays under the old id. The atlas or page table keeps the old pages until the new pages are fully uploaded, then flips. `hot_reload_frames` counts frames from that flip to the G-buffer sampling the new page. Threshold 1. The upload itself may take many frames. That wait is the measured transfer rate, not this metric. A reload does not read the picture back and does not stall the submit.
 
 A texture-only change is a change record. A triangle change goes through the existing bake. Emission is not a geometry edit.
 
-Settings, when the feature exists, follow `docs/engine/settings-principles.md`. `MaterialSettings` is a public `EngineSettings` value. MCP `get_material_settings` and `set_material_settings` read and write it. The debug menu shows the key and the control: `residency_mb`, `mip_bias`, `anisotropy`, `occlusion`, `emissive_promote`, `emissive_promote_flux`. The menu does not carry a description line. The argument wins when both the argument and the environment variable are set.
+Settings, when the feature exists, follow `docs/engine/settings-principles.md`. `MaterialSettings` is a public value with `to_text`, `parse`, and `set_key`. MCP `get_material_settings` and `set_material_settings` read and write it. The debug menu shows the key and the control: `texture_quality`, `mip_bias`, `anisotropy`, `occlusion`, `emissive_promote`, `emissive_promote_flux`, `headroom_percent`, `headroom_floor_mb`, `dwell_frames`. The menu does not carry a description line. The argument wins when both the argument and the environment variable are set. Presets do not assign a texture pool and do not lower `texture_quality`.
 
-| Argument | Environment mirror | Preset default |
+| Argument | Environment mirror | Default |
 |---|---|---|
-| `--material-residency-mb` | `GENOS_MATERIAL_RESIDENCY_MB` | Potato 32, Low 64, Medium 128, High 256 |
+| `--material-texture-quality ultra\|high\|medium\|low` | `GENOS_MATERIAL_TEXTURE_QUALITY` | `ultra` on every preset |
 | `--material-mip-bias` | `GENOS_MATERIAL_MIP_BIAS` | Potato +2, Low +1, Medium 0, High 0 |
 | `--material-anisotropy` | `GENOS_MATERIAL_ANISOTROPY` | Potato 1, Low 2, Medium 4, High 8 |
 | `--material-occlusion on\|off` | `GENOS_MATERIAL_OCCLUSION` | Potato off, others on |
 | `--material-emissive-promote on\|off` | `GENOS_MATERIAL_EMISSIVE_PROMOTE` | Potato off, others on |
 | `--material-emissive-promote-flux` | `GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX` | 0.01 of the brightest lamp |
+| `--material-headroom-percent` | `GENOS_MATERIAL_HEADROOM_PERCENT` | 5 |
+| `--material-headroom-floor-mb` | `GENOS_MATERIAL_HEADROOM_FLOOR_MB` | 256 |
+| `--material-dwell-frames` | `GENOS_MATERIAL_DWELL_FRAMES` | 8 |
 | `--watch PATH` | `GENOS_MATERIAL_WATCH` | unset |
+| `--material-residency-mb` | `GENOS_MATERIAL_RESIDENCY_MB` | deprecated alias, warning, ignored |
 
 ## Mesh loading, proposed only
 
@@ -184,8 +204,8 @@ Ceilings, not measurements. Lighting VRAM is ADR 0013's and is unchanged. Materi
 | Max edge | 512 | 1024 | 2048 | 4096 |
 | Colour, metallic-roughness, occlusion, emissive | BC7, or RGBA8 if the device lacks `textureCompressionBC` | BC7 | BC7 | BC7 |
 | Normals | off | RGBA8 | RGBA8 | RGBA8 |
-| Resident cap | 32 MB | 64 MB | 128 MB | 256 MB |
-| Upload cap | 0.25 MB/frame | 1 MB/frame | 2 MB/frame | 4 MB/frame |
+| Resident bytes | the VRAM budget, not a preset cap | same | same | same |
+| Upload rate | measured disk, decode, and transfer | same | same | same |
 | Anisotropy | 1 | 2 | 4 | 8 |
 | G-buffer maps | base colour | base, metallic-roughness, normal | plus occlusion | plus emissive |
 | G-buffer ceiling, 4070, 1440p, basic | 0.40 ms | 0.45 ms | 0.50 ms | 0.60 ms |
@@ -193,7 +213,7 @@ Ceilings, not measurements. Lighting VRAM is ADR 0013's and is unchanged. Materi
 | Promoted emitters per mesh | 0 | 4 | 8 | 16 |
 | Shade | Lambert, no normal, no occlusion | Lambert, normal, occlusion | same | same, metallic and roughness stored |
 
-BC7 is 1 byte per texel. A mip chain adds about a third. 256 MB at High is about 192 M texels of BC7, which covers a Sponza-sized set (the loader notes 69 images) with room for a second scene. RGBA8 normals are the expensive extra. High caps the normal atlas with the same residency budget. When the budget is full, the farthest image's finest mip is the one that is not resident. The miss rule then reads the coarser mip. The frame does not stutter to make room.
+BC7 is 1 byte per texel. A mip chain adds about a third. How much of that chain is resident is the VRAM budget above, not a 256 MB High cap and not the image's place in the file. RGBA8 normals are the expensive extra. They share the same target. When the target is full, the upload is refused. When the heap shrinks, the lowest-importance mip leaves, a bounded count per frame. The miss rule then reads the coarser mip. The frame does not stall the submit to make room.
 
 A basic scene that is one room of flat materials uploads nothing after the first settle and adds no cache rays. The 0.60 ms High ceiling plus ADR 0013's lighting cap still has to leave the basic frame under 2 ms. If a measurement misses that, the feature cuts maps from the preset. It does not raise the frame budget.
 
@@ -270,7 +290,14 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `double_count` | 0.02 | `NOT-IMPLEMENTED`. Model only; waits on lighting_gpu.rs. |
 | `bc7_colour_rmse` | 0.02 | `NOT-IMPLEMENTED`. Open question 1 is unchosen. RGBA8 is the cook. A stand-in encoder is not an RMSE. |
 | `astc_colour_rmse` | 0 | `NOT-IMPLEMENTED`. UASTC to ASTC 4×4 would be lossless, so the threshold stays 0. No transcode is linked. |
-| `residency_mb` | 256 | Resident mebibytes from `plan_residency`, the cap `load_gltf` applies. The farthest finest mip drops first. |
+| `budget_recover` | 6 | Frames until texture bytes sit under `heapBudget` − headroom after a simulated shrink. A reader that does not evict stays over the line. |
+| `upload_refused` | 0 | An upload that would pass the target is refused. 0 means it was refused and the resident bytes did not move. |
+| `oom_recover` | 0 | A simulated `VK_ERROR_OUT_OF_DEVICE_MEMORY` evicts, retries, and samples a resident mip or the factor. A hole or an abort is a failure. |
+| `spin_evict` | 0 | Evictions while the camera spins and the budget has headroom. |
+| `quality_cap` | 0 | Resident mips finer than `texture_quality`. |
+| `ultra_near` | 0 | Small VRAM, fast bus, Ultra: the visible near texture is at mip 0 and the far texture stays coarser, inside the target. |
+| `slow_bus` | 0 | A slow transfer rate lowers the admit. The frame time stays inside the budget. |
+| `thrash` | 0 | Mips evicted and loaded again inside the dwell window during the spin. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
@@ -285,8 +312,8 @@ Each phase is its own commit and its own measurement. A phase that misses a thre
 | P2 | G-buffer samples metallic-roughness, normal, occlusion, and emissive. `surface_mean` uses the shade. Metallic and roughness are stored. Lambert stays. | `draw_mean`, `occlusion_indirect`, `normal_angle_deg`. |
 | P3 | The CPU path tracer samples the shade. Dielectric pictures use the reference check. | `picture_dielectric`. `picture_metal` stays unimplemented. |
 | P4 | Emission at cache hits, promoted emitters, furnace, double-count switch. | `emissive_furnace`, `double_count`. |
-| P5 | Cook writes BC7 and ASTC mips. Normals stay RGBA8. Residency cap enforced. | `bc7_colour_rmse`, `astc_colour_rmse`, `residency_mb`. |
-| P6 | Page table and the miss rule. | `materials-stream.rhai` on the owner's machine. Lavapipe checks the counters. |
+| P5 | Cook writes BC7 and ASTC mips. Normals stay RGBA8. | `bc7_colour_rmse`, `astc_colour_rmse`. |
+| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`. |
 | P7 | `--watch` hot reload. | `hot_reload_frames`. |
 | — | `gbuffer_ms` | Measured on the 4070 when phase 2's maps exist. Not a reason to build a pass early. |
 

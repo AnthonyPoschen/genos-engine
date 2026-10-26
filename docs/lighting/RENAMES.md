@@ -22,6 +22,7 @@ Policy: keep old CLI/config/env/MCP names as deprecated aliases that log one war
 | 13 | `lighting_filter.comp`, GPU bucket `filter` | `lighting_probe_filter.comp`, `probe_filter` | collision with denoiser/shadow filter | 1 shader, GpuBuckets, GPU_MS labels | yes for GPU_MS parsers unless both labels print for one release |
 | 14 | env-only `URGENT, BORROW, MOVED_DROP, YOUNG_ONLY, CACHE_PICKS, CACHE_HZ, SC_SETTLE, WORLD_CAP` | promote the live ones to config/debug/MCP with descriptive names (e.g. `cache_young_only`); delete dead ones | settings rule; opaque names | lighting_gpu.rs ~L350–380, ~L2090–2100 | no |
 | 15 | gi-design.md "cards" / "world probe bricks" | state the as-built surface light cache (ADR 0012) | doc drift | 1 doc | no |
+| 16 | `residency_mb`, `--material-residency-mb`, `GENOS_MATERIAL_RESIDENCY_MB` | VRAM budget plus `texture_quality` | the fixed cap was file order, not distance, and too small | `MaterialSettings`; the old key warns and is ignored | no |
 
 **Synonym groups: 9** (surface/world cache/SC; patch/slot/texel/cell; denoise/denoiser/atrous-dirty; stale/staleness; rays/samples; TILE/probe_tile; reuse/ReSTIR; ambient flat/constant; shadow hard/traced + cell/cached).
 **Collisions: 7** (probe ×4; filter ×3; world cache vs WRC; page vs 12.5 cm shadow cell; fill ×3; ring (wake ring vs distance-band edge); hysteresis vs DDGI).
