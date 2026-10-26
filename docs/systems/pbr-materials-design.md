@@ -138,7 +138,7 @@ ADR 0012 and the GI design's emissive section still hold, with the departure in 
 - A dim wall stays cache-only. The cache cell is large enough for that and too coarse for a thin strip. The strip is the promoted emitter.
 - Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. `double_count` is the relative change in a settled room when a debug switch moves the strip between promoted and cache-only. Threshold 0.02.
 - Turning a promoted emitter on or off is a light change, a multiply on its layer once layers exist, and a change record until then. It does not rebuild the SDF, the BVH, or the page table.
-- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` is the relative error against that. Threshold 0.02, on both tracers. The analytic `5E` is computed in the gate. The engine value is absent, so the line is `NOT-IMPLEMENTED`.
+- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` is the relative error against that. Threshold 0.02. The analytic `5E` is computed in the gate. The engine value is `furnace_wall` in `crates/load/src/emitters.rs`, a fixed radiosity iteration. The GPU cache does not skip promoted flux yet: that write is in `lighting_gpu.rs`, which the lighting branch owns.
 
 ## Asset cache and hot reload
 
@@ -265,8 +265,8 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |
 | `picture_dielectric` | 0.12 | Blurred relative error, metallic 0. The path tracer does not sample textures. |
 | `picture_metal` | 0.12 | The same score for a metal under Appendix B. Stays unimplemented until the lobe exists. |
-| `emissive_furnace` | 0.02 | Relative error against `5E`. |
-| `double_count` | 0.02 | Relative change when a strip is toggled between promoted and cache-only. |
+| `emissive_furnace` | 0.02 | Relative error of `furnace_wall` against `5E`. |
+| `double_count` | 0.02 | Relative change when a strip is toggled between promoted and cache-only. The broken reader adds the strip in the cache and in the light tree. |
 | `bc7_colour_rmse` | 0.02 | Linear RMSE of a BC7 round trip. No encoder is linked. |
 | `astc_colour_rmse` | 0 | Linear RMSE. UASTC to ASTC 4×4 is lossless, so the threshold is 0. |
 | `residency_mb` | 256 | Resident megabytes against the High cap. |

@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use genos_bake::BakeMesh;
-use genos_load::{load_gltf_file, GltfScene};
+use genos_load::{double_count as room_double_count, furnace_wall, load_gltf_file, GltfScene};
 
 const SHADE: f32 = 1.0 / 255.0;
 const SRGB: f32 = 1.0e-5;
@@ -80,7 +80,7 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 8] = [
+const MUST_FAIL: [&str; 10] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
@@ -89,6 +89,8 @@ const MUST_FAIL: [&str; 8] = [
     "mr_channels",
     "texcoord_sample",
     "roughness_from_g",
+    "emissive_furnace",
+    "double_count",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
@@ -333,13 +335,13 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
             "the path tracer does not sample textures",
         ),
         pending("picture_metal", PICTURE, "the specular lobe is not shaded"),
-        pending_ref(
+        measured_ref(
             "emissive_furnace",
+            furnace_error(reader),
             RELATIVE,
-            "no GI run in this gate",
             furnace_outgoing(),
         ),
-        pending("double_count", RELATIVE, "no promoted emitter"),
+        measured("double_count", promoted_change(reader), RELATIVE),
         pending("bc7_colour_rmse", BC7, "no BC7 encoder"),
         pending("astc_colour_rmse", ASTC, "no ASTC encoder"),
         pending("residency_mb", RESIDENCY_MB, "no page table"),
@@ -405,15 +407,10 @@ fn pending(name: &'static str, threshold: f32, note: &'static str) -> Metric {
     }
 }
 
-fn pending_ref(name: &'static str, threshold: f32, note: &'static str, reference: f64) -> Metric {
-    Metric {
-        name,
-        value: None,
-        threshold,
-        status: Status::NotImplemented,
-        note: Some(note),
-        reference: Some(reference),
-    }
+fn measured_ref(name: &'static str, value: f32, threshold: f32, reference: f64) -> Metric {
+    let mut metric = measured(name, value, threshold);
+    metric.reference = Some(reference);
+    metric
 }
 
 fn line(metric: &Metric) -> String {
@@ -726,6 +723,22 @@ fn furnace_outgoing() -> f64 {
     let albedo = 0.8_f64;
     let emit = 1.0_f64;
     emit / (1.0 - albedo)
+}
+
+/// Relative error of the radiosity against `5E`. The broken reader returns `E`.
+fn furnace_error(reader: Reader) -> f32 {
+    let engine = match reader {
+        Reader::Bake => furnace_wall(0.8, 1.0),
+        Reader::Broken => 1.0,
+    };
+    let reference = 5.0_f32;
+    (engine - reference).abs() / reference
+}
+
+/// Relative change when the strip toggles. The broken reader adds it twice.
+fn promoted_change(reader: Reader) -> f32 {
+    let counts_twice = matches!(reader, Reader::Broken);
+    room_double_count(0.8, 1.0, 0.05, counts_twice)
 }
 
 #[derive(Clone, Copy)]

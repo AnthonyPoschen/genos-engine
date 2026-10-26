@@ -120,3 +120,26 @@ fn roughness_from_g_leaves_the_lambert_picture() {
     assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
     assert!(metal_after <= 1.0e-6);
 }
+
+#[test]
+fn the_furnace_picture_settles_and_the_lambert_picture_stays() {
+    use genos_load::{double_count, furnace_wall};
+
+    let reference = 5.0_f32;
+    let before = (1.0 - reference).abs() / reference;
+    let after = (furnace_wall(0.8, 1.0) - reference).abs() / reference;
+    let counted_twice = double_count(0.8, 1.0, 0.05, true);
+    let counted_once = double_count(0.8, 1.0, 0.05, false);
+    let (metal_before, metal_after) = score(0.25);
+    eprintln!(
+        "picture_furnace before {before:.6} after {after:.6}\n\
+         picture_double_count before {counted_twice:.6} after {counted_once:.6}\n\
+         picture_lambert before {metal_before:.6} after {metal_after:.6}"
+    );
+    assert!((before - 0.8).abs() < 1.0e-6);
+    assert!(after < 0.02, "furnace {after}");
+    assert!(counted_twice > 0.5);
+    assert!(counted_once < 1.0e-4);
+    assert!((metal_before - 1.0 / 3.0).abs() < 1.0e-5);
+    assert!(metal_after <= 1.0e-6);
+}

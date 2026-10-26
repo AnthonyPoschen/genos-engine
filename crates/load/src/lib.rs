@@ -7,6 +7,7 @@
 
 mod animation;
 mod bin;
+mod emitters;
 mod error;
 mod gltf;
 mod inflate;
@@ -21,6 +22,10 @@ mod ttf;
 mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
+pub use emitters::{
+    double_count, furnace_wall, settled_wall, should_promote, Enclosure, MaterialSettings,
+    PromoteBudget, PromotePreset, CELL_EDGE_M,
+};
 pub use error::LoadError;
 pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
