@@ -327,32 +327,25 @@ pub fn summary_line(metric: &Metric) -> String {
 /// Pretty JSON for `{case}.json`.
 #[must_use]
 pub fn to_json(report: &Report) -> String {
-    let mut body = String::from("{\n");
-    body.push_str(&format!("  \"case\": \"{}\",\n", report.case_name));
-    body.push_str(&format!("  \"source\": \"{}\",\n", report.source));
-    body.push_str("  \"preset\": \"high\",\n");
-    body.push_str("  \"metrics\": [\n");
-    for (index, metric) in report.metrics.iter().enumerate() {
-        let comma = if index + 1 == report.metrics.len() {
-            ""
-        } else {
-            ","
-        };
-        body.push_str("    {");
-        body.push_str(&format!("\"name\": \"{}\"", metric.name));
-        body.push_str(&format!(", \"value\": {}", value_json(&metric.value)));
-        body.push_str(&format!(
-            ", \"threshold\": {}",
-            value_json(&metric.threshold)
+    let mut metrics = Vec::new();
+    for metric in &report.metrics {
+        let detail = metric
+            .detail
+            .map_or_else(String::new, |detail| format!(", \"detail\": \"{detail}\""));
+        metrics.push(format!(
+            "    {{\"name\": \"{}\", \"value\": {}, \"threshold\": {}, \"status\": \"{}\"{detail}}}",
+            metric.name,
+            value_json(&metric.value),
+            value_json(&metric.threshold),
+            metric.status.as_str()
         ));
-        body.push_str(&format!(", \"status\": \"{}\"", metric.status.as_str()));
-        if let Some(detail) = metric.detail {
-            body.push_str(&format!(", \"detail\": \"{detail}\""));
-        }
-        body.push_str(&format!("}}{comma}\n"));
     }
-    body.push_str("  ]\n}\n");
-    body
+    format!(
+        "{{\n  \"case\": \"{}\",\n  \"source\": \"{}\",\n  \"preset\": \"high\",\n  \"metrics\": [\n{}\n  ]\n}}\n",
+        report.case_name,
+        report.source,
+        metrics.join(",\n")
+    )
 }
 
 /// Write `{dir}/{case}.json`. Creates `dir`.
