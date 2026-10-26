@@ -28,8 +28,13 @@ fn main() {
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
-    // compiles out. glslc does not take -D; glslangValidator's SPIR-V for this
-    // shader faulted lavapipe.
+    // compiles out. glslc does not take -D. glslangValidator --target-env
+    // vulkan1.3 emits SPIR-V 1.6. The instance is Vulkan 1.0 (API_VERSION in
+    // gpu.rs). A 1.6 module is illegal there: validation reports
+    // VUID-VkShaderModuleCreateInfo-pCode-08737, and the NVIDIA compiler logs
+    // "NVVM compilation failed: 3" (IR version mismatch) and can smash the
+    // process heap, which glibc reports at exit as corrupted size vs. prev_size.
+    // vulkan1.0 keeps this kernel on SPIR-V 1.0, the same version as glslc.
     let screen = compile(
         "shaders/lighting_screen.comp",
         &out.join("lighting_screen.comp.spv"),
@@ -137,7 +142,7 @@ fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
         .args([
             "-V",
             "--target-env",
-            "vulkan1.3",
+            "vulkan1.0",
             &format!("-D{define}"),
             src,
             "-o",
