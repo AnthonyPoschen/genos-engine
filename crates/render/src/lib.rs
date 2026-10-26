@@ -35,9 +35,10 @@ pub use reflections::{
     ReflectionPicture, TILE,
 };
 pub use particles::{
-    card_quad, compose_fog, fire_radiance, fog_along, frame_at, image_from_map, image_from_texture,
-    medium, object_cards, shade_lit, Card, Emitter, FireLight, FogHit, FogLamp, Kind, LiveParticle,
-    Puff, Simulation, FIRE_COLOR, PROOF_STEPS, SMOKE_ALBEDO, SMOKE_DENSITY, SMOKE_RADIUS, STEP_DT,
+    card_quad, compose_fog, fire_radiance, fog_along, frame_at, height_fog_along, image_from_map,
+    image_from_texture, medium, object_cards, phase_weight, shade_lit, Card, Emitter, FireLight,
+    FogHit, FogLamp, Kind, LiveParticle, Puff, Simulation, FIRE_COLOR, PROOF_STEPS, SMOKE_ALBEDO,
+    SMOKE_DENSITY, SMOKE_RADIUS, STEP_DT,
 };
 pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{

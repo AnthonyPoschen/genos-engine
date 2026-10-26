@@ -10,9 +10,9 @@ workspace = true
 [dependencies]
 genos-load = { path = "../load" }
 genos-bake = { path = "../bake" }
+genos-math = { path = "../math" }
 genos-mesh = { path = "../mesh" }
 genos-scene = { path = "../scene" }
-genos-math = { path = "../math" }
 
 [dev-dependencies]
 genos-ui = { path = "../ui" }

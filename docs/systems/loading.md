@@ -20,7 +20,7 @@ A texture map keeps one image, frame rectangles, and named clips. The descriptio
 
 A mesh is triangles from a Wavefront OBJ file. A material is a flat color and an optional texture file name.
 
-A glTF 2.0 scene (`.gltf` or `.glb`) is meshes, metallic-roughness materials, decoded images and placed instances. A mesh has primitives: indexed triangles with positions, normals, `TEXCOORD_0` and tangents, and one material. An instance is a mesh and its node's world matrix (column-major, as glTF stores it).
+A glTF 2.0 scene (`.gltf` or `.glb`) is meshes, metallic-roughness materials, decoded images and placed instances. A mesh has primitives: indexed triangles with positions, normals, `TEXCOORD_0` through `TEXCOORD_7`, and tangents, and one material. An instance is a mesh and its node's world matrix (column-major, as glTF stores it).
 
 An animation is timed transform keys. Rotation is a quaternion in x, y, z, w order. `Quat::slerp` takes the short arc when the dot product is negative.
 
@@ -73,7 +73,7 @@ The loader reads the whole source into memory. It does not stream.
 
 PNG images are 8-bit and not interlaced. Each edge is at most 8192 pixels. JPEG images are baseline or progressive Huffman, 8-bit, greyscale or YCbCr (Adobe RGB too), any chroma subsampling, at most 8192 pixels per edge; chroma is upsampled bilinearly, within 3 levels of libjpeg. Arithmetic-coded, lossless and 12-bit JPEG, GIF, WebP, BMP, DDS, KTX, and block-compressed textures are not decoded.
 
-glTF: triangle lists, strips and fans; points and lines are skipped. A primitive without normals gets flat normals (its vertices are unwelded). Sparse accessors, `byteStride`, normalized integers, `data:` URIs and `KHR_materials_emissive_strength` are read. A file that requires any other extension (Draco, meshopt, KHR_texture_basisu, texture transforms) is refused. Skins, morph targets, animations, cameras and lights are ignored. Only `TEXCOORD_0` is kept. Images decode on load, single-threaded (Sponza: 69 images, about 4 s in release); the bake cache keeps the result.
+glTF: triangle lists, strips and fans; points and lines are skipped. A primitive without normals gets flat normals (its vertices are unwelded). Sparse accessors, `byteStride`, normalized integers, `data:` URIs and `KHR_materials_emissive_strength` are read. A file that requires any other extension (Draco, meshopt, KHR_texture_basisu, texture transforms) is refused. Skins, morph targets, animations, cameras and lights are ignored. `TEXCOORD_0` through `TEXCOORD_7` are kept. A material slot's `texCoord` selects the set. Vertex colour is not kept. `load_gltf` stores an RGBA8 mip chain on the scene until a BC7 encoder is chosen: sRGB images are boxed in linear light, linear images in the stored values, normals as vectors. Byte 128 is the normal axis zero, so opposite X encodings average to (0, 0, 1). `load_gltf` applies the residency cap with `plan_residency` and fills a missing mip from the next resident level, or from the factor colour. `HotReload` keeps the old page until the upload finishes, then the next sample sees the new page. Images decode on load, single-threaded (Sponza: 69 images, about 4 s in release); the bake cache keeps the result.
 
 FBX is not decoded. A face with more than three vertices becomes a triangle fan.
 
@@ -85,6 +85,18 @@ A composite TrueType glyph returns an error. The loader does not hint, kern, or 
 
 This crate does not upload pixels or triangles to Vulkan.
 
+## Networking
+
+Gameplay networking still waits. These lines are the contract for the shade.
+
+- **Replicated state.** `AssetId` (SHA-256 of the source bytes) and the material-record hash for assets referenced by bodies in interest. Texture pages stay on the client. A BC7 package and an ASTC package share the sim hash and differ in the render hash.
+- **Authority.** The server names the `AssetId`. The client loads it. A local sim hash that differs from the snapshot is a fault.
+- **Prediction / rollback.** None for a material. Until the render subset arrives, the draw uses the factor colour. A rollback leaves resident pages where they are.
+- **Determinism.** The same source bytes and the same cook settings produce the same shade factors on every machine. Block compression may differ by `bc7_colour_rmse` and stays out of the sim hash. The picture is not a sim input.
+- **Headless server.** `LoadProfile::Sim`. No texture upload, no Vulkan device, no page table. Factors are not drawn.
+
 ## Decisions
 
 [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device and the network. This crate does not link those devices. Inflate lives in this crate.
+
+[ADR 0014](../adr/0014-pbr-materials.md) is the shade. `shade_uv` is the one metallic-roughness sample. Diffuse albedo is base colour times (1 − metallic).
