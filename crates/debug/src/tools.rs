@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use genos_load::MaterialSettings;
 use genos_mcp::json::Value;
-use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
+use genos_render::{DebugView, MaterialStats, Renderer, ScreenRect, ViewMode};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
     LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
@@ -1264,6 +1264,7 @@ impl Tools {
                     text(ctx.renderer.material_settings().to_text()),
                 )]))
             }
+            "get_material_stats" => reply(material_stats_value(ctx.renderer.material_stats())),
             "set_material_settings" => {
                 let mut settings = ctx.renderer.material_settings();
                 apply_material_update(&mut settings, args.0)?;
@@ -1967,6 +1968,20 @@ fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), 
         settings.set_key(key, &text)?;
     }
     Ok(())
+}
+
+fn material_stats_value(stats: MaterialStats) -> Value {
+    obj(vec![
+        ("committed", num(stats.committed as f64)),
+        ("budget", num(stats.budget as f64)),
+        ("refused", num(f64::from(stats.refused))),
+        ("evictions", num(f64::from(stats.evictions))),
+        ("thrash", num(f64::from(stats.thrash))),
+        ("holes", num(f64::from(stats.holes))),
+        ("rate", num(stats.rate as f64)),
+        ("stream_ms", num(f64::from(stats.stream_ms))),
+        ("text", text(stats.line())),
+    ])
 }
 
 fn apply_material_update(settings: &mut MaterialSettings, args: &Value) -> Result<(), String> {

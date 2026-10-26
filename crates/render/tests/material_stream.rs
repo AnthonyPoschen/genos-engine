@@ -28,15 +28,17 @@
 //! and the storage buffer the shader samples holds the resident mip.
 
 use genos_render::{
-    identity_pose, Bounds, DebugView, DrawKind, MaterialAtlas, Object, Renderer, Surface, ViewMode,
-    World,
+    identity_pose, Bounds, DebugView, DrawKind, MaterialAtlas, MaterialStats, Object, Renderer,
+    Surface, ViewMode, World,
 };
 use genos_scene::{Camera, Floor, Scene, Vec3};
 use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(640, 360).expect("proof window");
     let frame = window.pump();
     let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
@@ -123,6 +125,24 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Ca
         .draw(world, camera, true)
         .expect("draw")
         .expect("readback")
+}
+
+#[test]
+fn material_stats_line_names_the_counters() {
+    let stats = MaterialStats {
+        committed: 340,
+        budget: 170,
+        refused: 1,
+        evictions: 2,
+        thrash: 3,
+        holes: 4,
+        rate: 5,
+        stream_ms: 1.5,
+    };
+    assert_eq!(
+        stats.line(),
+        "materials committed=340 budget=170 refused=1 evictions=2 thrash=3 holes=4 rate=5 stream_ms=1.500"
+    );
 }
 
 fn channel_max(pixels: &[u8], offset: usize) -> u8 {
@@ -224,4 +244,30 @@ fn a_smaller_heap_budget_evicts_on_the_renderer() {
         value <= 6.0,
         "heap_shrink {value} committed {now} target {target}"
     );
+}
+
+#[test]
+fn the_renderer_reports_the_live_streamer() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = world();
+    let camera = Camera::new(0.0, 4.0, 0.0);
+    let mut stats = renderer.material_stats();
+    for _ in 0..8 {
+        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        stats = renderer.material_stats();
+        if renderer.material_residency().1 == Some(0) && stats.committed > 0 {
+            break;
+        }
+    }
+    assert_eq!(stats.committed, renderer.material_committed());
+    assert_eq!(stats.budget, renderer.vram_budget().texture_target());
+    assert!(stats.committed > 0, "committed {}", stats.committed);
+    assert!(stats.budget > stats.committed, "budget {}", stats.budget);
+    let line = stats.line();
+    assert!(
+        line.contains(&format!("committed={}", stats.committed)),
+        "{line}"
+    );
+    assert!(line.contains(&format!("budget={}", stats.budget)), "{line}");
+    eprintln!("material_stats {line}");
 }

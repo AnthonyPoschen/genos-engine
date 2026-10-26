@@ -1111,9 +1111,10 @@ fn run() -> Result<(), String> {
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if opts.step && dt > 0.0 {
             eprintln!(
-                "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {}",
+                "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {} {}",
                 run_started.elapsed().as_secs_f64(),
-                renderer.picture_settled()
+                renderer.picture_settled(),
+                renderer.material_stats().line()
             );
         }
         tools.after_draw(
@@ -1161,7 +1162,10 @@ fn run() -> Result<(), String> {
                     }
                 }
             }
-            println!("genos-stress frames={drawn}");
+            println!(
+                "genos-stress frames={drawn} {}",
+                renderer.material_stats().line()
+            );
             finish(window, renderer, code);
         }
     }

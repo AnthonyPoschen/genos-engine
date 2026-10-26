@@ -117,6 +117,37 @@ type VkResult = i32;
 type Handle = *mut c_void;
 type Pfn = *const c_void;
 
+/// Live streamer counters. `budget` is the texture target for this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialStats {
+    pub committed: u64,
+    pub budget: u64,
+    pub refused: u32,
+    pub evictions: u32,
+    pub thrash: u32,
+    pub holes: u32,
+    pub rate: u64,
+    pub stream_ms: f32,
+}
+
+impl MaterialStats {
+    /// One line for the stress log and the finish line.
+    #[must_use]
+    pub fn line(self) -> String {
+        format!(
+            "materials committed={} budget={} refused={} evictions={} thrash={} holes={} rate={} stream_ms={:.3}",
+            self.committed,
+            self.budget,
+            self.refused,
+            self.evictions,
+            self.thrash,
+            self.holes,
+            self.rate,
+            self.stream_ms,
+        )
+    }
+}
+
 pub struct Renderer {
     gpu: Gpu,
     width: u32,
@@ -364,6 +395,22 @@ impl Renderer {
     #[must_use]
     pub fn material_committed(&self) -> u64 {
         self.gpu.streamer.committed()
+    }
+
+    /// Counters the next auto-tune reads: committed bytes, the texture target, and the streamer meters.
+    #[must_use]
+    pub fn material_stats(&self) -> MaterialStats {
+        let stream = &self.gpu.streamer;
+        MaterialStats {
+            committed: stream.committed(),
+            budget: self.gpu.vram.texture_target(),
+            refused: stream.refused(),
+            evictions: stream.evictions(),
+            thrash: stream.thrash(),
+            holes: stream.holes(),
+            rate: stream.rate(),
+            stream_ms: stream.frame_ms(),
+        }
     }
 
     /// Replace the queried `heapBudget` and `heapUsage`. `None` uses the device again.

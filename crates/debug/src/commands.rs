@@ -127,6 +127,10 @@ fn material_specs() -> Vec<CommandSpec> {
             "set_material_settings",
             "Partial material update. Keys match the settings text. A text field overlays key=value lines. residency_mb is a deprecated alias: it warns once and does not set a pool. Applies on the next draw.",
         ),
+        spec(
+            "get_material_stats",
+            "Streamer counters for the frame in force: committed, budget, refused, evictions, thrash, holes, rate, stream_ms. budget is the texture target. rate is the bytes the last step admitted. stream_ms is the base frame time that step saw.",
+        ),
     ]
 }
 
