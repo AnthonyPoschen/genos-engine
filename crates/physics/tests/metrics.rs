@@ -7,10 +7,12 @@
 //! the inelastic drop fails `|energy_drift| <= 0.01`. `broken` cooks an
 //! overhang, breaks its seam, and scores `bonds_broken`, `debris_alive`,
 //! and `floor_penetration_m`. Those rows are not printed for the ship fixtures.
+//! `spin` is a long thin box that turns a quarter-circle in one step beside a
+//! block. `tunnel_count` is the block still at rest.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad|discrete|loss|broken
+//! --fixture proof|good|bad|discrete|loss|broken|spin
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -90,6 +92,21 @@ const METRICS: &[Spec] = &[
     },
 ];
 
+const SPIN_METRICS: &[Spec] = &[
+    Spec {
+        name: "tunnel_count",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
+    },
+    Spec {
+        name: "determinism_hash_match",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+];
+
 const BROKEN_METRICS: &[Spec] = &[
     Spec {
         name: "bonds_broken",
@@ -147,6 +164,7 @@ enum Fixture {
     Discrete,
     Loss,
     Broken,
+    Spin,
 }
 
 impl Fixture {
@@ -158,6 +176,7 @@ impl Fixture {
             Self::Discrete => "discrete",
             Self::Loss => "loss",
             Self::Broken => "broken",
+            Self::Spin => "spin",
         }
     }
 }
@@ -236,6 +255,14 @@ fn run() -> Result<i32, String> {
             let (reading, broken) = measure_broken()?;
             let rows = judge_broken(&broken);
             write_report(&args.out, "broken", &reading, &rows)?;
+            print_scene(&reading);
+            print_rows(&rows);
+            Ok(exit_code(&rows))
+        }
+        Fixture::Spin => {
+            let reading = measure_spin()?;
+            let rows = judge_spin(&reading);
+            write_report(&args.out, "spin", &reading, &rows)?;
             print_scene(&reading);
             print_rows(&rows);
             Ok(exit_code(&rows))
@@ -372,6 +399,7 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "discrete" => Ok(Fixture::Discrete),
         "loss" => Ok(Fixture::Loss),
         "broken" => Ok(Fixture::Broken),
+        "spin" => Ok(Fixture::Spin),
         other => Err(format!("unknown fixture {other}")),
     }
 }
@@ -402,7 +430,9 @@ fn setup(fixture: &Fixture) -> Result<Setup, String> {
             protect: false,
             full_energy: true,
         }),
-        Fixture::Proof | Fixture::Broken => Err("proof does not score itself".into()),
+        Fixture::Proof | Fixture::Broken | Fixture::Spin => {
+            Err("proof does not score itself".into())
+        }
     }
 }
 
@@ -412,8 +442,8 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad|discrete|loss|broken
-    proof runs the ship fixtures and the broken overhang. Default proof.
+--fixture proof|good|bad|discrete|loss|broken|spin
+    proof runs the ship fixtures, the broken overhang, and the spinning pair. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
     good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
@@ -421,6 +451,8 @@ discrete runs ships at {CATCH_SHIP} m/s and the bullet at {CATCH_BULLET} m/s.
     energy_drift on good, bad, and discrete sums free-flight steps only.
 loss is the discrete scene scored from start to end, so an inelastic drop fails.
 broken cooks an overhang, breaks the seam at step {DAMAGE_STEP}, and steps {BROKEN_STEPS} times.
+spin is one step: a long thin swept box turns a quarter-circle beside a block.
+    tunnel_count is 1 when that block is still at rest.
 Ship fixtures call step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
@@ -507,6 +539,66 @@ fn run_broken() -> Result<(World, genos_physics::DestructionReport), String> {
     }
     let report = destruction_report(&world);
     Ok((world, report))
+}
+
+fn measure_spin() -> Result<Reading, String> {
+    let first = run_spin()?;
+    let second = run_spin()?;
+    let match_bit = u8::from(hash_state(&first.0) == hash_state(&second.0));
+    Ok(Reading {
+        tunnel_count: first.1,
+        penetration_m: 0.0,
+        energy_drift: 0.0,
+        determinism_hash_match: f64::from(match_bit),
+        contacts_stored: 0.0,
+        toi_deferred: 0.0,
+        ship_speed: 0.0,
+        bullet_speed: 0.0,
+        protect: true,
+        full_energy: false,
+        ccd_in_step: first.2,
+        steps: 1,
+    })
+}
+
+/// Quarter-turn of a long thin box. The block sits where the tip passes.
+/// A time-of-impact bound without `|ω| r` integrates that whole turn at once
+/// and never strikes the block.
+fn run_spin() -> Result<(World, f64, bool), String> {
+    let mut bar = Body::cuboid(
+        genos_math::Vec3::ZERO,
+        1.0,
+        genos_math::Vec3::new(0.02, 1.5, 0.02),
+    );
+    bar.angular_velocity = genos_math::Vec3::new(0.0, 0.0, std::f32::consts::FRAC_PI_2 / DT);
+    bar.velocity = genos_math::Vec3::new(-1.0, 0.0, 0.0);
+    bar.motion = MotionQuality::Swept;
+    let block = Body::cuboid(
+        genos_math::Vec3::new(-0.3, 1.0, 0.0),
+        1.0,
+        genos_math::Vec3::new(0.05, 0.05, 0.05),
+    );
+    let mut world = World::new(genos_math::Vec3::ZERO);
+    let _bar = world.insert(bar);
+    let block_index = world.insert(block);
+    genos_physics::step(&mut world, DT);
+    let hit = world
+        .bodies
+        .get(block_index)
+        .ok_or_else(|| "spin block missing".to_string())?;
+    let missed = u32::from(hit.velocity.length() < 1.0e-4);
+    let tunnels = missed.saturating_add(world.step_stats.toi_failed);
+    let ccd = world.step_stats.ccd_applied;
+    Ok((world, f64::from(tunnels), ccd))
+}
+
+fn judge_spin(reading: &Reading) -> Vec<Row> {
+    let values = [reading.tunnel_count, reading.determinism_hash_match];
+    SPIN_METRICS
+        .iter()
+        .zip(values)
+        .map(|(spec, value)| judge(spec, value))
+        .collect()
 }
 
 fn judge_broken(scores: &BrokenScores) -> Vec<Row> {
@@ -953,6 +1045,7 @@ fn prove(out: &Path) -> Result<i32, String> {
     let discrete = run_child(&exe, out, "discrete")?;
     let loss = run_child(&exe, out, "loss")?;
     let broken = run_child(&exe, out, "broken")?;
+    let spin = run_child(&exe, out, "spin")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
@@ -963,10 +1056,18 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", loss.stdout);
     println!("# broken");
     print!("{}", broken.stdout);
-    if good.code != 0 || bad.code != 1 || discrete.code != 0 || loss.code != 1 || broken.code != 0 {
+    println!("# spin");
+    print!("{}", spin.stdout);
+    if good.code != 0
+        || bad.code != 1
+        || discrete.code != 0
+        || loss.code != 1
+        || broken.code != 0
+        || spin.code != 0
+    {
         return Err(format!(
-            "proof exits good {} bad {} discrete {} loss {} broken {}",
-            good.code, bad.code, discrete.code, loss.code, broken.code
+            "proof exits good {} bad {} discrete {} loss {} broken {} spin {}",
+            good.code, bad.code, discrete.code, loss.code, broken.code, spin.code
         ));
     }
     expect_protected(&good.stdout)?;
@@ -974,11 +1075,13 @@ fn prove(out: &Path) -> Result<i32, String> {
     expect_discrete(&discrete.stdout)?;
     expect_loss(&loss.stdout)?;
     expect_broken(&broken.stdout)?;
+    expect_spin(&spin.stdout)?;
     expect_file(out, "good", true, 0, "free-flight", true)?;
     expect_file(out, "bad", false, 2, "free-flight", false)?;
     expect_file(out, "discrete", false, 0, "free-flight", false)?;
     expect_file(out, "loss", false, 1, "full", false)?;
     expect_file(out, "broken", false, 0, "free-flight", false)?;
+    expect_file(out, "spin", true, 0, "free-flight", true)?;
     Ok(0)
 }
 
@@ -1167,6 +1270,21 @@ fn expect_loss(text: &str) -> Result<(), String> {
     }
     if !energy_failed {
         return Err("loss run has no energy_drift".into());
+    }
+    Ok(())
+}
+
+fn expect_spin(text: &str) -> Result<(), String> {
+    if !text.contains("steps=1") || !text.contains("ccd_in_step=true") {
+        return Err("spin scene did not run one swept step".into());
+    }
+    for row in printed_against(text, SPIN_METRICS)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the spin scene", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
     }
     Ok(())
 }
