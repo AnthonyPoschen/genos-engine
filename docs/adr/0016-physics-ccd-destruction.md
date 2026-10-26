@@ -29,4 +29,4 @@ Release multiplayer is server-authoritative. Both peers have to agree on the imp
 
 ## Consequences
 
-The metrics and the phase order are in the design. Until the swept step and the bond graph exist, the metrics harness reports `NOT-IMPLEMENTED` and does not invent a reading. The physics system record changes in the commit that changes `step`, not in this decision.
+The metrics and the phase order are in the design. The harness runs the current `step`. With protection off, the 3 000 m/s ships and bullet miss the obstacle, and `tunnel_count` fails. That failure is the baseline. It is not `NOT-IMPLEMENTED`. Bond breaks and preset CPU time stay out of the harness until those features exist. The physics system record changes in the commit that changes `step`, not in this decision.

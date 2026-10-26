@@ -44,7 +44,7 @@ The step has to grow a swept pair and a bond break without a second physics libr
 2. **Time of impact, then sub-step that pair.** Conservative advancement (Brian Mirtich, *Impulse-based Dynamic Simulation of Rigid Body Systems*, PhD thesis, UC Berkeley, 1996; the game account is Erin Catto, "Continuous Collision", GDC 2013, [slides](https://box2d.org/files/ErinCatto_ContinuousCollision_GDC2013.pdf)) walks the closest-point distance against the relative velocity of those points, including rotation. Bullet uses that walk for convex versus convex. Rapier's nonlinear CCD and Bepu's `Continuous` mode are the same family: find a time, advance, repeat. Jolt's linear cast is the cheaper sibling and, by its own note, misses a fast spin because it sweeps the start rotation.
 3. **Sub-step the whole world** until every body's travel is under its radius. Box2D moves the simulation to the first time of impact ([simulation](https://github.com/erincatto/box2d/blob/main/docs/simulation.md)). Correct, and one fast pair re-simulates every awake body. The room does not need that.
 
-**Pick: (1) for bullets, (2) for ships, and pair-local slices when a pair outruns its radius.** (3) is the cost we refuse. This is the physics plan's P17–P20.
+**Pick: (1) for bullets, (2) for ships, and pair-local slices when a pair outruns its radius.** (3) is the cost we refuse. This is the physics plan's P17–P20, except the advancement in step 3. P19 as written on 12 Oct 2026 used the closest-point velocity, a 0.8 factor, and a minimum step of `1e-4` s. Those three are not used.
 
 `MotionQuality::Discrete` uses the current bounds. `Speculative` is the bullet. `Swept` is the ship. A body has one quality. The default is `Discrete`, so a scene that never sets a quality does no swept work.
 
@@ -56,7 +56,7 @@ speculative margin   default 0.25 m (Medium and High). Low uses 0.05 m. Potato d
 ToiEvent        pair, time (s), normal, point, advances, failed
 pair_slices     how many slices that pair took
 body_slices     how many slices that body took
-toi_failed      count of pairs that made no progress
+toi_failed      count of pairs clamped at the last safe time because 16 iterations left a gap above 1 mm
 toi_deferred    Swept pairs treated as Speculative because the preset pair cap was full
 ```
 
@@ -68,11 +68,11 @@ Sub-steps divide the tick. They do not rebuild the broadphase. The global sub-st
 
 1. Forces, then the broadphase on swept bounds.
 2. `Discrete` and `Speculative` bodies take the global sub-steps. A speculative contact distance is `min(speed * dt_sub, speculative margin)`. The solver stops the approach. No time-of-impact loop.
-3. Each `Swept` pair, and only that pair: GJK distance, closing speed from the relative velocity of the closest points (both linear velocities and both angular velocities). Time of impact is distance divided by closing speed when the points are approaching. Advance `0.8` of the remaining time, and at least `1e-4` s, solve the contact, and repeat until the tick is consumed or 16 advances have run. Other bodies stay on the global sub-step. No progress sets `toi_failed` for that pair and leaves the last safe pose.
+3. Each `Swept` pair, and only that pair: let `gap` be the GJK distance and `bound = |v_a - v_b| + |ω_a| r_a + |ω_b| r_b`, where `r` is the bounding radius. The bound is an upper limit on how fast the gap can close. It uses the full linear relative speed plus both rotational terms. It is not the relative velocity of the closest points, and it is not `max(0, -n · (v_a - v_b))`. When `bound > 0`, the time of impact is `min(remaining, gap / bound)`. Advance both bodies by that time. There is no scale factor. Solve the contact. Repeat until `gap <= 0.001` m or the remaining time is 0. Stop after 16 iterations. If the cap is hit while `gap > 0.001` m, clamp the pair at the last safe time of impact, drop the rest of that pair's tick, and count `toi_failed`. Other bodies stay on the global sub-step.
 4. If a pair's relative travel over the tick exceeds the smaller bounding radius, that pair integrates in slices whose travel is at most that radius. The rest of the world keeps the global sub-step count.
 5. A `Swept` pair past the preset's pair cap is integrated as `Speculative` for that tick and increments `toi_deferred`.
 
-A missed root counts as a tunnel in `tunnel_count`. The debug binary still shows `toi_failed` on its own.
+A pair clamped by the iteration cap counts as a tunnel in `tunnel_count`. The debug binary still shows `toi_failed` on its own.
 
 ## Destruction
 
@@ -112,7 +112,7 @@ The SHA-256 of the version-1 payload is the sim content hash. SDF cards and text
 
 ## CPU milliseconds per preset
 
-These are ceilings for the physics step on the owner's machine. They are not a measurement. This change records no times. The harness metric stays `NOT-IMPLEMENTED` until the workload exists and the owner's PC records it. Lavapipe and a cloud VM do not supply the number. A ceiling is a cap: an asleep island adds no narrowphase and no solver work, and the frame does not fill the cap on purpose.
+These are ceilings for the physics step on the owner's machine. They are not a measurement. This change records no times. The harness does not print `step_ms_*`. Lavapipe and a cloud VM do not supply the number. The owner's PC records it when the debug binary exists. A ceiling is a cap: an asleep island adds no narrowphase and no solver work, and the frame does not fill the cap on purpose.
 
 One time-of-impact advance is budgeted at 3 µs (one closest-point query plus one contact solve). One awake debris body is budgeted at 10 µs of solver work. Those unit costs are the arithmetic behind the ceilings, not a profile.
 
@@ -129,26 +129,26 @@ High arithmetic: `8 × 16 × 3 µs = 0.384 ms` of advances, plus `32 × 10 µs =
 
 ## Success metrics
 
-Each metric has one threshold. The comparator is inclusive. A non-finite reading fails. The live scene prints `NOT-IMPLEMENTED` until the step can produce the reading. A missing feature does not get a stand-in number.
+Each metric has one threshold. The comparator is inclusive. A non-finite reading fails. The harness prints a metric only when `step` can produce it. A missing feature is left out of the run. It is not given a stand-in number. The unprotected high-speed case is a `FAIL`, not `NOT-IMPLEMENTED`.
 
-`energy_drift = (E_end - E_start) / max(|E_start|, 1)`. `E` is kinetic energy plus `m * 9.81 * position.y`. Bonds store no elastic energy. A gain above the threshold fails. A loss passes, because a contact may be inelastic.
+`energy_drift = (E_end - E_start) / max(|E_start|, 1)`. `E = Σ (½ m |v|² + ½ ωᵀ I ω + m * 9.81 * h)` over dynamic bodies. `h` is `position.y`. Bonds store no elastic energy. `Body` has no angular velocity, so the rotational term is 0 until it does. A gain above the threshold fails. A loss passes, because a contact may be inelastic.
 
-`penetration_m` is the minimum signed separation on the ship lanes, in metres. Negative is an overlap.
+`penetration_m` is the deepest positive overlap, in metres. Zero is no overlap.
 
 `bonds_broken` is the minimum broken-bond count of the two `destruction_wall` columns.
 
 `contacts_stored` is 1 when every ship lane stored a contact impulse, and 0 otherwise.
 
-`floor_penetration_m` is the deepest distance a chunk centre sits below the floor past its own half-extent. 0 means none.
+`floor_penetration_m` is the deepest positive distance a chunk centre sits below the floor past its own half-extent. 0 means none.
 
-`tunnel_count` counts a lane whose centres exchanged order along the closing axis, a lane whose separation went past −0.01 m, or a lane with `toi_failed`.
+`tunnel_count` counts a ship lane whose centres exchanged order along the closing axis, a bullet whose trailing point has passed the far face of a finite obstacle it started short of, or a lane with `toi_failed`. Overlap that does not clear the obstacle is `penetration_m`, not a tunnel.
 
-`determinism_hash_match` is 1 when a second run in the same process hashes equal, and 0 otherwise. The hash is the physics plan's state hash, over the same spawns, the same `.gfract` bytes, and `step` at `1/60`.
+`determinism_hash_match` is 1 when a second run in the same process hashes equal, and 0 otherwise. Phase 0 hashes FNV-1a over the bits of each body's position and velocity after `step` at `1/60`. The physics plan's fuller state hash, including the `.gfract` bytes, arrives with the bond graph.
 
 | Metric | Threshold | Scene |
 |---|---|---|
 | `tunnel_count` | `<=0` | `ship_impact` |
-| `penetration_m` | `>=-0.01` | `ship_impact` |
+| `penetration_m` | `<=0.01` | `ship_impact` |
 | `energy_drift` | `<=0.01` | `ship_impact` |
 | `determinism_hash_match` | `>=1` | both |
 | `contacts_stored` | `>=1` | `ship_impact` |
@@ -173,20 +173,25 @@ The scenes will live in `debug/scenes/ship_impact.rhai` and `debug/scenes/destru
 
 ### Harness that exists now
 
-CCD and the bond graph are not in `step`. The harness is test code, `crates/physics/tests/metrics.rs`, and it does not add a solver.
+CCD and the bond graph are not in `step`. The harness is test code, `crates/physics/tests/metrics.rs`. It builds a world and calls `step`. It does not add a solver, and it does not read a scripted number.
+
+The scene is two ships and one bullet. Each ship is a box, half-extents `(2, 1, 1)` m, mass 1 000 kg, centres `(0, 2, 0)` and `(6, 2, 0)`. The bullet is a sphere, radius 0.05 m, mass 0.02 kg, centre `(0, 2, 4)`. A static box wall, half-extents `(0.15, 5, 1)` m, centre `(0.3, 2, 4)`, sits on the bullet's path and clear of the ships. Eight steps of `1/60` s. Restitution is 0.
+
+`protection` is the only switch. `step` has no CCD flag, so the switch selects the speed. On, the ships move at 30 m/s and the bullet at 6 m/s. Each of those steps still overlaps the obstacle, and the discrete solver stops the body. Off, the ships and the bullet move at 3 000 m/s. One step is 50 m. The end bounds miss the other ship and miss the wall.
+
+The four phase-0 metrics are computed from that body state. `tunnel_count` is the ship-order check plus the bullet trailing-point check described above. `penetration_m` is the deepest positive overlap of the ship pair and of the bullet against the wall. Energy and the hash are as above. The other rows in the table are gates for later phases. The harness does not print them.
 
 ```text
 cargo test -p genos-physics --test metrics
 cargo test -p genos-physics --test metrics -- --fixture good
 cargo test -p genos-physics --test metrics -- --fixture bad
-cargo test -p genos-physics --test metrics -- --fixture live
 ```
 
 `--fixture` defaults to `proof`. `GENOS_PHYSICS_METRICS_FIXTURE` is the mirror and applies only when `--fixture` was omitted. The argument wins when both are set.
 
-Each run prints one line per metric: `name value threshold status`. It writes `./genos-debug/physics/<fixture>.json`. `cargo test` starts in the package directory; the default still writes to the repository `genos-debug/physics`. `--out` and `GENOS_PHYSICS_METRICS_OUT` stay relative to the process directory. Exit 0 when no line is `FAIL`. Exit 1 when a line is `FAIL`. Exit 2 on a bad argument or a bad script. `NOT-IMPLEMENTED` is not a failure.
+Each run prints one line per metric: `name value threshold status`. It writes `./genos-debug/physics/<fixture>.json`, including the protection flag and the speeds. `cargo test` starts in the package directory; the default still writes to the repository `genos-debug/physics`. `--out` and `GENOS_PHYSICS_METRICS_OUT` stay relative to the process directory. Exit 0 when no line is `FAIL`. Exit 1 when a line is `FAIL`. Exit 2 on a bad argument.
 
-`good.rhai` feeds a reading inside every threshold. `bad.rhai` feeds a reading outside every threshold. `live.rhai` marks every metric pending. `proof` runs all three and exits 0 only when good exits 0, bad exits 1, and live exits 0 with every line `NOT-IMPLEMENTED`. The scripts cannot change a threshold. The table above is the gate. Phase 0 reads `reading`, `pending`, and full-line `//` comments from those files. It does not embed the `rhai` crate. The debug binary's Rhai host, the one [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md) allows, runs the same calls when the scenes move.
+`good` is protection on. Every line is `PASS` and the process exits 0. `bad` is protection off. `tunnel_count` is `FAIL` and greater than 0, and the process exits 1. That failure is the discrete baseline. `proof` runs both and exits 0 only when those two outcomes hold. The debug binary's Rhai host, the one [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md) allows, runs `ship_impact` and `destruction_wall` when those scenes move.
 
 The debug menu, when the physics binary exists, has no help text. A knob's label is the word itself (`speculative margin`, `debris budget`, `bond health`). The menu does not explain the word.
 
@@ -223,9 +228,9 @@ Gameplay networking still waits. These lines are the contract.
 
 | Phase | What lands | Gate |
 |---|---|---|
-| 0 | This design and the metrics harness | `proof` exits 0. Live lines are `NOT-IMPLEMENTED`. |
-| 1 | Swept bounds and speculative contacts | The bullet case in the physics plan. Ship lanes stay `NOT-IMPLEMENTED`. |
-| 2 | Time of impact, pair slices, `ship_impact` | `tunnel_count`, `penetration_m`, `contacts_stored`, `toi_deferred`, `determinism_hash_match` become readings. |
+| 0 | This design and the metrics harness | `proof` exits 0. `good` is all `PASS`. `bad` exits 1 with `tunnel_count` `FAIL`. |
+| 1 | Swept bounds and speculative contacts | The bullet case in the physics plan. The 3 000 m/s ship lane still fails `tunnel_count` until phase 2. |
+| 2 | Time of impact, pair slices, `ship_impact` | Protection on at 30, 120, 600, and 3 000 m/s passes `tunnel_count` and `penetration_m`. `contacts_stored` and `toi_deferred` join the harness. |
 | 3 | `genos-fracture` and `.gfract` in the cook | Round-trip bytes. `step` still does not break. |
 | 4 | Hot-swap, `apply_damage`, debris | `destruction_wall` readings: `bonds_broken`, `debris_alive`, `floor_penetration_m`. |
 | 5 | Change records from chunk bounds, per-chunk bake keys already cooked | A break does not switch on the global stillness hash. Spawn stays inside the ADR 0013 cap. |
@@ -251,7 +256,7 @@ One meaning each. Lighting names used above (`change record`, `object-local entr
 
 **Time of impact.** The earliest time in the step at which two convex bodies touch.
 
-**Conservative advancement.** Advance a pair by a fraction of the remaining time of impact, solve that contact, and repeat. The fraction stays below 1.
+**Conservative advancement.** Advance a pair by `distance / (|v_a - v_b| + |ω_a| r_a + |ω_b| r_b)`, an upper bound on how fast the gap can close, solve that contact, and repeat. Stop at a 1 mm gap or when the tick is consumed. An iteration cap clamps the pair at the last safe time.
 
 **Bond.** One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 
@@ -274,7 +279,7 @@ One meaning each. Lighting names used above (`change record`, `object-local entr
 - Müller, Chentanez, and Kim, SIGGRAPH 2013, sections on impact patterns and island rebuilds. The paper applies a fracture pattern at the hit and rebuilds connectivity. This design stores one Voronoi pattern in `.gfract` and spawns the precomputed children. Support is kept: a chunk with a bond path to `WORLD` stays static. `slice_chunk` is a game call, and `step` does not slice.
 - The Voronoi clip is bisector planes in seed order (physics plan P33). The paper's decomposition is a volumetric approximate convex decomposition, built to accept a runtime pattern. We do not build that decomposition.
 - Bepu's default maximum speculative margin is unbounded. Ours is 0.25 m on Medium and High, and 0.05 m on Low. Past that cap the body is `Swept`, not a larger margin.
-- Catto, GDC 2013, on conservative advancement needing many iterations when shapes are close. We stop at 16 advances, advance 0.8 of the remaining time, require at least `1e-4` s of progress, and set `toi_failed` plus a tunnel. We do not iterate until the root converges.
+- Catto, GDC 2013, advances a fraction of the time of impact because the closest-point velocity can underestimate rotation between samples. This design does not use that fraction, and it does not use the closest-point velocity. The denominator is `|v_a - v_b| + |ω_a| r_a + |ω_b| r_b`, which already upper-bounds the closing speed. Termination is a gap of 1 mm, not a minimum step of `1e-4` s (0.3 m at 3 000 m/s). The iteration cap is 16. Past the cap the pair clamps at the last safe time, drops the rest of its tick, and sets `toi_failed`. The same three rules (closest-point velocity, the 0.8 factor, the `1e-4` s minimum) were in P19 on 12 Oct 2026. They are not used.
 - Jolt `LinearCast` sweeps the starting rotation and steals the rest of the tick. We include angular velocity in the closing speed, we sub-step the pair through the rest of the tick, and other bodies keep the global sub-step.
 - Box2D sub-steps the simulation to the first impact. We sub-step the fast pair.
 - Blast and Chaos ship the bond graph inside their own solvers. The graph is the idea we copy. The SDK stays out ([ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md)).
