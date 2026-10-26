@@ -42,5 +42,6 @@ These are plans. They are not system records. A step edits the matching record w
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 - [Renderer performance review](rendering/perf-review.md): the 1920×1080 moving stress frame against a 5 ms budget, ranked by the lighting passes that close the gap.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
+- [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
