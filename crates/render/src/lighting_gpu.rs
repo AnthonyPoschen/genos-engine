@@ -2538,7 +2538,10 @@ impl Gpu {
         // cover the image. A small sun step, with the camera held, takes one
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
         // forces the full picture.
-        let compose_full = !self.lighting.compose_valid
+        // Wireframe replaces the shaded triangles. A quiet compose would copy
+        // the previous shaded picture back over those lines.
+        let compose_full = self.wire_on
+            || !self.lighting.compose_valid
             || camera_moved
             || view_changed
             || self.lighting.still == 0 && !sun_amortise
