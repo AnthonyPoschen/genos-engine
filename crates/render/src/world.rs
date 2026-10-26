@@ -1,6 +1,18 @@
-#![cfg_attr(test, expect(clippy::items_after_test_module, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::items_after_test_module,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! What the renderer can draw, and what it may skip on screen.
 //!
@@ -240,6 +252,51 @@ pub struct Reflector {
     pub normal: [f32; 3],
     /// Where a portal opens. Mirrors and water leave this at zero.
     pub portal_to: [f32; 3],
+    /// Column-major orthonormal basis of the opening. Identity for a mirror.
+    pub from_basis: [f32; 9],
+    /// Column-major orthonormal basis of the destination.
+    pub to_basis: [f32; 9],
+    /// Tangent of the window quad. A zero vector is derived from the normal.
+    pub tangent: [f32; 3],
+    pub bitangent: [f32; 3],
+    pub half_u: f32,
+    pub half_v: f32,
+    /// Colour written when the view is refused or the reflection misses.
+    pub albedo: [f32; 3],
+    /// Window pixels `x, y, w, h`. `w == 0` means the whole window.
+    pub scissor: [u32; 4],
+}
+
+impl Default for Reflector {
+    fn default() -> Self {
+        Self {
+            kind: ReflectorKind::Mirror,
+            origin: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            portal_to: [0.0; 3],
+            from_basis: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            to_basis: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            tangent: [1.0, 0.0, 0.0],
+            bitangent: [0.0, 0.0, 1.0],
+            half_u: 1.0,
+            half_v: 1.0,
+            albedo: [0.5, 0.5, 0.55],
+            scissor: [0; 4],
+        }
+    }
+}
+
+/// A finite plane the water shader raycasts. The same quad is drawn as a mesh
+/// so the depth buffer and the reflection views see it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShadePlane {
+    pub origin: [f32; 3],
+    pub normal: [f32; 3],
+    pub tangent: [f32; 3],
+    pub bitangent: [f32; 3],
+    pub half_u: f32,
+    pub half_v: f32,
+    pub color: [f32; 3],
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +305,12 @@ pub struct World {
     pub objects: Vec<Object>,
     /// Planar mirrors, portals, and water. Empty skips the reflection passes.
     pub reflectors: Vec<Reflector>,
+    /// Planes the water shader raycasts, and meshes the reflection views draw.
+    pub shade_planes: Vec<ShadePlane>,
+    /// Draw the GGX energy swatch in the corner of the presented frame.
+    pub reflection_swatch: bool,
+    /// Sky radiance a water reflection uses when no plane is hit.
+    pub reflection_sky: [f32; 3],
     /// Meshes the GPU software tracer sees through their SDFs (GI).
     pub fields: Vec<crate::mesh_field::FieldInstance>,
     /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
@@ -282,6 +345,9 @@ impl World {
             scene,
             objects,
             reflectors: Vec::new(),
+            shade_planes: Vec::new(),
+            reflection_swatch: false,
+            reflection_sky: [0.45, 0.58, 0.72],
             fields: Vec::new(),
             surfaces: Vec::new(),
             color_atlas: MaterialAtlas::empty(),

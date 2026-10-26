@@ -4,13 +4,27 @@
 // matches the Rust constant.
 
 const float MIRROR_FRESNEL_CUTOFF = 0.02;
+const float REFLECT_SCALE = 2.0;
+const float FRESNEL_AVG = 0.5;
+const float REFLECTION_PI = 3.141592653589793;
+const float REFLECTION_TAU = 6.283185307179586;
+const float INVERT_EPS = 1.0e-12;
+const float OBLIQUE_EPS = 1.0e-12;
+const float AXIS_EPS = 1.0e-8;
+const float WAVE_LENGTH_EPS = 1.0e-4;
+const float GRADE_FOV_DEG = 60.0;
+const float GRADE_HALF = 0.5;
+const float GRADE_NEAR = 0.05;
+const float GRADE_FAR = 200.0;
+const float GRADE_ASPECT_EPS = 0.01;
+const float WATER_IOR = 1.333;
 
 vec3 reflection_mirror_dir(vec3 incident, vec3 normal) {
-    return incident - 2.0 * dot(normal, incident) * normal;
+    return incident - REFLECT_SCALE * dot(normal, incident) * normal;
 }
 
 vec3 reflection_mirror_point(vec3 point, vec3 normal) {
-    return point - 2.0 * dot(point, normal) * normal;
+    return point - REFLECT_SCALE * dot(point, normal) * normal;
 }
 
 float reflection_fresnel(float eta_t_over_eta_i, float cos_i) {
@@ -24,7 +38,7 @@ float reflection_fresnel(float eta_t_over_eta_i, float cos_i) {
     float eta = eta_t_over_eta_i;
     float rs = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
     float rp = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
-    return 0.5 * (rs * rs + rp * rp);
+    return FRESNEL_AVG * (rs * rs + rp * rp);
 }
 
 bool reflection_refract(vec3 incident, vec3 normal, float eta, out vec3 transmitted) {
@@ -43,7 +57,7 @@ float reflection_ggx_ndf(float n_dot_h, float alpha) {
     float mu = clamp(n_dot_h, 0.0, 1.0);
     float a2 = alpha * alpha;
     float den = mu * mu * (a2 - 1.0) + 1.0;
-    return a2 / (3.141592653589793 * den * den);
+    return a2 / (REFLECTION_PI * den * den);
 }
 
 float reflection_beer(float sigma, float distance) {
@@ -115,7 +129,7 @@ mat4 reflection_inverse(mat4 m) {
                 pivot = row;
             }
         }
-        if (best < 1.0e-12) {
+        if (best < INVERT_EPS) {
             return mat4(1.0);
         }
         if (pivot != col) {
@@ -149,9 +163,9 @@ mat4 reflection_inverse(mat4 m) {
 }
 
 mat4 reflection_parity_projection() {
-    float h = 1.0 / tan(radians(60.0) * 0.5);
-    float near_z = 0.05;
-    float far_z = 200.0;
+    float h = 1.0 / tan(radians(GRADE_FOV_DEG) * GRADE_HALF);
+    float near_z = GRADE_NEAR;
+    float far_z = GRADE_FAR;
     mat4 proj = mat4(0.0);
     proj[0][0] = h;
     proj[1][1] = -h;
@@ -165,7 +179,7 @@ vec4 reflection_oblique_row(mat4 projection, vec4 plane) {
     vec4 corner = vec4(reflection_sgn(plane.x), reflection_sgn(plane.y), 1.0, 1.0);
     vec4 q = reflection_inverse(projection) * corner;
     float denom = dot(plane, q);
-    float scale = abs(denom) < 1.0e-12 ? 0.0 : 1.0 / denom;
+    float scale = abs(denom) < OBLIQUE_EPS ? 0.0 : 1.0 / denom;
     return plane * scale;
 }
 
@@ -181,8 +195,8 @@ void reflection_gerstner(
     out vec3 normal
 ) {
     float len = length(direction);
-    vec2 axis = len <= 1.0e-8 ? vec2(1.0, 0.0) : direction / len;
-    float wave_number = 6.283185307179586 / max(wavelength, 1.0e-4);
+    vec2 axis = len <= AXIS_EPS ? vec2(1.0, 0.0) : direction / len;
+    float wave_number = REFLECTION_TAU / max(wavelength, WAVE_LENGTH_EPS);
     float phase = wave_number * (dot(axis, xz) - speed * time);
     float sine = sin(phase);
     float cosine = cos(phase);

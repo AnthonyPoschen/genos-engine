@@ -628,48 +628,33 @@ fn unit_vec(value: Vec3) -> Vec3 {
     }
 }
 
-/// Bytes the frame's grade buffer holds: 192 pixels, then four `u32`s.
-pub const GRADE_BYTES: usize = 192 * 16 + 16;
+/// Bytes the ray counter holds: `rays`, then three padding `u32`s.
+pub const GRADE_BYTES: usize = 16;
 
-/// What the reflection composite wrote. `ran` is false when the frame skipped it.
+/// Ray count, view count, and the device time and bytes of one reflection pass.
+/// `ran` is false when the frame skipped it. Colour is the presented picture,
+/// not this record.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReflectionGrade {
     pub ran: bool,
-    pub color: Vec<[f32; 3]>,
-    pub depth: Vec<f32>,
     pub rays: u32,
     pub views: u32,
+    pub gpu_ns: u64,
+    pub vram_bytes: u64,
 }
 
-/// Read the grade buffer the composite stores. `None` when the bytes are short.
+/// Read the ray counter. `None` when the bytes are short.
 #[must_use]
 pub fn reflection_grade_from_bytes(bytes: &[u8]) -> Option<ReflectionGrade> {
     if bytes.len() < GRADE_BYTES {
         return None;
     }
-    let mut color = Vec::with_capacity(192);
-    let mut depth = Vec::with_capacity(192);
-    for index in 0..192 {
-        let at = index * 16;
-        let mut word = [0u8; 4];
-        word.copy_from_slice(&bytes[at..at + 4]);
-        let r = f32::from_le_bytes(word);
-        word.copy_from_slice(&bytes[at + 4..at + 8]);
-        let g = f32::from_le_bytes(word);
-        word.copy_from_slice(&bytes[at + 8..at + 12]);
-        let b = f32::from_le_bytes(word);
-        word.copy_from_slice(&bytes[at + 12..at + 16]);
-        let distance = f32::from_le_bytes(word);
-        color.push([r, g, b]);
-        depth.push(distance);
-    }
-    let trailer = 192 * 16;
     Some(ReflectionGrade {
         ran: true,
-        color,
-        depth,
-        rays: read_u32(&bytes[trailer..trailer + 4]),
-        views: read_u32(&bytes[trailer + 4..trailer + 8]),
+        rays: read_u32(&bytes[0..4]),
+        views: read_u32(&bytes[4..8]),
+        gpu_ns: 0,
+        vram_bytes: 0,
     })
 }
 
@@ -677,6 +662,68 @@ fn read_u32(bytes: &[u8]) -> u32 {
     let mut word = [0u8; 4];
     word.copy_from_slice(bytes);
     u32::from_le_bytes(word)
+}
+
+/// One window quad per reflector, in list order, at most eight.
+#[must_use]
+pub fn reflector_quads(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> {
+    let mut out = Vec::new();
+    for reflector in reflectors.iter().take(8) {
+        out.extend(surface_quad(reflector));
+    }
+    out
+}
+
+fn surface_quad(reflector: &crate::world::Reflector) -> [GpuVertex; 6] {
+    let origin = Vec3::new(
+        reflector.origin[0],
+        reflector.origin[1],
+        reflector.origin[2],
+    );
+    let normal = unit_vec(Vec3::new(
+        reflector.normal[0],
+        reflector.normal[1],
+        reflector.normal[2],
+    ));
+    let given_t = Vec3::new(
+        reflector.tangent[0],
+        reflector.tangent[1],
+        reflector.tangent[2],
+    );
+    let given_b = Vec3::new(
+        reflector.bitangent[0],
+        reflector.bitangent[1],
+        reflector.bitangent[2],
+    );
+    let (tangent, bitangent) = if given_t.length() > 1.0e-4 && given_b.length() > 1.0e-4 {
+        (unit_vec(given_t), unit_vec(given_b))
+    } else {
+        camera_axes(normal)
+    };
+    let half_u = if reflector.half_u > 0.0 {
+        reflector.half_u
+    } else {
+        1.0
+    };
+    let half_v = if reflector.half_v > 0.0 {
+        reflector.half_v
+    } else {
+        1.0
+    };
+    let albedo = reflector.albedo;
+    let corner = |u: f32, v: f32| origin + tangent * (u * half_u) + bitangent * (v * half_v);
+    let vert = |point: Vec3| GpuVertex {
+        pos: [point.x, point.y, point.z],
+        albedo,
+        normal: [normal.x, normal.y, normal.z],
+        shade: 1.0,
+        uv: [-1.0, -1.0],
+    };
+    let a = corner(-1.0, -1.0);
+    let b = corner(1.0, -1.0);
+    let c = corner(1.0, 1.0);
+    let d = corner(-1.0, 1.0);
+    [vert(a), vert(b), vert(c), vert(a), vert(c), vert(d)]
 }
 
 /// Water quads for the translucent pass. At most four surfaces.
@@ -689,8 +736,16 @@ pub fn water_vertices(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> 
         .take(4)
     {
         let quad = water_quad(
-            Vec3::new(reflector.origin[0], reflector.origin[1], reflector.origin[2]),
-            Vec3::new(reflector.normal[0], reflector.normal[1], reflector.normal[2]),
+            Vec3::new(
+                reflector.origin[0],
+                reflector.origin[1],
+                reflector.origin[2],
+            ),
+            Vec3::new(
+                reflector.normal[0],
+                reflector.normal[1],
+                reflector.normal[2],
+            ),
         );
         out.extend(quad);
     }

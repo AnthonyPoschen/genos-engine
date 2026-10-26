@@ -33,19 +33,21 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     assert_eq!(good_code, 0, "{good_text}");
     assert_eq!(good_text.lines().count(), 21);
     assert!(good_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
-    assert!(good_text
-        .lines()
-        .filter(|line| !line.starts_with("denoise_lag_frames"))
-        .all(|line| {
-            line.ends_with(" CPU model check") || line.ends_with(" GPU frame readback")
-        }));
+    assert!(good_text.lines().all(|line| {
+        line.ends_with(" NOT-IMPLEMENTED")
+            || line.ends_with(" presented frame")
+            || line.ends_with(" GPU dispatch count")
+            || line.ends_with(" wave oracle")
+    }));
+    assert!(!good_text.contains("GPU frame readback"));
+    assert!(!good_text.contains("CPU model check"));
     assert!(good_text.contains("near_weighted_rel") && good_text.contains("low_reflection_rays"));
     assert!(good_text
         .lines()
-        .any(|line| line.starts_with("near_weighted_rel") && line.ends_with(" GPU frame readback")));
-    assert!(good_text
-        .lines()
-        .any(|line| line.starts_with("mirror_law_rad") && line.ends_with(" CPU model check")));
+        .any(|line| line.starts_with("near_weighted_rel") && line.ends_with(" presented frame")));
+    assert!(good_text.lines().any(|line| {
+        line.starts_with("low_reflection_rays") && line.ends_with(" GPU dispatch count")
+    }));
     let good_json = std::fs::read_to_string(good_dir.join("metrics.json")).unwrap();
     assert!(good_json.contains("\"fixture\": \"good\""));
     assert!(!good_json.contains("FAIL"));
@@ -54,12 +56,12 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     assert_eq!(bad_code, 1, "{bad_text}");
     assert_eq!(bad_text.lines().count(), 21);
     assert!(bad_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
-    assert!(bad_text
-        .lines()
-        .filter(|line| !line.starts_with("denoise_lag_frames"))
-        .all(|line| {
-            line.ends_with(" FAIL CPU model check") || line.ends_with(" FAIL GPU frame readback")
-        }));
+    assert!(bad_text.lines().all(|line| {
+        line.ends_with(" NOT-IMPLEMENTED")
+            || line.ends_with(" FAIL presented frame")
+            || line.ends_with(" FAIL GPU dispatch count")
+            || line.ends_with(" FAIL wave oracle")
+    }));
     let bad_json = std::fs::read_to_string(bad_dir.join("metrics.json")).unwrap();
     assert!(bad_json.contains("\"fixture\": \"bad\""));
     assert!(!bad_json.contains("\"status\": \"PASS\""));
@@ -85,14 +87,13 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
         "low_reflection_rays",
     ] {
         assert!(
-            live_text
-                .lines()
-                .any(|line| {
-                    line.starts_with(name)
-                        && (line.ends_with(" CPU model check")
-                            || line.ends_with(" GPU frame readback"))
-                        && line.contains(" PASS ")
-                }),
+            live_text.lines().any(|line| {
+                line.starts_with(name)
+                    && (line.ends_with(" presented frame")
+                        || line.ends_with(" GPU dispatch count")
+                        || line.ends_with(" wave oracle"))
+                    && line.contains(" PASS ")
+            }),
             "{name}\n{live_text}"
         );
     }

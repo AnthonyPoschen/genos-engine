@@ -1,7 +1,7 @@
 //! Reference-image checks for lighting.
 //!
-//! The metric core stays free of the window and of Vulkan so a defect injected
-//! into a picture can be caught without a GPU. `genos-stress` owns the scenes
+//! The layering checks stay free of the window. The reflections grade opens a
+//! proof window and reads the presented frame. `genos-stress` owns the scenes
 //! and is the driver. Reports and reference pictures are written under
 //! `./genos-debug/` in the current directory.
 
@@ -14,6 +14,7 @@ pub mod metrics;
 pub mod paths;
 pub mod picture;
 pub mod policy;
+mod presented;
 pub mod reflections;
 mod reflections_trace;
 pub mod report;

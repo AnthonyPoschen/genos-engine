@@ -1,43 +1,166 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::assigning_clones, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::borrow_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_ptr_alignment, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::field_reassign_with_default, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::fn_params_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::if_not_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::items_after_statements, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_c_str_literals, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_slice_size_calculation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::panic, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::precedence, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::ptr_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_locals, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_field_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
-#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::useless_vec, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::assigning_clones,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::borrow_as_ptr,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_ptr_alignment,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::field_reassign_with_default,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::fn_params_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::if_not_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::items_after_statements,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_assert,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_c_str_literals,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_slice_size_calculation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_range_loop,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::panic,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::precedence,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::ptr_as_ptr,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_locals,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_field_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_arguments,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::useless_vec,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Vulkan loader and one forward pass. Entry points come from libvulkan.
 
@@ -460,10 +583,10 @@ impl Renderer {
         let world_dynamic = dynamic.len() as u32;
         let mut dynamic = dynamic;
         dynamic.extend(overlay_verts);
-        let water_first = u32::try_from(dynamic.len()).unwrap_or(0);
-        let water_verts = crate::reflections::water_vertices(&world.reflectors);
-        let water_count = u32::try_from(water_verts.len()).unwrap_or(0);
-        dynamic.extend(water_verts);
+        let quad_first = u32::try_from(dynamic.len()).unwrap_or(0);
+        let quads = crate::reflections::reflector_quads(&world.reflectors);
+        let quad_count = u32::try_from(quads.len()).unwrap_or(0);
+        dynamic.extend(quads);
         if !dynamic.is_empty() {
             self.gpu.upload(&dynamic)?;
         }
@@ -488,7 +611,7 @@ impl Renderer {
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
         self.gpu
-            .note_reflections(world, camera, aspect, water_first, water_count);
+            .note_reflections(world, camera, aspect, quad_first, quad_count);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
@@ -889,6 +1012,12 @@ struct Gpu {
     frag_override: Option<&'static [u8]>,
     /// The vertex shader the next raster pipeline uses instead of scene.vert.
     vert_override: Option<&'static [u8]>,
+    /// Pipeline layout for the next raster pipeline. Null uses `layout`.
+    layout_override: Handle,
+    /// Render pass for the next raster pipeline. Null uses `render_pass`.
+    pipe_pass: Handle,
+    /// Depth write for the next raster pipeline. `None` follows the depth test.
+    depth_write_force: Option<bool>,
     /// How long each pipeline took to build.
     pipeline_times: Vec<(String, Duration)>,
     desc_layout: Handle,
@@ -1538,6 +1667,9 @@ impl Gpu {
                 lighting: Lighting::default(),
                 frag_override: None,
                 vert_override: None,
+                layout_override: std::ptr::null_mut(),
+                pipe_pass: std::ptr::null_mut(),
+                depth_write_force: None,
                 pipeline_times: Vec::new(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
@@ -1930,7 +2062,8 @@ impl Gpu {
                     self.extent_w,
                     self.extent_h,
                 )?;
-                self.depths[slot] = self.make_image(126, 0x20, 2, self.extent_w, self.extent_h)?;
+                self.depths[slot] =
+                    self.make_image(126, 0x20 | 0x1, 2, self.extent_w, self.extent_h)?;
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
@@ -2679,9 +2812,7 @@ impl Gpu {
         if status == VK_SUCCESS {
             return Ok(());
         }
-        let timed = unsafe {
-            (self.fns.wait_fences)(self.device, 1, &fence, 1, FENCE_BUDGET_NS)
-        };
+        let timed = unsafe { (self.fns.wait_fences)(self.device, 1, &fence, 1, FENCE_BUDGET_NS) };
         if timed == VK_SUCCESS {
             return Ok(());
         }
@@ -4004,14 +4135,7 @@ impl Gpu {
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
-                (self.fns.map_mem)(
-                    self.device,
-                    memory,
-                    0,
-                    bytes.len() as u64,
-                    0,
-                    &mut mapped,
-                ),
+                (self.fns.map_mem)(self.device, memory, 0, bytes.len() as u64, 0, &mut mapped),
                 "map gpu buffer",
             )?;
             copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
@@ -4498,12 +4622,13 @@ impl Gpu {
                 max: f32,
             }
             let depth_on = if depth_test { 1 } else { 0 };
+            let depth_write = u32::from(self.depth_write_force.unwrap_or(depth_test));
             let depth = Depth {
                 s_type: 25,
                 next: std::ptr::null(),
                 flags: 0,
                 test: depth_on,
-                write: depth_on,
+                write: depth_write,
                 // LESS for the depth pass, LESS_OR_EQUAL after it: the same shape
                 // (scene.vert's invariant position) passes at the depth it wrote.
                 compare: if depth_only { 1 } else { 3 },
@@ -4650,8 +4775,16 @@ impl Gpu {
                 depth: &depth,
                 blend: &blend,
                 dynamic: &dyn_state,
-                layout: self.layout,
-                pass: self.render_pass,
+                layout: if self.layout_override.is_null() {
+                    self.layout
+                } else {
+                    self.layout_override
+                },
+                pass: if self.pipe_pass.is_null() {
+                    self.render_pass
+                } else {
+                    self.pipe_pass
+                },
                 subpass: 0,
                 base: std::ptr::null_mut(),
                 base_index: -1,
@@ -5233,9 +5366,9 @@ impl Gpu {
     fn destroy_targets(&mut self) {
         unsafe {
             if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-            self.destroy_aa_targets();
-            self.destroy_reflection_targets();
-            return;
+                self.destroy_aa_targets();
+                self.destroy_reflection_targets();
+                return;
             }
             self.destroy_aa_targets();
             self.destroy_reflection_targets();
@@ -5413,7 +5546,11 @@ impl Drop for Gpu {
                     (self.fns.destroy_query_pool)(self.device, times.pool, std::ptr::null());
                 }
                 if !times.lighting_pool.is_null() {
-                    (self.fns.destroy_query_pool)(self.device, times.lighting_pool, std::ptr::null());
+                    (self.fns.destroy_query_pool)(
+                        self.device,
+                        times.lighting_pool,
+                        std::ptr::null(),
+                    );
                 }
             }
             if !self.compute_pool.is_null() {
@@ -5651,7 +5788,6 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
-include!("reflection_readback.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
@@ -5985,7 +6121,6 @@ mod pass_time_tests {
         assert!((times.frame - (nonlight + 8.0)).abs() < 1e-9);
     }
 }
-
 
 #[cfg(test)]
 mod gpu_times_launch {

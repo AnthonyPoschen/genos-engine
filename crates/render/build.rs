@@ -35,7 +35,7 @@ fn main() {
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
-    let (reflection_frame, reflection_water) = reflection_shaders(&out);
+    let reflection_spv = reflection_shaders(&out);
     // Not embedded: catches errors in pieces no pass includes yet.
     for file in ["lighting_check.comp", "media_check.comp", "reflections_check.comp"] {
         let src = format!("shaders/{file}");
@@ -115,29 +115,32 @@ fn main() {
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         screen.display()
     ));
-    glue_text.push_str(&format!(
-        "pub static REFLECTION_FRAME_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        reflection_frame.display()
-    ));
-    glue_text.push_str(&format!(
-        "pub static REFLECTION_WATER_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        reflection_water.display()
-    ));
+    for (name, path) in &reflection_spv {
+        glue_text.push_str(&format!(
+            "pub static {name}: &[u8] = include_bytes!(\"{}\");\n",
+            path.display()
+        ));
+    }
     std::fs::write(&glue, glue_text).unwrap();
     watch_shaders();
 }
 
-fn reflection_shaders(out: &std::path::Path) -> (PathBuf, PathBuf) {
-    (
-        compile(
-            "shaders/reflections_frame.comp",
-            &out.join("reflections_frame.comp.spv"),
-        ),
-        compile(
-            "shaders/reflections_water.frag",
-            &out.join("reflections_water.frag.spv"),
-        ),
-    )
+fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
+    [
+        ("REFLECTION_FRAME_SPV", "reflections_frame.comp"),
+        ("REFLECTION_WATER_SPV", "reflections_water.frag"),
+        ("REFLECTION_ALBEDO_SPV", "reflections_albedo.frag"),
+        ("REFLECTION_QUAD_SPV", "reflections_quad.vert"),
+        ("REFLECTION_PORTAL_SPV", "reflections_portal.vert"),
+        ("REFLECTION_COMPOSITE_SPV", "reflections_composite.frag"),
+        ("REFLECTION_GGX_SPV", "reflections_ggx.frag"),
+    ]
+    .into_iter()
+    .map(|(name, file)| {
+        let src = format!("shaders/{file}");
+        (name, compile(&src, &out.join(format!("{file}.spv"))))
+    })
+    .collect()
 }
 
 fn watch_shaders() {
@@ -161,6 +164,11 @@ fn watch_shaders() {
         "reflections.glsl",
         "reflections_frame.comp",
         "reflections_water.frag",
+        "reflections_albedo.frag",
+        "reflections_quad.vert",
+        "reflections_portal.vert",
+        "reflections_composite.frag",
+        "reflections_ggx.frag",
         "scene_data.glsl",
         "dither.glsl",
         "transmit.comp",

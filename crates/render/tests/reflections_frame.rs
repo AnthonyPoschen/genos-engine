@@ -1,161 +1,101 @@
-//! The presented frame writes the reflection grade and shades a water quad.
-//!
-//! An empty reflector list does not enter the pass. This scene has a mirror,
-//! a portal, and water, on the Low preset, so the stored ray count is 0.
+//! The presented frame composites the mirror and the portal and counts rays.
 
-#![expect(clippy::as_conversions, reason = "pixel bytes and extents are the API's integers")]
-#![expect(clippy::cast_possible_truncation, reason = "the picture is 1280 by 720")]
-#![expect(clippy::cast_precision_loss, reason = "a pixel coordinate is a small integer")]
-#![expect(clippy::cast_sign_loss, reason = "a pixel coordinate is checked before the cast")]
+#![expect(
+    clippy::as_conversions,
+    reason = "the readback index is a byte offset"
+)]
 #![expect(clippy::expect_used, reason = "a failed fixture aborts the test")]
 #![expect(
-    clippy::redundant_closure_for_method_calls,
-    reason = "the poison handler matches the other frame tests"
+    clippy::print_stderr,
+    reason = "a mismatch prints the sample that failed"
 )]
 
-use genos_math::optics::{self, WATER_IOR};
-use genos_math::Vec3;
-use genos_render::{
-    frame_ray_count, lighting_reflection_preset, read_frame_grade, shade_picture, LightingPreset,
-    LightingSettings,
-    PictureFault, Reflector, ReflectorKind, Renderer, World,
-};
-use genos_scene::{viewport_uv, Camera, Floor, ReflectionSettings, Scene, Vec3 as SceneVec3};
+use genos_math::optics::ReflectionPreset;
+use genos_render::{grade_camera, grade_world, Renderer, GRADE_HEIGHT, GRADE_WIDTH};
 use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
-    let mut window = Window::open_proof(1280, 720).expect("proof window");
+    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut window = Window::open_proof(GRADE_WIDTH, GRADE_HEIGHT).expect("proof window");
     let frame = window.pump();
-    let renderer =
-        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+        .expect("renderer");
     (guard, window, renderer)
 }
 
-fn world(preset: LightingPreset) -> World {
-    let mut world = World::from_scene(Scene {
-        floor: Floor {
-            position: SceneVec3::new(0.0, 0.0, 0.0),
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.6, 0.6, 0.6],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(preset),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: ReflectionSettings::for_preset(match preset {
-            LightingPreset::Potato => genos_math::optics::ReflectionPreset::Potato,
-            LightingPreset::Low => genos_math::optics::ReflectionPreset::Low,
-            LightingPreset::Medium => genos_math::optics::ReflectionPreset::Medium,
-            LightingPreset::DayCycle | LightingPreset::Gi1Bounce | LightingPreset::High => {
-                genos_math::optics::ReflectionPreset::High
-            }
-        }),
-        menu: genos_scene::MenuSettings::default(),
-    });
-    world.reflectors.push(Reflector {
-        kind: ReflectorKind::Mirror,
-        origin: [0.0, 1.0, 0.0],
-        normal: [0.0, 0.0, 1.0],
-        portal_to: [0.0; 3],
-    });
-    world.reflectors.push(Reflector {
-        kind: ReflectorKind::Portal,
-        origin: [2.0, 1.0, 0.0],
-        normal: [1.0, 0.0, 0.0],
-        portal_to: [10.0, 0.0, 0.0],
-    });
-    world.reflectors.push(Reflector {
-        kind: ReflectorKind::Water,
-        origin: [0.0, 1.0, 0.0],
-        normal: [0.0, 1.0, 0.0],
-        portal_to: [0.0; 3],
-    });
-    world
-}
-
-fn camera() -> Camera {
-    let mut camera = Camera::new(0.0, 2.0, 0.0);
-    camera.position = SceneVec3::new(0.0, 3.0, 2.0);
-    camera.pitch = -0.9;
-    camera
+fn sample(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 3] {
+    let index = ((y * width + x) * 4) as usize;
+    [
+        f32::from(pixels[index + 2]) / 255.0,
+        f32::from(pixels[index + 1]) / 255.0,
+        f32::from(pixels[index]) / 255.0,
+    ]
 }
 
 #[test]
-fn the_frame_grades_low_at_zero_rays_and_shades_water() {
+fn the_presented_frame_shows_the_mirror_the_portal_and_the_ray_cap() {
     let (_guard, mut window, mut renderer) = open();
-    let mut scene = world(LightingPreset::Low);
-    let camera = camera();
+    let camera = grade_camera();
+    let scene = grade_world(ReflectionPreset::Medium);
     let _ = window.pump();
     let pixels = renderer
         .draw(&scene, &camera, true)
         .expect("draw")
         .expect("readback");
     let grade = renderer.reflection_grade().expect("grade");
-    assert!(grade.ran, "the composite did not run");
-    let preset = lighting_reflection_preset(LightingPreset::Low);
-    assert_eq!(grade.rays, frame_ray_count(preset));
-    assert_eq!(grade.rays, 0);
-    assert_eq!(grade.views, 1);
-    let cpu = shade_picture(0, PictureFault::default());
-    assert_eq!(grade.color.len(), cpu.color.len());
-    let mut worst = 0.0f32;
-    for (gpu, reference) in grade.color.iter().zip(cpu.color.iter()) {
-        for channel in 0..3 {
-            worst = worst.max((gpu[channel] - reference[channel]).abs());
+    let width = renderer.width();
+    let height = renderer.height();
+    eprintln!(
+        "extent {width}x{height} rays {} views {}",
+        grade.rays, grade.views
+    );
+    for (name, x, y) in [
+        ("water", 40u32, 30u32),
+        ("below", 120, 30),
+        ("mirror", 40, 90),
+        ("portal", 100, 90),
+        ("extra", 140, 90),
+        ("ggx", 2, 2),
+    ] {
+        if x < width && y < height {
+            eprintln!("{name} {:?}", sample(&pixels, width, x, y));
         }
     }
-    assert!(worst < 1.0e-3, "{worst}");
-    let headless = read_frame_grade(preset, 0).expect("headless grade");
-    assert_eq!(headless.rays, grade.rays);
-    assert_eq!(headless.views, grade.views);
-    assert_eq!(headless.color, grade.color);
-
-    let shaded = optics::water_shade(
-        optics::fresnel_dielectric(WATER_IOR, 1.0),
-        Vec3::new(0.72, 0.68, 0.55),
-        Vec3::new(0.08, 0.22, 0.72),
-        0.35,
-        1.0,
+    assert!(grade.ran);
+    assert_eq!(
+        grade.rays, 32_000,
+        "medium must count the rays it dispatched"
     );
-    let aspect = renderer_aspect(&pixels);
-    let uv = viewport_uv(&camera, aspect, [0.0, 1.0, 0.0]).expect("water is on screen");
-    let width = 1280u32;
-    let height = (pixels.len() / 4 / width as usize) as u32;
-    let x = (uv[0] * width as f32).round() as i32;
-    let y = (uv[1] * height as f32).round() as i32;
-    assert!(x >= 0 && y >= 0 && (x as u32) < width && (y as u32) < height);
-    let index = ((y as u32 * width + x as u32) * 4) as usize;
-    let got = [
-        f32::from(pixels[index + 2]) / 255.0,
-        f32::from(pixels[index + 1]) / 255.0,
-        f32::from(pixels[index]) / 255.0,
-    ];
-    for channel in 0..3 {
-        let expect = [shaded.x, shaded.y, shaded.z][channel];
-        assert!((got[channel] - expect).abs() < 0.03, "{got:?} {expect}");
+    assert_eq!(grade.views, 2, "medium keeps the mirror and the portal");
+    let mirror = sample(&pixels, width, 40, 90);
+    assert!(mirror[0] > 0.6, "mirror {mirror:?}");
+    assert!(
+        mirror[0] > mirror[2],
+        "mirror should be the red wall, got {mirror:?}"
+    );
+    let portal = sample(&pixels, width, 100, 90);
+    assert!(
+        portal[2] > portal[0],
+        "portal should be the blue wall, got {portal:?}"
+    );
+    let extra = sample(&pixels, width, 140, 90);
+    assert!(
+        (extra[0] - 0.28).abs() < 0.08 && (extra[2] - 0.34).abs() < 0.08,
+        "refused view keeps the albedo, got {extra:?}"
+    );
+
+    for (preset, rays, views) in [
+        (ReflectionPreset::Potato, 0, 0),
+        (ReflectionPreset::Low, 0, 1),
+        (ReflectionPreset::High, 128_000, 3),
+    ] {
+        let scene = grade_world(preset);
+        let _ = window.pump();
+        renderer.draw(&scene, &camera, true).expect("preset draw");
+        let grade = renderer.reflection_grade().expect("preset grade");
+        eprintln!("{:?} rays {} views {}", preset, grade.rays, grade.views);
+        assert_eq!(grade.rays, rays);
+        assert_eq!(grade.views, views);
     }
-
-    scene.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
-    scene.scene.reflections =
-        ReflectionSettings::for_preset(genos_math::optics::ReflectionPreset::Potato);
-    let _ = window.pump();
-    renderer.draw(&scene, &camera, true).expect("potato draw");
-    let potato = renderer.reflection_grade().expect("potato grade");
-    assert!(potato.ran);
-    assert_eq!(potato.rays, 0);
-    assert_eq!(potato.views, 0);
-}
-
-fn renderer_aspect(pixels: &[u8]) -> f32 {
-    let width = 1280.0f32;
-    let height = (pixels.len() / 4) as f32 / width;
-    width / height
 }

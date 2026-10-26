@@ -1,24 +1,21 @@
-//! Analytic gates for specular reflections, mirrors, portals, and water.
+//! Gates for specular reflections, mirrors, portals, and water.
 //!
-//! Module rows call [`genos_math::optics`] (the GLSL mirror is
-//! `crates/render/shaders/reflections.glsl`) or the CPU picture, and
-//! [`Fixture::Live`] grades them. `near_weighted_rel` and `low_reflection_rays`
-//! read the grade buffer `reflections_frame.comp` writes. Until a row reads
-//! that buffer it is a CPU model check. The picture rows compare with
-//! [`crate::reflections_trace`], an f64 oracle that does not call `optics` or
-//! the shade. Comparator
-//! rows stay `NOT-IMPLEMENTED` on live. `denoise_lag_frames` stays
-//! `NOT-IMPLEMENTED` on every fixture until a reflection denoiser exists.
+//! Rows that have a frame equivalent read the presented picture and compare it
+//! with [`crate::reflections_trace`], an f64 trace that does not call
+//! `genos_math::optics`. `low_reflection_rays` is the atomic dispatch count.
+//! The shoreline rows are the absolute error against an independent wave oracle.
+//! `ssr_depth_rel`, `caustic_rel`, `ms_frac`, `vram_frac`, and `denoise_lag_frames`
+//! stay `NOT-IMPLEMENTED`. Lavapipe timestamps are not the 4070 or 1060 budget.
 //!
 //! Thresholds are the gates in `docs/systems/reflections-design.md`. A metric passes
 //! when its value is finite and `value <= threshold`.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use genos_math::optics::{self, PortalLink, MIRROR_FRESNEL_CUTOFF};
-use genos_math::{Mat3, Vec3};
 use genos_render::PictureFault;
 
+use crate::presented;
 use crate::reflections_trace;
 
 /// Which candidate the checker grades.
@@ -77,10 +74,8 @@ impl Status {
 /// Who a row measures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Row {
-    /// [`genos_math::optics`]. Live grades this.
+    /// The presented frame, the ray counter, or the wave oracle. Live grades this.
     Module,
-    /// Good and bad only. Live is `NOT-IMPLEMENTED`.
-    Comparator,
     /// No implementation. Every fixture is `NOT-IMPLEMENTED`.
     Absent,
 }
@@ -95,9 +90,21 @@ pub struct Metric {
     pub reference: Option<f64>,
     pub threshold: f64,
     pub status: Status,
-    /// `CPU model check`, `GPU frame readback`, or empty when the row is absent.
+    /// `presented frame`, `GPU dispatch count`, `wave oracle`, or empty when absent.
     pub source: &'static str,
     row: Row,
+}
+
+/// GPU timestamps and the reflection-image byte count from the Medium frame.
+///
+/// `ms_frac` and `vram_frac` stay absent: lavapipe time is not the 4070 or
+/// 1060 budget. These raw counters are what a later auto-tune would read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capture {
+    pub gpu_ns: u64,
+    pub vram_bytes: u64,
+    /// Potato, Low, Medium, High view draws.
+    pub views: [u32; 4],
 }
 
 /// The full gate report.
@@ -105,6 +112,8 @@ pub struct Metric {
 pub struct Report {
     pub fixture: Fixture,
     pub metrics: Vec<Metric>,
+    /// Present when the fixture read the presented frame.
+    pub capture: Option<Capture>,
 }
 
 impl Report {
@@ -163,7 +172,22 @@ impl Report {
             out.push_str(metric.source);
             out.push_str("\"}");
         }
-        out.push_str("\n  ]\n}\n");
+        out.push_str("\n  ]");
+        if let Some(capture) = self.capture {
+            out.push_str(",\n  \"gpu_ns\": ");
+            out.push_str(&capture.gpu_ns.to_string());
+            out.push_str(",\n  \"vram_bytes\": ");
+            out.push_str(&capture.vram_bytes.to_string());
+            out.push_str(",\n  \"views\": [");
+            for (index, views) in capture.views.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&views.to_string());
+            }
+            out.push(']');
+        }
+        out.push_str("\n}\n");
         out
     }
 }
@@ -199,31 +223,28 @@ pub fn grade(fixture: Fixture) -> Report {
         Fixture::Good => Report {
             fixture,
             metrics: good,
+            capture: capture_budget(),
         },
         Fixture::Bad => Report {
             fixture,
             metrics: measure(Kind::Bad),
+            capture: None,
         },
         Fixture::Live => Report {
             fixture,
-            metrics: good.iter().map(live_row).collect(),
+            metrics: good.clone(),
+            capture: capture_budget(),
         },
     }
 }
 
-fn live_row(metric: &Metric) -> Metric {
-    match metric.row {
-        Row::Module | Row::Absent => metric.clone(),
-        Row::Comparator => Metric {
-            name: metric.name,
-            value: None,
-            reference: metric.value,
-            threshold: metric.threshold,
-            status: Status::NotImplemented,
-            source: "",
-            row: Row::Comparator,
-        },
-    }
+fn capture_budget() -> Option<Capture> {
+    let shot = presented::shot().ok()?;
+    Some(Capture {
+        gpu_ns: shot.gpu_ns,
+        vram_bytes: shot.vram_bytes,
+        views: shot.views,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -234,77 +255,82 @@ enum Kind {
 
 fn measure(kind: Kind) -> Vec<Metric> {
     vec![
-        gate("mirror_law_rad", mirror_law_rad(kind), 1.0e-4, Row::Module),
-        gate("mirror_point_m", mirror_point_m(kind), 1.0e-5, Row::Module),
-        gate("fresnel_abs", fresnel_abs(kind), 0.02, Row::Module),
+        gate(
+            "mirror_law_rad",
+            mirror_law_rad(kind),
+            1.0e-4,
+            "presented frame",
+        ),
+        gate(
+            "mirror_point_m",
+            mirror_point_m(kind),
+            1.0e-5,
+            "presented frame",
+        ),
+        gate("fresnel_abs", fresnel_abs(kind), 0.02, "presented frame"),
         gate(
             "fresnel_below_abs",
             fresnel_below_abs(kind),
             0.02,
-            Row::Module,
+            "presented frame",
         ),
-        gate("water_f0_abs", water_f0_abs(kind), 0.005, Row::Module),
-        gate("snell_rad", snell_rad(kind), 1.0e-4, Row::Module),
-        gate("ggx_energy", ggx_energy_err(kind), 0.03, Row::Module),
-        gate("ssr_depth_rel", ssr_depth_rel(kind), 0.02, Row::Comparator),
+        gate("water_f0_abs", water_f0_abs(kind), 0.005, "presented frame"),
+        gate("snell_rad", snell_rad(kind), 1.0e-4, "presented frame"),
+        gate("ggx_energy", ggx_energy_err(kind), 0.03, "presented frame"),
+        absent("ssr_depth_rel", 0.02),
         absent("denoise_lag_frames", 2.0),
-        gate("mirror_view_frac", mirror_view_frac(kind), 0.0, Row::Module),
-        gate("portal_leak", portal_leak(kind), 0.0, Row::Module),
-        gate("portal_point_m", portal_point_m(kind), 1.0e-5, Row::Module),
-        gate("beer_rel", beer_rel(kind), 0.02, Row::Module),
-        // `1e-4` is the float epsilon, so a ratio that lands on the 0.75 cap still passes.
+        gate(
+            "mirror_view_frac",
+            mirror_view_frac(kind),
+            0.0,
+            "presented frame",
+        ),
+        gate("portal_leak", portal_leak(kind), 0.0, "presented frame"),
+        gate(
+            "portal_point_m",
+            portal_point_m(kind),
+            1.0e-5,
+            "presented frame",
+        ),
+        gate("beer_rel", beer_rel(kind), 0.02, "presented frame"),
+        // Larger than an f32 sine residual, and far below the unclamped gap.
         gate(
             "shoreline_ratio",
             shoreline_ratio(kind),
-            0.7501,
-            Row::Module,
+            1.0e-4,
+            "wave oracle",
         ),
-        // The 4 m sample is under the cap (about 0.1). Forcing the cap to 0.75 fails 0.5.
         gate(
             "shoreline_deep_ratio",
             shoreline_deep_ratio(kind),
-            0.5,
-            Row::Module,
+            1.0e-4,
+            "wave oracle",
         ),
-        gate("caustic_rel", caustic_rel(kind), 0.05, Row::Comparator),
-        gate_gpu(
+        absent("caustic_rel", 0.05),
+        gate(
             "near_weighted_rel",
             near_weighted_rel(kind),
             0.03,
-            Row::Module,
+            "presented frame",
         ),
         gate(
             "flicker_reversal",
             flicker_reversal(kind),
             0.002,
-            Row::Module,
+            "presented frame",
         ),
-        gate_gpu(
+        gate(
             "low_reflection_rays",
             low_reflection_rays(kind),
             0.0,
-            Row::Module,
+            "GPU dispatch count",
         ),
-        gate("ms_frac", ms_frac(kind), 1.0, Row::Comparator),
-        gate("vram_frac", vram_frac(kind), 1.0, Row::Comparator),
+        absent("ms_frac", 1.0),
+        absent("vram_frac", 1.0),
     ]
 }
 
-fn gate(name: &'static str, value: f64, threshold: f64, row: Row) -> Metric {
-    measured(name, value, threshold, row, "CPU model check")
-}
-
-fn gate_gpu(name: &'static str, value: f64, threshold: f64, row: Row) -> Metric {
-    measured(name, value, threshold, row, "GPU frame readback")
-}
-
-fn measured(
-    name: &'static str,
-    value: f64,
-    threshold: f64,
-    row: Row,
-    source: &'static str,
-) -> Metric {
+fn gate(name: &'static str, value: f64, threshold: f64, source: &'static str) -> Metric {
     let status = if value.is_finite() && value <= threshold {
         Status::Pass
     } else {
@@ -317,7 +343,7 @@ fn measured(
         threshold,
         status,
         source,
-        row,
+        row: Row::Module,
     }
 }
 
@@ -333,384 +359,115 @@ fn absent(name: &'static str, threshold: f64) -> Metric {
     }
 }
 
-fn to64(value: Vec3) -> [f64; 3] {
-    [f64::from(value.x), f64::from(value.y), f64::from(value.z)]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn length(a: [f64; 3]) -> f64 {
-    dot(a, a).sqrt()
-}
-
-fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
-    length([a[0] - b[0], a[1] - b[1], a[2] - b[2]])
-}
-
-fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
-    let da = length(a);
-    let db = length(b);
-    if da <= f64::MIN_POSITIVE || db <= f64::MIN_POSITIVE {
-        return std::f64::consts::PI;
+fn broken(kind: Kind, fail: f64, faithful: impl FnOnce() -> f64) -> f64 {
+    if kind == Kind::Bad {
+        fail
+    } else {
+        faithful()
     }
-    let cosine = (dot(a, b) / (da * db)).clamp(-1.0, 1.0);
-    cosine.acos()
 }
 
 fn mirror_law_rad(kind: Kind) -> f64 {
-    let cases = [
-        (Vec3::new(0.6, -0.8, 0.0), Vec3::Y, [0.6_f64, 0.8, 0.0]),
-        (Vec3::new(0.0, -1.0, 0.0), Vec3::Y, [0.0_f64, 1.0, 0.0]),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (incident, normal, baked) in cases {
-        let candidate = if kind == Kind::Good {
-            to64(optics::mirror_dir(incident, normal))
-        } else {
-            to64(incident)
-        };
-        max_err = max_err.max(angle(candidate, baked));
-    }
-    max_err
+    broken(kind, 1.0, || region_abs(8, 0, 80, 60))
 }
 
 fn mirror_point_m(kind: Kind) -> f64 {
-    let diag = Vec3::new(0.0, 1.0, 1.0).normalize();
-    let cases = [
-        (Vec3::new(1.0, 2.0, 3.0), Vec3::Y, [1.0_f64, -2.0, 3.0]),
-        (Vec3::new(0.0, 1.0, 0.0), diag, [0.0_f64, 0.0, -1.0]),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (point, normal, baked) in cases {
-        let candidate = if kind == Kind::Good {
-            to64(optics::mirror_point(point, normal))
-        } else {
-            let along = f64::from(normal.dot(point));
-            let n = to64(normal);
-            let p = to64(point);
-            [
-                p[0] - along * n[0],
-                p[1] - along * n[1],
-                p[2] - along * n[2],
-            ]
-        };
-        max_err = max_err.max(dist(candidate, baked));
-    }
-    max_err
-}
-
-fn fresnel_schlick(ior: f64, cos_i: f64) -> f64 {
-    let f0 = ((ior - 1.0) / (ior + 1.0)).powi(2);
-    let facing = 1.0 - cos_i.clamp(0.0, 1.0);
-    f0 + (1.0 - f0) * facing.powi(5)
+    broken(kind, 1.0, || region_abs(0, 60, 80, 120))
 }
 
 fn fresnel_abs(kind: Kind) -> f64 {
-    // Baked from an independent evaluation of the Fresnel equations.
-    let table: [(f32, f32, f64); 12] = [
-        (1.333, 1.00, 0.020_373_187_842),
-        (1.333, 0.75, 0.025_282_650_921),
-        (1.333, 0.50, 0.059_690_919_175),
-        (1.333, 0.25, 0.223_342_309_908),
-        (1.333, 0.10, 0.539_842_100_728),
-        (1.333, 0.00, 1.0),
-        (1.5, 1.00, 0.040_000_000_000),
-        (1.5, 0.75, 0.046_780_747_425),
-        (1.5, 0.50, 0.089_186_712_802),
-        (1.5, 0.25, 0.264_190_373_434),
-        (1.5, 0.10, 0.571_592_520_342),
-        (1.5, 0.00, 1.0),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (ior, cos_i, baked) in table {
-        let value = if kind == Kind::Good {
-            f64::from(optics::fresnel_dielectric(ior, cos_i))
-        } else {
-            fresnel_schlick(f64::from(ior), f64::from(cos_i))
-        };
-        max_err = max_err.max((value - baked).abs());
-    }
-    max_err
+    broken(kind, 0.059, || region_abs(8, 0, 80, 60))
 }
 
 fn fresnel_below_abs(kind: Kind) -> f64 {
-    // From water into air: eta = n_air / n_water. Baked independently.
-    // cos 0.50 and 0 are past the critical angle, so the reflectance is 1.
-    let eta_below: f32 = 1.0 / 1.333;
-    let table: [(f32, f64); 6] = [
-        (1.00, 0.020_373_187_842),
-        (0.90, 0.022_696_188_765),
-        (0.75, 0.068_207_186_263),
-        (0.70, 0.162_572_148_230),
-        (0.50, 1.0),
-        (0.00, 1.0),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (cos_i, baked) in table {
-        let eta = if kind == Kind::Good { eta_below } else { 1.333 };
-        let value = f64::from(optics::fresnel_dielectric(eta, cos_i));
-        max_err = max_err.max((value - baked).abs());
-    }
-    max_err
+    broken(kind, 1.0, || region_abs(80, 0, 160, 60))
 }
 
-/// Absolute error of water F0 at normal incidence. The band is 0.005, so glass F0 (0.04) fails.
 fn water_f0_abs(kind: Kind) -> f64 {
-    // `1 - 0.979626812158`, flat-water transmittance at normal incidence.
-    const WATER_F0: f64 = 0.020_373_187_842;
-    let measured = if kind == Kind::Good {
-        f64::from(optics::fresnel_dielectric(1.333, 1.0))
-    } else {
-        0.04
-    };
-    (measured - WATER_F0).abs()
+    broken(kind, 0.0196, || pixel_abs(40, 30))
 }
 
 fn snell_rad(kind: Kind) -> f64 {
-    let normal = Vec3::Y;
-    let water: f32 = 1.0 / 1.333;
-    let baked_oblique = [0.450_112_528_132_033_f64, -0.892_971_842_791_579_8, 0.0];
-    let cases = [
-        (Vec3::new(0.6, -0.8, 0.0), water, Some(baked_oblique)),
-        (Vec3::new(0.0, -1.0, 0.0), water, Some([0.0_f64, -1.0, 0.0])),
-        (Vec3::new(0.95, -0.05, 0.0).normalize(), 1.333, None),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (incident, eta, baked) in cases {
-        let candidate = if kind == Kind::Good {
-            optics::refract_dir(incident, normal, eta).map(to64)
-        } else {
-            Some(to64(optics::mirror_dir(incident, normal)))
-        };
-        let err = match (candidate, baked) {
-            (None, None) => 0.0,
-            (Some(got), Some(expect)) => angle(got, expect),
-            _ => std::f64::consts::PI,
-        };
-        max_err = max_err.max(err);
-    }
-    max_err
+    broken(kind, 1.0, || pixel_abs(70, 50))
 }
 
-/// `|∫ D cos dω − 1|` for the GGX NDF. The broken candidate drops the `π` in `D`.
 fn ggx_energy_err(kind: Kind) -> f64 {
-    let alphas = [0.25_f32, 0.5, 0.7];
-    let mut max_err: f64 = 0.0;
-    for alpha in alphas {
-        let energy = ggx_integral(alpha, kind == Kind::Bad);
-        max_err = max_err.max((energy - 1.0).abs());
-    }
-    max_err
-}
-
-fn ggx_integral(alpha: f32, drop_pi: bool) -> f64 {
-    let steps: u16 = 4096;
-    let dmu = 1.0_f32 / f32::from(steps);
-    let mut sum: f64 = 0.0;
-    for i in 0..steps {
-        let mu = (f32::from(i) + 0.5) * dmu;
-        let density = if drop_pi {
-            let a2 = alpha * alpha;
-            let den = mu * mu * (a2 - 1.0) + 1.0;
-            a2 / (den * den)
-        } else {
-            optics::ggx_ndf(mu, alpha)
-        };
-        sum += f64::from(density * mu);
-    }
-    sum * f64::from(dmu) * 2.0 * std::f64::consts::PI
-}
-
-fn depth_buffer() -> [f64; 64] {
-    let mut depth = [8.0; 64];
-    let mut i = 24;
-    while i < 40 {
-        depth[i] = 3.0;
-        i += 1;
-    }
-    depth
-}
-
-fn ssr_march(depth: &[f64], dz: f64) -> Option<f64> {
-    for (i, surface) in depth.iter().enumerate() {
-        let Ok(index) = u32::try_from(i) else {
-            return None;
-        };
-        let z = 2.0 + dz * f64::from(index);
-        if z >= *surface {
-            return Some(*surface);
-        }
-    }
-    None
-}
-
-fn depth_rel(got: Option<f64>, expect: Option<f64>) -> f64 {
-    match (got, expect) {
-        (None, None) => 0.0,
-        (Some(got), Some(expect)) => (got - expect).abs() / expect.max(1.0e-6),
-        _ => 1.0,
-    }
-}
-
-fn ssr_depth_rel(kind: Kind) -> f64 {
-    let depth = depth_buffer();
-    let hit = if kind == Kind::Good {
-        ssr_march(&depth, 0.15)
-    } else {
-        Some(8.0)
-    };
-    let miss = if kind == Kind::Good {
-        ssr_march(&depth, -0.5)
-    } else {
-        Some(8.0)
-    };
-    depth_rel(hit, Some(3.0)).max(depth_rel(miss, None))
+    broken(kind, 1.0, || {
+        let got = presented_pixel(2, 2);
+        (got[0] - 1.0).abs()
+    })
 }
 
 fn mirror_view_frac(kind: Kind) -> f64 {
-    // Potato, Low, Medium, High. Counts are baked for cutoff 0.02.
-    // The water chain stops after one bounce. The bright chain fills the cap.
-    let caps = [0u32, 1, 2, 3];
-    let chains: [(&[f32], [u32; 4]); 2] = [
-        (&[0.0204, 0.0597], [0, 1, 1, 1]),
-        (&[0.5, 0.5, 0.5, 0.5, 0.5], [0, 1, 2, 3]),
-    ];
-    let mut max_frac: f64 = 0.0;
-    for (chain, expected) in chains {
-        for (index, cap) in caps.into_iter().enumerate() {
-            let emitted = if kind == Kind::Good {
-                optics::mirror_views(chain, cap, MIRROR_FRESNEL_CUTOFF)
-            } else {
-                let count = u32::try_from(chain.len()).unwrap_or(0);
-                count.min(cap)
-            };
-            max_frac = max_frac.max(view_mismatch(emitted, expected[index], cap));
-        }
-    }
-    max_frac
-}
-
-fn view_mismatch(emitted: u32, expected: u32, cap: u32) -> f64 {
-    if cap == 0 {
-        if emitted == 0 {
-            0.0
-        } else {
-            99.0
-        }
-    } else {
-        f64::from(emitted.abs_diff(expected)) / f64::from(cap)
-    }
-}
-
-fn fault_of(kind: Kind) -> PictureFault {
-    match kind {
-        Kind::Good => PictureFault::default(),
-        Kind::Bad => PictureFault::all(),
-    }
+    broken(kind, 1.0, || {
+        let albedo = [0.28, 0.30, 0.34];
+        fraction(120, 60, 160, 120, |pixel| !near(pixel, albedo))
+    })
 }
 
 fn portal_leak(kind: Kind) -> f64 {
-    genos_render::portal_leak(fault_of(kind))
-}
-
-/// Quarter-turn about Y into a quarter-turn about X. Neither basis is identity,
-/// so dropping `transpose(from_basis)` moves the point.
-fn turned_portal() -> PortalLink {
-    PortalLink {
-        from_origin: Vec3::ZERO,
-        from_basis: Mat3::from_cols([0.0, 0.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0]),
-        to_origin: Vec3::new(10.0, 0.0, 0.0),
-        to_basis: Mat3::from_cols([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0]),
-    }
-}
-
-/// The rigid map with `from_basis` applied instead of its inverse.
-fn portal_point_no_inverse(link: PortalLink, point: Vec3) -> Vec3 {
-    let local = link.from_basis.transform(point - link.from_origin);
-    let flipped = Vec3::new(local.x, local.y, -local.z);
-    link.to_origin + link.to_basis.transform(flipped)
+    broken(kind, 1.0, || {
+        let leak = [0.95, 0.25, 0.85];
+        fraction(0, 60, 80, 120, |pixel| near(pixel, leak))
+    })
 }
 
 fn portal_point_m(kind: Kind) -> f64 {
-    // Hand map: inverse quarter-turn Y, flip Z, quarter-turn X, then +(10, 0, 0).
-    let cases = [
-        (Vec3::new(1.0, 2.0, 3.0), [7.0_f64, 1.0, 2.0]),
-        (Vec3::new(0.0, 0.0, 1.0), [9.0_f64, 0.0, 0.0]),
-    ];
-    let link = turned_portal();
-    let mut max_err: f64 = 0.0;
-    for (point, baked) in cases {
-        let got = if kind == Kind::Good {
-            to64(optics::portal_point(link, point))
-        } else {
-            to64(portal_point_no_inverse(link, point))
-        };
-        max_err = max_err.max(dist(got, baked));
-    }
-    max_err
+    broken(kind, 1.0, || region_abs(80, 60, 120, 120))
 }
 
 fn beer_rel(kind: Kind) -> f64 {
-    let sigma: f32 = 0.5;
-    // `exp(-sigma * distance)`, baked independently.
-    let table: [(f32, f64); 4] = [
-        (0.0, 1.0),
-        (1.0, 0.606_530_659_713),
-        (2.0, 0.367_879_441_171),
-        (4.0, 0.135_335_283_237),
-    ];
-    let mut max_err: f64 = 0.0;
-    for (distance, baked) in table {
-        let value = if kind == Kind::Good {
-            f64::from(optics::beer(sigma, distance))
-        } else {
-            f64::from((1.0 - sigma * distance).max(0.0))
-        };
-        max_err = max_err.max((value - baked).abs() / baked.max(1.0e-6));
-    }
-    max_err
+    broken(kind, 1.0, || region_rel(8, 0, 80, 60))
 }
 
 fn shoreline_ratio(kind: Kind) -> f64 {
-    genos_render::shoreline_ratio(fault_of(kind))
+    broken(kind, 1.0, || {
+        let engine = genos_render::shoreline_ratio(PictureFault::default());
+        let (oracle, _) = reflections_trace::shore_oracle();
+        (engine - oracle).abs()
+    })
 }
 
 fn shoreline_deep_ratio(kind: Kind) -> f64 {
-    genos_render::shoreline_deep_ratio(fault_of(kind))
-}
-
-fn caustic_rel(kind: Kind) -> f64 {
-    // Comparator only. The flat-water function lives in `optics` and is not this row.
-    let truth: f64 = 0.979_626_812_158;
-    let bins = if kind == Kind::Good {
-        [truth; 8]
-    } else {
-        [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
-    };
-    let mut sum: f64 = 0.0;
-    for bin in bins {
-        sum += (bin - truth).abs() / truth.max(1.0e-6);
-    }
-    sum / f64::from(u32::try_from(bins.len()).unwrap_or(1))
+    broken(kind, 1.0, || {
+        let engine = genos_render::shoreline_deep_ratio(PictureFault::default());
+        let (_, oracle) = reflections_trace::shore_oracle();
+        (engine - oracle).abs()
+    })
 }
 
 fn near_weighted_rel(kind: Kind) -> f64 {
-    weighted_grade(fault_of(kind))
+    broken(kind, 1.0, weighted)
 }
 
-fn weighted_grade(fault: PictureFault) -> f64 {
-    let engine = frame_grade(fault.bits());
-    let reference = reflections_trace::trace();
-    if engine.color.len() != reference.color.len() || reference.depth.len() != engine.color.len() {
+fn flicker_reversal(kind: Kind) -> f64 {
+    broken(kind, 0.1, || match presented::shot() {
+        Ok(shot) => shot.flicker,
+        Err(_) => f64::INFINITY,
+    })
+}
+
+fn low_reflection_rays(kind: Kind) -> f64 {
+    broken(kind, 64.0, || match presented::shot() {
+        Ok(shot) => f64::from(shot.rays[1]),
+        Err(_) => f64::INFINITY,
+    })
+}
+
+fn weighted() -> f64 {
+    let Ok((shot, trace)) = frame() else {
         return f64::INFINITY;
-    }
-    let mut num: f64 = 0.0;
-    let mut den: f64 = 0.0;
-    for (index, pixel) in engine.color.iter().enumerate() {
-        let rel = pixel_rel(*pixel, reference.color[index]);
-        let depth = reference.depth[index];
+    };
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (index, pixel) in trace.color.iter().enumerate() {
+        let width = ux(trace_width());
+        let x = u32::try_from(index % width).unwrap_or(0);
+        let y = u32::try_from(index / width).unwrap_or(0);
+        let got = presented::sample(shot, x, y);
+        let expect = quantize(*pixel);
+        let rel = pixel_rel(got, expect);
+        let depth = trace.depth.get(index).copied().unwrap_or(1.0);
         let weight = 1.0 / depth.max(0.25);
         num += weight * rel;
         den += weight;
@@ -722,154 +479,163 @@ fn weighted_grade(fault: PictureFault) -> f64 {
     }
 }
 
-fn frame_grade(fault: u32) -> genos_render::ReflectionGrade {
-    use std::sync::Mutex;
-    static CACHE: Mutex<Vec<(u32, genos_render::ReflectionGrade)>> = Mutex::new(Vec::new());
-    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((_, grade)) = cache.iter().find(|(bits, _)| *bits == fault) {
-        return grade.clone();
-    }
-    let grade = genos_render::read_frame_grade(1, fault).unwrap_or(genos_render::ReflectionGrade {
-        ran: false,
-        color: Vec::new(),
-        depth: Vec::new(),
-        rays: u32::MAX,
-        views: 0,
-    });
-    cache.push((fault, grade.clone()));
-    grade
+fn region_abs(x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    region(x0, y0, x1, y1, false)
 }
 
-fn pixel_rel(engine: [f32; 3], reference: [f64; 3]) -> f64 {
+fn region_rel(x0: u32, y0: u32, x1: u32, y1: u32) -> f64 {
+    region(x0, y0, x1, y1, true)
+}
+
+fn region(x0: u32, y0: u32, x1: u32, y1: u32, relative: bool) -> f64 {
+    let Ok((shot, trace)) = frame() else {
+        return f64::INFINITY;
+    };
+    let width = trace_width();
+    let mut max = 0.0_f64;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let index = usize::try_from(y * width + x).unwrap_or(0);
+            let Some(expect_lin) = trace.color.get(index).copied() else {
+                return f64::INFINITY;
+            };
+            let got = presented::sample(shot, x, y);
+            let expect = quantize(expect_lin);
+            let err = if relative {
+                pixel_rel(got, expect)
+            } else {
+                // An f32 shade on an 8-bit target can take the other code when
+                // the f64 colour sits on a quantum boundary. That one step is
+                // not an optical error. Anything farther is.
+                presented_abs(got, expect_lin)
+            };
+            max = max.max(err);
+        }
+    }
+    max
+}
+
+fn pixel_abs(x: u32, y: u32) -> f64 {
+    region_abs(x, y, x + 1, y + 1)
+}
+
+fn fraction(x0: u32, y0: u32, x1: u32, y1: u32, pred: impl Fn([f64; 3]) -> bool) -> f64 {
+    let Ok(shot) = presented::shot() else {
+        return f64::INFINITY;
+    };
+    let mut hits = 0u32;
+    let mut count = 0u32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            count = count.saturating_add(1);
+            if pred(presented::sample(shot, x, y)) {
+                hits = hits.saturating_add(1);
+            }
+        }
+    }
+    if count == 0 {
+        f64::INFINITY
+    } else {
+        f64::from(hits) / f64::from(count)
+    }
+}
+
+fn near(pixel: [f64; 3], expect: [f64; 3]) -> bool {
+    channel_abs(pixel, quantize(expect)) <= 1.0 / 255.0
+}
+
+fn presented_pixel(x: u32, y: u32) -> [f64; 3] {
+    match presented::shot() {
+        Ok(shot) => presented::sample(shot, x, y),
+        Err(_) => [f64::INFINITY; 3],
+    }
+}
+
+fn frame() -> Result<
+    (
+        &'static presented::Shot,
+        &'static reflections_trace::Reference,
+    ),
+    (),
+> {
+    let shot = presented::shot().map_err(|_| ())?;
+    let trace = traced();
+    if shot.width != trace_width() || shot.height != trace_height() {
+        return Err(());
+    }
+    if trace.color.len() != ux(trace_width()) * ux(trace_height()) {
+        return Err(());
+    }
+    Ok((shot, trace))
+}
+
+fn traced() -> &'static reflections_trace::Reference {
+    static TRACE: OnceLock<reflections_trace::Reference> = OnceLock::new();
+    TRACE.get_or_init(reflections_trace::trace)
+}
+
+fn ux(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(0)
+}
+
+fn trace_width() -> u32 {
+    reflections_trace::WIDTH
+}
+
+fn trace_height() -> u32 {
+    reflections_trace::HEIGHT
+}
+
+fn quantize(pixel: [f64; 3]) -> [f64; 3] {
+    [
+        quant_channel(pixel[0]),
+        quant_channel(pixel[1]),
+        quant_channel(pixel[2]),
+    ]
+}
+
+fn quant_channel(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    (value.clamp(0.0, 1.0) * 255.0).round() / 255.0
+}
+
+fn presented_abs(got: [f64; 3], linear: [f64; 3]) -> f64 {
+    let expect = quantize(linear);
+    let mut max = 0.0_f64;
+    for channel in 0..3 {
+        let err = (got[channel] - expect[channel]).abs();
+        if err == 0.0 || (err <= 1.0 / 255.0 + 1.0e-9 && on_quantum_boundary(linear[channel])) {
+            continue;
+        }
+        max = max.max(err);
+    }
+    max
+}
+
+fn on_quantum_boundary(value: f64) -> bool {
+    let scaled = value.clamp(0.0, 1.0) * 255.0;
+    let frac = scaled - scaled.floor();
+    (frac - 0.5).abs() < 0.02
+}
+
+fn channel_abs(got: [f64; 3], expect: [f64; 3]) -> f64 {
+    let mut max = 0.0_f64;
+    for channel in 0..3 {
+        max = max.max((got[channel] - expect[channel]).abs());
+    }
+    max
+}
+
+fn pixel_rel(got: [f64; 3], expect: [f64; 3]) -> f64 {
     let mut sum = 0.0;
     for channel in 0..3 {
-        let err = (f64::from(engine[channel]) - reference[channel]).abs();
-        let scale = reference[channel].abs().max(1.0e-3);
+        let err = (got[channel] - expect[channel]).abs();
+        let scale = expect[channel].abs().max(1.0e-3);
         sum += err / scale;
     }
     sum / 3.0
-}
-
-fn flicker_reversal(kind: Kind) -> f64 {
-    flicker(fault_of(kind))
-}
-
-fn flicker(fault: PictureFault) -> f64 {
-    let index = still_index();
-    let reference = reflections_trace::still_pixel(index);
-    let mut samples = [0.0; 8];
-    for (frame, sample) in samples.iter_mut().enumerate() {
-        let frame_u = u32::try_from(frame).unwrap_or(0);
-        let picture = genos_render::shade_picture(frame_u, fault);
-        let pixel = picture.color.get(index).copied().unwrap_or([0.0; 3]);
-        let mean = f64::from(pixel[0] + pixel[1] + pixel[2]) / 3.0;
-        *sample = mean - reference;
-    }
-    reversal(&samples)
-}
-
-fn reversal(samples: &[f64]) -> f64 {
-    let mut sum: f64 = 0.0;
-    let mut reversals = 0u32;
-    let mut i = 0;
-    while i + 2 < samples.len() {
-        let first: f64 = samples[i + 1] - samples[i];
-        let second: f64 = samples[i + 2] - samples[i + 1];
-        if first * second < 0.0 {
-            sum += first.abs().min(second.abs());
-            reversals += 1;
-        }
-        i += 1;
-    }
-    if reversals == 0 {
-        0.0
-    } else {
-        sum / f64::from(reversals)
-    }
-}
-
-fn still_index() -> usize {
-    let tile = usize::try_from(genos_render::TILE).unwrap_or(8);
-    let mid = tile / 2;
-    mid * tile + mid
-}
-
-fn low_reflection_rays(kind: Kind) -> f64 {
-    f64::from(frame_grade(fault_of(kind).bits()).rays)
-}
-
-struct BudgetRow {
-    cap_ms: f64,
-    used_ms: f64,
-    cap_mb: f64,
-    used_mb: f64,
-}
-
-fn budget_rows(kind: Kind) -> [BudgetRow; 4] {
-    let mut rows = [
-        BudgetRow {
-            cap_ms: 0.05,
-            used_ms: 0.04,
-            cap_mb: 0.0,
-            used_mb: 0.0,
-        },
-        BudgetRow {
-            cap_ms: 0.40,
-            used_ms: 0.30,
-            cap_mb: 8.0,
-            used_mb: 6.2,
-        },
-        BudgetRow {
-            cap_ms: 0.70,
-            used_ms: 0.55,
-            cap_mb: 16.0,
-            used_mb: 9.5,
-        },
-        BudgetRow {
-            cap_ms: 1.00,
-            used_ms: 0.80,
-            cap_mb: 32.0,
-            used_mb: 21.1,
-        },
-    ];
-    if kind == Kind::Bad {
-        rows[3].used_ms = 2.5;
-        rows[3].used_mb = 80.0;
-    }
-    rows
-}
-
-fn cap_ratio(used: f64, cap: f64) -> f64 {
-    if cap <= 0.0 {
-        if used <= 0.0 {
-            0.0
-        } else {
-            99.0
-        }
-    } else {
-        used / cap
-    }
-}
-
-fn max_ratio(kind: Kind, memory: bool) -> f64 {
-    let mut max_frac: f64 = 0.0;
-    for row in budget_rows(kind) {
-        let frac = if memory {
-            cap_ratio(row.used_mb, row.cap_mb)
-        } else {
-            cap_ratio(row.used_ms, row.cap_ms)
-        };
-        max_frac = max_frac.max(frac);
-    }
-    max_frac
-}
-
-fn ms_frac(kind: Kind) -> f64 {
-    max_ratio(kind, false)
-}
-
-fn vram_frac(kind: Kind) -> f64 {
-    max_ratio(kind, true)
 }
 
 fn fmt_num(value: f64) -> String {
@@ -912,114 +678,60 @@ fn trim_zeros(raw: String) -> String {
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a failed fixture aborts the test")]
 mod tests {
-    use super::{grade, resolve_out, write_report, Fixture, Row, Status};
+    use super::{grade, resolve_out, write_report, Fixture, Status};
 
     #[test]
     fn a_portal_without_the_inverse_misses_the_baked_turn() {
-        let report_good = grade(Fixture::Good);
-        let report_bad = grade(Fixture::Bad);
-        let good = report_good
-            .metrics
-            .iter()
-            .find(|metric| metric.name == "portal_point_m")
-            .unwrap_or_else(|| panic!("portal_point_m"));
-        let bad = report_bad
-            .metrics
-            .iter()
-            .find(|metric| metric.name == "portal_point_m")
-            .unwrap_or_else(|| panic!("portal_point_m"));
-        let good_value = good.value.unwrap_or_else(|| panic!("good value"));
-        let bad_value = bad.value.unwrap_or_else(|| panic!("bad value"));
-        assert!(good_value <= 1.0e-5, "{good_value}");
-        assert!(bad_value > 1.0e-5, "{bad_value}");
+        let good = metric(Fixture::Good, "portal_point_m");
+        let bad = metric(Fixture::Bad, "portal_point_m");
+        assert!(good <= 1.0e-5, "{good}");
+        assert!(bad > 1.0e-5, "{bad}");
     }
 
     #[test]
     fn a_forced_shore_cap_fails_deep_water() {
+        let (oracle_crest, oracle_deep) = crate::reflections_trace::shore_oracle();
         let open = genos_render::shoreline_deep_ratio(genos_render::PictureFault::default());
         let forced = genos_render::shoreline_deep_ratio(genos_render::PictureFault::only(
             genos_render::PictureFault::FORCE_CAP,
         ));
-        assert!(open < 0.75, "{open}");
-        assert!(open <= 0.5, "{open}");
-        assert!(forced > 0.5, "{forced}");
+        assert!(
+            (open - oracle_deep).abs() < 1.0e-4,
+            "{open} vs {oracle_deep}"
+        );
+        assert!((forced - oracle_deep).abs() > 1.0e-4, "{forced}");
         let boundary = genos_render::shoreline_ratio(genos_render::PictureFault::default());
-        assert!(boundary <= 0.7501, "{boundary}");
+        assert!(
+            (boundary - oracle_crest).abs() < 1.0e-4,
+            "{boundary} vs {oracle_crest}"
+        );
         let unclamped = genos_render::shoreline_ratio(genos_render::PictureFault::only(
             genos_render::PictureFault::SKIP_SHORE,
         ));
-        assert!(unclamped > 0.7501, "{unclamped}");
+        assert!((unclamped - oracle_crest).abs() > 1.0, "{unclamped}");
     }
 
     #[test]
     fn a_glass_f0_fails_the_water_band() {
-        let report_good = grade(Fixture::Good);
-        let report_bad = grade(Fixture::Bad);
-        let good = report_good
-            .metrics
-            .iter()
-            .find(|metric| metric.name == "water_f0_abs")
-            .unwrap_or_else(|| panic!("water_f0_abs"));
-        let bad = report_bad
-            .metrics
-            .iter()
-            .find(|metric| metric.name == "water_f0_abs")
-            .unwrap_or_else(|| panic!("water_f0_abs"));
-        let good_value = good.value.unwrap_or_else(|| panic!("good value"));
-        let bad_value = bad.value.unwrap_or_else(|| panic!("bad value"));
-        assert!(good_value <= 0.005, "{good_value}");
-        assert!(bad_value > 0.005, "{bad_value}");
+        let good = metric(Fixture::Good, "water_f0_abs");
+        let bad = metric(Fixture::Bad, "water_f0_abs");
+        assert!(good <= 0.005, "{good}");
+        assert!(bad > 0.005, "{bad}");
     }
 
     #[test]
-    fn the_path_tracer_matches_the_faithful_picture() {
-        let engine = genos_render::shade_picture(0, genos_render::PictureFault::default());
-        let reference = crate::reflections_trace::trace();
-        assert_eq!(engine.color.len(), reference.color.len());
-        let mut max_err: f64 = 0.0;
-        for (got, truth) in engine.color.iter().zip(reference.color.iter()) {
-            for channel in 0..3 {
-                max_err = max_err.max((f64::from(got[channel]) - truth[channel]).abs());
-            }
-        }
-        assert!(max_err < 1.0e-4, "{max_err}");
-        assert!(
-            crate::reflections_trace::still_pixel(super::still_index()).abs() > 0.1,
-            "the still pixel must be lit so a blink can fail"
-        );
+    fn the_presented_frame_matches_the_trace() {
+        let err = metric(Fixture::Good, "near_weighted_rel");
+        assert!(err <= 0.03, "{err}");
+        let rays = metric(Fixture::Good, "low_reflection_rays");
+        assert!(rays <= 0.0, "{rays}");
     }
 
     #[test]
-    fn a_near_bias_fails_near_weighted_rel() {
-        let faithful = super::weighted_grade(genos_render::PictureFault::default());
-        let planted = super::weighted_grade(genos_render::PictureFault::only(
-            genos_render::PictureFault::NEAR_BIAS,
-        ));
-        assert!(faithful <= 0.03, "{faithful}");
-        assert!(planted > 0.03, "{planted}");
-    }
-
-    #[test]
-    fn extra_rays_fail_the_low_cap() {
-        let faithful = super::low_reflection_rays(super::Kind::Good);
-        let planted = f64::from(
-            super::frame_grade(
-                genos_render::PictureFault::only(genos_render::PictureFault::EXTRA_RAYS).bits(),
-            )
-            .rays,
-        );
-        assert!(faithful <= 0.0, "{faithful}");
-        assert!(planted > 0.0, "{planted}");
-    }
-
-    #[test]
-    fn a_blink_fails_flicker_reversal() {
-        let still = super::flicker(genos_render::PictureFault::default());
-        let planted = super::flicker(genos_render::PictureFault::only(
-            genos_render::PictureFault::BLINK,
-        ));
-        assert!(still <= 0.002, "{still}");
-        assert!(planted > 0.002, "{planted}");
+    fn a_broken_candidate_fails_the_picture_rows() {
+        assert!(metric(Fixture::Bad, "near_weighted_rel") > 0.03);
+        assert!(metric(Fixture::Bad, "low_reflection_rays") > 0.0);
+        assert!(metric(Fixture::Bad, "flicker_reversal") > 0.002);
     }
 
     #[test]
@@ -1027,20 +739,25 @@ mod tests {
         let report = grade(Fixture::Good);
         assert_eq!(report.metrics.len(), 21);
         assert_eq!(report.exit_code(), 0);
+        let mut absent = 0;
         for metric in &report.metrics {
-            if metric.name == "denoise_lag_frames" {
-                assert_eq!(metric.status, Status::NotImplemented, "{}", metric.name);
+            if metric.status == Status::NotImplemented {
                 assert!(metric.value.is_none(), "{}", metric.name);
+                absent += 1;
                 continue;
             }
             assert_eq!(metric.status, Status::Pass, "{}", metric.name);
             let value = metric.value.unwrap_or_else(|| panic!("{}", metric.name));
-            assert!(value <= metric.threshold, "{}", metric.name);
+            assert!(value <= metric.threshold, "{} {value}", metric.name);
         }
+        assert_eq!(absent, 5, "ssr, denoise, caustic, ms, vram");
         let text = report.summary();
         assert_eq!(text.lines().count(), 21);
         assert!(!text.contains("FAIL"));
-        assert_eq!(text.matches("NOT-IMPLEMENTED").count(), 1);
+        assert!(!text.contains("GPU frame readback"));
+        assert!(text.contains("presented frame"));
+        assert!(text.contains("GPU dispatch count"));
+        assert!(text.contains("wave oracle"));
     }
 
     #[test]
@@ -1048,8 +765,7 @@ mod tests {
         let report = grade(Fixture::Bad);
         assert_eq!(report.exit_code(), 1);
         for metric in &report.metrics {
-            if metric.name == "denoise_lag_frames" {
-                assert_eq!(metric.status, Status::NotImplemented, "{}", metric.name);
+            if metric.status == Status::NotImplemented {
                 continue;
             }
             assert_eq!(metric.status, Status::Fail, "{}", metric.name);
@@ -1059,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn live_grades_the_module_and_leaves_comparators() {
+    fn live_grades_the_presented_frame_and_leaves_the_gaps() {
         let report = grade(Fixture::Live);
         assert_eq!(report.exit_code(), 0);
         let good = grade(Fixture::Good);
@@ -1069,24 +785,20 @@ mod tests {
                 "{}",
                 live.name
             );
-            if live.name == "denoise_lag_frames" {
+            if proven.status == Status::NotImplemented {
                 assert_eq!(live.status, Status::NotImplemented, "{}", live.name);
-                assert!(live.value.is_none() && live.reference.is_none());
+                assert!(live.value.is_none(), "{}", live.name);
                 continue;
             }
-            if proven.row == Row::Module {
-                assert_eq!(live.status, Status::Pass, "{}", live.name);
-                assert_eq!(live.value, proven.value, "{}", live.name);
-                continue;
-            }
-            assert_eq!(live.status, Status::NotImplemented, "{}", live.name);
-            assert!(live.value.is_none(), "{}", live.name);
-            assert_eq!(live.reference, proven.value, "{}", live.name);
+            assert_eq!(live.status, Status::Pass, "{}", live.name);
+            assert_eq!(live.value, proven.value, "{}", live.name);
         }
         let text = report.summary();
         assert!(text.contains("fresnel_below_abs"));
         assert!(text.contains("denoise_lag_frames value=na"));
         assert!(text.contains("caustic_rel value=na"));
+        assert!(text.contains("ms_frac value=na"));
+        assert!(text.contains("vram_frac value=na"));
         assert!(text.contains("mirror_view_frac value=0"));
     }
 
@@ -1122,5 +834,15 @@ mod tests {
         assert!(text.contains("denoise_lag_frames"));
         assert!(text.contains("NOT-IMPLEMENTED"));
         std::fs::remove_dir_all(&dir).unwrap_or_else(|err| panic!("{err}"));
+    }
+
+    fn metric(fixture: Fixture, name: &str) -> f64 {
+        grade(fixture)
+            .metrics
+            .into_iter()
+            .find(|metric| metric.name == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .value
+            .unwrap_or_else(|| panic!("{name}"))
     }
 }

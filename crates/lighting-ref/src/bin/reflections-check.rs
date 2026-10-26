@@ -113,9 +113,10 @@ fn env_mirror() -> Option<String> {
 const HELP: &str = "\
 reflections-check — analytic gates for specular reflections, mirrors, portals, and water.
 
-The default fixture is live. Rows backed by genos-math optics are graded.
-Comparator rows and denoise_lag_frames are NOT-IMPLEMENTED. good grades a
-known-good candidate. bad grades a deliberately broken candidate and exits 1.
+The default fixture is live. Implemented rows read the presented frame, the
+ray dispatch counter, or the wave oracle. ssr_depth_rel, denoise_lag_frames,
+caustic_rel, ms_frac, and vram_frac are NOT-IMPLEMENTED. good grades the
+engine frame. bad grades a deliberately broken candidate and exits 1.
 
   --fixture live|good|bad   candidate to grade (default live)
   --case live|good|bad      alias of --fixture
