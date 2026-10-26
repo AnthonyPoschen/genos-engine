@@ -11,7 +11,7 @@ use genos_fog_check::{
 fn analytic_good_passes() {
     let report = evaluate(Suite::Analytic, Fixture::Good);
     assert_eq!(exit_code(&report), 0, "{}", format_lines(&report));
-    assert_eq!(report.metrics.len(), 5);
+    assert_eq!(report.metrics.len(), 7);
     for metric in &report.metrics {
         assert_eq!(metric.status, Status::Pass, "{metric:?}");
         assert!(metric.value.is_some(), "{}", metric.name);
@@ -22,7 +22,7 @@ fn analytic_good_passes() {
 fn analytic_broken_fails_each_metric() {
     let report = evaluate(Suite::Analytic, Fixture::Broken);
     assert_eq!(exit_code(&report), 1, "{}", format_lines(&report));
-    assert_eq!(report.metrics.len(), 5);
+    assert_eq!(report.metrics.len(), 7);
     for metric in &report.metrics {
         assert_eq!(metric.status, Status::Fail, "{metric:?}");
         let value = metric.value.unwrap();
@@ -41,7 +41,7 @@ fn analytic_broken_fails_each_metric() {
 fn feature_metrics_are_not_implemented() {
     let report = evaluate(Suite::Feature, Fixture::Good);
     let lines = format_lines(&report);
-    assert_eq!(exit_code(&report), 2, "{lines}");
+    assert_eq!(exit_code(&report), 0, "{lines}");
     assert!(report.metrics.len() > 5);
     for line in lines.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -66,9 +66,9 @@ fn a_zero_does_not_pass_a_missing_feature() {
 }
 
 #[test]
-fn all_good_exits_with_the_gap() {
+fn all_good_exits_0_with_not_implemented_rows() {
     let report = evaluate(Suite::All, Fixture::Good);
-    assert_eq!(exit_code(&report), 2);
+    assert_eq!(exit_code(&report), 0);
     assert!(report
         .metrics
         .iter()
@@ -142,6 +142,27 @@ fn json_records_pass_and_fail() {
         feature_text.contains("\"status\": \"NOT-IMPLEMENTED\""),
         "{feature_text}"
     );
+}
+
+#[test]
+fn a_bad_argument_exits_2() {
+    let exe = env!("CARGO_BIN_EXE_fog-check");
+    let bad_suite = std::process::Command::new(exe)
+        .arg("--suite")
+        .arg("nope")
+        .output()
+        .unwrap();
+    assert_eq!(bad_suite.status.code(), Some(2), "{bad_suite:?}");
+    let missing = std::process::Command::new(exe)
+        .arg("--out")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2), "{missing:?}");
+    let help = std::process::Command::new(exe)
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert_eq!(help.status.code(), Some(0));
 }
 
 fn metric<'a>(report: &'a genos_fog_check::Report, name: &str) -> &'a genos_fog_check::Metric {

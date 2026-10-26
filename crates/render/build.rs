@@ -20,11 +20,12 @@ fn main() {
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
-    // Not embedded: catches errors in lighting shader pieces no pass includes yet.
-    compile(
-        "shaders/lighting_check.comp",
-        &out.join("lighting_check.comp.spv"),
-    );
+    // Not embedded: catches errors in pieces no pass includes yet.
+    for file in ["lighting_check.comp", "media_check.comp"] {
+        let src = format!("shaders/{file}");
+        println!("cargo:rerun-if-changed={src}");
+        compile(&src, &out.join(format!("{file}.spv")));
+    }
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
@@ -102,6 +103,7 @@ fn main() {
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
         "lighting_screen.comp",
+        "media.glsl",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
@@ -113,7 +115,6 @@ fn main() {
     println!("cargo:rerun-if-changed=shaders/wire.frag");
     println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
     println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
-    println!("cargo:rerun-if-changed=shaders/lighting_check.comp");
     println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
     println!("cargo:rerun-if-changed=shaders/dither.glsl");
     println!("cargo:rerun-if-changed=shaders/transmit.comp");

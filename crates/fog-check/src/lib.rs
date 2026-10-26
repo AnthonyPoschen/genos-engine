@@ -15,7 +15,7 @@ pub use report::{exit_code, format_lines, judge, write_metrics, Metric, Report, 
 /// Which metrics to score.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Suite {
-    /// Beer-Lambert, height density, phase, homogeneous integral, synthetic picture.
+    /// Closed forms in `genos_math`, plus a synthetic picture.
     Analytic,
     /// Renderer metrics. Each one is `NOT-IMPLEMENTED` until that pass exists.
     Feature,

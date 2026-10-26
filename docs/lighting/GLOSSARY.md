@@ -216,8 +216,8 @@ Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · 
 **Light shaft**: a beam made visible by shadowed direct light in the medium.
 Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
 
-**Fog history**: the previous froxel's in-scattering, kept only when reprojection, change records, and the neighborhood clamp all accept it.
-Role: TEMPORAL · Literature: Hillaire 2015 temporal integration (we add the reject); Karis, SIGGRAPH 2014 · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
+**Fog history**: a reserved slot for the previous froxel's in-scattering. The setting is off on every preset. Whether to enable it is open.
+Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../adr/0012-gi.md) stores no radiance history · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
 
 ### Quality and tooling
 **Preset**: a named full set of settings: potato, day-cycle, gi-1bounce, low, medium, high. **Potato** is direct light plus flat ambient, with no GI. Role: TOOL

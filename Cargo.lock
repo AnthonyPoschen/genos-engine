@@ -153,6 +153,7 @@ name = "genos-fog-check"
 version = "0.1.0"
 dependencies = [
  "genos-lighting-ref",
+ "genos-math",
 ]
 
 [[package]]
@@ -236,6 +237,7 @@ version = "0.1.0"
 dependencies = [
  "genos-bake",
  "genos-load",
+ "genos-math",
  "genos-mesh",
  "genos-scene",
  "genos-ui",

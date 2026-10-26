@@ -69,24 +69,16 @@ pub fn judge(present: bool, value: Option<f64>, threshold: f64) -> Status {
     }
 }
 
-/// 0 all passed, 1 any failure, 2 no failure and at least one gap.
+/// 0 when no metric failed. A `NOT-IMPLEMENTED` row is not a failure.
+/// 1 when any metric failed. A bad argument is exit 2, from the process edge.
 #[must_use]
 pub fn exit_code(report: &Report) -> i32 {
-    if report
-        .metrics
-        .iter()
-        .any(|metric| metric.status == Status::Fail)
-    {
-        1
-    } else if report
-        .metrics
-        .iter()
-        .any(|metric| metric.status == Status::NotImplemented)
-    {
-        2
-    } else {
-        0
-    }
+    i32::from(
+        report
+            .metrics
+            .iter()
+            .any(|metric| metric.status == Status::Fail),
+    )
 }
 
 /// One compact line per metric: name, value, threshold, status.

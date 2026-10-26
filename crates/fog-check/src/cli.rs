@@ -176,4 +176,7 @@ Arguments:
 GENOS_FOG_SUITE, GENOS_FOG_FIXTURE, and GENOS_FOG_OUT apply only when the
 matching argument was omitted. The argument wins. Output stays under the
 working directory unless --out names another path.
+
+Exit status: 0 when no metric failed, including NOT-IMPLEMENTED rows.
+1 when any metric failed. 2 on a bad argument.
 ";
