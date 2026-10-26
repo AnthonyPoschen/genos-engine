@@ -37,7 +37,7 @@ Role: LIGHTS · Literature: GIBS treats it as a shadow-ray light · More detail:
 Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode`
 
 **Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
-Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces)
+Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
 ### Screen probes (final gather)
 **Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
@@ -191,6 +191,28 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
+
+### Materials
+**Material record**: one glTF material's factors, texture slots, and alpha mode, before any texel is read. The code type is `PbrMaterial`.
+Role: STORE · Literature: glTF 2.0 material; Filament `Material` parameters · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Shade sample**: the linear values of one material record at one UV. Base colour, metallic, roughness, tangent-space normal, occlusion, emissive, and alpha.
+Role: SAMPLE · Literature: glTF 2.0 Appendix B inputs; Filament `PixelParams` · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Diffuse albedo**: base colour times (1 − metallic). It is the weight on irradiance. The base colour is a different value.
+Role: OUT · Literature: glTF 2.0 Appendix B diffuse term; Filament diffuse albedo · More detail: `BakeMesh::surface`; [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Ambient occlusion**: the glTF occlusion texture. It scales indirect irradiance and does not scale direct light.
+Role: VIS · Literature: glTF 2.0 occlusion texture · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Promoted emitter**: an emissive region extracted at import and placed in the light tree.
+Role: LIGHTS · Literature: Lumen emissive cards promoted to lights · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Texture page**: one fixed block of one mip of a texture. The word page alone remains the 8×8 surface-cache block.
+Role: STORE · Literature: Mittring virtual-texture page (SIGGRAPH 2008) · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md); [assets/plan.md](../systems/assets/plan.md)
+
+**Material residency**: which texture pages are on the GPU.
+Role: SCHED · Literature: Mittring physical page pool · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
 ### Historical (do not reuse)
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
