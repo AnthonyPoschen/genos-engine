@@ -114,6 +114,7 @@ pub fn specs() -> Vec<CommandSpec> {
     .into_iter()
     .chain(fog_specs())
     .chain(host_specs())
+    .chain(material_specs())
     .collect()
 }
 
@@ -130,6 +131,23 @@ fn fog_specs() -> Vec<CommandSpec> {
         spec(
             "get_fog_stats",
             "Fog counters: dispatches, samples_used, samples_capped, grid_width, grid_height, grid_slices, dispatched_width, dispatched_height, dispatched_slices, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. samples_used is the samples setting (0 keeps every cell). The dispatched_* fields are the grid the frame runs. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not graded against an RTX 4070 ceiling.",
+        ),
+    ]
+}
+
+fn material_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_material_settings",
+            "The material settings in force (text form): texture_quality, mip_bias, anisotropy, occlusion, emissive_promote, emissive_promote_flux, headroom_percent, headroom_floor_mb, dwell_frames. texture_quality does not follow VRAM size.",
+        ),
+        spec(
+            "set_material_settings",
+            "Partial material update. Keys match the settings text. A text field overlays key=value lines. residency_mb is a deprecated alias: it warns once and does not set a pool. Applies on the next draw.",
+        ),
+        spec(
+            "get_material_stats",
+            "Streamer counters for the frame in force: committed, budget, refused, evictions, thrash, holes, rate, stream_ms. budget is the texture target. rate is the bytes the last step admitted. stream_ms is the base frame time that step saw.",
         ),
     ]
 }

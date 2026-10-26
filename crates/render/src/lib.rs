@@ -5,6 +5,7 @@ mod fog_budget;
 mod fog_pass;
 mod gltf_draw;
 mod gpu;
+mod material_stream;
 #[cfg(test)]
 mod lamp_pick;
 mod mesh;
@@ -50,8 +51,8 @@ pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
-    LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, Renderer, ScreenLine,
-    ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
+    LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, MaterialStats, Renderer,
+    ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
@@ -71,7 +72,8 @@ pub use trace::{
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
-    MaterialAtlas, Object, ParticleFrame, ParticleImage, ShaderSpace, Surface, World,
+    MaterialAtlas, Object, ParticleFrame, ParticleImage, ShaderSpace, StreamedTexture, Surface,
+    World,
 };
 
 /// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).
