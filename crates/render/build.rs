@@ -62,6 +62,7 @@ fn main() {
         // pipelines and their compile stay the lighting set.
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
         ("HDR_AGX_SPV", "hdr_agx.comp"),
+        ("HDR_BLOOM_SPV", "hdr_bloom.comp"),
     ]
     .iter()
     .map(|(name, file)| {

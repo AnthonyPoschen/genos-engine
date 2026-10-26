@@ -114,20 +114,13 @@ pub(crate) struct Lighting {
     hdr_params: Buffer,
     /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
     agx_lut: Buffer,
-    /// Full-resolution bloom from `bloom_pyramid`, before the intensity scale.
+    /// Full-resolution bloom, then the mip chain. The GPU pyramid writes it.
+    /// The intensity scale is not in the texels.
     bloom: Buffer,
     /// Last `still_pop_share` of subsampled scene luma. Zero until two copies exist.
     still_pop: f64,
     /// Previous subsampled scene luma.
     prev_luma: Vec<f64>,
-    /// Scene hash the uploaded pyramid was built from.
-    bloom_scene: u64,
-    /// Scene-referred peak the uploaded pyramid was built from.
-    bloom_peak: f64,
-    /// `bloom` holds a pyramid, so a still scene can reuse it.
-    bloom_filled: bool,
-    /// The bloom buffer was zeroed after allocate, so the first frame is black.
-    bloom_cleared: bool,
     hdr: genos_scene::HdrSettings,
     /// Last scale written. Legacy bytes stay at 1.
     exposure_scale: f32,
@@ -267,8 +260,10 @@ pub(crate) struct Lighting {
     sun_gpu_slice: u32,
     /// Sun compose. Built the first time a small sun step needs it.
     sun_pipe: Handle,
-    /// AgX display. Built the first time the display mode is AgX.
+    /// Display pass (AgX or the shoulder). Built the first HDR frame.
     agx_pipe: Handle,
+    /// Same-frame bloom pyramid. Built the first frame that asks for bloom.
+    bloom_pipe: Handle,
     /// Compose with the scene image and bloom. The plain pipe stays free of them.
     compose_hdr_pipe: Handle,
     /// Sun compose with the scene image and bloom.
@@ -392,10 +387,6 @@ impl Default for Lighting {
             bloom: Buffer::empty(),
             still_pop: 0.0,
             prev_luma: Vec::new(),
-            bloom_scene: 0,
-            bloom_peak: 0.0,
-            bloom_filled: false,
-            bloom_cleared: false,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
             last_ev100: 0.0,
@@ -476,6 +467,7 @@ impl Default for Lighting {
             sun_gpu_slice: 0,
             sun_pipe: std::ptr::null_mut(),
             agx_pipe: std::ptr::null_mut(),
+            bloom_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
@@ -1047,14 +1039,12 @@ impl Gpu {
         let scene_bytes = pixels.saturating_mul(16).max(16);
         self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
-        self.lighting.hdr_params = self.make_buffer(16, 0x20, Memory::Upload)?;
+        // Transfer-dst so the pyramid can write the bloom intensity word.
+        self.lighting.hdr_params = self.make_buffer(16, 0x20 | 0x2, Memory::Upload)?;
         self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
         self.write_agx_lut();
-        self.lighting.bloom = self.make_buffer(scene_bytes, 0x20, Memory::Upload)?;
-        self.lighting.bloom_filled = false;
-        self.lighting.bloom_cleared = false;
-        self.lighting.bloom_peak = 0.0;
-        self.lighting.bloom_scene = 0;
+        // The second half holds the mip chain and two upsample scratches.
+        self.lighting.bloom = self.make_buffer(scene_bytes.saturating_mul(2), 0x20, Memory::Upload)?;
         self.lighting.prev_luma.clear();
         self.lighting.still_pop = 0.0;
         self.lighting.hdr_copied = false;
@@ -1269,6 +1259,17 @@ impl Gpu {
         Ok(())
     }
 
+    fn ensure_bloom_pipe(&mut self) -> Result<(), String> {
+        if !self.lighting.bloom_pipe.is_null() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        self.lighting.bloom_pipe =
+            self.make_compute_pipe(HDR_BLOOM_SPV, self.lighting.layout, "hdr bloom")?;
+        self.note_pipeline_time("hdr bloom", start);
+        Ok(())
+    }
+
     fn ensure_hdr_compose(&mut self) -> Result<(), String> {
         if !self.lighting.compose_hdr_pipe.is_null() {
             return Ok(());
@@ -1295,14 +1296,6 @@ impl Gpu {
         )?;
         self.note_pipeline_time("lighting sun compose hdr", start);
         Ok(())
-    }
-
-    fn agx_display(&self) -> bool {
-        !self.lighting.hdr.legacy_bytes
-            && matches!(
-                self.lighting.hdr.display,
-                genos_scene::DisplayTransform::Agx
-            )
     }
 
     /// Record the sun and the view, minus the sun and the sky. Point-lamp motion
@@ -2225,54 +2218,111 @@ impl Gpu {
         self.lighting.prev_luma = luma;
     }
 
-    /// CPU pyramid of the previous scene image. One frame late, same as the meter.
-    /// A still scene whose peak moved by less than half a stop keeps the buffer.
-    fn write_bloom(&mut self) {
-        if !self.bloom_active() || self.lighting.bloom.memory.is_null() {
+    /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
+    /// The intensity word is updated after the chain so the display pass adds it.
+    fn record_gpu_bloom(&mut self, width: u32, height: u32) {
+        if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
             return;
         }
-        let Some(rgba) = self.read_scene_rgba() else {
-            if !self.lighting.bloom_cleared {
-                self.zero_host_buffer(&self.lighting.bloom);
-                self.lighting.bloom_cleared = true;
-            }
-            return;
-        };
-        let width = self.extent_w as usize;
-        let height = self.extent_h as usize;
-        let mut peak = 0.0_f64;
         let pixels = width.saturating_mul(height);
-        for index in 0..pixels {
-            let base = index.saturating_mul(4);
-            let rgb = [
-                f64::from(*rgba.get(base).unwrap_or(&0.0)),
-                f64::from(*rgba.get(base.saturating_add(1)).unwrap_or(&0.0)),
-                f64::from(*rgba.get(base.saturating_add(2)).unwrap_or(&0.0)),
-            ];
-            let y = crate::hdr_output::scene_luma(rgb);
-            if y > peak {
-                peak = y;
-            }
-        }
-        let half = std::f64::consts::SQRT_2;
-        let peak_held = if self.lighting.bloom_peak == 0.0 && peak == 0.0 {
-            true
-        } else if self.lighting.bloom_peak > 0.0 && peak > 0.0 {
-            let ratio = peak / self.lighting.bloom_peak;
-            ratio >= 1.0 / half && ratio <= half
-        } else {
-            false
-        };
-        if self.lighting.bloom_filled && self.lighting.bloom_scene == self.lighting.scene_hash && peak_held
-        {
+        let levels = self.lighting.hdr.bloom_levels.min(8);
+        if levels == 0 {
             return;
         }
-        let bloom = crate::hdr_output::bloom_pyramid(&rgba, width, height, self.lighting.hdr.bloom_levels);
-        self.upload_words(&self.lighting.bloom, &bloom);
-        self.lighting.bloom_filled = true;
-        self.lighting.bloom_cleared = true;
-        self.lighting.bloom_peak = peak;
-        self.lighting.bloom_scene = self.lighting.scene_hash;
+        let mut mips = Vec::new();
+        let mut cursor = pixels;
+        let mut level_w = width;
+        let mut level_h = height;
+        for _ in 0..levels {
+            level_w = (level_w / 2).max(1);
+            level_h = (level_h / 2).max(1);
+            mips.push((level_w, level_h, cursor));
+            cursor = cursor.saturating_add(level_w.saturating_mul(level_h));
+        }
+        let scratch_px = mips.first().map_or(0, |(w, h, _)| w.saturating_mul(*h));
+        let scratch_a = cursor;
+        let scratch_b = cursor.saturating_add(scratch_px);
+        let end = scratch_b.saturating_add(scratch_px);
+        if u64::from(end) > self.lighting.bloom.size / 16 {
+            eprintln!("lighting: bloom chain does not fit");
+            return;
+        }
+        let Some(&(first_w, first_h, first_dst)) = mips.first() else {
+            return;
+        };
+        self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
+        for index in 1..mips.len() {
+            let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
+                return;
+            };
+            let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
+                return;
+            };
+            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
+        }
+        let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
+            return;
+        };
+        let last = mips.len().saturating_sub(1);
+        let mut ping = 0u32;
+        for finer in (0..last).rev() {
+            let Some(&(finer_w, finer_h, finer_off)) = mips.get(finer) else {
+                return;
+            };
+            let dst = if ping == 0 { scratch_a } else { scratch_b };
+            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
+            src_w = finer_w;
+            src_h = finer_h;
+            src = dst;
+            ping ^= 1;
+        }
+        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
+        let word = self.lighting.hdr.bloom_intensity as f32;
+        unsafe {
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.hdr_params.buffer,
+                8,
+                4,
+                &word as *const f32 as *const c_void,
+            );
+        }
+        // Display reads the chain and the new intensity. Host reads the full image after the fence.
+        self.memory_barrier(0x800 | 0x1000, 0x800 | 0x4000, 0x40 | 0x1000, 0x20 | 0x2000);
+    }
+
+    fn bloom_dispatch(
+        &self,
+        dst_w: u32,
+        dst_h: u32,
+        src_w: u32,
+        src_h: u32,
+        src: u32,
+        dst: u32,
+        mode: u32,
+        finer: u32,
+    ) {
+        let pc = [
+            dst_w, dst_h, src_w, src_h, src, dst, mode, finer, 0, 0, 0, 0,
+        ];
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.bloom_pipe);
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr() as *const c_void,
+            );
+            (self.fns.cmd_dispatch)(
+                self.cmd,
+                dst_w.div_ceil(8).max(1),
+                dst_h.div_ceil(8).max(1),
+                1,
+            );
+        }
+        self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
     }
 
     fn read_scene_rgba(&self) -> Option<Vec<f32>> {
@@ -2306,7 +2356,7 @@ impl Gpu {
         Some(rgba)
     }
 
-    /// Host copy of the bloom upload. Empty until the buffer exists.
+    /// Host view of the full-resolution bloom image. The mip chain after it is omitted.
     fn read_bloom_host(&self) -> Result<Vec<f32>, String> {
         let width = usize::try_from(self.extent_w).unwrap_or(0);
         let height = usize::try_from(self.extent_h).unwrap_or(0);
@@ -2327,39 +2377,8 @@ impl Gpu {
         )
     }
 
-    fn upload_words(&self, buffer: &Buffer, words: &[f32]) {
-        if buffer.memory.is_null() || words.is_empty() {
-            return;
-        }
-        let bytes = (words.len() as u64).saturating_mul(4).min(buffer.size);
-        let count = (bytes / 4) as usize;
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            if (self.fns.map_mem)(self.device, buffer.memory, 0, bytes, 0, &mut mapped) != 0 {
-                return;
-            }
-            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<f32>(), count);
-            (self.fns.unmap_mem)(self.device, buffer.memory);
-        }
-    }
-
-    fn zero_host_buffer(&self, buffer: &Buffer) {
-        if buffer.memory.is_null() || buffer.size == 0 {
-            return;
-        }
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            if (self.fns.map_mem)(self.device, buffer.memory, 0, buffer.size, 0, &mut mapped) != 0 {
-                return;
-            }
-            std::ptr::write_bytes(mapped.cast::<u8>(), 0, buffer.size as usize);
-            (self.fns.unmap_mem)(self.device, buffer.memory);
-        }
-    }
-
     fn write_hdr_exposure(&mut self) {
         self.note_still_pop();
-        self.write_bloom();
         if self.lighting.hdr_params.memory.is_null() {
             return;
         }
@@ -2381,12 +2400,9 @@ impl Gpu {
                 genos_scene::DisplayTransform::Aces => 2.0,
             }
         };
-        let bloom = if self.lighting.hdr.legacy_bytes || !self.lighting.hdr.bloom {
-            0.0
-        } else {
-            self.lighting.hdr.bloom_intensity as f32
-        };
-        let words = [scale, mode, bloom, 0.0_f32];
+        // Bloom intensity stays 0 until the pyramid has run. The display pass
+        // reads the updated word. Compose therefore does not add a stale buffer.
+        let words = [scale, mode, 0.0_f32, 0.0_f32];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
@@ -2904,11 +2920,18 @@ impl Gpu {
                 hdr_compose = false;
             }
         }
-        let mut agx_display = hdr_compose && self.agx_display();
+        let mut agx_display = hdr_compose;
         if agx_display {
             if let Err(err) = self.ensure_agx_pipe() {
-                eprintln!("lighting: agx display off: {err}");
+                eprintln!("lighting: display pass off: {err}");
                 agx_display = false;
+            }
+        }
+        let mut gpu_bloom = agx_display && self.bloom_active();
+        if gpu_bloom {
+            if let Err(err) = self.ensure_bloom_pipe() {
+                eprintln!("lighting: gpu bloom off: {err}");
+                gpu_bloom = false;
             }
         }
         if !sun_compose {
@@ -3165,9 +3188,12 @@ impl Gpu {
             self.lighting.compose_valid = true;
         }
         if agx_display {
-            // Compose stored scene radiance and the shoulder. This pass replaces
-            // the 8-bit picture. The lattice sample is not in the GI shader.
+            // Compose stored scene radiance. Bloom runs on that image, then this
+            // pass replaces the 8-bit picture. The lattice sample is not in the GI shader.
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            if gpu_bloom {
+                self.record_gpu_bloom(w, h);
+            }
             unsafe {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.agx_pipe);
                 (self.fns.cmd_push)(
@@ -3423,6 +3449,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
                 .chain(std::iter::once(&mut self.lighting.agx_pipe))
+                .chain(std::iter::once(&mut self.lighting.bloom_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {

@@ -1,8 +1,8 @@
 #version 450
-// AgX display pass. The lattice sample stays out of the GI compose shader so
-// the plain compile stays the pre-HDR shader. This pass reads the scene
-// radiance compose stored, adds bloom, applies exposure, and replaces the
-// 8-bit picture.
+// Display pass. The lattice sample stays out of the GI compose shader so the
+// plain compile stays the pre-HDR shader. This pass reads the scene radiance
+// compose stored, adds the same-frame bloom, applies exposure, and replaces
+// the 8-bit picture. Mode 1 is AgX. Mode 0 and mode 2 keep the shoulder.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "dither.glsl"
@@ -61,6 +61,14 @@ vec3 agx_sample(vec3 c) {
     return mix(c0, c1, f.z);
 }
 
+float tone_channel(float x) {
+    if (x <= 0.64) {
+        return max(x, 0.0);
+    }
+    float extra = x - 0.64;
+    return 0.64 + 0.14 * (extra / (extra + 1.1));
+}
+
 uint pack_rgb(vec3 rgb) {
     uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);
     if ((pc.params.z & 1u) == 1u) {
@@ -82,5 +90,8 @@ void main() {
         exposure = 1.0;
     }
     c *= exposure;
-    outc.px[index] = pack_rgb(dither8(agx_sample(c), p));
+    vec3 formed = (hdr.v.y > 0.5 && hdr.v.y < 1.5)
+        ? agx_sample(c)
+        : vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    outc.px[index] = pack_rgb(dither8(formed, p));
 }

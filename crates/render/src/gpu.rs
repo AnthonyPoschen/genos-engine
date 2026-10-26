@@ -397,10 +397,8 @@ impl Renderer {
         self.gpu.read_scene_host()
     }
 
-    /// Bloom the frame uploaded before compose. RGBA32F, full resolution.
-    ///
-    /// The buffer is host-visible and is not copied again: the draw already waited,
-    /// and the pyramid was written before that frame was submitted.
+    /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
+    /// intensity scale. The mip chain sits past this image and is not returned.
     pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
         self.gpu.read_bloom_host()
     }

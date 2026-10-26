@@ -12,8 +12,9 @@
 //! `aces2_rec709` is the Academy CTL.
 
 use genos_render::{
-    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,
-    bloom_upsample, bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera,
+    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_pyramid, bloom_upsample,
+    ev100_from_luminance,
+    exposure_from_camera,
     exposure_from_ev100, exposure_adapt_outside, exposure_overshoot, exposure_still_change,
     exposure_with_compensation, grade_peak, grade_relative, histogram_ev100,
     karis_downsample_rgb, karis_firefly_response, linear_from_display, near_grade,
@@ -579,20 +580,30 @@ fn exposure_without_saturation_camera(aperture: f64, shutter: f64, iso: f64) -> 
 }
 
 fn bloom_error() -> f64 {
-    let weight = (bloom_downsample_weight_sum() - 1.0)
-        .abs()
-        .max((bloom_upsample_weight_sum() - 1.0).abs());
-    let mut pixels = vec![0.0; 64 * 64];
-    pixels[32 * 64 + 32] = 1.0;
-    let first = bloom_downsample(&pixels, 64, 64);
-    let second = bloom_downsample(&first.pixels, first.width, first.height);
-    let up_first = bloom_upsample(&second, first.width, first.height);
-    let up = bloom_upsample(&up_first, 64, 64);
-    let mut sum = 0.0;
-    for sample in &up.pixels {
-        sum += *sample;
+    let side = 16usize;
+    let mut rgba = vec![0.0_f32; side.saturating_mul(side).saturating_mul(4)];
+    for index in 0..side.saturating_mul(side) {
+        let base = index.saturating_mul(4);
+        if let Some(slot) = rgba.get_mut(base) {
+            *slot = 0.5;
+        }
+        if let Some(slot) = rgba.get_mut(base.saturating_add(1)) {
+            *slot = 0.25;
+        }
+        if let Some(slot) = rgba.get_mut(base.saturating_add(2)) {
+            *slot = 0.125;
+        }
     }
-    weight.max((sum - 1.0).abs())
+    let got = bloom_pyramid(&rgba, side, side, 3);
+    let mut rgb = Vec::new();
+    for index in 0..side.saturating_mul(side) {
+        let base = index.saturating_mul(4);
+        rgb.push(f64::from(rgba.get(base).copied().unwrap_or(0.0)));
+        rgb.push(f64::from(rgba.get(base.saturating_add(1)).copied().unwrap_or(0.0)));
+        rgb.push(f64::from(rgba.get(base.saturating_add(2)).copied().unwrap_or(0.0)));
+    }
+    let want = reference_pyramid(&rgb, side, side, 3);
+    bloom_delta(&got, &want, 1.0)
 }
 
 fn pq_error(encode: fn(f64) -> f64) -> f64 {
@@ -1122,10 +1133,11 @@ fn capture_gpu() -> Grab {
     if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
         return fail_grab(&err);
     }
-    let scene1 = match renderer.read_scene() {
-        Ok(scene) => scene,
-        Err(err) => return fail_grab(&err),
-    };
+    // The second frame is a different lamp, so a pyramid of the previous
+    // frame does not match this frame's bloom.
+    if let Some(light) = world.scene.lights.first_mut() {
+        light.color = [6.0, 0.3, 0.1];
+    }
     let pixels = match draw_once(&mut window, &mut renderer, &world, &camera) {
         Ok(pixels) => pixels,
         Err(err) => return fail_grab(&err),
@@ -1138,7 +1150,7 @@ fn capture_gpu() -> Grab {
         Ok(bloom) => bloom,
         Err(err) => return fail_grab(&err),
     };
-    finish_grab(&renderer, pixels, &scene1, &scene2, bloom_buf)
+    finish_grab(&renderer, pixels, &scene2, bloom_buf)
 }
 
 fn load_hall() -> Result<genos_scene::Scene, String> {
@@ -1213,15 +1225,12 @@ fn fail_grab(why: &str) -> Grab {
 fn finish_grab(
     renderer: &Renderer,
     pixels: Vec<u8>,
-    scene1: &genos_render::SceneRead,
     scene2: &genos_render::SceneRead,
     bloom_buf: Vec<f32>,
 ) -> Grab {
     let width = usize::try_from(scene2.width).unwrap_or(0);
     let height = usize::try_from(scene2.height).unwrap_or(0);
-    let src_w = usize::try_from(scene1.width).unwrap_or(0);
-    let src_h = usize::try_from(scene1.height).unwrap_or(0);
-    let bloom_ref = reference_pyramid(&scene1.rgb, src_w, src_h, GPU_BLOOM_LEVELS);
+    let bloom_ref = reference_pyramid(&scene2.rgb, width, height, GPU_BLOOM_LEVELS);
     let (format, _) = renderer.hdr_surface();
     let exposure_want = wanted_exposure();
     let gap_x4 = formula_gap(&scene2.rgb, &bloom_ref, exposure_want);
