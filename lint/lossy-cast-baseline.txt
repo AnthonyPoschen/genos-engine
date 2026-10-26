@@ -51,7 +51,7 @@ crates/render/src/gltf_draw.rs 8
 crates/render/src/gpu.rs 28
 crates/render/src/lamp_pick.rs 2
 crates/render/src/lighting_dispatch.rs 4
-crates/render/src/lighting_gpu.rs 10
+crates/render/src/lighting_gpu.rs 9
 crates/render/src/mesh_field.rs 13
 crates/render/src/occ_grid.rs 39
 crates/render/src/pack.rs 20

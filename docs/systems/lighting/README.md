@@ -54,7 +54,48 @@ Plan for moving lamps and moving assets (not yet built; measurement first): [dyn
 
 The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
 
+## Local change tracking
+
+A mover emits a change record of its bounds before and after the frame. A point lamp that moves or changes intensity or reach emits a record of each place it occupied, with that place's reach. Those records dirty the world-cache cells they overlap. Cells outside them keep their finished values. The GPU change list is the bounding sphere of a swept box. A lamp is not on that list: the list drops kept probe rays, and a lamp's reach would drop the room. Texels inside the reach still go due. More than 64 spheres wait for a later frame. They are not replaced by one scene-sized sphere. The change-block head drops kept rays only on the first frame, when there is no previous scene.
+
+The camera is not a record. `still_frames` counts frames since the last record. Floor, roof, sky, fire, and a large sun step still reset the quiet schedule through the static light key. A small sun step keeps the previous key. A directional sun is not a region record.
+
+Probe: `Renderer::gi_region_stats` and the MCP `status` fields `change_records` and `deferred_spheres`. `Renderer::settle_stats` still reports `still_frames`.
+
+Failure modes and the probe for each:
+
+- A far cell is marked dirty. The unit test `a_single_moving_box_dirties_only_nearby_regions` checks the cells. `status.change_records` is the count for the frame.
+- A frozen scene never settles. `status.still_frames` and `settle_stats`. The unit test `a_frozen_scene_settles_and_keeps_its_light` runs 32 empty frames.
+- Spheres stay deferred because the 64-list is full. `status.deferred_spheres`. `still_frames` stays 0 while any sphere is waiting.
+- A lamp's reach is kilometres. The CPU hot path does not list every 25 cm cell. The shader tests the sphere. `dirty_regions` skips a volume wider than 48 cells on one axis. `is_dirty` still answers a single cell.
+
+Tunable: `world_cache.cell_metres` (existing). The cell size is the world-cache grid. It is not a new key.
+
+Networking:
+
+- Replicated state: none. Change records and the dirty set are computed on the machine that shades.
+- Authority: the machine that shades the picture.
+- Prediction / rollback: none. A region keeps its finished value until a local record dirties it.
+- Determinism: the dirty set is a pure function of the previous and current bounds, the lamp reaches, and the cell size.
+- Headless server: a headless server does not shade and does not build the set.
+
+Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and [the design](localized-invalidation-design.md):
+
+- The design feeds records into a priority histogram. This slice dirties cells. There is no scheduler, work cap, starvation slice, or `--lighting-schedule`.
+- UE5 virtual shadow maps (design §9) raise a page's priority from caster bounds. This slice marks overlapping cells for relight and keeps the stored value until that relight finishes. There is no priority score.
+- The GPU list is a sphere around a mover's swept bounds, so a shader may relight a few cells outside the box and inside the sphere. The CPU test uses the box. A lamp record is not copied onto that list: the list drops kept probe rays that cross a sphere, and a lamp's reach would drop the room. Texels inside the reach still go due through the lamp-touch test.
+- The sun is not a region record. A small sun step is unchanged. A large sun step resets the quiet schedule through the static key.
+- Floor, roof, sky, and fire reset the quiet schedule. They do not drop kept probe rays.
+- One bounce of reach past the mover, scaled by albedo, is not applied. Only the swept bounds and the lamp reach.
+- Screen passes (trace, gather, filter, denoise, direct) still launch while `still_frames` is 0. Their budgets are later. Compose redraws the picture when the camera moves, the debug view changes, or a change record is in flight.
+- The region grid is the uniform `world_cell` (default 25 cm). It is not distance-doubled LOD and not 8×8 pages.
+- More than 64 change spheres wait. They do not expand into a full recompute. `still_frames` stays 0 while any sphere is waiting.
+- Shadow epochs no longer bump every lamp from a whole-world flag. A lamp still bumps when it changes or a change sphere meets its reach.
+- The design's `global` A/B mode is not kept. The hash that zeroed stillness for every mover is deleted.
+
 ## Deviations from the papers (summary)
+
+- Local change tracking (ADR 0013): UE5 virtual shadow maps raise a page's priority from caster bounds. This slice dirties the overlapping world-cache cells and keeps the stored value until the relight finishes. The rest of the departures are in the Local change tracking section.
 
 - The MSME step follows Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`. The firefly clamp (`0.1 + short mean + sigma * deviation`) is biased. `surface_cache.firefly_sigma` defaults to the listing's 8. Zero keeps the `0.1` floor. Variance is one scalar, not `float3`, weighted with the listing's Rec. 601 `(0.299, 0.587, 0.114)`. The hold path uses Rec. 709 `(0.2126, 0.7152, 0.0722)`, keeps its own clamp of 8, and does not read `surface_cache.firefly_sigma`. A newborn starts at short mean = long mean, inconsistency 1, vbbr 1, and variance `(0.15 * luma)^2`. The first 16 sets blend at most `1 / (n + 1)`. A mover raises the blend to at least 0.5; a lamp delta is capped at 0.9. `surface_cache.blend` forces estimator bit 20 and the hold bit (bit 30).
 - Mover cache entries store an object-local position and normal (`surface_cache.attach_movers`). A cache entry is one hashed surface patch. GIBS attaches every surfel. Static geometry and world probes stay on the world lattice.
@@ -360,7 +401,7 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## Dynamic objects
 
-- **Ours:** each frame lists the bounds of objects that moved, came or went (up to 64; more drops every kept stratum). Kept rays crossing them are re-traced; light-cache patches near a change (1 m) are relit first and run short means (2 sets) in SC.
+- **Ours:** each frame lists the bounds of objects that moved, came or went (up to 64; the rest wait for a later frame and do not drop every kept stratum). Kept rays crossing them are re-traced; light-cache patches near a change (1 m) are relit first and run short means (2 sets) in SC.
 - **Reference:** Lumen: movers are in the SDF/BVH, their cards are recaptured, pixels whose rays hit movers switch to fast temporal update with stronger spatial filtering [W21 s.99, W22]. ReSTIR GI validates reused samples with visibility rays.
 - **Differences:** we invalidate by ray path (exact) rather than by hit velocity.
 - **SC movers (S42-S49):** occluders that moved in the last 240 frames are movers; pixels inside a mover's bounds and within 1 m of this frame's changes show the probes, texels near a change are relit first with 2-set means. While only the light changes (lamps move), texels stay shown and lag a little, as Lumen's surface cache does (S46/S47; swapping every pixel to the probes swapped methods and was most of the mix error).

@@ -51,15 +51,15 @@ const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
-/// Bounds of moved objects one frame can list (lighting_common.glsl LIGHTING_CHANGES); past
-/// that every kept stratum is dropped.
+    /// Bounds of moved objects one frame can list (lighting_common.glsl LIGHTING_CHANGES).
+    /// Spheres past this wait for a later frame. They are not a full-frame drop.
 const LIGHTING_CHANGES: usize = 64;
 /// Vec4s before the bounds in the changes block (lighting_common.glsl LIGHTING_CHANGE_HEAD).
 const LIGHTING_CHANGE_HEAD: usize = 5;
-/// GI counts as settled once the scene block (camera included) has stayed the
-/// same for this many frames (the screen probes average up to 32 frames' rays,
-/// lighting_gather.comp) and a full sweep of the light cache changed no patch
-/// by more than LIGHTING_SETTLE_CHANGE.
+/// GI counts as settled once this many frames have passed since the last change
+/// record (the screen probes average up to 32 frames' rays, lighting_gather.comp)
+/// and a full sweep of the light cache changed no patch by more than
+/// LIGHTING_SETTLE_CHANGE. A camera move is not a change record.
 const LIGHTING_SETTLE_FRAMES: u32 = 32;
 /// Largest relative change of a relit cache patch, in millionths, that counts as
 /// settled (0.2 %, well under a display code).
@@ -117,9 +117,8 @@ pub(crate) struct Lighting {
     /// The picture in the output buffer was drawn for this size. A new buffer
     /// has no picture yet, so the next compose covers every pixel.
     compose_valid: bool,
-    /// The traced world as of the last frame's passes: the scene block (its
-    /// occluder list is compared, lighting_changes) and the key of what else is traced
-    /// (meshes, floor, roof); a change of the key drops every kept stratum.
+    /// The traced world as of the last frame the probes ran. Change records compare
+    /// it with this frame. It is not rewritten while GI is frozen.
     kept_bytes: Vec<u8>,
     kept_key: u64,
     /// Key of the traced world besides the occluders (set with the scene upload).
@@ -131,8 +130,8 @@ pub(crate) struct Lighting {
     /// Frames the probes ran: which views block is last frame's (its parity).
     probe_runs: u32,
     frame: u32,
-    /// Hash of what GI sees (scene block, traced and drawn meshes), and frames
-    /// it has stayed the same.
+    /// Static light key of the frame the async cache round was built from.
+    /// Movers, point lamps, and the camera are not in it.
     scene_hash: u64,
     still: u32,
     /// Hash of this frame's draw instances (poses, colours, emission).
@@ -188,6 +187,27 @@ pub(crate) struct Lighting {
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
+    /// World-cache cells a frame's change records dirty.
+    regions: crate::lighting_regions::WorldCacheRegions,
+    /// Change spheres that did not fit the GPU list. Retried next frame.
+    /// Never promoted to a full-frame drop.
+    pending_spheres: Vec<[f32; 4]>,
+    /// Mesh bounds from the previous sample.
+    mesh_bounds: Vec<crate::lighting_regions::Aabb>,
+    /// Mesh mover records since `note_field_movers`, consumed by the passes.
+    mesh_records: Vec<crate::lighting_regions::ChangeRecord>,
+    /// Floor, roof, sky, fire, and the sun. Point lamps and occluders are absent,
+    /// so a mover does not clear the quiet schedule of every cell.
+    static_light: u64,
+    /// Eye and camera basis from the previous frame. Compared even while GI is
+    /// frozen, so a camera that stops returns to the dirty-list compose.
+    /// `kept_bytes` stays the scene the probes last shaded.
+    camera_stamp: [u8; 60],
+    camera_stamp_set: bool,
+    /// Last frame's debug view word (scene header, byte 252). A view change
+    /// redraws the picture. It is not a change record.
+    debug_view_word: u32,
+    debug_view_set: bool,
     young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
@@ -388,6 +408,15 @@ impl Default for Lighting {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
+            regions: crate::lighting_regions::WorldCacheRegions::new(0.25),
+            pending_spheres: Vec::new(),
+            mesh_bounds: Vec::new(),
+            mesh_records: Vec::new(),
+            static_light: 0,
+            camera_stamp: [0; 60],
+            camera_stamp_set: false,
+            debug_view_word: 0,
+            debug_view_set: false,
             young_ok: genos_scene::lighting_env("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
@@ -504,6 +533,17 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
+        let now: Vec<crate::lighting_regions::Aabb> = live
+            .iter()
+            .map(|inst| {
+                let (min, max) = inst.world_bounds();
+                crate::lighting_regions::Aabb { min, max }
+            })
+            .collect();
+        self.lighting.mesh_records = crate::lighting_regions::bounds_change_records(
+            &mut self.lighting.mesh_bounds,
+            &now,
+        );
         let g = &mut self.lighting;
         lighting_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
     }
@@ -1077,8 +1117,8 @@ impl Gpu {
         Ok(())
     }
 
-    /// Settle state for the debug tools, in the tier's terms: one "brick", settled
-    /// once the scene (camera included) has not changed for LIGHTING_SETTLE_FRAMES.
+    /// Settle state for the debug tools. `still_frames` counts frames since the
+    /// last change record. A camera move does not reset it.
     #[allow(
         clippy::disallowed_methods,
         reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
@@ -1120,6 +1160,14 @@ impl Gpu {
 
     fn lighting_still_frames(&self) -> u32 {
         self.lighting.still
+    }
+
+    pub(crate) fn gi_region_stats(&self) -> crate::lighting_regions::GiRegionStats {
+        crate::lighting_regions::GiRegionStats {
+            change_records: self.lighting.regions.change_records(),
+            still_frames: self.lighting.still,
+            deferred_spheres: u32::try_from(self.lighting.pending_spheres.len()).unwrap_or(u32::MAX),
+        }
     }
 
     /// Rays the screen probes held in the last frame drawn, and probes placed
@@ -1943,21 +1991,47 @@ impl Gpu {
         let probe_rays = probes * self.lighting.settings.probe_rays();
         let bgra = if self.format == 44 { 1u32 } else { 0 };
         self.lighting.frame = self.lighting.frame.wrapping_add(1);
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            // Lamps, occluders and camera; the traced meshes; the drawn ones.
-            self.frame_bytes.hash(&mut hasher);
-            self.mesh_field_key.hash(&mut hasher);
-            self.lighting.draw_key.hash(&mut hasher);
-            hasher.finish()
-        };
-        if hash == self.lighting.scene_hash {
-            self.lighting.still = self.lighting.still.saturating_add(1);
+        // Change records dirty the cells a mover or a point lamp touches. The
+        // camera, the draw list, and a whole-scene hash do not. There is no
+        // full-frame drop.
+        let have_prev = !self.lighting.kept_bytes.is_empty();
+        let mut records = if have_prev {
+            crate::lighting_regions::scene_change_records(&self.lighting.kept_bytes, &self.frame_bytes)
         } else {
-            self.lighting.scene_hash = hash;
+            Vec::new()
+        };
+        records.extend(std::mem::take(&mut self.lighting.mesh_records));
+        self.lighting
+            .regions
+            .set_cell(self.lighting.settings.world_cache.cell_metres);
+        self.lighting.regions.apply(&records);
+        let deferred = !self.lighting.pending_spheres.is_empty();
+        // The first frame has no previous scene: stillness stays 0, as a hash
+        // mismatch did. After that, only a change record or a deferred sphere
+        // resets it. The camera does not.
+        if !have_prev || !records.is_empty() || deferred {
             self.lighting.still = 0;
-            self.lighting.quiet = 0;
+        } else {
+            self.lighting.still = self.lighting.still.saturating_add(1);
+        }
+        self.lighting.scene_hash = self.lighting.static_light;
+        let stamp = camera_stamp(&self.frame_bytes);
+        let camera_moved = match stamp {
+            Some(now) => !self.lighting.camera_stamp_set || now != self.lighting.camera_stamp,
+            None => true,
+        };
+        if let Some(now) = stamp {
+            self.lighting.camera_stamp = now;
+            self.lighting.camera_stamp_set = true;
+        }
+        let debug_view = header_word(&self.frame_bytes, 252);
+        let view_changed = match debug_view {
+            Some(word) => !self.lighting.debug_view_set || word != self.lighting.debug_view_word,
+            None => false,
+        };
+        if let Some(word) = debug_view {
+            self.lighting.debug_view_word = word;
+            self.lighting.debug_view_set = true;
         }
         self.lighting.stats_still[slot] = self.lighting.still;
         self.lighting.last_slot = slot;
@@ -1972,19 +2046,29 @@ impl Gpu {
             hasher.finish()
         };
         let frozen = self.lighting_stats().settled;
-        let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
-        let changes = if had {
-            lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
-        } else {
-            None
-        };
+        // The change list drops kept probe rays that cross a sphere. A lamp's
+        // reach would cover the room, and those hits are shaded again anyway.
+        // Lamp records still dirty world-cache cells. The surface cache marks
+        // texels inside the reach through lighting_sc_lamp_touched.
+        let mut geometry = Vec::new();
+        for record in &records {
+            if let crate::lighting_regions::ChangeRecord::Mover { .. } = record {
+                geometry.push(*record);
+            }
+        }
+        let mut spheres = std::mem::take(&mut self.lighting.pending_spheres);
+        spheres.extend(crate::lighting_regions::change_spheres(&geometry));
+        let (spheres, rest) = crate::lighting_regions::split_spheres(spheres, LIGHTING_CHANGES);
+        self.lighting.pending_spheres = rest;
         if lighting_debug_on() {
             if frozen {
                 eprintln!("lighting frozen");
             } else {
                 eprintln!(
-                    "lighting kept had {had} changes {}",
-                    changes.as_ref().map_or(-1, |c| c.len() as i64)
+                    "lighting records {} spheres {} deferred {}",
+                    records.len(),
+                    spheres.len(),
+                    self.lighting.pending_spheres.len()
                 );
             }
         }
@@ -2027,21 +2111,17 @@ impl Gpu {
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
-        let mut used = 0;
-        // Vec4s of the block the GPU gets: head, changes and movers.
-        let mut sent = LIGHTING_CHANGE_HEAD;
-        match &changes {
-            None => block[1] = 1.0,
-            Some(list) => {
-                block[0] = list.len() as f32;
-                for (j, b) in list.iter().enumerate() {
-                    let at = 4 * (LIGHTING_CHANGE_HEAD + j);
-                    block[at..at + 4].copy_from_slice(b);
-                }
-                used = list.len();
-            }
+        // Head y drops kept rays only on the first frame, when there is no
+        // previous scene. A mover never sets it.
+        block[0] = spheres.len() as f32;
+        block[1] = if have_prev { 0.0 } else { 1.0 };
+        for (j, b) in spheres.iter().enumerate() {
+            let at = 4 * (LIGHTING_CHANGE_HEAD + j);
+            block[at..at + 4].copy_from_slice(b);
         }
-        sent += used;
+        let used = spheres.len();
+        // Vec4s of the block the GPU gets: head, changes and movers.
+        let mut sent = LIGHTING_CHANGE_HEAD + used;
         // Movers (surface cache): bounds of every occluder that moved in the
         // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
         // Compared whenever there is a last scene (not only when the trace key held:
@@ -2075,7 +2155,7 @@ impl Gpu {
                 block[3] += 100000.0;
             }
         }
-        if had {
+        if have_prev {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
             let f = |at: usize| {
                 let b = &self.lighting.kept_bytes[at..at + 4];
@@ -2177,31 +2257,19 @@ impl Gpu {
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
             }
         }
-        // The light alone (no camera): while it holds and a full sweep has changed
-        // no mature patch, rounds relight young patches only. Any change goes back
-        // to full sweeps at once. A small sun step stays on the hash from the last
-        // full refresh: the direction is in the scene hash, and taking the new one
-        // would relight the room as a whole-scene light change.
+        // Floor, roof, sky, fire, and a large sun step reset the quiet schedule.
+        // A small sun step stays on the hash from the last full refresh: taking
+        // the new direction would relight the room as a whole-scene light change.
+        // A mover or a point lamp is a change record and does not reset this.
         let sun_amortise = self.note_sun_amortise();
-        let light = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.lighting.light_scene.hash(&mut hasher);
-            self.mesh_field_key.hash(&mut hasher);
-            // The drawn list follows the camera (culling), so the surface cache
-            // (mode 3) leaves it out: a turn is not a light change there.
-            if self.lighting.settings.world_mode() != 3 {
-                self.lighting.draw_key.hash(&mut hasher);
-            }
-            hasher.finish()
-        };
+        let light = self.lighting.static_light;
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
         let counters_read = self.lighting.async_on
             || lighting_stats_wanted(self.lighting.settings.world_mode());
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
-        } else if self.lighting.still > 0
+        } else if have_prev
             && lighting_counts_light_on_cpu(
                 self.lighting.settings.world_mode(),
                 probe_only(&self.lighting.settings),
@@ -2267,7 +2335,9 @@ impl Gpu {
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
         // forces the full picture.
         let compose_full = !self.lighting.compose_valid
-            || !(self.lighting.still > 0 || sun_amortise)
+            || camera_moved
+            || view_changed
+            || self.lighting.still == 0 && !sun_amortise
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
@@ -3052,46 +3122,6 @@ pub(crate) fn lighting_mesh_movers(
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
 const LIGHTING_MOVER_KEEP: u32 = 240;
 
-/// Spheres (centre, radius) around every occluder that moved, came or went between
-/// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
-/// ray that crosses either sees something else now. None when there are more than
-/// LIGHTING_CHANGES (drop every kept ray instead). Lamps are not compared: kept hits are
-/// shaded again every frame, so light needs no change list.
-pub(crate) fn lighting_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
-    fn occs(bytes: &[u8]) -> Vec<&[u8]> {
-        let word = |at: usize| {
-            bytes
-                .get(at * 4..at * 4 + 4)
-                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
-        };
-        let start = crate::pack::SCENE_TAIL + word(0) * 32;
-        (0..word(1))
-            .filter_map(|i| bytes.get(start + i * 64..start + i * 64 + 64))
-            .collect()
-    }
-    fn bounds(rec: &[u8]) -> [f32; 4] {
-        let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
-        // center_shape xyz; extent: x and z half extents, y full height, w radius.
-        let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
-        let (hx, hz) = (hx.max(r), hz.max(r));
-        [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
-    }
-    let (a, b) = (occs(old), occs(new));
-    if a == b {
-        return Some(Vec::new());
-    }
-    let left: std::collections::HashSet<&[u8]> = a.iter().copied().collect();
-    let right: std::collections::HashSet<&[u8]> = b.iter().copied().collect();
-    let mut out = Vec::new();
-    for rec in a.iter().filter(|r| !right.contains(*r)).chain(b.iter().filter(|r| !left.contains(*r))) {
-        if out.len() == LIGHTING_CHANGES {
-            return None;
-        }
-        out.push(bounds(rec));
-    }
-    Some(out)
-}
-
 /// Key of what the probes trace besides the occluders and meshes: the floor and the
 /// roof (their place and colour, which kept hits hold).
 pub(crate) fn lighting_trace_key(pack: &crate::pack::Pack) -> u64 {
@@ -3142,6 +3172,70 @@ pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 
         f.to_bits().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Floor, roof, sky, fire, smoke, and directional lamps (direction and colour).
+/// Point lamps, occluders, and the camera are change records or ignored, so they
+/// do not reset the quiet schedule of every cell.
+pub(crate) fn lighting_static_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let word = |at: usize| {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let tail = crate::pack::SCENE_TAIL;
+    for index in 0..word(0) {
+        let at = tail + index * 32;
+        let Some(rec) = bytes.get(at..at + 32) else {
+            break;
+        };
+        let directional = f32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]);
+        if directional <= 0.5 {
+            continue;
+        }
+        rec[..12].hash(&mut hasher);
+        rec[16..28].hash(&mut hasher);
+    }
+    let mut floats: Vec<f32> = Vec::new();
+    floats.extend(pack.fire.position);
+    floats.extend(pack.fire.color);
+    floats.push(pack.fire.strength);
+    for puff in &pack.puffs {
+        floats.extend(puff.center);
+        floats.push(puff.radius);
+        floats.push(puff.density);
+    }
+    floats.extend(pack.floor_center);
+    floats.push(pack.floor_half_x);
+    floats.push(pack.floor_half_z);
+    floats.extend(pack.floor_color);
+    floats.extend(pack.ceiling);
+    floats.extend(pack.sky);
+    for value in floats {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Eye at byte 16 (12 bytes) and the basis at bytes 96..144.
+fn camera_stamp(bytes: &[u8]) -> Option<[u8; 60]> {
+    let eye = bytes.get(16..28)?;
+    let basis = bytes.get(96..144)?;
+    let mut out = [0u8; 60];
+    out[..12].copy_from_slice(eye);
+    out[12..].copy_from_slice(basis);
+    Some(out)
+}
+
+/// One little-endian word of the scene block. Byte 252 is `pack.debug_view`.
+fn header_word(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + 4)?;
+    let Ok(arr) = <[u8; 4]>::try_from(slice) else {
+        return None;
+    };
+    Some(u32::from_le_bytes(arr))
 }
 
 /// S78S debug isolate toggles: attribute a change to exactly one component.

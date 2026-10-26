@@ -19,7 +19,7 @@ fn spec(name: &str, description: &str) -> CommandSpec {
 /// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and scripts.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled)."),
+        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled, change_records, deferred_spheres)."),
         spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(

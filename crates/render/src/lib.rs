@@ -4,6 +4,7 @@ mod gltf_draw;
 mod gpu;
 #[cfg(test)]
 mod lamp_pick;
+mod lighting_regions;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
@@ -25,6 +26,9 @@ pub use gpu::{
     lighting_sun_flag_needs_value, DebugView, DrawProfile, LampPickCounts, LampReport,
     LightingAtrousStats, LightingSunStats, Renderer, ScreenLine, ScreenRect, SettleStats,
     UnfilledControl, UnfilledStats, ViewMode,
+};
+pub use lighting_regions::{
+    Aabb, ChangeRecord, FinishedLight, GiRegionStats, WorldCacheRegion, WorldCacheRegions,
 };
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
