@@ -10,7 +10,7 @@
     expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
 )]
 
-//! s7 on lavapipe: 96×54, 300 settle frames, 64 still and 64 pan.
+//! s7 on lavapipe: 96×54, 4200 settle frames, 64 still and 64 pan.
 //!
 //! Needs a Wayland socket (`WAYLAND_DISPLAY`) and lavapipe. Run with
 //! `--test-threads=1`. Grade A exits through the assertion below.

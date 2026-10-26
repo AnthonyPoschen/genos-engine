@@ -58,7 +58,7 @@ A preset whose lamp pick is off cannot grade the random path.
 Lavapipe times are not a result. The report is <out>/metrics.json.
 
   --size WxH       picture size (default 96x54)
-  --settle N       still frames before the capture (default 300)
+  --settle N       still frames before the capture (default 4200)
   --frames N       still frames, and pan frames (default 64, at least 9)
   --preset NAME    potato, day-cycle, gi-1bounce, low, medium, high
   --lamps N        lamps on a grid (default 16, at least 9). Intensity is 3/N
@@ -89,7 +89,7 @@ impl Config {
         Self {
             width: 96,
             height: 54,
-            settle: 300,
+            settle: 4200,
             frames: 64,
             preset: None,
             lamps: 16,
@@ -112,7 +112,7 @@ where
 {
     let mut width = 96u32;
     let mut height = 54u32;
-    let mut settle = 300u32;
+    let mut settle = 4200u32;
     let mut frames = 64u32;
     let mut preset = None;
     let mut lamps = 16u32;
@@ -596,7 +596,7 @@ mod tests {
         let config = parse(["--out", "genos-debug/noise"]).unwrap().unwrap();
         assert_eq!(config.width, 96);
         assert_eq!(config.height, 54);
-        assert_eq!(config.settle, 300);
+        assert_eq!(config.settle, 4200);
         assert_eq!(config.frames, 64);
         assert_eq!(config.lamps, 16);
         assert!(!config.broken);

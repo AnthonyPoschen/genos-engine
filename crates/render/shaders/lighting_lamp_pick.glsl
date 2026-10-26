@@ -111,11 +111,12 @@ bool lamp_pick_broken() {
     return ((pc.lamp.y >> 20u) & 1u) != 0u;
 }
 
-// Running mean of unbiased samples while the hold is off. Past this the picture
-// stays put and the pixel keeps tracing, so the grade sees a settled integral
-// and a non-zero ray count. 128 is enough for the 16-lamp overlap to settle
-// inside the grade's ratio, and the lavapipe settle is 300 frames.
-const uint LAMP_PICK_MEAN_CAP = 128u;
+// Running mean of fresh unbiased samples while the hold is off. Past this the
+// picture stays put and the pixel keeps tracing, so the grade sees a settled
+// integral and a non-zero ray count. The mean is three full floats (the
+// reservoir weight, the target, and the geo colour word). Packing it to
+// rgb9e5 every frame truncated the tail and the average went dark.
+const uint LAMP_PICK_MEAN_CAP = 4096u;
 
 uint lamp_res_index(uint pixel, uint slot) {
     return (slot * pc.dims.x * pc.dims.y + pixel) * 2u;

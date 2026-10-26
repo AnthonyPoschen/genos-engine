@@ -851,9 +851,12 @@ void main() {
             uvec4 hg = lamp_geo_load(hist_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR) {
                 LampReservoir prev_res = lamp_res_load(hist_px, lamp_res_slot_prev());
-                prev_count = lamp_res_frames(prev_res);
+                // The hold-off path stores the mean length in the low 24 bits.
+                // The high 8 bits only count to 255, which froze a short mean.
+                // Hold-off stores the mean as three floats, not rgb9e5.
+                prev_count = lamp_res_samples(prev_res);
                 if (prev_count > 0u) {
-                    prev = lighting_unpack_rgb9e5(hg.w);
+                    prev = vec3(prev_res.w_sum, prev_res.target, uintBitsToFloat(hg.w));
                 }
             }
         }
@@ -895,9 +898,19 @@ void main() {
         } else if (chosen_n > 0u) {
             LampReservoir cur = lamp_res_load(idx, slot);
             if (cur.lamp != LAMP_ALL) {
-                cur.m = lamp_res_samples(cur) | (mean_count << 24u);
+                uint color_word = lighting_pack_rgb9e5(e);
+                if (lamp_pick_hold_off()) {
+                    // Full-precision mean. w_sum and target are free: this path
+                    // does not merge, and the picture quantizes once below.
+                    cur.m = mean_count;
+                    cur.w_sum = e.r;
+                    cur.target = e.g;
+                    color_word = floatBitsToUint(e.b);
+                } else {
+                    cur.m = lamp_res_samples(cur);
+                }
                 lamp_res_store(idx, slot, cur);
-                lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR, lighting_pack_rgb9e5(e)));
+                lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR, color_word));
                 if (lamp_pick_diag()) {
                     atomicAdd(gstats.diag[59u], 1u);
                 }
