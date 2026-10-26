@@ -21,7 +21,9 @@ mod world;
 
 pub use aa::Antialias;
 pub use fog_pass::{
-    media_images, near_images, shaft_image, smear_broken, smear_fixture, yaw_pop_broken,
+    column_luma, flicker_dispatch, media_dispatch, media_images, near_dispatch, near_images,
+    picture_from, shaft_dispatch, shaft_image, smear_broken, smear_dispatch, smear_fixture,
+    smear_tracking, sphere_dispatch, sphere_volume, yaw_pop_broken,
     yaw_pop_fixture, FogDispatch, FogGpu, FogImage, FogPointLamp, FOG_FLIP_G,
     FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
 };
@@ -30,10 +32,11 @@ pub use fog_budget::{
     millisecond_ceiling, sample_cap, unfitted_milliseconds, FogProbe, PassCost,
 };
 pub use fog::{
-    apply_fog, compose_camera_medium, compose_pixel_medium, grid_size, inject,
+    apply_fog, compose_camera_medium, compose_pixel_medium, grid_size, inject, point_at, ray_dir,
     integrate_samples, integrate_unshadowed,
     leak_broken,
-    leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, still_flicker,
+    leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, sphere_leak_broken,
+    still_flicker,
     still_flicker_broken, still_flicker_fixture, uniform_delta_transmittance, world_cache_inscatter,
     DepthTap, DirectSun,
     FogColumn, FogView, FroxelGrid, GridSize, PixelRay, SliceSample, Z_FAR, Z_NEAR,

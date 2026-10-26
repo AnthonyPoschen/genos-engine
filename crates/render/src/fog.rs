@@ -253,6 +253,46 @@ pub fn leak_fixture() -> f32 {
     local_volume_leak(&grid, &volume, &view)
 }
 
+/// A sphere with one outside cell forced to extinction 1.
+#[must_use]
+pub fn sphere_leak_broken() -> f32 {
+    let volume = FogVolume {
+        shape: FogShape::Sphere,
+        position: [0.0, 0.0, -6.0],
+        extents: [1.2, 1.2, 1.2],
+        density: 1.0,
+        albedo: 1.0,
+        phase_g: 0.0,
+        falloff: 0.0,
+    };
+    let settings = FogSettings {
+        volumes: vec![volume],
+        ..FogSettings::default()
+    };
+    let size = GridSize {
+        width: 8,
+        height: 8,
+        slices: 12,
+    };
+    let view = FogView::look([0.0, 0.0, 0.0], 0.0, 0.0, 1.0, 1.0);
+    let mut grid = inject(&settings, &view, size);
+    for z in 0..size.slices {
+        for y in 0..size.height {
+            for x in 0..size.width {
+                let Some(index) = cell_index(size, x, y, z) else {
+                    continue;
+                };
+                let centre = cell_centre(&view, size, x, y, z);
+                if !volume_contains(&volume, centre) {
+                    grid.extinction[index] = 1.0;
+                    return local_volume_leak(&grid, &volume, &view);
+                }
+            }
+        }
+    }
+    1.0
+}
+
 /// The same fixture with extinction written into a cell outside the box.
 #[must_use]
 pub fn leak_broken() -> f32 {
@@ -923,7 +963,8 @@ fn column_at(columns: &[FogColumn], size: GridSize, x: u32, y: u32) -> FogColumn
         })
 }
 
-pub(crate) fn ray_dir(view: &FogView, size: GridSize, x: u32, y: u32) -> [f32; 3] {
+#[must_use]
+pub fn ray_dir(view: &FogView, size: GridSize, x: u32, y: u32) -> [f32; 3] {
     let u = (unit(x) + 0.5) / unit(size.width.max(1));
     let v = (unit(y) + 0.5) / unit(size.height.max(1));
     let nx = (u * 2.0 - 1.0) * view.tan_half_x;
@@ -1049,7 +1090,8 @@ fn volume_contains(volume: &FogVolume, point: [f32; 3]) -> bool {
     }
 }
 
-pub(crate) fn point_at(view: &FogView, size: GridSize, x: u32, y: u32, view_z: f32) -> [f32; 3] {
+#[must_use]
+pub fn point_at(view: &FogView, size: GridSize, x: u32, y: u32, view_z: f32) -> [f32; 3] {
     let u = (unit(x) + 0.5) / unit(size.width.max(1));
     let v = (unit(y) + 0.5) / unit(size.height.max(1));
     let nx = (u * 2.0 - 1.0) * view.tan_half_x;

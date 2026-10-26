@@ -224,8 +224,32 @@ fn yaw_energy(frame: u32, scale_odd: bool) -> f32 {
     sum
 }
 
+/// Centroid lag of caller-supplied per-frame luma. `step` 1 walks every yaw frame.
+/// The geometric centre does not use the fog integral.
+#[must_use]
+pub fn smear_tracking(step: u32, mut luma_at: impl FnMut(u32) -> Vec<f32>) -> f64 {
+    let step = step.max(1);
+    let mut max_lag = 0.0_f64;
+    let mut prev_rendered = picture_x(centroid_from(0, &luma_at(0)));
+    let mut prev_geometric = picture_x(project_blob(0));
+    let mut frame = step;
+    while frame < YAW_FRAMES {
+        let rendered = picture_x(centroid_from(frame, &luma_at(frame)));
+        let geometric = picture_x(project_blob(frame));
+        let lag = ((rendered - prev_rendered) - (geometric - prev_geometric)).abs();
+        max_lag = max_lag.max(lag);
+        prev_rendered = rendered;
+        prev_geometric = geometric;
+        frame = frame.saturating_add(step);
+    }
+    max_lag
+}
+
 fn centroid(frame: u32) -> f32 {
-    let luma = blob_luma(frame);
+    centroid_from(frame, &blob_luma(frame))
+}
+
+fn centroid_from(frame: u32, luma: &[f32]) -> f32 {
     let size = blob_size();
     let view = blob_view(frame);
     let mut weight = 0.0_f32;
@@ -695,6 +719,110 @@ fn columns_image(size: GridSize, columns: &[FogColumn]) -> FogImage {
         height: size.height,
         linear,
     }
+}
+
+/// Height-fog dispatch. `scene` is absent, so shadows are skipped.
+#[must_use]
+pub fn media_dispatch(flags: u32, stop_slices: u32) -> FogDispatch {
+    let (settings, view, size, sun) = media_scene();
+    FogDispatch {
+        settings,
+        view,
+        size,
+        sun,
+        lamps: Vec::new(),
+        scene: None,
+        flags,
+        stop_slices,
+        read_extinction: false,
+    }
+}
+
+/// Nearest quarter of the slices, no tail.
+#[must_use]
+pub fn near_dispatch(flags: u32) -> FogDispatch {
+    let stop = media_scene().2.slices / 4;
+    media_dispatch(flags, stop.max(1))
+}
+
+/// Shadowed shaft. `flags` can skip the shadow lookup.
+#[must_use]
+pub fn shaft_dispatch(flags: u32) -> FogDispatch {
+    let (settings, view, size, sun, lamp, scene) = shaft_scene();
+    FogDispatch {
+        settings,
+        view,
+        size,
+        sun,
+        lamps: vec![lamp],
+        scene: Some(scene),
+        flags,
+        stop_slices: 0,
+        read_extinction: false,
+    }
+}
+
+/// One sphere, height density zero. The extinction image comes back.
+#[must_use]
+pub fn sphere_dispatch(flags: u32) -> FogDispatch {
+    let mut job = media_dispatch(flags, 0);
+    job.settings.density = 0.0;
+    job.settings.volumes = vec![sphere_volume()];
+    job.size = GridSize {
+        width: 8,
+        height: 8,
+        slices: 12,
+    };
+    job.view = FogView::look([0.0, 0.0, 0.0], 0.0, 0.0, 1.0, 1.0);
+    job.read_extinction = true;
+    job
+}
+
+/// The sphere the leak row injects.
+#[must_use]
+pub fn sphere_volume() -> FogVolume {
+    FogVolume {
+        shape: FogShape::Sphere,
+        position: [0.0, 0.0, -6.0],
+        extents: [1.2, 1.2, 1.2],
+        density: 1.0,
+        albedo: 1.0,
+        phase_g: 0.0,
+        falloff: 0.0,
+    }
+}
+
+/// Still camera, two identical dispatches.
+#[must_use]
+pub fn flicker_dispatch() -> FogDispatch {
+    media_dispatch(0, 0)
+}
+
+/// One yaw frame of the High-grid blob. History is not read.
+#[must_use]
+pub fn smear_dispatch(frame: u32) -> FogDispatch {
+    let mut job = media_dispatch(0, 0);
+    job.settings.density = 0.0;
+    job.settings.volumes = vec![blob_volume()];
+    job.view = blob_view(frame);
+    job.size = blob_size();
+    job.sun = DirectSun {
+        toward: [0.0, 1.0, 0.0],
+        color: [1.0, 1.0, 1.0],
+    };
+    job
+}
+
+/// In-scatter luminance, one value per column.
+#[must_use]
+pub fn column_luma(columns: &[FogColumn]) -> Vec<f32> {
+    columns.iter().map(|column| luma(column.inscatter)).collect()
+}
+
+/// `apply_fog` of `[0.05, 0.05, 0.06]` over the columns.
+#[must_use]
+pub fn picture_from(size: GridSize, columns: &[FogColumn]) -> FogImage {
+    columns_image(size, columns)
 }
 
 #[cfg(test)]

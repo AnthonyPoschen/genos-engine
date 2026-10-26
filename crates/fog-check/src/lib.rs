@@ -11,6 +11,7 @@ mod feature;
 mod report;
 
 pub use cli::{resolve, Config, HELP};
+pub use feature::planted_scores;
 pub use report::{exit_code, format_lines, judge, write_metrics, Metric, Report, Status};
 
 /// Which metrics to score.
@@ -24,7 +25,7 @@ pub enum Suite {
     All,
 }
 
-/// Analytic input. Feature metrics ignore it.
+/// Analytic input. The feature suite uses it too: `broken` runs the `*_broken` helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fixture {
     /// A candidate that matches the closed form.
@@ -60,7 +61,7 @@ pub fn evaluate(suite: Suite, fixture: Fixture) -> Report {
         metrics.extend(analytic::evaluate_analytic(fixture));
     }
     if matches!(suite, Suite::Feature | Suite::All) {
-        metrics.extend(feature::evaluate_feature());
+        metrics.extend(feature::evaluate_feature(fixture));
     }
     Report {
         suite,

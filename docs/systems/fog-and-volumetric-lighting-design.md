@@ -266,14 +266,15 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `phase_hg_integral_abs` | 1e-4 | Max abs error of the sphere integral of Henyey-Greenstein against 1, Simpson in μ times `2π`, at g = 0, 0.4, and 0.7 | Graded. The good fixture integrates `phase_hg`. Broken fixture drops the `4π`. |
 | `homogeneous_inscatter_max_abs` | 1e-3 | Max abs error of `(S/σ)(1-exp(-σ D))` against piecewise steps, σ = 0.2, S = 0.15 | Graded. The good fixture calls `homogeneous_inscatter`. Broken fixture adds `S*D` with no transmittance. |
 | `image_grade_blur_rel` | 0.12 | `blur_relative` of a synthetic fog picture against itself. The lighting-ref fail line. | Graded. Broken fixture scales luminance by 1.4. |
-| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded. History is off, so the froxel centroid tracks the projected shaft. Holding the first frame fails. |
-| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | Graded. History is off, so the fog energy stays under the gate. Scaling odd frames by 1.4 fails. |
+| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded from lavapipe column readback at High 160×90×48. The harness strides 16 of the 320 yaw frames. The CPU evidence walks every frame. History is off. Holding the first frame fails. |
+| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | Graded on the CPU High grid. History is off. Scaling odd frames by 1.4 fails. |
 | `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded. Height density is zero and one box sits on the view axis. A write outside that box fails the gate. |
-| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | Graded. Sun and point lamps take `V` from `trace::sees`. Forcing `V` to 1 fails the grade. |
-| `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
-| `media_path_blur_rel` | 0.12 | Full picture against the media path trace | Graded. The froxel against the closed-form height ray. Scaling the froxel by 1.4 fails. |
-| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | Graded. The nearest quarter against that segment's closed form. Scaling by 1.4 fails. |
-| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded. History is off, so two still frames match. Scaling the second frame by 1.4 fails. |
+| `sphere_volume_leak` | 1e-4 | Peak extinction outside a local sphere, divided by the peak inside | Graded from the lavapipe extinction image. Ignoring the sphere bound fails the gate. |
+| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance of the shadowed GPU columns against the CPU shadowed integral | Graded. The CPU model is the reference. Skipping the shadow lookup fails. `--fixture broken` compares the unshadowed CPU integral with the shadowed one. |
+| `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` until lighting phase 3 |
+| `media_path_blur_rel` | 0.12 | Full picture against a local closed form, not `genos_math` | Graded from lavapipe columns. The broken fixture scales the CPU picture by 1.4. |
+| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | Graded from lavapipe columns against that segment's local closed form. |
+| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded from two lavapipe frames. History is off. Scaling the second frame by 1.4 fails. |
 | `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
 | `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
 | `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
@@ -283,9 +284,9 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | Graded on lavapipe, or `NOT-IMPLEMENTED` with no window. |
 | `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | Graded on lavapipe, or `NOT-IMPLEMENTED` with no window. An unreduced cap that exceeds the ceiling fails. |
 
-Exit status: 0 when no selected metric failed, including a run whose rows are `NOT-IMPLEMENTED`. 1 when any metric failed. 2 when an argument is bad. `--suite analytic` is the closed forms plus the synthetic picture. `--suite feature` is the renderer metrics. `--suite all` is both. `--fixture good` and `--fixture broken` select the analytic inputs. The feature suite ignores the fixture.
+Exit status: 0 when no selected metric failed, including a run whose rows are `NOT-IMPLEMENTED`. 1 when any metric failed. 2 when an argument is bad. `--suite analytic` is the closed forms plus the synthetic picture. `--suite feature` is the renderer metrics. `--suite all` is both. `--fixture good` grades lavapipe readback against the CPU model and the local closed form. `--fixture broken` runs the `*_broken` helpers. The millisecond ceilings are RTX 4070 figures. A lavapipe timestamp is labelled as lavapipe and can miss those ceilings. That miss is a fail, not a pass.
 
-The good analytic run exits 0. The broken analytic run exits 1. The feature run exits 0. A measured 0 on a feature that is absent is still `NOT-IMPLEMENTED`.
+The good analytic run exits 0. The broken analytic run exits 1. A measured 0 on a feature that is absent is still `NOT-IMPLEMENTED`. `gi_inscatter_blur_rel` stays absent.
 
 Phase 0 on this tree (`cargo run -p genos-fog-check --offline --locked`):
 
@@ -299,7 +300,7 @@ Phase 0 on this tree (`cargo run -p genos-fog-check --offline --locked`):
 | `homogeneous_inscatter_max_abs` | 7.216450e-16 PASS | 6.014224e-1 FAIL |
 | `image_grade_blur_rel` | 0 PASS | 4.000000e-1 FAIL |
 
-Good exits 0. Broken exits 1. `--suite feature` prints 16 lines, each `NOT-IMPLEMENTED`, and exits 0. `--suite all` with the good fixture exits 0. JSON is `genos-debug/fog/<fixture>/metrics.json`.
+Good exits 0. Broken exits 1. That table is the phase-0 analytic run. The feature suite now grades the froxel. JSON is `genos-debug/fog/<fixture>/metrics.json`.
 
 ## 12. Debug tool and tests
 
@@ -313,6 +314,7 @@ Views, with no help text, labelled by the key: `extinction`, `inscatter`, `trans
 | Shaft smears on a yaw | `froxel_temporal_smear_px` |
 | Yaw pops | `fog_yaw_pop_rel` |
 | Density outside a box | `local_volume_leak` |
+| Density outside a sphere | `sphere_volume_leak` |
 | Shaft ignores a wall | `shaft_shadow_blur_rel` |
 | Cache light missing in the medium | `gi_inscatter_blur_rel` |
 | Picture misses the reference | `media_path_blur_rel`, `near_fog_blur_rel` |
@@ -339,7 +341,7 @@ cargo run -p genos-fog-check -- --suite analytic --fixture broken --out genos-de
 cargo run -p genos-fog-check -- --suite feature --out genos-debug/fog/feature
 ```
 
-`cargo test -p genos-fog-check` is the fast check. It does not need a GPU. The media path trace and the 4070 timings stay commands for the owner machine. Lavapipe, when a later phase draws, is a wiring check only.
+`cargo test -p genos-fog-check` grades the feature rows on lavapipe. The analytic rows do not need a GPU. The millisecond ceilings stay the 4070 figures. A lavapipe time is not that measurement.
 
 ## 13. Settings and arguments
 
