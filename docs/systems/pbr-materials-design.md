@@ -302,6 +302,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `fence` | 0 | Mips that become resident while `transfer_ready` is false. |
 | `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the device-atlas texel the transfer copied out is not that resident mip. The CPU chain is not that texel. `cargo test -p genos-render --test material_stream`. |
 | `heap_shrink` | 6 | Frames until committed texture bytes sit under the texture target after `heapBudget` is replaced mid-run on the renderer, with headroom at 0. A streamer that does not evict stays over the line and the row is 7. |
+| `oom_device` | 0 | A `VK_ERROR_OUT_OF_DEVICE_MEMORY` injected into the renderer's device alloc. The retry succeeds and `device_bytes` drops. That counter moves only in the free that calls the driver, so evicting without freeing leaves it in place. `cargo test -p genos-render --test material_stream`. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
@@ -317,7 +318,7 @@ Each phase is its own commit and its own measurement. A phase that misses a thre
 | P3 | The CPU path tracer samples the shade. Dielectric pictures use the reference check. | `picture_dielectric`. `picture_metal` stays unimplemented. |
 | P4 | Emission at cache hits, promoted emitters, furnace, double-count switch. | `emissive_furnace`, `double_count`. |
 | P5 | Cook writes BC7 and ASTC mips. Normals stay RGBA8. | `bc7_colour_rmse`, `astc_colour_rmse`. |
-| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`, `evict_order`, `fence`, `frame_streamer`, `heap_shrink`. |
+| P6 | View-driven streaming inside the VRAM budget. | `budget_recover`, `upload_refused`, `oom_recover`, `spin_evict`, `quality_cap`, `ultra_near`, `slow_bus`, `thrash`, `evict_order`, `fence`, `frame_streamer`, `heap_shrink`, `oom_device`. |
 | P7 | `--watch` hot reload. | `hot_reload_frames`. |
 | — | `gbuffer_ms` | Measured on the 4070 when phase 2's maps exist. Not a reason to build a pass early. |
 

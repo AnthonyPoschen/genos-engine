@@ -428,6 +428,37 @@ impl Renderer {
         self.gpu.bind_next_unbacked(memory)
     }
 
+    /// The next `count` device allocations return out of device memory and do
+    /// not call the driver.
+    pub fn fail_next_device_allocs(&self, count: u32) {
+        self.gpu.fail_device_allocs.set(count);
+    }
+
+    /// Device bytes still held. This drops only when a free reaches the driver.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        self.gpu.device_bytes.get()
+    }
+
+    /// Bytes of device memory still bound to streamed mip pages.
+    #[must_use]
+    pub fn material_page_bytes(&self) -> u64 {
+        self.gpu
+            .stream_pages
+            .iter()
+            .filter(|page| !page.memory.is_null())
+            .map(|page| page.bytes)
+            .sum()
+    }
+
+    /// Allocate one device page through the out-of-memory retry, then release
+    /// that probe. A drop in `device_bytes` is the mip the retry freed.
+    pub fn retry_texture_alloc(&mut self) -> Result<(), String> {
+        let memory = self.gpu.allocate_texture(4096, u32::MAX)?;
+        self.gpu.release_device(memory, 4096);
+        Ok(())
+    }
+
     fn fund_stream_pages(&mut self) -> Result<(), String> {
         if self.gpu.transfer_busy {
             return Ok(());
@@ -1083,6 +1114,11 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// Device allocations to fail with out-of-device-memory before the driver.
+    fail_device_allocs: std::cell::Cell<u32>,
+    /// Device bytes allocated minus the bytes passed to the free that calls
+    /// the driver. Bookkeeping that drops a mip without that free does not move.
+    device_bytes: std::cell::Cell<u64>,
     /// Dedicated transfer queue when the device has one, otherwise the graphics queue.
     transfer_queue: Handle,
     transfer_family: u32,
@@ -1902,6 +1938,8 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                fail_device_allocs: std::cell::Cell::new(0),
+                device_bytes: std::cell::Cell::new(0),
                 transfer_queue,
                 transfer_family,
                 transfer_pool: std::ptr::null_mut(),
@@ -5457,6 +5495,13 @@ impl Gpu {
     }
 
     fn alloc(&self, size: u64, type_bits: u32, memory: Memory) -> Result<Handle, String> {
+        if memory == Memory::Device {
+            let pending = self.fail_device_allocs.get();
+            if pending > 0 {
+                self.fail_device_allocs.set(pending - 1);
+                return Err("out of device memory".into());
+            }
+        }
         // Buffers the CPU only writes go in memory the GPU reads at full speed when the
         // device has it (resizable BAR, or the 256 MB BAR window): from plain host memory
         // every probe, scene and tier read crossed PCIe. Readbacks want cached host memory.
@@ -5494,7 +5539,12 @@ impl Gpu {
         let Some(index) = index else {
             return Err("no memory type".into());
         };
-        self.alloc_index(size, index)
+        let handle = self.alloc_index(size, index)?;
+        if memory == Memory::Device {
+            self.device_bytes
+                .set(self.device_bytes.get().saturating_add(size));
+        }
+        Ok(handle)
     }
 
     /// The first memory type allowed by `type_bits` with every flag in `want`.
@@ -6385,10 +6435,20 @@ impl Gpu {
                 page.image = std::ptr::null_mut();
             }
             if !page.memory.is_null() {
-                (self.fns.free_mem)(self.device, page.memory, std::ptr::null());
+                self.release_device(page.memory, page.bytes);
                 page.memory = std::ptr::null_mut();
             }
         }
+    }
+
+    /// Free device memory and drop those bytes from the running total.
+    fn release_device(&self, memory: Handle, bytes: u64) {
+        if memory.is_null() {
+            return;
+        }
+        unsafe { (self.fns.free_mem)(self.device, memory, std::ptr::null()) };
+        self.device_bytes
+            .set(self.device_bytes.get().saturating_sub(bytes));
     }
 
     fn allocate_texture(&mut self, size: u64, type_bits: u32) -> Result<Handle, String> {

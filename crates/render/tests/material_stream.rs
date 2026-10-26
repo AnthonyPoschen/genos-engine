@@ -248,6 +248,37 @@ fn a_smaller_heap_budget_evicts_on_the_renderer() {
 }
 
 #[test]
+fn an_out_of_device_memory_retry_frees_device_memory() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = world();
+    let camera = Camera::new(0.0, 4.0, 0.0);
+    let mut pages = 0u64;
+    for _ in 0..8 {
+        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        pages = renderer.material_page_bytes();
+        if renderer.material_residency().1 == Some(0) && pages > 0 {
+            break;
+        }
+    }
+    let before = renderer.device_bytes();
+    renderer.fail_next_device_allocs(1);
+    let retried = renderer.retry_texture_alloc();
+    let after = renderer.device_bytes();
+    let pages_after = renderer.material_page_bytes();
+    let dropped = before.saturating_sub(after);
+    let value = u32::from(retried.is_err() || after >= before);
+    let status = if value == 0 { "PASS" } else { "FAIL" };
+    eprintln!(
+        "oom_device {value}.000000 0.000000 {status} device_bytes {before} -> {after} dropped {dropped} pages {pages} -> {pages_after}"
+    );
+    assert!(retried.is_ok(), "oom retry failed: {retried:?}");
+    assert!(
+        after < before,
+        "device bytes did not drop: {before} -> {after} pages {pages} -> {pages_after}"
+    );
+}
+
+#[test]
 fn the_renderer_reports_the_live_streamer() {
     let (_gpu, mut window, mut renderer) = open();
     let world = world();
