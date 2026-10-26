@@ -1071,7 +1071,9 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         }
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
-            if (v.w > 0.5) {
+            // A finished finer parent still has to be this surface. The tail's
+            // test does not run once this walk returns.
+            if (v.w > 0.5 && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                 return vec4(v.rgb, 1.0);
             }
@@ -1148,7 +1150,8 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
         // counts too (it used to drop out, the pixel took the other corners, and
         // it popped in with its first set).
         vec4 shown_s = vec4(0.0);
-        if (v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on()) {
+        if (v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on()
+            && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
             shown_s = lighting_sc_shown(s);
             if (shown_s.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
@@ -1158,7 +1161,8 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
             }
             continue;
         }
-        if (v.w > 0.5 && fract(v.w) < 0.1) {
+        if (v.w > 0.5 && fract(v.w) < 0.1
+            && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
             sum += bil * lighting_sc_shown(s).rgb;
             fsum += bil * lighting_sc_sunfrac_now(s);
