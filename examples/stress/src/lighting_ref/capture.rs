@@ -21,7 +21,7 @@ use std::time::Instant;
 use genos_lighting_ref::{
     blur_relative, mean_luma_ratio, mean_relative, settle_line, MetricParams, Picture,
 };
-use genos_render::Renderer;
+use genos_render::{pack_f32, Renderer};
 use genos_window::Window;
 
 use super::scenes::{self, Shot};
@@ -118,7 +118,7 @@ fn scene_picture(renderer: &mut Renderer) -> Result<Picture, String> {
     if scene.rgb.is_empty() || scene.width == 0 {
         return Err("no scene image".into());
     }
-    let linear = scene.rgb.iter().copied().map(|value| value as f32).collect();
+    let linear = scene.rgb.iter().copied().map(pack_f32).collect();
     Picture::from_linear(scene.width, scene.height, linear)
 }
 

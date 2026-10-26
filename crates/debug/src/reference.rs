@@ -32,8 +32,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use genos_load::ShadeSample;
 use genos_render::{
-    direct_light_in, linear_from_display, rec709_y, scene_luma, SceneMesh, SceneRead, Surfaces,
-    TraceHit,
+    direct_light_in, linear_from_display, pack_f32, rec709_y, scene_luma, SceneMesh, SceneRead,
+    Surfaces, TraceHit,
 };
 use genos_scene::{look_direction, Camera, Scene};
 
@@ -624,7 +624,9 @@ fn scene_texel(scene: &SceneRead, x: u32, y: u32, dst_w: u32, dst_h: u32) -> [f6
         .min(u64::from(scene.width) - 1);
     let sy = (u64::from(y) * u64::from(scene.height) / u64::from(dst_h.max(1)))
         .min(u64::from(scene.height) - 1);
-    let index = (sy * u64::from(scene.width) + sx) as usize * 3;
+    let index = usize::try_from(sy.saturating_mul(u64::from(scene.width)).saturating_add(sx))
+        .unwrap_or(0)
+        .saturating_mul(3);
     [
         scene.rgb.get(index).copied().unwrap_or(0.0),
         scene.rgb.get(index + 1).copied().unwrap_or(0.0),
@@ -705,7 +707,7 @@ fn grade(
                                     f64::from(rgb[1]),
                                     f64::from(rgb[2]),
                                 ]);
-                                (got as f32, want as f32)
+                                (pack_f32(got), pack_f32(want))
                             }
                             None => (
                                 display_y(&live.rgb[i * 3..i * 3 + 3]),

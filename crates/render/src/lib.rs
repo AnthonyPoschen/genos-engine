@@ -37,7 +37,7 @@ pub use hdr_output::{
     histogram_ev100_bins, karis_downsample_rgb, karis_firefly_response, karis_weight,
     step_exposure, agx_display_linear, graphics_white_linear, hdr10_pq, nits_from_display,
     rec2020_from_rec709, scrgb_from_display,
-    legacy_display, legacy_display_channel, near_grade, pick_hdr_output, present_host, pq_st2084,
+    legacy_display, legacy_display_channel, near_grade, pack_f32, pick_hdr_output, present_host, pq_st2084,
     rec709_y, resolve_swapchain, surface_choice, swapchain_format_code, swapchain_nits,
     swapchain_pair,
     scene_luma, scene_peak_error, scene_read_from_rgba, scene_referred, scrgb_code, still_pop_share,
