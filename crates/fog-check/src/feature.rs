@@ -385,10 +385,13 @@ fn shaft_grade_cpu(traced: bool) -> f64 {
     image_grade(shaft_image(true), shaft_image(traced))
 }
 
-/// Dense near segment. Skipping per-slice extinction is visible once optical depth is not tiny.
+/// Operating density 0.08 across every slice, no analytic tail.
+/// The near quarter at this density hides a skipped extinction (Beer error
+/// stays under the 0.08 gate). The full slice stack does not.
 fn extinction_grade() -> f64 {
     let mut job = near_dispatch(FOG_SKIP_EXTINCTION);
-    job.settings.density = 1.0;
+    job.settings.density = 0.08;
+    job.stop_slices = job.size.slices.max(1);
     let Some(gpu) = run(&job) else {
         return 1.0;
     };
