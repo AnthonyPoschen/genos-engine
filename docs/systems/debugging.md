@@ -235,7 +235,9 @@ Every command is a function taking a map: `capture(#{ mode: "albedo" })`. Short
 forms: `wait(n)`, `step(n)`, `view("direct")`, `knob(name, value)`, `knob(name)`,
 `shot(name)`, `shot(name, mode)`, `log(text)`, `out_dir()`. Checks: `check(bool,
 msg)`, `require(bool, msg)` (stops the script), `check_lt(a, b, msg)`,
-`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`.
+`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`. `wait(n)` asks for one
+second per frame, and at least two minutes, so a 600-frame soak finishes
+on lavapipe. The cap is one hour.
 
 ```rhai
 time(#{ pause: true });

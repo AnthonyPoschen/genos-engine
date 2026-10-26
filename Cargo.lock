@@ -157,6 +157,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-fracture"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
+]
+
+[[package]]
 name = "genos-gpuref"
 version = "0.1.0"
 dependencies = [
@@ -228,6 +235,7 @@ version = "0.1.0"
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [
+ "genos-fracture",
  "genos-math",
 ]
 

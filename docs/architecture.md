@@ -39,6 +39,7 @@ Cargo.toml
 crates/input/       package genos-input
 crates/math/        package genos-math
 crates/physics/     package genos-physics
+crates/fracture/    package genos-fracture
 crates/scene/       package genos-scene
 crates/mcp/         package genos-mcp
 crates/debug/       package genos-debug
@@ -61,7 +62,7 @@ examples/camera/    package genos-camera
 
 `genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
-`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs. The camera capsule calls that step.
+`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs, and hot-swaps a broken fracture asset. `genos-fracture` cooks that asset offline. The camera capsule calls the physics step. The cook does not run inside `step`.
 
 `genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
 

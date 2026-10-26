@@ -207,6 +207,21 @@ Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020) · More detail: `
 **Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On follows Algorithm 6 (a source counts only when its target weight for the selected lamp is positive) and does not clamp M. Off divides by the sum of M and clamps M. The menu switch is this key.
 Role: LIGHTS · Literature: Bitterli et al. 2020 Algorithm 6; Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
 
+**Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
+Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer weight** (proposed): the RGB intensity multiplied onto a lamp layer. Off, on, a dim, and a glow change the weight. They do not rebake the layer.
+Role: LIGHTS · Literature: Enlighten runtime light scale · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Live layer** (proposed): the one indirect cache written by every light that has no lamp layer. That is moving lamps, unflagged static lamps, the sun's indirect, and emissive.
+Role: STORE · Literature: Lumen's single surface cache · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Fast-blend** (proposed): the live layer's published irradiance closing on a confirmed new mean with a fixed time constant, after the multi-scale mean estimator says the short mean has moved. It is not a display fade.
+Role: TEMPORAL · Literature: MSME catch-up (Barré-Brisebois, Ray Tracing Gems ch. 25); the time floor is not in that listing · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer combine** (proposed): the pass that writes published irradiance as the live layer plus each published lamp layer times its layer weight. Readers see that sum only.
+Role: OUT · Literature: — · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
 **Candidates / samples**: candidates are lamps considered without shadows. Samples are the shadow rays actually traced.
 Role: SAMPLE · Literature: ReSTIR M candidates / visible samples
 

@@ -1,6 +1,6 @@
 # 0014: One glTF shade for the picture, the cache, and the path tracer
 
-Status: **Proposed**. Design: [`docs/systems/pbr-materials-design.md`](../systems/pbr-materials-design.md).
+Status: **Accepted**. Design: [`docs/systems/pbr-materials-design.md`](../systems/pbr-materials-design.md). Anthony delegated design approval to the Engine bot, which accepted this decision.
 
 ## Context
 

@@ -24,10 +24,13 @@
 //! bounce limit: every pixel's primary hit gathers next-event direct light at each
 //! vertex and continues along cosine-sampled paths, ended by Russian roulette after
 //! three bounces (capped at `max_bounces`). It runs on the CPU, so it is exact up to
-//! its noise, whatever the GPU path does. Not traced: fog, particle cards, textures.
+//! its noise, whatever the GPU path does. Not traced: fog and particle cards.
+//! A hit's albedo is the shared shade's diffuse albedo (`genos_load::ShadeSample`).
+//! Analytic paint is that shade with metallic 0. A glTF hit passes the textured shade.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use genos_load::ShadeSample;
 use genos_render::{
     direct_light_in, linear_from_display, rec709_y, scene_luma, SceneMesh, SceneRead, Surfaces,
     TraceHit,
@@ -193,8 +196,15 @@ fn path_from(
 ) -> [f32; 3] {
     let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let mut at = *first;
-    let mut weight = scale(first.albedo, LAMBERT);
-    let mut sum = mul(weight, direct_light_in(scene, surfaces, lift(&at), at.normal));
+    // Analytic hits are paint. A caller that already shaded a glTF material stores
+    // the diffuse albedo here, which is the same product with metallic applied.
+    let primary = ShadeSample::paint(first.albedo);
+    let mut weight = scale(primary.diffuse_albedo(), LAMBERT);
+    let mut sum = primary.outgoing(
+        LAMBERT,
+        direct_light_in(scene, surfaces, lift(&at), at.normal),
+        [0.0; 3],
+    );
     for bounce in 0..max_bounces {
         let (u, v) = if bounce == 0 {
             stratum
@@ -209,7 +219,9 @@ fn path_from(
             sum = add(sum, mul(weight, sky));
             break;
         };
-        weight = mul(weight, scale(next.albedo, LAMBERT));
+        let next_shade = ShadeSample::paint(next.albedo);
+        sum = add(sum, mul(weight, next_shade.emissive));
+        weight = mul(weight, scale(next_shade.diffuse_albedo(), LAMBERT));
         sum = add(
             sum,
             mul(weight, direct_light_in(scene, surfaces, lift(&next), next.normal)),
@@ -787,8 +799,29 @@ fn grade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genos_scene::{Ceiling, Floor, Light, Sky, Vec3, Wall};
+    use genos_load::shade_uv;
     use genos_render::trace_ray;
+    use genos_scene::{Ceiling, Floor, Light, Sky, Vec3, Wall};
+
+    #[test]
+    fn the_path_weight_is_the_shade_diffuse_albedo() {
+        let paint = ShadeSample::paint([0.5, 0.25, 0.125]);
+        assert_eq!(paint.diffuse_albedo(), [0.5, 0.25, 0.125]);
+        let metal = shade_uv(
+            &genos_load::PbrMaterial {
+                base_color: [0.8, 0.1, 0.1, 1.0],
+                metallic: 0.25,
+                ..genos_load::PbrMaterial::default()
+            },
+            &[],
+            [0.0, 0.0],
+        );
+        let irradiance = [1.0; 3];
+        let shared = metal.outgoing(LAMBERT, irradiance, [0.0; 3]);
+        let legacy = ShadeSample::paint([0.8, 0.1, 0.1]).outgoing(LAMBERT, irradiance, [0.0; 3]);
+        assert!(shared[0] < legacy[0]);
+        assert!((shared[0] / legacy[0] - 0.75).abs() < 1.0e-5);
+    }
 
     fn lamp(x: f32, y: f32, z: f32) -> Light {
         Light {
