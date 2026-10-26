@@ -92,6 +92,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --display NAME         Wayland display name. Omit it to use the session compositor.
+  --lifecycle-block-ms N stall shutdown once, for the quit-gap test.
+                         GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
   --frames N             quit after N frames. The last frame PNG leaves out
                          the debug menu, the menu tab, the frame-rate plate,
                          and tool overlays
@@ -225,19 +227,25 @@ struct Options {
     check: bool,
     /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
     mcp_port: Option<u16>,
+    /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
+    block_ms: Option<std::time::Duration>,
 }
 
 /// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
 const MCP_PORT: u16 = 8766;
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-lighting: {err}");
-        std::process::exit(1);
-    }
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("genos-lighting: {err}");
+            1
+        }
+    };
+    genos_window::exit(code);
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     let opts = options()?;
     apply_intent(&opts)?;
     std::fs::create_dir_all(opts.out.join("shots")).map_err(|err| err.to_string())?;
@@ -262,7 +270,8 @@ fn run() -> Result<(), String> {
         log.try_clone().map_err(|err| err.to_string())?,
     )?;
     if opts.check {
-        return check_all(&mut app, &opts, &mut log);
+        check_all(&mut app, &opts, &mut log)?;
+        return Ok(0);
     }
     if !app.entries.iter().any(|entry| entry.name == opts.scene) {
         return Err(format!("unknown scene {}", opts.scene));
@@ -277,7 +286,39 @@ fn run() -> Result<(), String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<genos_window::ThreadStop<bool>>,
+    ));
+    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
+    {
+        let hold = std::sync::Arc::clone(&server_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard.take());
+            true
+        });
+    }
+    {
+        let hold = std::sync::Arc::clone(&script_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.as_mut() {
+                Some(stop) => stop.poll(),
+                None => true,
+            }
+        });
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut camera = Camera::opening();
     if app.entry().name != opts.scene {
         app.start_load(&opts.scene)?;
@@ -287,7 +328,10 @@ fn run() -> Result<(), String> {
     let load_world = loading_world();
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
     let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
-    let mut server = Some(genos_mcp::Server::start_on(mcp_host, mcp_port)?);
+    let server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
+    *server_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server);
     let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
@@ -298,12 +342,14 @@ fn run() -> Result<(), String> {
     if opts.frames.is_some() || opts.script.is_some() {
         tools.set_fixed_step(Some(STEP));
     }
-    let mut script_thread = opts.script.clone().map(|run| {
+    if let Some(run) = opts.script.clone() {
         let _ = writeln!(log, "script {}", run.script.display());
-        genos_debug::script::spawn(run)
-    });
-    if let Some(thread) = &script_thread {
-        let _ = writeln!(log, "script thread {:?}", thread.thread().id());
+        let handle = genos_debug::script::spawn(run);
+        let _ = writeln!(log, "script thread {:?}", handle.thread().id());
+        *script_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(genos_window::ThreadStop::new(handle));
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
@@ -354,14 +400,8 @@ fn run() -> Result<(), String> {
             }
         }
         if frame.closing {
-            finish(
-                window,
-                renderer,
-                script_thread.take(),
-                server.take(),
-                tools.quit_code().is_some(),
-                tools.quit_code().unwrap_or(0),
-            );
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
+            return Ok(code);
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -387,7 +427,7 @@ fn run() -> Result<(), String> {
             &keys,
             &mut camera,
             &mut tools,
-            &mut renderer,
+            renderer,
         )?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
@@ -441,7 +481,7 @@ fn run() -> Result<(), String> {
                 match *action {
                     Action::Slide { id, value } => slide(&mut app, id, value)?,
                     Action::Select { id, value } => {
-                        select(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
+                        select(&mut app, &mut camera, &mut tools, renderer, id, value)?;
                     }
                     Action::Toggle { id, on } => toggle(&mut app, id, on)?,
                     Action::Press(id) => {
@@ -526,7 +566,7 @@ fn run() -> Result<(), String> {
         }
         let capture_ui = app.scene().debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut app,
         });
@@ -559,7 +599,7 @@ fn run() -> Result<(), String> {
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
         tools.after_draw(
-            &mut renderer,
+            renderer,
             pixels.as_deref(),
             genos_debug::FrameTiming {
                 frame_ms: real_dt as f64 * 1000.0,
@@ -567,7 +607,7 @@ fn run() -> Result<(), String> {
                 gpu_ms: None,
             },
         );
-        note_gi(&mut app, &mut renderer);
+        note_gi(&mut app, renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts
@@ -584,50 +624,27 @@ fn run() -> Result<(), String> {
             }
         }
         if last || tools.quit_code().is_some() {
-            finish(
-                window,
-                renderer,
-                script_thread.take(),
-                server.take(),
-                tools.quit_code().is_some(),
-                tools.quit_code().unwrap_or(0),
-            );
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
+            return Ok(code);
         }
     }
 }
 
-/// Stop the script and MCP threads, then destroy the device, then the window.
-///
-/// `quitting` means `quit` was already answered, so the script thread will
-/// leave `command::call` and exit. Joining it first is required. A script
-/// still blocked on the command queue is not joined: that wait is the frame
-/// thread, and joining here would deadlock. The device is destroyed while the
-/// window is mapped, so the seat pump can answer pings during the idle.
-/// `process::exit` then has no live script thread and no Vulkan device for
-/// the driver to reclaim.
-fn finish(
-    window: Window,
-    renderer: Renderer,
-    mut script: Option<std::thread::JoinHandle<bool>>,
-    server: Option<genos_mcp::Server>,
-    quitting: bool,
+fn script_exit_code(
+    slot: &std::sync::Mutex<Option<genos_window::ThreadStop<bool>>>,
     code: i32,
-) -> ! {
-    if !quitting {
-        if let Some(script) = script.take() {
-            if script.is_finished() {
-                let _ = script.join();
-            }
-        }
+) -> i32 {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(stop) = guard.as_mut() else {
+        return code;
+    };
+    if stop.try_join() && stop.result().copied() == Some(false) {
+        1
+    } else {
+        code
     }
-    genos_debug::script::join_then(script, || {
-        drop(server);
-        drop(renderer);
-    });
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
-    std::process::exit(code);
 }
 
 fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(), String> {
@@ -635,7 +652,10 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let load_world = loading_world();
     let mut camera = Camera::opening();
     let mut passed = Vec::new();
@@ -715,10 +735,6 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     }
     let summary = check_summary(&passed, &skipped, &failed);
     let _ = writeln!(log, "{summary}");
-    drop(renderer);
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
     if failed.is_empty() {
         eprintln!("genos-lighting: {summary}");
         Ok(())
@@ -2046,10 +2062,11 @@ fn options() -> Result<Options, String> {
     let mut size = (1280u32, 720u32);
     let mut check = false;
     let mut mcp_port = None;
+    let mut block_ms = None;
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
-            std::process::exit(0);
+            genos_window::exit(0);
         }
         match arg.as_str() {
             "--scene" => scene = Some(need_arg(&mut args, "--scene")?),
@@ -2121,6 +2138,12 @@ fn options() -> Result<Options, String> {
             "--mcp-port" => {
                 mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
             }
+            "--lifecycle-block-ms" => {
+                block_ms = Some(genos_window::parse_block_ms(
+                    "--lifecycle-block-ms",
+                    Some(&need_arg(&mut args, "--lifecycle-block-ms")?),
+                )?);
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -2137,6 +2160,8 @@ fn options() -> Result<Options, String> {
                     parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--mcp-port=") {
                     mcp_port = Some(parse_mcp_port(value)?);
+                } else if genos_window::block_ms_needs_value(other) == Some(false) {
+                    block_ms = Some(genos_window::parse_block_ms(other, None)?);
                 } else if genos_scene::lighting_flag_needs_value(other).is_some() {
                     let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -2195,6 +2220,7 @@ fn options() -> Result<Options, String> {
         size,
         check,
         mcp_port,
+        block_ms: genos_window::block_ms_mirror(block_ms),
     })
 }
 
@@ -2280,6 +2306,7 @@ mod tests {
             size: (320, 180),
             check: false,
             mcp_port: None,
+            block_ms: None,
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();

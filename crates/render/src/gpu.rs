@@ -176,16 +176,6 @@ impl Renderer {
         LEAVE.with(|cell| cell.set(None));
     }
 
-    /// Drop the renderer without `vkDeviceWaitIdle`.
-    ///
-    /// Call this after the window is destroyed. The driver reclaims the device
-    /// when the process exits. Waiting here is what makes a quit miss pings
-    /// when the window is still mapped, and what keeps the process alive after
-    /// the window is gone.
-    pub fn abandon(mut self) {
-        self.gpu.abandon = true;
-    }
-
     /// Lines drawn over the picture with the next overlay rectangles, in the same
     /// draw. They stay until replaced.
     pub fn set_overlay_lines(&mut self, lines: &[ScreenLine]) {
@@ -649,6 +639,20 @@ impl Renderer {
     }
 }
 
+impl genos_window::ShutdownDevice for Renderer {
+    fn prepare_shutdown(&mut self) {
+        Self::clear_blocker();
+    }
+
+    fn poll_idle(&mut self) -> bool {
+        self.gpu.poll_idle()
+    }
+
+    fn destroy_step(&mut self) -> bool {
+        self.gpu.destroy_step()
+    }
+}
+
 /// Host time and device time for one profiled draw.
 ///
 /// `gpu` is `None` until that draw's fence has signaled. It is never a copy of `cpu`.
@@ -898,8 +902,18 @@ struct Gpu {
     audio_cmd: Handle,
     audio_fence: Handle,
     submit_pending: bool,
-    /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
-    abandon: bool,
+    /// The lifecycle is draining and destroying. Lighting waits must not block.
+    lifecycle_release: bool,
+    /// `destroy_rest` has released the device.
+    torn_down: bool,
+    /// 0 yields, 1 destroys lighting, then the rest of the device.
+    teardown: u8,
+    /// The drain submits have been queued.
+    shutdown_armed: bool,
+    /// Fence for the graphics-queue drain submit.
+    shutdown_fence: Handle,
+    /// Fence for the compute-queue drain submit, when that queue is distinct.
+    shutdown_compute: Handle,
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
@@ -1542,7 +1556,12 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 submit_pending: false,
-                abandon: false,
+                lifecycle_release: false,
+                torn_down: false,
+                teardown: 0,
+                shutdown_armed: false,
+                shutdown_fence: std::ptr::null_mut(),
+                shutdown_compute: std::ptr::null_mut(),
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
@@ -5354,12 +5373,184 @@ impl Buffer {
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        unsafe {
-            if self.abandon || self.device.is_null() {
-                return;
-            }
+        if self.torn_down || self.device.is_null() {
+            return;
+        }
+        if !self.lifecycle_release {
             self.idle_device();
+        }
+        if self.teardown < 2 {
             self.destroy_lighting();
+        }
+        self.destroy_rest();
+    }
+}
+
+impl Gpu {
+    /// `true` when the queues that presented and built lighting have retired.
+    ///
+    /// An empty submit on each queue, after the last present, is ordered after
+    /// that present. The frame fences are not polled: a reset without a submit
+    /// leaves them unsignaled forever.
+    pub(crate) fn poll_idle(&mut self) -> bool {
+        if self.device.is_null() || self.torn_down {
+            return true;
+        }
+        if !self.shutdown_armed && !self.arm_shutdown() {
+            return false;
+        }
+        self.fence_retired(self.shutdown_fence)
+            && self.fence_retired(self.shutdown_compute)
+            && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
+    }
+
+    /// Destroy one group and return. `true` when the device is gone.
+    pub(crate) fn destroy_step(&mut self) -> bool {
+        if self.torn_down || self.device.is_null() {
+            return true;
+        }
+        self.lifecycle_release = true;
+        match self.teardown {
+            0 => {
+                self.teardown = 1;
+                false
+            }
+            1 => {
+                self.destroy_lighting();
+                self.teardown = 2;
+                false
+            }
+            _ => {
+                self.destroy_rest();
+                true
+            }
+        }
+    }
+
+    fn fence_retired(&self, fence: Handle) -> bool {
+        if fence.is_null() || self.device.is_null() {
+            return true;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+        status != VK_NOT_READY
+    }
+
+    fn arm_shutdown(&mut self) -> bool {
+        if self.shutdown_armed {
+            return true;
+        }
+        let Ok(graphics) = self.make_plain_fence() else {
+            return false;
+        };
+        self.shutdown_fence = graphics;
+        let distinct = !self.compute_queue.is_null() && !std::ptr::eq(self.compute_queue, self.queue);
+        if distinct {
+            let Ok(fence) = self.make_plain_fence() else {
+                self.destroy_shutdown_fences();
+                return false;
+            };
+            self.shutdown_compute = fence;
+        }
+        if !self.submit_empty(self.queue, self.shutdown_fence) {
+            self.destroy_shutdown_fences();
+            return false;
+        }
+        if distinct && !self.submit_empty(self.compute_queue, self.shutdown_compute) {
+            unsafe {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+            }
+            self.shutdown_compute = std::ptr::null_mut();
+        }
+        self.shutdown_armed = true;
+        true
+    }
+
+    fn make_plain_fence(&mut self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct FenceInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+        }
+        let info = FenceInfo {
+            s_type: 8,
+            next: std::ptr::null(),
+            flags: 0,
+        };
+        let mut fence = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &info as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut fence,
+                ),
+                "shutdown fence",
+            )?;
+        }
+        Ok(fence)
+    }
+
+    fn submit_empty(&self, queue: Handle, fence: Handle) -> bool {
+        if queue.is_null() || fence.is_null() {
+            return false;
+        }
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 0,
+            cmds: std::ptr::null(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        let result = unsafe {
+            (self.fns.queue_submit)(queue, 1, &submit as *const Submit as *const u8, fence)
+        };
+        result == VK_SUCCESS
+    }
+
+    fn destroy_shutdown_fences(&mut self) {
+        if self.device.is_null() {
+            self.shutdown_fence = std::ptr::null_mut();
+            self.shutdown_compute = std::ptr::null_mut();
+            return;
+        }
+        unsafe {
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
+            }
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
+        }
+    }
+
+    fn destroy_rest(&mut self) {
+        if self.torn_down || self.device.is_null() {
+            self.torn_down = true;
+            return;
+        }
+        self.torn_down = true;
+        self.lifecycle_release = true;
+        unsafe {
             self.destroy_targets();
             self.vertex = Buffer::empty();
             let mut vertices =
@@ -5476,7 +5667,16 @@ impl Drop for Gpu {
             if !self.aa_desc_layout.is_null() {
                 (self.fns.destroy_desc_layout)(self.device, self.aa_desc_layout, std::ptr::null());
             }
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
+            }
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
             (self.fns.destroy_device)(self.device, std::ptr::null());
+            self.device = std::ptr::null_mut();
             if !self.surface.is_null() {
                 (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
             }

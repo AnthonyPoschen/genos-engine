@@ -767,6 +767,12 @@ impl Gpu {
     /// wait (`vkDeviceWaitIdle` in `Drop`); that one ends when the picture
     /// shader does not walk the occluder grid.
     fn wait_lighting_world(&mut self) {
+        // Shutdown polls this fence from the event loop. Waiting here would
+        // block that loop inside device destruction.
+        if self.lifecycle_release {
+            self.lighting.world_busy = false;
+            return;
+        }
         if !self.lighting.world_busy || self.lighting.world_fence.is_null() {
             return;
         }

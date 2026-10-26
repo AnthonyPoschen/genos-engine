@@ -105,6 +105,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-math",
+ "genos-window",
 ]
 
 [[package]]
@@ -121,6 +122,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-mesh",
+ "genos-window",
 ]
 
 [[package]]

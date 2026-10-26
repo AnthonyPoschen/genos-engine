@@ -81,8 +81,13 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     }
     let mut window = Window::open_proof_on(opts.width, opts.height, opts.display.as_deref())?;
     window.set_title("Genos lighting reference check");
+    window.install_seat_pump();
+    Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     if renderer.width() != opts.width || renderer.height() != opts.height {
         return Err(format!(
             "proof window is {}x{}, the reference is {}x{}",
@@ -103,7 +108,7 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
             ));
             continue;
         };
-        match capture_one(&mut window, &mut renderer, opts, job, &shot) {
+        match capture_one(window, renderer, opts, job, &shot) {
             Ok(live) => shots.push(live),
             Err(err) => skipped.push((job.scene.clone(), job.checkpoint.clone(), err)),
         }

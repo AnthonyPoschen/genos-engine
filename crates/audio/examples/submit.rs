@@ -53,19 +53,19 @@ fn main() {
     println!("head={},{},{},{}", mixed[0], mixed[1], mixed[2], mixed[3]);
     if mixed.iter().all(|sample| *sample == 0) || mix_fnv == dry_fnv {
         eprintln!("mix was silence or the dry clip");
-        std::process::exit(1);
+        genos_window::exit(1);
     }
     match submit(&mixed, 48_000) {
         Ok(frames) => {
             println!("frames={frames}");
             if frames != mixed.len() as u64 / 2 {
                 eprintln!("short write: {frames}");
-                std::process::exit(1);
+                genos_window::exit(1);
             }
         }
         Err(err) => {
             eprintln!("alsa open failed: {err}");
-            std::process::exit(2);
+            genos_window::exit(2);
         }
     }
 }

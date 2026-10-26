@@ -123,3 +123,34 @@ rules:
     pattern-either:
       - pattern: std::process::Command::new("hyprctl")
       - pattern: Command::new("hyprctl")
+
+  - id: genos-no-process-exit
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Leave the process with genos_window::exit. The app lifecycle destroys
+      the device and unmaps the window first. std::process::exit skips that
+      and skips destructors.
+    metadata:
+      date: "2026-10-26"
+    paths:
+      exclude:
+        - crates/window/src/lifecycle.rs
+    pattern: std::process::exit(...)
+
+  - id: genos-no-device-teardown
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      The app lifecycle drains fences and destroys the device. Do not call
+      vkDeviceWaitIdle, and do not abandon the device, outside that path.
+    metadata:
+      date: "2026-10-26"
+    paths:
+      exclude:
+        - crates/render/src/gpu.rs
+        - crates/render/src/lighting_gpu.rs
+        - crates/gpuref
+    pattern-either:
+      - pattern-regex: vkDeviceWaitIdle\(
+      - pattern-regex: \.abandon\(
