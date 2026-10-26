@@ -274,7 +274,13 @@ The lighting targets are the guard-band size. The picture is the crop. The eye s
 
 With `--gi-metrics`, the next frame reads the retired `lighting_ms` against that frame's cap. Over the cap, the scale becomes `cap / ms`, down to 1/64. Under 75% of the cap, the scale grows by 5% up to 1. Picture tests do not record, so a lavapipe timestamp does not pull the scale down.
 
-Budget mode with world-cache mode 3 walks five parents (25 cm, 50 cm, 1 m, 2 m, 4 m) when a 12.5 cm cell is empty. One extra missing parent may be claimed under the spawn cap. The existing 25 cm seed claim is not charged. Cells at 2 m and 4 m also take a coarse slot (High 24 MB at 368 bytes). A cell that already holds a finished value does not read the parent. The slot table stays 1,048,576 entries.
+Budget mode with world-cache mode 3 reads parents of an empty 12.5 cm cell at 25 cm, 50 cm, 1 m, 2 m, and 4 m. A finished parent (`v.w > 0.5`) is what a waiting pixel shows. The walk is split, because lavapipe faulted on one five-step body:
+
+- `lighting_sc_parent` (ray hits, and pixels that are not on the seed-split path) loops a constant three times. A runtime trip count faulted lavapipe. From 12.5 cm that is a 25 cm seed claim, a 50 cm read, and a 1 m read. From the 25 cm hit patch that is a 50 cm seed claim, a 1 m read, and a 2 m read.
+- `lighting_sc_parent_bilerp` (seed-split pixels, preset high) stays at two bilinear steps, 25 cm then 50 cm. The 25 cm seed claim is the existing one and is not charged to the spawn cap.
+- `lighting_sc_level_tail` then starts at the size the walk already reached and doubles twice, stopping above 4 m. A 12.5 cm start therefore claims among 1 m, 2 m, and 4 m. A 25 cm hit start claims among 2 m and 4 m. At most one missing cell is claimed. The claim is counted after the insert. An over-cap key is cleared. Cells at 2 m and 4 m also take a coarse slot (High 24 MB at 368 bytes).
+
+The slot table stays 1,048,576 entries. A cell that already holds a finished value does not read the parent.
 
 Departures from this design:
 
@@ -283,6 +289,8 @@ Departures from this design:
 - §6.1's projected-pixel target does not pick a level. The shown lattice stays 12.5 cm (S57). Coarser sizes are parents of that key.
 - §6.4's area-weighted merge is the CPU function `merge_into_parent`. The GPU claims a missing parent empty. `should_remove_level` does not run on the GPU. A fine cell is not dropped because it left the view. Coarse cells leave on the expiry sweep once the live coarse count is over the slot cap, not farthest-first.
 - §6.5 does not seed a new fine cell from the parent's mean, and there is no level blend.
+- The parent find cannot be one five-step loop on lavapipe. A runtime trip count faulted it. Five bilinear steps overflowed it. A fourth copy of the `lighting_sc_parent` body overflowed it, including a helper whose extra finds survived an early return. The code keeps a constant three-step find, the original two bilinear steps, and `lighting_sc_level_tail` for 1 m through 4 m. That tail is a nearest read, not a bilinear. A ray hit starts at 25 cm, so its 1 m step stays a read inside the three-step find and is not claimed there. The tail stops at 4 m. Without that cap a 25 cm start continued to 8 m.
+- One parent claim is counted after the hash insert, not before it. A rejected coarse claim still consumes the spawn count. The 25 cm seed claim stays outside that cap.
 - The denoise row's iteration counts are not applied. High still runs 5 iterations. The rect is the cut.
 - §12's ~140 MB figure is missed. The hash table stays about 368 MB. The coarse cap only limits how many 2 m and 4 m cells stay inside that table.
 - A cell larger than 0.2 m shares the world-radiance refresh lists, so a new 1 m, 2 m, or 4 m cell competes with those refreshes.

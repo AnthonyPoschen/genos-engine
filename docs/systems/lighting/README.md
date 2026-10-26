@@ -99,7 +99,7 @@ Presets use schedule mode `budget`. Each frame pushes the preset work caps, scal
 
 Direct, à-trous, and trace gate to one centered tile rect when the grant is under the demand. À-trous also requires a change record. Ten percent of the grant is a band that steps down the picture. Outside the rect, a stored direct value and a finished probe hit or miss stay on screen. An empty slot still traces. The lighting images are the guard-band size. The picture is the crop. The eye does not move, and the band leads the turn.
 
-The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, an empty cell can read or claim a parent at 25 cm, 50 cm, 1 m, 2 m, or 4 m. A finished cell does not take that path. One extra parent claim per empty read is charged to the spawn cap. The 25 cm seed claim is not. Cells at 2 m and 4 m also need a coarse slot (High 24 MB). The slot table is still 1,048,576 entries, about 368 MB.
+The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, an empty cell can read or claim a parent at 25 cm, 50 cm, 1 m, 2 m, or 4 m. A finished cell does not take that path. `lighting_sc_parent` takes three constant steps. The seed-split pixel path keeps two bilinear steps. `lighting_sc_level_tail` then covers 1 m through 4 m and claims at most one missing cell. A finished parent is the value a waiting pixel shows. One extra parent claim per empty read is charged to the spawn cap after the insert. The 25 cm seed claim is not. Cells at 2 m and 4 m also need a coarse slot (High 24 MB). The slot table is still 1,048,576 entries, about 368 MB. Lavapipe faulted on a five-step body, so the walk stays split. The tail stops at 4 m.
 
 A frozen scene with grants that cover the picture does not gate, so the full denoise still runs and the picture can settle. The first moving frames can sit over the cap: the scale moves on the sample from the frame before.
 
@@ -130,6 +130,7 @@ Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and
 - The GPU does not merge a retiring fine entry into its parent, and it does not drop coarse cells farthest-first. A missing parent is claimed empty. Coarse cells leave on the expiry sweep after the slot cap.
 - High still runs 5 denoise iterations. The cap table's 3 is not applied. The rect is the cut.
 - The hash table stays about 368 MB, over the ~140 / 200 MB budget. The coarse cap limits 2 m and 4 m cells inside that table.
+- The parent walk is split so lavapipe can run it. `lighting_sc_parent` is three constant steps. A runtime trip count faulted lavapipe. The pixel bilinear stays at 25 cm and 50 cm. Five bilinear steps overflowed lavapipe. `lighting_sc_level_tail` is the 1 m to 4 m nearest read and the one claim. A fourth copy of the parent find overflowed lavapipe. A ray hit starts at 25 cm, so that walk reads 1 m and claims from 2 m. The tail stops at 4 m. The claim is after the insert. A rejected coarse claim still consumes the spawn count.
 - The controller is one scale on the lighting total. It moves one frame after the sample.
 - `lighting_lod_snapshot` does not read the live coarse occupancy.
 - The gate scripts check p99 against the preset cap. They do not check max ≤ cap × 1.1. `--report` is the script report directory. The unique metrics file is `<out>/gi/NAME.csv`, then `NAME-2.csv`.
