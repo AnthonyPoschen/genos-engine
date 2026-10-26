@@ -188,6 +188,9 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **Ray budget / budget shift**: the per-round ray budget divided by 2^shift. Role: SCHED · Literature: GIBS global ray budget (§1.12)
 **Refresh frames**: "do this every Nth frame". Role: SCHED
 **Reference tester**: [`crates/lighting-ref`](../../crates/lighting-ref): CPU references and picture verdicts. Role: TOOL
+**Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
+**GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
+**Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
 
 ### Historical (do not reuse)
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.

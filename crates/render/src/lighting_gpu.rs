@@ -1519,10 +1519,13 @@ impl Gpu {
         }
         self.lighting.world_busy = false;
         self.trace_sc(self.lighting.world_stats.memory, "round");
-        if let Ok(words) = self.read_stats_memory(self.lighting.world_stats.memory) {
+        let round_stats = self.read_stats16(self.lighting.world_stats.memory).ok();
+        if let Some(words) = round_stats {
             let current = self.lighting.world_still > 0 && self.lighting.world_hash == self.lighting.scene_hash;
             let light = self.lighting.world_light == self.lighting.light_hash;
-            self.note_lighting_round(words, current, light, self.lighting.world_young);
+            let mut head = [0u32; 8];
+            head.copy_from_slice(&words[..8]);
+            self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
             let mut raw = [0u64; 6];
@@ -1542,14 +1545,25 @@ impl Gpu {
             let bits = self.timestamp_bits;
             if got == 0 {
                 if let Some(times) = self.gpu_times.as_mut() {
-                    times.light_spans.push((raw[0], raw[1]));
-                    times.world_ms += tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6;
-                    times.world_runs += 1;
-                    // Per pass: compact, trace, light, cache.
-                    let mut prev = raw[0];
-                    for k in 0..4 {
-                        times.world_pass[k] += tick_delta(prev, raw[2 + k], bits) as f64 * period / 1.0e6;
-                        prev = raw[2 + k];
+                    if times.print {
+                        times.light_spans.push((raw[0], raw[1]));
+                        times.world_ms += tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6;
+                        times.world_runs += 1;
+                        // Per pass: compact, trace, light, cache.
+                        let mut prev = raw[0];
+                        for k in 0..4 {
+                            times.world_pass[k] +=
+                                tick_delta(prev, raw[2 + k], bits) as f64 * period / 1.0e6;
+                            prev = raw[2 + k];
+                        }
+                    }
+                    if times.record {
+                        if let Some(words) = round_stats {
+                            times.pending_world_rays =
+                                times.pending_world_rays.saturating_add(words[16]);
+                            times.pending_world_relit =
+                                times.pending_world_relit.saturating_add(words[1]);
+                        }
                     }
                 }
             }
@@ -2244,7 +2258,12 @@ impl Gpu {
         } else {
             self.lighting.settings.probes.tile
         };
-        let lamp = lamp_pick_push(&self.lighting.settings);
+        let mut lamp = lamp_pick_push(&self.lighting.settings);
+        // The existing diag bit counts fresh shadow rays. It does not change
+        // the shade. It is set only while GI metrics are recording.
+        if self.gpu_times.as_ref().is_some_and(|times| times.record) {
+            lamp[1] |= 1 << 17;
+        }
         let pc = [
             w,
             h,

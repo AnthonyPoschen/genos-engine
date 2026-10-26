@@ -1,6 +1,6 @@
 # 0013: Lighting cost is budgeted and reuses a world-space cache
 
-Status: **proposed** (draft for Anthony's review; revision 2, 2026-10-20). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
+Status: **accepted** (Anthony Poschen, 2026-10-26). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
 
 ## Context
 
@@ -9,9 +9,10 @@ One global stillness hash switches every GI pass on or off. On stress/hall that 
 ## Decision
 
 1. The persistent **surface light cache** is the reuse layer. It is extended, not replaced by GIBS surfels: hash LOD levels with hysteresis, a persistent coarse layer, merge-coarsening on eviction, and parent seeding on return.
-2. Every expensive pass has a **static per-preset work cap** (rays, relights, spawns, coarsen ops, fresh shadow rays, denoise items). Work beyond the cap is deferred by priority. **There is no full-frame fallback.** Under load, values get older but are always finished.
-3. A **priority scheduler** (change magnitude from change records, near-camera error, age, new visibility, inconsistency, plus a reserved starvation slice) replaces the global stillness hash.
-4. Screen space does only fixed-size resolve work: apply, budgeted gather, ReSTIR DI resampling, compose, and one denoise iteration.
+2. Every expensive pass has a per-preset **work-unit cap** (rays, relights, spawns, coarsen ops, fresh shadow rays, denoise items). Work beyond the cap is deferred by priority. **There is no full-frame fallback.** Under load, values get older but are always finished. The millisecond cap is per preset. A later controller scales the work units to hold that cap. Phase 0 only records the pass times those caps are calibrated from.
+3. A **priority scheduler** (change magnitude from change records, near-camera error, age, new visibility, inconsistency, plus a reserved starvation slice) replaces the global stillness hash. An optional game-side importance hint is a later phase, not phase 0.
+4. Screen space does only fixed-size resolve work: apply, budgeted gather, ReSTIR DI resampling, compose, and one denoise iteration. Low and Medium may reuse a cached shadow. Fresh shadow rays prefer near-camera pixels.
+5. The coarse-layer cap is fixed per preset (High 24 MB, Medium 16 MB, Low 8 MB). When it is full, evict the farthest coarse entries, then the least recently seen on a distance tie.
 
 ## Rules kept
 
