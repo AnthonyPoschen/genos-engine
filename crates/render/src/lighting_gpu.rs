@@ -106,6 +106,10 @@ pub(crate) struct Lighting {
     gbuf: Buffer,
     work: Buffer,
     out: Buffer,
+    /// Scene-referred radiance, RGBA32F. w is the eye distance in metres.
+    scene_lin: Buffer,
+    /// Host copy of `scene_lin`, filled when a picture is read back.
+    scene_host: Buffer,
     cache_keys: Buffer,
     cache: Buffer,
     /// The cache buffers are new and get zeroed before the next frame's passes.
@@ -346,6 +350,8 @@ impl Default for Lighting {
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
             out: Buffer::empty(),
+            scene_lin: Buffer::empty(),
+            scene_host: Buffer::empty(),
             cache_keys: Buffer::empty(),
             cache: Buffer::empty(),
             cache_clear: false,
@@ -531,7 +537,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -620,7 +626,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 27 };
+            let size = Size { kind: 7, count: 30 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -893,9 +899,13 @@ impl Gpu {
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
+        let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
+        let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        self.destroy_buffer(&mut scene_lin);
+        self.destroy_buffer(&mut scene_host);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -975,6 +985,9 @@ impl Gpu {
             0x20 | 0x1 | 0x2,
             Memory::Device,
         )?;
+        let scene_bytes = pixels.saturating_mul(16).max(16);
+        self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
@@ -1035,6 +1048,7 @@ impl Gpu {
                 (6, self.lighting.gbuf.buffer),
                 (7, self.lighting.work.buffer),
                 (8, self.lighting.out.buffer),
+                (13, self.lighting.scene_lin.buffer),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
@@ -2822,6 +2836,8 @@ impl Gpu {
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
+        let mut scene_lin = std::mem::replace(&mut self.lighting.scene_lin, Buffer::empty());
+        let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -2834,6 +2850,8 @@ impl Gpu {
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
+        self.destroy_buffer(&mut scene_lin);
+        self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);

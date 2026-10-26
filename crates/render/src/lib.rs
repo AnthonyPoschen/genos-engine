@@ -29,9 +29,12 @@ pub use gpu::{
 };
 pub use hdr_output::{
     aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
-    bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
-    histogram_ev100, pick_hdr_output, pq_st2084, scrgb_code, HdrSwapchain, ListedFormat,
-    PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10,
+    bloom_upsample_weight_sum, display_transform, ev100_from_luminance, exposure_from_camera,
+    exposure_from_ev100, grade_peak, grade_relative, grade_weight, histogram_ev100,
+    legacy_display, legacy_display_channel, near_grade, pick_hdr_output, pq_st2084, rec709_y,
+    scene_luma, scene_peak_error, scene_read_from_rgba, scene_referred, scrgb_code, DisplayMode,
+    HdrSwapchain, ListedFormat, SceneRead, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    COLOR_SPACE_SRGB, FORMAT_A2B10,
     FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8, GRAPHICS_WHITE_NITS,
     SCRGB_NITS_PER_CODE,
 };

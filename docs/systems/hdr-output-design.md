@@ -293,9 +293,9 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
-| `scene_peak` | ≤ 0.0025 | `\|stored − 4\| / 4` for a scene-referred pixel of 4 | NOT-IMPLEMENTED |
-| `linear_grade` | ≤ 0.02 | mean relative luminance against a path-trace linear image, pre-exposure, pre-bloom | NOT-IMPLEMENTED |
-| `grade_is_linear` | ≥ 1.5 | max channel of the buffer the grade read, on a fixture whose peak is 8 | NOT-IMPLEMENTED |
+| `scene_peak` | ≤ 0.0025 | `\|stored − 4\| / 4` for a scene-referred pixel of 4 | PASS. `scene_referred` stores 4 |
+| `linear_grade` | ≤ 0.02 | mean relative luminance against a path-trace linear image, pre-exposure, pre-bloom | PASS. `grade_relative` on `scene_referred` |
+| `grade_is_linear` | ≥ 1.5 | max channel of the buffer the grade read, on a fixture whose peak is 8 | PASS. `grade_peak` of a scene pixel whose peak is 8 |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | NOT-IMPLEMENTED |
@@ -306,7 +306,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | NOT-IMPLEMENTED. The pass does not call it yet |
 | `bloom_commute` | ≤ 0.01 | `\|bloom(k x) − k bloom(x)\|` for the linear 13-tap | NOT-IMPLEMENTED |
 | `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR | PASS. `pick_hdr_output` |
-| `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | NOT-IMPLEMENTED |
+| `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | PASS. `near_grade(0, 0.20)` |
 | `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | NOT-IMPLEMENTED |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |

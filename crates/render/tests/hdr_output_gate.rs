@@ -13,9 +13,10 @@
 use genos_render::{
     aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
     bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
-    histogram_ev100, linear_from_display, pick_hdr_output, pq_st2084, scrgb_code, tone,
-    HdrSwapchain, ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
-    COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
+    grade_peak, grade_relative, histogram_ev100, linear_from_display, near_grade,
+    pick_hdr_output, pq_st2084, scene_peak_error, scene_referred, scrgb_code, tone, HdrSwapchain,
+    ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
+    FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
 
 use std::path::{Path, PathBuf};
@@ -217,9 +218,13 @@ fn run() -> Result<(), String> {
 fn live_metrics() -> Vec<Metric> {
     vec![
         at_most("legacy_inverse", legacy_inverse_error(), LEGACY_MAX),
-        not_implemented("scene_peak", PEAK_MAX, Compare::AtMost),
-        not_implemented("linear_grade", GRADE_MAX, Compare::AtMost),
-        not_implemented("grade_is_linear", LINEAR_MIN, Compare::AtLeast),
+        at_most(
+            "scene_peak",
+            scene_peak_error(scene_referred([4.0, 0.0, 0.0])[0]),
+            PEAK_MAX,
+        ),
+        at_most("linear_grade", live_linear_grade(), GRADE_MAX),
+        at_least("grade_is_linear", live_grade_peak(), LINEAR_MIN),
         at_most(
             "exposure_ev",
             exposure_patch_error(ev100_from_luminance, exposure_from_ev100),
@@ -242,7 +247,7 @@ fn live_metrics() -> Vec<Metric> {
         not_implemented("bloom_firefly", FIREFLY_MAX, Compare::AtMost),
         not_implemented("bloom_commute", COMMUTE_MAX, Compare::AtMost),
         at_most("output_pick", pick_misses(pick_hdr_output), PICK_MAX),
-        not_implemented("near_error", NEAR_MAX, Compare::AtMost),
+        at_most("near_error", near_grade(0.0, 0.20), NEAR_MAX),
         not_implemented("still_pop", POP_MAX, Compare::AtMost),
         at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
         at_most(
@@ -641,39 +646,30 @@ fn pick_always_sdr(_host: PresentHost, _list: &[ListedFormat]) -> HdrSwapchain {
 }
 
 fn peak_err(stored: f64) -> f64 {
-    (stored - 4.0).abs() / 4.0
+    scene_peak_error(stored)
+}
+
+fn live_linear_grade() -> f64 {
+    let reference = [0.25_f64, 0.5, 1.0, 4.0];
+    let mut stored = [0.0; 4];
+    for (slot, value) in stored.iter_mut().enumerate() {
+        let radiance = reference[slot];
+        *value = scene_referred([radiance, radiance, radiance])[0];
+    }
+    grade_relative(&stored, &reference)
+}
+
+fn live_grade_peak() -> f64 {
+    let pixel = scene_referred([0.2, 8.0, 0.4]);
+    grade_peak(&pixel)
 }
 
 fn rel_mean(candidate: &[f64], reference: &[f64]) -> f64 {
-    let mut n = 0.0;
-    let mut sum = 0.0;
-    for sample in reference {
-        sum += *sample;
-        n += 1.0;
-    }
-    let mean = if n == 0.0 { 0.0 } else { sum / n };
-    let mut err = 0.0;
-    let mut count = 0.0;
-    for (cand, refer) in candidate.iter().zip(reference.iter()) {
-        let denom = refer.max(0.25 * mean).max(0.02);
-        err += (cand - refer).abs() / denom;
-        count += 1.0;
-    }
-    if count == 0.0 {
-        1.0
-    } else {
-        err / count
-    }
+    grade_relative(candidate, reference)
 }
 
 fn max_channel(values: &[f64]) -> f64 {
-    let mut peak = 0.0;
-    for value in values {
-        if *value > peak {
-            peak = *value;
-        }
-    }
-    peak
+    grade_peak(values)
 }
 
 fn max_rel_step(values: &[f64]) -> f64 {
@@ -743,7 +739,7 @@ fn outside_window(value: f64, low: f64, high: f64) -> f64 {
 }
 
 fn weighted(near: f64, far: f64) -> f64 {
-    (4.0 * near + far) / 5.0
+    near_grade(near, far)
 }
 
 fn flat(count: usize, value: f64) -> Vec<f64> {

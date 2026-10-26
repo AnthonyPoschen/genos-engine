@@ -139,6 +139,11 @@ impl Picture {
         Self::new(width, height, linear)
     }
 
+    /// Scene-referred linear RGB, three floats per pixel. No display inverse.
+    pub fn from_linear(width: u32, height: u32, linear: Vec<f32>) -> Result<Self, String> {
+        Self::new(width, height, linear)
+    }
+
     pub fn toned_rgb8(&self) -> Vec<u8> {
         self.linear
             .iter()

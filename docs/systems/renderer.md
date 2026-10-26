@@ -100,8 +100,19 @@ The picture does not read the tier's probes straight from the light field. Each 
 
 `genos-camera` with `GENOS_BENCH=<seconds>` runs unattended: a still phase, a lamp orbit, then the lamp drops beside the boxes and rises back, each until the tier is settled, one `BENCH` line per phase, then it exits. `GENOS_BENCH_SHOTS=<dir>` also saves the picture at fixed times (0 to 4000 ms) into each drop and rise, as drawn at the normal budget, mid-change (`Renderer::set_live_readback`); the captures stall the frame they are taken in, so time a separate run. A last flicker phase orbits the lamp a fixed step per frame (a tenth of a degree, the orbit's pace at 600 frames a second) and reads back every frame (`GENOS_BENCH_FLICKER=<frames>`, 240 by default after a 60-frame lead-in, 0 skips it). A pixel flickers when its 8-bit luminance turns back from one frame to the next (up then down, or down then up), by the smaller of the two steps; the moving lamp and a moving shadow edge change a pixel one way at a time, rounding included, so they read zero. Each of 4 x 4 screen tiles takes the mean of its pixels, so a small flickering patch counts. Its line gives the mean and worst tile and all 16 tiles, row by row; its frame times include the readbacks. Every bench readback is live: it shows the light as drawn at the normal budget, mid-change, never a settled field. Then the red box (or the first solid) is dragged: `Drag` moves it 1 m/s along x for 1.5 s and gives its frame times (spikes in `ms_p99` and `ms_max`), `Rest` holds it and gives its settle times like a drop, and `DragFlicker` moves it back a fixed step per frame (the drag speed at 600 frames a second) and reads every frame back for the flicker measure. Last, `Switch` moves every solid 0.37 m along x and z at once, off the probe grid, so every brick near a face places its probes again, as when another room loads, and gives its settle times. `Rest` and `Switch` read the picture back every 25 ms (every fourth pixel along x and y, as luminance) and compare each with the last, settled one: the pixels the change touched are those more than 6 of 255 codes off it in any picture (`touched`, a share of the screen), `conv95_ms` is when 95% of them came within 6 codes for good, `start_within` the share of them within in the first picture, and `start_err` the first picture's mean error over the screen. A bench draws without the panel and the graph.
 
+Compose writes a scene-referred image (Rec.709 linear radiance, eye distance in the fourth channel) and then the legacy shoulder into the 8-bit picture. `Renderer::read_scene` copies that image and calls `scene_read_from_rgba`. A path-trace grade uses `compare_linear` on that read. The 8-bit grade still undoes the legacy shoulder, and only when the scene image is absent.
+
+## Networking
+
+- **Replicated state:** `HdrSettings` only, once that struct is on the scene. The scene image, the pyramid, the histogram, and the swapchain stay on the client that presents.
+- **Authority:** that client. A server does not choose the display transform.
+- **Prediction / rollback:** none. Exposure is presentation. A rollback does not replay the histogram.
+- **Determinism:** the same settings and the same scene-referred image select the same EV100 on the CPU meter. The GPU histogram is not cross-device deterministic. The analytic gate is deterministic. Pixels are not.
+- **Headless server:** no swapchain, no pyramid, no histogram. It can store the struct and forward it.
+
 ## Decisions
 
 - [ADR 0003](../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md) keeps one Vulkan renderer.
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) forbids a renderer framework.
+- [ADR 0015](../adr/0015-hdr-output.md) stores scene-referred radiance through the display transform.
 - [Lighting](lighting/README.md) owns the light pass that this draw calls.

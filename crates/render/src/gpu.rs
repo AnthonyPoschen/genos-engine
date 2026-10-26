@@ -329,6 +329,15 @@ impl Renderer {
         self.gpu.read_color()
     }
 
+    /// Scene-referred radiance of the last compose, before the display transform.
+    ///
+    /// Empty when lighting has not allocated the image. Each texel goes through
+    /// [`scene_read_from_rgba`], which calls [`scene_referred`].
+    pub fn read_scene(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
+        self.gpu.copy_last_picture()?;
+        self.gpu.read_scene_host()
+    }
+
     /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
     ///
     /// When `wireframe` is true, each floor, wall, and solid draws its vertices and its edges.
@@ -2768,6 +2777,7 @@ impl Gpu {
                 "begin cmd",
             )?;
             self.copy_color_to_buffer();
+            self.copy_scene_for_readback();
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
             #[repr(C)]
             struct Submit {
@@ -2826,6 +2836,63 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, self.host.memory);
         }
         Ok(out)
+    }
+
+    /// Device scene image to the host buffer. The fence has already waited.
+    fn copy_scene_for_readback(&mut self) {
+        let src = self.lighting.scene_lin.buffer;
+        let dst = self.lighting.scene_host.buffer;
+        if src.is_null() || dst.is_null() {
+            return;
+        }
+        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        if size == 0 {
+            return;
+        }
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region { src: 0, dst: 0, size };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                self.cmd,
+                src,
+                dst,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
+    }
+
+    fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
+        let pixels = self.extent_w as usize * self.extent_h as usize;
+        let bytes = pixels.saturating_mul(16);
+        if bytes == 0
+            || self.lighting.scene_host.memory.is_null()
+            || self.lighting.scene_host.size < bytes as u64
+        {
+            return Ok(crate::hdr_output::SceneRead {
+                width: 0,
+                height: 0,
+                rgb: Vec::new(),
+                distance_m: Vec::new(),
+            });
+        }
+        let values = read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            self.lighting.scene_host.memory,
+            pixels.saturating_mul(4),
+        )?;
+        Ok(crate::hdr_output::scene_read_from_rgba(
+            self.extent_w,
+            self.extent_h,
+            &values,
+        ))
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {

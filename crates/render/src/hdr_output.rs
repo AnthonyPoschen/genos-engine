@@ -174,6 +174,163 @@ pub const fn scrgb_code(nits: f64) -> f64 {
     nits / SCRGB_NITS_PER_CODE
 }
 
+/// Compose stores this radiance. No shoulder and no clamp at 1.
+#[must_use]
+pub const fn scene_referred(radiance: [f64; 3]) -> [f64; 3] {
+    radiance
+}
+
+/// One read of the scene-referred image. `rgb` is three channels per pixel.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneRead {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<f64>,
+    pub distance_m: Vec<f64>,
+}
+
+/// Build a grade image from RGBA32F texels. Each pixel goes through [`scene_referred`].
+#[must_use]
+pub fn scene_read_from_rgba(width: u32, height: u32, rgba: &[f32]) -> SceneRead {
+    let pixels = usize::try_from(width)
+        .unwrap_or(0)
+        .saturating_mul(usize::try_from(height).unwrap_or(0));
+    let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
+    let mut distance_m = Vec::with_capacity(pixels);
+    for pixel in rgba.chunks(4).take(pixels) {
+        let r = f64::from(pixel.first().copied().unwrap_or(0.0));
+        let g = f64::from(pixel.get(1).copied().unwrap_or(0.0));
+        let b = f64::from(pixel.get(2).copied().unwrap_or(0.0));
+        let stored = scene_referred([r, g, b]);
+        rgb.push(stored[0]);
+        rgb.push(stored[1]);
+        rgb.push(stored[2]);
+        distance_m.push(f64::from(pixel.get(3).copied().unwrap_or(0.0)));
+    }
+    SceneRead {
+        width,
+        height,
+        rgb,
+        distance_m,
+    }
+}
+
+/// `|stored − 4| / 4` for one scene-referred channel whose radiance is 4.
+#[must_use]
+pub fn scene_peak_error(stored: f64) -> f64 {
+    (stored - 4.0).abs() / 4.0
+}
+
+/// Legacy shoulder. The body is [`crate::mesh::tone`].
+#[must_use]
+pub fn legacy_display_channel(channel: f64) -> f64 {
+    f64::from(crate::mesh::tone(narrow_f32(channel)))
+}
+
+/// Legacy shoulder on a scene-referred pixel.
+#[must_use]
+pub fn legacy_display(scene: [f64; 3]) -> [f64; 3] {
+    [
+        legacy_display_channel(scene[0]),
+        legacy_display_channel(scene[1]),
+        legacy_display_channel(scene[2]),
+    ]
+}
+
+/// Which curve the display pass runs. `Aces` stays empty until the Academy CTL.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMode {
+    Agx,
+    Aces,
+    Legacy,
+}
+
+/// Display transform after exposure. `None` is ACES, which is not the CTL yet.
+#[must_use]
+pub fn display_transform(scene: [f64; 3], mode: DisplayMode) -> Option<[f64; 3]> {
+    match mode {
+        DisplayMode::Legacy => Some(legacy_display(scene)),
+        DisplayMode::Agx => Some(agx_rec709(scene)),
+        DisplayMode::Aces => aces2_rec709(scene),
+    }
+}
+
+/// Rec.709 relative luminance.
+#[must_use]
+pub fn rec709_y(rgb: [f64; 3]) -> f64 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+}
+
+/// Rec.709 `Y` of one scene-referred pixel. The grade calls this.
+#[must_use]
+pub fn scene_luma(rgb: [f64; 3]) -> f64 {
+    rec709_y(scene_referred(rgb))
+}
+
+/// Mean relative luminance error. The grade calls this on scene-referred `Y`.
+#[must_use]
+pub fn grade_relative(candidate: &[f64], reference: &[f64]) -> f64 {
+    let mut n = 0.0;
+    let mut sum = 0.0;
+    for sample in reference {
+        sum += *sample;
+        n += 1.0;
+    }
+    let mean = if n == 0.0 { 0.0 } else { sum / n };
+    let mut err = 0.0;
+    let mut count = 0.0;
+    for (cand, refer) in candidate.iter().zip(reference.iter()) {
+        let denom = refer.max(0.25 * mean).max(0.02);
+        err += (cand - refer).abs() / denom;
+        count += 1.0;
+    }
+    if count == 0.0 {
+        1.0
+    } else {
+        err / count
+    }
+}
+
+/// Largest channel. A display shoulder peaks near 0.78 and fails the 1.5 floor.
+#[must_use]
+pub fn grade_peak(values: &[f64]) -> f64 {
+    let mut peak = 0.0;
+    for value in values {
+        if *value > peak {
+            peak = *value;
+        }
+    }
+    peak
+}
+
+/// Weight of one grade sample. Under 2 m the weight is 4. Farther it is 1.
+#[must_use]
+pub fn grade_weight(distance_m: f64) -> f64 {
+    if distance_m < 2.0 {
+        4.0
+    } else {
+        1.0
+    }
+}
+
+/// `(4 × e_near + e_far) / 5`. One near sample and one far sample.
+#[must_use]
+pub fn near_grade(near: f64, far: f64) -> f64 {
+    (grade_weight(0.0) * near + grade_weight(3.0) * far) / (grade_weight(0.0) + grade_weight(3.0))
+}
+
+#[allow(
+    clippy::as_conversions,
+    reason = "mesh::tone takes f32; the legacy display is that function"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "mesh::tone takes f32; the legacy display is that function"
+)]
+fn narrow_f32(value: f64) -> f32 {
+    value as f32
+}
+
 #[must_use]
 pub fn ev100_from_luminance(luminance: f64) -> f64 {
     (luminance * (100.0 / 12.5)).log2()

@@ -23,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
 use genos_mcp::json::Value;
-use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
+use genos_render::{DebugView, Renderer, SceneRead, ScreenRect, ViewMode};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
     LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
@@ -250,6 +250,8 @@ struct RefJob {
     grid: (u32, u32),
     region: Region,
     paused: bool,
+    /// Scene-referred read of the live frame. None falls back to the display image.
+    scene: Option<SceneRead>,
 }
 
 struct Running {
@@ -549,6 +551,10 @@ impl Tools {
                     {
                         if let Some(img) = &image {
                             job.live = Some(img.clone());
+                            job.scene = renderer
+                                .read_scene()
+                                .ok()
+                                .filter(|read| !read.rgb.is_empty());
                             image_used = true;
                         }
                     }
@@ -1193,6 +1199,7 @@ impl Tools {
                     grid,
                     region: region_arg(args)?,
                     paused: self.paused,
+                    scene: None,
                 };
                 // Reuse a stored reference instead of tracing again.
                 if let Some(stored) = args.str("reference")? {
@@ -1588,7 +1595,13 @@ fn finish_reference(
         ),
     ];
     if let Some(live) = &job.live {
-        let (c, heat) = reference::compare(live, &r, job.region, job.grid, job.block);
+        let (c, heat, grade) = if let Some(scene) = &job.scene {
+            let (c, heat) = reference::compare_linear(scene, &r, job.region, job.grid, job.block);
+            (c, heat, "scene")
+        } else {
+            let (c, heat) = reference::compare(live, &r, job.region, job.grid, job.block);
+            (c, heat, "display")
+        };
         live.resized(r.image.width, r.image.height)
             .save(&path("live"))?;
         heat.save(&path("heatmap"))?;
@@ -1598,6 +1611,7 @@ fn finish_reference(
             .map(|(e, b)| obj(vec![("mean_rel", num(*e as f64)), ("bias", num(*b as f64))]))
             .collect();
         fields.extend([
+            ("grade", text(grade)),
             ("live", text(path("live").display().to_string())),
             ("heatmap", text(path("heatmap").display().to_string())),
             ("mean_abs", num(c.mean_abs as f64)),

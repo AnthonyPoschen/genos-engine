@@ -111,6 +111,17 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     Ok(CaptureOutcome { shots, skipped })
 }
 
+/// Scene-referred read. Empty before the compose image exists, and then the
+/// caller undoes the legacy shoulder on the 8-bit picture.
+fn scene_picture(renderer: &mut Renderer) -> Result<Picture, String> {
+    let scene = renderer.read_scene()?;
+    if scene.rgb.is_empty() || scene.width == 0 {
+        return Err("no scene image".into());
+    }
+    let linear = scene.rgb.iter().copied().map(|value| value as f32).collect();
+    Picture::from_linear(scene.width, scene.height, linear)
+}
+
 fn capture_one(
     window: &mut Window,
     renderer: &mut Renderer,
@@ -143,7 +154,9 @@ fn capture_one(
         let pixels = renderer.draw(&stage.world, &camera, true)?;
         let wall_s = started.elapsed().as_secs_f64();
         let pixels = pixels.ok_or_else(|| "readback returned no picture".to_string())?;
-        let picture = Picture::from_bgra(renderer.width(), renderer.height(), &pixels)?;
+        let picture = scene_picture(renderer).or_else(|_| {
+            Picture::from_bgra(renderer.width(), renderer.height(), &pixels)
+        })?;
         let raw_settled = renderer.picture_settled();
         let trusted = prev_phase == Some(step.phase);
         prev_phase = Some(step.phase);
