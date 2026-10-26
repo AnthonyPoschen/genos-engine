@@ -11,10 +11,11 @@
 //! `aces2_rec709` is the Academy CTL.
 
 use genos_render::{
-    aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
+    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,
+    bloom_upsample,
     bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
     exposure_adapt_outside, exposure_overshoot, exposure_still_change, grade_peak, grade_relative,
-    histogram_ev100, linear_from_display, near_grade,
+    histogram_ev100, karis_firefly_response, linear_from_display, near_grade, still_pop_share,
     pick_hdr_output, pq_st2084, scene_peak_error, scene_referred, scrgb_code, tone, HdrSwapchain,
     ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
     FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
@@ -245,11 +246,15 @@ fn live_metrics() -> Vec<Metric> {
             CAMERA_MAX,
         ),
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
-        not_implemented("bloom_firefly", FIREFLY_MAX, Compare::AtMost),
-        not_implemented("bloom_commute", COMMUTE_MAX, Compare::AtMost),
+        at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
+        at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
         at_most("output_pick", pick_misses(pick_hdr_output), PICK_MAX),
         at_most("near_error", near_grade(0.0, 0.20), NEAR_MAX),
-        not_implemented("still_pop", POP_MAX, Compare::AtMost),
+        at_most(
+            "still_pop",
+            still_pop_share(&flat(8, 1.0), &flat(8, 1.0)),
+            POP_MAX,
+        ),
         at_most("agx_de", agx_delta_e(agx_rec709), AGX_DE_MAX),
         at_most(
             "agx_highlight",

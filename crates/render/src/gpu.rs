@@ -267,6 +267,11 @@ impl Renderer {
         self.gpu.lighting.histogram_counts.clone()
     }
 
+    /// Share of subsampled scene luma that moved by more than 0.01 since the previous copy.
+    pub fn hdr_still_pop(&self) -> f64 {
+        self.gpu.lighting.still_pop
+    }
+
     /// Swapchain format and color space in use. Color space stays sRGB until selection runs.
     pub fn hdr_surface(&self) -> (i32, i32) {
         (self.gpu.format, crate::hdr_output::COLOR_SPACE_SRGB)

@@ -102,11 +102,18 @@ impl HdrSettings {
     }
 
     /// Design defaults for a lighting preset. `AgX` is the display transform.
-    /// `legacy_bytes` stays on the shoulder so an old picture does not move.
+    /// Bloom is on at intensity 0.05 except Potato. `legacy_bytes` stays on the
+    /// shoulder with bloom off, so an old picture does not move.
     pub fn for_preset(preset: LightingPreset) -> Self {
         let mut settings = Self::legacy_bytes();
         settings.legacy_bytes = false;
         settings.display = DisplayTransform::Agx;
+        settings.bloom = preset != LightingPreset::Potato;
+        settings.bloom_intensity = if preset == LightingPreset::Potato {
+            0.0
+        } else {
+            0.05
+        };
         match preset {
             LightingPreset::Potato => {
                 settings.exposure_mode = ExposureMode::Fixed;
@@ -518,11 +525,19 @@ mod tests {
         assert!(!high.legacy_bytes);
         assert!(matches!(high.display, DisplayTransform::Agx));
         assert!(matches!(high.output, OutputMode::Auto));
+        assert!(high.bloom);
+        assert_eq!(high.bloom_intensity.to_bits(), 0.05_f64.to_bits());
+        assert_eq!(high.bloom_levels, 6);
+        let low = HdrSettings::for_preset(LightingPreset::Low);
+        assert!(low.bloom);
+        assert_eq!(low.bloom_intensity.to_bits(), 0.05_f64.to_bits());
+        assert!(matches!(low.output, OutputMode::Sdr));
         let potato = HdrSettings::for_preset(LightingPreset::Potato);
         assert!(matches!(potato.exposure_mode, ExposureMode::Fixed));
         assert!(matches!(potato.display, DisplayTransform::Agx));
         assert!(matches!(potato.output, OutputMode::Sdr));
         assert!(!potato.bloom);
+        assert_eq!(potato.bloom_intensity.to_bits(), 0.0_f64.to_bits());
         assert_eq!(potato.bloom_levels, 0);
     }
 

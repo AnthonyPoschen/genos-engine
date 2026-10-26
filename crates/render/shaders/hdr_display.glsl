@@ -5,6 +5,18 @@ layout(std430, set = 0, binding = 15) readonly buffer AgxLut {
     vec4 texel[];
 } agx_lut;
 
+// Bloom add from bloom_pyramid, before exposure. Intensity 0 does not read it.
+layout(std430, set = 0, binding = 16) readonly buffer BloomAdd {
+    vec4 px[];
+} bloom_add;
+
+vec3 add_bloom(vec3 c, uint index) {
+    if (hdr.v.z > 0.0) {
+        c += bloom_add.px[index].rgb * hdr.v.z;
+    }
+    return c;
+}
+
 vec3 agx_fetch(int x, int y, int z) {
     int index = (z * 32 + y) * 32 + x;
     return agx_lut.texel[index].rgb;

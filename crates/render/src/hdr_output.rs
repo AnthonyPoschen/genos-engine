@@ -505,6 +505,257 @@ fn adapt_four_stops() -> (f64, f64) {
     (t90, overshoot)
 }
 
+/// Karis weight `1 / (1 + Y)` for one 2×2 box. Rec.709 `Y`.
+#[must_use]
+pub fn karis_weight(luma: f64) -> f64 {
+    1.0 / (1.0 + luma.max(0.0))
+}
+
+/// First-downsample response of one white pixel of `centre` in a field of zeros.
+/// The inner box is weighted as luma 0. Each outer box sees `centre / 4`.
+#[must_use]
+pub fn karis_firefly_response(centre: f64) -> f64 {
+    let outer = centre / 4.0;
+    let centre_w = 0.5 * karis_weight(0.0);
+    let outer_w = 0.125 * karis_weight(outer);
+    (outer * outer_w * 4.0) / (centre_w + outer_w * 4.0)
+}
+
+/// `|bloom(k x) − k bloom(x)|` for the linear 13-tap. Karis is not in this check.
+#[must_use]
+pub fn bloom_commute_error() -> f64 {
+    let mut pixels = vec![0.0; 16];
+    if let Some(slot) = pixels.get_mut(5) {
+        *slot = 1.0;
+    }
+    let scale = 2.0;
+    let plain = bloom_downsample(&pixels, 4, 4);
+    for sample in &mut pixels {
+        *sample *= scale;
+    }
+    let scaled = bloom_downsample(&pixels, 4, 4);
+    let mut worst = 0.0;
+    for (left, right) in plain.pixels.iter().zip(scaled.pixels.iter()) {
+        let err = (right - scale * left).abs();
+        if err > worst {
+            worst = err;
+        }
+    }
+    worst
+}
+
+/// Share of samples whose linear value moves by more than 0.01.
+#[must_use]
+pub fn still_pop_share(before: &[f64], after: &[f64]) -> f64 {
+    let mut n = 0.0;
+    let mut moved = 0.0;
+    for (before_y, after_y) in before.iter().zip(after.iter()) {
+        n += 1.0;
+        if (before_y - after_y).abs() > 0.01 {
+            moved += 1.0;
+        }
+    }
+    if n == 0.0 {
+        1.0
+    } else {
+        moved / n
+    }
+}
+
+/// First bloom downsample. Five 2×2 boxes, Karis weights, then renormalized.
+/// `rgb` is packed RGB. Later levels use [`bloom_downsample`].
+#[must_use]
+pub fn karis_downsample_rgb(rgb: &[f64], width: usize, height: usize) -> Image {
+    let dst_w = (width / 2).max(1);
+    let dst_h = (height / 2).max(1);
+    let mut pixels = vec![0.0; dst_w.saturating_mul(dst_h).saturating_mul(3)];
+    for y in 0..dst_h {
+        for x in 0..dst_w {
+            let mut acc = [0.0; 3];
+            let mut sum_w = 0.0;
+            let mut take = |color: [f64; 3], base: f64| {
+                let weight = base * karis_weight(rec709_y(color));
+                sum_w += weight;
+                acc[0] += color[0] * weight;
+                acc[1] += color[1] * weight;
+                acc[2] += color[2] * weight;
+            };
+            let ox = x.saturating_mul(2);
+            let oy = y.saturating_mul(2);
+            take(box2(rgb, width, height, ox, oy), 0.5);
+            take(box2(rgb, width, height, ox.saturating_add(2), oy), 0.125);
+            take(
+                box2(rgb, width, height, ox.saturating_sub(2), oy),
+                0.125,
+            );
+            take(box2(rgb, width, height, ox, oy.saturating_add(2)), 0.125);
+            take(box2(rgb, width, height, ox, oy.saturating_sub(2)), 0.125);
+            if sum_w > 0.0 {
+                acc[0] /= sum_w;
+                acc[1] /= sum_w;
+                acc[2] /= sum_w;
+            }
+            let index = (y.saturating_mul(dst_w).saturating_add(x)).saturating_mul(3);
+            if let Some(slot) = pixels.get_mut(index) {
+                *slot = acc[0];
+            }
+            if let Some(slot) = pixels.get_mut(index.saturating_add(1)) {
+                *slot = acc[1];
+            }
+            if let Some(slot) = pixels.get_mut(index.saturating_add(2)) {
+                *slot = acc[2];
+            }
+        }
+    }
+    Image {
+        pixels,
+        width: dst_w,
+        height: dst_h,
+    }
+}
+
+fn box2(rgb: &[f64], width: usize, height: usize, x: usize, y: usize) -> [f64; 3] {
+    let mut acc = [0.0; 3];
+    for dy in 0..2 {
+        for dx in 0..2 {
+            let sample = rgb_at(rgb, width, height, x.saturating_add(dx), y.saturating_add(dy));
+            acc[0] += sample[0];
+            acc[1] += sample[1];
+            acc[2] += sample[2];
+        }
+    }
+    [acc[0] / 4.0, acc[1] / 4.0, acc[2] / 4.0]
+}
+
+fn rgb_at(rgb: &[f64], width: usize, height: usize, x: usize, y: usize) -> [f64; 3] {
+    if x >= width || y >= height {
+        return [0.0; 3];
+    }
+    let index = y.saturating_mul(width).saturating_add(x).saturating_mul(3);
+    [
+        rgb.get(index).copied().unwrap_or(0.0),
+        rgb.get(index.saturating_add(1)).copied().unwrap_or(0.0),
+        rgb.get(index.saturating_add(2)).copied().unwrap_or(0.0),
+    ]
+}
+
+/// Full-resolution bloom add, before exposure and before the intensity scale.
+/// Level 0 is black. The first downsample is Karis. The rest are the linear 13-tap.
+#[must_use]
+pub fn bloom_pyramid(rgba: &[f32], width: usize, height: usize, levels: u32) -> Vec<f32> {
+    let pixels = width.saturating_mul(height);
+    let mut out = vec![0.0_f32; pixels.saturating_mul(4)];
+    if levels == 0 || width == 0 || height == 0 {
+        return out;
+    }
+    let mut rgb = Vec::with_capacity(pixels.saturating_mul(3));
+    for index in 0..pixels {
+        let base = index.saturating_mul(4);
+        rgb.push(f64::from(*rgba.get(base).unwrap_or(&0.0)));
+        rgb.push(f64::from(*rgba.get(base.saturating_add(1)).unwrap_or(&0.0)));
+        rgb.push(f64::from(*rgba.get(base.saturating_add(2)).unwrap_or(&0.0)));
+    }
+    let mut chain = vec![karis_downsample_rgb(&rgb, width, height)];
+    let count = usize::try_from(levels).unwrap_or(1).max(1);
+    for _ in 1..count {
+        let Some(current) = chain.last() else {
+            break;
+        };
+        chain.push(downsample_rgb_linear(current));
+    }
+    // The pyramid sum is bloom only. The scene image is not added back.
+    let Some(mut acc) = chain.pop() else {
+        return out;
+    };
+    while let Some(finer) = chain.pop() {
+        acc = upsample_rgb(&acc, &finer, true);
+    }
+    let full = upsample_rgb(
+        &acc,
+        &Image {
+            pixels: vec![0.0; rgb.len()],
+            width,
+            height,
+        },
+        false,
+    );
+    for (index, pixel) in full.pixels.as_chunks::<3>().0.iter().enumerate() {
+        let slot = index.saturating_mul(4);
+        if let Some(r) = out.get_mut(slot) {
+            *r = narrow_f32(pixel[0]);
+        }
+        if let Some(g) = out.get_mut(slot.saturating_add(1)) {
+            *g = narrow_f32(pixel[1]);
+        }
+        if let Some(b) = out.get_mut(slot.saturating_add(2)) {
+            *b = narrow_f32(pixel[2]);
+        }
+    }
+    out
+}
+
+fn downsample_rgb_linear(current: &Image) -> Image {
+    let dst_w = (current.width / 2).max(1);
+    let dst_h = (current.height / 2).max(1);
+    let mut pixels = vec![0.0; dst_w.saturating_mul(dst_h).saturating_mul(3)];
+    for channel in 0..3 {
+        let plane: Vec<f64> = current
+            .pixels
+            .iter()
+            .skip(channel)
+            .step_by(3)
+            .copied()
+            .collect();
+        let down = bloom_downsample(&plane, current.width, current.height);
+        for (index, sample) in down.pixels.iter().enumerate() {
+            let slot = index.saturating_mul(3).saturating_add(channel);
+            if let Some(dst) = pixels.get_mut(slot) {
+                *dst = *sample;
+            }
+        }
+    }
+    Image {
+        pixels,
+        width: dst_w,
+        height: dst_h,
+    }
+}
+
+fn upsample_rgb(coarse: &Image, finer: &Image, add_finer: bool) -> Image {
+    let mut pixels = vec![0.0; finer.pixels.len()];
+    for channel in 0..3 {
+        let plane: Vec<f64> = coarse
+            .pixels
+            .iter()
+            .skip(channel)
+            .step_by(3)
+            .copied()
+            .collect();
+        let image = Image {
+            pixels: plane,
+            width: coarse.width,
+            height: coarse.height,
+        };
+        let up = bloom_upsample(&image, finer.width, finer.height);
+        for (index, sample) in up.pixels.iter().enumerate() {
+            let slot = index.saturating_mul(3).saturating_add(channel);
+            let base = if add_finer {
+                finer.pixels.get(slot).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if let Some(dst) = pixels.get_mut(slot) {
+                *dst = base + *sample;
+            }
+        }
+    }
+    Image {
+        pixels,
+        width: finer.width,
+        height: finer.height,
+    }
+}
+
 #[must_use]
 pub fn bloom_downsample_weight_sum() -> f64 {
     let mut sum = 0.0;

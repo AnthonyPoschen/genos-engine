@@ -174,6 +174,7 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 - There is no artist threshold and no soft knee. A threshold pops. The slides argue for thresholdless; some ports add a knee anyway. We do not.
 - The Karis luma is Rec.709, the same weights as `luminance` in `trace.rs`. The course does not pin the coefficients.
 - Karis does not commute with exposure. It runs on scene luminance, before exposure, so a later exposure change does not reshape the firefly weight. Named, because a purely linear filter would commute.
+- The pyramid is `bloom_pyramid` on the CPU, from the previous frame's scene image, then uploaded. The compose shader adds that buffer times `bloom_intensity` before exposure. The course's pyramid is a GPU pass on the current frame. One frame late, same as the histogram. Intensity 0 does not read the buffer.
 
 **Rejected:** Kawase, because the energy contract is weaker and a single bright pixel is less stable. Convolution, because the FFT and the kernel asset do not pay for themselves on a GTX 1060, and because a lens-dirt texture is a non-goal. Either can be a later mode once the dual filter has a measured cost. The mode would be a new glossary term in that change.
 
@@ -303,11 +304,11 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `exposure_overshoot` | ≤ 0.02 | progress past the target on that step | PASS. `exposure_overshoot` on the same step |
 | `physical_camera` | ≤ 1e−9 | `exposure_from_camera` against `1 / (1.2 × N² / t × 100 / S)` | PASS |
 | `bloom_energy` | ≤ 1e−4 | downsample and upsample weights each sum to 1, and one pixel of energy 1 survives two down/up levels | PASS |
-| `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | NOT-IMPLEMENTED. The pass does not call it yet |
-| `bloom_commute` | ≤ 0.01 | `\|bloom(k x) − k bloom(x)\|` for the linear 13-tap | NOT-IMPLEMENTED |
+| `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | PASS. `karis_firefly_response(1000)`, which calls `karis_weight`. A box filter (`1000 × 0.125`) fails |
+| `bloom_commute` | ≤ 0.01 | `\|bloom(k x) − k bloom(x)\|` for the linear 13-tap | PASS. `bloom_commute_error` calls `bloom_downsample`. A 0.125 residual fails |
 | `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR | PASS. `pick_hdr_output` |
 | `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | PASS. `near_grade(0, 0.20)` |
-| `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | NOT-IMPLEMENTED |
+| `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | PASS. `still_pop_share` on two equal fields. A 10% pop fails. Compose calls the same function on subsampled scene luma |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |

@@ -114,6 +114,20 @@ pub(crate) struct Lighting {
     hdr_params: Buffer,
     /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
     agx_lut: Buffer,
+    /// Full-resolution bloom from `bloom_pyramid`, before the intensity scale.
+    bloom: Buffer,
+    /// Last `still_pop_share` of subsampled scene luma. Zero until two copies exist.
+    still_pop: f64,
+    /// Previous subsampled scene luma.
+    prev_luma: Vec<f64>,
+    /// Scene hash the uploaded pyramid was built from.
+    bloom_scene: u64,
+    /// Scene-referred peak the uploaded pyramid was built from.
+    bloom_peak: f64,
+    /// `bloom` holds a pyramid, so a still scene can reuse it.
+    bloom_filled: bool,
+    /// The bloom buffer was zeroed after allocate, so the first frame is black.
+    bloom_cleared: bool,
     hdr: genos_scene::HdrSettings,
     /// Last scale written. Legacy bytes stay at 1.
     exposure_scale: f32,
@@ -369,6 +383,13 @@ impl Default for Lighting {
             scene_host: Buffer::empty(),
             hdr_params: Buffer::empty(),
             agx_lut: Buffer::empty(),
+            bloom: Buffer::empty(),
+            still_pop: 0.0,
+            prev_luma: Vec::new(),
+            bloom_scene: 0,
+            bloom_peak: 0.0,
+            bloom_filled: false,
+            bloom_cleared: false,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
             last_ev100: 0.0,
@@ -560,7 +581,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -649,7 +670,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 36 };
+            let size = Size { kind: 7, count: 39 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -926,6 +947,7 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
+        let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
@@ -933,6 +955,7 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut agx_lut);
+        self.destroy_buffer(&mut bloom);
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -1018,6 +1041,13 @@ impl Gpu {
         self.lighting.hdr_params = self.make_buffer(16, 0x20, Memory::Upload)?;
         self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
         self.write_agx_lut();
+        self.lighting.bloom = self.make_buffer(scene_bytes, 0x20, Memory::Upload)?;
+        self.lighting.bloom_filled = false;
+        self.lighting.bloom_cleared = false;
+        self.lighting.bloom_peak = 0.0;
+        self.lighting.bloom_scene = 0;
+        self.lighting.prev_luma.clear();
+        self.lighting.still_pop = 0.0;
         self.lighting.hdr_copied = false;
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
@@ -1082,6 +1112,7 @@ impl Gpu {
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
                 (15, self.lighting.agx_lut.buffer),
+                (16, self.lighting.bloom.buffer),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
@@ -2102,7 +2133,155 @@ impl Gpu {
         let _ = std::fs::write(dir.join("histogram.txt"), body);
     }
 
+    fn bloom_active(&self) -> bool {
+        let hdr = &self.lighting.hdr;
+        !hdr.legacy_bytes && hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0
+    }
+
+    /// Subsampled scene luma. `still_pop_share` is the gate's still-frame check.
+    fn note_still_pop(&mut self) {
+        if self.lighting.hdr.legacy_bytes {
+            return;
+        }
+        let Some(rgba) = self.read_scene_rgba() else {
+            return;
+        };
+        let pixels = rgba.len() / 4;
+        let mut luma = Vec::new();
+        let mut index = 0usize;
+        while index < pixels {
+            let base = index.saturating_mul(4);
+            let rgb = [
+                f64::from(*rgba.get(base).unwrap_or(&0.0)),
+                f64::from(*rgba.get(base.saturating_add(1)).unwrap_or(&0.0)),
+                f64::from(*rgba.get(base.saturating_add(2)).unwrap_or(&0.0)),
+            ];
+            luma.push(crate::hdr_output::scene_luma(rgb));
+            index = index.saturating_add(32);
+        }
+        let before = if self.lighting.prev_luma.is_empty() {
+            luma.clone()
+        } else {
+            self.lighting.prev_luma.clone()
+        };
+        self.lighting.still_pop = crate::hdr_output::still_pop_share(&before, &luma);
+        self.lighting.prev_luma = luma;
+    }
+
+    /// CPU pyramid of the previous scene image. One frame late, same as the meter.
+    /// A still scene whose peak moved by less than half a stop keeps the buffer.
+    fn write_bloom(&mut self) {
+        if !self.bloom_active() || self.lighting.bloom.memory.is_null() {
+            return;
+        }
+        let Some(rgba) = self.read_scene_rgba() else {
+            if !self.lighting.bloom_cleared {
+                self.zero_host_buffer(&self.lighting.bloom);
+                self.lighting.bloom_cleared = true;
+            }
+            return;
+        };
+        let width = self.extent_w as usize;
+        let height = self.extent_h as usize;
+        let mut peak = 0.0_f64;
+        let pixels = width.saturating_mul(height);
+        for index in 0..pixels {
+            let base = index.saturating_mul(4);
+            let rgb = [
+                f64::from(*rgba.get(base).unwrap_or(&0.0)),
+                f64::from(*rgba.get(base.saturating_add(1)).unwrap_or(&0.0)),
+                f64::from(*rgba.get(base.saturating_add(2)).unwrap_or(&0.0)),
+            ];
+            let y = crate::hdr_output::scene_luma(rgb);
+            if y > peak {
+                peak = y;
+            }
+        }
+        let half = std::f64::consts::SQRT_2;
+        let peak_held = if self.lighting.bloom_peak == 0.0 && peak == 0.0 {
+            true
+        } else if self.lighting.bloom_peak > 0.0 && peak > 0.0 {
+            let ratio = peak / self.lighting.bloom_peak;
+            ratio >= 1.0 / half && ratio <= half
+        } else {
+            false
+        };
+        if self.lighting.bloom_filled && self.lighting.bloom_scene == self.lighting.scene_hash && peak_held
+        {
+            return;
+        }
+        let bloom = crate::hdr_output::bloom_pyramid(&rgba, width, height, self.lighting.hdr.bloom_levels);
+        self.upload_words(&self.lighting.bloom, &bloom);
+        self.lighting.bloom_filled = true;
+        self.lighting.bloom_cleared = true;
+        self.lighting.bloom_peak = peak;
+        self.lighting.bloom_scene = self.lighting.scene_hash;
+    }
+
+    fn read_scene_rgba(&self) -> Option<Vec<f32>> {
+        if !self.lighting.hdr_copied || self.lighting.scene_host.memory.is_null() {
+            return None;
+        }
+        let width = self.extent_w as usize;
+        let height = self.extent_h as usize;
+        let pixels = width.saturating_mul(height);
+        let bytes = pixels.saturating_mul(16);
+        if pixels == 0 || self.lighting.scene_host.size < bytes as u64 {
+            return None;
+        }
+        let mut rgba = vec![0.0_f32; pixels.saturating_mul(4)];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.scene_host.memory,
+                0,
+                bytes as u64,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return None;
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<f32>(), rgba.as_mut_ptr(), rgba.len());
+            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
+        }
+        Some(rgba)
+    }
+
+    fn upload_words(&self, buffer: &Buffer, words: &[f32]) {
+        if buffer.memory.is_null() || words.is_empty() {
+            return;
+        }
+        let bytes = (words.len() as u64).saturating_mul(4).min(buffer.size);
+        let count = (bytes / 4) as usize;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 0, bytes, 0, &mut mapped) != 0 {
+                return;
+            }
+            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<f32>(), count);
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+    }
+
+    fn zero_host_buffer(&self, buffer: &Buffer) {
+        if buffer.memory.is_null() || buffer.size == 0 {
+            return;
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 0, buffer.size, 0, &mut mapped) != 0 {
+                return;
+            }
+            std::ptr::write_bytes(mapped.cast::<u8>(), 0, buffer.size as usize);
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+    }
+
     fn write_hdr_exposure(&mut self) {
+        self.note_still_pop();
+        self.write_bloom();
         if self.lighting.hdr_params.memory.is_null() {
             return;
         }
@@ -2124,10 +2303,10 @@ impl Gpu {
                 genos_scene::DisplayTransform::Aces => 2.0,
             }
         };
-        let bloom = if self.lighting.hdr.bloom {
-            self.lighting.hdr.bloom_intensity as f32
-        } else {
+        let bloom = if self.lighting.hdr.legacy_bytes || !self.lighting.hdr.bloom {
             0.0
+        } else {
+            self.lighting.hdr.bloom_intensity as f32
         };
         let words = [scale, mode, bloom, 0.0_f32];
         unsafe {
@@ -2174,9 +2353,9 @@ impl Gpu {
     }
 
     fn copy_scene_for_meter(&mut self) {
-        if self.lighting.hdr.legacy_bytes
-            || self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto
-        {
+        let hdr = &self.lighting.hdr;
+        let bloom = hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0;
+        if hdr.legacy_bytes || (hdr.exposure_mode != genos_scene::ExposureMode::Auto && !bloom) {
             return;
         }
         let src = self.lighting.scene_lin.buffer;
@@ -3084,6 +3263,7 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
+        let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -3100,6 +3280,7 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut agx_lut);
+        self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);

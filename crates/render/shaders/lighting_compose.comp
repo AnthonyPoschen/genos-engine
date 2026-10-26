@@ -208,6 +208,7 @@ void main() {
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
+    c = add_bloom(c, index);
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;

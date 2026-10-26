@@ -1863,6 +1863,7 @@ fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
             list(renderer.hdr_scales().into_iter().map(num).collect()),
         ),
         ("grade", text("scene")),
+        ("still_pop", num(renderer.hdr_still_pop())),
         (
             "histogram",
             list(
