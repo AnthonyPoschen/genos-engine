@@ -323,6 +323,8 @@ finished_read NOT-IMPLEMENTED 0 NOT-IMPLEMENTED
 
 `fade_deviation` is 0.2813, on the same scale as 0.05. Frame 0 still requests the lamp on. Its mean linear luma is 0.158 against the on trace at 0.220, and that ratio is the 0.2813. The 30-frame warmup is not a soak. Frame 1 requests the lamp off. Its mean miss against the off trace is 0.020. The mean then climbs: frame 36 is 0.161 against the off trace at 0.141. Blurred error never holds for four frames, so settle is the frame count, 37. The last frame's blurred error is 0.6190. The trace noise is part of that blurred error. The last four frames are calm. The layer rows have no lamp layer.
 
+The soaked script (600-frame wait, eight frames at weight 1, frames 8–120 at weight 0, `max_spp` 1024, 600 seconds, noise target 0.025) was run on lavapipe. Both traces stopped at 1024 spp, under the time cap: off noise 0.09073 in 449.7 s, on noise 0.07611 in 457.2 s. `layering-gate` printed no metric rows. Stderr was `off endpoint trace noise 0.0907 is above 0.025` and the process exited 2.
+
 Later phases add rhai gates under `debug/lighting/scripts/gates/`. The host cannot toggle a layer that does not exist, so those scripts wait. Each script soaks, records a settled frame, performs one change, and returns to the start, which is the existing test rule.
 
 | Script | When | Pass |
