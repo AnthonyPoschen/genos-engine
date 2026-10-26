@@ -59,7 +59,7 @@ Role: TOOL · Literature: camera EV compensation · More detail: `HdrSettings.co
 **Display transform**: the map from exposed linear colour to the code the swapchain stores. AgX is the default.
 Role: OUT · Literature: AgX; ACES output transform · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
-**AgX**: Sobotka's image formation. Inset, a log sigmoid, then outset. The default display transform.
+**AgX**: Sobotka's image formation, the Eary Chow generator. Inset, a log sigmoid from −10 to +6.5, a 40% hue mix, then outset. The default display transform.
 Role: OUT · Literature: Sobotka; Blender AgX (Eary Chow) · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
 **ACES**: the Academy output transform, kept as an alternate display transform.
@@ -71,10 +71,10 @@ Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compos
 **Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
 Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
-**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve.
+**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The Linux/Wayland preference.
 Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
-**scRGB**: a linear extended-sRGB swapchain image. Code 1.0 is 80 nits. A code above 1 is brighter.
+**scRGB**: a linear extended-sRGB swapchain image. Code 1.0 is 80 nits. Graphics white is 203 nits, code 2.54. The Windows preference.
 Role: OUT · Literature: IEC 61966-2-2; `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
 
 **SDR output**: an 8-bit UNORM swapchain image in the sRGB nonlinear color space. Used when HDR is not selected.

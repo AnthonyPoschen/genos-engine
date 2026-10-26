@@ -1,8 +1,8 @@
 # HDR output and bloom
 
-Status: **proposed**. ADR: [0015](../adr/0015-hdr-output.md). Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). This document does not change the renderer. A later phase edits [Renderer](renderer.md) in the same change that changes a game use or a limit.
+Status: **proposed**. ADR: [0015](../adr/0015-hdr-output.md). Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The CPU references live in `crates/render/src/hdr_output.rs`. They are not dispatched. A later phase edits [Renderer](renderer.md) in the same change that changes a game use or a limit.
 
-The metric gate is `crates/render/tests/hdr_output_gate.rs`. It grades analytic fixtures. Where the pass does not exist, the live line is `NOT-IMPLEMENTED`. It does not invent a picture.
+The metric gate is `crates/render/tests/hdr_output_gate.rs`. It calls those references. Where the pass does not call one yet, the live line is `NOT-IMPLEMENTED`. It does not invent a picture.
 
 ## 1. Goals and non-goals
 
@@ -11,7 +11,7 @@ The metric gate is `crates/render/tests/hdr_output_gate.rs`. It grades analytic 
 - The light the GI passes compute stays scene-referred until a display pass. A pixel brighter than 1 is stored, not folded into a shoulder.
 - Exposure is one scale. Auto-exposure reads a histogram. A camera (aperture, shutter, ISO) writes the same scale. A still scene does not hunt.
 - The default display transform is AgX. ACES is selectable. The legacy shoulder remains until the byte gate no longer needs it.
-- Linux (Wayland, Hyprland) and Windows can present HDR10 or scRGB. SDR is the fallback. macOS stays on the one Vulkan path.
+- Linux (Wayland) prefers HDR10, then scRGB. Windows prefers scRGB, then HDR10. SDR is the fallback. macOS stays on the one Vulkan path. Hyprland and Mesa version claims are unverified (§4.3).
 - Bloom is a wide, thresholdless, energy-preserving filter on the scene-referred image.
 - The path-trace grade keeps scoring linear Rec.709 radiance. The display transform is not in that grade.
 
@@ -86,11 +86,13 @@ Near the camera still matters most, and it matters in the grade, not by allocati
 | Invert for the grade | Yes, below the asymptote | No | No |
 | Real-time cost | A few flops | A full ODT, heavier | A 3×3, a log, a sigmoid, a 3×3 |
 
-**Pick: AgX base**, copied from the Eary Chow generator (or the simplified GLSL that cites `AgXBasesRGB.py` and says it is that generator). The log range in that port is `min_ev = −12.47393`, `max_ev = 4.026069`. Those constants are copied. They are not refit.
+**Pick: AgX base**, the Eary Chow generator ([AgX_LUT_Gen](https://github.com/EaryChow/AgX_LUT_Gen) `AgX_Base_Rec2020`, then the sRGB cube path). Log2 runs from −10 to +6.5 around middle grey 0.18. The sigmoid slope is 2.4 and both powers are 1.5. The hue mix is 40%. The SDR code is power 2.4, which is what that cube stores. The CPU reference is `agx_rec709`. The gate compares it to generator samples, max CIEDE2000 ≤ 0.5.
 
 **Rejected as the implementation of this pick:** Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve", 2016, [knarkowicz.wordpress.com](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/). The coefficients `(2.51, 0.03, 2.43, 0.59, 0.14)` are a rational fit of an older ACES curve, then a clamp to 1. Shipping that fit and calling it ACES or AgX would be a silent departure. `display=aces` is the Academy 2.0 transform, not this fit. It lands in phase 5's alternate, after AgX is the default.
 
-**Departure from Blender.** Blender's AgX view includes the sRGB display encoding. Our SDR path keeps that encoding. Our HDR path keeps the inset, the log range, and the sigmoid, and replaces the final sRGB encoding with a nit encoding (§4.3). The polynomial sigmoid in community ports that quote a mean squared error against the LUT is a fit. We do not use it.
+**Departure from a community GLSL port** that quotes `min_ev = −12.47393`, `max_ev = 4.026069`. Those are not the generator's limits. We use −10 and +6.5.
+
+**Departure from Blender's IEC sRGB piece.** The generator's cube encodes with power 2.4, not the piecewise sRGB OETF. SDR uses that power so the gate matches the LUT. HDR keeps the same formation through the linear Rec.709 result, then the nit map in §4.3. The polynomial sigmoid in community ports that quote a mean squared error against the LUT is a fit. We do not use it.
 
 ### 4.2 Exposure
 
@@ -118,7 +120,7 @@ Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×=
 
 ### 4.3 Swapchain
 
-| | SDR UNORM (today) | HDR10 | **scRGB, then HDR10, then SDR** (pick) |
+| | SDR UNORM (today) | HDR10 (Linux / Wayland pick) | **scRGB (Windows pick)** |
 |---|---|---|---|
 | Format | 44 or 37, color space 0 | 10-bit UNORM (`A2B10G10R10` 64, else `A2R10G10B10` 58) with `VK_COLOR_SPACE_HDR10_ST2084_EXT` (1000104008) | `R16G16B16A16_SFLOAT` (97) with `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` (1000104002) |
 | Encoding | the display transform writes the 8-bit code | PQ, SMPTE ST 2084:2014, BT.2100 | linear extended sRGB. Code 1.0 is 80 nits |
@@ -126,18 +128,18 @@ Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×=
 
 The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_colorspace` extension. HDR10 is "HDR10 (BT.2020), encoded according to SMPTE ST 2084". Extended sRGB linear is "extended sRGB color space, encoded using a linear transfer function". The nonlinear extended-sRGB enum (1000104014) is the scRGB specification's other encoding. We do not pick it. Windows literature for the linear one is `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`. We do not call DXGI.
 
-**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. Prefer scRGB when that pair is listed, else HDR10, else the current SDR pair (44, then 37, color space 0). Potato and Low ignore HDR pairs and take SDR. Medium and High follow the preference when `output=auto`.
+**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
 
-**Why scRGB first.** The exposed image is already linear. scRGB stores it. HDR10 needs a PQ encode and a BT.2020 matrix in the display pass. Both are available. scRGB is the one that does not add a second curve.
+**Why the split.** HDR10 is PQ in a 10-bit UNORM image, which is the usual Wayland HDR advertisement. scRGB stores linear extended sRGB, which is the Windows linear HDR path (`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` in the Windows literature; we do not call DXGI). This preference is a decision, not a driver measurement.
 
-**Nit mapping, HDR only.** SDR runs AgX through to the sRGB code, as Blender does. HDR10 and scRGB run the same inset, log, and sigmoid, then:
+**Nit mapping, HDR only.** SDR runs AgX through to the power-2.4 code. HDR10 and scRGB run the same inset, log, and sigmoid, then map graphics white to 203 nits (ITU-R BT.2408) on both:
 
-- scRGB: AgX reference white maps to 80 nits, which is code 1.0. The sigmoid's top maps to the display peak, or to 1000 nits when `VK_EXT_hdr_metadata` does not report a peak.
-- HDR10: AgX reference white maps to 203 nits (ITU-R BT.2408, graphics white), then PQ into 10-bit BT.2020. The sigmoid's top maps to the same peak.
+- scRGB: code 1.0 stays 80 nits. Graphics white is `203/80 = 2.5375`, written 2.54. The sigmoid's top maps to the display peak, or to 1000 nits when `VK_EXT_hdr_metadata` does not report a peak.
+- HDR10: the same 203 nits, then PQ into 10-bit BT.2020. The sigmoid's top maps to the same peak.
 
-**Departure:** Blender never emits nits. The inset, the log range, and the sigmoid are the paper (the published formation). The last stage is ours. SDR does not take this departure.
+**Departure:** Blender never emits nits. The inset, the log range, and the sigmoid are the generator. The last stage is ours. SDR does not take this departure.
 
-Hyprland presents those color spaces when the monitor is in HDR (`cm = "hdr"`, `bitdepth = 10` on Hyprland ≥ 0.55; the Arch wiki HDR page records the Vulkan side). The renderer does not configure the compositor. If the surface list has no HDR space, the mode is SDR and the probe records the list. We do not vendor `VK_hdr_layer`. Mesa 25.1 and current NVIDIA drivers expose the extension themselves. An older driver that needs the layer stays on SDR.
+Whether Hyprland lists these color spaces, from which version, or with `cm = "hdr"` and `bitdepth = 10`, is unverified. Whether Mesa or a current NVIDIA driver exposes `VK_EXT_swapchain_colorspace` without `VK_hdr_layer` is unverified. The renderer does not configure the compositor. If the surface list has no HDR space, the mode is SDR and the probe records the list. We do not vendor `VK_hdr_layer`. An older driver that needs the layer stays on SDR.
 
 macOS uses MoltenVK ([ADR 0003](../adr/0003-one-vulkan-renderer-moltenvk-on-macos.md)). The same query runs. An empty HDR list is SDR. The software tracer is the ray path on that machine. It is not a second display path.
 
@@ -240,7 +242,7 @@ Low's histogram is 64 bins so the reduction is smaller. The EV100 formula does n
 
 ## 7. VRAM and milliseconds
 
-1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings for the phase that measures them. They are not a timing run. The gate checks the arithmetic. A device time is `NOT-IMPLEMENTED` until that phase.
+1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings for the phase that measures them. They are not a timing run. The gate does not score them. A device time is `NOT-IMPLEMENTED` until that phase.
 
 Scene image: `2560 × 1440 × 8 = 28.125 MiB`.
 
@@ -257,12 +259,12 @@ Bloom pyramid:
 
 | | Potato | Low | Medium | High |
 |---|---|---|---|---|
-| Scene image | 28.13 | 28.13 | 28.13 | 28.13 |
-| Bloom | 0 | 9.34 | 9.37 | 9.37 |
+| Scene image | 28.125 | 28.125 | 28.125 | 28.125 |
+| Bloom | 0 | 9.338 | 9.366 | 9.373 |
 | Histogram | 0 | < 0.01 | < 0.01 | < 0.01 |
-| **Working set** | **28.13** | **37.46** | **37.49** | **37.50** |
-| Swapchain extra | 0 | 0 | 0, or 42.19 if scRGB is chosen | 42.19 if scRGB, else 0 |
-| **With scRGB** | 28.13 | 37.46 (SDR forced) | 79.68 | **79.69** |
+| **Working set** | **28.125** | **37.463** | **37.491** | **37.498** |
+| Swapchain extra | 0 | 0 | 0, or 42.188 if scRGB is chosen | 42.188 if scRGB, else 0 |
+| **With scRGB** | 28.125 | 37.463 (SDR forced) | **79.678** | **79.685** |
 | ms ceiling, 4070, 1440p | 0.25 | 0.80 | 1.00 | 1.20 |
 | ms ceiling, 1060, 1440p | 1.00 | 2.50 | not the target | not the target |
 
@@ -272,7 +274,9 @@ Frame budgets, using numbers already in the tree:
 
 - Basic scene, above 500 fps, means a frame under 2.0 ms. High post 1.20 ms plus the frozen lighting floor of 0.43 ms from ADR 0013 is 1.63 ms.
 - Stress scene, about 100 fps, means a frame under 10 ms. High post 1.20 ms plus the ADR 0013 High lighting cap of 8 ms at 1080p is 9.20 ms. The 8 ms cap is not a 1440p measurement. If 1440p lighting exceeds 8.80 ms, the lighting cap moves. This design does not raise the post ceiling to pay for it.
-- 4 GB is the minimum. High with scRGB is 79.69 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
+The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366.
+
+- 4 GB is the minimum. High with scRGB is 79.685 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
 
 A steady basic scene on Potato or on a held High frame dispatches the display pass only. The pyramid and the histogram reduction are off or reused. That is the path that has to leave room for 500 fps.
 
@@ -288,30 +292,30 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
-| `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. Relative, denominator `max(x, 1)` | PASS. The function is in the tree |
-| `post_vram_mib` | ≤ 48 | largest preset working set, scene plus bloom | PASS. Arithmetic of §7 |
-| `post_scrgb_mib` | ≤ 96 | High working set plus the scRGB swapchain extra | PASS. Arithmetic of §7 |
-| `basic_frame_ms` | ≤ 2.0 | High post ceiling 1.20 plus the 0.43 ms frozen lighting floor | PASS. Arithmetic |
-| `stress_frame_ms` | ≤ 10 | High post ceiling 1.20 plus the 8 ms lighting cap | PASS. Arithmetic |
-| `low_1060_ms` | ≤ 2.5 | Low post ceiling on the 1060 | PASS. The ceiling is the value |
+| `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
 | `scene_peak` | ≤ 0.0025 | `\|stored − 4\| / 4` for a scene-referred pixel of 4 | NOT-IMPLEMENTED |
 | `linear_grade` | ≤ 0.02 | mean relative luminance against a path-trace linear image, pre-exposure, pre-bloom | NOT-IMPLEMENTED |
 | `grade_is_linear` | ≥ 1.5 | max channel of the buffer the grade read, on a fixture whose peak is 8 | NOT-IMPLEMENTED |
-| `exposure_ev` | ≤ 0.10 stops | metered EV100 against `log2(L × 100 / 12.5)` on a grey field with a one-pixel sun | NOT-IMPLEMENTED |
+| `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
+| `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
 | `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | NOT-IMPLEMENTED |
 | `exposure_adapt` | outside `[0.40, 2.00]` s is 0 | time to cover 90% of a 4-stop step. The value is the distance outside that window | NOT-IMPLEMENTED |
 | `exposure_overshoot` | ≤ 0.02 | progress past the target on that step | NOT-IMPLEMENTED |
-| `physical_camera` | ≤ 0.001 | relative error of `1 / (1.2 × N² / t × 100 / S)` against the cited formula | NOT-IMPLEMENTED |
-| `bloom_energy` | ≤ 0.01 | `\|sum(13-tap weights) − 1\|` | NOT-IMPLEMENTED |
-| `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | NOT-IMPLEMENTED |
+| `physical_camera` | ≤ 1e−9 | `exposure_from_camera` against `1 / (1.2 × N² / t × 100 / S)` | PASS |
+| `bloom_energy` | ≤ 1e−4 | downsample and upsample weights each sum to 1, and one pixel of energy 1 survives two down/up levels | PASS |
+| `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | NOT-IMPLEMENTED. The pass does not call it yet |
 | `bloom_commute` | ≤ 0.01 | `\|bloom(k x) − k bloom(x)\|` for the linear 13-tap | NOT-IMPLEMENTED |
-| `output_pick` | = 0 mismatches | scRGB if listed, else HDR10, else SDR, on three fixture lists | NOT-IMPLEMENTED |
+| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR | PASS. `pick_hdr_output` |
 | `near_error` | ≤ 0.05 | `(4 × e_near + e_far) / 5`, distance split at 2 m | NOT-IMPLEMENTED |
 | `still_pop` | ≤ 0.001 | share of pixels whose linear `Y` moves by more than 0.01 between two still frames. The 0.01 step is the gi-check pop step | NOT-IMPLEMENTED |
-| `agx_highlight` | outside `[0.85, 0.995]` is 0 | display code of linear 16. A hard clip to 1 fails. The legacy shoulder near 0.77 fails | NOT-IMPLEMENTED |
-| `agx_hue` | ≤ 15 degrees | hue of a saturated primary against the AgX reference, at +4 stops | NOT-IMPLEMENTED |
+| `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
+| `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
+| `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
+| `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
 | `post_ms_device` | ≤ 1.50 | measured High post milliseconds on the 4070 at 1440p | NOT-IMPLEMENTED |
 | `post_vram_device` | ≤ 96 | measured post allocation, MiB | NOT-IMPLEMENTED |
+
+The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
 
 The GI grade does not use `linear_grade`'s 0.02 line. GI keeps 0.12. `linear_grade` is the post readback against the path tracer when both are the same linear radiance, so the only legal error is numerical. A GI miss still fails in the lighting reference check, not by widening this line.
 
@@ -365,7 +369,7 @@ cargo test -p genos-render --test hdr_output_gate -- --out genos-debug/hdr-outpu
 
 The test prints one line per metric (`LIVE` or `PROOF`, name, value, threshold, status) and writes `live.json`, `proof-good.json`, and `proof-broken.json`. `PROOF` known-good must be `PASS`. `PROOF` broken must be `FAIL`. A live `FAIL`, or a proof line on the wrong side, exits non-zero. There is no GPU and no window. Lavapipe is not involved.
 
-The broken fixtures are deliberate: a peak clamped to 1, a grade of display-encoded bytes, a meter that averages the sun in, an exposure that steps by 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, a 13-tap that sums to 2, a box filter on the firefly, a threshold bloom, a picker that always returns SDR, a near-field error, a 10% pop, a highlight clipped to 1, a primary hue 40° off, and budgets of 500 MiB and 5 ms.
+The broken fixtures are deliberate: a peak clamped to 1, a grade of display-encoded bytes, an exposure scale that drops the `1.2`, a meter that averages the sun in, an exposure that steps by 0.05 a frame, an adaptor that snaps past the target, a camera scale that drops the `1.2`, bloom weights that sum to 2, a box filter on the firefly, a threshold bloom, a picker that always returns SDR, a near-field error, a 10% pop, AgX replaced by white, a highlight clipped to 1, an ACES channel 0.2 off, PQ replaced by `nits/10000`, and device budgets of 500 MiB and 5 ms. Those device lines are comparator fixtures. They are not a 4070 measurement.
 
 ### Gates that wait for a phase
 
@@ -406,13 +410,13 @@ Collected so a phase cannot drift in silence. Lighting departures also belong in
 
 | Source | Taken | Departure |
 |---|---|---|
-| Sobotka / Eary Chow AgX | Inset, log range, sigmoid, outset, copied | HDR replaces the final sRGB encoding with a nit map. The polynomial community fit is refused |
+| Sobotka / Eary Chow AgX_LUT_Gen | Inset, log −10 to +6.5, sigmoid slope 2.4, 40% hue mix, power 2.4 code | HDR replaces that power encode with a 203-nit map. The −12.47393 to 4.026069 range is not used. The polynomial community fit is refused |
 | ACES 2.0 | Alternate `display=aces`, the Academy transform | Not in the default. Not the Narkowicz fit |
 | Lagarde and de Rousiers, SIGGRAPH 2014, §5.1; Filament `Exposure.cpp` | EV100, K = 12.5, `q = 0.65`, scale `1 / (1.2 × 2^EV100)` | Histogram tails instead of one mean. Hold at 0.001 relative. One frame of readback latency. No second scale onto 0.18 |
 | Reinhard et al., SIGGRAPH 2002 | A log meter as the auto-exposure idea | Not a single log-average |
 | Jimenez, SIGGRAPH 2014 | 13-tap, 9-tap, thresholdless pyramid, weights sum to 1 | Not every frame. No knee. Rec.709 Karis luma |
 | Karis, same course | `1 / (1 + Y)` on the first downsample | Runs before exposure, so it does not commute with that scale |
-| SMPTE ST 2084, BT.2100, BT.2408 | PQ, BT.2020, graphics white at 203 nits | Used on HDR10 only |
+| SMPTE ST 2084, BT.2100, BT.2408 | PQ, BT.2020, graphics white at 203 nits on HDR10 and on scRGB | scRGB code of that white is 2.5375, written 2.54. Code 1.0 stays 80 nits |
 | Vulkan `VK_EXT_swapchain_colorspace` | The two enums and the SDR color space | Potato and Low force SDR even when HDR is listed |
 | ADR 0012 | Stored light ignores the camera | Exposure and bloom are downstream of compose |
 | ADR 0013 | Budgets are ceilings. A cheap check decides a skip | The check is the histogram max bin. Post ceilings are not the lighting caps |
@@ -424,12 +428,12 @@ Each phase is its own change, with the gate it names. A miss is dropped: a note,
 
 | Phase | Change | Gate |
 |---|---|---|
-| P0 | This design, the glossary, ADR 0015, and the metric gate. No renderer change | `hdr_output_gate` exits 0. Live feature lines are `NOT-IMPLEMENTED` |
+| P0 | This design, the glossary, ADR 0015, the metric gate, and the CPU references the passes will call. No display dispatch | `hdr_output_gate` exits 0. Rows whose pass is not the reference stay `NOT-IMPLEMENTED` |
 | P1 | Compose writes the scene-referred image. A display pass runs the legacy shoulder. FXAA stays on the display image | `legacy_inverse` still passes. `hdr-bytes.rhai` within 1 code. `display=legacy`, bloom off, fixed exposure |
 | P2 | The reference check reads the scene image. `linear_from_display` is not used on `agx` or `aces` | `linear_grade`, `grade_is_linear`. The GI fail line is untouched |
 | P3 | Histogram, camera, hold | `exposure_ev`, `exposure_still`, `exposure_adapt`, `exposure_overshoot`, `physical_camera` |
 | P4 | Dual-filter bloom | `bloom_energy`, `bloom_firefly`, `bloom_commute`, `still_pop`. Intensity 0 matches P3 |
-| P5 | AgX default. ACES alternate. Legacy remains a mode | `agx_highlight`, `agx_hue`. `display=legacy` still matches P1 bytes |
+| P5 | AgX default. ACES alternate. Legacy remains a mode | `agx_de`, `agx_highlight`. `aces_ctl` once `aces2_rec709` is the CTL. `display=legacy` still matches P1 bytes |
 | P6 | scRGB, HDR10, SDR fallback. Output page, `get_hdr` | `output_pick` against the live surface list. `post_ms_device`, `post_vram_device` on the 4070. 1060 runs Low |
 
 P2 is before P5 on purpose. AgX is not invertible. Shipping it before the linear readback would make the path-trace grade a guess.

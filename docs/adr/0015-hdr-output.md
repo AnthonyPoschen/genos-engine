@@ -15,7 +15,7 @@ Bloom, auto-exposure, and an HDR swapchain are named in the lighting backlog and
 3. **Exposure** is one scale, `1 / (1.2 × 2^EV100)`. Auto-exposure takes EV100 from a log-luminance histogram with the outer 10% of samples clipped. A physical camera (aperture, shutter, ISO) writes the same EV100. A still scene holds the scale.
 4. The default **display transform** is AgX (Sobotka, the Blender / Eary Chow formation). ACES 2.0 is an alternate. The legacy shoulder stays a mode so today's bytes can be reproduced. The Narkowicz rational fit is not an implementation of either.
 5. **Bloom** is the Call of Duty dual-filter pyramid (Jimenez, SIGGRAPH 2014), thresholdless, on the scene-referred image, before exposure. The first downsample uses the Karis weight. A convolution bloom and an eye point-spread function are not the kernel.
-6. The swapchain prefers **scRGB** (`R16G16B16A16_SFLOAT`, `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT`) when the surface lists it, then **HDR10** (10-bit UNORM, `VK_COLOR_SPACE_HDR10_ST2084_EXT`), then the current SDR UNORM pair. Potato and Low force SDR. macOS uses whatever MoltenVK lists, which is SDR unless an HDR space is actually listed. Ray queries stay optional. This pass does not trace.
+6. On Linux (Wayland) the swapchain prefers **HDR10** (10-bit UNORM, `VK_COLOR_SPACE_HDR10_ST2084_EXT`), then **scRGB** (`R16G16B16A16_SFLOAT`, `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT`), then the current SDR UNORM pair. On Windows the order is scRGB, then HDR10, then SDR. Potato and Low force SDR. macOS takes the first HDR pair MoltenVK lists, else SDR. Graphics white is 203 nits on both HDR paths. In scRGB that is code 2.54 (203/80 = 2.5375). Ray queries stay optional. This pass does not trace.
 
 ## Rejected
 

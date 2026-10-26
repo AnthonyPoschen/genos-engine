@@ -40,7 +40,7 @@ These are plans. They are not system records. A step edits the matching record w
 
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
-- [HDR output design](hdr-output-design.md): scene-referred colour, exposure, AgX, bloom, and HDR10 or scRGB ([ADR 0015](../adr/0015-hdr-output.md)). The metric gate is `crates/render/tests/hdr_output_gate.rs`.
+- [HDR output design](hdr-output-design.md): scene-referred colour, exposure, AgX, bloom, HDR10 on Linux and scRGB on Windows ([ADR 0015](../adr/0015-hdr-output.md)). The metric gate is `crates/render/tests/hdr_output_gate.rs`.
 - [Renderer performance review](rendering/perf-review.md): the 1920×1080 moving stress frame against a 5 ms budget, ranked by the lighting passes that close the gap.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 

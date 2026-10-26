@@ -2,6 +2,7 @@ mod aa;
 mod budget;
 mod gltf_draw;
 mod gpu;
+mod hdr_output;
 #[cfg(test)]
 mod lamp_pick;
 mod mesh;
@@ -26,6 +27,15 @@ pub use gpu::{
     LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, Renderer, ScreenLine,
     ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
+pub use hdr_output::{
+    aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
+    bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
+    histogram_ev100, pick_hdr_output, pq_st2084, scrgb_code, HdrSwapchain, ListedFormat,
+    PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10,
+    FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8, GRAPHICS_WHITE_NITS,
+    SCRGB_NITS_PER_CODE,
+};
+pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
