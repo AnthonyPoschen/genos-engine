@@ -256,8 +256,8 @@ enum Kind {
 fn measure(kind: Kind) -> Vec<Metric> {
     vec![
         gate(
-            "mirror_law_rad",
-            mirror_law_rad(kind),
+            "mirror_reflect",
+            mirror_reflect(kind),
             1.0e-4,
             "presented frame",
         ),
@@ -274,8 +274,13 @@ fn measure(kind: Kind) -> Vec<Metric> {
             0.02,
             "presented frame",
         ),
-        gate("water_f0_abs", water_f0_abs(kind), 0.005, "presented frame"),
-        gate("snell_rad", snell_rad(kind), 1.0e-4, "presented frame"),
+        gate("water_f0", water_f0(kind), 0.005, "presented frame"),
+        gate(
+            "snell_transmit",
+            snell_transmit(kind),
+            1.0e-4,
+            "presented frame",
+        ),
         gate("ggx_energy", ggx_energy_err(kind), 0.03, "presented frame"),
         absent("ssr_depth_rel", 0.02),
         absent("denoise_lag_frames", 2.0),
@@ -367,8 +372,9 @@ fn broken(kind: Kind, fail: f64, faithful: impl FnOnce() -> f64) -> f64 {
     }
 }
 
-fn mirror_law_rad(kind: Kind) -> f64 {
-    broken(kind, 1.0, || region_abs(8, 0, 80, 60))
+fn mirror_reflect(kind: Kind) -> f64 {
+    // The red reflection target, not the flat F0 patch and not the transmission strip.
+    broken(kind, 1.0, || region_abs(0, 20, 32, 44))
 }
 
 fn mirror_point_m(kind: Kind) -> f64 {
@@ -376,19 +382,45 @@ fn mirror_point_m(kind: Kind) -> f64 {
 }
 
 fn fresnel_abs(kind: Kind) -> f64 {
-    broken(kind, 0.059, || region_abs(8, 0, 80, 60))
+    broken(kind, 0.059, || region_abs(8, 0, 80, 16))
 }
 
 fn fresnel_below_abs(kind: Kind) -> f64 {
     broken(kind, 1.0, || region_abs(80, 0, 160, 60))
 }
 
-fn water_f0_abs(kind: Kind) -> f64 {
-    broken(kind, 0.0196, || pixel_abs(40, 30))
+fn water_f0(kind: Kind) -> f64 {
+    // Glass F0 is 0.04. |0.04 − 0.0204| = 0.0196, which misses the band.
+    broken(kind, 0.0196, read_water_f0)
 }
 
-fn snell_rad(kind: Kind) -> f64 {
-    broken(kind, 1.0, || pixel_abs(70, 50))
+fn snell_transmit(kind: Kind) -> f64 {
+    broken(kind, 1.0, || region_abs(40, 48, 72, 58))
+}
+
+/// `((1.333 − 1) / (1.333 + 1))²` rounded to four decimals.
+const WATER_F0: f64 = 0.0204;
+
+/// Mean channel of the flat normal-incidence patch. Reflection is white and
+/// transmission is black, so the pixel is the Fresnel weight.
+fn read_water_f0() -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for y in 48..58 {
+        for x in 2..14 {
+            let pixel = presented_pixel(x, y);
+            if !pixel[0].is_finite() {
+                return f64::INFINITY;
+            }
+            sum += (pixel[0] + pixel[1] + pixel[2]) / 3.0;
+            count += 1.0;
+        }
+    }
+    if count == 0.0 {
+        f64::INFINITY
+    } else {
+        (sum / count - WATER_F0).abs()
+    }
 }
 
 fn ggx_energy_err(kind: Kind) -> f64 {
@@ -417,7 +449,7 @@ fn portal_point_m(kind: Kind) -> f64 {
 }
 
 fn beer_rel(kind: Kind) -> f64 {
-    broken(kind, 1.0, || region_rel(8, 0, 80, 60))
+    broken(kind, 1.0, || region_rel(40, 20, 80, 44))
 }
 
 fn shoreline_ratio(kind: Kind) -> f64 {
@@ -513,10 +545,6 @@ fn region(x0: u32, y0: u32, x1: u32, y1: u32, relative: bool) -> f64 {
         }
     }
     max
-}
-
-fn pixel_abs(x: u32, y: u32) -> f64 {
-    region_abs(x, y, x + 1, y + 1)
 }
 
 fn fraction(x0: u32, y0: u32, x1: u32, y1: u32, pred: impl Fn([f64; 3]) -> bool) -> f64 {
@@ -713,8 +741,8 @@ mod tests {
 
     #[test]
     fn a_glass_f0_fails_the_water_band() {
-        let good = metric(Fixture::Good, "water_f0_abs");
-        let bad = metric(Fixture::Bad, "water_f0_abs");
+        let good = metric(Fixture::Good, "water_f0");
+        let bad = metric(Fixture::Bad, "water_f0");
         assert!(good <= 0.005, "{good}");
         assert!(bad > 0.005, "{bad}");
     }

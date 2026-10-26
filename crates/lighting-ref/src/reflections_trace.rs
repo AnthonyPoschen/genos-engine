@@ -102,7 +102,15 @@ fn pixel(
     }
     let dir = view_ray(x, y, forward, right, up, aspect);
     if y < 60 {
-        let plane = if x < 80 { air_plane() } else { below_plane() };
+        let plane = if x < 80 {
+            if y >= 46 && x < 16 {
+                f0_plane()
+            } else {
+                air_plane()
+            }
+        } else {
+            below_plane()
+        };
         return shade_water(eye, dir, &plane);
     }
     if x < 80 {
@@ -560,7 +568,19 @@ fn below_plane() -> Plane {
     }
 }
 
-fn shade_planes() -> [Plane; 6] {
+fn f0_plane() -> Plane {
+    Plane {
+        origin: [-1.023_523, 1.599_509_2, 2.522_671_8],
+        normal: [0.568_623_9, -0.055_282_88, 0.820_737_9],
+        tangent: [0.821_994_94, 0.0, -0.569_494_8],
+        bitangent: [0.031_483_31, 0.998_470_7, 0.045_442_25],
+        half_u: 12.0,
+        half_v: 12.0,
+        color: [0.0, 0.0, 0.0],
+    }
+}
+
+fn shade_planes() -> [Plane; 8] {
     [
         Plane {
             origin: [-0.77, 0.92, 0.0],
@@ -615,6 +635,24 @@ fn shade_planes() -> [Plane; 6] {
             half_u: 6.0,
             half_v: 4.0,
             color: BLUE,
+        },
+        Plane {
+            origin: [-0.966_147_65, 1.593_955, 2.604_326_5],
+            normal: [-0.568_908_6, 0.055_297_96, -0.820_539_5],
+            tangent: [-0.821_797, 0.0, 0.569_780_4],
+            bitangent: [0.031_507_7, 0.998_469_9, 0.045_443_7],
+            half_u: 0.077_033_48,
+            half_v: 0.079_672_84,
+            color: [1.0, 1.0, 1.0],
+        },
+        Plane {
+            origin: [-1.045_739_5, 1.601_692_2, 2.489_488_1],
+            normal: [0.568_410_3, -0.055_271_56, 0.820_886_6],
+            tangent: [0.822_143_3, 0.0, -0.569_280_5],
+            bitangent: [0.031_465_02, 0.998_471_4, 0.045_441_15],
+            half_u: 0.074_491_31,
+            half_v: 0.077_033_76,
+            color: [0.0, 0.0, 0.0],
         },
     ]
 }

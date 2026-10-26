@@ -48,6 +48,20 @@ const PINK_O: [f32; 3] = [3.063_806_48, 1.929_368_31, 2.064_088_16];
 const PINK_N: [f32; 3] = [-0.986_814_714, 0.002_126_320, 0.161_840_041];
 const PINK_T: [f32; 3] = [0.161_840_407, 0.0, 0.986_816_945];
 const PINK_B: [f32; 3] = [0.002_098_289, 0.999_997_739, -0.000_344_124];
+/// Flat patch facing the grade camera. Its centre ray is the normal, so the
+/// patch is at normal incidence and the shaded pixel is the water F0.
+const F0_O: [f32; 3] = [-1.023_523, 1.599_509_2, 2.522_671_8];
+const F0_N: [f32; 3] = [0.568_623_9, -0.055_282_88, 0.820_737_9];
+const F0_T: [f32; 3] = [0.821_994_94, 0.0, -0.569_494_8];
+const F0_B: [f32; 3] = [0.031_483_31, 0.998_470_7, 0.045_442_25];
+const F0_WHITE_O: [f32; 3] = [-0.966_147_65, 1.593_955, 2.604_326_5];
+const F0_WHITE_N: [f32; 3] = [-0.568_908_6, 0.055_297_96, -0.820_539_5];
+const F0_WHITE_T: [f32; 3] = [-0.821_797, 0.0, 0.569_780_4];
+const F0_WHITE_B: [f32; 3] = [0.031_507_7, 0.998_469_9, 0.045_443_7];
+const F0_BLACK_O: [f32; 3] = [-1.045_739_5, 1.601_692_2, 2.489_488_1];
+const F0_BLACK_N: [f32; 3] = [0.568_410_3, -0.055_271_56, 0.820_886_6];
+const F0_BLACK_T: [f32; 3] = [0.822_143_3, 0.0, -0.569_280_5];
+const F0_BLACK_B: [f32; 3] = [0.031_465_02, 0.998_471_4, 0.045_441_15];
 
 /// Camera for [`grade_world`]. Yaw and pitch are zero, so it looks down −Z.
 #[must_use]
@@ -133,7 +147,29 @@ fn grade_reflectors() -> Vec<Reflector> {
         AIR_T,
         AIR_B,
         TRANS,
-        [0, 0, 80, 60],
+        [0, 0, 80, 46],
+    );
+    // The same plane continues under the transmission patch. The flat F0 quad
+    // takes the corner, so this scissor starts at x = 16.
+    let air_tail = reflector(
+        ReflectorKind::Water,
+        AIR_O,
+        AIR_N,
+        AIR_T,
+        AIR_B,
+        TRANS,
+        [16, 46, 64, 14],
+    );
+    // Albedo is black. The reflection target is white, so a pixel on this quad
+    // is the Fresnel weight at normal incidence.
+    let f0 = reflector(
+        ReflectorKind::Water,
+        F0_O,
+        F0_N,
+        F0_T,
+        F0_B,
+        [0.0, 0.0, 0.0],
+        [0, 46, 16, 14],
     );
     let below = reflector(
         ReflectorKind::Water,
@@ -144,10 +180,10 @@ fn grade_reflectors() -> Vec<Reflector> {
         TRANS,
         [80, 0, 80, 60],
     );
-    vec![mirror, portal, extra, air, below]
+    vec![mirror, portal, extra, air, air_tail, f0, below]
 }
 
-fn grade_planes() -> [ShadePlane; 6] {
+fn grade_planes() -> [ShadePlane; 8] {
     // Leak sits on the reflected camera's side of the mirror (z = 0, mirror at
     // z = 1). The oblique near plane drops it. The red wall fills the mirror
     // scissor and stops short of the water reflection ray. The beer back is
@@ -190,6 +226,26 @@ fn grade_planes() -> [ShadePlane; 6] {
             6.0,
             4.0,
             BLUE,
+        ),
+        // White sits on the F0 reflection ray. Black sits on the transmitted ray.
+        // Both are small enough that the mirror, the portal, and the other water miss them.
+        shade(
+            F0_WHITE_O,
+            F0_WHITE_N,
+            F0_WHITE_T,
+            F0_WHITE_B,
+            0.077_033_48,
+            0.079_672_84,
+            [1.0, 1.0, 1.0],
+        ),
+        shade(
+            F0_BLACK_O,
+            F0_BLACK_N,
+            F0_BLACK_T,
+            F0_BLACK_B,
+            0.074_491_31,
+            0.077_033_76,
+            [0.0, 0.0, 0.0],
         ),
     ]
 }

@@ -70,11 +70,11 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
     assert_eq!(live_code, 0, "{live_text}");
     assert_eq!(live_text.lines().count(), 21);
     for name in [
-        "mirror_law_rad",
+        "mirror_reflect",
         "fresnel_abs",
         "fresnel_below_abs",
-        "water_f0_abs",
-        "snell_rad",
+        "water_f0",
+        "snell_transmit",
         "ggx_energy",
         "mirror_view_frac",
         "portal_leak",
