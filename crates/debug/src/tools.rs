@@ -284,6 +284,8 @@ pub struct Tools {
     /// Last sample sequence already appended to `frames.csv`.
     gi_flushed: u64,
     base_lights: usize,
+    /// Last reflection pass: ray count, view count, GPU time, image bytes.
+    reflection_stats: Option<genos_render::ReflectionGrade>,
 }
 
 impl Default for Tools {
@@ -321,6 +323,7 @@ impl Tools {
             gi_dir: PathBuf::from("genos-debug").join("gi"),
             gi_flushed: 0,
             base_lights: 0,
+            reflection_stats: None,
         }
     }
 
@@ -481,6 +484,7 @@ impl Tools {
         timing: FrameTiming,
     ) {
         self.frame += 1;
+        self.reflection_stats = renderer.reflection_grade().ok();
         self.timing.push_back((self.frame, timing));
         while self.timing.len() > 240 {
             self.timing.pop_front();
@@ -1294,6 +1298,7 @@ impl Tools {
             "get_reflection_settings" => {
                 reply(reflection_value(&ctx.host.scene().reflections.effective()))
             }
+            "get_reflection_stats" => reply(reflection_stats_value(self.reflection_stats.as_ref())),
             "set_reflection_settings" => {
                 apply_reflection_update(&mut ctx.host.scene().reflections, args.0)?;
                 reply(reflection_value(&ctx.host.scene().reflections.effective()))
@@ -1813,6 +1818,23 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn reflection_stats_value(grade: Option<&genos_render::ReflectionGrade>) -> Value {
+    let ran = grade.is_some_and(|grade| grade.ran);
+    let rays = grade.map_or(0, |grade| grade.rays);
+    let views = grade.map_or(0, |grade| grade.views);
+    let gpu_ns = grade.map_or(0, |grade| grade.gpu_ns);
+    let vram_bytes = grade.map_or(0, |grade| grade.vram_bytes);
+    obj(vec![
+        ("ran", Value::Bool(ran)),
+        ("rays", num(f64::from(rays))),
+        ("views", num(f64::from(views))),
+        ("gpu_ns", num(gpu_ns as f64)),
+        ("vram_bytes", num(vram_bytes as f64)),
+        ("ms_frac", text("NOT-IMPLEMENTED")),
+        ("vram_frac", text("NOT-IMPLEMENTED")),
+    ])
 }
 
 fn reflection_value(settings: &ReflectionSettings) -> Value {

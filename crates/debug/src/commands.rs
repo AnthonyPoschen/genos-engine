@@ -127,6 +127,10 @@ fn reflection_specs() -> Vec<CommandSpec> {
             "set_reflection_settings",
             "Partial reflection update. Keys are enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics (off, image, cache), tracer (off, software, ray_query), and water. A text field overlays key=value lines. Writes the scene. The command-line arguments and GENOS_REFLECTION_* mirrors still overlay the value the picture uses.",
         ),
+        spec(
+            "get_reflection_stats",
+            "The last reflection pass: ran, rays, views, gpu_ns, and vram_bytes. gpu_ns is the timestamp query around that pass. vram_bytes is the reflection images and grade buffers. ms_frac and vram_frac stay NOT-IMPLEMENTED: lavapipe time is not the 4070 or 1060 cap. Settings stay on get_reflection_settings.",
+        ),
     ]
 }
 
