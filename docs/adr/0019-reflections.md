@@ -1,6 +1,6 @@
 # 0019: Specular reflections, mirrors, portals, and water
 
-Status: **proposed**. Design: [`docs/systems/reflections-design.md`](../systems/reflections-design.md).
+Status: **accepted** (Engine bot, 2026-10-26). Anthony Poschen delegated design approval to the Engine bot, which accepted this ADR. Design: [`docs/systems/reflections-design.md`](../systems/reflections-design.md).
 
 ## Context
 
@@ -16,7 +16,7 @@ Status: **proposed**. Design: [`docs/systems/reflections-design.md`](../systems/
 4. Water is a Gerstner mesh in world space. Shading is exact dielectric Fresnel, one Snell direction, and Beer–Lambert absorption. Caustics are off on Potato and Low, an image-space sun map on Medium, and that map plus an optional cache confirmation on High. Wave height at the shore is clamped to `0.75 × depth`.
 5. Reflection cost is a ceiling inside the frame target. Potato stays at the classify check (0.05 ms, 0 MB). Low is 0.40 ms and 8 MB. Medium is 0.70 ms and 16 MB. High is 1.00 ms and 32 MB. Work past a cap waits. It is not run as a full-frame fallback.
 
-Accepting this ADR lifts two limits and no others: the specular-and-mirrors non-goal in ADR 0012, and the water paragraph in the extras plan that says the probes are the reflection. ADR 0012's other rules stay: stored light does not follow the camera, no radiance history, ray queries rather than ray-tracing pipelines, the software tracer on macOS, Vulkan 1.3, the 4 GB floor.
+Acceptance lifts two limits and no others: the specular-and-mirrors non-goal in ADR 0012, and the water paragraph in the extras plan that says the probes are the reflection. Those two edits landed with this acceptance. ADR 0012's other rules stay: stored light does not follow the camera, no radiance history, ray queries rather than ray-tracing pipelines, the software tracer on macOS, Vulkan 1.3, the 4 GB floor.
 
 ## Rules kept
 

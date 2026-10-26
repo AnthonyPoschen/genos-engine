@@ -38,7 +38,7 @@ Lumen is the best-tested real-time GI in shipped games, so where it has solved a
 
 Where we hope to do better than Lumen: no pops from camera movement (stored light is view-independent), no ghosting or light lag (no radiance history), free light toggles (layers), cheaper low-end frames (caches instead of rays), and a numeric gate against ground truth.
 
-Where Lumen is still ahead and we accept it for now: specular reflections, translucency, very large open worlds with streaming, and skinned meshes in the GI.
+Where Lumen is still ahead and we accept it for now: translucency, very large open worlds with streaming, and skinned meshes in the GI. Specular reflections, mirrors, portals, and water are [ADR 0019](../adr/0019-reflections.md), accepted 2026-10-26. They are no longer a gap we leave to Lumen.
 
 ## Goals
 
@@ -53,7 +53,8 @@ Where Lumen is still ahead and we accept it for now: specular reflections, trans
 
 ## Non-goals (for v2)
 
-- Specular reflections and mirrors. We store roughness and metallic now so they can come later.
+Specular reflections and mirrors were a non-goal. [ADR 0019](../adr/0019-reflections.md) (accepted 2026-10-26) lifts that limit. Roughness and metallic stay stored for that path.
+
 - Fog, volumetrics and god rays. GI leaves room for a froxel volume that reads the same caches.
 - Translucent surfaces receiving GI.
 - Exact GI from skinned (animated) meshes. They use proxies.
@@ -439,7 +440,7 @@ score = screen_impact x expected_error x (1 + waiting_time x k)
 
 - glTF 2.0 metallic-roughness: base colour (factor and texture), metallic, roughness, emissive (factor, texture and strength), normal map, alpha mode (opaque and mask in v2; blend is drawn but gets no GI).
 - GI uses diffuse albedo = base colour x (1 - metallic). Cards capture it at import.
-- Roughness and metallic go in the G-buffer now, for specular later. A later specular pass can reuse screen probe rays for rough reflections and the surface cache for reflection hits.
+- Roughness and metallic go in the G-buffer now, for the specular path in [ADR 0019](../adr/0019-reflections.md). A later specular pass can reuse screen probe rays for rough reflections and the surface cache for reflection hits.
 - The current paint reflectance and colour mix become material parameters. The stress scene's defaults map to a white material with albedo 0.8.
 
 ## Presets and budgets

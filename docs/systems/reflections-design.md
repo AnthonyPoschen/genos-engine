@@ -1,10 +1,10 @@
 # Specular reflections, mirrors, portals, and water
 
-Status: **proposed**. ADR: [0019](../adr/0019-reflections.md). Terms: [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md).
+Status: **accepted** (Engine bot, 2026-10-26). Anthony Poschen delegated design approval to the Engine bot, which accepted [ADR 0019](../adr/0019-reflections.md). Terms: [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md).
 
 This design adds the specular picture on top of the live GI path. It does not add renderer code. The measurement harness in this change is `reflections-check`.
 
-ADR 0012 still lists specular reflections and mirrors as a non-goal, and the [rendering extras plan](rendering/extras-plan.md) still says the screen probes are the reflection. Accepting ADR 0019 lifts those two limits. It leaves the rest of ADR 0012 in force: the world-space cache, no radiance history, ray queries rather than ray-tracing pipelines, the software tracer on macOS, Vulkan 1.3, and the 4 GB floor. Cost follows [ADR 0013](../adr/0013-lighting-invalidation-is-local.md): a work cap per preset, finished values only, and no full-frame fallback.
+ADR 0019 is accepted. That lifts the specular-and-mirrors non-goal in the [GI design](gi-design.md) (ADR 0012) and the [extras-plan](rendering/extras-plan.md) sentence that said the screen probes are the water reflection. The rest of ADR 0012 stays in force: the world-space cache, no radiance history, ray queries rather than ray-tracing pipelines, the software tracer on macOS, Vulkan 1.3, and the 4 GB floor. Cost follows [ADR 0013](../adr/0013-lighting-invalidation-is-local.md): a work cap per preset, finished values only, and no full-frame fallback.
 
 ## Goals
 
