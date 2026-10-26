@@ -336,9 +336,23 @@ impl Renderer {
         self.gpu.streamer.observe_decode(bytes, ms);
     }
 
-    /// Device memory for a texture page. An out-of-device-memory error evicts and retries.
+    /// Device memory for a texture page. An out-of-device-memory error evicts,
+    /// frees that mip's device memory, and retries.
     pub fn allocate_texture_pages(&mut self, size: u64, type_bits: u32) -> Result<(), String> {
-        self.gpu.allocate_texture(size, type_bits).map(|_| ())
+        let memory = self.gpu.allocate_texture(size, type_bits)?;
+        self.gpu.bind_next_unbacked(memory)
+    }
+
+    fn fund_stream_pages(&mut self) -> Result<(), String> {
+        if self.gpu.transfer_busy {
+            return Ok(());
+        }
+        self.gpu.prepare_unbacked()?;
+        while self.gpu.has_unbacked() {
+            let (size, bits) = self.gpu.next_unbacked()?;
+            self.allocate_texture_pages(size, bits)?;
+        }
+        Ok(())
     }
 
     /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
@@ -399,6 +413,8 @@ impl Renderer {
         self.wire_on = wireframe;
         let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
         self.gpu.tick_materials(self.memory.accounted(), &views)?;
+        self.fund_stream_pages()?;
+        self.gpu.submit_transfer()?;
         let overlay_count = overlay_verts.len() as u32;
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
@@ -1024,6 +1040,15 @@ struct StreamPage {
     level: u32,
     image: Handle,
     memory: Handle,
+    bytes: u64,
+    type_bits: u32,
+    copied: bool,
+}
+
+struct UnboundImage {
+    image: Handle,
+    bytes: u64,
+    type_bits: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -5389,10 +5414,8 @@ impl Gpu {
             .set_transfer_ready(!self.transfer_busy || ready);
         let budget = self.vram;
         self.streamer.step(&budget, views, base_ms, FRAME_BUDGET_MS);
+        self.reclaim_unheld();
         self.note_sample();
-        if !self.transfer_busy {
-            self.submit_transfer()?;
-        }
         Ok(())
     }
 
@@ -5497,12 +5520,9 @@ impl Gpu {
     /// Copy staging mip bytes into device images. The fence is polled later.
     /// Does not call wait_for_fences or queue_wait_idle.
     fn submit_transfer(&mut self) -> Result<(), String> {
-        let due = self.copies_due();
+        let due = self.uncopied_pages();
         if due.is_empty() || self.transfer_cmd.is_null() || self.transfer_fence.is_null() {
             return Ok(());
-        }
-        for (index, level) in &due {
-            self.ensure_page(*index, *level)?;
         }
         let mut copied = 0u64;
         unsafe {
@@ -5566,10 +5586,27 @@ impl Gpu {
                 "transfer submit",
             )?;
         }
+        for (index, level) in due {
+            if let Some(page) = self
+                .stream_pages
+                .iter_mut()
+                .find(|page| page.index == index && page.level == level)
+            {
+                page.copied = true;
+            }
+        }
         self.transfer_busy = true;
         self.transfer_bytes = copied;
         self.transfer_submitted = Some(Instant::now());
         Ok(())
+    }
+
+    fn uncopied_pages(&self) -> Vec<(usize, u32)> {
+        self.stream_pages
+            .iter()
+            .filter(|page| !page.memory.is_null() && !page.copied)
+            .map(|page| (page.index, page.level))
+            .collect()
     }
 
     fn copies_due(&self) -> Vec<(usize, u32)> {
@@ -5628,36 +5665,7 @@ impl Gpu {
         u64::from(mip.width) * u64::from(mip.height) * 4
     }
 
-    fn ensure_page(&mut self, index: usize, level: u32) -> Result<(), String> {
-        if self.page_has(index, level) {
-            return Ok(());
-        }
-        let Some(source) = self
-            .stream_sources
-            .iter()
-            .find(|source| source.index == index)
-        else {
-            return Ok(());
-        };
-        let Some(slot) = usize::try_from(level).ok() else {
-            return Ok(());
-        };
-        let Some(mip) = source.chain.levels.get(slot) else {
-            return Ok(());
-        };
-        let width = mip.width.max(1);
-        let height = mip.height.max(1);
-        let image = self.make_transfer_image(width, height)?;
-        self.stream_pages.push(StreamPage {
-            index,
-            level,
-            image: image.image,
-            memory: image.memory,
-        });
-        Ok(())
-    }
-
-    fn make_transfer_image(&self, width: u32, height: u32) -> Result<Image, String> {
+    fn create_unbound_image(&self, width: u32, height: u32) -> Result<UnboundImage, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -5716,17 +5724,12 @@ impl Gpu {
             )?;
             let mut req = [0u8; 24];
             (self.fns.image_reqs)(self.device, image, req.as_mut_ptr());
-            let size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
-            let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
-            let memory = self.alloc(size, bits, Memory::Device)?;
-            check(
-                (self.fns.bind_image)(self.device, image, memory, 0),
-                "bind mip",
-            )?;
-            Ok(Image {
+            let bytes = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let type_bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
+            Ok(UnboundImage {
                 image,
-                view: std::ptr::null_mut(),
-                memory,
+                bytes,
+                type_bits,
             })
         }
     }
@@ -5907,15 +5910,104 @@ impl Gpu {
             match self.alloc(size, type_bits, Memory::Device) {
                 Ok(memory) => return Ok(memory),
                 Err(err)
-                    if err == "out of device memory"
-                        && left > 0
-                        && self.streamer.evict_for_oom() =>
+                    if err == "out of device memory" && left > 0 && self.evict_for_device() =>
                 {
                     left -= 1;
                 }
                 Err(err) => return Err(err),
             }
         }
+    }
+
+    /// Drop the lowest-priority mip and release its device memory.
+    fn evict_for_device(&mut self) -> bool {
+        if !self.streamer.evict_for_oom() {
+            return false;
+        }
+        self.reclaim_unheld();
+        true
+    }
+
+    fn reclaim_unheld(&mut self) {
+        let pages = std::mem::take(&mut self.stream_pages);
+        let mut keep = Vec::new();
+        for mut page in pages {
+            if self.streamer.holds_memory(page.index, page.level) {
+                keep.push(page);
+            } else {
+                self.free_page(&mut page);
+            }
+        }
+        self.stream_pages = keep;
+    }
+
+    fn has_unbacked(&self) -> bool {
+        self.stream_pages.iter().any(|page| page.memory.is_null())
+    }
+
+    fn next_unbacked(&self) -> Result<(u64, u32), String> {
+        self.stream_pages
+            .iter()
+            .find(|page| page.memory.is_null())
+            .map(|page| (page.bytes, page.type_bits))
+            .ok_or_else(|| "no mip is waiting for memory".to_string())
+    }
+
+    fn bind_next_unbacked(&mut self, memory: Handle) -> Result<(), String> {
+        let Some(page) = self
+            .stream_pages
+            .iter_mut()
+            .find(|page| page.memory.is_null())
+        else {
+            unsafe { (self.fns.free_mem)(self.device, memory, std::ptr::null()) };
+            return Err("no mip is waiting for memory".into());
+        };
+        let image = page.image;
+        page.memory = memory;
+        unsafe {
+            check(
+                (self.fns.bind_image)(self.device, image, memory, 0),
+                "bind mip",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn prepare_unbacked(&mut self) -> Result<(), String> {
+        let due = self.copies_due();
+        for (index, level) in due {
+            if self
+                .stream_pages
+                .iter()
+                .any(|page| page.index == index && page.level == level)
+            {
+                continue;
+            }
+            let Some(source) = self
+                .stream_sources
+                .iter()
+                .find(|source| source.index == index)
+            else {
+                continue;
+            };
+            let Some(slot) = usize::try_from(level).ok() else {
+                continue;
+            };
+            let Some(mip) = source.chain.levels.get(slot) else {
+                continue;
+            };
+            let image = self.create_unbound_image(mip.width.max(1), mip.height.max(1))?;
+            self.stream_pages.push(StreamPage {
+                index,
+                level,
+                image: image.image,
+                memory: std::ptr::null_mut(),
+                bytes: image.bytes,
+                type_bits: image.type_bits,
+                copied: false,
+            });
+        }
+        Ok(())
     }
 
     fn image_barrier(

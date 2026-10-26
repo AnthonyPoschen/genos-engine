@@ -1136,6 +1136,16 @@ mod tests {
     }
 
     #[test]
+    fn an_oom_eviction_releases_the_mip_the_device_holds() {
+        let mut stream = Streamer::new(0, 0.0, 0);
+        stream.add_texture(8, 8, &[64, 16]);
+        assert!(stream.holds_memory(0, 1));
+        assert!(stream.evict_for_oom());
+        assert!(!stream.holds_memory(0, 1));
+        assert!(!stream.evict_for_oom());
+    }
+
+    #[test]
     fn a_magnified_texel_wants_mip_zero_and_a_tiny_one_does_not() {
         let near = wanted_mip(1024, 1024, near_derivatives(1024), 0.0, 0, 8);
         let far = wanted_mip(1024, 1024, far_derivatives(1024), 0.0, 0, 8);
