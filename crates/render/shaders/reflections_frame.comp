@@ -1,0 +1,195 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "reflections.glsl"
+
+// The picture the frame writes after lighting. Eight by twenty-four: mirror,
+// portal, then water. Potato and Low (`preset` 0 and 1) store a ray count of 0
+// and this shader does not march those rays. Fault bit 1 draws behind the
+// plane, bit 4 adds the near bias, bit 16 stores 64 rays.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Push {
+    uint preset;
+    uint fault;
+    uint pad0;
+    uint pad1;
+} pc;
+
+struct GradePixel {
+    vec4 color_depth;
+};
+
+layout(std430, set = 0, binding = 0) buffer Grade {
+    GradePixel pixels[192];
+    uint rays;
+    uint views;
+    uint width;
+    uint height;
+} grade;
+
+const vec3 HIDDEN = vec3(1.0, 0.0, 1.0);
+const vec3 WALL_POS = vec3(0.85, 0.12, 0.08);
+const vec3 WALL_NEG = vec3(0.10, 0.55, 0.20);
+const vec3 PORTAL_HIGH = vec3(0.15, 0.35, 0.90);
+const vec3 PORTAL_LOW = vec3(0.90, 0.70, 0.20);
+const vec3 FLOOR_COLOR = vec3(0.08, 0.22, 0.72);
+const vec3 CEILING_COLOR = vec3(0.72, 0.68, 0.55);
+
+bool hit_plane(vec3 origin, vec3 direction, float place, int axis, out vec3 hit, out float travel) {
+    float start = axis == 0 ? origin.x : (axis == 1 ? origin.y : origin.z);
+    float slope = axis == 0 ? direction.x : (axis == 1 ? direction.y : direction.z);
+    if (abs(slope) < 1.0e-8) {
+        hit = vec3(0.0);
+        travel = 0.0;
+        return false;
+    }
+    travel = (place - start) / slope;
+    if (travel <= 1.0e-4) {
+        hit = vec3(0.0);
+        return false;
+    }
+    hit = origin + direction * travel;
+    return true;
+}
+
+vec3 primary_dir(uint px, uint py, vec3 forward, vec3 right, vec3 up) {
+    float scale = tan(radians(60.0) * 0.5);
+    float u = (float(px) + 0.5) / 8.0 * 2.0 - 1.0;
+    float v = 1.0 - (float(py) + 0.5) / 8.0 * 2.0;
+    return normalize(forward + right * (u * scale) + up * (v * scale));
+}
+
+vec3 first_wall(vec3 origin, vec3 direction, vec3 plane_origin, vec3 plane_normal, bool draw_behind, bool portal) {
+    vec3 best = vec3(0.0);
+    float best_t = 1.0e20;
+    for (int which = 0; which < 2; which++) {
+        float place = which == 0 ? -1.0 : 2.0;
+        vec3 hit;
+        float travel;
+        if (!hit_plane(origin, direction, place, 2, hit, travel)) {
+            continue;
+        }
+        if (travel <= 1.0e-3 || travel >= best_t) {
+            continue;
+        }
+        if (!draw_behind && !reflection_plane_front(hit, plane_origin, plane_normal)) {
+            continue;
+        }
+        best_t = travel;
+        if (which == 0) {
+            best = HIDDEN;
+        } else if (portal) {
+            best = hit.y >= 1.0 ? PORTAL_HIGH : PORTAL_LOW;
+        } else {
+            best = hit.x >= 0.0 ? WALL_POS : WALL_NEG;
+        }
+    }
+    return best;
+}
+
+vec3 portal_dir_identity(vec3 direction) {
+    mat3 basis = mat3(1.0);
+    vec3 to_origin = vec3(10.0, 0.0, 0.0);
+    vec3 through = reflection_portal_point(direction, vec3(0.0), basis, to_origin, basis);
+    vec3 zero = reflection_portal_point(vec3(0.0), vec3(0.0), basis, to_origin, basis);
+    return through - zero;
+}
+
+vec3 water_color(vec3 dir, vec3 hit, vec3 opaque) {
+    float cos_i = clamp(dot(vec3(0.0, 1.0, 0.0), -dir), 0.0, 1.0);
+    float fresnel = reflection_fresnel(1.333, cos_i);
+    vec3 reflected_dir = reflection_mirror_dir(dir, vec3(0.0, 1.0, 0.0));
+    vec3 ceiling_hit;
+    float ceiling_travel;
+    vec3 reflected = hit_plane(hit, reflected_dir, 4.0, 1, ceiling_hit, ceiling_travel)
+        ? CEILING_COLOR
+        : opaque;
+    vec3 transmitted_dir;
+    if (!reflection_refract(dir, vec3(0.0, 1.0, 0.0), 1.0 / 1.333, transmitted_dir)) {
+        return CEILING_COLOR;
+    }
+    vec3 floor_hit;
+    float floor_travel;
+    vec3 sample_color = opaque;
+    float travel = max(hit.y, 0.0);
+    if (hit_plane(hit, transmitted_dir, 0.0, 1, floor_hit, floor_travel)) {
+        sample_color = FLOOR_COLOR;
+        travel = length(floor_hit - hit);
+    }
+    return reflection_water_shade(fresnel, reflected, sample_color, 0.35, travel);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= 192u) {
+        return;
+    }
+    uint tile = index / 64u;
+    uint local = index - tile * 64u;
+    uint px = local % 8u;
+    uint py = local / 8u;
+    bool draw_behind = (pc.fault & 1u) != 0u;
+    vec3 color = vec3(0.0);
+    float depth = 0.0;
+    vec3 mirror_eye = vec3(0.0, 1.0, 4.0);
+    vec3 mirror_forward = vec3(0.0, 0.0, -1.0);
+    vec3 right = vec3(1.0, 0.0, 0.0);
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 plane_normal = vec3(0.0, 0.0, 1.0);
+    if (tile == 0u) {
+        vec3 dir = primary_dir(px, py, mirror_forward, right, up);
+        vec3 hit;
+        float travel;
+        if (hit_plane(mirror_eye, dir, 0.0, 2, hit, travel)) {
+            depth = travel;
+            float chain[8] = float[8](1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            uint views = reflection_mirror_views(chain, 1u, reflection_view_cap(1u), 0.02);
+            if (views != 0u) {
+                vec3 origin = reflection_mirror_point(mirror_eye, plane_normal);
+                vec3 direction = reflection_mirror_dir(dir, plane_normal);
+                color = first_wall(origin, direction, vec3(0.0), plane_normal, draw_behind, false);
+            }
+        }
+    } else if (tile == 1u) {
+        vec3 dir = primary_dir(px, py, mirror_forward, right, up);
+        vec3 hit;
+        float travel;
+        if (hit_plane(mirror_eye, dir, 0.0, 2, hit, travel)) {
+            depth = travel;
+            vec3 direction = portal_dir_identity(dir);
+            mat3 basis = mat3(1.0);
+            vec3 origin = reflection_portal_point(hit, vec3(0.0), basis, vec3(10.0, 0.0, 0.0), basis)
+                + direction * 1.0e-3;
+            color = first_wall(origin, direction, vec3(0.0), plane_normal, draw_behind, true);
+        }
+    } else {
+        vec3 eye = vec3(0.0, 3.0, 0.5);
+        vec3 dir = primary_dir(px, py, vec3(0.0, -1.0, 0.0), right, vec3(0.0, 0.0, -1.0));
+        vec3 hit;
+        float travel;
+        if (hit_plane(eye, dir, 1.0, 1, hit, travel)) {
+            depth = travel;
+            vec3 opaque = vec3(0.0);
+            vec3 floor_hit;
+            float floor_travel;
+            if (hit_plane(eye, dir, 0.0, 1, floor_hit, floor_travel)) {
+                opaque = FLOOR_COLOR;
+            }
+            color = water_color(dir, hit, opaque);
+        }
+    }
+    if ((pc.fault & 2u) != 0u && (pc.pad0 % 2u) == 1u) {
+        color *= 0.4;
+    }
+    if ((pc.fault & 4u) != 0u && depth < 3.0) {
+        color += vec3(0.5);
+    }
+    grade.pixels[index].color_depth = vec4(color, depth);
+    if (index == 0u) {
+        grade.rays = (pc.fault & 16u) != 0u ? 64u : reflection_ray_cap(pc.preset);
+        grade.views = reflection_view_cap(pc.preset);
+        grade.width = 8u;
+        grade.height = 24u;
+    }
+}

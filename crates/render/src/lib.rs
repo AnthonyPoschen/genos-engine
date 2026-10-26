@@ -31,9 +31,10 @@ pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS}
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
 pub use reflections::{
-    portal_leak, scheduled_low_rays, shade_picture, shoreline_deep_ratio, shoreline_ratio,
-    PictureFault,
-    ReflectionPicture, TILE,
+    frame_ray_count, lighting_reflection_preset, mirror_view_proj, portal_leak, portal_view_proj,
+    reflection_frame_active, reflection_grade_from_bytes, scheduled_low_rays, shade_picture,
+    shoreline_deep_ratio, shoreline_ratio, water_quad, water_vertices, PictureFault,
+    ReflectionGrade, ReflectionPicture, GRADE_BYTES, TILE,
 };
 pub use particles::{
     card_quad, compose_fog, fire_radiance, fog_along, frame_at, height_fog_along, image_from_map,
@@ -50,7 +51,8 @@ pub use trace::{
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
-    MaterialAtlas, Object, ParticleFrame, ParticleImage, ShaderSpace, Surface, World,
+    MaterialAtlas, Object, ParticleFrame, ParticleImage, Reflector, ReflectorKind, ShaderSpace,
+    Surface, World,
 };
 
 /// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).

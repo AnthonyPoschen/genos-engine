@@ -1,8 +1,10 @@
 //! CPU picture for planar mirrors, portals, and flat water.
 //!
-//! The frame does not call this. Glossy screen marches, the world cache, and
-//! `ray_query` wait on the lighting schedule. Low schedules zero reflection
-//! rays. A refraction miss keeps the opaque sample, darkened by Beer–Lambert.
+//! The frame shades water with `reflection_water_shade` and rasters mirror and
+//! portal views when the world has those surfaces. Glossy screen marches, the
+//! world cache, and `ray_query` wait on the lighting schedule. Potato and Low
+//! schedule zero reflection rays. A refraction miss keeps the opaque sample,
+//! darkened by Beer–Lambert.
 //!
 //! The oblique row is Lengyel's clip with Vulkan clip Z in 0..1: the third
 //! row is the scaled plane, not `plane - row3`. The shade rejects a point
@@ -11,7 +13,10 @@
 //! reflected camera's axis.
 
 use genos_math::optics::{self, PortalLink, ReflectionPreset, MIRROR_FRESNEL_CUTOFF, WATER_IOR};
-use genos_math::{Mat3, Vec3, Vec4};
+use genos_math::{Mat3, Mat4, Vec3, Vec4};
+use genos_scene::{CAMERA_FAR, CAMERA_NEAR};
+
+use crate::pack::GpuVertex;
 
 /// Pixels on a side of one mirror, portal, or water tile.
 pub const TILE: u32 = 8;
@@ -443,13 +448,270 @@ fn add(color: [f32; 3], extra: f32) -> [f32; 3] {
     [color[0] + extra, color[1] + extra, color[2] + extra]
 }
 
+/// Reflection rays a frame may cast. Potato (`0`) and Low (`1`) stay at zero.
+#[must_use]
+pub fn frame_ray_count(preset: u32) -> u32 {
+    let preset = match preset {
+        0 => ReflectionPreset::Potato,
+        1 => ReflectionPreset::Low,
+        2 => ReflectionPreset::Medium,
+        _ => ReflectionPreset::High,
+    };
+    optics::reflection_ray_cap(preset)
+}
+
+/// The frame runs the reflection passes only when a surface asks for one.
+#[must_use]
+pub fn reflection_frame_active(mirrors: u32, portals: u32, water: u32) -> bool {
+    mirrors.saturating_add(portals).saturating_add(water) > 0
+}
+
+/// Mirror camera, oblique near plane on the mirror. Vulkan clip Z is 0..1.
+#[must_use]
+pub fn mirror_view_proj(
+    eye: Vec3,
+    forward: Vec3,
+    aspect: f32,
+    origin: Vec3,
+    normal: Vec3,
+) -> [f32; 16] {
+    let normal = unit_vec(normal);
+    let forward = unit_vec(forward);
+    let (right, up) = camera_axes(forward);
+    let eye = optics::mirror_point(eye - origin, normal) + origin;
+    oblique_camera_proj(
+        eye,
+        unit_vec(optics::mirror_dir(forward, normal)),
+        unit_vec(optics::mirror_dir(right, normal)),
+        unit_vec(optics::mirror_dir(up, normal)),
+        aspect,
+        origin,
+        normal,
+    )
+}
+
+/// Portal camera. The oblique plane sits on the destination opening.
+#[must_use]
+pub fn portal_view_proj(
+    eye: Vec3,
+    forward: Vec3,
+    aspect: f32,
+    origin: Vec3,
+    normal: Vec3,
+    portal_to: Vec3,
+) -> [f32; 16] {
+    let normal = unit_vec(normal);
+    let forward = unit_vec(forward);
+    let (right, up) = camera_axes(forward);
+    let link = PortalLink {
+        from_origin: origin,
+        from_basis: Mat3::IDENTITY,
+        to_origin: portal_to,
+        to_basis: Mat3::IDENTITY,
+    };
+    oblique_camera_proj(
+        optics::portal_point(link, eye),
+        unit_vec(optics::portal_dir(link, forward)),
+        unit_vec(optics::portal_dir(link, right)),
+        unit_vec(optics::portal_dir(link, up)),
+        aspect,
+        portal_to,
+        unit_vec(optics::portal_dir(link, normal)),
+    )
+}
+
+/// One water quad, two triangles, on the plane. The albedo is the transmitted sample.
+#[must_use]
+pub fn water_quad(origin: Vec3, normal: Vec3) -> [GpuVertex; 6] {
+    let normal = unit_vec(normal);
+    let (right, tangent) = camera_axes(normal);
+    let corner = |x: f32, z: f32| origin + right * x + tangent * z;
+    let vert = |point: Vec3| GpuVertex {
+        pos: [point.x, point.y, point.z],
+        albedo: FLOOR,
+        normal: [normal.x, normal.y, normal.z],
+        shade: 1.0,
+        uv: [-1.0, -1.0],
+    };
+    let a = corner(-1.0, -1.0);
+    let b = corner(1.0, -1.0);
+    let c = corner(1.0, 1.0);
+    let d = corner(-1.0, 1.0);
+    [vert(a), vert(b), vert(c), vert(a), vert(c), vert(d)]
+}
+
+fn oblique_camera_proj(
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    aspect: f32,
+    origin: Vec3,
+    normal: Vec3,
+) -> [f32; 16] {
+    let view = Mat4::from_cols([
+        right.x,
+        up.x,
+        -forward.x,
+        0.0,
+        right.y,
+        up.y,
+        -forward.y,
+        0.0,
+        right.z,
+        up.z,
+        -forward.z,
+        0.0,
+        -right.dot(eye),
+        -up.dot(eye),
+        forward.dot(eye),
+        1.0,
+    ]);
+    let rel = origin - eye;
+    let origin_cam = Vec3::new(right.dot(rel), up.dot(rel), -forward.dot(rel));
+    let normal_cam = Vec3::new(right.dot(normal), up.dot(normal), -forward.dot(normal));
+    let plane = Vec4::new(
+        normal_cam.x,
+        normal_cam.y,
+        normal_cam.z,
+        -normal_cam.dot(origin_cam),
+    );
+    let fovy = 60.0_f32.to_radians();
+    let h = 1.0 / (fovy * 0.5).tan();
+    let w = h / aspect.max(0.01);
+    let near = CAMERA_NEAR;
+    let far = CAMERA_FAR;
+    let proj = Mat4::from_cols([
+        w,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -h,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        far / (near - far),
+        -1.0,
+        0.0,
+        0.0,
+        (far * near) / (near - far),
+        0.0,
+    ]);
+    (optics::oblique_projection(proj, plane) * view).cols
+}
+
+fn camera_axes(forward: Vec3) -> (Vec3, Vec3) {
+    let helper = if forward.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let right = unit_vec(forward.cross(helper));
+    let up = unit_vec(right.cross(forward));
+    (right, up)
+}
+
+fn unit_vec(value: Vec3) -> Vec3 {
+    let len = value.length();
+    if len < 1.0e-8 {
+        Vec3::Z
+    } else {
+        value / len
+    }
+}
+
+/// Bytes the frame's grade buffer holds: 192 pixels, then four `u32`s.
+pub const GRADE_BYTES: usize = 192 * 16 + 16;
+
+/// What the reflection composite wrote. `ran` is false when the frame skipped it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReflectionGrade {
+    pub ran: bool,
+    pub color: Vec<[f32; 3]>,
+    pub depth: Vec<f32>,
+    pub rays: u32,
+    pub views: u32,
+}
+
+/// Read the grade buffer the composite stores. `None` when the bytes are short.
+#[must_use]
+pub fn reflection_grade_from_bytes(bytes: &[u8]) -> Option<ReflectionGrade> {
+    if bytes.len() < GRADE_BYTES {
+        return None;
+    }
+    let mut color = Vec::with_capacity(192);
+    let mut depth = Vec::with_capacity(192);
+    for index in 0..192 {
+        let at = index * 16;
+        let mut word = [0u8; 4];
+        word.copy_from_slice(&bytes[at..at + 4]);
+        let r = f32::from_le_bytes(word);
+        word.copy_from_slice(&bytes[at + 4..at + 8]);
+        let g = f32::from_le_bytes(word);
+        word.copy_from_slice(&bytes[at + 8..at + 12]);
+        let b = f32::from_le_bytes(word);
+        word.copy_from_slice(&bytes[at + 12..at + 16]);
+        let distance = f32::from_le_bytes(word);
+        color.push([r, g, b]);
+        depth.push(distance);
+    }
+    let trailer = 192 * 16;
+    Some(ReflectionGrade {
+        ran: true,
+        color,
+        depth,
+        rays: read_u32(&bytes[trailer..trailer + 4]),
+        views: read_u32(&bytes[trailer + 4..trailer + 8]),
+    })
+}
+
+fn read_u32(bytes: &[u8]) -> u32 {
+    let mut word = [0u8; 4];
+    word.copy_from_slice(bytes);
+    u32::from_le_bytes(word)
+}
+
+/// Water quads for the translucent pass. At most four surfaces.
+#[must_use]
+pub fn water_vertices(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> {
+    let mut out = Vec::new();
+    for reflector in reflectors
+        .iter()
+        .filter(|item| item.kind == crate::world::ReflectorKind::Water)
+        .take(4)
+    {
+        let quad = water_quad(
+            Vec3::new(reflector.origin[0], reflector.origin[1], reflector.origin[2]),
+            Vec3::new(reflector.normal[0], reflector.normal[1], reflector.normal[2]),
+        );
+        out.extend(quad);
+    }
+    out
+}
+
+/// Lighting preset index the frame pushes. Potato is 0, Low is 1, Medium is 2.
+#[must_use]
+pub fn lighting_reflection_preset(preset: genos_scene::LightingPreset) -> u32 {
+    match preset {
+        genos_scene::LightingPreset::Potato => 0,
+        genos_scene::LightingPreset::Low => 1,
+        genos_scene::LightingPreset::Medium => 2,
+        genos_scene::LightingPreset::DayCycle
+        | genos_scene::LightingPreset::Gi1Bounce
+        | genos_scene::LightingPreset::High => 3,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        idx, portal_leak, scheduled_low_rays, shade_picture, shoreline_deep_ratio, shoreline_ratio,
-        water_color, PictureFault, HIDDEN, TILE,
+        frame_ray_count, idx, mirror_view_proj, portal_leak, reflection_frame_active,
+        scheduled_low_rays, shade_picture, shoreline_deep_ratio, shoreline_ratio, water_color,
+        water_quad, PictureFault, HIDDEN, TILE,
     };
-    use genos_math::Vec3;
+    use genos_math::{Mat4, Vec3};
 
     #[test]
     fn low_schedules_zero_rays_and_the_broken_scheduler_does_not() {
@@ -504,5 +766,38 @@ mod tests {
         assert_ne!(miss, hit);
         let again = shade_picture(1, PictureFault::default());
         assert_eq!(picture.color, again.color);
+    }
+
+    #[test]
+    fn potato_and_low_cast_no_rays_and_an_empty_scene_skips_the_frame() {
+        assert_eq!(frame_ray_count(0), 0);
+        assert_eq!(frame_ray_count(1), 0);
+        assert!(frame_ray_count(2) > 0);
+        assert!(!reflection_frame_active(0, 0, 0));
+        assert!(reflection_frame_active(1, 0, 0));
+        assert!(reflection_frame_active(0, 0, 1));
+    }
+
+    #[test]
+    fn the_oblique_mirror_keeps_the_front_and_clips_the_back() {
+        let matrix = mirror_view_proj(
+            Vec3::new(0.0, 1.0, 4.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            1.0,
+            Vec3::ZERO,
+            Vec3::Z,
+        );
+        let front = clip_z(&matrix, Vec3::new(0.0, 1.0, 1.0));
+        let back = clip_z(&matrix, Vec3::new(0.0, 1.0, -1.0));
+        assert!(front >= -1.0e-4, "{front}");
+        assert!(back < 0.0, "{back}");
+        let quad = water_quad(Vec3::Y, Vec3::Y);
+        assert_eq!(quad.len(), 6);
+        assert!((quad[0].normal[1] - 1.0).abs() < 1.0e-5);
+    }
+
+    fn clip_z(matrix: &[f32; 16], point: Vec3) -> f32 {
+        let clip = Mat4::from_cols(*matrix).transform_homogeneous(point);
+        clip.z / clip.w
     }
 }

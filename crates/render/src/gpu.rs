@@ -324,6 +324,13 @@ impl Renderer {
     ///
     /// Waits for that draw's graphics fence. Does not wait for a light gather.
     /// A `readback` draw already waited, and its pixels are the finished field.
+    /// Grade buffer from the reflection composite. Empty when this frame skipped it.
+    ///
+    /// A `readback` draw has already waited, so the buffer is the frame that just ran.
+    pub fn reflection_grade(&self) -> Result<crate::reflections::ReflectionGrade, String> {
+        self.gpu.read_reflection_grade()
+    }
+
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
         self.gpu.copy_last_picture()?;
         self.gpu.read_color()
@@ -453,6 +460,10 @@ impl Renderer {
         let world_dynamic = dynamic.len() as u32;
         let mut dynamic = dynamic;
         dynamic.extend(overlay_verts);
+        let water_first = u32::try_from(dynamic.len()).unwrap_or(0);
+        let water_verts = crate::reflections::water_vertices(&world.reflectors);
+        let water_count = u32::try_from(water_verts.len()).unwrap_or(0);
+        dynamic.extend(water_verts);
         if !dynamic.is_empty() {
             self.gpu.upload(&dynamic)?;
         }
@@ -476,6 +487,8 @@ impl Renderer {
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
         self.gpu.note_overlay_count(overlay_count);
+        self.gpu
+            .note_reflections(world, camera, aspect, water_first, water_count);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
@@ -923,6 +936,9 @@ struct Gpu {
     aa_fxaa: Handle,
     aa_pool: Handle,
     aa_sets: [Handle; 2],
+    /// Mirror views, the water quad, and the grade buffer. Idle when the scene
+    /// has no reflector.
+    reflection: ReflectionGpu,
     fns: Fns,
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
@@ -1579,6 +1595,7 @@ impl Gpu {
                 aa_fxaa: std::ptr::null_mut(),
                 aa_pool: std::ptr::null_mut(),
                 aa_sets: [std::ptr::null_mut(); 2],
+                reflection: ReflectionGpu::idle(),
                 fns: load_fns(
                     dload,
                     create_wayland_surface,
@@ -2168,6 +2185,7 @@ impl Gpu {
                     self.lighting_passes(slot);
                 }
                 self.frame_stamp(slot, FrameStamp::Lighting);
+                self.reflections_after_lighting(matrix)?;
                 // No antialias: the overlay is its own pass, after lighting, so its
                 // time stays out of the lighting span.
                 if lighting && !filtering && self.overlay_count > 0 {
@@ -5215,10 +5233,12 @@ impl Gpu {
     fn destroy_targets(&mut self) {
         unsafe {
             if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-                self.destroy_aa_targets();
-                return;
+            self.destroy_aa_targets();
+            self.destroy_reflection_targets();
+            return;
             }
             self.destroy_aa_targets();
+            self.destroy_reflection_targets();
             for slot in 0..2 {
                 if !self.framebuffers[slot].is_null() {
                     (self.fns.destroy_framebuffer)(
@@ -5476,6 +5496,7 @@ impl Drop for Gpu {
             if !self.aa_desc_layout.is_null() {
                 (self.fns.destroy_desc_layout)(self.device, self.aa_desc_layout, std::ptr::null());
             }
+            self.destroy_reflection();
             (self.fns.destroy_device)(self.device, std::ptr::null());
             if !self.surface.is_null() {
                 (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
@@ -5629,6 +5650,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
+include!("reflections_frame.rs");
 
 extern "C" {
     fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;

@@ -35,6 +35,7 @@ fn main() {
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
+    let (reflection_frame, reflection_water) = reflection_shaders(&out);
     // Not embedded: catches errors in pieces no pass includes yet.
     for file in ["lighting_check.comp", "media_check.comp", "reflections_check.comp"] {
         let src = format!("shaders/{file}");
@@ -114,7 +115,32 @@ fn main() {
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         screen.display()
     ));
+    glue_text.push_str(&format!(
+        "pub static REFLECTION_FRAME_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        reflection_frame.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static REFLECTION_WATER_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        reflection_water.display()
+    ));
     std::fs::write(&glue, glue_text).unwrap();
+    watch_shaders();
+}
+
+fn reflection_shaders(out: &std::path::Path) -> (PathBuf, PathBuf) {
+    (
+        compile(
+            "shaders/reflections_frame.comp",
+            &out.join("reflections_frame.comp.spv"),
+        ),
+        compile(
+            "shaders/reflections_water.frag",
+            &out.join("reflections_water.frag.spv"),
+        ),
+    )
+}
+
+fn watch_shaders() {
     for piece in [
         "lighting_common.glsl",
         "lighting_pack.glsl",
@@ -124,22 +150,24 @@ fn main() {
         "lighting_sun_compose.comp",
         "lighting_screen.comp",
         "media.glsl",
+        "scene.vert",
+        "overlay.frag",
+        "depth_mask.frag",
+        "material_atlas.glsl",
+        "wire.vert",
+        "wire.frag",
+        "scene_rays.glsl",
+        "mesh_field.glsl",
+        "reflections.glsl",
+        "reflections_frame.comp",
+        "reflections_water.frag",
+        "scene_data.glsl",
+        "dither.glsl",
+        "transmit.comp",
+        "fxaa.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
-    println!("cargo:rerun-if-changed=shaders/scene.vert");
-    println!("cargo:rerun-if-changed=shaders/overlay.frag");
-    println!("cargo:rerun-if-changed=shaders/depth_mask.frag");
-    println!("cargo:rerun-if-changed=shaders/material_atlas.glsl");
-    println!("cargo:rerun-if-changed=shaders/wire.vert");
-    println!("cargo:rerun-if-changed=shaders/wire.frag");
-    println!("cargo:rerun-if-changed=shaders/scene_rays.glsl");
-    println!("cargo:rerun-if-changed=shaders/mesh_field.glsl");
-    println!("cargo:rerun-if-changed=shaders/reflections.glsl");
-    println!("cargo:rerun-if-changed=shaders/scene_data.glsl");
-    println!("cargo:rerun-if-changed=shaders/dither.glsl");
-    println!("cargo:rerun-if-changed=shaders/transmit.comp");
-    println!("cargo:rerun-if-changed=shaders/fxaa.comp");
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {

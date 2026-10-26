@@ -333,10 +333,15 @@ impl Gpu {
             clear_count: u32,
             clears: *const f32,
         }
+        let pass = if self.reflection.pass_override.is_null() {
+            self.render_pass
+        } else {
+            self.reflection.pass_override
+        };
         let rp = RpBegin {
             s_type: 43,
             next: std::ptr::null(),
-            pass: self.render_pass,
+            pass,
             fb,
             area: Rect {
                 offset: Offset { x: 0, y: 0 },

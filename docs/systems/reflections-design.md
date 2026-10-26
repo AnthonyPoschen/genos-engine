@@ -2,7 +2,7 @@
 
 Status: **accepted** (Engine bot, 2026-10-26). Anthony Poschen delegated design approval to the Engine bot, which accepted [ADR 0019](../adr/0019-reflections.md). Terms: [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md).
 
-This design adds the specular picture on top of the live GI path. It does not add renderer code. The measurement harness in this change is `reflections-check`.
+This design adds the specular picture on top of the live GI path. The frame composite, the planar views, and the water quad are in the renderer. Glossy marches stay out of the GI passes. The measurement harness is `reflections-check`.
 
 ADR 0019 is accepted. That lifts the specular-and-mirrors non-goal in the [GI design](gi-design.md) (ADR 0012) and the [extras-plan](rendering/extras-plan.md) sentence that said the screen probes are the water reflection. The rest of ADR 0012 stays in force: the world-space cache, no radiance history, ray queries rather than ray-tracing pipelines, the software tracer on macOS, Vulkan 1.3, and the 4 GB floor. Cost follows [ADR 0013](../adr/0013-lighting-invalidation-is-local.md): a work cap per preset, finished values only, and no full-frame fallback.
 
@@ -57,7 +57,7 @@ Priority, when a budget is short, is the ADR 0013 score with the near-camera ter
 
 ## Optics
 
-These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. `reflections_check.comp` compiles that file in the renderer build and is not embedded in the frame. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
+These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. The frame composite (`reflections_frame.comp`) and the water fragment include that file. `reflections_check.comp` compiles it as well and is the lavapipe parity dispatch, not a draw. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
 
 **Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness bakes both and gates the angle at `1e-4` rad and the point at `1e-5` m (`mirror_law_rad`, `mirror_point_m`).
 
@@ -353,7 +353,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.
 
-The CPU picture landed the parts that do not need that lighting phase: planar mirrors and portals (P5, P6) with the Fresnel view cap, water shading and refraction (P7) on a flat plane, the shoreline clamp (P8; Jacobian foam still waits), and the Low ray count from P4. The frame is not hooked, so a later schedule skips these passes when their counts are zero and today's Lambert picture stays valid. `ReflectionSettings` is on the scene, the debug menu, and MCP. Classify counters and the idle-millisecond probe wait with the frame hook.
+The CPU picture landed the parts that do not need that lighting phase: planar mirrors and portals (P5, P6) with the Fresnel view cap, water shading and refraction (P7) on a flat plane, the shoreline clamp (P8; Jacobian foam still waits), and the Low ray count from P4. The frame runs those passes after lighting when the world lists a mirror, a portal, or water. Potato and Low store a ray count of 0 and do not march rays. Mirror and portal views are planar cameras with the oblique near clip, capped by `reflection_view_cap`. Water quads are the translucent pass and call `reflection_water_shade`. A scene with none of those surfaces skips the passes, so today's Lambert picture stays valid. `ReflectionSettings` is on the scene, the debug menu, and MCP. Classify counters and the idle-millisecond probe wait on `debug/reflections`.
 
 Next, after lighting phase 3: the screen march, the world-cache or `ray_query` fallback, and one spatial reflection filter. Those three stay out of `lighting_schedule.rs` and out of the GI passes. They turn `ssr_depth_rel` and `denoise_lag_frames` live under the same thresholds.
 

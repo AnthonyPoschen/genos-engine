@@ -224,10 +224,30 @@ pub fn solid_reach(solid: &Solid) -> f32 {
     }
 }
 
+/// A planar mirror, a portal opening, or a water surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReflectorKind {
+    Mirror,
+    Portal,
+    Water,
+}
+
+/// One reflector the frame may draw. An empty list leaves the picture alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reflector {
+    pub kind: ReflectorKind,
+    pub origin: [f32; 3],
+    pub normal: [f32; 3],
+    /// Where a portal opens. Mirrors and water leave this at zero.
+    pub portal_to: [f32; 3],
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     pub scene: Scene,
     pub objects: Vec<Object>,
+    /// Planar mirrors, portals, and water. Empty skips the reflection passes.
+    pub reflectors: Vec<Reflector>,
     /// Meshes the GPU software tracer sees through their SDFs (GI).
     pub fields: Vec<crate::mesh_field::FieldInstance>,
     /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
@@ -261,6 +281,7 @@ impl World {
         Self {
             scene,
             objects,
+            reflectors: Vec::new(),
             fields: Vec::new(),
             surfaces: Vec::new(),
             color_atlas: MaterialAtlas::empty(),
