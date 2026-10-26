@@ -1,6 +1,6 @@
 # 0018: Fog is a budgeted froxel volume
 
-Status: **Proposed**. Design: [`docs/systems/fog-and-volumetric-lighting-design.md`](../systems/fog-and-volumetric-lighting-design.md).
+Status: **Accepted**. Anthony delegated design approval to the Engine bot, which accepted it. Design: [`docs/systems/fog-and-volumetric-lighting-design.md`](../systems/fog-and-volumetric-lighting-design.md).
 
 ## Context
 
@@ -10,8 +10,8 @@ Anthony's targets stay in force: RTX 4070 at 1440p, Low tuned for a GTX 1060 6 G
 
 ## Decision
 
-1. The realtime volume is a **froxel grid** (Hillaire, SIGGRAPH 2015; the same family as Wronski, SIGGRAPH 2014). One grid holds height fog, local fog volumes, and shadowed in-scattering. Per-pixel ray marching and epipolar shaft sampling are rejected.
-2. Extinction is recomputed for the whole grid every frame it is enabled. It is analytic. In-scattering is the expensive term. It has a per-preset sample cap. Work beyond the cap waits. There is no full-volume refresh.
+1. The realtime volume is a **froxel grid** (Hillaire, SIGGRAPH 2015; the same family as Wronski, SIGGRAPH 2014). One grid holds height fog, local fog volumes, and shadowed in-scattering. Per-pixel ray marching and epipolar shaft sampling are rejected. Local-volume in-scatter taps are view-aligned at the volume's depth instead of taken along the view ray, so a thick slice does not shear the volume across the cell. Extinction stays on the view ray. That is the departure from Hillaire.
+2. Extinction is recomputed for the whole grid every frame it is enabled. It is analytic. In-scattering is the expensive term. Grid width, height, slices, and the sample count are settings. Zero keeps the preset grid (Low 64×36×24, Medium 96×54×32, High 160×90×48) and dispatches every cell. A positive sample count limits cells. A later auto-tune writes those settings. The frame does not shrink on its own. There is no full-volume refresh.
 3. Fog history is off on Potato, Low, Medium, and High. [ADR 0012](0012-gi.md) stores no radiance history. Enabling fog history is an open decision for Anthony. The evidence is the smear gate and the yaw-pop gate in the design. This ADR does not choose that outcome. An unsampled cell shows the unshadowed closed-form integral.
 4. The sun and point lamps shadow the medium through the existing tracer. Ray queries when `VK_KHR_ray_query` is present, otherwise the software tracer. macOS uses the software tracer. Low and Medium may read the shadow cell cache.
 5. Indirect in-scattering is a read of the world cache. Fog does not write the cache.

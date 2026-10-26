@@ -2,7 +2,10 @@
 
 use genos_math::Vec3;
 
-use crate::{DebugSettings, EventLoopSettings, FpsCounterSettings, LightingSettings, MenuSettings};
+use crate::{
+    DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, LightingSettings,
+    MenuSettings,
+};
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -184,6 +187,9 @@ pub struct Scene {
     /// Longest gap between window pumps, in milliseconds. The frame writes it.
     /// A value of `0` clears the mark. See `docs/systems/window.md`.
     pub event_loop: EventLoopSettings,
+    /// Height fog, local volumes, and the froxel switches. Off and density
+    /// zero dispatch nothing, so an existing picture is unchanged.
+    pub fog: FogSettings,
 }
 
 impl Scene {

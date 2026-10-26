@@ -46,7 +46,7 @@ use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-use genos_scene::{view_proj, Camera};
+use genos_scene::{view_proj, Camera, LightingPreset};
 
 use crate::aa::Antialias;
 use crate::budget::FrameMemory;
@@ -54,6 +54,9 @@ use crate::pack::{self, GpuVertex, Pack};
 use crate::world::World;
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
+
+mod fog;
+mod media_check;
 
 #[path = "debug_view.rs"]
 mod debug_view;
@@ -691,6 +694,7 @@ impl Renderer {
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
+        self.gpu.set_froxel_frame(&world.scene, camera, aspect);
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
@@ -780,6 +784,88 @@ impl Renderer {
     /// Whether the lighting has settled, for reports and the debug tools.
     pub fn settle_stats(&self) -> SettleStats {
         self.gpu.lighting_stats()
+    }
+
+    /// Five closed forms from `media_check.comp`. The parity test compares them
+    /// with `genos_math::media`. This does not present.
+    pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {
+        self.gpu.media_closed_forms()
+    }
+
+    /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
+    /// The fog budget scales this span. Lavapipe is the cloud device.
+    pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
+        self.gpu.media_dispatch_ms(groups)
+    }
+
+    /// Run the froxel inject and integrate passes and read the columns back.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn run_fog(&mut self, job: &crate::fog_pass::FogDispatch) -> Result<crate::fog_pass::FogGpu, String> {
+        self.gpu.run_fog(job)
+    }
+
+    /// Lavapipe timestamp of one fitted froxel sample count. Not an RTX 4070 time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device has no timestamp queries or the dispatch fails.
+    pub fn froxel_sample_ms(&mut self, preset: LightingPreset, samples: u32) -> Result<f64, String> {
+        self.gpu.froxel_sample_ms(preset, samples)
+    }
+
+    /// Lavapipe timestamp of one full froxel grid. Not an RTX 4070 time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device has no timestamp queries or the dispatch fails.
+    pub fn froxel_grid_ms(&mut self, size: crate::fog::GridSize) -> Result<f64, String> {
+        self.gpu.froxel_grid_ms(size)
+    }
+
+    /// Bytes of the preset froxel allocation. `doubled` allocates a second copy
+    /// and adds it, which is the planted VRAM miss.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the image or buffer allocation fails.
+    pub fn froxel_allocation(&mut self, preset: LightingPreset, doubled: bool) -> Result<u64, String> {
+        self.gpu.froxel_allocation(preset, doubled)
+    }
+
+    /// Probe for the debug page. `pass_ms` is the last frame's froxel timestamp.
+    /// History stays off, so accepts and rejects stay 0.
+    #[must_use]
+    pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
+        let mut probe = crate::fog_budget::fog_probe(fog, preset);
+        if probe.dispatches == 0 || !self.gpu.froxel_wrote {
+            probe.dispatches = 0;
+            probe.pass_ms = 0.0;
+            probe.vram_bytes = 0;
+            return probe;
+        }
+        probe.pass_ms = self.gpu.froxel_pass_ms();
+        probe.vram_bytes = self.gpu.froxel_vram();
+        probe
+    }
+
+    /// Columns written by the last frame dispatch. Empty when that frame skipped fog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the column buffer cannot be mapped.
+    pub fn frame_fog_columns(&mut self) -> Result<Vec<crate::fog::FogColumn>, String> {
+        self.gpu.read_frame_columns()
+    }
+
+    /// CPU shadowed integral of the view the last frame dispatch built.
+    ///
+    /// `scene` is the scene that frame drew. Empty when that frame did not dispatch.
+    #[must_use]
+    pub fn frame_fog_reference(&self, scene: &genos_scene::Scene) -> Vec<crate::fog::FogColumn> {
+        self.gpu.frame_fog_reference(scene)
     }
 
     /// One compute pass over the resident occluders. This does not present and does not upload them.
@@ -1129,6 +1215,24 @@ struct Gpu {
     audio_pipe: Handle,
     audio_cmd: Handle,
     audio_fence: Handle,
+    /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
+    media_check: Option<media_check::Pipe>,
+    /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
+    media_ms: Option<f64>,
+    /// Workgroups for the next media dispatch. The parity check uses 1.
+    media_groups: u32,
+    /// Froxel targets, pipelines, and the standalone command buffer.
+    froxel: Option<fog::Targets>,
+    /// What the next frame's froxel pass runs. None skips the pass.
+    froxel_frame: Option<fog::FrameJob>,
+    /// Last froxel timestamp span, milliseconds. Zero before a dispatch.
+    froxel_pass_ms: f64,
+    /// Bytes of the live froxel allocation. Zero when the pass is off.
+    froxel_vram: u64,
+    /// The frame command buffer wrote froxel timestamps that have not been read.
+    froxel_pending: bool,
+    /// This frame's `record_froxel` copied columns and wrote the compose header.
+    froxel_wrote: bool,
     submit_pending: bool,
     /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
     abandon: bool,
@@ -1940,6 +2044,15 @@ impl Gpu {
                 audio_pipe: std::ptr::null_mut(),
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
+                media_check: None,
+                media_ms: None,
+                media_groups: 1,
+                froxel: None,
+                froxel_frame: None,
+                froxel_pass_ms: 0.0,
+                froxel_vram: 0,
+                froxel_pending: false,
+                froxel_wrote: false,
                 submit_pending: false,
                 abandon: false,
                 timestamp_period,
@@ -2565,6 +2678,7 @@ impl Gpu {
             if self.lighting_active() {
                 self.take_unfilled(slot);
             }
+            self.collect_froxel_time();
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -2628,6 +2742,11 @@ impl Gpu {
                 );
                 self.color_layout[slot] = 6;
                 self.frame_stamp(slot, FrameStamp::Gbuffer);
+                self.froxel_wrote = false;
+                self.record_froxel()?;
+                if !self.froxel_wrote {
+                    self.release_froxel_header();
+                }
                 if lighting {
                     self.lighting_passes(slot);
                 }
@@ -3169,7 +3288,9 @@ impl Gpu {
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
-        self.wait_fence(self.fence, "present wait")
+        self.wait_fence(self.fence, "present wait")?;
+        self.collect_froxel_time();
+        Ok(())
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
@@ -4546,6 +4667,26 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, buffer.memory);
             byte
         }
+    }
+
+    fn write_memory(&self, memory: Handle, bytes: &[u8]) -> Result<(), String> {
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    0,
+                    bytes.len() as u64,
+                    0,
+                    &mut mapped,
+                ),
+                "map gpu buffer",
+            )?;
+            copy_to_mapped(mapped as *mut u8, bytes.as_ptr(), bytes.len());
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(())
     }
 
     fn write_buffer(&self, buffer: &Buffer, bytes: &[u8]) -> Result<(), String> {
@@ -7178,6 +7319,8 @@ impl Drop for Gpu {
             }
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
+            self.destroy_media_check();
+            self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
             }

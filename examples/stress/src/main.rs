@@ -40,7 +40,7 @@ use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor,
+    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, FogSettings, Floor,
     FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
     PITCH_LIMIT,
 };
@@ -1198,6 +1198,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }
