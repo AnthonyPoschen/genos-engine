@@ -913,6 +913,11 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
 // The 12.5 cm lattice stays the resident texel. These are its parents.
 // Words 14 and 15 of the dispatch-args header: spawns this frame, live coarse slots.
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+const float LIGHTING_COARSE_METRES = 1.99;
+const float LIGHTING_LEVEL_ABOVE_SEED = 0.2;
+const float LIGHTING_SLOT_DEPTH = 1.0e-3;
+const float LIGHTING_SLOT_TAN = 1.0e-6;
+const float LIGHTING_NDC_HALF = 0.5;
 bool lighting_levels_on() {
     return lighting_world_mode() == 3u && (pc.schedule.x & 8u) != 0u;
 }
@@ -928,7 +933,7 @@ bool lighting_spawn_permit() {
 
 // 2 m and 4 m share the coarse-slot cap (pc.frame.w). Word 15 is the live count.
 bool lighting_coarse_permit(float size) {
-    if (size < 1.99) {
+    if (size < LIGHTING_COARSE_METRES) {
         return true;
     }
     uint cap = pc.frame.w;
@@ -944,7 +949,7 @@ bool lighting_coarse_permit(float size) {
 }
 
 void lighting_coarse_undo(float size) {
-    if (size < 1.99) {
+    if (size < LIGHTING_COARSE_METRES) {
         return;
     }
     uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
@@ -960,7 +965,7 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
         return false;
     }
     float size = cache.v[3u * slot + 1u].w;
-    if (!(lighting_levels_on() && size >= 1.99)) {
+    if (!(lighting_levels_on() && size >= LIGHTING_COARSE_METRES)) {
         return true;
     }
     uint cap = pc.frame.w;
@@ -982,7 +987,7 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
 // Insert the parent at `size` when it is missing and the frame has room.
 // A resident cell is not a spawn. True only when this invocation inserted it.
 bool lighting_level_ensure(vec3 pos, vec3 n, float size) {
-    if (!lighting_levels_on() || !(size > 0.2)) {
+    if (!lighting_levels_on() || !(size > LIGHTING_LEVEL_ABOVE_SEED)) {
         return false;
     }
     if (lighting_cache_find_sized(pos, n, false, size, pos) != ~0u) {
@@ -3708,20 +3713,20 @@ bool lighting_slot_in_budget(uint slot) {
     }
     vec3 v = pos - scene.eye.xyz;
     float fz = dot(v, scene.view_forward.xyz);
-    if (!(fz > 1.0e-3)) {
+    if (!(fz > LIGHTING_SLOT_DEPTH)) {
         return false;
     }
     float t = scene.view_right.w;
     float aspect = scene.view_forward.w;
-    if (!(t > 1.0e-6)) {
+    if (!(t > LIGHTING_SLOT_TAN)) {
         return true;
     }
-    float ndc_x = dot(v, scene.view_right.xyz) / (fz * t * max(aspect, 1.0e-6));
+    float ndc_x = dot(v, scene.view_right.xyz) / (fz * t * max(aspect, LIGHTING_SLOT_TAN));
     float ndc_y = dot(v, scene.view_up.xyz) / (fz * t);
     uint dw = pc.frame.x != 0u ? pc.frame.x : pc.dims.x;
     uint dh = pc.frame.y != 0u ? pc.frame.y : pc.dims.y;
-    float sx = (ndc_x * 0.5 + 0.5) * float(dw);
-    float sy = (0.5 - ndc_y * 0.5) * float(dh);
+    float sx = (ndc_x * LIGHTING_NDC_HALF + LIGHTING_NDC_HALF) * float(dw);
+    float sy = (LIGHTING_NDC_HALF - ndc_y * LIGHTING_NDC_HALF) * float(dh);
     uint crop = pc.schedule.w;
     int px = int(floor(sx)) + int(crop & 0xffffu);
     int py = int(floor(sy)) + int(crop >> 16u);

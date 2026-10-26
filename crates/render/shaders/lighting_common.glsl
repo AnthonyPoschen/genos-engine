@@ -216,6 +216,7 @@ vec4 lighting_miss_slot(vec3 light) {
     return vec4(-1.0 - light.r, light.g, light.b, dot(light, vec3(0.2126, 0.7152, 0.0722)));
 }
 const vec4 LIGHTING_NO_RAY = vec4(-0.5, 0.0, 0.0, 0.0);
+const float LIGHTING_MISS_LIMIT = -0.75;
 bool lighting_ray_none(vec4 v) {
     return v.x > -0.75 && v.x < -0.25;
 }

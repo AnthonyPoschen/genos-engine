@@ -159,7 +159,7 @@ void main() {
         uvec2 pix = uvec2((pr % cols) * tile_px, (pr / cols) * tile_px);
         if (!lighting_tile_kept(pix)) {
             vec4 cur = work.v[at];
-            if (cur.x >= 0.0 || cur.x < -0.75) {
+            if (cur.x >= 0.0 || cur.x < LIGHTING_MISS_LIMIT) {
                 return;
             }
         }
