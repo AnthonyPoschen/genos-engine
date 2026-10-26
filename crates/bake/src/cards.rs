@@ -118,7 +118,8 @@ pub fn build(mesh: &BakeMesh, s: &BakeSettings) -> Cards {
                     continue;
                 };
                 let t = &tris[hit.triangle as usize];
-                let (a, e) = mesh.surface(t.material, t.uv_at(hit.u, hit.v));
+                let sample = mesh.shade_hit(hit.triangle as usize, hit.u, hit.v);
+                let (a, e) = (sample.diffuse_albedo(), sample.emissive);
                 let mut n = t.normal_at(hit.u, hit.v);
                 if hit.back {
                     n = n.map(|c| -c);

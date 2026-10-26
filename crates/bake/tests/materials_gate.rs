@@ -29,11 +29,15 @@
 //! The good case also runs the broken shade and exits 2 if that shade would
 //! pass a shade metric, or if a path that is not in the tree comes back as PASS.
 
+use std::fmt::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use genos_bake::BakeMesh;
-use genos_load::{load_gltf_file, GltfScene};
+use genos_load::{
+    load_gltf_file, mib_f32, normal_from_bytes, plan_residency, GltfScene, HotReload, ImageChain,
+    Mip,
+};
 
 const SHADE: f32 = 1.0 / 255.0;
 const SRGB: f32 = 1.0e-5;
@@ -79,17 +83,24 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 6] = [
+const MUST_FAIL: [&str; 11] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
     "srgb_double",
     "metal_diffuse",
     "mr_channels",
+    "texcoord_sample",
+    "roughness_from_g",
+    "mip_chain",
+    "residency_mb",
+    "hot_reload_frames",
 ];
 
 /// Measured from the loaded file or from `from_gltf`, not from the broken shade.
-const FILE_METRICS: [&str; 3] = ["mask_alpha", "texcoord_set", "emissive_default"];
+/// `texel_alpha` is the raw texel. The broken reader returns that byte too, so it
+/// passes, and the self-check allows it the way it allows `mask_alpha`.
+const FILE_METRICS: [&str; 4] = ["mask_alpha", "texcoord_set", "emissive_default", "texel_alpha"];
 
 struct Sample {
     material: usize,
@@ -307,17 +318,10 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
         measured("mr_channels", mr_channels(reader, scene, &mesh)?, SHADE),
         measured("mask_alpha", mask_mistakes(&mesh), 0.0),
         measured("texcoord_set", texcoord_mistakes(scene)?, 0.0),
-        pending(
-            "texcoord_sample",
-            0.0,
-            "BakeMesh::surface ignores TextureSlot.texcoord; the mesh keeps TEXCOORD_0 only",
-        ),
+        measured("texcoord_sample", texcoord_sample(reader, scene, &mesh)?, 0.0),
         measured("emissive_default", emissive_default(scene)?, 0.0),
-        pending(
-            "roughness_from_g",
-            SHADE,
-            "BakeMesh::surface does not return roughness; the fixture stores it in G",
-        ),
+        measured("roughness_from_g", roughness_from_g(reader, scene, &mesh)?, SHADE),
+        measured("texel_alpha", texel_alpha(reader, scene, &mesh)?, SHADE),
         pending("draw_mean", SHADE, "genos-render is not linked"),
         pending(
             "occlusion_indirect",
@@ -335,17 +339,29 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
             "the path tracer does not sample textures",
         ),
         pending("picture_metal", PICTURE, "the specular lobe is not shaded"),
-        pending_ref(
+        pending(
             "emissive_furnace",
             RELATIVE,
-            "no GI run in this gate",
-            furnace_outgoing(),
+            "model only; waits on lighting_gpu.rs",
         ),
-        pending("double_count", RELATIVE, "no promoted emitter"),
-        pending("bc7_colour_rmse", BC7, "no BC7 encoder"),
-        pending("astc_colour_rmse", ASTC, "no ASTC encoder"),
-        pending("residency_mb", RESIDENCY_MB, "no page table"),
-        pending("hot_reload_frames", RELOAD_FRAMES, "no watcher"),
+        pending(
+            "double_count",
+            RELATIVE,
+            "model only; waits on lighting_gpu.rs",
+        ),
+        measured("mip_chain", mip_chain_error(reader)?, 0.0),
+        pending(
+            "bc7_colour_rmse",
+            BC7,
+            "no BC7 encoder is vendored; RGBA8 stays the cook",
+        ),
+        pending(
+            "astc_colour_rmse",
+            ASTC,
+            "no lossless ASTC transcode is linked",
+        ),
+        measured("residency_mb", residency_mb(reader), RESIDENCY_MB),
+        measured("hot_reload_frames", reload_frames(reader), RELOAD_FRAMES),
         pending("gbuffer_ms", GBUFFER_MS, "no GPU timing in this gate"),
     ])
 }
@@ -407,17 +423,6 @@ fn pending(name: &'static str, threshold: f32, note: &'static str) -> Metric {
     }
 }
 
-fn pending_ref(name: &'static str, threshold: f32, note: &'static str, reference: f64) -> Metric {
-    Metric {
-        name,
-        value: None,
-        threshold,
-        status: Status::NotImplemented,
-        note: Some(note),
-        reference: Some(reference),
-    }
-}
-
 fn line(metric: &Metric) -> String {
     match metric.value {
         Some(value) => format!(
@@ -427,12 +432,20 @@ fn line(metric: &Metric) -> String {
             metric.threshold,
             metric.status.text()
         ),
-        None => format!(
-            "{} na {:.6} {}",
-            metric.name,
-            metric.threshold,
-            metric.status.text()
-        ),
+        None => match metric.note {
+            Some(note) => format!(
+                "{} na {:.6} {} {note}",
+                metric.name,
+                metric.threshold,
+                metric.status.text()
+            ),
+            None => format!(
+                "{} na {:.6} {}",
+                metric.name,
+                metric.threshold,
+                metric.status.text()
+            ),
+        },
     }
 }
 
@@ -471,10 +484,10 @@ fn metric_json(metric: &Metric) -> String {
         metric.status.text()
     );
     if let Some(note) = metric.note {
-        line.push_str(&format!(",\"note\":\"{note}\""));
+        let _ = write!(line, ",\"note\":\"{note}\"");
     }
     if let Some(reference) = metric.reference {
-        line.push_str(&format!(",\"reference\":{reference:.6}"));
+        let _ = write!(line, ",\"reference\":{reference:.6}");
     }
     line.push('}');
     line
@@ -635,6 +648,87 @@ fn texcoord_mistakes(scene: &GltfScene) -> Result<f32, String> {
     Ok(mistakes)
 }
 
+/// Wrong-slot count at the shade triangle's first corner.
+///
+/// Set 0 is `(0.25, 0.25)` (base, once-decoded 188). Set 1 is `(0.75, 0.75)`
+/// (emissive texel 255). The broken reader samples every slot at set 0.
+fn texcoord_sample(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let corner = mesh
+        .triangles
+        .first()
+        .ok_or("shade mesh has no triangle")?;
+    if (corner.uvs[0][0] - 0.25).abs() > 1.0e-4 || (corner.uvs[0][1] - 0.25).abs() > 1.0e-4 {
+        return Err("shade corner is not TEXCOORD_0 (0.25, 0.25)".to_string());
+    }
+    let (albedo, emissive) = match reader {
+        Reader::Bake => {
+            let sample = mesh.shade_hit(0, 0.0, 0.0);
+            (sample.diffuse_albedo(), sample.emissive)
+        }
+        Reader::Broken => broken_shade(scene, SHADE_MAT, [0.25, 0.25])?,
+    };
+    let mut mistakes = 0.0_f32;
+    if max_abs(albedo, [ONCE_188, 0.0, 0.0]) > 1.0e-4 {
+        mistakes += 1.0;
+    }
+    if max_abs(emissive, [1.0, 0.0, 0.0]) > 1.0e-4 {
+        mistakes += 1.0;
+    }
+    Ok(mistakes)
+}
+
+/// Absolute error of roughness against `0.5 * 10/255`.
+///
+/// The fixture stores roughness in G. The broken reader uses B, which is 0
+/// at this texel.
+fn roughness_from_g(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let got = match reader {
+        Reader::Bake => mesh.shade(u32::try_from(SHADE_MAT).map_err(|_| "material")?, [0.25, 0.25]).roughness,
+        Reader::Broken => broken_roughness(scene, SHADE_MAT, [0.25, 0.25])?,
+    };
+    Ok((got - (0.5 * (10.0 / 255.0))).abs())
+}
+
+fn broken_roughness(scene: &GltfScene, material: usize, uv: [f32; 2]) -> Result<f32, String> {
+    let material = scene
+        .materials
+        .get(material)
+        .ok_or("broken shade material is missing")?;
+    let mr = broken_sample(scene, material.metallic_roughness_texture, uv)?;
+    Ok(material.roughness * mr[2])
+}
+
+/// Absolute error of the base-colour texel alpha, before the factor.
+///
+/// Mask UVs land on alpha.png bytes 128, 255, and 0. The product with the
+/// mask factor 0.5 would miss the first sample. The broken reader returns the
+/// raw byte, so this row stays a file metric.
+fn texel_alpha(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    const MASK_MAT: usize = 1;
+    let samples = [([0.1, 0.1], 128.0 / 255.0), ([0.6, 0.1], 1.0), ([0.1, 0.6], 0.0)];
+    let mut worst = 0.0_f32;
+    for (uv, expect) in samples {
+        let got = match reader {
+            Reader::Bake => {
+                mesh.shade(u32::try_from(MASK_MAT).map_err(|_| "material")?, uv)
+                    .texel_alpha
+            }
+            Reader::Broken => broken_texel_alpha(scene, MASK_MAT, uv)?,
+        };
+        worst = worst.max((got - expect).abs());
+    }
+    Ok(worst)
+}
+
+fn broken_texel_alpha(scene: &GltfScene, material: usize, uv: [f32; 2]) -> Result<f32, String> {
+    let material = scene
+        .materials
+        .get(material)
+        .ok_or("broken shade material is missing")?;
+    let texel = broken_sample(scene, material.base_color_texture, uv)?;
+    Ok(texel[3])
+}
+
 fn emissive_default(scene: &GltfScene) -> Result<f32, String> {
     let shade = scene
         .materials
@@ -643,10 +737,124 @@ fn emissive_default(scene: &GltfScene) -> Result<f32, String> {
     Ok((shade.emissive_strength - 1.0).abs())
 }
 
-fn furnace_outgoing() -> f64 {
-    let albedo = 0.8_f64;
-    let emit = 1.0_f64;
-    emit / (1.0 - albedo)
+/// Wrong-chain count for the loader's mip chains.
+///
+/// The colour image is flat sRGB 188. The chain must reach 1×1 and stay 188.
+/// The normal image is opposite X encodings. The 1×1 texel must be (0, 0, 1).
+/// The broken reader keeps only the source level, which has no 1×1 texel.
+fn mip_chain_error(reader: Reader) -> Result<f32, String> {
+    let scene = load_mip_scene()?;
+    let material = scene
+        .materials
+        .first()
+        .ok_or("mip fixture has no material")?;
+    let colour_index = material
+        .base_color_texture
+        .ok_or("mip fixture has no base colour")?
+        .image;
+    let normal_index = material
+        .normal_texture
+        .ok_or("mip fixture has no normal")?
+        .image;
+    let (colour, normal) = match reader {
+        Reader::Bake => (
+            chain_at(&scene.mips, colour_index),
+            chain_at(&scene.mips, normal_index),
+        ),
+        Reader::Broken => (
+            source_only(scene.images.get(colour_index)),
+            source_only(scene.images.get(normal_index)),
+        ),
+    };
+    Ok(mip_mistakes(&colour, &normal))
+}
+
+fn load_mip_scene() -> Result<GltfScene, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/mips.gltf");
+    load_gltf_file(&path).map_err(|err| format!("load {}: {err}", path.display()))
+}
+
+fn chain_at(mips: &[Vec<Mip>], index: usize) -> Vec<Mip> {
+    mips.get(index).cloned().unwrap_or_default()
+}
+
+fn source_only(image: Option<&genos_load::Image>) -> Vec<Mip> {
+    let Some(image) = image else {
+        return Vec::new();
+    };
+    vec![Mip {
+        width: image.width,
+        height: image.height,
+        pixels: image.pixels.clone(),
+    }]
+}
+
+fn mip_mistakes(colour: &[Mip], normal: &[Mip]) -> f32 {
+    let mut mistakes = 0.0_f32;
+    if !colour_chain_ok(colour) {
+        mistakes += 1.0;
+    }
+    if !normal_chain_ok(normal) {
+        mistakes += 1.0;
+    }
+    mistakes
+}
+
+fn colour_chain_ok(chain: &[Mip]) -> bool {
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+        return false;
+    };
+    first.width == 2
+        && first.height == 2
+        && last.width == 1
+        && last.height == 1
+        && last.pixels.as_slice() == [188, 0, 0, 255]
+}
+
+fn normal_chain_ok(chain: &[Mip]) -> bool {
+    let (Some(first), Some(last)) = (chain.first(), chain.last()) else {
+        return false;
+    };
+    if first.width != 2 || first.height != 2 || last.width != 1 || last.height != 1 {
+        return false;
+    }
+    let pixel = last.pixels.as_slice();
+    if pixel.len() < 4 {
+        return false;
+    }
+    let normal = normal_from_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+    normal[0].abs() <= 1.0e-6 && normal[1].abs() <= 1.0e-6 && (normal[2] - 1.0).abs() <= 1.0e-6
+}
+
+fn mib(n: u64) -> u64 {
+    n * 1024 * 1024
+}
+
+/// Resident MiB under the High cap. The loader's planner drops the finest mip.
+/// The broken reader keeps every level.
+fn residency_mb(reader: Reader) -> f32 {
+    let images = [ImageChain {
+        levels: vec![mib(300), mib(75), mib(20)],
+        rank: 1,
+    }];
+    let bytes = match reader {
+        Reader::Bake => plan_residency(&images, mib(256)).bytes,
+        Reader::Broken => images.iter().flat_map(|image| &image.levels).sum(),
+    };
+    mib_f32(bytes)
+}
+
+/// Frames from a finished upload to the sample.
+///
+/// The broken reader holds the upload and never flips, so the new page is
+/// still absent when the frame limit lands.
+fn reload_frames(reader: Reader) -> f32 {
+    let mut reload = HotReload::open(1);
+    match reader {
+        Reader::Bake => reload.upload(2),
+        Reader::Broken => reload.hold(2),
+    }
+    reload.frames_until_visible(5)
 }
 
 #[derive(Clone, Copy)]

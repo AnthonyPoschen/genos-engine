@@ -1,6 +1,6 @@
 # PBR materials and glTF 2.0 import
 
-Status: **proposed**. ADR: [0014](../adr/0014-pbr-materials.md). This is a design. It adds no renderer, loader, or cook behaviour. The only code in the same change is the measurement gate `crates/bake/tests/materials_gate.rs`.
+Status: **accepted**. ADR: [0014](../adr/0014-pbr-materials.md). The Engine bot accepted the design. Implementation follows the phased rollout below. The measurement gate is `crates/bake/tests/materials_gate.rs`.
 
 Terms used here are defined in [the lighting glossary](../lighting/GLOSSARY.md). New entries from this design live in that file under Materials. One term has one meaning.
 
@@ -95,7 +95,7 @@ The cook and the page table follow the asset plan: KTX 2.0 (<https://registry.kh
 | `KHR_materials_ior`, `KHR_materials_specular` | Stored. Not shaded. F0 is 0.04. | `loaded, unsupported` |
 | Transmission, volume, clearcoat, sheen, iridescence, anisotropy, dispersion, variants, specular-glossiness | Not shaded. Specular-glossiness is not converted. | `loaded, unsupported` |
 | `KHR_texture_basisu` | Not decoded in the renderer. | `loaded, unsupported` until the cook accepts the image |
-| `TEXCOORD_1` and above, vertex colour | Not sampled. A transform that selects another UV set is unsupported. | `loaded, unsupported` |
+| `TEXCOORD_0` through `TEXCOORD_7` | The CPU shade, the bake cards, and `surface_mean` read the slot's `texCoord`. A missing set falls back to set 0, then to (0, 0). Vertex colour is not sampled. | The G-buffer atlas is still fetched with `TEXCOORD_0`. A second vertex UV needs the layout in `crates/render/src/gpu.rs`. |
 | Draco, meshopt | Triangles stay absent, so nothing draws a wrong mesh. | Asset plan. Not this design's phases. |
 
 `load_gltf` keeps returning `LoadError` for a required extension it does not apply. The import document from the asset plan is what keeps the JSON. This design does not invent a second document.
@@ -136,9 +136,9 @@ ADR 0012 and the GI design's emissive section still hold, with the departure in 
 - Every emissive texel lights indirect through the cache, because a hit adds emission to the irradiance it reads.
 - A connected region is promoted when its area is under one L0 cache cell (0.25 m × 0.25 m) or its flux exceeds `emissive_promote_flux`. The default flux is 1% of the brightest lamp, which is the GI design's rule and is not a measured constant. At most 4 regions per mesh on Low, 8 on Medium, 16 on High. Potato promotes none.
 - A dim wall stays cache-only. The cache cell is large enough for that and too coarse for a thin strip. The strip is the promoted emitter.
-- Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. `double_count` is the relative change in a settled room when a debug switch moves the strip between promoted and cache-only. Threshold 0.02.
+- Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. That skip is in `lighting_gpu.rs`, which the lighting branch owns. `double_count` stays `NOT-IMPLEMENTED` until that write exists. The note is `model only; waits on lighting_gpu.rs`.
 - Turning a promoted emitter on or off is a light change, a multiply on its layer once layers exist, and a change record until then. It does not rebuild the SDF, the BVH, or the page table.
-- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` is the relative error against that. Threshold 0.02, on both tracers. The analytic `5E` is computed in the gate. The engine value is absent, so the line is `NOT-IMPLEMENTED`.
+- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` stays `NOT-IMPLEMENTED` with the same note. `furnace_wall` in `crates/load/src/emitters.rs` is the radiosity model, not the cache.
 
 ## Asset cache and hot reload
 
@@ -244,7 +244,7 @@ cargo test -p genos-bake --test materials_gate -- --case bad
 cargo test -p genos-bake --test materials_gate -- --nocapture --case good
 ```
 
-The binary is not a libtest harness, so it already prints. `--nocapture`, `--test-threads`, `--skip`, and `--format` are accepted and ignored, because `cargo test -- --nocapture` forwards those flags to every test binary. The good process also grades the broken shade and exits 2 if that shade would pass a shade metric, or if a missing feature comes back as PASS. File checks (`mask_alpha`, `texcoord_set`, `emissive_default`) stay measured on the broken reader, because that reader does not replace the loader or the mask clip. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
+The binary is not a libtest harness, so it already prints. `--nocapture`, `--test-threads`, `--skip`, and `--format` are accepted and ignored, because `cargo test -- --nocapture` forwards those flags to every test binary. The good process also grades the broken shade and exits 2 if that shade would pass a shade metric, or if a missing feature comes back as PASS. File checks (`mask_alpha`, `texcoord_set`, `emissive_default`, `texel_alpha`) stay measured on the broken reader, because that reader does not replace the loader or the mask clip. `texel_alpha` is the raw texel, which the broken reader also returns. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
 
 | Metric | Threshold | What the number is |
 |---|---|---|
@@ -256,20 +256,22 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `mr_channels` | 1/255 | Error at the texel whose metallic-roughness image is G=255, B=128. The hand value uses B (`127/255` on a white base). Reading G would be 0. |
 | `mask_alpha` | 0 | Wrong keep/drop count. Alpha is base alpha 0.5 times texture alpha, cutoff 0.5. Products: 64/255 drops, 0.5 stays (the spec keeps `alpha >= cutoff`), 0 drops. |
 | `texcoord_set` | 0 | Wrong-slot count. The emissive slot's `texCoord` is 1, the other slots are 0, and the primitive UVs are `TEXCOORD_0` `(0.25, 0.25)`, not set 1's `(0.75, 0.75)`. |
-| `texcoord_sample` | 0 | `NOT-IMPLEMENTED`. `BakeMesh::surface` takes the UV it is given and ignores `TextureSlot.texcoord`. The primitive keeps `TEXCOORD_0` only. |
+| `texcoord_sample` | 0 | Wrong-slot count at the shade triangle's first corner. Base comes from set 0 (once-decoded 188). Emission comes from set 1 (texel 255). Sampling set 0 for emission is a wrong slot. |
 | `emissive_default` | 0 | Absolute error of the loaded strength against 1 on the material that omits `KHR_materials_emissive_strength`. |
-| `roughness_from_g` | 1/255 | `NOT-IMPLEMENTED`. `BakeMesh::surface` does not return roughness. The fixture stores it in G (byte 10 at the first texel, factor 0.5). |
+| `roughness_from_g` | 1/255 | Absolute error of roughness against `0.5 × 10/255`. The fixture stores roughness in G. Reading B is 0 at that texel and fails. |
+| `texel_alpha` | 1/255 | Absolute error of the base-colour texel alpha before the factor, at the three mask UVs (bytes 128, 255, and 0). The product with the mask factor 0.5 fails the first sample. |
+| `mip_chain` | 0 | Wrong-chain count through `load_gltf`. A 2×2 flat sRGB 188 image keeps a chain down to 1×1 that is still byte 188. A 2×2 normal map of opposite X encodings averages to (0, 0, 1). A chain with no 1×1 level fails. |
 | `draw_mean` | 1/255 | `surface_mean` against the same shade. The gate does not link `genos-render`. |
 | `occlusion_indirect` | 1/255 | Occlusion scales indirect only. The bake does not return occlusion. |
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |
 | `picture_dielectric` | 0.12 | Blurred relative error, metallic 0. The path tracer does not sample textures. |
 | `picture_metal` | 0.12 | The same score for a metal under Appendix B. Stays unimplemented until the lobe exists. |
-| `emissive_furnace` | 0.02 | Relative error against `5E`. |
-| `double_count` | 0.02 | Relative change when a strip is toggled between promoted and cache-only. |
-| `bc7_colour_rmse` | 0.02 | Linear RMSE of a BC7 round trip. No encoder is linked. |
-| `astc_colour_rmse` | 0 | Linear RMSE. UASTC to ASTC 4×4 is lossless, so the threshold is 0. |
-| `residency_mb` | 256 | Resident megabytes against the High cap. |
-| `hot_reload_frames` | 1 | Frames from a finished upload to the sample that sees it. |
+| `emissive_furnace` | 0.02 | `NOT-IMPLEMENTED`. Model only; waits on lighting_gpu.rs. |
+| `double_count` | 0.02 | `NOT-IMPLEMENTED`. Model only; waits on lighting_gpu.rs. |
+| `bc7_colour_rmse` | 0.02 | `NOT-IMPLEMENTED`. Open question 1 is unchosen. RGBA8 is the cook. A stand-in encoder is not an RMSE. |
+| `astc_colour_rmse` | 0 | `NOT-IMPLEMENTED`. UASTC to ASTC 4×4 would be lossless, so the threshold stays 0. No transcode is linked. |
+| `residency_mb` | 256 | Resident mebibytes from `plan_residency`, the cap `load_gltf` applies. The farthest finest mip drops first. |
+| `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
 ## Phased rollout
