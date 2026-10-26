@@ -152,7 +152,64 @@ pub fn frame_views(
             false,
         ));
     }
+    let mut index = views.len();
+    for streamed in &world.stream_textures {
+        if !atlas_live(
+            streamed.atlas.width,
+            streamed.atlas.height,
+            &streamed.atlas.rgba,
+        ) {
+            continue;
+        }
+        views.push(streamed_view(
+            world, camera, width, height, view_proj, index, streamed,
+        ));
+        index += 1;
+    }
     views
+}
+
+fn streamed_view(
+    world: &World,
+    camera: &Camera,
+    width: u32,
+    height: u32,
+    view_proj: &[f32; 16],
+    index: usize,
+    streamed: &crate::world::StreamedTexture,
+) -> TextureView {
+    let far = TextureView {
+        index,
+        distance: 1.0e6,
+        visible: false,
+        derivatives: None,
+    };
+    let Some(object) = world.objects.get(streamed.object) else {
+        return far;
+    };
+    let DrawKind::Mesh {
+        vertices,
+        texcoords,
+        pose,
+        ..
+    } = &object.kind
+    else {
+        return far;
+    };
+    let eye = [camera.position.x, camera.position.y, camera.position.z];
+    let distance = bounds_distance(object.bounds, eye);
+    let visible = !object.hidden && in_view(view_proj, object.bounds);
+    let derivatives = if visible {
+        triangle_derivatives(vertices, texcoords, pose, width, height, view_proj)
+    } else {
+        None
+    };
+    TextureView {
+        index,
+        distance,
+        visible,
+        derivatives,
+    }
 }
 
 fn atlas_live(width: u32, height: u32, rgba: &[u8]) -> bool {

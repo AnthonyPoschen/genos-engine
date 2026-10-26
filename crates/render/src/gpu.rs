@@ -397,6 +397,42 @@ impl Renderer {
         self.gpu.streamer.committed()
     }
 
+    /// Textures the frame has registered.
+    #[must_use]
+    pub fn material_texture_count(&self) -> usize {
+        self.gpu.streamer.texture_count()
+    }
+
+    /// Finest resident mip of one registered texture.
+    #[must_use]
+    pub fn material_finest(&self, index: usize) -> Option<u32> {
+        self.gpu.streamer.finest_resident(index)
+    }
+
+    /// Bytes per millisecond of the slowest measured path.
+    #[must_use]
+    pub fn material_bytes_per_ms(&self) -> u64 {
+        self.gpu.streamer.bytes_per_ms()
+    }
+
+    /// Bytes the last step was willing to admit, after the sustainable cap.
+    #[must_use]
+    pub fn material_last_admit(&self) -> u64 {
+        self.gpu.streamer.last_admit()
+    }
+
+    /// Base frame time the last step measured, in milliseconds.
+    #[must_use]
+    pub fn material_frame_ms(&self) -> f32 {
+        self.gpu.streamer.frame_ms()
+    }
+
+    /// Eviction victims in the order they were dropped.
+    #[must_use]
+    pub fn material_evicted(&self) -> Vec<(usize, u32)> {
+        self.gpu.streamer.evicted().to_vec()
+    }
+
     /// Counters the next auto-tune reads: committed bytes, the texture target, and the streamer meters.
     #[must_use]
     pub fn material_stats(&self) -> MaterialStats {
@@ -1039,6 +1075,8 @@ struct Gpu {
     atlas_readback: Buffer,
     material_key: u64,
     normal_key: u64,
+    /// Keys of [`crate::world::World::stream_textures`], in register order.
+    stream_keys: Vec<u64>,
     /// Mip chains registered with the streamer. Parallel to its texture indices.
     stream_sources: Vec<StreamSource>,
     /// Device images that received a real transfer copy.
@@ -1853,6 +1891,7 @@ impl Gpu {
                 atlas_readback: Buffer::empty(),
                 material_key: 0,
                 normal_key: 0,
+                stream_keys: Vec::new(),
                 stream_sources: Vec::new(),
                 stream_pages: Vec::new(),
                 transfer_done: std::ptr::null_mut(),
@@ -4352,30 +4391,51 @@ impl Gpu {
     }
 
     fn sync_materials(&mut self, world: &World) -> Result<(), String> {
-        if self.material_key == world.color_atlas.key && self.normal_key == world.normal_atlas.key {
+        if self.materials_current(world) {
             return Ok(());
         }
         self.idle_device();
         self.drop_stream_resources();
         self.streamer.clear();
-        self.bind_atlas(true, &world.color_atlas)?;
-        self.bind_atlas(false, &world.normal_atlas)?;
+        self.bind_atlas(true, &world.color_atlas, true)?;
+        self.bind_atlas(false, &world.normal_atlas, true)?;
+        self.stream_keys.clear();
+        for streamed in &world.stream_textures {
+            self.bind_atlas(true, &streamed.atlas, false)?;
+            self.stream_keys.push(streamed.atlas.key);
+        }
         self.material_key = world.color_atlas.key;
         self.normal_key = world.normal_atlas.key;
         self.write_raster_sets()
     }
 
+    fn materials_current(&self, world: &World) -> bool {
+        self.material_key == world.color_atlas.key
+            && self.normal_key == world.normal_atlas.key
+            && self.stream_keys.len() == world.stream_textures.len()
+            && self
+                .stream_keys
+                .iter()
+                .zip(&world.stream_textures)
+                .all(|(key, streamed)| *key == streamed.atlas.key)
+    }
+
     /// Register the atlas mip chain. The device image starts empty; the transfer fills it.
+    /// `sampled` is the colour or normal image the fragment shader loads. Extra
+    /// chains still get device mips; they do not replace that image.
     fn bind_atlas(
         &mut self,
         color: bool,
         atlas: &crate::world::MaterialAtlas,
+        sampled: bool,
     ) -> Result<(), String> {
         let Some(chain) = crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
         else {
             return Ok(());
         };
-        self.ensure_sampled(color, chain.width, chain.height)?;
+        if sampled {
+            self.ensure_sampled(color, chain.width, chain.height)?;
+        }
         let started = Instant::now();
         let bytes = chain.level_bytes();
         let total = chain.total_bytes();
