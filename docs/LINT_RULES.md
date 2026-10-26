@@ -99,6 +99,7 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 |---|---|---|
 | `GENOS_GPU_DISPATCH` | `crates/render/src/gpu.rs:2315` | none |
 | `GENOS_GPU_TIMES` | `crates/render/src/gpu.rs:1448` | `--gpu-times` |
+| `GENOS_GI_METRICS` | `crates/render/src/gpu.rs:1550` | `--gi-metrics` |
 | `GENOS_LIGHTING_ASYNC` | `crates/render/src/lighting_gpu.rs:373` | none |
 | `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2947` | none |
 | `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2246` | none |
