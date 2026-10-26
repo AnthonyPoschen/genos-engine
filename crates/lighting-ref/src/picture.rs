@@ -187,6 +187,14 @@ impl Picture {
             .collect();
         Self::new(width, height, linear)
     }
+
+    /// Stored-deflate RGB8 PNG, the encoding `genos-debug` writes for captures.
+    ///
+    /// Display bytes are undone with [`linear_from_display`].
+    pub fn load_png(path: &Path) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        decode_png(&bytes).map_err(|err| format!("{}: {err}", path.display()))
+    }
 }
 
 pub fn luma(rgb: [f32; 3]) -> f32 {
@@ -266,6 +274,173 @@ pub fn encode_png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
     png
 }
 
+fn decode_png(bytes: &[u8]) -> Result<Picture, String> {
+    const SIG: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
+    if bytes.len() < 8 || bytes[0..8] != SIG {
+        return Err("not a png".to_string());
+    }
+    let mut cursor = 8_usize;
+    let mut width = None;
+    let mut height = None;
+    let mut idat = Vec::new();
+    while cursor + 8 <= bytes.len() {
+        let len = be_u32(bytes, cursor)?;
+        let len_us = usize::try_from(len).map_err(|_| "png chunk is too large".to_string())?;
+        let kind = bytes
+            .get(cursor + 4..cursor + 8)
+            .ok_or_else(|| "truncated png".to_string())?;
+        let data_at = cursor + 8;
+        let data_end = data_at
+            .checked_add(len_us)
+            .ok_or_else(|| "png chunk overflows".to_string())?;
+        let next = data_end
+            .checked_add(4)
+            .ok_or_else(|| "png chunk overflows".to_string())?;
+        if next > bytes.len() {
+            return Err("truncated png".to_string());
+        }
+        let data = &bytes[data_at..data_end];
+        match kind {
+            b"IHDR" => {
+                let (w, h) = ihdr(data)?;
+                width = Some(w);
+                height = Some(h);
+            }
+            b"IDAT" => idat.extend_from_slice(data),
+            b"IEND" => break,
+            _ => {}
+        }
+        cursor = next;
+    }
+    let width = width.ok_or_else(|| "png has no IHDR".to_string())?;
+    let height = height.ok_or_else(|| "png has no IHDR".to_string())?;
+    let raw = inflate_stored(&idat)?;
+    rgb_from_rows(width, height, &raw)
+}
+
+fn ihdr(data: &[u8]) -> Result<(u32, u32), String> {
+    if data.len() < 13 {
+        return Err("short IHDR".to_string());
+    }
+    let width = u32::from_be_bytes(copy4(data, 0)?);
+    let height = u32::from_be_bytes(copy4(data, 4)?);
+    let bit_depth = data[8];
+    let color = data[9];
+    let interlace = data[12];
+    if bit_depth != 8 || color != 2 || interlace != 0 {
+        return Err("png must be 8-bit RGB, not interlaced".to_string());
+    }
+    if width == 0 || height == 0 {
+        return Err("png size is zero".to_string());
+    }
+    Ok((width, height))
+}
+
+fn rgb_from_rows(width: u32, height: u32, raw: &[u8]) -> Result<Picture, String> {
+    let w = usize::try_from(width).map_err(|_| "png size overflow".to_string())?;
+    let h = usize::try_from(height).map_err(|_| "png size overflow".to_string())?;
+    let rgb_len = w
+        .checked_mul(3)
+        .ok_or_else(|| "png size overflow".to_string())?;
+    let stride = rgb_len
+        .checked_add(1)
+        .ok_or_else(|| "png size overflow".to_string())?;
+    let need = stride
+        .checked_mul(h)
+        .ok_or_else(|| "png size overflow".to_string())?;
+    if raw.len() < need {
+        return Err("png image data is short".to_string());
+    }
+    let mut linear = Vec::with_capacity(rgb_len.saturating_mul(h));
+    for y in 0..h {
+        let at = y * stride;
+        if raw[at] != 0 {
+            return Err("png row filter is not none".to_string());
+        }
+        for byte in &raw[at + 1..at + 1 + rgb_len] {
+            linear.push(linear_from_display(f32::from(*byte) / 255.0));
+        }
+    }
+    Picture::new(width, height, linear)
+}
+
+fn inflate_stored(zlib: &[u8]) -> Result<Vec<u8>, String> {
+    if zlib.len() < 6 {
+        return Err("short zlib stream".to_string());
+    }
+    let cmf = u32::from(zlib[0]);
+    let flg = u32::from(zlib[1]);
+    if (cmf * 256 + flg) % 31 != 0 || cmf & 0x0f != 8 {
+        return Err("bad zlib header".to_string());
+    }
+    if flg & 0x20 != 0 {
+        return Err("zlib preset dictionary".to_string());
+    }
+    let mut cursor = 2_usize;
+    let mut out = Vec::new();
+    loop {
+        let hdr = *zlib
+            .get(cursor)
+            .ok_or_else(|| "truncated deflate".to_string())?;
+        cursor += 1;
+        let bfinal = hdr & 1;
+        let btype = (hdr >> 1) & 3;
+        if btype != 0 {
+            return Err("png is compressed; captures are stored deflate".to_string());
+        }
+        if cursor + 4 > zlib.len() {
+            return Err("truncated stored block".to_string());
+        }
+        let len = u16::from_le_bytes([zlib[cursor], zlib[cursor + 1]]);
+        let nlen = u16::from_le_bytes([zlib[cursor + 2], zlib[cursor + 3]]);
+        if nlen != !len {
+            return Err("stored block length check failed".to_string());
+        }
+        cursor += 4;
+        let n = usize::from(len);
+        let end = cursor
+            .checked_add(n)
+            .ok_or_else(|| "stored block overflows".to_string())?;
+        if end > zlib.len() {
+            return Err("truncated stored block".to_string());
+        }
+        out.extend_from_slice(&zlib[cursor..end]);
+        cursor = end;
+        if bfinal == 1 {
+            break;
+        }
+    }
+    if cursor + 4 > zlib.len() {
+        return Err("missing adler32".to_string());
+    }
+    let adler = u32::from_be_bytes(copy4(zlib, cursor)?);
+    if adler32(&out) != adler {
+        return Err("adler32 mismatch".to_string());
+    }
+    Ok(out)
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    let mut s1 = 1_u32;
+    let mut s2 = 0_u32;
+    for byte in data {
+        s1 = (s1 + u32::from(*byte)) % 65_521;
+        s2 = (s2 + s1) % 65_521;
+    }
+    (s2 << 16) | s1
+}
+
+fn be_u32(bytes: &[u8], at: usize) -> Result<u32, String> {
+    Ok(u32::from_be_bytes(copy4(bytes, at)?))
+}
+
+fn copy4(bytes: &[u8], at: usize) -> Result<[u8; 4], String> {
+    let slice = bytes
+        .get(at..at + 4)
+        .ok_or_else(|| "truncated png".to_string())?;
+    slice.try_into().map_err(|_| "truncated png".to_string())
+}
+
 fn write_chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
     out.extend_from_slice(kind);
@@ -301,6 +476,21 @@ mod tests {
         let loaded = Picture::load_linear(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(loaded, picture);
+    }
+
+    #[test]
+    fn png_round_trips_under_the_shoulder() {
+        let picture = Picture::solid(2, 2, [0.2, 0.4, 0.6]);
+        let path = std::env::temp_dir().join(format!("lref-{}-png.png", std::process::id()));
+        picture.save_png(&path).unwrap();
+        let loaded = Picture::load_png(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(loaded.width, 2);
+        assert_eq!(loaded.height, 2);
+        let px = loaded.pixel(1, 1);
+        for (got, want) in px.into_iter().zip([0.2_f32, 0.4, 0.6]) {
+            assert!((got - want).abs() < 1.0 / 255.0, "{got} vs {want}");
+        }
     }
 
     #[test]

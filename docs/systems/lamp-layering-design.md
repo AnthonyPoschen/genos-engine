@@ -252,16 +252,20 @@ Settled means the blurred error stays ≤ 0.05 for 4 consecutive frames. The rep
 
 | Metric | Value | Threshold (High) | What a failure means |
 |---|---|---|---|
-| `toggle_settle_frames` | first settled frame after a live-layer lamp change | ≤ 12 | The change is still visible at 200 ms, or it never stays under the line. Low's design line is 24; this grader scores High. |
-| `pop_magnitude` | max over consecutive frames of (peak per-pixel relative step − mean relative step). The step is `\|Y−Yprev\| / max(Yprev, 0.02)`, unblurred, so one speck counts. | ≤ 0.05 | A pixel jumped while the picture did not. A uniform fade scores about 0. |
+| `toggle_settle_frames` | first settled frame after a live-layer lamp change, counted from the frame before the largest mean-luma step | ≤ 12 | The change is still visible at 200 ms, or it never stays under the line. Low's design line is 24; this grader scores High. |
+| `pop_magnitude` | max over consecutive frames of (peak per-pixel relative step − mean relative step). The step is `\|Y−Yprev\| / max(Yprev, 0.02)`, unblurred, so one speck counts. | ≤ 0.05 | A pixel jumped while the picture did not. A uniform step scores about 0, including an instant full-frame toggle. |
+| `fade_deviation` | max over frames of `\|Δmean − Δcurve\| / \|start − end\|`. The curve is `exp(−t / τ)` with τ = 50 ms and `t` counted from the frame before the largest mean step. `start` is that frame's mean luma. `end` is the reference mean. | ≤ 0.05 | The mean did not follow the 50 ms fade. An instant toggle lands near 0.72. |
+| `hold_flicker` | per-pixel population standard deviation of linear luma on the steady hold (the frames from the settle index on, or the last four if it never settles). The value is the nearest-rank 99th percentile. | ≤ 0.02 | The hold shimmers. At 60 fps, τ = 50 ms is a blend of about 0.28, so a noisy sample still shows. |
 | `dim_error` | blurred error of the graded frame against the path-traced reference at the new intensity | ≤ 0.05 | The settled picture does not match the reference. |
 | `layer_same_frame` | blurred error of the first frame after a weight write, against the path-traced reference at that weight | ≤ 0.05 | A published layer did not track the weight in that frame. |
 | `layer_bytes` | sample bytes charged to one lamp | ≤ 1,048,576 (the High per-lamp ceiling) | The lamp broke its cap. |
 | `finished_read` | count of probe or pixel reads whose value differs from the published sum by more than 0.001 | ≤ 0 | A reader saw a bake buffer or a raw set. |
 
-Potato: the three GI picture metrics are not applicable (no GI). The grader does not invent Potato numbers.
+Potato: the GI picture metrics are not applicable (no GI). The grader does not invent Potato numbers.
 
-`layering-gate` (crate `genos-lighting-ref`) implements these comparisons. `--case good` and `--case broken` use planted pictures and planted counters. `--case baseline` is today's engine: there is no lamp-layer flag, no layer pool, no publish counter, and this run has no lamp-toggle capture, so every row is `NOT-IMPLEMENTED`. Passing a capture later is how the baseline becomes a measurement. The planted rows are how the comparisons are proven without a GPU.
+`pop_magnitude` stays the speck check. It is blind to a jump that every pixel shares. `fade_deviation` is the row that fails that jump. The clock for both the fade and `toggle_settle_frames` starts on the frame before the largest mean step, so one frame of command delay does not slide the curve.
+
+`layering-gate` (crate `genos-lighting-ref`) implements these comparisons. `--case good` passes every row. `--case broken` fails every row. `--case instant` is a uniform jump: `pop_magnitude` passes and `fade_deviation` fails. `--case noisy` alternates one pixel on a held picture: `hold_flicker` fails. `--case baseline` with no `--capture` is today's engine with nothing to measure, so every row is `NOT-IMPLEMENTED`. `--capture DIR` reads `frame-NNNN.png` (stored RGB8, the debug PNG) and fills the picture rows. `dim_error` stays `NOT-IMPLEMENTED` unless `reference.png` is present. The settle reference is then the mean of the last four frames, which is the held end, not a path trace. Layer rows stay `NOT-IMPLEMENTED` until a lamp layer exists.
 
 ## 11. Test plan
 
@@ -272,14 +276,29 @@ Commands this change adds:
 ```sh
 cargo run -p genos-lighting-ref --bin layering-gate -- --case good
 cargo run -p genos-lighting-ref --bin layering-gate -- --case broken
+cargo run -p genos-lighting-ref --bin layering-gate -- --case instant
+cargo run -p genos-lighting-ref --bin layering-gate -- --case noisy
 cargo run -p genos-lighting-ref --bin layering-gate -- --case baseline
 ```
 
-`--out` sets the directory. The default is `./genos-debug/gi/layering/`. The tool writes `{case}.json` there. It does not write under `$HOME`. There is no environment mirror. Exit 0 when no row is `FAIL`. Exit 1 when any row is `FAIL`. `NOT-IMPLEMENTED` does not fail the process. Exit 2 is a bad argument or an I/O error.
+`--out` sets the directory. The default is `./genos-debug/gi/layering/`. The tool writes `{case}.json` there. `--capture` writes `baseline.json`. It does not write under `$HOME`. There is no environment mirror. Exit 0 when no row is `FAIL`. Exit 1 when any row is `FAIL`. `NOT-IMPLEMENTED` does not fail the process. Exit 2 is a bad argument or an I/O error.
 
-`cargo test -p genos-lighting-ref layering` locks the same rows: the good fixture passes each comparison, the broken fixture fails each comparison, and the baseline stays `NOT-IMPLEMENTED` with a null value.
+`cargo test -p genos-lighting-ref layering` locks the same rows: the good fixture passes each comparison, the broken fixture fails each comparison, the instant toggle fails `fade_deviation` while `pop_magnitude` passes, the noisy hold fails `hold_flicker`, and the baseline without a capture stays `NOT-IMPLEMENTED` with a null value.
 
-Later phases add rhai gates under `debug/lighting/scripts/gates/`. They are not in this change, because the host cannot toggle a layer that does not exist. Each script soaks, records a settled frame, performs one change, and returns to the start, which is the existing test rule.
+`examples/stress/scripts/lamp_toggle_frames.rhai` freezes the stress scene, writes `frame-0000.png` with a lamp on, turns that lamp off, and writes `frame-0001.png` through `frame-0036.png`. Paths are relative to `--report`. There is no path trace in that script.
+
+```sh
+genos-stress --proof --no-panel --size 320x180 --preset high \
+  --script examples/stress/scripts/lamp_toggle_frames.rhai \
+  --report genos-debug/gi/layering/capture
+cargo run -p genos-lighting-ref --bin layering-gate -- \
+  --capture genos-debug/gi/layering/capture \
+  --out genos-debug/gi/layering
+```
+
+On a machine with no GPU that command runs under lavapipe and a headless Weston. The warmup is 30 frames, so the capture is the toggle, not a soaked cache. Timing on lavapipe is not a result. The picture rows are.
+
+Later phases add rhai gates under `debug/lighting/scripts/gates/`. The host cannot toggle a layer that does not exist, so those scripts wait. Each script soaks, records a settled frame, performs one change, and returns to the start, which is the existing test rule.
 
 | Script | When | Pass |
 |---|---|---|
@@ -290,7 +309,7 @@ Later phases add rhai gates under `debug/lighting/scripts/gates/`. They are not 
 | `layer-lod.rhai` | Walk A→B→A across a level boundary. | No rebake counter spike. `pop_magnitude` ≤ 0.05. `layer_bytes` stable. |
 | `layer-mover.rhai` | A box crosses a layered lamp's beam inside 10 m. | `dim_error` ≤ 0.05 against the path trace that includes the box. A miss drops the phase. |
 
-The owner's 4070 runs the picture grades. Lavapipe runs the grader's fixtures and checks that the JSON appears. Timing on lavapipe is not a result.
+The owner's 4070 runs the picture grades that need a path trace. Lavapipe runs the grader's fixtures, the lamp-toggle capture, and checks that the JSON appears. Timing on lavapipe is not a result.
 
 Debug probes the implementation has to grow, named now so a phase cannot land without them:
 
@@ -298,6 +317,8 @@ Debug probes the implementation has to grow, named now so a phase cannot land wi
 |---|---|
 | Settle slower than the gate | `toggle_settle_frames` in `layering-gate`; `LIGHTING_MS` already on the debug binary |
 | Speck or page pop | `pop_magnitude`; overlay `blend-k` (the `k` that was applied) |
+| Full-frame pop | `fade_deviation` |
+| Hold shimmer | `hold_flicker` |
 | Wrong brightness after a dim | `dim_error` against the path trace |
 | Weight ignored | `layer_same_frame`; overlay `layer-weight` |
 | Pool overrun or a refused lamp | `layer_bytes`; counter `lamp_layer_refused`; MCP `get_lamp_layers` |
@@ -313,7 +334,7 @@ Each phase is its own change, with an A/B against the path trace. A miss drops t
 
 | Phase | What lands | Gate |
 |---|---|---|
-| P0 (this change) | This design, the glossary entries, `layering-gate` | Fixtures: good passes, broken fails, baseline is `NOT-IMPLEMENTED` |
+| P0 (this change) | This design, the glossary entries, `layering-gate`, `lamp_toggle_frames.rhai` | Fixtures: good passes, broken fails, instant fade fails, noisy flicker fails. Baseline without a capture is `NOT-IMPLEMENTED`. `--capture` fills the picture rows. |
 | P1 | Fast-blend `k` floor on the live layer. Removes the 0.9 lamp cap on that path. | `live-blend.rhai` on High and Low. Pop and settle. No new rays above the ADR 0013 cap. |
 | P2 | Flag, hidden bake, layer combine, weight. | `layer-weight.rhai`, `layer-toggle.rhai`, `layer-fade.rhai`. `layer_bytes` under the cap. `finished_read` is 0. |
 | P3 | Merge and seed of lamp-layer samples with ADR 0013 coarsening. | `layer-lod.rhai`, `layer-mover.rhai`. |

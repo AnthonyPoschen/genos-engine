@@ -1,14 +1,17 @@
 //! Grade lamp-layer metrics. No window and no Vulkan.
 //!
-//! `--case good` and `--case broken` are planted pictures. `--case baseline`
-//! reports `NOT-IMPLEMENTED` for a live lamp toggle, which this binary does
-//! not capture.
+//! `--case good` and `--case broken` are planted pictures. `--case instant`
+//! is a full-frame jump that `pop_magnitude` misses. `--case noisy` shimmers
+//! on the hold. `--capture DIR` scores engine frames. `--case baseline` with
+//! no capture prints `NOT-IMPLEMENTED`.
 
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use genos_lighting_ref::layering::{evaluate, summary_line, write_report, Case, DEFAULT_OUT};
+use genos_lighting_ref::layering::{
+    evaluate, evaluate_capture, summary_line, write_report, Case, DEFAULT_OUT,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -27,7 +30,10 @@ fn run() -> Result<u8, String> {
         return Ok(0);
     }
     let opts = parse(&args)?;
-    let report = evaluate(opts.case)?;
+    let report = match opts.capture {
+        Some(dir) => evaluate_capture(&dir)?,
+        None => evaluate(opts.case.ok_or("missing --case or --capture")?)?,
+    };
     for metric in &report.metrics {
         println!("{}", summary_line(metric));
     }
@@ -36,12 +42,14 @@ fn run() -> Result<u8, String> {
 }
 
 struct Opts {
-    case: Case,
+    case: Option<Case>,
+    capture: Option<PathBuf>,
     out: PathBuf,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
     let mut case = None;
+    let mut capture = None;
     let mut out = PathBuf::from(DEFAULT_OUT);
     let mut index = 0;
     while index < args.len() {
@@ -51,6 +59,9 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 let name = next_value(args, &mut index, "--case")?;
                 case = Some(Case::parse(name).ok_or_else(|| format!("unknown case {name}"))?);
             }
+            "--capture" => {
+                capture = Some(PathBuf::from(next_value(args, &mut index, "--capture")?));
+            }
             "--out" => {
                 out = PathBuf::from(next_value(args, &mut index, "--out")?);
             }
@@ -58,8 +69,16 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         }
         index += 1;
     }
-    let case = case.ok_or("missing --case (good, broken, or baseline)")?;
-    Ok(Opts { case, out })
+    if capture.is_some() {
+        if let Some(case) = case {
+            if case != Case::Baseline {
+                return Err("--capture grades the baseline; drop --case".to_string());
+            }
+        }
+    } else if case.is_none() {
+        return Err("missing --case or --capture".to_string());
+    }
+    Ok(Opts { case, capture, out })
 }
 
 fn next_value<'a>(args: &'a [String], index: &mut usize, flag: &str) -> Result<&'a str, String> {
@@ -74,13 +93,18 @@ fn print_help() {
         "\
 layering-gate — score lamp-layer settle metrics
 
-  --case good|broken|baseline   planted pass, planted fail, or today's engine
+  --case good|broken|instant|noisy|baseline
+                                planted pass, planted fail, full-frame jump,
+                                noisy hold, or today's engine with no frames
+  --capture DIR                 grade frame-NNNN.png from the engine
+                                (DIR or DIR/frames; optional reference.png)
   --out DIR                     directory for {{case}}.json
                                 default: {DEFAULT_OUT}
 
 Prints one line per metric: name, value, threshold, PASS/FAIL/NOT-IMPLEMENTED.
 Exit 0 when no row is FAIL. Exit 1 when a row is FAIL. NOT-IMPLEMENTED does
 not fail the process. Exit 2 is a bad argument or a write error.
-A live lamp toggle is not captured here. Baseline rows stay NOT-IMPLEMENTED."
+--capture writes baseline.json. Layer rows stay NOT-IMPLEMENTED.
+dim_error stays NOT-IMPLEMENTED unless reference.png is present."
     );
 }

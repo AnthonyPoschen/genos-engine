@@ -26,4 +26,4 @@ Anthony's plan of 8 Oct 2026: probes never throw a value away; a change blends a
 
 ## Consequences
 
-The grader is `layering-gate` in `genos-lighting-ref`. It scores planted pictures and prints `NOT-IMPLEMENTED` for a live capture, which this proposal does not have. Shipping either phase still requires the rhai gates and a path-traced grade in the design. A phase that misses its gate is dropped.
+The grader is `layering-gate` in `genos-lighting-ref`. Planted pictures prove the rows. `--capture DIR` scores `frame-NNNN.png` from the engine. Without a capture, and for any layer counter the engine does not have yet, the row is `NOT-IMPLEMENTED`. `pop_magnitude` does not see a uniform step; `fade_deviation` does. Shipping either phase still requires the rhai gates and a path-traced grade. A phase that misses its gate is dropped.
