@@ -31,7 +31,8 @@ pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS}
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
 pub use reflections::{
-    portal_leak, scheduled_low_rays, shade_picture, shoreline_ratio, PictureFault,
+    portal_leak, scheduled_low_rays, shade_picture, shoreline_deep_ratio, shoreline_ratio,
+    PictureFault,
     ReflectionPicture, TILE,
 };
 pub use particles::{

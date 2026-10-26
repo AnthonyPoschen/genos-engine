@@ -175,7 +175,7 @@ The oblique clip is Lengyel's construction with a Vulkan depth row. The third ro
 
 The surface normal comes from the Gerstner sum. The glossy stack is the reflection once that pass exists. The CPU picture in this phase reflects a flat plane along the mirrored ray. Refraction samples the opaque colour along the Snell direction. A refracted miss keeps the opaque sample, darkened by Beer–Lambert over the water depth. It does not invent a tint, and it does not read the world cache. The cache waits with the screen march.
 
-Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp: `shoreline_ratio` ≤ 0.75.
+Shoreline depth is the opaque depth minus the water surface, in metres. Wave height is `min(deep_height, 0.75 × depth)`. Foam coverage is 1 where the clamp is active or the horizontal Jacobian drops below 0.5, and 0 elsewhere, with a smooth step between. The path tracer does not model foam yet ([reference check](lighting/reference-check.md) blind spots). Foam's picture grade stays `NOT-IMPLEMENTED` until the reference grows that term. The harness grades the clamp on two samples. `shoreline_ratio` is the max crest / depth. The shallow sample sits on the cap, and the gate is `0.75 + 1e-4` (`0.7501`), so a ratio that lands on the cap still passes. `shoreline_deep_ratio` is the same crest at 4 m, where the wave is under the cap, gated at 0.5. Forcing the cap there fails.
 
 Caustics:
 
@@ -225,7 +225,8 @@ Live grades the optics rows and the CPU picture. Optics rows are the module's er
 Picture rows read the CPU mirror, portal, and flat-water image, and the Low ray cap:
 
 - `portal_leak` is the six-sample oblique disagreement above.
-- `shoreline_ratio` is the Gerstner crest after `shoreline_height`, divided by depth. The crest is the wave, not a canned 0.4.
+- `shoreline_ratio` is the max Gerstner crest after `shoreline_height`, divided by depth. The shallow sample is the boundary and lands on 0.75. The gate is 0.7501: `1e-4` is the float epsilon, so that landing still passes. An unclamped crest fails it.
+- `shoreline_deep_ratio` is that crest at 4 m divided by depth. The ratio stays under the cap. The gate is 0.5. Applying the cap in deep water (`PictureFault::FORCE_CAP`) fails it.
 - `near_weighted_rel` is the depth-weighted relative error of that image against `crates/lighting-ref/src/reflections_trace.rs`. The tracer rebuilds the tiles in f64. Its Fresnel, Snell, Beer–Lambert, portal map, and view count are closed forms in that file. It does not call `genos_math::optics`, and it does not read that module's constants. It does not call `shade_picture` or `water_shade`. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels. A planted near bias (`PictureFault::NEAR_BIAS` alone) fails this row. A planted blink (`PictureFault::BLINK` alone) fails `flicker_reversal`.
 - `flicker_reversal` is the mean size of a sign change in one still mirror pixel, eight frames, after subtracting the tracer's value.
 - `low_reflection_rays` is the ray count `scheduled_low_rays` reports. The Low preset is 0. The broken scheduler reports 64.
@@ -249,7 +250,8 @@ These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na
 | `portal_leak` | 0 | fraction of plane samples drawn on the wrong side |
 | `portal_point_m` | 1e-5 | error of the portal rigid map, metres |
 | `beer_rel` | 0.02 | relative error of transmittance against `exp(-σ d)` |
-| `shoreline_ratio` | 0.75 | max wave height / depth |
+| `shoreline_ratio` | 0.7501 | max wave height / depth. `1e-4` above 0.75 is the float epsilon |
+| `shoreline_deep_ratio` | 0.5 | crest / depth at 4 m, under the cap |
 | `caustic_rel` | 0.05 | mean relative error against flat-water transmittance |
 | `near_weighted_rel` | 0.03 | depth-weighted relative error, weight `1 / max(depth, 0.25)` |
 | `flicker_reversal` | 0.002 | mean size of a frame-to-frame reversal on a still pixel |
@@ -284,7 +286,7 @@ Rhai gates land with `debug/reflections`, on the same line format, under `debug/
 | `water.rhai` | a pool, a shore, a vertical sun | `snell_rad`, `beer_rel`, `shoreline_ratio`, `caustic_rel` |
 | `low.rhai` | the pool on the Low preset, software tracer forced | `low_reflection_rays` = 0 |
 
-The CPU picture grades `portal_leak`, `shoreline_ratio`, `near_weighted_rel`, `flicker_reversal`, and `low_reflection_rays` on live. The Rhai scenes and `debug/reflections` still wait. Glossy screen marches, the world-cache read, the `ray_query` fallback, and the reflection denoiser wait on lighting phase 3 (`cursor/lighting-p3-capped-refresh`). That next phase does not edit `lighting_schedule.rs` and does not edit the GI passes. `ssr_depth_rel` stays `NOT-IMPLEMENTED` until the march exists. Foam and `caustic_rel` stay `NOT-IMPLEMENTED` until P9.
+The CPU picture grades `portal_leak`, `shoreline_ratio`, `shoreline_deep_ratio`, `near_weighted_rel`, `flicker_reversal`, and `low_reflection_rays` on live. The Rhai scenes and `debug/reflections` still wait. Glossy screen marches, the world-cache read, the `ray_query` fallback, and the reflection denoiser wait on lighting phase 3 (`cursor/lighting-p3-capped-refresh`). That next phase does not edit `lighting_schedule.rs` and does not edit the GI passes. `ssr_depth_rel` stays `NOT-IMPLEMENTED` until the march exists. Foam and `caustic_rel` stay `NOT-IMPLEMENTED` until P9.
 
 ## Debug and tests
 
@@ -346,7 +348,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 | P5 | Planar mirrors. | `mirror_view_frac`, `portal_leak`, `mirror_point_m` |
 | P6 | Portals on the same cap. | `portal_point_m`, `portal_leak` |
 | P7 | Water shade, Snell, Beer–Lambert. | `snell_rad`, `beer_rel` |
-| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 0.75 |
+| P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 0.7501, `shoreline_deep_ratio` ≤ 0.5 |
 | P9 | Caustic modes. | `caustic_rel` ≤ 0.05, `vram_frac` ≤ 1 |
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.

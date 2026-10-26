@@ -38,6 +38,8 @@ impl PictureFault {
     pub const NEAR_BIAS: u8 = 4;
     pub const SKIP_SHORE: u8 = 8;
     pub const EXTRA_RAYS: u8 = 16;
+    /// Apply the shore cap in deep water, where the crest is already under it.
+    pub const FORCE_CAP: u8 = 32;
 
     #[must_use]
     pub const fn only(bit: u8) -> Self {
@@ -47,7 +49,12 @@ impl PictureFault {
     #[must_use]
     pub const fn all() -> Self {
         Self(
-            Self::DRAW_BEHIND | Self::BLINK | Self::NEAR_BIAS | Self::SKIP_SHORE | Self::EXTRA_RAYS,
+            Self::DRAW_BEHIND
+                | Self::BLINK
+                | Self::NEAR_BIAS
+                | Self::SKIP_SHORE
+                | Self::EXTRA_RAYS
+                | Self::FORCE_CAP,
         )
     }
 
@@ -134,10 +141,8 @@ pub fn portal_leak(fault: PictureFault) -> f64 {
     f64::from(wrong) / f64::from(u32::try_from(samples.len()).unwrap_or(6))
 }
 
-/// Max Gerstner crest / depth after the shore clamp.
-#[must_use]
-pub fn shoreline_ratio(fault: PictureFault) -> f64 {
-    let crest = optics::gerstner(
+fn gerstner_crest() -> f32 {
+    optics::gerstner(
         &[optics::GerstnerWave {
             direction: [1.0, 0.0],
             amplitude: 0.4,
@@ -149,7 +154,13 @@ pub fn shoreline_ratio(fault: PictureFault) -> f64 {
         0.0,
     )
     .0
-    .y;
+    .y
+}
+
+/// Max Gerstner crest / depth after the shore clamp. The shallow sample is the boundary.
+#[must_use]
+pub fn shoreline_ratio(fault: PictureFault) -> f64 {
+    let crest = gerstner_crest();
     let depths = [0.0625_f32, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0];
     let mut max_ratio: f64 = 0.0;
     for depth in depths {
@@ -161,6 +172,19 @@ pub fn shoreline_ratio(fault: PictureFault) -> f64 {
         max_ratio = max_ratio.max(f64::from(height) / f64::from(depth));
     }
     max_ratio
+}
+
+/// Crest / depth at 4 m. The crest is under the cap there, so the ratio stays below 0.75.
+#[must_use]
+pub fn shoreline_deep_ratio(fault: PictureFault) -> f64 {
+    let crest = gerstner_crest();
+    let depth = 4.0_f32;
+    let height = if fault.has(PictureFault::FORCE_CAP) {
+        optics::SHORE_CAP * depth
+    } else {
+        optics::shoreline_height(crest, depth, optics::SHORE_CAP)
+    };
+    f64::from(height) / f64::from(depth)
 }
 
 fn mirror_pixel(px: u32, py: u32, fault: PictureFault) -> ([f32; 3], f32) {
@@ -422,8 +446,8 @@ fn add(color: [f32; 3], extra: f32) -> [f32; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        idx, portal_leak, scheduled_low_rays, shade_picture, shoreline_ratio, water_color,
-        PictureFault, HIDDEN, TILE,
+        idx, portal_leak, scheduled_low_rays, shade_picture, shoreline_deep_ratio, shoreline_ratio,
+        water_color, PictureFault, HIDDEN, TILE,
     };
     use genos_math::Vec3;
 
@@ -446,6 +470,9 @@ mod tests {
     fn the_shore_clamp_holds_and_the_unclamped_crest_does_not() {
         assert!(shoreline_ratio(PictureFault::default()) <= 0.75);
         assert!(shoreline_ratio(PictureFault::only(PictureFault::SKIP_SHORE)) > 0.75);
+        let deep = shoreline_deep_ratio(PictureFault::default());
+        assert!(deep < 0.75, "{deep}");
+        assert!(shoreline_deep_ratio(PictureFault::only(PictureFault::FORCE_CAP)) > 0.5);
     }
 
     #[test]

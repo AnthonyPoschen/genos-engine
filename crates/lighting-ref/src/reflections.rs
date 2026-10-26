@@ -241,7 +241,20 @@ fn measure(kind: Kind) -> Vec<Metric> {
         gate("portal_leak", portal_leak(kind), 0.0, Row::Module),
         gate("portal_point_m", portal_point_m(kind), 1.0e-5, Row::Module),
         gate("beer_rel", beer_rel(kind), 0.02, Row::Module),
-        gate("shoreline_ratio", shoreline_ratio(kind), 0.75, Row::Module),
+        // `1e-4` is the float epsilon, so a ratio that lands on the 0.75 cap still passes.
+        gate(
+            "shoreline_ratio",
+            shoreline_ratio(kind),
+            0.7501,
+            Row::Module,
+        ),
+        // The 4 m sample is under the cap (about 0.1). Forcing the cap to 0.75 fails 0.5.
+        gate(
+            "shoreline_deep_ratio",
+            shoreline_deep_ratio(kind),
+            0.5,
+            Row::Module,
+        ),
         gate("caustic_rel", caustic_rel(kind), 0.05, Row::Comparator),
         gate(
             "near_weighted_rel",
@@ -637,6 +650,10 @@ fn shoreline_ratio(kind: Kind) -> f64 {
     genos_render::shoreline_ratio(fault_of(kind))
 }
 
+fn shoreline_deep_ratio(kind: Kind) -> f64 {
+    genos_render::shoreline_deep_ratio(fault_of(kind))
+}
+
 fn caustic_rel(kind: Kind) -> f64 {
     // Comparator only. The flat-water function lives in `optics` and is not this row.
     let truth: f64 = 0.979_626_812_158;
@@ -873,6 +890,23 @@ mod tests {
     }
 
     #[test]
+    fn a_forced_shore_cap_fails_deep_water() {
+        let open = genos_render::shoreline_deep_ratio(genos_render::PictureFault::default());
+        let forced = genos_render::shoreline_deep_ratio(genos_render::PictureFault::only(
+            genos_render::PictureFault::FORCE_CAP,
+        ));
+        assert!(open < 0.75, "{open}");
+        assert!(open <= 0.5, "{open}");
+        assert!(forced > 0.5, "{forced}");
+        let boundary = genos_render::shoreline_ratio(genos_render::PictureFault::default());
+        assert!(boundary <= 0.7501, "{boundary}");
+        let unclamped = genos_render::shoreline_ratio(genos_render::PictureFault::only(
+            genos_render::PictureFault::SKIP_SHORE,
+        ));
+        assert!(unclamped > 0.7501, "{unclamped}");
+    }
+
+    #[test]
     fn a_glass_f0_fails_the_water_band() {
         let report_good = grade(Fixture::Good);
         let report_bad = grade(Fixture::Bad);
@@ -933,7 +967,7 @@ mod tests {
     #[test]
     fn good_passes_every_implemented_gate() {
         let report = grade(Fixture::Good);
-        assert_eq!(report.metrics.len(), 20);
+        assert_eq!(report.metrics.len(), 21);
         assert_eq!(report.exit_code(), 0);
         for metric in &report.metrics {
             if metric.name == "denoise_lag_frames" {
@@ -946,7 +980,7 @@ mod tests {
             assert!(value <= metric.threshold, "{}", metric.name);
         }
         let text = report.summary();
-        assert_eq!(text.lines().count(), 20);
+        assert_eq!(text.lines().count(), 21);
         assert!(!text.contains("FAIL"));
         assert_eq!(text.matches("NOT-IMPLEMENTED").count(), 1);
     }

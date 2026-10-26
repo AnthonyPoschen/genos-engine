@@ -31,7 +31,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (good_code, good_text) = run("--fixture", "good", &good_dir);
     assert_eq!(good_code, 0, "{good_text}");
-    assert_eq!(good_text.lines().count(), 20);
+    assert_eq!(good_text.lines().count(), 21);
     assert!(good_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(good_text
         .lines()
@@ -43,7 +43,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (bad_code, bad_text) = run("--case", "bad", &bad_dir);
     assert_eq!(bad_code, 1, "{bad_text}");
-    assert_eq!(bad_text.lines().count(), 20);
+    assert_eq!(bad_text.lines().count(), 21);
     assert!(bad_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(bad_text
         .lines()
@@ -55,7 +55,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (live_code, live_text) = run("--fixture", "live", &live_dir);
     assert_eq!(live_code, 0, "{live_text}");
-    assert_eq!(live_text.lines().count(), 20);
+    assert_eq!(live_text.lines().count(), 21);
     for name in [
         "mirror_law_rad",
         "fresnel_abs",
@@ -68,6 +68,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
         "portal_point_m",
         "beer_rel",
         "shoreline_ratio",
+        "shoreline_deep_ratio",
         "near_weighted_rel",
         "flicker_reversal",
         "low_reflection_rays",
