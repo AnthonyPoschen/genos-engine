@@ -27,8 +27,10 @@
 
 use genos_json::Value;
 
+use crate::emitters::MaterialSettings;
 use crate::error::LoadError;
 use crate::mips::{mip_chain, Mip, MipSpace};
+use crate::pages::{miss_colour, plan_residency, ImageChain};
 use crate::png::Image;
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
@@ -54,6 +56,11 @@ pub struct GltfScene {
     /// Mip chain for each image, finest first, down to 1×1. Parallel to
     /// [`Self::images`] after a file load. A scene built by hand leaves this empty.
     pub mips: Vec<Vec<Mip>>,
+    /// Bytes still resident after the material cap. 0 on a scene built by hand.
+    pub resident_bytes: u64,
+    /// Colour a sample uses when the finest mip of that image was dropped.
+    /// Parallel to [`Self::images`] after a file load.
+    pub mip_fallback: Vec<[f32; 4]>,
 }
 
 /// One glTF mesh: a list of primitives, each with one material.
@@ -354,13 +361,63 @@ pub(crate) fn decode_gltf(
         }
     }
     let mips = cook_mips(&images, &materials);
+    let (resident_bytes, mip_fallback) = fit_mips(&mips);
     Ok(GltfScene {
         meshes,
         materials,
         images,
         instances,
         mips,
+        resident_bytes,
+        mip_fallback,
     })
+}
+
+fn fit_mips(mips: &[Vec<Mip>]) -> (u64, Vec<[f32; 4]>) {
+    let chains: Vec<ImageChain> = mips
+        .iter()
+        .enumerate()
+        .map(|(rank, chain)| ImageChain {
+            levels: chain
+                .iter()
+                .map(|mip| u64::try_from(mip.pixels.len()).unwrap_or(0))
+                .collect(),
+            rank: u32::try_from(rank).unwrap_or(u32::MAX),
+        })
+        .collect();
+    let cap = u64::from(MaterialSettings::default().residency_mb) * 1024 * 1024;
+    let plan = plan_residency(&chains, cap);
+    let fallback = mips
+        .iter()
+        .zip(&plan.dropped)
+        .map(|(chain, dropped)| {
+            let resident: Vec<Option<[f32; 4]>> = chain
+                .iter()
+                .enumerate()
+                .map(|(level, mip)| {
+                    if level < *dropped {
+                        None
+                    } else {
+                        Some(level_colour(mip))
+                    }
+                })
+                .collect();
+            miss_colour(&resident, 0, [1.0; 4])
+        })
+        .collect();
+    (plan.bytes, fallback)
+}
+
+fn level_colour(mip: &Mip) -> [f32; 4] {
+    if mip.pixels.len() < 4 {
+        return [1.0; 4];
+    }
+    [
+        f32::from(mip.pixels[0]) / 255.0,
+        f32::from(mip.pixels[1]) / 255.0,
+        f32::from(mip.pixels[2]) / 255.0,
+        f32::from(mip.pixels[3]) / 255.0,
+    ]
 }
 
 fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {

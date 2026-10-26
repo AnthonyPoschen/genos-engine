@@ -146,7 +146,7 @@ fn the_furnace_picture_settles_and_the_lambert_picture_stays() {
 
 #[test]
 fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
-    use genos_load::{mib_f32, resident_bytes, ImageChain};
+    use genos_load::{mib_f32, plan_residency, ImageChain};
 
     let mib = |n: u64| n * 1024 * 1024;
     let images = [ImageChain {
@@ -154,7 +154,7 @@ fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
         rank: 1,
     }];
     let before = mib_f32(images.iter().flat_map(|image| &image.levels).sum());
-    let after = mib_f32(resident_bytes(&images, mib(256)));
+    let after = mib_f32(plan_residency(&images, mib(256)).bytes);
     let (metal_before, metal_after) = score(0.25);
     eprintln!(
         "picture_residency before {before:.6} after {after:.6}\n\

@@ -10,6 +10,7 @@
 //! which is what the bake already did. The spec leaves that default to the
 //! runtime. A file that sets 9728 or 9729 is honoured.
 
+use crate::pages::miss_colour;
 use crate::{Image, PbrMaterial, TextureSlot};
 
 const MIRRORED_REPEAT: u32 = 33_648;
@@ -154,10 +155,10 @@ fn sample_slot(
         return [1.0; 4];
     };
     let Some(image) = images.get(slot.image) else {
-        return [1.0; 4];
+        return miss_colour(&[], 0, [1.0; 4]);
     };
     if image.width == 0 || image.height == 0 {
-        return [1.0; 4];
+        return miss_colour(&[], 0, [1.0; 4]);
     }
     let uv = uv_for(slot.texcoord, uvs);
     let u = wrap_coord(uv[0], slot.sampler.wrap_s);

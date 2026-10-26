@@ -12,14 +12,25 @@ pub struct ImageChain {
     pub rank: u32,
 }
 
-/// Bytes that stay under `cap`, dropping finest mips of the farthest images.
+/// Which finest mips were dropped, and the bytes that remain.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidencyPlan {
+    pub bytes: u64,
+    /// Finest levels dropped from each image. Parallel to `images`.
+    pub dropped: Vec<usize>,
+}
+
+/// Drop the farthest finest mips until the bytes fit `cap`.
 #[must_use]
-pub fn resident_bytes(images: &[ImageChain], cap: u64) -> u64 {
+pub fn plan_residency(images: &[ImageChain], cap: u64) -> ResidencyPlan {
     let mut dropped = vec![0_usize; images.len()];
     loop {
         let sum = kept_bytes(images, &dropped);
         if sum <= cap {
-            return sum;
+            return ResidencyPlan {
+                bytes: sum,
+                dropped,
+            };
         }
         let mut choice: Option<usize> = None;
         for (index, image) in images.iter().enumerate() {
@@ -39,10 +50,19 @@ pub fn resident_bytes(images: &[ImageChain], cap: u64) -> u64 {
             }
         }
         let Some(index) = choice else {
-            return sum;
+            return ResidencyPlan {
+                bytes: sum,
+                dropped,
+            };
         };
         dropped[index] += 1;
     }
+}
+
+/// Bytes that stay under `cap`, dropping finest mips of the farthest images.
+#[must_use]
+pub fn resident_bytes(images: &[ImageChain], cap: u64) -> u64 {
+    plan_residency(images, cap).bytes
 }
 
 fn kept_bytes(images: &[ImageChain], dropped: &[usize]) -> u64 {
@@ -115,6 +135,52 @@ impl MaterialWatch {
     pub fn frames_since_flip(&self) -> u32 {
         self.frames_since_flip
     }
+}
+
+/// `--watch` reload. The old page stays published until the upload finishes,
+/// then the next frame is the one that sees the new page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotReload {
+    watch: MaterialWatch,
+    pending: u64,
+}
+
+impl HotReload {
+    #[must_use]
+    pub fn open(published: u64) -> Self {
+        Self {
+            watch: MaterialWatch::new(published),
+            pending: published,
+        }
+    }
+
+    /// Upload `hash` and publish it. The frame counter starts at the flip.
+    pub fn upload(&mut self, hash: u64) {
+        self.pending = hash;
+        self.watch.begin(hash);
+        self.watch.finish_upload();
+    }
+
+    /// Frames from the flip until the sample sees [`Self::upload`]'s hash.
+    /// Stops at `limit` when the page never appears.
+    #[must_use]
+    pub fn frames_until_visible(&mut self, limit: u32) -> f32 {
+        let mut left = limit;
+        while left > 0 {
+            self.watch.frame();
+            left -= 1;
+            if self.watch.sample() == self.pending && self.watch.frames_since_flip() >= 1 {
+                return frames_f32(self.watch.frames_since_flip());
+            }
+        }
+        frames_f32(limit)
+    }
+}
+
+#[expect(clippy::as_conversions, reason = "a reload waits a handful of frames")]
+#[expect(clippy::cast_precision_loss, reason = "a reload waits a handful of frames")]
+fn frames_f32(value: u32) -> f32 {
+    value as f32
 }
 
 #[expect(clippy::as_conversions, reason = "a residency total in MiB fits the f32 mantissa")]

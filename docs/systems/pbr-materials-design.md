@@ -136,9 +136,9 @@ ADR 0012 and the GI design's emissive section still hold, with the departure in 
 - Every emissive texel lights indirect through the cache, because a hit adds emission to the irradiance it reads.
 - A connected region is promoted when its area is under one L0 cache cell (0.25 m × 0.25 m) or its flux exceeds `emissive_promote_flux`. The default flux is 1% of the brightest lamp, which is the GI design's rule and is not a measured constant. At most 4 regions per mesh on Low, 8 on Medium, 16 on High. Potato promotes none.
 - A dim wall stays cache-only. The cache cell is large enough for that and too coarse for a thin strip. The strip is the promoted emitter.
-- Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. `double_count` is the relative change in a settled room when a debug switch moves the strip between promoted and cache-only. Threshold 0.02.
+- Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. That skip is in `lighting_gpu.rs`, which the lighting branch owns. `double_count` stays `NOT-IMPLEMENTED` until that write exists. The note is `model only; waits on lighting_gpu.rs`.
 - Turning a promoted emitter on or off is a light change, a multiply on its layer once layers exist, and a change record until then. It does not rebuild the SDF, the BVH, or the page table.
-- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` is the relative error against that. Threshold 0.02. The analytic `5E` is computed in the gate. The engine value is `furnace_wall` in `crates/load/src/emitters.rs`, a fixed radiosity iteration. The GPU cache does not skip promoted flux yet: that write is in `lighting_gpu.rs`, which the lighting branch owns.
+- The furnace is a closed room, albedo 0.8, emission `E`, occlusion off, nothing promoted. Outgoing light settles at `E / (1 − 0.8) = 5E`. `emissive_furnace` stays `NOT-IMPLEMENTED` with the same note. `furnace_wall` in `crates/load/src/emitters.rs` is the radiosity model, not the cache.
 
 ## Asset cache and hot reload
 
@@ -266,12 +266,12 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |
 | `picture_dielectric` | 0.12 | Blurred relative error, metallic 0. The path tracer does not sample textures. |
 | `picture_metal` | 0.12 | The same score for a metal under Appendix B. Stays unimplemented until the lobe exists. |
-| `emissive_furnace` | 0.02 | Relative error of `furnace_wall` against `5E`. |
-| `double_count` | 0.02 | Relative change when a strip is toggled between promoted and cache-only. The broken reader adds the strip in the cache and in the light tree. |
+| `emissive_furnace` | 0.02 | `NOT-IMPLEMENTED`. Model only; waits on lighting_gpu.rs. |
+| `double_count` | 0.02 | `NOT-IMPLEMENTED`. Model only; waits on lighting_gpu.rs. |
 | `bc7_colour_rmse` | 0.02 | `NOT-IMPLEMENTED`. Open question 1 is unchosen. RGBA8 is the cook. A stand-in encoder is not an RMSE. |
 | `astc_colour_rmse` | 0 | `NOT-IMPLEMENTED`. UASTC to ASTC 4×4 would be lossless, so the threshold stays 0. No transcode is linked. |
-| `residency_mb` | 256 | Resident mebibytes after dropping the farthest finest mip to the High cap. |
-| `hot_reload_frames` | 1 | Frames from a finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
+| `residency_mb` | 256 | Resident mebibytes from `plan_residency`, the cap `load_gltf` applies. The farthest finest mip drops first. |
+| `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
 
 ## Phased rollout

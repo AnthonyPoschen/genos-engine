@@ -35,8 +35,8 @@ use std::process::ExitCode;
 
 use genos_bake::BakeMesh;
 use genos_load::{
-    double_count as room_double_count, furnace_wall, load_gltf_file, mib_f32, normal_from_bytes,
-    resident_bytes, GltfScene, ImageChain, MaterialWatch, Mip,
+    load_gltf_file, mib_f32, normal_from_bytes, plan_residency, GltfScene, HotReload, ImageChain,
+    Mip,
 };
 
 const SHADE: f32 = 1.0 / 255.0;
@@ -83,7 +83,7 @@ const SHADE_MAT: usize = 0;
 const BRIGHT_MAT: usize = 2;
 const METAL_MAT: usize = 3;
 
-const MUST_FAIL: [&str; 13] = [
+const MUST_FAIL: [&str; 11] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
@@ -93,8 +93,6 @@ const MUST_FAIL: [&str; 13] = [
     "texcoord_sample",
     "roughness_from_g",
     "mip_chain",
-    "emissive_furnace",
-    "double_count",
     "residency_mb",
     "hot_reload_frames",
 ];
@@ -341,13 +339,16 @@ fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
             "the path tracer does not sample textures",
         ),
         pending("picture_metal", PICTURE, "the specular lobe is not shaded"),
-        measured_ref(
+        pending(
             "emissive_furnace",
-            furnace_error(reader),
             RELATIVE,
-            furnace_outgoing(),
+            "model only; waits on lighting_gpu.rs",
         ),
-        measured("double_count", promoted_change(reader), RELATIVE),
+        pending(
+            "double_count",
+            RELATIVE,
+            "model only; waits on lighting_gpu.rs",
+        ),
         measured("mip_chain", mip_chain_error(reader)?, 0.0),
         pending(
             "bc7_colour_rmse",
@@ -422,12 +423,6 @@ fn pending(name: &'static str, threshold: f32, note: &'static str) -> Metric {
     }
 }
 
-fn measured_ref(name: &'static str, value: f32, threshold: f32, reference: f64) -> Metric {
-    let mut metric = measured(name, value, threshold);
-    metric.reference = Some(reference);
-    metric
-}
-
 fn line(metric: &Metric) -> String {
     match metric.value {
         Some(value) => format!(
@@ -437,12 +432,20 @@ fn line(metric: &Metric) -> String {
             metric.threshold,
             metric.status.text()
         ),
-        None => format!(
-            "{} na {:.6} {}",
-            metric.name,
-            metric.threshold,
-            metric.status.text()
-        ),
+        None => match metric.note {
+            Some(note) => format!(
+                "{} na {:.6} {} {note}",
+                metric.name,
+                metric.threshold,
+                metric.status.text()
+            ),
+            None => format!(
+                "{} na {:.6} {}",
+                metric.name,
+                metric.threshold,
+                metric.status.text()
+            ),
+        },
     }
 }
 
@@ -823,40 +826,19 @@ fn normal_chain_ok(chain: &[Mip]) -> bool {
     normal[0].abs() <= 1.0e-6 && normal[1].abs() <= 1.0e-6 && (normal[2] - 1.0).abs() <= 1.0e-6
 }
 
-fn furnace_outgoing() -> f64 {
-    let albedo = 0.8_f64;
-    let emit = 1.0_f64;
-    emit / (1.0 - albedo)
-}
-
-/// Relative error of the radiosity against `5E`. The broken reader returns `E`.
-fn furnace_error(reader: Reader) -> f32 {
-    let engine = match reader {
-        Reader::Bake => furnace_wall(0.8, 1.0),
-        Reader::Broken => 1.0,
-    };
-    let reference = 5.0_f32;
-    (engine - reference).abs() / reference
-}
-
-/// Relative change when the strip toggles. The broken reader adds it twice.
-fn promoted_change(reader: Reader) -> f32 {
-    let counts_twice = matches!(reader, Reader::Broken);
-    room_double_count(0.8, 1.0, 0.05, counts_twice)
-}
-
 fn mib(n: u64) -> u64 {
     n * 1024 * 1024
 }
 
-/// Resident MiB under the High cap. The broken reader reports the uncapped sum.
+/// Resident MiB under the High cap. The loader's planner drops the finest mip.
+/// The broken reader keeps every level.
 fn residency_mb(reader: Reader) -> f32 {
     let images = [ImageChain {
         levels: vec![mib(300), mib(75), mib(20)],
         rank: 1,
     }];
     let bytes = match reader {
-        Reader::Bake => resident_bytes(&images, mib(256)),
+        Reader::Bake => plan_residency(&images, mib(256)).bytes,
         Reader::Broken => images.iter().flat_map(|image| &image.levels).sum(),
     };
     mib_f32(bytes)
@@ -867,21 +849,9 @@ fn reload_frames(reader: Reader) -> f32 {
     if matches!(reader, Reader::Broken) {
         return 5.0;
     }
-    let mut watch = MaterialWatch::new(1);
-    watch.begin(2);
-    if watch.sample() != 1 {
-        return 99.0;
-    }
-    watch.finish_upload();
-    if watch.sample() != 2 {
-        return 99.0;
-    }
-    watch.frame();
-    if watch.frames_since_flip() == 1 {
-        1.0
-    } else {
-        99.0
-    }
+    let mut reload = HotReload::open(1);
+    reload.upload(2);
+    reload.frames_until_visible(5)
 }
 
 #[derive(Clone, Copy)]
