@@ -600,6 +600,38 @@ pub fn fog_knobs(fog: &FogSettings) -> Vec<Knob> {
         ),
         Knob::switch("gi", "gi", fog.gi),
         Knob::switch("history", "history", fog.history),
+        Knob::number(
+            "grid_width",
+            "grid_width",
+            f64::from(fog.grid_width),
+            (0.0, 256.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "grid_height",
+            "grid_height",
+            f64::from(fog.grid_height),
+            (0.0, 256.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "grid_slices",
+            "grid_slices",
+            f64::from(fog.grid_slices),
+            (0.0, 64.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "samples",
+            "samples",
+            f64::from(fog.samples),
+            (0.0, 691_200.0),
+            1.0,
+            "",
+        ),
         Knob::choice(
             "fog_view",
             "view",
@@ -623,6 +655,10 @@ pub fn apply_fog_knob(settings: &mut FogSettings, name: &str, v: f64) -> Result<
         "phase_g" => settings.set_key("phase_g", &format!("{v}"))?,
         "gi" => settings.set_key("gi", switch)?,
         "history" => settings.set_key("history", switch)?,
+        "grid_width" => settings.set_key("grid_width", &format!("{v:.0}"))?,
+        "grid_height" => settings.set_key("grid_height", &format!("{v:.0}"))?,
+        "grid_slices" => settings.set_key("grid_slices", &format!("{v:.0}"))?,
+        "samples" => settings.set_key("samples", &format!("{v:.0}"))?,
         "fog_view" => {
             let label = FogInspect::NAMES
                 .get(choice_index(v, FogInspect::NAMES.len()))

@@ -1,8 +1,8 @@
 //! Metric harness for fog and volumetric lighting.
 //!
 //! Closed-form fixtures are graded here. Renderer rows become live as each
-//! pass lands. Millisecond rows need a lavapipe window and stay
-//! `NOT-IMPLEMENTED` without one.
+//! pass lands. Millisecond rows time the dispatched grid on lavapipe and stay
+//! `NOT-IMPLEMENTED`: those times are not graded against the RTX 4070 ceilings.
 
 mod analytic;
 mod cli;
@@ -11,7 +11,6 @@ mod feature;
 mod report;
 
 pub use cli::{resolve, Config, HELP};
-pub use device::recorded_fits;
 pub use feature::planted_scores;
 pub use report::{exit_code, format_lines, judge, write_metrics, Metric, Report, Status};
 

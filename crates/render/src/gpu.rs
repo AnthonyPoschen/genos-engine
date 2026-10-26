@@ -604,6 +604,15 @@ impl Renderer {
         self.gpu.froxel_sample_ms(preset, samples)
     }
 
+    /// Lavapipe timestamp of one full froxel grid. Not an RTX 4070 time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device has no timestamp queries or the dispatch fails.
+    pub fn froxel_grid_ms(&mut self, size: crate::fog::GridSize) -> Result<f64, String> {
+        self.gpu.froxel_grid_ms(size)
+    }
+
     /// Bytes of the preset froxel allocation. `doubled` allocates a second copy
     /// and adds it, which is the planted VRAM miss.
     ///

@@ -64,6 +64,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --fog-phase N          Henyey-Greenstein g (GENOS_FOG_PHASE)
   --fog-gi on|off        world-cache read (GENOS_FOG_GI)
   --fog-history on|off   stored only; the pass does not blend (GENOS_FOG_HISTORY)
+  --fog-grid WxHxS       froxel columns, rows, and slices. 0 on an axis keeps
+                         the preset (GENOS_FOG_GRID)
+  --fog-samples N        cell budget. 0 dispatches the whole grid (GENOS_FOG_SAMPLES)
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
                          (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
@@ -1840,8 +1843,11 @@ fn fog_counter_row(app: &App, setting: &str) -> PanelRow {
     let label = match setting {
         "fog_dispatches" => format!("fog_dispatches {}", probe.dispatches),
         "fog_samples" => format!(
-            "fog_samples {} capped {}",
-            probe.samples_used, probe.samples_capped
+            "fog_samples {} grid {}x{}x{}",
+            probe.samples_used,
+            probe.dispatched_width,
+            probe.dispatched_height,
+            probe.dispatched_slices
         ),
         "fog_vram" => format!("fog_vram {}", probe.vram_bytes),
         "fog_ms" => format!("fog_ms {}", probe.pass_ms),
@@ -2198,7 +2204,8 @@ fn options() -> Result<Options, String> {
                 mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
             }
             "--fog" | "--fog-density" | "--fog-height" | "--fog-thickness" | "--fog-albedo"
-            | "--fog-phase" | "--fog-gi" | "--fog-history" => {
+            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid"
+            | "--fog-samples" => {
                 take_fog(&mut fog_cli, &arg, &mut args)?;
             }
             other => {
@@ -2302,6 +2309,8 @@ fn fog_env_from_process(cli: &FogCli) -> Result<FogEnv, String> {
         phase_g: mirror_number(cli.phase_g.is_some(), "GENOS_FOG_PHASE", "phase_g")?,
         gi: mirror_switch(cli.gi.is_some(), "GENOS_FOG_GI")?,
         history: mirror_switch(cli.history.is_some(), "GENOS_FOG_HISTORY")?,
+        grid: mirror_grid(cli.grid.is_some())?,
+        samples: mirror_count(cli.samples.is_some(), "GENOS_FOG_SAMPLES", "samples")?,
     })
 }
 
@@ -2313,6 +2322,32 @@ fn mirror_switch(argument_set: bool, name: &str) -> Result<Option<bool>, String>
         Err(_) => Ok(None),
         Ok(value) if value.trim().is_empty() => Ok(None),
         Ok(value) => genos_scene::parse_fog_switch(&value)
+            .map(Some)
+            .map_err(|err| format!("{name}: {err}")),
+    }
+}
+
+fn mirror_grid(argument_set: bool) -> Result<Option<(u32, u32, u32)>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var("GENOS_FOG_GRID") {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_grid(&value)
+            .map(Some)
+            .map_err(|err| format!("GENOS_FOG_GRID: {err}")),
+    }
+}
+
+fn mirror_count(argument_set: bool, name: &str, key: &str) -> Result<Option<u32>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var(name) {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => genos_scene::parse_fog_count(key, &value)
             .map(Some)
             .map_err(|err| format!("{name}: {err}")),
     }
@@ -2790,6 +2825,10 @@ mod tests {
         assert!(super::USAGE.contains("--fog-density"));
         assert!(super::USAGE.contains("GENOS_FOG"));
         assert!(super::USAGE.contains("GENOS_FOG_HISTORY"));
+        assert!(super::USAGE.contains("--fog-grid"));
+        assert!(super::USAGE.contains("--fog-samples"));
+        assert!(super::USAGE.contains("GENOS_FOG_GRID"));
+        assert!(super::USAGE.contains("GENOS_FOG_SAMPLES"));
     }
 
     #[test]

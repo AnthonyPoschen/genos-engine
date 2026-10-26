@@ -34,8 +34,8 @@ pub use fog_budget::{
     millisecond_ceiling, sample_cap, unfitted_milliseconds, FogProbe, PassCost,
 };
 pub use fog::{
-    apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, frame_fog_view,
-    grid_size, inject, point_at, ray_dir,
+    apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,
+    frame_fog_view, grid_size, inject, point_at, ray_dir,
     integrate_samples, integrate_unshadowed,
     leak_broken,
     leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, sphere_leak_broken,

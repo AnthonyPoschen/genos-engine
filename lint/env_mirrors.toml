@@ -1250,6 +1250,16 @@ kind = "mirror"
 detail = "--fog-history"
 
 [[var]]
+name = "GENOS_FOG_GRID"
+kind = "mirror"
+detail = "--fog-grid"
+
+[[var]]
+name = "GENOS_FOG_SAMPLES"
+kind = "mirror"
+detail = "--fog-samples"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"

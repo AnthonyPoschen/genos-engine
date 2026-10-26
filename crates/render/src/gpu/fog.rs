@@ -9,7 +9,8 @@ use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
 use crate::fog::{
-    default_frame_sun, frame_fog_view, grid_size, normalize, DirectSun, FogColumn, FogView, GridSize,
+    default_frame_sun, dispatched_grid, frame_fog_view, grid_size, normalize, DirectSun, FogColumn,
+    FogView, GridSize,
 };
 use crate::fog_budget::allocation_bytes;
 use crate::fog_pass::{integrate_traced, FogDispatch, FogGpu, FogPointLamp, FOG_SKIP_SHADOW};
@@ -59,7 +60,7 @@ impl Gpu {
             self.froxel_vram = 0;
             return;
         }
-        let size = grid_size(scene.lighting.preset);
+        let size = dispatched_grid(&scene.fog, scene.lighting.preset);
         if size.slices == 0 || size.width == 0 || size.height == 0 {
             self.froxel_frame = None;
             self.froxel_vram = 0;
@@ -439,6 +440,32 @@ impl Gpu {
             pass_ms,
             vram_bytes,
         })
+    }
+
+    /// Timestamp of one inject plus integrate at `size`. Not an RTX 4070 time.
+    pub(super) fn froxel_grid_ms(&mut self, size: GridSize) -> Result<f64, String> {
+        if size.width == 0 || size.height == 0 || size.slices == 0 {
+            return Ok(0.0);
+        }
+        let job = FogDispatch {
+            settings: height_settings(),
+            view: FogView::look([0.0, 1.6, 0.0], 0.0, 0.0, 0.5, 1.0),
+            size,
+            sun: DirectSun {
+                toward: normalize([0.2, 0.9, 0.1]),
+                color: [1.0, 0.95, 0.85],
+            },
+            lamps: Vec::new(),
+            scene: None,
+            flags: 0,
+            stop_slices: 0,
+            read_extinction: false,
+        };
+        let gpu = self.run_fog(&job)?;
+        if self.timestamp_period <= 0.0 {
+            return Err("Vulkan timestamp queries are not available on this device".into());
+        }
+        Ok(gpu.pass_ms)
     }
 
     pub(super) fn froxel_sample_ms(

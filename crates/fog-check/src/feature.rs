@@ -16,7 +16,7 @@ use genos_render::{
     FOG_SKIP_SHADOW, Z_FAR, Z_NEAR,
 };
 
-use crate::device::{allocation_mb, fitted_cost, frame_grade, run, unfitted_ms};
+use crate::device::{allocation_mb, dispatched_ms, frame_grade, run};
 use crate::report::{judge, Metric};
 use crate::Fixture;
 
@@ -41,7 +41,8 @@ const NO_GI: &str =
     "world-cache in-scattering waits for lighting phase 3 (cursor/lighting-p3-capped-refresh)";
 const NO_TIME: &str = "no lavapipe window for a fog timestamp";
 const LAVAPIPE_BYTES: &str = "lavapipe allocation, decimal MB";
-const LAVAPIPE_MS: &str = "lavapipe timestamp, not an RTX 4070 measurement";
+const LAVAPIPE_MS: &str =
+    "lavapipe full-grid timestamp; not graded against the RTX 4070 ceiling";
 const SMEAR_NOTE: &str = "lavapipe GPU readback, High 160x90x48, all 320 yaw frames";
 const SHAFT_NOTE: &str = "lavapipe GPU shadowed columns against the CPU shadowed integral";
 const FLICKER_NOTE: &str = "lavapipe GPU frame N against frame N+1, camera still";
@@ -197,7 +198,7 @@ fn broken_feature() -> Vec<Metric> {
     }
     for (preset, ceiling) in presets.into_iter().zip(time_ceilings) {
         let name = ms_name(preset);
-        rows.push(ms_row(name, unfitted_ms(preset), ceiling));
+        rows.push(ms_row(name, dispatched_ms(preset), ceiling));
     }
     rows
 }
@@ -251,7 +252,7 @@ fn measure_good() -> Good {
         near: Some(media_grade(0, true)),
         sphere: Some(sphere_grade(0)),
         vram: presets.map(|preset| allocation_mb(preset, false)),
-        ms: presets.map(|preset| fitted_cost(preset).map(|cost| cost.milliseconds)),
+        ms: presets.map(dispatched_ms),
         frame_column: frame.0,
         frame_picture: frame.1,
     }
@@ -547,7 +548,14 @@ fn vram_row(name: &'static str, value: Option<f64>, threshold: f64) -> Metric {
 }
 
 fn ms_row(name: &'static str, value: Option<f64>, threshold: f64) -> Metric {
-    optional(name, value, threshold, LAVAPIPE_MS)
+    let note = if value.is_some() { LAVAPIPE_MS } else { NO_TIME };
+    Metric {
+        name,
+        value,
+        threshold,
+        status: judge(false, value, threshold),
+        note,
+    }
 }
 
 fn optional(name: &'static str, value: Option<f64>, threshold: f64, note: &'static str) -> Metric {

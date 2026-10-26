@@ -37,26 +37,36 @@ fn analytic_broken_fails_each_metric() {
     assert!(beer.value.unwrap() > 0.3, "{beer:?}");
 }
 
-/// Lavapipe sits above the 4070 millisecond ceilings once a froxel is dispatched.
-/// Potato stays at 0. A faster device may pass the other three.
-const LAVAPIPE_MS_ROWS: &[&str] = &["froxel_ms_low", "froxel_ms_medium", "froxel_ms_high"];
+const MS_ROWS: &[&str] = &[
+    "froxel_ms_potato",
+    "froxel_ms_low",
+    "froxel_ms_medium",
+    "froxel_ms_high",
+];
 
-fn assert_only_lavapipe_ms_may_fail(report: &genos_fog_check::Report) {
+fn assert_graded_rows_pass(report: &genos_fog_check::Report) {
     let lines = format_lines(report);
     for metric in &report.metrics {
-        if metric.status == Status::Fail {
-            assert!(
-                LAVAPIPE_MS_ROWS.contains(&metric.name),
-                "unexpected fail {}\n{lines}",
-                metric.name
-            );
+        assert_ne!(
+            metric.status,
+            Status::Fail,
+            "{}\n{lines}",
+            metric.name
+        );
+    }
+    assert_eq!(exit_code(report), 0, "{lines}");
+    for name in MS_ROWS {
+        let row = metric(report, name);
+        assert_eq!(row.status, Status::NotImplemented, "{row:?}\n{lines}");
+        assert!(row.value.is_some(), "{row:?}\n{lines}");
+        assert!(!row.note.is_empty(), "{row:?}");
+    }
+    for metric in &report.metrics {
+        if metric.status == Status::NotImplemented && !MS_ROWS.contains(&metric.name) {
+            assert_eq!(metric.value, None, "{}", metric.name);
+            assert!(!metric.note.is_empty(), "{}", metric.name);
         }
     }
-    let failed = report
-        .metrics
-        .iter()
-        .any(|metric| metric.status == Status::Fail);
-    assert_eq!(exit_code(report), i32::from(failed), "{lines}");
 }
 
 #[test]
@@ -64,13 +74,7 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
     let report = evaluate(Suite::Feature, Fixture::Good);
     let lines = format_lines(&report);
     println!("{lines}");
-    for cost in genos_fog_check::recorded_fits() {
-        println!(
-            "fitted samples {} slices {} ms {:.6}",
-            cost.samples, cost.slices, cost.milliseconds
-        );
-    }
-    assert_only_lavapipe_ms_may_fail(&report);
+    assert_graded_rows_pass(&report);
     assert!(report.metrics.len() > 5);
     for name in [
         "froxel_temporal_smear_px",
@@ -87,7 +91,6 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
         "froxel_vram_low_mb",
         "froxel_vram_medium_mb",
         "froxel_vram_high_mb",
-        "froxel_ms_potato",
     ] {
         let row = metric(&report, name);
         assert_eq!(row.status, Status::Pass, "{row:?}\n{lines}");
@@ -98,11 +101,11 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
     let gi = metric(&report, "gi_inscatter_blur_rel");
     assert_eq!(gi.value, None);
     assert_eq!(gi.status, Status::NotImplemented);
-    for metric in &report.metrics {
-        if metric.status == Status::NotImplemented {
-            assert_eq!(metric.value, None, "{}", metric.name);
-            assert!(!metric.note.is_empty(), "{}", metric.name);
-        }
+    let potato = metric(&report, "froxel_ms_potato");
+    assert_eq!(potato.value, Some(0.0));
+    for name in ["froxel_ms_low", "froxel_ms_medium", "froxel_ms_high"] {
+        let row = metric(&report, name);
+        assert!(row.value.unwrap() > 0.0, "{row:?}");
     }
 }
 
@@ -229,10 +232,10 @@ fn a_zero_does_not_pass_a_missing_feature() {
 }
 
 #[test]
-fn all_good_keeps_gi_unimplemented_and_only_ms_rows_may_fail() {
+fn all_good_keeps_gi_and_lavapipe_times_ungraded() {
     let report = evaluate(Suite::All, Fixture::Good);
     println!("{}", format_lines(&report));
-    assert_only_lavapipe_ms_may_fail(&report);
+    assert_graded_rows_pass(&report);
     assert!(report
         .metrics
         .iter()

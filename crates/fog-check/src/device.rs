@@ -6,8 +6,8 @@
 use std::cell::RefCell;
 
 use genos_render::{
-    column_peak, composed_frame_camera, composed_frame_scene, fit_pass, picture_mean_abs,
-    picture_unchanged, FogDispatch, FogGpu, LightingPreset, PassCost, Renderer, World,
+    column_peak, composed_frame_camera, composed_frame_scene, grid_size, picture_mean_abs,
+    picture_unchanged, FogDispatch, FogGpu, LightingPreset, Renderer, World,
 };
 use genos_window::Window;
 
@@ -18,44 +18,19 @@ struct Session {
 
 thread_local! {
     static GPU: RefCell<Option<Session>> = const { RefCell::new(None) };
-    static FITS: RefCell<Vec<PassCost>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Fitted pass time from froxel timestamps. `None` without a lavapipe window.
-pub(crate) fn fitted_cost(preset: LightingPreset) -> Option<PassCost> {
+/// Timestamp of the grid the frame dispatches. Potato is 0 without a window.
+/// A positive grid is `None` when lavapipe is missing. Not an RTX 4070 time.
+pub(crate) fn dispatched_ms(preset: LightingPreset) -> Option<f64> {
+    let size = grid_size(preset);
+    if size.width == 0 || size.height == 0 || size.slices == 0 {
+        return Some(0.0);
+    }
     if !open() {
         return None;
     }
-    let mut missing = false;
-    let cost = fit_pass(preset, |samples| {
-        if let Some(milliseconds) = sample_ms(preset, samples) {
-            milliseconds
-        } else {
-            missing = true;
-            0.0
-        }
-    });
-    if missing {
-        None
-    } else {
-        FITS.with(|slot| slot.borrow_mut().push(cost));
-        Some(cost)
-    }
-}
-
-/// Fitted passes recorded by the last good feature grade, in preset order.
-#[must_use]
-pub fn recorded_fits() -> Vec<PassCost> {
-    FITS.with(|slot| slot.borrow().clone())
-}
-
-/// Full sample cap, not reduced. The broken millisecond row uses this.
-pub(crate) fn unfitted_ms(preset: LightingPreset) -> Option<f64> {
-    if !open() {
-        return None;
-    }
-    let samples = genos_render::sample_cap(preset);
-    sample_ms(preset, samples)
+    with_renderer(|renderer| renderer.froxel_grid_ms(size))
 }
 
 pub(crate) fn allocation_mb(preset: LightingPreset, doubled: bool) -> Option<f64> {
@@ -106,10 +81,6 @@ pub(crate) fn run(job: &FogDispatch) -> Option<FogGpu> {
         return None;
     }
     with_renderer(|renderer| renderer.run_fog(job))
-}
-
-fn sample_ms(preset: LightingPreset, samples: u32) -> Option<f64> {
-    with_renderer(|renderer| renderer.froxel_sample_ms(preset, samples))
 }
 
 fn open() -> bool {

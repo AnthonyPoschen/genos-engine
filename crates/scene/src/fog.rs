@@ -8,9 +8,10 @@
 
 //! Participating-medium settings.
 //!
-//! The froxel reads this value. The grid, the history slot, and the column
-//! target are not settings and are not replicated. History stays off: the
-//! pass does not blend a previous frame. Turning that blend on is an open
+//! The froxel reads this value. Grid width, height, slices, and the sample
+//! count are settings. Zero on each one keeps the lighting preset's full grid.
+//! The history slot and the column target are not settings. History stays off:
+//! the pass does not blend a previous frame. Turning that blend on is an open
 //! decision. `docs/systems/fog-and-volumetric-lighting-design.md`.
 
 use std::fmt::Write as _;
@@ -140,7 +141,9 @@ pub struct FogVolume {
 /// Fog and volumetric lighting. A public [`EngineSettings`] value on the scene.
 ///
 /// Keys: `enabled`, `density`, `height`, `thickness`, `albedo`, `phase_g`,
-/// `gi`, `history`. A `volume` line appends one local volume.
+/// `gi`, `history`, `grid_width`, `grid_height`, `grid_slices`, `samples`.
+/// A `volume` line appends one local volume. Zero grid axes and a zero sample
+/// count keep the preset grid, dispatched in full.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FogSettings {
     /// Off skips the volume pass.
@@ -160,6 +163,15 @@ pub struct FogSettings {
     pub gi: bool,
     /// Reserved. The pass does not blend history, whatever this flag says.
     pub history: bool,
+    /// Froxel columns. Zero keeps the lighting preset.
+    pub grid_width: u32,
+    /// Froxel rows. Zero keeps the lighting preset.
+    pub grid_height: u32,
+    /// Froxel slices. Zero keeps the lighting preset.
+    pub grid_slices: u32,
+    /// In-scatter sample budget. Zero dispatches the whole grid. A later
+    /// auto-tune writes this; a positive value limits the dispatched cells.
+    pub samples: u32,
     /// Debug page. Not part of the replicated text.
     pub inspect: FogInspect,
     /// Local boxes and spheres. They add to the height field.
@@ -185,6 +197,10 @@ pub struct FogCli {
     pub gi: Option<bool>,
     /// `--fog-history on|off`.
     pub history: Option<bool>,
+    /// `--fog-grid WxHxS`. Zero on an axis is not used here; omit the flag.
+    pub grid: Option<(u32, u32, u32)>,
+    /// `--fog-samples`.
+    pub samples: Option<u32>,
 }
 
 impl Default for FogSettings {
@@ -198,6 +214,10 @@ impl Default for FogSettings {
             phase_g: 0.4,
             gi: false,
             history: false,
+            grid_width: 0,
+            grid_height: 0,
+            grid_slices: 0,
+            samples: 0,
             inspect: FogInspect::Extinction,
             volumes: Vec::new(),
         }
@@ -225,6 +245,10 @@ impl FogSettings {
         let _ = writeln!(out, "phase_g={}", num(self.phase_g));
         let _ = writeln!(out, "gi={}", on_off(self.gi));
         let _ = writeln!(out, "history={}", on_off(self.history));
+        let _ = writeln!(out, "grid_width={}", self.grid_width);
+        let _ = writeln!(out, "grid_height={}", self.grid_height);
+        let _ = writeln!(out, "grid_slices={}", self.grid_slices);
+        let _ = writeln!(out, "samples={}", self.samples);
         for volume in &self.volumes {
             let _ = writeln!(
                 out,
@@ -284,6 +308,16 @@ impl FogSettings {
             "phase_g" => self.phase_g = parse_f32("phase_g", value)?.clamp(-0.99, 0.99),
             "gi" => self.gi = parse_on(value)?,
             "history" => self.history = parse_on(value)?,
+            "grid" => {
+                let (width, height, slices) = parse_grid(value)?;
+                self.grid_width = width;
+                self.grid_height = height;
+                self.grid_slices = slices;
+            }
+            "grid_width" => self.grid_width = parse_u32("grid_width", value)?,
+            "grid_height" => self.grid_height = parse_u32("grid_height", value)?,
+            "grid_slices" => self.grid_slices = parse_u32("grid_slices", value)?,
+            "samples" => self.samples = parse_u32("samples", value)?,
             "view" => {
                 self.inspect = FogInspect::parse(value)
                     .ok_or_else(|| format!("view is one of the fog page keys, got {value}"))?;
@@ -320,6 +354,12 @@ impl FogSettings {
             .clamp(-0.99, 0.99);
         out.gi = cli.gi.or(env.gi).unwrap_or(out.gi);
         out.history = cli.history.or(env.history).unwrap_or(out.history);
+        if let Some((width, height, slices)) = cli.grid.or(env.grid) {
+            out.grid_width = width;
+            out.grid_height = height;
+            out.grid_slices = slices;
+        }
+        out.samples = cli.samples.or(env.samples).unwrap_or(out.samples);
         out
     }
 
@@ -383,6 +423,8 @@ pub fn apply_fog_arg(cli: &mut FogCli, arg: &str, next: Option<&str>) -> Result<
         "phase_g" => cli.phase_g = Some(parse_f32(key, value).map_err(bad)?),
         "gi" => cli.gi = Some(parse_on(value).map_err(bad)?),
         "history" => cli.history = Some(parse_on(value).map_err(bad)?),
+        "grid" => cli.grid = Some(parse_grid(value).map_err(bad)?),
+        "samples" => cli.samples = Some(parse_u32(key, value).map_err(bad)?),
         _ => return Err(format!("unknown argument {arg}")),
     }
     Ok(())
@@ -416,6 +458,24 @@ pub fn parse_fog_number(key: &str, value: &str) -> Result<f32, String> {
     parse_f32(key, value)
 }
 
+/// `--fog-grid` as three cell counts.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not `WxHxS`.
+pub fn parse_fog_grid(value: &str) -> Result<(u32, u32, u32), String> {
+    parse_grid(value)
+}
+
+/// A fog count as the process edge parsed it.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not a whole number.
+pub fn parse_fog_count(key: &str, value: &str) -> Result<u32, String> {
+    parse_u32(key, value)
+}
+
 fn fog_dash(arg: &str) -> Option<(&str, Option<&str>)> {
     let rest = arg.strip_prefix("--")?;
     if let Some((name, value)) = rest.split_once('=') {
@@ -435,6 +495,8 @@ fn fog_key(name: &str) -> Option<&'static str> {
         "fog-phase" => Some("phase_g"),
         "fog-gi" => Some("gi"),
         "fog-history" => Some("history"),
+        "fog-grid" => Some("grid"),
+        "fog-samples" => Some("samples"),
         _ => None,
     }
 }
@@ -461,6 +523,10 @@ pub struct FogEnv {
     pub gi: Option<bool>,
     /// `GENOS_FOG_HISTORY`.
     pub history: Option<bool>,
+    /// `GENOS_FOG_GRID`.
+    pub grid: Option<(u32, u32, u32)>,
+    /// `GENOS_FOG_SAMPLES`.
+    pub samples: Option<u32>,
 }
 
 impl EngineSettings for FogSettings {
@@ -509,6 +575,28 @@ fn parse_f32(key: &str, value: &str) -> Result<f32, String> {
         .map_err(|_| format!("{key} is a number, got {value}"))
 }
 
+fn parse_u32(key: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("{key} is a whole number, got {value}"))
+}
+
+fn parse_grid(value: &str) -> Result<(u32, u32, u32), String> {
+    let parts: Vec<&str> = value
+        .split(['x', 'X', ','])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 3 {
+        return Err(format!("grid is WxHxS, got {value}"));
+    }
+    Ok((
+        parse_u32("grid_width", parts[0])?,
+        parse_u32("grid_height", parts[1])?,
+        parse_u32("grid_slices", parts[2])?,
+    ))
+}
+
 fn parse_volume(value: &str) -> Result<FogVolume, String> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     if parts.len() != 11 {
@@ -548,6 +636,10 @@ mod tests {
             phase_g: 0.4,
             gi: false,
             history: false,
+            grid_width: 0,
+            grid_height: 0,
+            grid_slices: 0,
+            samples: 0,
             inspect: FogInspect::Extinction,
             volumes: vec![FogVolume {
                 shape: FogShape::Box,
@@ -576,6 +668,12 @@ mod tests {
         );
         assert!(resolved.enabled);
         assert!((resolved.density - 0.2).abs() < 1.0e-6);
+        settings.set_key("grid", "8x4x2").expect("grid");
+        settings.set_key("samples", "1000").expect("samples");
+        assert_eq!(settings.grid_width, 8);
+        assert_eq!(settings.grid_height, 4);
+        assert_eq!(settings.grid_slices, 2);
+        assert_eq!(settings.samples, 1000);
     }
 
     #[test]
@@ -583,16 +681,25 @@ mod tests {
         let mut cli = FogCli::default();
         apply_fog_arg(&mut cli, "--fog", Some("on")).expect("fog");
         apply_fog_arg(&mut cli, "--fog-density=0.2", None).expect("density");
+        apply_fog_arg(&mut cli, "--fog-grid", Some("16x8x4")).expect("grid");
+        apply_fog_arg(&mut cli, "--fog-samples", Some("32")).expect("samples");
         let resolved = FogSettings::default().resolve(
             &cli,
             &FogEnv {
                 density: Some(9.0),
                 enabled: Some(false),
+                grid: Some((1, 1, 1)),
+                samples: Some(1),
                 ..FogEnv::default()
             },
         );
         assert!(resolved.enabled);
         assert!((resolved.density - 0.2).abs() < 1.0e-6);
+        assert_eq!(
+            (resolved.grid_width, resolved.grid_height, resolved.grid_slices),
+            (16, 8, 4)
+        );
+        assert_eq!(resolved.samples, 32);
         assert!(check_fog_arg("--fog", Some("maybe")).is_err());
         assert!(check_fog_arg("--not-fog", None).is_err());
         let mut page = FogSettings::default();

@@ -1,13 +1,14 @@
-//! Preset grid bytes and the sample cap that keeps a pass under its ceiling.
+//! Preset grid bytes and the sample budget a later auto-tune can write.
 //!
 //! VRAM is `froxels * 16 + columns * 8`, decimal MB. The 16 bytes reserve the
-//! history slot. History is not blended. A pass over its millisecond ceiling
-//! loses samples first, then far slices. Near slices stay. Potato does not
-//! dispatch.
+//! history slot. History is not blended. The frame dispatches
+//! [`dispatched_grid`]: zero axes keep the preset, and a positive `samples`
+//! limits cells. [`fit_pass`] is the CPU helper for that limit. The frame
+//! does not call it. Potato does not dispatch.
 
 use genos_scene::{FogSettings, LightingPreset};
 
-use crate::fog::{grid_size, GridSize};
+use crate::fog::{dispatched_grid, grid_size, GridSize};
 
 /// One preset after the controller has run.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -122,11 +123,23 @@ pub fn allocation_bytes(preset: LightingPreset) -> u64 {
 pub struct FogProbe {
     /// 1 when the pass would run, otherwise 0.
     pub dispatches: u32,
-    /// Sample cap when the pass runs, otherwise 0.
+    /// The `samples` setting. Zero dispatches every cell of the resolved grid.
     pub samples_used: u32,
-    /// Samples dropped by the controller. The frame dispatches the full preset
-    /// grid, so this stays 0. The millisecond gate fits a separate count.
+    /// Cells dropped before the dispatch. The frame dispatches `dispatched_*`,
+    /// so this stays 0.
     pub samples_capped: u32,
+    /// `grid_width` setting. Zero keeps the preset width.
+    pub grid_width: u32,
+    /// `grid_height` setting. Zero keeps the preset height.
+    pub grid_height: u32,
+    /// `grid_slices` setting. Zero keeps the preset slice count.
+    pub grid_slices: u32,
+    /// Columns the frame dispatches.
+    pub dispatched_width: u32,
+    /// Rows the frame dispatches.
+    pub dispatched_height: u32,
+    /// Slices the frame dispatches.
+    pub dispatched_slices: u32,
     /// History accepts. History is off, so this stays 0.
     pub history_accepts: u32,
     /// History rejects. History is off, so this stays 0.
@@ -141,25 +154,22 @@ pub struct FogProbe {
 /// `dispatches` 0 and zero bytes, including when `history` is on.
 #[must_use]
 pub fn fog_probe(fog: &FogSettings, preset: LightingPreset) -> FogProbe {
-    if !fog.dispatches() {
-        return FogProbe {
-            dispatches: 0,
-            samples_used: 0,
-            samples_capped: 0,
-            history_accepts: 0,
-            history_rejects: 0,
-            vram_bytes: 0,
-            pass_ms: 0.0,
-        };
-    }
+    let size = dispatched_grid(fog, preset);
+    let live = fog.dispatches();
     FogProbe {
-        dispatches: 1,
-        samples_used: sample_cap(preset),
+        dispatches: u32::from(live),
+        samples_used: fog.samples,
         samples_capped: 0,
         history_accepts: 0,
         history_rejects: 0,
-        vram_bytes: allocation_bytes(preset),
+        vram_bytes: if live { byte_count(size) } else { 0 },
         pass_ms: 0.0,
+        grid_width: fog.grid_width,
+        grid_height: fog.grid_height,
+        grid_slices: fog.grid_slices,
+        dispatched_width: size.width,
+        dispatched_height: size.height,
+        dispatched_slices: size.slices,
     }
 }
 
@@ -238,7 +248,32 @@ mod tests {
         assert_eq!(probe.history_rejects, 0);
         assert_eq!(probe.pass_ms, 0.0);
         assert_eq!(probe.samples_capped, 0);
-        assert_eq!(probe.samples_used, 4_000);
+        assert_eq!(probe.samples_used, 0);
+        assert_eq!(probe.grid_width, 0);
+        assert_eq!(probe.dispatched_width, 64);
+        assert_eq!(probe.dispatched_height, 36);
+        assert_eq!(probe.dispatched_slices, 24);
         assert_eq!(probe.vram_bytes, 903_168);
+        let tuned = FogSettings {
+            enabled: true,
+            density: 0.08,
+            grid_width: 8,
+            grid_height: 4,
+            grid_slices: 2,
+            samples: 10,
+            ..FogSettings::default()
+        };
+        let tuned_probe = fog_probe(&tuned, LightingPreset::High);
+        assert_eq!(tuned_probe.dispatches, 1);
+        assert_eq!(tuned_probe.samples_used, 10);
+        assert_eq!(
+            (
+                tuned_probe.dispatched_width,
+                tuned_probe.dispatched_height,
+                tuned_probe.dispatched_slices
+            ),
+            (8, 1, 1)
+        );
+        assert!(tuned_probe.vram_bytes < 903_168);
     }
 }

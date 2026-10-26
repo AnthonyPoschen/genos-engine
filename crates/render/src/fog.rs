@@ -184,6 +184,65 @@ pub fn grid_size(preset: LightingPreset) -> GridSize {
     }
 }
 
+/// Grid the frame dispatches. A zero axis keeps the preset. A positive
+/// `samples` limits the cell count. Zero samples keeps that grid whole.
+#[must_use]
+pub fn dispatched_grid(fog: &genos_scene::FogSettings, preset: LightingPreset) -> GridSize {
+    let base = grid_size(preset);
+    let size = GridSize {
+        width: if fog.grid_width > 0 {
+            fog.grid_width
+        } else {
+            base.width
+        },
+        height: if fog.grid_height > 0 {
+            fog.grid_height
+        } else {
+            base.height
+        },
+        slices: if fog.grid_slices > 0 {
+            fog.grid_slices
+        } else {
+            base.slices
+        },
+    };
+    if fog.samples == 0 {
+        size
+    } else {
+        limit_grid(size, fog.samples)
+    }
+}
+
+fn limit_grid(size: GridSize, samples: u32) -> GridSize {
+    let budget = usize::try_from(samples).unwrap_or(0).max(1);
+    if size.cells() <= budget || size.width == 0 || size.height == 0 || size.slices == 0 {
+        return size;
+    }
+    let mut width = size.width.max(1);
+    let mut height = size.height.max(1);
+    let mut slices = size.slices.max(1);
+    let cells = |width: u32, height: u32, slices: u32| {
+        usize::try_from(width)
+            .unwrap_or(1)
+            .saturating_mul(usize::try_from(height).unwrap_or(1))
+            .saturating_mul(usize::try_from(slices).unwrap_or(1))
+    };
+    while cells(width, height, slices) > budget && slices > 1 {
+        slices -= 1;
+    }
+    while cells(width, height, slices) > budget && height > 1 {
+        height -= 1;
+    }
+    while cells(width, height, slices) > budget && width > 1 {
+        width -= 1;
+    }
+    GridSize {
+        width,
+        height,
+        slices,
+    }
+}
+
 /// View-Z of slice edge `index` in `0..=slices`.
 #[must_use]
 pub fn slice_edge(index: u32, slices: u32) -> f32 {
@@ -1362,5 +1421,31 @@ mod tests {
         );
         assert!((kept.inscatter[0] - 1.0).abs() < 1.0e-5);
         assert!(kept.inscatter[2].abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn a_zero_grid_dispatches_the_preset_and_samples_limit_cells() {
+        let full = dispatched_grid(&FogSettings::default(), LightingPreset::Low);
+        assert_eq!((full.width, full.height, full.slices), (64, 36, 24));
+        let set = FogSettings {
+            grid_width: 8,
+            grid_height: 4,
+            grid_slices: 2,
+            ..FogSettings::default()
+        };
+        let sized = dispatched_grid(&set, LightingPreset::Low);
+        assert_eq!((sized.width, sized.height, sized.slices), (8, 4, 2));
+        let limited = dispatched_grid(
+            &FogSettings {
+                samples: 10,
+                ..set
+            },
+            LightingPreset::Low,
+        );
+        assert!(limited.cells() <= 10);
+        assert!(limited.cells() >= 1);
+        assert_eq!(limited.width, 8);
+        let potato = dispatched_grid(&FogSettings::default(), LightingPreset::Potato);
+        assert_eq!(potato.cells(), 0);
     }
 }
