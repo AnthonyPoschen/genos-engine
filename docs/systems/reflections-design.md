@@ -59,11 +59,11 @@ Priority, when a budget is short, is the ADR 0013 score with the near-camera ter
 
 These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/render/shaders/reflections.glsl` is the same formulas. The frame composite (`reflections_frame.comp`) and the water fragment include that file. `reflections_check.comp` compiles it as well and is the lavapipe parity dispatch, not a draw. A reflection pass includes the GLSL file when it calls one of them. Live rows grade the Rust functions against baked numbers. `reflections_check.comp` is also dispatched on lavapipe: every optics output in that buffer matches `genos_math::optics` within `1e-5`. A push constant that forgets to invert the below-water index ratio fails that check.
 
-**Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness reads the reflected colour of its own screen patch (`mirror_reflect`) and the reflected point through the mirror window (`mirror_point_m`).
+**Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness reads the reflected colour of its own screen patch (`mirror_reflect`) and the mirror window (`mirror_point`). Both are presented-frame colour error, with a floor of `2/255`.
 
-**Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water. `water_f0` reads the flat normal-incidence patch. Reflection there is white and transmission is black, so the pixel is the Fresnel weight. The row is `|mean channel − 0.0204|`. `0.0204` is `((1.333 − 1) / (1.333 + 1))²` rounded to four decimals. The band is 0.005, so a glass F0 of 0.04 fails.
+**Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water. `water_f0` reads the flat normal-incidence patch. Reflection there is white and transmission is black, so the pixel is the Fresnel weight. The row is `|mean channel − 0.0204|`. `0.0204` is `((1.333 − 1) / (1.333 + 1))²` rounded to four decimals. The band is `2/255`, so a glass F0 of 0.04 fails.
 
-**Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_transmit` ≤ `1e-4` on the transmission patch, which does not share pixels with the F0 patch or the reflection patch. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
+**Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_transmit` ≤ `2/255` on the transmission patch, which does not share pixels with the F0 patch or the reflection patch. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
 
 **GGX.** `D(h) = α² / (π (dot(n, h)² (α² − 1) + 1)²)` with `α = roughness²` (glTF). The projected integral of `D` is 1 (Walter et al.). Smith masking (Heitz, JCGT 2014) multiplies the lobe. The gate is the NDF integral, not a claim that the full BRDF integrates to 1. Gate: `ggx_energy` ≤ 0.03.
 
@@ -133,7 +133,7 @@ G-buffer channels this design adds, beside the roughness and metallic ADR 0012 a
 p' = origin_b + basis_b * flip_z * basis_a⁻¹ * (p - origin_a)
 ```
 
-`flip_z` reverses the source forward axis so the view looks out of the destination. The harness grades a quarter-turn about Y into a quarter-turn about X, origin B at `(10, 0, 0)`, forward flipped. The expected points are baked by hand. A map that applies `from_basis` instead of its inverse misses them. Gate: `portal_point_m` ≤ `1e-5`.
+`flip_z` reverses the source forward axis so the view looks out of the destination. The harness grades a quarter-turn about Y into a quarter-turn about X, origin B at `(10, 0, 0)`, forward flipped. The expected points are baked by hand. A map that applies `from_basis` instead of its inverse misses them. Gate: `portal_point` ≤ `2/255`.
 
 **Water.** A mesh plus a uniform block of Gerstner components (direction, amplitude, wavelength, speed, steepness). The count is 0 / 4 / 6 / 8 for Potato / Low / Medium / High. Time is the scene clock. A frozen clock does not move the surface. The mesh writes the G-buffer (kind = water) and claims surface-cache texels the way any mesh does, so the room can pick up the water's colour. That replaces the extras-plan rule that water does not write the G-buffer, once this ADR is accepted.
 
@@ -167,9 +167,9 @@ A planar mirror reflects the camera through its plane and draws one view. A port
 | Medium | 2 |
 | High | 3 |
 
-A further view is emitted when the running product of Fresnel reflectances stays at least 0.02 and the cap still has room. `min(request, cap)` is the broken scheduler: a water chain (F ≈ 0.020 then 0.060) emits one view, and clamping a request of 2 to the Medium cap emits two. Gate: `mirror_view_frac` ≤ 0, the max over Potato, Low, Medium, and High of `|emitted − fresnel_budget| / cap`. A cap of 0 passes only when that preset emits 0. The count is `optics::mirror_views`.
+A further view is emitted when the running product of Fresnel reflectances stays at least 0.02 and the cap still has room. `min(request, cap)` is the broken scheduler: a water chain (F ≈ 0.020 then 0.060) emits one view, and clamping a request of 2 to the Medium cap emits two. Gate: `mirror_view_frac` ≤ `2/255`. The presented row is the fraction of the third window that is not albedo. A cap of 0 passes only when that preset emits 0. The count is `optics::mirror_views`.
 
-The oblique clip is Lengyel's construction with a Vulkan depth row. The third row is the scaled plane `c` (scale 1), so the plane sits on clip `z/w = 0`. Lengyel's listing uses scale 2 and `c − row3` because that lands on the OpenGL near plane `z/w = −1`. `sgn(0)` is +1. `portal_leak` is the fraction of six reflected-camera samples where `oblique_draws` disagrees with `plane_in_front`. Gate: `portal_leak` ≤ 0. Drawing every sample is the broken case.
+The oblique clip is Lengyel's construction with a Vulkan depth row. The third row is the scaled plane `c` (scale 1), so the plane sits on clip `z/w = 0`. Lengyel's listing uses scale 2 and `c − row3` because that lands on the OpenGL near plane `z/w = −1`. `sgn(0)` is +1. `portal_leak` is the fraction of mirror pixels that show the plane behind the mirror. Gate: `portal_leak` ≤ `2/255`. Drawing that plane is the broken case.
 
 ## Water
 
@@ -224,12 +224,14 @@ Live and good read the presented frame. The picture is the grade window: a mirro
 
 A channel that matches the quantised trace contributes 0. A one-code miss contributes 0 only when the f64 colour sits within 0.02 of a rounding boundary, which is the f32 store of that shade. Any larger miss is the row's value. The source label is `presented frame`. Nothing is labeled `GPU frame readback`.
 
+Presented-frame thresholds are at least `2/255`. One code is `1/255`. Lavapipe and a device GPU can round a blend to opposite sides of a code, so a limit under two codes flakes. Fresnel (`0.02`), Beer (`0.02`), GGX (`0.03`), and `near_weighted_rel` (`0.03`) are already above that floor and keep those optical limits. `low_reflection_rays` is a dispatch count and stays at 0.
+
 - `mirror_reflect` is the red reflection patch, x 0..32, y 20..44.
 - `fresnel_abs` is the incident-side water at x 8..80, y 0..16, clear of the GGX swatch.
 - `beer_rel` is x 40..80, y 20..44.
 - `water_f0` is the flat patch x 2..14, y 48..58. `snell_transmit` is x 40..72, y 48..58.
 - `fresnel_below_abs` is the transmitted-side water, past the critical angle.
-- `mirror_point_m` is the mirror window. `portal_point_m` is the portal window. `portal_leak` is the fraction of mirror pixels that show the plane behind the mirror.
+- `mirror_point` is the mirror window. `portal_point` is the portal window. `portal_leak` is the fraction of mirror pixels that show the plane behind the mirror.
 - `mirror_view_frac` is the fraction of the third window that is not the surface albedo. Medium's cap is 2, so that window is refused.
 - `ggx_energy` is `|presented[2,2].r − 1|` on the projected-NDF swatch.
 - `near_weighted_rel` is the depth-weighted relative error of the whole frame. Weight is `1 / max(depth, 0.25)` on the tracer depth. Per pixel the error is the mean of `|a − b| / max(|b|, 1e-3)` over the three channels.
@@ -243,24 +245,24 @@ A channel that matches the quantised trace contributes 0. A one-code miss contri
 
 | Metric | Threshold | What it measures |
 |---|---|---|
-| `mirror_reflect` | 1e-4 | max channel error of the reflected-colour patch |
-| `mirror_point_m` | 1e-5 | error of a point reflected through a plane, metres |
+| `mirror_reflect` | 2/255 | max channel error of the reflected-colour patch |
+| `mirror_point` | 2/255 | max channel error of the mirror window |
 | `fresnel_abs` | 0.02 | max absolute error against the Fresnel equations, from air |
 | `fresnel_below_abs` | 0.02 | the same error from under water, including total internal reflection |
-| `water_f0` | 0.005 | `|mean channel − 0.0204|` on the flat normal-incidence patch. Glass F0 0.04 fails |
-| `snell_transmit` | 1e-4 | max channel error of the transmission patch |
+| `water_f0` | 2/255 | `|mean channel − 0.0204|` on the flat normal-incidence patch. Glass F0 0.04 fails |
+| `snell_transmit` | 2/255 | max channel error of the transmission patch |
 | `ggx_energy` | 0.03 | absolute error of the GGX projected integral against 1 |
 | `ssr_depth_rel` | 0.02 | relative depth error of a screen march on a synthetic buffer |
 | `denoise_lag_frames` | 2 | frames after a step until the shaded value reaches 90 % |
-| `mirror_view_frac` | 0 | max `|emitted − fresnel_budget| / cap` across Potato, Low, Medium, High |
-| `portal_leak` | 0 | fraction of plane samples drawn on the wrong side |
-| `portal_point_m` | 1e-5 | error of the portal rigid map, metres |
+| `mirror_view_frac` | 2/255 | fraction of the third window that is not albedo. Medium refuses that window |
+| `portal_leak` | 2/255 | fraction of mirror pixels that show the plane behind the mirror |
+| `portal_point` | 2/255 | max channel error of the portal window |
 | `beer_rel` | 0.02 | relative error of transmittance against `exp(-σ d)` |
 | `shoreline_ratio` | 1e-4 | `|engine − oracle|` of max crest / depth. The oracle's cap literal is 0.75 |
 | `shoreline_deep_ratio` | 1e-4 | `|engine − oracle|` of the same crest at 4 m |
 | `caustic_rel` | 0.05 | mean relative error against flat-water transmittance |
 | `near_weighted_rel` | 0.03 | depth-weighted relative error, weight `1 / max(depth, 0.25)` |
-| `flicker_reversal` | 0.002 | mean size of a frame-to-frame reversal on a still pixel |
+| `flicker_reversal` | 2/255 | max mean-channel change across three still frames |
 | `low_reflection_rays` | 0 | reflection rays the Low preset schedules |
 | `ms_frac` | 1 | max of used milliseconds / cap |
 | `vram_frac` | 1 | max of used megabytes / cap |
@@ -288,7 +290,7 @@ Rhai gates land with `debug/reflections`, on the same line format, under `debug/
 | `idle.rhai` | basic room, no glossy pixels | reflection ms ≤ 0.05, rays = 0 |
 | `glossy.rhai` | a metal sphere and a dielectric sphere, still camera | `near_weighted_rel`, `flicker_reversal`, `fresnel_abs` |
 | `mirror.rhai` | a planar mirror of a lit room | `mirror_reflect` against a second path-traced camera, `mirror_view_frac` |
-| `portal.rhai` | two linked openings, a graph that wants more views than the cap | `portal_leak`, `portal_point_m`, `mirror_view_frac` |
+| `portal.rhai` | two linked openings, a graph that wants more views than the cap | `portal_leak`, `portal_point`, `mirror_view_frac` |
 | `water.rhai` | a pool, a shore, a vertical sun | `snell_transmit`, `beer_rel`, `shoreline_ratio`, `caustic_rel` |
 | `low.rhai` | the pool on the Low preset, software tracer forced | `low_reflection_rays` = 0 |
 
@@ -328,7 +330,7 @@ Overlays, drawn by the debug binary, with no legend paragraph: source colour, re
 | Denoise lags a step | `denoise_lag_frames` |
 | Too many mirror views | `mirror_view_frac`, recursion overlay |
 | Portal draws the back side | `portal_leak` |
-| Portal map jumps | `portal_point_m` |
+| Portal map jumps | `portal_point` |
 | Water absorption | `beer_rel` |
 | Waves at the shore | `shoreline_ratio`, water-depth overlay |
 | Caustic does not match the flux | `caustic_rel`, caustic overlay |
@@ -349,10 +351,10 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 | P0 | This harness and `genos-math` optics. No picture change. | good exits 0, bad exits 1, live passes the module rows and leaves the comparator rows `NOT-IMPLEMENTED` |
 | P1 | `ReflectionSettings`, classify, counters. Picture unchanged. | idle ms ≤ 0.05, rays = 0 |
 | P2 | Screen march and cache fallback. No rays. | `ssr_depth_rel`, `mirror_reflect`, `fresnel_abs` on the spheres |
-| P3 | One spatial filter. | `denoise_lag_frames` ≤ 2, `flicker_reversal` ≤ 0.002 |
+| P3 | One spatial filter. | `denoise_lag_frames` ≤ 2, `flicker_reversal` ≤ 2/255 |
 | P4 | Optional rays. Low stays at 0. | `low_reflection_rays`, `near_weighted_rel` ≤ 0.03, `ms_frac` |
-| P5 | Planar mirrors. | `mirror_view_frac`, `portal_leak`, `mirror_point_m` |
-| P6 | Portals on the same cap. | `portal_point_m`, `portal_leak` |
+| P5 | Planar mirrors. | `mirror_view_frac`, `portal_leak`, `mirror_point` |
+| P6 | Portals on the same cap. | `portal_point`, `portal_leak` |
 | P7 | Water shade, Snell, Beer–Lambert. | `snell_transmit`, `beer_rel` |
 | P8 | Shoreline clamp and Jacobian foam. | `shoreline_ratio` ≤ 1e-4, `shoreline_deep_ratio` ≤ 1e-4 against the wave oracle |
 | P9 | Caustic modes. | `caustic_rel` ≤ 0.05, `vram_frac` ≤ 1 |

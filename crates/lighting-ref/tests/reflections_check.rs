@@ -78,7 +78,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
         "ggx_energy",
         "mirror_view_frac",
         "portal_leak",
-        "portal_point_m",
+        "portal_point",
         "beer_rel",
         "shoreline_ratio",
         "shoreline_deep_ratio",
