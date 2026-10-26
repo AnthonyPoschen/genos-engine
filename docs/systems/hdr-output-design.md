@@ -247,7 +247,7 @@ Low's histogram is 64 bins so the reduction is smaller. The EV100 formula does n
 
 ## 7. VRAM and milliseconds
 
-1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings for the phase that measures them. They are not a timing run. The gate does not score them. A device time is `NOT-IMPLEMENTED` until that phase.
+1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings. `post_ms_device` is the bloom and display timestamp. `post_vram_device` is the post allocation. The 1.50 ms ceiling is the 4070 at 1440p. Lavapipe reports the timestamp and is not that score.
 
 Scene image: `2560 × 1440 × 8 = 28.125 MiB`.
 
@@ -319,8 +319,8 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
 | `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
 | `scrgb_code` | = 2.5375 | `scrgb_code(203)` against the literal 2.5375. The expected code is not recomputed as `203/80` | PASS. An 80-nit paper white (`80/80`) fails |
-| `post_ms_device` | ≤ 1.50 | measured High post milliseconds on the 4070 at 1440p | NOT-IMPLEMENTED |
-| `post_vram_device` | ≤ 96 | measured post allocation, MiB | NOT-IMPLEMENTED |
+| `post_ms_device` | ≤ 1.50 | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. The ceiling is the 4070 at 1440p. Lavapipe reports the timestamp and is not that score | PASS when the query returned a finite time. A missing timestamp fails |
+| `post_vram_device` | ≤ 96 | post buffers in MiB: scene image, host copy, bloom, encode, lattice, params | PASS. The sum is the allocation |
 
 The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
 
@@ -337,7 +337,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 | Failure | Probe |
 |---|---|
 | Exposure hunts on a still scene | `get_hdr` returns `ev100`, `exposure`, and the last 8 scales. `exposure_still` reads those |
-| The histogram fence stalls the frame | `get_hdr` returns `hdr_ms`, the bloom and display timestamp, split from `lighting`, one frame behind. Zero when timestamps are off. The read stays after the fence |
+| The histogram fence stalls the frame | `get_hdr` returns `hdr_ms` and `post_ms_device`, the bloom and display timestamp, one frame behind. Zero when the device has no timestamps. The read stays after the fence. `post_vram_device` is the post buffers in MiB |
 | A sun pixel pins the meter | histogram dump, 256 counts, under `./genos-debug/hdr-output/`. `exposure_ev` |
 | A one-pixel firefly flickers in bloom | bloom level 1 dump. `bloom_firefly` |
 | Bloom pops | `still_pop_share` on subsampled scene luma, reported by `get_hdr`. The gate does not compare two equal flats |
@@ -365,7 +365,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --out DIR
 ```
 
-`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, and `GENOS_HDR_OUT` mirror those arguments. The thirteen design-table keys are the first thirteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` also returns `hdr_ms` and `hdr_vram_bytes` for a later GPU auto-tune. `hdr_ms` is the bloom and display timestamp, one frame behind, and zero when timestamps are off. `hdr_vram_bytes` is the post buffers. `post_ms_device` and `post_vram_device` stay unimplemented: lavapipe time is not a 4070 score.
+`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, and `GENOS_HDR_OUT` mirror those arguments. The thirteen design-table keys are the first thirteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p. Lavapipe time is not that score. The 96 MiB ceiling is the allocation.
 
 Screenshots and the histogram dump go to `./genos-debug/hdr-output/` unless `--out` is set. Nothing is written under `$HOME`.
 

@@ -280,8 +280,8 @@ fn live_metrics() -> Vec<Metric> {
         aces_row(aces2_rec709([1.0, 1.0, 1.0])),
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
-        not_implemented("post_ms_device", DEVICE_MS_MAX, Compare::AtMost),
-        not_implemented("post_vram_device", DEVICE_VRAM_MAX, Compare::AtMost),
+        at_most("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
+        at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
     ]
 }
 
@@ -1080,6 +1080,8 @@ struct Grab {
     exposure_got: f64,
     exposure_want: f64,
     gap_x4: f64,
+    post_ms: f64,
+    post_vram: f64,
 }
 
 fn gpu_grab() -> &'static Grab {
@@ -1121,7 +1123,35 @@ fn capture_gpu() -> Grab {
         Ok(bloom) => bloom,
         Err(err) => return fail_grab(&err),
     };
-    finish_grab(&renderer, pixels, &scene2, bloom_buf)
+    let mut grab = finish_grab(&renderer, pixels, &scene2, bloom_buf);
+    let mut post_ms = renderer.post_ms_device();
+    if post_ms <= 0.0 {
+        if draw_once(&mut window, &mut renderer, &world, &camera).is_err() {
+            return fail_grab("the timestamp frame returned no readback");
+        }
+        post_ms = renderer.post_ms_device();
+    }
+    grab.post_ms = post_ms;
+    grab.post_vram = renderer.post_vram_device();
+    grab
+}
+
+fn gpu_post_ms() -> f64 {
+    let ms = gpu_grab().post_ms;
+    if ms.is_finite() && ms > 0.0 {
+        ms
+    } else {
+        DEVICE_MS_MAX + 1.0
+    }
+}
+
+fn gpu_post_vram() -> f64 {
+    let mib = gpu_grab().post_vram;
+    if mib.is_finite() && mib > 0.0 {
+        mib
+    } else {
+        DEVICE_VRAM_MAX + 1.0
+    }
 }
 
 fn load_hall() -> Result<genos_scene::Scene, String> {
@@ -1299,6 +1329,8 @@ fn fail_grab(why: &str) -> Grab {
         exposure_got: 0.0,
         exposure_want: wanted_exposure(),
         gap_x4: 0.0,
+        post_ms: 0.0,
+        post_vram: DEVICE_VRAM_MAX + 1.0,
     }
 }
 
@@ -1326,6 +1358,8 @@ fn finish_grab(
         exposure_got: renderer.hdr_exposure(),
         exposure_want,
         gap_x4,
+        post_ms: 0.0,
+        post_vram: 0.0,
     }
 }
 

@@ -2219,6 +2219,26 @@ impl Gpu {
         let _ = std::fs::write(dir.join("histogram.txt"), body);
     }
 
+    /// Start (`begin`) or end of bloom plus the display pass.
+    /// The query index stays on the start so the next frame can read the pair.
+    fn stamp_hdr_time(&mut self, slot: usize, begin: bool) {
+        if self.hdr_time_pool.is_null() {
+            self.lighting.hdr_query[slot] = u32::MAX;
+            return;
+        }
+        let base = u32::try_from(slot).unwrap_or(0).saturating_mul(2);
+        let query = if begin { base } else { base.saturating_add(1) };
+        unsafe {
+            if begin {
+                (self.fns.cmd_reset_query)(self.cmd, self.hdr_time_pool, base, 2);
+            }
+            (self.fns.cmd_write_timestamp)(self.cmd, 0x800, self.hdr_time_pool, query);
+        }
+        if begin {
+            self.lighting.hdr_query[slot] = base;
+        }
+    }
+
     fn bloom_active(&self) -> bool {
         let hdr = &self.lighting.hdr;
         !hdr.legacy_bytes && hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0
@@ -3288,6 +3308,7 @@ impl Gpu {
         if agx_display {
             // Compose stored scene radiance. Bloom runs on that image, then this
             // pass replaces the 8-bit picture. The lattice sample is not in the GI shader.
+            self.stamp_hdr_time(slot, true);
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
             if gpu_bloom {
                 self.record_gpu_bloom(w, h);
@@ -3310,6 +3331,7 @@ impl Gpu {
                 );
             }
             self.memory_barrier(0x800, 0x1000 | 0x4000, 0x40, 0x800 | 0x2000);
+            self.stamp_hdr_time(slot, false);
             if let Some(base) = hdr_base {
                 unsafe {
                     (self.fns.cmd_write_timestamp)(
@@ -3319,7 +3341,6 @@ impl Gpu {
                         base.saturating_add(1),
                     );
                 }
-                self.lighting.hdr_query[slot] = base;
             }
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);

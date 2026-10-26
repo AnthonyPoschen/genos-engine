@@ -298,11 +298,15 @@ impl Renderer {
 
     /// GPU milliseconds of bloom plus the display pass on the last collected frame.
     ///
-    /// One frame behind the draw that just returned. Zero when timestamps are off,
-    /// or when the lighting stamp list left no room for the pair. Lavapipe time
-    /// is not a device score.
+    /// One frame behind the draw that just returned. Zero when the device has no
+    /// timestamp queries. Lavapipe time is not a 4070 score.
     pub fn hdr_ms(&self) -> f64 {
         self.gpu.lighting.hdr_ms
+    }
+
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    pub fn post_ms_device(&self) -> f64 {
+        self.hdr_ms()
     }
 
     /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params.
@@ -317,6 +321,11 @@ impl Renderer {
             .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size);
         bytes as f64
+    }
+
+    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    pub fn post_vram_device(&self) -> f64 {
+        self.hdr_vram_bytes() / (1024.0 * 1024.0)
     }
 
     /// The legacy shoulder is the display curve, so a missing scene image may undo it.
@@ -1015,6 +1024,8 @@ struct Gpu {
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
+    /// Two timestamps per frame, bloom start and display end. Independent of `--gpu-times`.
+    hdr_time_pool: Handle,
     /// `--gpu-times N`, or `GENOS_GPU_TIMES` when that argument was omitted:
     /// per-pass GPU times of every frame and light build,
     /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
@@ -1684,6 +1695,7 @@ impl Gpu {
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
+                hdr_time_pool: std::ptr::null_mut(),
                 gpu_times: {
                     let args: Vec<String> = std::env::args().skip(1).collect();
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1832,6 +1844,7 @@ impl Gpu {
             self.fence = self.fences[0];
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
+                self.hdr_time_pool = self.make_query_pool_n(4)?;
                 if self.gpu_times.is_some() {
                     let pool = self.make_query_pool_n(2 * FRAME_STAMPS)?;
                     let lighting_pool = self.make_query_pool_n(2 * LIGHTING_STAMPS)?;
@@ -2416,6 +2429,7 @@ impl Gpu {
             if self.lighting_active() {
                 self.take_unfilled(slot);
             }
+            self.collect_hdr_time(slot);
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -2618,6 +2632,36 @@ impl Gpu {
         }
     }
 
+    /// Bloom and display timestamps from the previous frame. Zero when the device
+    /// has no timestamp queries or the pair was not written.
+    fn collect_hdr_time(&mut self, slot: usize) {
+        let base = self.lighting.hdr_query[slot];
+        if self.hdr_time_pool.is_null() || base == u32::MAX || self.timestamp_period <= 0.0 {
+            self.lighting.hdr_ms = 0.0;
+            return;
+        }
+        let mut raw = [0u64; 2];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.hdr_time_pool,
+                base,
+                2,
+                16,
+                raw.as_mut_ptr() as *mut c_void,
+                8,
+                0x1,
+            )
+        };
+        self.lighting.hdr_ms = if got == 0 {
+            tick_delta(raw[0], raw[1], self.timestamp_bits) as f64
+                * f64::from(self.timestamp_period)
+                / 1.0e6
+        } else {
+            0.0
+        };
+    }
+
     /// Read a finished frame's stamps (its fence has been waited) and print the averages
     /// every `every` frames.
     #[allow(
@@ -2754,30 +2798,6 @@ impl Gpu {
                     }
                 }
             }
-        }
-        let hdr_base = self.lighting.hdr_query[slot];
-        let pool = times.lighting_pool;
-        if hdr_base != u32::MAX && !pool.is_null() {
-            let mut raw = [0u64; 2];
-            let got = unsafe {
-                (self.fns.get_query_results)(
-                    self.device,
-                    pool,
-                    hdr_base,
-                    2,
-                    16,
-                    raw.as_mut_ptr() as *mut c_void,
-                    8,
-                    0x1,
-                )
-            };
-            self.lighting.hdr_ms = if got == 0 {
-                tick_delta(raw[0], raw[1], bits) as f64 * period / 1.0e6
-            } else {
-                0.0
-            };
-        } else {
-            self.lighting.hdr_ms = 0.0;
         }
         if !times.print {
             return;
@@ -5840,6 +5860,9 @@ impl Drop for Gpu {
             }
             if !self.query_pool.is_null() {
                 (self.fns.destroy_query_pool)(self.device, self.query_pool, std::ptr::null());
+            }
+            if !self.hdr_time_pool.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.hdr_time_pool, std::ptr::null());
             }
             if !self.wire_pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.wire_pipeline, std::ptr::null());

@@ -1775,7 +1775,12 @@ fn lighting_report(body: &str, renderer: &Renderer) -> Value {
             ])
         })
         .collect();
-    obj(vec![("text", text(body)), ("passes", list(passes))])
+    obj(vec![
+        ("text", text(body)),
+        ("passes", list(passes)),
+        ("post_ms_device", num(renderer.post_ms_device())),
+        ("post_vram_device", num(renderer.post_vram_device())),
+    ])
 }
 
 fn lighting_value_text(value: &Value) -> Result<String, String> {
@@ -1887,6 +1892,8 @@ fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
         ("scrgb_white", num(renderer.hdr_scrgb_white())),
         ("hdr_ms", num(renderer.hdr_ms())),
         ("hdr_vram_bytes", num(renderer.hdr_vram_bytes())),
+        ("post_ms_device", num(renderer.post_ms_device())),
+        ("post_vram_device", num(renderer.post_vram_device())),
     ])
 }
 
