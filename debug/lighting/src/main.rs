@@ -2723,6 +2723,7 @@ mod tests {
                 "Denoise",
                 "Shadows",
                 "Perf",
+                "Reflections",
                 "Info"
             ]
         );
