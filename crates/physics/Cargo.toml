@@ -12,3 +12,7 @@ genos-math = { path = "../math" }
 
 [dev-dependencies]
 genos-math = { path = "../math" }
+
+[[test]]
+name = "metrics"
+harness = false
