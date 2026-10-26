@@ -273,6 +273,33 @@ impl Renderer {
         self.gpu.lighting.last_ms
     }
 
+    /// `--gi-metrics` is on, so pass times and work counters are recorded.
+    pub fn gi_metrics_enabled(&self) -> bool {
+        self.gpu
+            .gpu_times
+            .as_ref()
+            .is_some_and(|times| times.record)
+    }
+
+    /// Samples since the last clear, oldest first. One frame behind the draw.
+    pub fn gi_metrics_samples(&mut self) -> &[GiSample] {
+        let Some(times) = self.gpu.gpu_times.as_mut() else {
+            return &[];
+        };
+        if !times.record {
+            return &[];
+        }
+        times.samples.make_contiguous()
+    }
+
+    /// Drop the recorded window. The next sample starts at sequence 1.
+    pub fn gi_metrics_clear(&mut self) {
+        if let Some(times) = self.gpu.gpu_times.as_mut() {
+            times.samples.clear();
+            times.recorded = 0;
+        }
+    }
+
     /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
     pub fn lighting_bucket_names() -> &'static [&'static str] {
         &LIGHTING_BUCKET_NAMES
@@ -1524,12 +1551,19 @@ impl Gpu {
                     let args: Vec<String> = std::env::args().skip(1).collect();
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                     let env = std::env::var("GENOS_GPU_TIMES").ok();
-                    gpu_times_every(&refs, env.as_deref())?.map(|every| {
-                        Box::new(GpuTimes {
-                            every,
+                    let metrics_env = std::env::var("GENOS_GI_METRICS").ok();
+                    let every = gpu_times_every(&refs, env.as_deref())?;
+                    let record = gi_metrics_enabled(&refs, metrics_env.as_deref())?;
+                    if every.is_none() && !record {
+                        None
+                    } else {
+                        Some(Box::new(GpuTimes {
+                            every: every.unwrap_or(u32::MAX),
+                            print: every.is_some(),
+                            record,
                             ..GpuTimes::default()
-                        })
-                    })
+                        }))
+                    }
                 },
                 profile_submit: false,
                 stamp_pending: [false; 2],
@@ -1670,7 +1704,7 @@ impl Gpu {
                     }
                 }
             } else if self.gpu_times.take().is_some() {
-                eprintln!("GENOS_GPU_TIMES: this device has no timestamp queries");
+                eprintln!("GI metrics: this device has no timestamp queries");
             }
             let start = Instant::now();
             self.make_scene_buffers()?;
@@ -1917,7 +1951,11 @@ impl Gpu {
                 (self.fns.map_mem)(self.device, self.vertex.memory, 0, bytes, 0, &mut mapped),
                 "map vertices",
             )?;
-            copy_to_mapped(mapped as *mut u8, verts.as_ptr() as *const u8, bytes as usize);
+            copy_to_mapped(
+                mapped as *mut u8,
+                verts.as_ptr() as *const u8,
+                bytes as usize,
+            );
             (self.fns.unmap_mem)(self.device, self.vertex.memory);
         }
         Ok(())
@@ -2277,12 +2315,11 @@ impl Gpu {
         let period = f64::from(self.timestamp_period);
         let antialias = self.antialias;
         // The print below borrows `gpu_times`. Read the diag counters first.
-        let lamp_pick_line = if genos_scene::lighting_env_os("GENOS_LIGHTING_LAMP_PICK_DIAG").is_some()
-            && self
-                .gpu_times
-                .as_ref()
-                .is_some_and(|times| times.written[slot] && times.frames + 1 >= times.every)
-        {
+        let lamp_pick_line = if genos_scene::lighting_env_os("GENOS_LIGHTING_LAMP_PICK_DIAG")
+            .is_some()
+            && self.gpu_times.as_ref().is_some_and(|times| {
+                times.print && times.written[slot] && times.frames.saturating_add(1) >= times.every
+            }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
                 " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
@@ -2290,6 +2327,16 @@ impl Gpu {
             )
         } else {
             String::new()
+        };
+        let stats_words = if self
+            .gpu_times
+            .as_ref()
+            .is_some_and(|times| times.record && times.written[slot])
+        {
+            self.read_stats16(self.lighting.stats[slot].memory)
+                .unwrap_or([0; LIGHTING_STATS_WORDS])
+        } else {
+            [0; LIGHTING_STATS_WORDS]
         };
         let Some(times) = self.gpu_times.as_mut() else {
             return;
@@ -2314,12 +2361,14 @@ impl Gpu {
         if got != 0 {
             return;
         }
-        for (k, w) in raw.windows(2).enumerate() {
-            times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+        if times.print {
+            for (k, w) in raw.windows(2).enumerate() {
+                times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+            }
+            times
+                .frame_spans
+                .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         }
-        times
-            .frame_spans
-            .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
         let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
         let shadow = self.lighting.frame_shadow[slot];
@@ -2341,32 +2390,59 @@ impl Gpu {
                 )
             };
             if got == 0 {
-                if times.lighting_disp.len() != ids.len() {
+                if times.print && times.lighting_disp.len() != ids.len() {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
                 }
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
-                    if pass < times.lighting.len() {
+                    if times.print && pass < times.lighting.len() {
                         times.lighting[pass] += ms;
                     }
-                    times.lighting_disp[i].1 += ms;
+                    if times.print {
+                        times.lighting_disp[i].1 += ms;
+                    }
                     let tag = tags.get(i).copied().unwrap_or(pass as u8) as usize;
                     if tag < BUCKETS {
                         bucket_ms[tag] += ms;
-                        times.lighting_bucket[tag] += ms;
+                        if times.print {
+                            times.lighting_bucket[tag] += ms;
+                        }
                     }
                     if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
                         bucket_ms[B_SHADOWS as usize] += ms;
-                        times.lighting_bucket[B_SHADOWS as usize] += ms;
+                        if times.print {
+                            times.lighting_bucket[B_SHADOWS as usize] += ms;
+                        }
                     }
                 }
-                times.lighting_frames += 1;
-                if prefill {
-                    times.prefill_frames += 1;
+                if times.print {
+                    times.lighting_frames += 1;
+                    if prefill {
+                        times.prefill_frames += 1;
+                    }
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                if times.record {
+                    let world_rays = std::mem::take(&mut times.pending_world_rays);
+                    let world_relit = std::mem::take(&mut times.pending_world_relit);
+                    times.recorded += 1;
+                    let sample = gi_sample_from(
+                        times.recorded,
+                        &bucket_ms,
+                        &stats_words,
+                        world_rays,
+                        world_relit,
+                    );
+                    times.samples.push_back(sample);
+                    while times.samples.len() > GI_SAMPLE_CAP {
+                        times.samples.pop_front();
+                    }
+                }
             }
+        }
+        if !times.print {
+            return;
         }
         times.frames += 1;
         let since = *times.since.get_or_insert_with(std::time::Instant::now);
@@ -2448,12 +2524,24 @@ impl Gpu {
         }
         let pool = times.pool;
         let lighting_pool = times.lighting_pool;
+        let print = times.print;
+        let record = times.record;
+        let samples = std::mem::take(&mut times.samples);
+        let recorded = times.recorded;
+        let pending_world_rays = times.pending_world_rays;
+        let pending_world_relit = times.pending_world_relit;
         **times = GpuTimes {
             pool,
             lighting_pool,
             written: times.written,
             every: times.every,
             placed: true,
+            print,
+            record,
+            samples,
+            recorded,
+            pending_world_rays,
+            pending_world_relit,
             ..GpuTimes::default()
         };
     }
@@ -5620,6 +5708,61 @@ const FRAME_SPANS: usize = FRAME_STAMPS as usize - 1;
 /// Frames averaged per `GENOS_GPU_TIMES` line unless it gives a number.
 const GPU_TIMES_FRAMES: u32 = 120;
 
+/// `Some(true)` when `arg` is `--gi-metrics` and the switch is the next argument.
+/// `Some(false)` when the flag already includes its value. `None` otherwise.
+///
+/// A bare `--gi-metrics` is on and takes no value. `--gi-metrics=on` and
+/// `--gi-metrics=off` carry the switch.
+pub fn gi_metrics_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, _) = gpu_times_dash(arg)?;
+    (name == "gi-metrics").then_some(false)
+}
+
+/// Reject a bad `--gi-metrics` argument.
+pub fn check_gi_metrics_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    parse_gi_metrics_flag(arg, next).map(|_| ())
+}
+
+/// `--gi-metrics` wins. `GENOS_GI_METRICS` applies only when the argument was
+/// omitted. `0`, `off`, `false`, and `no` are off. Anything else set is on.
+fn gi_metrics_enabled(args: &[&str], env: Option<&str>) -> Result<bool, String> {
+    let mut chosen = None;
+    for arg in args {
+        if let Some(on) = parse_gi_metrics_flag(arg, None)? {
+            chosen = Some(on);
+        }
+    }
+    if let Some(on) = chosen {
+        return Ok(on);
+    }
+    Ok(env.is_some_and(gi_metrics_env_on))
+}
+
+fn gi_metrics_env_on(value: &str) -> bool {
+    !matches!(value.trim(), "" | "0" | "off" | "false" | "no")
+}
+
+fn parse_gi_metrics_flag(arg: &str, _next: Option<&str>) -> Result<Option<bool>, String> {
+    let Some((name, inline)) = gpu_times_dash(arg) else {
+        return Ok(None);
+    };
+    if name != "gi-metrics" {
+        return Ok(None);
+    }
+    // A bare `--gi-metrics` is on. It does not take the next argument.
+    let Some(value) = inline else {
+        return Ok(Some(true));
+    };
+    if value.is_empty() {
+        return Err("--gi-metrics needs on or off".into());
+    }
+    match value {
+        "1" | "on" | "true" | "yes" => Ok(Some(true)),
+        "0" | "off" | "false" | "no" => Ok(Some(false)),
+        other => Err(format!("--gi-metrics {other} is not on or off")),
+    }
+}
+
 /// Where a frame timestamp sits. Lighting is its own span so `GPU_MS` does not
 /// fold it into the raster.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -5697,6 +5840,15 @@ struct GpuTimes {
     pool: Handle,
     /// Frames per printed line.
     every: u32,
+    /// `--gpu-times` asked for the `GPU_MS` line. Metrics-only runs stay quiet.
+    print: bool,
+    /// `--gi-metrics` records one [`GiSample`] per collected lighting frame.
+    record: bool,
+    samples: VecDeque<GiSample>,
+    recorded: u64,
+    /// Async cache-round rays and relit entries not yet folded into a sample.
+    pending_world_rays: u32,
+    pending_world_relit: u32,
     /// A slot's stamps hold a frame that has not been read yet.
     written: [bool; 2],
     frames: u32,
@@ -5734,6 +5886,9 @@ struct GpuTimes {
 /// dispatches (the filter runs three rounds).
 const LIGHTING_STAMPS: u32 = 24;
 
+/// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
+const GI_SAMPLE_CAP: usize = 16_384;
+
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
     let mut total = 0.0;
@@ -5759,6 +5914,12 @@ impl Default for GpuTimes {
         Self {
             pool: std::ptr::null_mut(),
             every: GPU_TIMES_FRAMES,
+            print: true,
+            record: false,
+            samples: VecDeque::new(),
+            recorded: 0,
+            pending_world_rays: 0,
+            pending_world_relit: 0,
             written: [false; 2],
             frames: 0,
             frame: [0.0; FRAME_SPANS],
@@ -5843,5 +6004,38 @@ mod gpu_times_launch {
             "--gpu-times needs a value"
         );
         assert!(check_gpu_times_arg("--gpu-times", Some("30")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod gi_metrics_launch {
+    use super::{check_gi_metrics_arg, gi_metrics_enabled, gi_metrics_flag_needs_value};
+
+    #[test]
+    fn the_argument_wins_and_the_env_is_the_mirror() {
+        assert!(!gi_metrics_enabled(&[], None).unwrap());
+        assert!(gi_metrics_enabled(&[], Some("1")).unwrap());
+        assert!(gi_metrics_enabled(&[], Some("on")).unwrap());
+        assert!(!gi_metrics_enabled(&[], Some("0")).unwrap());
+        assert!(!gi_metrics_enabled(&[], Some("off")).unwrap());
+        assert!(!gi_metrics_enabled(&[], Some("false")).unwrap());
+        assert!(gi_metrics_enabled(&["--gi-metrics"], Some("0")).unwrap());
+        assert!(!gi_metrics_enabled(&["--gi-metrics=off"], Some("1")).unwrap());
+        assert!(gi_metrics_enabled(&["--gi-metrics=on"], Some("0")).unwrap());
+        assert!(gi_metrics_enabled(&["--preset", "high", "--gi-metrics"], None).unwrap());
+        assert!(!gi_metrics_enabled(&["--preset", "high"], Some("no")).unwrap());
+        assert!(gi_metrics_flag_needs_value("--gi-metrics").is_some_and(|needs| !needs));
+        assert!(gi_metrics_flag_needs_value("--gi-metrics=on").is_some_and(|needs| !needs));
+        assert!(gi_metrics_flag_needs_value("--preset").is_none());
+        assert_eq!(
+            check_gi_metrics_arg("--gi-metrics=maybe", None).unwrap_err(),
+            "--gi-metrics maybe is not on or off"
+        );
+        assert_eq!(
+            check_gi_metrics_arg("--gi-metrics=", None).unwrap_err(),
+            "--gi-metrics needs on or off"
+        );
+        assert!(check_gi_metrics_arg("--gi-metrics", None).is_ok());
+        assert!(check_gi_metrics_arg("--gi-metrics=off", None).is_ok());
     }
 }

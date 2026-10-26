@@ -7,6 +7,7 @@
 //! tests. See `docs/systems/debugging.md`.
 
 pub mod commands;
+pub mod gi_metrics;
 pub mod image;
 pub mod knobs;
 pub mod png;

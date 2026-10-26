@@ -1,4 +1,7 @@
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! The command catalogue the MCP port lists. Each command takes one JSON object.
 
@@ -63,6 +66,10 @@ pub fn specs() -> Vec<CommandSpec> {
             "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
+        spec(
+            "gi_metrics",
+            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
+        ),
         spec(
             "get_lighting_settings",
             "The lighting settings in force (text form) and the last collected GPU pass: name, milliseconds, and dispatch count. One frame behind the draw that just finished.",

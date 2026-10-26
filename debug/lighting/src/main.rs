@@ -26,7 +26,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use genos_debug::{png, CheckpointPose, Host, Knob, LoadPace};
+use genos_debug::{png, script::ScriptRun, CheckpointPose, Host, Knob, LoadPace};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyBindings};
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
@@ -74,6 +74,13 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          16-ray entry every ceil(16 / N) frames
                          (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --gpu-times N          print GPU_MS every N frames (GENOS_GPU_TIMES)
+  --gi-metrics [on|off]  record GI pass times and work counters.
+                         A bare flag turns recording on. GENOS_GI_METRICS
+                         applies only when this argument is omitted.
+                         Files go to <out>/gi
+  --script FILE          run a rhai script on this binary, then quit.
+                         The scene step is 1/60. genos-stress is not this path
+  --report DIR           script report (default <out>/gi/<script name>)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
@@ -133,6 +140,8 @@ over each 1/rate window (default 4 Hz). It is off until the checkbox, F or F3, M
 or --fps-counter turns it on. GENOS_DEBUG_KEYS replaces those keys.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
+GI metrics go to <out>/gi. frames.csv is the live window. gi_metrics write NAME
+saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv.
 The binary does not write under $HOME.
 ";
 
@@ -197,6 +206,7 @@ struct Options {
     look: Option<[f32; 3]>,
     preset: Option<String>,
     gpu_times: Option<u32>,
+    script: Option<ScriptRun>,
     lighting_debug: bool,
     unfilled: bool,
     full_effort: bool,
@@ -281,11 +291,19 @@ fn run() -> Result<(), String> {
     let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
+    tools.set_gi_dir(opts.out.join("gi"));
     if opts.unfilled {
         tools.set_view(ViewMode::Texels);
     }
-    if opts.frames.is_some() {
+    if opts.frames.is_some() || opts.script.is_some() {
         tools.set_fixed_step(Some(STEP));
+    }
+    let script_thread = opts.script.clone().map(|run| {
+        let _ = writeln!(log, "script {}", run.script.display());
+        genos_debug::script::spawn(run)
+    });
+    if let Some(thread) = &script_thread {
+        let _ = writeln!(log, "script thread {:?}", thread.thread().id());
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
@@ -316,7 +334,8 @@ fn run() -> Result<(), String> {
         let real_dt = clock
             .map(|then| now.saturating_duration_since(then).as_secs_f32())
             .unwrap_or(STEP);
-        let dt = tools.scene_dt(if opts.frames.is_some() {
+        let paced = opts.frames.is_some() || opts.script.is_some();
+        let dt = tools.scene_dt(if paced {
             STEP
         } else {
             real_dt.min(MAX_FRAME_SECONDS)
@@ -541,6 +560,7 @@ fn run() -> Result<(), String> {
                 gpu_ms: None,
             },
         );
+        note_gi(&mut app, &mut renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts
@@ -614,7 +634,10 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
                 return Err(format!("{name}: scene load did not finish"));
             }
         }
-        if skipped.last().is_some_and(|skipped_name| skipped_name == name) {
+        if skipped
+            .last()
+            .is_some_and(|skipped_name| skipped_name == name)
+        {
             continue;
         }
         let check = app.entry().check.clone();
@@ -698,6 +721,10 @@ struct App {
     root: PathBuf,
     log: std::fs::File,
     load: Option<LoadJob>,
+    /// Last GI pass times, milliseconds. Numbers only.
+    gi_passes: String,
+    /// Last GI work counters. Numbers only.
+    gi_work: String,
 }
 
 enum Show {
@@ -716,6 +743,8 @@ impl App {
             root,
             log,
             load: None,
+            gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
+            gi_work: "rays 0 refreshed 0 lamps 0".into(),
         })
     }
 
@@ -1497,8 +1526,26 @@ fn setting_piece(
             dropdown: None,
             checks: Vec::new(),
         })),
-        "menu_wheel" => focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row),
-        "menu_keys" => focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row),
+        "gi_passes" => Some(Piece::Row(PanelRow {
+            label: app.gi_passes.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "gi_work" => Some(Piece::Row(PanelRow {
+            label: app.gi_work.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "menu_wheel" => {
+            focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row)
+        }
+        "menu_keys" => {
+            focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row)
+        }
         name => {
             let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
             if knob.choices == ["off", "on"] {
@@ -1881,6 +1928,27 @@ fn picture_stats(bgra: &[u8]) -> (f32, f32) {
     (mean as f32, var.sqrt() as f32)
 }
 
+/// Perf labels for the last recorded GI sample. Empty until a sample lands.
+fn note_gi(app: &mut App, renderer: &mut Renderer) {
+    let Some(sample) = renderer.gi_metrics_samples().last().copied() else {
+        return;
+    };
+    app.gi_passes = format!(
+        "direct {:.2} atrous {:.2} compose {:.2} trace {:.2} filter {:.2} gather {:.2} resolve {:.2}",
+        sample.direct_ms,
+        sample.atrous_ms,
+        sample.compose_ms,
+        sample.trace_ms,
+        sample.filter_ms,
+        sample.gather_ms,
+        sample.resolve_ms
+    );
+    app.gi_work = format!(
+        "rays {} refreshed {} lamps {}",
+        sample.rays, sample.cache_entries_refreshed, sample.lamps_shaded
+    );
+}
+
 fn apply_intent(opts: &Options) -> Result<(), String> {
     if let Some(preset) = &opts.preset {
         if !PRESETS.contains(&preset.as_str()) {
@@ -1920,6 +1988,8 @@ fn options() -> Result<Options, String> {
     let mut look = None;
     let mut preset = None;
     let mut gpu_times = None;
+    let mut script = None;
+    let mut report = None;
     let mut lighting_debug = false;
     let mut unfilled = false;
     let mut full_effort = false;
@@ -1952,6 +2022,8 @@ fn options() -> Result<Options, String> {
                         .map_err(|_| "bad --gpu-times".to_string())?,
                 );
             }
+            "--script" => script = Some(PathBuf::from(need_arg(&mut args, "--script")?)),
+            "--report" => report = Some(PathBuf::from(need_arg(&mut args, "--report")?)),
             "--lighting-debug" => lighting_debug = true,
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
@@ -2027,6 +2099,14 @@ fn options() -> Result<Options, String> {
                     let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
                     genos_scene::check_lighting_arg(other, next.as_deref())?;
+                } else if genos_render::gi_metrics_flag_needs_value(other).is_some() {
+                    let needs = genos_render::gi_metrics_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_render::check_gi_metrics_arg(other, next.as_deref())?;
+                } else if genos_render::gpu_times_flag_needs_value(other).is_some() {
+                    let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
+                    let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
+                    genos_render::check_gpu_times_arg(other, next.as_deref())?;
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -2037,6 +2117,20 @@ fn options() -> Result<Options, String> {
         headless = true;
         size = (320, 180);
     }
+    if report.is_some() && script.is_none() {
+        return Err("--report needs --script".into());
+    }
+    let script = script.map(|path| {
+        let stem = path.file_stem().map_or_else(
+            || "script".to_string(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        ScriptRun {
+            script: path,
+            report_dir: report.unwrap_or_else(|| out.join("gi").join(stem)),
+            trace: false,
+        }
+    });
     Ok(Options {
         scene: scene.unwrap_or_else(|| "stress".into()),
         checkpoint,
@@ -2044,6 +2138,7 @@ fn options() -> Result<Options, String> {
         look,
         preset,
         gpu_times,
+        script,
         lighting_debug,
         unfilled,
         full_effort,
@@ -2128,6 +2223,7 @@ mod tests {
             look: Some([1.0, 2.0, 1.0]),
             preset: None,
             gpu_times: None,
+            script: None,
             lighting_debug: false,
             unfilled: false,
             full_effort: false,
@@ -2472,6 +2568,8 @@ mod tests {
         let flat = super::panel_rows(&app, ViewMode::Full, &fps);
         assert!(flat.iter().any(|row| row.label == "Bounce count"));
         assert!(flat.iter().any(|row| row.label == "Shadow cell cache"));
+        assert!(flat.iter().any(|row| row.label.starts_with("direct ")));
+        assert!(flat.iter().any(|row| row.label.starts_with("rays ")));
         assert!(flat.iter().all(|row| !row.label.contains("hides.")));
         let folds = super::menu_folds(&menu);
         assert!(folds.iter().all(|fold| fold.key != "-"));
@@ -2507,6 +2605,9 @@ mod tests {
         assert!(super::USAGE.contains("--mcp-port"));
         assert!(super::USAGE.contains("--ui"));
         assert!(super::USAGE.contains("8766"));
+        assert!(super::USAGE.contains("--gi-metrics"));
+        assert!(super::USAGE.contains("--script"));
+        assert!(super::USAGE.contains("GENOS_GI_METRICS"));
     }
 
     #[test]

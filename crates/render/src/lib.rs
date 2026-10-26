@@ -22,10 +22,10 @@ pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
-    check_gpu_times_arg, check_lighting_sun_arg, gpu_times_flag_needs_value,
-    lighting_sun_flag_needs_value, DebugView, DrawProfile, LampPickCounts, LampReport,
-    LightingAtrousStats, LightingSunStats, Renderer, ScreenLine, ScreenRect, SettleStats,
-    UnfilledControl, UnfilledStats, ViewMode,
+    check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
+    gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
+    LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, Renderer, ScreenLine,
+    ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use lighting_regions::{
     Aabb, ChangeRecord, FinishedLight, GiRegionStats, WorldCacheRegion, WorldCacheRegions,

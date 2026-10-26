@@ -1,10 +1,10 @@
 # Bounded lighting: world-cache reuse, fixed budgets, priority scheduling
 
-Status: **accepted** (Anthony, 26 Oct 2026). ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). The first code slice is local change tracking: change records dirty world-cache cells, and the full-frame drop is deleted. Section 5's priority scheduler, and phases P1 and P6 in the table below, are not that slice. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
+Status: **accepted** by Anthony Poschen, 26 Oct 2026. ADR: [0013](../../adr/0013-lighting-invalidation-is-local.md). Phase 0 records pass times and work counters and does not change the picture. The first code slice is local change tracking: change records dirty world-cache cells, and the full-frame drop is deleted. Section 5's priority scheduler, and phases P1 and P6 in the table below, are not that slice. Terms follow [`docs/lighting/GLOSSARY.md`](../../lighting/GLOSSARY.md).
 
 Revision 2 follows Anthony's review of rev 1. Real play spins the camera while things move. A screen-tile design dirties most tiles on a turn, and its "> 40% dirty or camera cut → full recompute" fallback has no upper bound. Rev 2 therefore:
 - moves reuse into the persistent world-space surface light cache;
-- gives every expensive pass a **static per-preset budget**;
+- gives every expensive pass a work-unit budget per preset, scaled later to hold a millisecond cap;
 - deletes the full-frame fallback;
 - replaces the global stillness hash with a priority scheduler;
 - adds LOD and eviction that mirror densification.
@@ -50,7 +50,7 @@ Nothing is replaced. The cache gains a level index (L0 = 25 cm … L4 = 4 m) in 
 
 ## 3. Fixed per-frame budgets
 
-Every expensive pass takes a **work-unit cap** fixed per preset: rays, entry relights, pixel reshades, denoise items. Caps are static numbers, not adaptive targets, so the upper bound is a property of the preset. Work that doesn't fit goes back into the priority queue (§5) and is never run late in a burst. The ms column is the cap on a 4070 at 1080p, to be calibrated in P0 against the 3-run breakdown method.
+Every expensive pass takes a **work-unit cap** per preset: rays, entry relights, pixel reshades, denoise items. Work units are the mechanism. Per-preset millisecond targets are calibrated from phase 0, and a later runtime controller scales the units so the frame holds that millisecond cap. Work that doesn't fit goes back into the priority queue (§5) and is never run late in a burst. The ms column is the cap on a 4070 at 1080p. Phase 0 records the pass times that calibrate it. The controller is not in phase 0.
 
 | budget (per frame) | Potato | Low | Medium | High |
 |---|---|---|---|---|
@@ -65,7 +65,7 @@ Every expensive pass takes a **work-unit cap** fixed per preset: rays, entry rel
 | **lighting cap (4070 1080p, P0 calibrates)** | **1.5 ms** | **4 ms** | **6 ms** | **8 ms** |
 | fixed screen resolve (§4) inside the cap | 0.8 | 1.5 | 2.0 | 2.5 |
 
-The High cap of 8 ms plus about 0.4 ms of non-lighting gives the ~10 ms stress frame target. Older GPUs use the same work units and therefore get a proportionally higher but still static ms. S72S already requires that nothing depends on a minimum ray count.
+The High cap of 8 ms plus about 0.4 ms of non-lighting gives the ~10 ms stress frame target. Older GPUs keep the same millisecond cap. The controller lowers the work units until the frame holds that cap. S72S already requires that nothing depends on a minimum ray count.
 
 **The full-frame fallback is deleted.** Camera cuts, resizes, a 360° spin and a big reveal all run the same capped passes. The pixels they uncover read:
 1. the nearest finished cache level (§6.4);
@@ -87,7 +87,7 @@ The screen keeps only fixed-size work. It does not grow with motion:
 | screen denoise, last iteration only, on the picture | all pixels | 0.2 ms |
 | **fixed resolve total** | | **≈ 2.5 ms**, independent of motion |
 
-Direct light: each frame, pixels get fresh shadow rays up to the budget, picked by priority (§5). A pixel without a fresh ray this frame reads its reservoir's lamp visibility from the **shadow cell cache** (12.5 cm per lamp, S74A, pushed). Pixels inside a mover's shadow volume (§5.2) rank first, which addresses S77B's torn edges: those pixels always get a fresh ray before any reuse.
+Direct light: each frame, pixels get fresh shadow rays up to the budget, picked by priority (§5). A pixel without a fresh ray this frame reads its reservoir's lamp visibility from the **shadow cell cache** (12.5 cm per lamp, S74A, pushed). Low and Medium may reuse that cached shadow. Fresh shadow rays go to near-camera pixels first. Pixels inside a mover's shadow volume (§5.2) still rank for torn edges when the scheduler lands, which addresses S77B: those pixels get a fresh ray before reuse.
 
 ## 5. Priority scheduler (replaces the global stillness hash)
 
@@ -129,7 +129,7 @@ The cache key gains a level L0–L4: 25 cm, 50 cm, 1 m, 2 m, 4 m. The target lev
 - That gives a 3× band plus a time lag, so back-and-forth motion or a spin doesn't thrash. A fine entry seen again inside the lag stays alive at full value.
 
 ### 6.3 Coarse layer that persists
-L3 and L4 entries form the **coarse world layer** with its own memory cap: High 24 MB, Medium 16 MB, Low 8 MB. They are never evicted for distance, only by LRU at the cap, and they keep MSME state. The WRC remains the fallback beyond that.
+L3 and L4 entries form the **coarse world layer**. The cap is fixed per preset: High 24 MB, Medium 16 MB, Low 8 MB. It does not grow with the world. When the layer is full, the farthest coarse entries are evicted, and a distance tie evicts the least recently seen. They keep MSME state. The WRC remains the fallback beyond that.
 
 ### 6.4 Eviction priority and budget
 `e = w_d * distance_level_excess + w_t * frames_since_seen / coarsen_age − w_i * importance`. Importance means emissive, lit by a lamp, or flagged by the game (e.g. a waypoint).
@@ -150,16 +150,25 @@ Coarsening is a **merge**, not a delete. Before a fine entry is retired, its MSM
 
 ## 8. Test scenarios and gates
 
-All run at 1080p on the 4070 in the clean or exclusive window, 3 runs each, with `genos-lighting --headless` on ws6 silent. Per-frame GPU timestamps are needed for p99; P0 adds them. Never genos-stress or 8765.
+All run at 1080p on the 4070 in the clean or exclusive window, 3 runs each, with `genos-lighting --headless` on ws6 silent. Per-frame GPU timestamps are needed for p99; phase 0 records them. Never genos-stress or port 8765.
+
+```sh
+genos-lighting --headless --menu hidden --scene stress --checkpoint hall \
+  --preset high --gi-metrics --size 1920x1080 \
+  --script debug/lighting/scripts/gates/s1-spin.rhai \
+  --report genos-debug/gi/s1-spin
+```
+
+The same command with `s2-strafe.rhai` through `s6-settle.rhai`. `--out DIR` moves the tree. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. Each script writes `<out>/gi/<name>.csv` (p50 and p99) and `<out>/gi/<name>-frames.csv`. The live window is `<out>/gi/frames.csv`. Lavapipe checks that the files appear. The millisecond calibration is the 4070, three runs.
 
 | scenario | script |
 |---|---|
-| S1 spin | 360° yaw in 2 s at hall while lamps (dynamic 50) and boxes move; repeat 3× |
-| S2 strafe | 6 m/s lateral strafe for 3 s through the hall, movers on |
-| S3 approach | walk from 8 m to 0.3 m of a lit wall, then back |
-| S4 many movers | stress scale medium, 64 moving boxes, 16 moving lamps |
-| S5 A→B→A | walk hall → room-a → hall, 5 cycles, 4 s per leg |
-| S6 settle | all motion stops, hold 600 frames |
+| S1 spin | `debug/lighting/scripts/gates/s1-spin.rhai`. 360° yaw in 2 s at hall while lamps (dynamic 50) and boxes move; repeat 3× |
+| S2 strafe | `debug/lighting/scripts/gates/s2-strafe.rhai`. 6 m/s lateral strafe for 3 s through the hall, movers on |
+| S3 approach | `debug/lighting/scripts/gates/s3-approach.rhai`. Walk from 8 m to 0.3 m of the lamp-wall, then back, at 2 m/s |
+| S4 many movers | `debug/lighting/scripts/gates/s4-many-movers.rhai`. Stress scale big is 16 sections × 3 movers = 48 moving boxes, plus 16 moving lamps. The building has no 64-box layout. The script logs that gap |
+| S5 A→B→A | `debug/lighting/scripts/gates/s5-aba.rhai`. Walk hall → room-a → hall, 5 cycles, 4 s per leg |
+| S6 settle | `debug/lighting/scripts/gates/s6-settle.rhai`. Boxes and lamps still, dynamic 0, sun frozen, hold 600 frames |
 
 | gate | pass condition |
 |---|---|
@@ -229,7 +238,7 @@ Low: one reservoir (33 MB), coarse cap 8 MB, ≈ 75 MB total.
 
 | PR | Content | Gate |
 |---|---|---|
-| P0 | Per-frame GPU timestamps (p99), budget counters, change records, priority buffer, debug views, MCP; behaviour unchanged | overhead ≤ 0.1 ms; calibrates the ms caps |
+| P0 | Per-pass GPU timestamps (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) and work counters (rays, cache entries refreshed, lamps shaded), MCP `gi_metrics`, CSV under `./genos-debug/gi/`, and the gate scripts. Behaviour unchanged. Change records, the priority buffer, and the §11 debug views are later phases | overhead measured on the 4070; calibrates the ms caps. Lavapipe checks the wiring only |
 | P1 | Budgeted cache relights + rays with the priority scheduler and starvation slice; global hash becomes debug only | G1 in S1–S2; G2; G5 |
 | P2 | LOD levels, hysteresis, coarse layer, merge-coarsening, parent seeding | G4 (A→B→A), G3 |
 | P3 | Budgeted screen-probe trace, gather and filter | G1 in S1–S4 |
@@ -245,10 +254,12 @@ A phase that misses its gate is dropped under the standing drop rule: research n
 2. *Previous reservoir on Low?* No. Low keeps one reservoir with temporal reuse only (−33 MB); spatial reuse starts at Medium.
 3. *Is a 1/64 verify trickle enough?* It is replaced by the reserved 10% starvation slice per budget, which gives a bounded refresh period (≤ ~30 frames for visible entries on High), plus the MSME inconsistency term.
 
-## 15. New open questions
+## 15. Open questions, decided 26 Oct 2026
 
-1. Caps in work units are static. Should a GPU-tier table also map them to ms targets, or is "same units, slower GPU" acceptable?
-2. Convergence N: are 120 frames (High) and 240 (Low) the right numbers for G2, and 60/120 for G4?
-3. Should game code be able to mark importance (§6.4), e.g. objective areas, through the MCP and settings path?
-4. Coarse-layer cap: is 24 MB on High enough for a big world, or should it scale with world size up to the 200 MB budget?
-5. Is biased direct (shadow cell cache for pixels without a fresh ray) acceptable on Low/Medium, or must every visible pixel get one fresh ray per K frames?
+Anthony Poschen approved these answers. Phase 0 does not implement the controller, the importance API, or the eviction policy. It records the pass times those answers are calibrated from.
+
+1. Work units are the mechanism. Per-preset millisecond targets are calibrated from phase 0. A later runtime controller scales work units to hold the millisecond cap. "Same units, slower GPU" is not the rule.
+2. Convergence stays 120 frames on High and 240 frames on Low for G2. G4 stays 60 frames to 1.5× the floor and 120 frames to the floor.
+3. Yes: an optional game-side importance hint (§6.4), through settings and MCP, in a later phase. Not phase 0.
+4. No: the coarse-layer cap stays fixed per preset (High 24 MB, Medium 16 MB, Low 8 MB). When the layer is full, evict the farthest coarse entries, then the least recently seen on a distance tie.
+5. Yes: cached shadow reuse is allowed on Low and Medium. Near-camera pixels are prioritised for fresh shadow rays. A pixel without a fresh ray reads the shadow cell cache. Mover shadow volumes (§5.2, S77B) still rank for torn edges when the scheduler lands.

@@ -35,6 +35,65 @@ pub(crate) const LIGHTING_BUCKET_NAMES: [&str; BUCKETS] = [
     "shadows",
 ];
 
+/// One frame of GI pass time and work, after the fence for that frame.
+///
+/// `resolve_ms` is gather + filter + compose (the screen resolve). It is not
+/// added on top of those passes. `lighting_ms` leaves out `shadows`, which is
+/// the same dispatches as direct and hit light. `trace_ms` is screen-probe
+/// trace plus cache rays. `direct_ms` is the direct dispatch plus hit light.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GiSample {
+    pub seq: u64,
+    pub direct_ms: f64,
+    pub atrous_ms: f64,
+    pub compose_ms: f64,
+    pub trace_ms: f64,
+    pub filter_ms: f64,
+    pub gather_ms: f64,
+    pub resolve_ms: f64,
+    pub lighting_ms: f64,
+    pub rays: u32,
+    pub cache_entries_refreshed: u32,
+    pub lamps_shaded: u32,
+}
+
+/// Fold bucket milliseconds and the stats words into one [`GiSample`].
+///
+/// `world_rays` and `world_relit` are a finished async cache round that has
+/// not been counted yet. Screen-probe rays are stats word 6. Cache rays are
+/// word 16. Relit entries are word 1. Lamps shaded are the fresh shadow rays
+/// in the lamp-pick diag words (pixels, kept hits, fills, cache rays).
+pub fn gi_sample_from(
+    seq: u64,
+    bucket: &[f64; BUCKETS],
+    stats: &[u32],
+    world_rays: u32,
+    world_relit: u32,
+) -> GiSample {
+    let gather = bucket[B_GATHER as usize];
+    let filter = bucket[B_FILTER as usize];
+    let compose = bucket[B_COMPOSE as usize];
+    let word = |i: usize| stats.get(i).copied().unwrap_or(0);
+    let lamps = word(LAMP_PICK_DIAG_WORD)
+        .saturating_add(word(LAMP_PICK_DIAG_WORD + 1))
+        .saturating_add(word(LAMP_PICK_DIAG_WORD + 2))
+        .saturating_add(word(LAMP_PICK_DIAG_WORD + 3));
+    GiSample {
+        seq,
+        direct_ms: bucket[B_DIRECT as usize] + bucket[B_HIT as usize],
+        atrous_ms: bucket[B_ATROUS as usize],
+        compose_ms: compose,
+        trace_ms: bucket[B_TRACE as usize] + bucket[B_CACHE_RAYS as usize],
+        filter_ms: filter,
+        gather_ms: gather,
+        resolve_ms: gather + filter + compose,
+        lighting_ms: bucket.iter().sum::<f64>() - bucket[B_SHADOWS as usize],
+        rays: word(6).saturating_add(word(16)).saturating_add(world_rays),
+        cache_entries_refreshed: word(1).saturating_add(world_relit),
+        lamps_shaded: lamps,
+    }
+}
+
 /// First stats word of the control block appended after the a-trous counters.
 pub(crate) const LIGHTING_CTRL_WORD: u64 = 124;
 
@@ -655,5 +714,49 @@ mod probe_still_tests {
         let off = pack_lighting_ctrl(&hash_settings, 0, 1.0, 0, 0);
         let off_bits = u32::from_le_bytes(off[0..4].try_into().unwrap());
         assert_eq!(off_bits & CTRL_DENOISE_SCREEN, 0);
+    }
+
+    #[test]
+    fn gi_sample_folds_passes_without_double_counting_shadows() {
+        let mut bucket = [0.0; BUCKETS];
+        bucket[B_DIRECT as usize] = 1.0;
+        bucket[B_HIT as usize] = 0.25;
+        bucket[B_SHADOWS as usize] = 1.25;
+        bucket[B_ATROUS as usize] = 2.0;
+        bucket[B_COMPOSE as usize] = 0.4;
+        bucket[B_TRACE as usize] = 0.3;
+        bucket[B_CACHE_RAYS as usize] = 0.2;
+        bucket[B_FILTER as usize] = 0.1;
+        bucket[B_GATHER as usize] = 0.05;
+        bucket[B_CACHE as usize] = 0.07;
+        let mut stats = vec![0u32; LAMP_PICK_DIAG_WORD + 4];
+        stats[1] = 7;
+        stats[6] = 100;
+        stats[16] = 50;
+        stats[LAMP_PICK_DIAG_WORD] = 3;
+        stats[LAMP_PICK_DIAG_WORD + 1] = 4;
+        stats[LAMP_PICK_DIAG_WORD + 2] = 5;
+        stats[LAMP_PICK_DIAG_WORD + 3] = 6;
+        let sample = gi_sample_from(4, &bucket, &stats, 10, 2);
+        assert!((sample.direct_ms - 1.25).abs() < 1e-9);
+        assert!((sample.atrous_ms - 2.0).abs() < 1e-9);
+        assert!((sample.compose_ms - 0.4).abs() < 1e-9);
+        assert!((sample.trace_ms - 0.5).abs() < 1e-9);
+        assert!((sample.filter_ms - 0.1).abs() < 1e-9);
+        assert!((sample.gather_ms - 0.05).abs() < 1e-9);
+        assert!((sample.resolve_ms - 0.55).abs() < 1e-9);
+        let parts = sample.direct_ms
+            + sample.atrous_ms
+            + sample.trace_ms
+            + sample.gather_ms
+            + sample.filter_ms
+            + sample.compose_ms
+            + bucket[B_CACHE as usize];
+        assert!((sample.lighting_ms - parts).abs() < 1e-9);
+        assert!((sample.lighting_ms - (parts + sample.resolve_ms)).abs() > 0.1);
+        assert_eq!(sample.rays, 160);
+        assert_eq!(sample.cache_entries_refreshed, 9);
+        assert_eq!(sample.lamps_shaded, 18);
+        assert_eq!(sample.seq, 4);
     }
 }
