@@ -39,7 +39,7 @@ Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode
 **Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
 Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
-### Display (proposed, ADR 0015)
+### Display (accepted, ADR 0015)
 
 **Scene-referred image**: Rec.709 linear radiance compose writes, before exposure, bloom, and the display transform. A value above 1 is in range.
 Role: OUT · Literature: scene-referred colour (ACES, Frostbite) · More detail: [../systems/hdr-output-design.md](../systems/hdr-output-design.md)

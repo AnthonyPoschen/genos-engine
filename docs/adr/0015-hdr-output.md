@@ -1,6 +1,6 @@
 # 0015: HDR output stays scene-referred until the display
 
-Status: **proposed** (Anthony Poschen, 2026-10-26). Design: [`docs/systems/hdr-output-design.md`](../systems/hdr-output-design.md).
+Status: **accepted** (Engine bot, 2026-10-26). Anthony Poschen delegated design approval to the Engine bot. Design: [`docs/systems/hdr-output-design.md`](../systems/hdr-output-design.md).
 
 ## Context
 

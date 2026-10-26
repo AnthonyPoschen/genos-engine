@@ -1,6 +1,6 @@
 # HDR output and bloom
 
-Status: **proposed**. ADR: [0015](../adr/0015-hdr-output.md). Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The CPU references live in `crates/render/src/hdr_output.rs`. They are not dispatched. A later phase edits [Renderer](renderer.md) in the same change that changes a game use or a limit.
+Status: **accepted** (Engine bot, 2026-10-26). Anthony Poschen delegated design approval to the Engine bot. ADR: [0015](../adr/0015-hdr-output.md). Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The CPU references live in `crates/render/src/hdr_output.rs`. They are not dispatched. A later phase edits [Renderer](renderer.md) in the same change that changes a game use or a limit.
 
 The metric gate is `crates/render/tests/hdr_output_gate.rs`. It calls those references. Where the pass does not call one yet, the live line is `NOT-IMPLEMENTED`. It does not invent a picture.
 
