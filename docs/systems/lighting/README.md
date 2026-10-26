@@ -259,6 +259,16 @@ Older entries below quote the names of their time (`GENOS_GI2_*`); read them thr
 
 Research notes with the cvar values: `/workspace/research/lumen-digest.md` (agent box).
 
+## GI pass times
+
+`--gi-metrics` records one sample per collected lighting frame: pass times `direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`, and `lighting`, plus work counters `rays`, `cache entries refreshed`, and `lamps shaded`. `resolve` is gather + filter + compose and is not added again into `lighting`. Files land in `<out>/gi/`. MCP `gi_metrics` reads the window and writes p50 and p99. `GENOS_GI_METRICS` applies only when `--gi-metrics` was omitted. The picture path is unchanged. The lamp-pick diag bit, which only counts fresh shadow rays, is set only while metrics are on. The gate scripts are `debug/lighting/scripts/gates/`. The inventory is [the debug standard](debug-standard.md).
+
+- Replicated state: none. The samples stay on the machine that drew the frame.
+- Authority: the machine that shades the picture.
+- Prediction / rollback: none.
+- Determinism: the counters follow the frame inputs. The timestamps are device-dependent.
+- Headless server: a server that does not shade leaves the counters at zero.
+
 ## Settings
 
 Presets, per-feature toggles, quality knobs, the scene text, Rhai, the debug menu, the launch arguments (`--preset`, `--bounces`, `--ambient`, `--time-of-day`), and the MCP commands are in [toggles.md](toggles.md). The struct is `LightingSettings` on the scene. High is the tuned path this document describes. A feature that is off skips its passes and its buffers.

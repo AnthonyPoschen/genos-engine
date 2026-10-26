@@ -279,6 +279,10 @@ pub struct Tools {
     overlay: Vec<ScreenRect>,
     quit: Option<i32>,
     out_dir: PathBuf,
+    /// `<out>/gi`. Live `frames.csv` and a written scenario summary land here.
+    gi_dir: PathBuf,
+    /// Last sample sequence already appended to `frames.csv`.
+    gi_flushed: u64,
     base_lights: usize,
 }
 
@@ -314,6 +318,8 @@ impl Tools {
             overlay: Vec::new(),
             quit: None,
             out_dir: genos_mcp::discovery_dir().join("shots"),
+            gi_dir: PathBuf::from("genos-debug").join("gi"),
+            gi_flushed: 0,
             base_lights: 0,
         }
     }
@@ -321,6 +327,11 @@ impl Tools {
     /// Where captures without a path go.
     pub fn set_out_dir(&mut self, dir: PathBuf) {
         self.out_dir = dir;
+    }
+
+    /// Where GI pass times and work counters are written. Default `genos-debug/gi`.
+    pub fn set_gi_dir(&mut self, dir: PathBuf) {
+        self.gi_dir = dir;
     }
 
     /// The view the next frame shows, unless a capture job asks for another.
@@ -608,6 +619,29 @@ impl Tools {
         for (index, result) in done.into_iter().rev() {
             let running = self.jobs.remove(index);
             genos_mcp::command::reply(running.id, result);
+        }
+        self.flush_gi_frames(renderer);
+    }
+
+    /// Append samples the renderer recorded after the last flush.
+    ///
+    /// The GPU timestamps are already in the sample. This write does not
+    /// change that frame's pass time.
+    fn flush_gi_frames(&mut self, renderer: &mut Renderer) {
+        if !renderer.gi_metrics_enabled() {
+            return;
+        }
+        let fresh: Vec<_> = renderer
+            .gi_metrics_samples()
+            .iter()
+            .filter(|sample| sample.seq > self.gi_flushed)
+            .copied()
+            .collect();
+        if let Some(last) = fresh.last() {
+            self.gi_flushed = last.seq;
+        }
+        if let Err(err) = crate::gi_metrics::append_frames(&self.gi_dir, &fresh) {
+            eprintln!("genos-debug: {err}");
         }
     }
 
@@ -1188,6 +1222,30 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "gi_metrics" => {
+                if !ctx.renderer.gi_metrics_enabled() {
+                    return Err(crate::gi_metrics::disabled_error());
+                }
+                if args.bool("reset")? == Some(true) {
+                    ctx.renderer.gi_metrics_clear();
+                    self.gi_flushed = 0;
+                    crate::gi_metrics::truncate_frames(&self.gi_dir)?;
+                }
+                let name = args.str("write")?;
+                let samples = ctx.renderer.gi_metrics_samples().to_vec();
+                if let Some(name) = name {
+                    if samples.is_empty() {
+                        return Err("GI metrics window is empty".into());
+                    }
+                    let path = crate::gi_metrics::write_summary(&self.gi_dir, &name, &samples)?;
+                    reply(crate::gi_metrics::with_path(
+                        crate::gi_metrics::report_value(true, &samples),
+                        &path,
+                    ))
+                } else {
+                    reply(crate::gi_metrics::report_value(true, &samples))
+                }
+            }
             "get_lighting_settings" => reply(lighting_report(
                 &ctx.renderer.lighting_settings().to_text(),
                 ctx.renderer,
@@ -1242,9 +1300,7 @@ impl Tools {
                 apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
                 reply(event_loop_value(&ctx.host.scene().event_loop))
             }
-            "get_menu_settings" => {
-                reply(menu_value(&ctx.host.scene().menu.effective()))
-            }
+            "get_menu_settings" => reply(menu_value(&ctx.host.scene().menu.effective())),
             "set_menu_settings" => {
                 apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
                 reply(menu_value(&ctx.host.scene().menu.effective()))
@@ -1253,13 +1309,7 @@ impl Tools {
                 self.quit = Some(args.f64("code")?.unwrap_or(0.0) as i32);
                 reply(obj(vec![("quit", Value::Bool(true))]))
             }
-            "list_scenes" => reply(list(
-                ctx.host
-                    .list_scenes()
-                    .into_iter()
-                    .map(text)
-                    .collect(),
-            )),
+            "list_scenes" => reply(list(ctx.host.list_scenes().into_iter().map(text).collect())),
             "load_scene" => {
                 let name = args.str("name")?.ok_or("load_scene needs name")?;
                 let checkpoint = args.str("checkpoint")?.unwrap_or_default();
@@ -1273,11 +1323,7 @@ impl Tools {
                 }
             }
             "list_checkpoints" => reply(list(
-                ctx.host
-                    .list_checkpoints()
-                    .into_iter()
-                    .map(text)
-                    .collect(),
+                ctx.host.list_checkpoints().into_iter().map(text).collect(),
             )),
             "jump_checkpoint" => {
                 let name = args.str("name")?.ok_or("jump_checkpoint needs name")?;
@@ -1340,11 +1386,7 @@ impl Tools {
         }
     }
 
-    fn scene_load_reply(
-        ctx: &mut Ctx,
-        name: &str,
-        checkpoint: &str,
-    ) -> Result<Value, String> {
+    fn scene_load_reply(ctx: &mut Ctx, name: &str, checkpoint: &str) -> Result<Value, String> {
         let checkpoint = if checkpoint.is_empty() {
             ctx.host
                 .list_checkpoints()
@@ -1373,7 +1415,7 @@ impl Tools {
         );
     }
 
-fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
+    fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
         if args.bool("solo_off")? == Some(true) {
             self.solo = None;
         }
@@ -1900,7 +1942,11 @@ fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), 
         let text = if let Some(text) = value.as_str() {
             text.to_string()
         } else if let Some(on) = value.as_bool() {
-            if on { "1".into() } else { "0".into() }
+            if on {
+                "1".into()
+            } else {
+                "0".into()
+            }
         } else {
             return Err(format!("debug setting {key} is a string or a bool"));
         };
@@ -1957,24 +2003,34 @@ mod tests {
             .shot_from(&Args(&genos_mcp::json::object([])), false)
             .unwrap();
         assert!(!plain.ui);
-        assert!(tools
-            .shot_from(&Args(&genos_mcp::json::object([])), true)
-            .unwrap()
-            .ui);
+        assert!(
+            tools
+                .shot_from(&Args(&genos_mcp::json::object([])), true)
+                .unwrap()
+                .ui
+        );
         let asked = tools
             .shot_from(
-                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(true))])),
+                &Args(&genos_mcp::json::object([(
+                    "ui",
+                    genos_mcp::json::bool(true),
+                )])),
                 false,
             )
             .unwrap();
         assert!(asked.ui);
-        assert!(!tools
-            .shot_from(
-                &Args(&genos_mcp::json::object([("ui", genos_mcp::json::bool(false))])),
-                true,
-            )
-            .unwrap()
-            .ui);
+        assert!(
+            !tools
+                .shot_from(
+                    &Args(&genos_mcp::json::object([(
+                        "ui",
+                        genos_mcp::json::bool(false)
+                    )])),
+                    true,
+                )
+                .unwrap()
+                .ui
+        );
         assert!(Tools::shot_ui(
             &Args(&genos_mcp::json::object([(
                 "ui",

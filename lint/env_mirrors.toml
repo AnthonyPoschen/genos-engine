@@ -28,6 +28,11 @@ kind = "mirror"
 detail = "--gpu-times"
 
 [[var]]
+name = "GENOS_GI_METRICS"
+kind = "mirror"
+detail = "--gi-metrics"
+
+[[var]]
 name = "GENOS_LIGHTING_AMBIENT"
 kind = "mirror"
 detail = "--ambient"
