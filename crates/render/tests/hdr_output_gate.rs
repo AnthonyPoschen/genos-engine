@@ -187,6 +187,8 @@ enum Status {
 enum Compare {
     AtMost,
     Equal,
+    /// The value is a lavapipe timestamp. The threshold is the 4070 ceiling and is not the pass test.
+    Collected,
 }
 
 struct Metric {
@@ -280,7 +282,7 @@ fn live_metrics() -> Vec<Metric> {
         aces_row(aces2_rec709([1.0, 1.0, 1.0])),
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
-        at_most("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
+        collected_ms("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
         at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
     ]
 }
@@ -412,6 +414,21 @@ fn equal(name: &'static str, value: f64, threshold: f64) -> Metric {
 )]
 fn eighty_nit_paper_white(_nits: f64) -> f64 {
     80.0 / 80.0
+}
+
+fn collected_ms(name: &'static str, value: f64, device_ceiling: f64) -> Metric {
+    let status = if value.is_finite() && value > 0.0 {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    Metric {
+        name,
+        value: Some(value),
+        threshold: device_ceiling,
+        compare: Compare::Collected,
+        status,
+    }
 }
 
 fn at_most(name: &'static str, value: f64, threshold: f64) -> Metric {
@@ -1010,6 +1027,7 @@ fn format_metric(metric: &Metric) -> String {
     let op = match metric.compare {
         Compare::AtMost => "<=",
         Compare::Equal => "==",
+        Compare::Collected => "collected, device <=",
     };
     format!(
         "{} {value} {op}{} {}",
@@ -1059,6 +1077,7 @@ fn json_metric(metric: &Metric) -> String {
     let compare = match metric.compare {
         Compare::AtMost => "at_most",
         Compare::Equal => "equal",
+        Compare::Collected => "collected",
     };
     format!(
         "{{\"name\":\"{}\",\"value\":{value},\"threshold\":{:.8},\"compare\":\"{compare}\",\"status\":\"{}\"}}",

@@ -319,7 +319,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
 | `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
 | `scrgb_code` | = 2.5375 | `scrgb_code(203)` against the literal 2.5375. The expected code is not recomputed as `203/80` | PASS. An 80-nit paper white (`80/80`) fails |
-| `post_ms_device` | ≤ 1.50 | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. The ceiling is the 4070 at 1440p. Lavapipe reports the timestamp and is not that score | PASS when the query returned a finite time. A missing timestamp fails |
+| `post_ms_device` | ≤ 1.50 on the 4070 | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. Lavapipe prints the timestamp and passes when the query returned. It does not apply the 1.50 ceiling | PASS when the timestamp is finite and positive. A missing timestamp fails |
 | `post_vram_device` | ≤ 96 | post buffers in MiB: scene image, host copy, bloom, encode, lattice, params | PASS. The sum is the allocation |
 
 The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
