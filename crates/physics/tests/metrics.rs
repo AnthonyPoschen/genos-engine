@@ -1,13 +1,14 @@
 //! Measures CCD metrics by running `genos_physics::step`.
 //!
-//! One scene: two ships, a bullet, and a finite wall. `good` leaves protection
-//! on and uses speeds the discrete solver can still stop. `bad` is that scene
-//! with protection off, at 3 000 m/s. `step` has no CCD, so the fast run misses
-//! the obstacles. `tunnel_count` is then `FAIL`. That is the baseline.
+//! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection.
+//! `step` has no CCD flag, so that run still tunnels and `tunnel_count` is
+//! `FAIL`. `bad` is protection off and fails the same way. `discrete` is the
+//! 30 m/s run, scored on free-flight steps. `loss` scores that run from start
+//! to end, so the inelastic drop fails `|energy_drift| <= 0.01`.
 //!
 //! ```text
 //! --out DIR
-//! --fixture proof|good|bad
+//! --fixture proof|good|bad|discrete|loss
 //! ```
 //!
 //! `--out` defaults to `./genos-debug/physics`. `GENOS_PHYSICS_METRICS_OUT`
@@ -33,6 +34,7 @@ const PENETRATION_LIMIT: f64 = 0.01;
 enum Bound {
     AtMost,
     AtLeast,
+    AbsAtMost,
 }
 
 struct Spec {
@@ -57,9 +59,9 @@ const METRICS: &[Spec] = &[
     },
     Spec {
         name: "energy_drift",
-        bound: Bound::AtMost,
+        bound: Bound::AbsAtMost,
         threshold: 0.01,
-        threshold_text: "<=0.01",
+        threshold_text: "|drift|<=0.01",
     },
     Spec {
         name: "determinism_hash_match",
@@ -96,6 +98,8 @@ enum Fixture {
     Proof,
     Good,
     Bad,
+    Discrete,
+    Loss,
 }
 
 impl Fixture {
@@ -104,8 +108,21 @@ impl Fixture {
             Self::Proof => "proof",
             Self::Good => "good",
             Self::Bad => "bad",
+            Self::Discrete => "discrete",
+            Self::Loss => "loss",
         }
     }
+}
+
+/// How a fixture is built. `good` and `bad` share the 3 000 m/s speeds.
+#[derive(Clone, Copy)]
+struct Setup {
+    ship_speed: f32,
+    bullet_speed: f32,
+    protect: bool,
+    /// Score `(E_end - E_start)`, which keeps the inelastic drop.
+    /// Otherwise sum only the steps whose velocity change is gravity.
+    full_energy: bool,
 }
 
 struct Scene {
@@ -126,6 +143,7 @@ struct Reading {
     ship_speed: f32,
     bullet_speed: f32,
     protect: bool,
+    full_energy: bool,
 }
 
 fn main() {
@@ -154,8 +172,8 @@ fn run() -> Result<i32, String> {
     }
     match args.fixture {
         Fixture::Proof => prove(&args.out),
-        Fixture::Good | Fixture::Bad => {
-            let reading = measure(matches!(args.fixture, Fixture::Good))?;
+        Fixture::Good | Fixture::Bad | Fixture::Discrete | Fixture::Loss => {
+            let reading = measure(setup(&args.fixture)?)?;
             let rows = judge_all(&reading);
             write_report(&args.out, args.fixture.name(), &reading, &rows)?;
             print_scene(&reading);
@@ -291,7 +309,39 @@ fn parse_fixture(text: &str) -> Result<Fixture, String> {
         "proof" => Ok(Fixture::Proof),
         "good" => Ok(Fixture::Good),
         "bad" => Ok(Fixture::Bad),
+        "discrete" => Ok(Fixture::Discrete),
+        "loss" => Ok(Fixture::Loss),
         other => Err(format!("unknown fixture {other}")),
+    }
+}
+
+fn setup(fixture: &Fixture) -> Result<Setup, String> {
+    match fixture {
+        Fixture::Good => Ok(Setup {
+            ship_speed: TUNNEL_SPEED,
+            bullet_speed: TUNNEL_SPEED,
+            protect: true,
+            full_energy: false,
+        }),
+        Fixture::Bad => Ok(Setup {
+            ship_speed: TUNNEL_SPEED,
+            bullet_speed: TUNNEL_SPEED,
+            protect: false,
+            full_energy: false,
+        }),
+        Fixture::Discrete => Ok(Setup {
+            ship_speed: CATCH_SHIP,
+            bullet_speed: CATCH_BULLET,
+            protect: false,
+            full_energy: false,
+        }),
+        Fixture::Loss => Ok(Setup {
+            ship_speed: CATCH_SHIP,
+            bullet_speed: CATCH_BULLET,
+            protect: false,
+            full_energy: true,
+        }),
+        Fixture::Proof => Err("proof does not score itself".into()),
     }
 }
 
@@ -301,19 +351,22 @@ fn print_help() {
 --out DIR
     JSON directory. Default ./genos-debug/physics.
     GENOS_PHYSICS_METRICS_OUT applies only when --out is omitted.
---fixture proof|good|bad
-    proof runs good and bad. Default proof.
+--fixture proof|good|bad|discrete|loss
+    proof runs all four. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
-good builds the scene with protection on (ships {CATCH_SHIP} m/s, bullet {CATCH_BULLET} m/s).
-bad is the same scene with protection off (ships and bullet {TUNNEL_SPEED} m/s).
+good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
+    good asks for protection. step has no CCD flag, so good still tunnels.
+discrete runs ships at {CATCH_SHIP} m/s and the bullet at {CATCH_BULLET} m/s.
+    energy_drift on good, bad, and discrete sums free-flight steps only.
+loss is the discrete scene scored from start to end, so an inelastic drop fails.
 Each fixture calls step {STEPS} times at 1/60 s.
 Exit 0 when no metric is FAIL. Exit 1 when a metric is FAIL. Exit 2 on a bad argument."
     );
 }
 
-fn measure(protect: bool) -> Result<Reading, String> {
-    let first = simulate(protect)?;
-    let second = simulate(protect)?;
+fn measure(setup: Setup) -> Result<Reading, String> {
+    let first = simulate(&setup)?;
+    let second = simulate(&setup)?;
     let match_bit = u8::from(hash_state(&first.world) == hash_state(&second.world));
     Ok(Reading {
         tunnel_count: first.tunnel_count,
@@ -322,7 +375,8 @@ fn measure(protect: bool) -> Result<Reading, String> {
         determinism_hash_match: f64::from(match_bit),
         ship_speed: first.ship_speed,
         bullet_speed: first.bullet_speed,
-        protect,
+        protect: setup.protect,
+        full_energy: setup.full_energy,
     })
 }
 
@@ -335,20 +389,31 @@ struct Simulated {
     bullet_speed: f32,
 }
 
-fn simulate(protect: bool) -> Result<Simulated, String> {
-    let mut scene = build(protect);
+fn simulate(setup: &Setup) -> Result<Simulated, String> {
+    let mut scene = build(setup);
     let start = energy(&scene.world);
     let mut ships_tunneled = false;
     let mut bullet_tunneled = false;
     let mut deepest = 0.0_f32;
+    let mut free_delta = 0.0;
     for _ in 0..STEPS {
+        let before = velocities(&scene.world);
+        let energy_before = energy(&scene.world);
         genos_physics::step(&mut scene.world, DT);
+        if free_flight(&before, &scene.world) {
+            free_delta += energy(&scene.world) - energy_before;
+        }
         ships_tunneled |= ships_exchanged(&scene)?;
         bullet_tunneled |= bullet_past_wall(&scene)?;
         deepest = deepest.max(penetration(&scene)?);
     }
     let end = energy(&scene.world);
-    let drift = (end - start) / start.abs().max(1.0);
+    let scale = start.abs().max(1.0);
+    let drift = if setup.full_energy {
+        (end - start) / scale
+    } else {
+        free_delta / scale
+    };
     let tunnels = u32::from(ships_tunneled) + u32::from(bullet_tunneled);
     Ok(Simulated {
         ship_speed: scene.ship_speed,
@@ -360,12 +425,53 @@ fn simulate(protect: bool) -> Result<Simulated, String> {
     })
 }
 
+struct VelocitySample {
+    velocity: genos_math::Vec3,
+    inverse_mass: f32,
+}
+
+fn velocities(world: &World) -> Vec<VelocitySample> {
+    world
+        .bodies
+        .iter()
+        .map(|body| VelocitySample {
+            velocity: body.velocity,
+            inverse_mass: body.inverse_mass,
+        })
+        .collect()
+}
+
+/// A step is free flight when every dynamic velocity changed only by gravity.
+/// An inelastic impulse is not free flight, so it stays out of `energy_drift`.
+fn free_flight(before: &[VelocitySample], world: &World) -> bool {
+    if before.len() != world.bodies.len() {
+        return false;
+    }
+    before
+        .iter()
+        .zip(&world.bodies)
+        .all(|(sample, body)| gravity_only(sample, body.velocity, world.gravity))
+}
+
+fn gravity_only(
+    sample: &VelocitySample,
+    after: genos_math::Vec3,
+    gravity: genos_math::Vec3,
+) -> bool {
+    let predicted = if sample.inverse_mass == 0.0 {
+        sample.velocity
+    } else {
+        sample.velocity + gravity * DT
+    };
+    let delta = after - predicted;
+    delta.length_squared() <= 1.0e-8
+}
+
 /// Ships face each other on X. The bullet and the wall share a Z the ships do not reach.
-/// Protection on uses a speed whose end pose still overlaps. Protection off uses 3 000 m/s,
-/// which steps past a finite box before the discrete pair test sees it.
-fn build(protect: bool) -> Scene {
-    let ship_speed = if protect { CATCH_SHIP } else { TUNNEL_SPEED };
-    let bullet_speed = if protect { CATCH_BULLET } else { TUNNEL_SPEED };
+/// `good` and `bad` both use 3 000 m/s. The speed is not the protection switch.
+fn build(setup: &Setup) -> Scene {
+    let ship_speed = setup.ship_speed;
+    let bullet_speed = setup.bullet_speed;
     let mut world = World::new(genos_physics::GRAVITY);
     let mut left = Body::cuboid(
         genos_math::Vec3::new(0.0, 2.0, 0.0),
@@ -492,7 +598,8 @@ fn sphere_box_depth(sphere: &Body, box_body: &Body) -> Result<f32, String> {
     }
 }
 
-/// `1/2 m |v|^2 + 1/2 ω^T I ω + m g h`. ω is zero because `Body` stores no angular velocity.
+/// `1/2 m |v|^2 + 1/2 ω^T I ω + m g h` over dynamic bodies.
+/// `Body` has no angular velocity, so `1/2 ω^T I ω` is 0 until that field exists.
 fn energy(world: &World) -> f64 {
     let gravity = f64::from(-world.gravity.y);
     let mut total = 0.0;
@@ -504,10 +611,15 @@ fn energy(world: &World) -> f64 {
         let speed_sq = f64::from(body.velocity.x) * f64::from(body.velocity.x)
             + f64::from(body.velocity.y) * f64::from(body.velocity.y)
             + f64::from(body.velocity.z) * f64::from(body.velocity.z);
-        let rotational = 0.0;
-        total += 0.5 * mass * speed_sq + rotational + mass * gravity * f64::from(body.position.y);
+        total += 0.5 * mass * speed_sq
+            + rotational_joules(body)
+            + mass * gravity * f64::from(body.position.y);
     }
     total
+}
+
+fn rotational_joules(_body: &Body) -> f64 {
+    0.0
 }
 
 fn hash_state(world: &World) -> u64 {
@@ -555,6 +667,7 @@ fn judge(spec: &Spec, value: f64) -> Row {
         && match spec.bound {
             Bound::AtMost => value <= spec.threshold,
             Bound::AtLeast => value >= spec.threshold,
+            Bound::AbsAtMost => value.abs() <= spec.threshold,
         };
     Row {
         name: spec.name,
@@ -580,8 +693,13 @@ fn fmt_num(value: f64) -> String {
 
 fn print_scene(reading: &Reading) {
     let protection = if reading.protect { "true" } else { "false" };
+    let energy = if reading.full_energy {
+        "full"
+    } else {
+        "free-flight"
+    };
     println!(
-        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={STEPS}",
+        "scene protection={protection} ships_m_s={} bullet_m_s={} steps={STEPS} energy={energy} ccd_in_step=false",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
     );
@@ -610,8 +728,13 @@ fn exit_code(rows: &[Row]) -> i32 {
 fn json(fixture: &str, reading: &Reading, rows: &[Row]) -> String {
     let failed = rows.iter().filter(|row| row.status == Status::Fail).count();
     let protection = if reading.protect { "true" } else { "false" };
+    let energy = if reading.full_energy {
+        "full"
+    } else {
+        "free-flight"
+    };
     let mut out = format!(
-        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {STEPS},\n  \"failed\": {failed},\n  \"metrics\": [\n",
+        "{{\n  \"fixture\": \"{fixture}\",\n  \"protection\": {protection},\n  \"ccd_in_step\": false,\n  \"energy\": \"{energy}\",\n  \"ship_speed_m_s\": {},\n  \"bullet_speed_m_s\": {},\n  \"steps\": {STEPS},\n  \"failed\": {failed},\n  \"metrics\": [\n",
         fmt_num(f64::from(reading.ship_speed)),
         fmt_num(f64::from(reading.bullet_speed)),
     );
@@ -648,17 +771,30 @@ fn prove(out: &Path) -> Result<i32, String> {
     let exe = std::env::current_exe().map_err(|err| format!("current exe: {err}"))?;
     let good = run_child(&exe, out, "good")?;
     let bad = run_child(&exe, out, "bad")?;
+    let discrete = run_child(&exe, out, "discrete")?;
+    let loss = run_child(&exe, out, "loss")?;
     println!("# good");
     print!("{}", good.stdout);
     println!("# bad");
     print!("{}", bad.stdout);
-    if good.code != 0 || bad.code != 1 {
-        return Err(format!("proof exits good {} bad {}", good.code, bad.code));
+    println!("# discrete");
+    print!("{}", discrete.stdout);
+    println!("# loss");
+    print!("{}", loss.stdout);
+    if good.code != 1 || bad.code != 1 || discrete.code != 0 || loss.code != 1 {
+        return Err(format!(
+            "proof exits good {} bad {} discrete {} loss {}",
+            good.code, bad.code, discrete.code, loss.code
+        ));
     }
-    expect_good(&good.stdout)?;
-    expect_bad(&bad.stdout)?;
-    expect_file(out, "good", true)?;
-    expect_file(out, "bad", false)?;
+    expect_tunnel_fail(&good.stdout, true)?;
+    expect_tunnel_fail(&bad.stdout, false)?;
+    expect_discrete(&discrete.stdout)?;
+    expect_loss(&loss.stdout)?;
+    expect_file(out, "good", true, 1, "free-flight")?;
+    expect_file(out, "bad", false, 1, "free-flight")?;
+    expect_file(out, "discrete", false, 0, "free-flight")?;
+    expect_file(out, "loss", false, 1, "full")?;
     Ok(0)
 }
 
@@ -741,28 +877,25 @@ fn printed_rows(text: &str) -> Result<Vec<Printed>, String> {
     Ok(rows)
 }
 
-fn expect_good(text: &str) -> Result<(), String> {
-    for row in printed_rows(text)? {
-        if row.status != "PASS" {
-            return Err(format!("{} wanted PASS", row.name));
-        }
+fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
+    let flag = if protect {
+        "protection=true"
+    } else {
+        "protection=false"
+    };
+    if !text.contains(flag) {
+        return Err(format!("scene missing {flag}"));
     }
-    if !text.contains("protection=true") {
-        return Err("good scene left protection off".into());
+    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
+        || !text.contains(&format!("bullet_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
+    {
+        return Err("high-speed scene did not use 3000 m/s for both bodies".into());
     }
-    Ok(())
-}
-
-fn expect_bad(text: &str) -> Result<(), String> {
-    if !text.contains("protection=false") {
-        return Err("bad scene left protection on".into());
+    if !text.contains("energy=free-flight") || !text.contains("ccd_in_step=false") {
+        return Err("high-speed scene did not record free-flight energy and no CCD".into());
     }
-    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED)))) {
-        return Err("bad scene did not use the tunnel speed".into());
-    }
-    let rows = printed_rows(text)?;
     let mut tunnel_failed = false;
-    for row in &rows {
+    for row in printed_rows(text)? {
         if row.name == "tunnel_count" {
             if row.status != "FAIL" || row.value <= 0.0 {
                 return Err(format!(
@@ -772,16 +905,66 @@ fn expect_bad(text: &str) -> Result<(), String> {
             }
             tunnel_failed = true;
         } else if row.status != "PASS" {
-            return Err(format!("{} wanted PASS on the bad baseline", row.name));
+            return Err(format!("{} wanted PASS beside the tunnel", row.name));
         }
     }
     if !tunnel_failed {
-        return Err("bad run has no tunnel_count".into());
+        return Err("run has no tunnel_count".into());
     }
     Ok(())
 }
 
-fn expect_file(dir: &Path, fixture: &str, protect: bool) -> Result<(), String> {
+fn expect_discrete(text: &str) -> Result<(), String> {
+    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(CATCH_SHIP))))
+        || !text.contains(&format!("bullet_m_s={}", fmt_num(f64::from(CATCH_BULLET))))
+    {
+        return Err("discrete scene changed the catching speeds".into());
+    }
+    if !text.contains("energy=free-flight") {
+        return Err("discrete scene scored the inelastic drop".into());
+    }
+    for row in printed_rows(text)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS", row.name));
+        }
+    }
+    Ok(())
+}
+
+fn expect_loss(text: &str) -> Result<(), String> {
+    if !text.contains("energy=full") {
+        return Err("loss scene hid the inelastic drop".into());
+    }
+    if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(CATCH_SHIP)))) {
+        return Err("loss scene is not the discrete impact".into());
+    }
+    let mut energy_failed = false;
+    for row in printed_rows(text)? {
+        if row.name == "energy_drift" {
+            if row.status != "FAIL" || row.value.abs() < 0.9 {
+                return Err(format!(
+                    "energy_drift {} {} wanted a FAIL past 90%",
+                    row.value, row.status
+                ));
+            }
+            energy_failed = true;
+        } else if row.status != "PASS" {
+            return Err(format!("{} wanted PASS on the loss scene", row.name));
+        }
+    }
+    if !energy_failed {
+        return Err("loss run has no energy_drift".into());
+    }
+    Ok(())
+}
+
+fn expect_file(
+    dir: &Path,
+    fixture: &str,
+    protect: bool,
+    failed: i32,
+    energy: &str,
+) -> Result<(), String> {
     let path = dir.join(format!("{fixture}.json"));
     let text =
         std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -792,20 +975,14 @@ fn expect_file(dir: &Path, fixture: &str, protect: bool) -> Result<(), String> {
     if !text.contains(&format!("\"protection\": {protection}")) {
         return Err(format!("{fixture} json has the wrong protection flag"));
     }
-    let failed = i32::from(!protect);
+    if !text.contains("\"ccd_in_step\": false") {
+        return Err(format!("{fixture} json claims CCD is in step"));
+    }
+    if !text.contains(&format!("\"energy\": \"{energy}\"")) {
+        return Err(format!("{fixture} json has the wrong energy account"));
+    }
     if !text.contains(&format!("\"failed\": {failed}")) {
         return Err(format!("{fixture} json missing failed {failed}"));
-    }
-    let status = if protect { "PASS" } else { "FAIL" };
-    if protect {
-        let count = text.matches("\"status\": \"PASS\"").count();
-        if count != METRICS.len() {
-            return Err(format!("{fixture} json has {count} PASS"));
-        }
-    } else if !text.contains("\"name\": \"tunnel_count\"")
-        || !text.contains(&format!("\"status\": \"{status}\""))
-    {
-        return Err(format!("{fixture} json missing the tunnel failure"));
     }
     Ok(())
 }

@@ -129,9 +129,9 @@ High arithmetic: `8 × 16 × 3 µs = 0.384 ms` of advances, plus `32 × 10 µs =
 
 ## Success metrics
 
-Each metric has one threshold. The comparator is inclusive. A non-finite reading fails. The harness prints a metric only when `step` can produce it. A missing feature is left out of the run. It is not given a stand-in number. The unprotected high-speed case is a `FAIL`, not `NOT-IMPLEMENTED`.
+Each metric has one threshold. The comparator is inclusive. A non-finite reading fails. The harness prints a metric only when `step` can produce it. A missing feature is left out of the run. It is not given a stand-in number. The 3 000 m/s case is a `FAIL`, with protection requested and with protection off. `step` has no CCD flag, so requesting protection does not change the step. That failure is not `NOT-IMPLEMENTED`: the tunnel is measured.
 
-`energy_drift = (E_end - E_start) / max(|E_start|, 1)`. `E = Σ (½ m |v|² + ½ ωᵀ I ω + m * 9.81 * h)` over dynamic bodies. `h` is `position.y`. Bonds store no elastic energy. `Body` has no angular velocity, so the rotational term is 0 until it does. A gain above the threshold fails. A loss passes, because a contact may be inelastic.
+`energy_drift = (E_accounted - E_start) / max(|E_start|, 1)`, and the gate is `|energy_drift| <= 0.01`. A gain and a loss both fail. `E = Σ (½ m |v|² + ½ ωᵀ I ω + m * 9.81 * h)` over dynamic bodies. `h` is `position.y`. Bonds store no elastic energy. `Body` has no angular velocity, so `½ ωᵀ I ω` is 0 until that field exists. On `good`, `bad`, and `discrete`, `E_accounted` adds only the free-flight steps: a step whose dynamic velocities changed by gravity alone. An inelastic impact is not one of those steps. The `loss` fixture uses `E_end` instead, so the same impact's drop is scored and fails.
 
 `penetration_m` is the deepest positive overlap, in metres. Zero is no overlap.
 
@@ -149,7 +149,7 @@ Each metric has one threshold. The comparator is inclusive. A non-finite reading
 |---|---|---|
 | `tunnel_count` | `<=0` | `ship_impact` |
 | `penetration_m` | `<=0.01` | `ship_impact` |
-| `energy_drift` | `<=0.01` | `ship_impact` |
+| `energy_drift` | `\|drift\|<=0.01` | `ship_impact` |
 | `determinism_hash_match` | `>=1` | both |
 | `contacts_stored` | `>=1` | `ship_impact` |
 | `bonds_broken` | `>=1` | `destruction_wall` |
@@ -177,7 +177,7 @@ CCD and the bond graph are not in `step`. The harness is test code, `crates/phys
 
 The scene is two ships and one bullet. Each ship is a box, half-extents `(2, 1, 1)` m, mass 1 000 kg, centres `(0, 2, 0)` and `(6, 2, 0)`. The bullet is a sphere, radius 0.05 m, mass 0.02 kg, centre `(0, 2, 4)`. A static box wall, half-extents `(0.15, 5, 1)` m, centre `(0.3, 2, 4)`, sits on the bullet's path and clear of the ships. Eight steps of `1/60` s. Restitution is 0.
 
-`protection` is the only switch. `step` has no CCD flag, so the switch selects the speed. On, the ships move at 30 m/s and the bullet at 6 m/s. Each of those steps still overlaps the obstacle, and the discrete solver stops the body. Off, the ships and the bullet move at 3 000 m/s. One step is 50 m. The end bounds miss the other ship and miss the wall.
+`good` and `bad` are that scene at 3 000 m/s for the ships and the bullet. One step is 50 m. The end bounds miss the other ship and miss the wall. `good` sets protection on. `bad` sets it off. `step` has no CCD flag, so the flag is recorded and the motion is the same. Both runs fail `tunnel_count`. `discrete` keeps the geometry and uses 30 m/s ships and a 6 m/s bullet, speeds the discrete solver still overlaps and stops. `loss` is that slower scene with energy scored from the start of the run to the end.
 
 The four phase-0 metrics are computed from that body state. `tunnel_count` is the ship-order check plus the bullet trailing-point check described above. `penetration_m` is the deepest positive overlap of the ship pair and of the bullet against the wall. Energy and the hash are as above. The other rows in the table are gates for later phases. The harness does not print them.
 
@@ -185,13 +185,15 @@ The four phase-0 metrics are computed from that body state. `tunnel_count` is th
 cargo test -p genos-physics --test metrics
 cargo test -p genos-physics --test metrics -- --fixture good
 cargo test -p genos-physics --test metrics -- --fixture bad
+cargo test -p genos-physics --test metrics -- --fixture discrete
+cargo test -p genos-physics --test metrics -- --fixture loss
 ```
 
 `--fixture` defaults to `proof`. `GENOS_PHYSICS_METRICS_FIXTURE` is the mirror and applies only when `--fixture` was omitted. The argument wins when both are set.
 
-Each run prints one line per metric: `name value threshold status`. It writes `./genos-debug/physics/<fixture>.json`, including the protection flag and the speeds. `cargo test` starts in the package directory; the default still writes to the repository `genos-debug/physics`. `--out` and `GENOS_PHYSICS_METRICS_OUT` stay relative to the process directory. Exit 0 when no line is `FAIL`. Exit 1 when a line is `FAIL`. Exit 2 on a bad argument.
+Each run prints one line per metric: `name value threshold status`. It writes `./genos-debug/physics/<fixture>.json`, including the protection flag, the speeds, and whether energy summed free-flight steps. `cargo test` starts in the package directory; the default still writes to the repository `genos-debug/physics`. `--out` and `GENOS_PHYSICS_METRICS_OUT` stay relative to the process directory. Exit 0 when no line is `FAIL`. Exit 1 when a line is `FAIL`. Exit 2 on a bad argument.
 
-`good` is protection on. Every line is `PASS` and the process exits 0. `bad` is protection off. `tunnel_count` is `FAIL` and greater than 0, and the process exits 1. That failure is the discrete baseline. `proof` runs both and exits 0 only when those two outcomes hold. The debug binary's Rhai host, the one [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md) allows, runs `ship_impact` and `destruction_wall` when those scenes move.
+`good` and `bad` each exit 1 with `tunnel_count` `FAIL` and greater than 0. `discrete` exits 0. `loss` exits 1 because `|energy_drift|` is the inelastic drop, about 0.96, which fails `|drift| <= 0.01`. `proof` exits 0 only when those four outcomes hold. The debug binary's Rhai host, the one [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md) allows, runs `ship_impact` and `destruction_wall` when those scenes move.
 
 The debug menu, when the physics binary exists, has no help text. A knob's label is the word itself (`speculative margin`, `debris budget`, `bond health`). The menu does not explain the word.
 
@@ -228,9 +230,9 @@ Gameplay networking still waits. These lines are the contract.
 
 | Phase | What lands | Gate |
 |---|---|---|
-| 0 | This design and the metrics harness | `proof` exits 0. `good` is all `PASS`. `bad` exits 1 with `tunnel_count` `FAIL`. |
+| 0 | This design and the metrics harness | `proof` exits 0. `good` and `bad` are the 3 000 m/s scene and both exit 1 with `tunnel_count` `FAIL`. `discrete` exits 0. `loss` exits 1 on `\|energy_drift\|`. |
 | 1 | Swept bounds and speculative contacts | The bullet case in the physics plan. The 3 000 m/s ship lane still fails `tunnel_count` until phase 2. |
-| 2 | Time of impact, pair slices, `ship_impact` | Protection on at 30, 120, 600, and 3 000 m/s passes `tunnel_count` and `penetration_m`. `contacts_stored` and `toi_deferred` join the harness. |
+| 2 | Time of impact, pair slices, `ship_impact` | `good` at 3 000 m/s passes `tunnel_count` and `penetration_m`. `bad` stays `FAIL`. `contacts_stored` and `toi_deferred` join the harness. |
 | 3 | `genos-fracture` and `.gfract` in the cook | Round-trip bytes. `step` still does not break. |
 | 4 | Hot-swap, `apply_damage`, debris | `destruction_wall` readings: `bonds_broken`, `debris_alive`, `floor_penetration_m`. |
 | 5 | Change records from chunk bounds, per-chunk bake keys already cooked | A break does not switch on the global stillness hash. Spawn stays inside the ADR 0013 cap. |
@@ -283,5 +285,5 @@ One meaning each. Lighting names used above (`change record`, `object-local entr
 - Jolt `LinearCast` sweeps the starting rotation and steals the rest of the tick. We include angular velocity in the closing speed, we sub-step the pair through the rest of the tick, and other bodies keep the global sub-step.
 - Box2D sub-steps the simulation to the first impact. We sub-step the fast pair.
 - Blast and Chaos ship the bond graph inside their own solvers. The graph is the idea we copy. The SDK stays out ([ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md)).
-- O'Brien-style fracture releases elastic energy at the crack. A bond here stores health only. `energy_drift` treats a gain as a solver fault.
+- O'Brien-style fracture releases elastic energy at the crack. A bond here stores health only. `energy_drift` fails when the absolute drift exceeds 0.01. An inelastic contact is omitted from the free-flight sum. Scoring that contact from the start of the run to the end fails the gate.
 - ADR 0013 is followed: a chunk is a mover, and the record is the old and new bounds. A break does not mark the whole cache dirty.
