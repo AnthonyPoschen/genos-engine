@@ -96,6 +96,7 @@ impl Options {
         let mut capture_frames = None;
         let mut bounces: Option<String> = None;
         let mut display: Option<String> = None;
+        let mut block_ms = None;
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
             match arg.as_str() {
@@ -128,9 +129,19 @@ impl Options {
                     }
                     display = Some(name);
                 }
+                "--lifecycle-block-ms" => {
+                    block_ms = Some(genos_window::parse_block_ms(
+                        "--lifecycle-block-ms",
+                        Some(&value()?),
+                    )?);
+                }
+                other if genos_window::block_ms_needs_value(other) == Some(false) => {
+                    block_ms = Some(genos_window::parse_block_ms(other, None)?);
+                }
                 other => return Err(format!("unknown argument {other}")),
             }
         }
+        let block_ms = genos_window::block_ms_mirror(block_ms);
         if !check {
             if out.is_some() {
                 return Err(
@@ -155,6 +166,9 @@ impl Options {
             }
             if candidate != "default" || reference_method != "path" {
                 return Err("that flag is for lighting-ref check".into());
+            }
+            if block_ms.is_some() {
+                return Err("--lifecycle-block-ms is for lighting-ref check".into());
             }
         }
         if reference_method != "path" {
@@ -255,6 +269,7 @@ impl Options {
                 only_checkpoint,
                 plan,
                 display,
+                block_ms,
             })),
         })
     }
@@ -412,6 +427,20 @@ mod tests {
         let err = match Options::parse(words("--fixed-dt 0.1").into_iter()) {
             Err(err) => err,
             Ok(_) => panic!("generate accepted --fixed-dt"),
+        };
+        assert!(err.contains("check"), "{err}");
+    }
+
+    #[test]
+    fn check_keeps_the_shutdown_stall() {
+        let opts = Options::parse(words("check --lifecycle-block-ms 2000").into_iter()).unwrap();
+        let Command::Check(check) = opts.command else {
+            panic!("expected check");
+        };
+        assert_eq!(check.block_ms, Some(std::time::Duration::from_millis(2000)));
+        let err = match Options::parse(words("--lifecycle-block-ms 2000").into_iter()) {
+            Err(err) => err,
+            Ok(_) => panic!("generate accepted --lifecycle-block-ms"),
         };
         assert!(err.contains("check"), "{err}");
     }

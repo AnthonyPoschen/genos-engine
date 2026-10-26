@@ -21,9 +21,14 @@ const ICD: &str = "/usr/share/vulkan/icd.d/lvp_icd.json";
 const LIMIT: Duration = Duration::from_secs(600);
 
 struct Spec {
+    label: &'static str,
     name: &'static str,
     port: u16,
     args: &'static [&'static str],
+    /// Rhai source written beside the run. The script thread is still in it at quit.
+    script: Option<&'static str>,
+    /// Process statuses that still mean the binary finished. A signal is never one of these.
+    codes: &'static [i32],
 }
 
 struct Finished {
@@ -42,53 +47,81 @@ struct Seat {
 fn every_binary_answers_pings_while_it_quits() {
     let seat = Seat::open("genos-quit").expect("weston");
     let mut measured = Vec::new();
-    for spec in binaries() {
-        let run = launch(&seat, &spec, None).expect(spec.name);
-        let gap = must_gap(spec.name, &run);
-        println!("MEASURE {}_gap_ms={gap:.1}", spec.name);
-        measured.push((spec.name, gap));
-        assert_eq!(
-            run.code,
-            Some(0),
-            "{} exit {:?} stderr {}",
-            spec.name,
-            run.code,
-            run.stderr
-        );
-        assert!(
-            !run.stderr.contains("corrupted size"),
-            "{} stderr {}",
-            spec.name,
-            run.stderr
-        );
+    for spec in paths() {
+        let run = launch(&seat, &spec, None).expect(spec.label);
+        let gap = must_gap(spec.label, &run);
+        println!("MEASURE {}_gap_ms={gap:.1} exit={:?}", spec.label, run.code);
+        measured.push((spec.label, gap));
+        assert_finished(&spec, &run);
         assert!(
             gap_within_budget(gap),
             "{} quit gap {gap:.1} ms is outside the 100 ms ping budget",
-            spec.name
+            spec.label
         );
     }
-    let camera = binaries().into_iter().next().expect("camera");
-    let planted = launch(&seat, &camera, Some("2000")).expect("planted block");
-    let gap = must_gap("planted", &planted);
-    println!("MEASURE planted_gap_ms={gap:.1}");
-    assert!(
-        !gap_within_budget(gap),
-        "a 2s teardown block must fail the budget, gap {gap:.1} ms; clean runs {measured:?}"
-    );
-    assert!(gap >= 1000.0, "planted gap was only {gap:.1} ms");
+    for spec in plants() {
+        let run = launch(&seat, &spec, Some("2000")).expect(spec.label);
+        let gap = must_gap(spec.label, &run);
+        println!("MEASURE {}_gap_ms={gap:.1} exit={:?}", spec.label, run.code);
+        assert_finished(&spec, &run);
+        assert!(
+            !gap_within_budget(gap),
+            "{} planted stall must fail the budget, gap {gap:.1} ms; clean runs {measured:?}",
+            spec.label
+        );
+        assert!(
+            gap >= 1000.0,
+            "{} planted gap was only {gap:.1} ms",
+            spec.label
+        );
+    }
 }
 
-fn binaries() -> Vec<Spec> {
+fn assert_finished(spec: &Spec, run: &Finished) {
+    assert!(
+        run.code.is_some_and(|code| spec.codes.contains(&code)),
+        "{} exit {:?} stderr {}",
+        spec.label,
+        run.code,
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("corrupted size"),
+        "{} stderr {}",
+        spec.label,
+        run.stderr
+    );
+}
+
+fn paths() -> Vec<Spec> {
+    let mut specs = first_paths();
+    specs.extend(later_paths());
+    specs
+}
+
+fn first_paths() -> Vec<Spec> {
     vec![
-        Spec {
-            name: "genos-camera",
-            port: 18765,
-            args: &["--proof", "--frames", "3", "--size", "320x180"],
-        },
-        Spec {
-            name: "genos-stress",
-            port: 18766,
-            args: &[
+        spec(
+            "camera_proof",
+            "genos-camera",
+            18765,
+            &["--proof", "--frames", "3", "--size", "320x180"],
+            None,
+            &[0],
+        ),
+        spec(
+            "camera_named",
+            "genos-camera",
+            18768,
+            &["--frames", "3", "--size", "320x180"],
+            None,
+            &[0],
+        ),
+        spec(
+            "stress_proof",
+            "genos-stress",
+            18766,
+            &[
                 "--proof",
                 "--frames",
                 "3",
@@ -100,11 +133,31 @@ fn binaries() -> Vec<Spec> {
                 "small",
                 "--no-panel",
             ],
-        },
-        Spec {
-            name: "genos-lighting",
-            port: 18767,
-            args: &[
+            None,
+            &[0],
+        ),
+        spec(
+            "stress_panel",
+            "genos-stress",
+            18769,
+            &[
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scale",
+                "small",
+            ],
+            None,
+            &[0],
+        ),
+        spec(
+            "lighting_headless",
+            "genos-lighting",
+            18767,
+            &[
                 "--headless",
                 "--frames",
                 "3",
@@ -115,8 +168,151 @@ fn binaries() -> Vec<Spec> {
                 "--scene",
                 "stress",
             ],
-        },
+            None,
+            &[0],
+        ),
+        spec(
+            "lighting_panel",
+            "genos-lighting",
+            18770,
+            &[
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scene",
+                "stress",
+            ],
+            None,
+            &[0],
+        ),
     ]
+}
+
+fn later_paths() -> Vec<Spec> {
+    vec![
+        spec(
+            "lighting_check",
+            "genos-lighting",
+            18771,
+            &["--check", "--size", "320x180", "--preset", "potato"],
+            None,
+            &[0, 1],
+        ),
+        spec(
+            "lighting_ref",
+            "genos-stress",
+            18772,
+            &[
+                "lighting-ref",
+                "check",
+                "--mode",
+                "lavapipe-small",
+                "--scene",
+                "stress-still",
+                "--checkpoint",
+                "hall",
+                "--warmup-frames",
+                "0",
+                "--settle",
+                "frames",
+                "--settle-frames",
+                "1",
+                "--capture-frames",
+                "1",
+            ],
+            None,
+            &[0, 1, 2],
+        ),
+        spec(
+            "lighting_script",
+            "genos-lighting",
+            18773,
+            &[
+                "--headless",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scene",
+                "stress",
+            ],
+            Some("loop { }\n"),
+            &[0],
+        ),
+    ]
+}
+
+fn plants() -> Vec<Spec> {
+    vec![
+        spec(
+            "camera_plant",
+            "genos-camera",
+            18774,
+            &["--proof", "--frames", "3", "--size", "320x180"],
+            None,
+            &[0],
+        ),
+        spec(
+            "stress_plant",
+            "genos-stress",
+            18775,
+            &[
+                "--proof",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scale",
+                "small",
+                "--no-panel",
+            ],
+            None,
+            &[0],
+        ),
+        spec(
+            "lighting_plant",
+            "genos-lighting",
+            18776,
+            &[
+                "--headless",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scene",
+                "stress",
+            ],
+            None,
+            &[0],
+        ),
+    ]
+}
+
+fn spec(
+    label: &'static str,
+    name: &'static str,
+    port: u16,
+    args: &'static [&'static str],
+    script: Option<&'static str>,
+    codes: &'static [i32],
+) -> Spec {
+    Spec {
+        label,
+        name,
+        port,
+        args,
+        script,
+        codes,
+    }
 }
 
 fn gap_of(run: &Finished) -> Option<f64> {
@@ -140,7 +336,7 @@ fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, 
     let bin = binary(spec.name)?;
     let work = std::env::temp_dir().join(format!(
         "genos-quit-{}-{}-{}",
-        spec.name,
+        spec.label,
         std::process::id(),
         block_ms.unwrap_or("clean")
     ));
@@ -165,9 +361,14 @@ fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, 
     if let Some(ms) = block_ms {
         command.arg("--lifecycle-block-ms").arg(ms);
     }
+    if let Some(body) = spec.script {
+        let path = work.join("loop.rhai");
+        std::fs::write(&path, body).map_err(|err| err.to_string())?;
+        command.arg("--script").arg(&path);
+    }
     let mut child = command
         .spawn()
-        .map_err(|err| format!("spawn {}: {err}", bin.display()))?;
+        .map_err(|err| format!("spawn {} ({}): {err}", spec.label, bin.display()))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_thread = std::thread::spawn(move || read_pipe(stdout));
@@ -179,7 +380,7 @@ fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, 
         let stderr = join_text(stderr_thread);
         return Err(format!(
             "{} timed out after {}s\nstdout {stdout}\nstderr {stderr}",
-            spec.name,
+            spec.label,
             LIMIT.as_secs()
         ));
     }

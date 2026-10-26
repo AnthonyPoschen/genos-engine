@@ -654,6 +654,9 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     let first = window.pump();
     let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let load_world = loading_world();

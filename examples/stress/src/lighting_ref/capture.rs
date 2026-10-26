@@ -68,6 +68,8 @@ pub struct CaptureOptions {
     pub jobs: Vec<Job>,
     /// Wayland display name. `None` is the session compositor.
     pub display: Option<String>,
+    /// Stall once during shutdown. The quit-gap test sets this.
+    pub block_ms: Option<std::time::Duration>,
 }
 
 pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
@@ -86,6 +88,9 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     let frame = window.pump();
     let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     if renderer.width() != opts.width || renderer.height() != opts.height {
