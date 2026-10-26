@@ -216,8 +216,6 @@ fn later_paths() -> Vec<Spec> {
                 "hall",
                 "--warmup-frames",
                 "0",
-                "--settle",
-                "frames",
                 "--settle-frames",
                 "1",
                 "--capture-frames",
