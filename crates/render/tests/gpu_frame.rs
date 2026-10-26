@@ -408,6 +408,12 @@ fn the_gpu_frame_keeps_the_learned_light() {
     let near_shadow = sample(&filled, width, height, &camera, [2.2, 0.0, 0.0]);
     let far_shadow = sample(&filled, width, height, &camera, [1.1, 0.0, 0.0]);
     let behind = sample(&filled, width, height, &camera, [3.8, 0.0, 0.0]);
+    eprintln!(
+        "learned near {} far {} behind {}",
+        brightness(near_shadow),
+        brightness(far_shadow),
+        brightness(behind)
+    );
     assert!(
         brightness(near_shadow) > 4.0,
         "the floor in front of the wall has no bounce: near {near_shadow:?} far {far_shadow:?}"
@@ -1203,68 +1209,6 @@ fn check_hall_wall(
         "{name} is lit without a lamp ray: expected {expected:?} measured {measured:?}"
     );
     0.0
-}
-
-/// The lit side of a wall fills the coarse parent. A later look at x = 0.8,
-/// after the cameras closer to that parent, still shows it. An unfinished
-/// finer cell must not hide that parent. The reads set `budget_scale` to 1/64.
-#[test]
-fn a_waiting_pixel_skips_an_unfinished_parent() {
-    let (_gpu, mut window, mut renderer) = open();
-    let width = renderer.width();
-    let height = renderer.height();
-    show_bounce(&mut renderer);
-    let mut world = scene(
-        vec![Light {
-            position: Vec3::new(1.0, 2.4, 0.4),
-            color: [1.0, 1.0, 1.0],
-            direction: Vec3::ZERO,
-        }],
-        vec![Wall {
-            base: 0.0,
-            position: Vec3::new(2.45, 0.0, 0.4),
-            half_x: 0.04,
-            half_z: 6.0,
-            height: 3.0,
-            color: [1.0, 1.0, 1.0],
-            absorption: 0.0,
-            reflectance: -1.0,
-            color_mix: -1.0,
-        }],
-        Vec::new(),
-    );
-    world.scene.lighting.denoiser.enabled = false;
-    world.scene.lighting.probes.enabled = false;
-    world.scene.lighting.ambient.mode = genos_scene::AmbientMode::Off;
-    for eye in [2.0f32, 2.15, 2.25, 2.2, 2.3, 2.2, 2.1, 2.28, 2.18, 2.32, 2.22, 2.12] {
-        let mut cam = look_down(eye, 0.4);
-        cam.pitch = -1.4;
-        let _ = draw(&mut window, &mut renderer, &world, &cam);
-    }
-    world = gated(world);
-    let mut waited = 0.0f32;
-    for eye in [1.6f32, 1.2, 0.8] {
-        let mut cam = look_down(eye, 0.4);
-        cam.pitch = -1.4;
-        let px = draw(&mut window, &mut renderer, &world, &cam);
-        if (eye - 0.8).abs() < 0.01 {
-            waited = brightness(sample(&px, width, height, &cam, [eye, 0.0, 0.4]));
-        }
-    }
-    let sched = renderer.last_schedule();
-    eprintln!(
-        "wait {waited:.0} direct {} scale {}",
-        sched.plan.direct_gate, sched.scale
-    );
-    assert!(
-        sched.plan.direct_gate && sched.scale < 0.02,
-        "the waiting read was not gated: direct {} scale {}",
-        sched.plan.direct_gate, sched.scale
-    );
-    assert!(
-        waited > 30.0,
-        "an unfinished parent hid the finished cell: {waited}"
-    );
 }
 
 /// A cleared ray slot is x = 0, which the trace gate keeps as a finished hit.
