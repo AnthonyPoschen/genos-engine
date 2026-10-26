@@ -302,7 +302,7 @@ The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighti
 | `genos-no-hardcoded-display` | 2026-10-14 | HDMI-A-1 is the proof display and DP-1 is the main display. Only `--proof` selects a proof window, and it must not hard-code either connector. | `lint/fail/hardcoded_display.rs` | 0. |
 | `genos-no-hyprctl` | 2026-10-14 | A proof run does not resize or focus unrelated windows. Shipping code does not spawn `hyprctl`. | `lint/fail/hyprctl.rs` | 6 call sites, all in the pointer-lock test in `crates/window/src/lib.rs`. |
 | `genos-no-process-exit` | 2026-10-26 | The process leaves through `genos_window::exit`, after the app lifecycle has destroyed the device. `std::process::exit` skips that. | `lint/fail/process_exit.rs` | 0. The one call is `crates/window/src/lifecycle.rs`. |
-| `genos-no-device-teardown` | 2026-10-26 | Fence drain and device destruction stay on the app lifecycle. Do not call `vkDeviceWaitIdle` or abandon the device from a binary. | `lint/fail/device_teardown.rs` | The Vulkan load and the idle path stay in `crates/render/src/gpu.rs` and `crates/render/src/lighting_gpu.rs`. `crates/gpuref` is the offline reference. |
+| `genos-no-device-teardown` | 2026-10-26 | Fence drain and device destruction stay on the app lifecycle. Do not call `vkDeviceWaitIdle` or abandon the device from a binary. A `drop` of the renderer is refused by `ShutdownPermit` and by `Gpu`'s `Drop`, which panics instead of waiting idle. | `lint/fail/device_teardown.rs` | The Vulkan load and the idle path stay in `crates/render/src/gpu.rs` and `crates/render/src/lighting_gpu.rs`. `crates/gpuref` is the offline reference. |
 
 ### TODO: semgrep excludes
 

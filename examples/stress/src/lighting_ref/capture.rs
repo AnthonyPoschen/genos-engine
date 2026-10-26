@@ -84,8 +84,8 @@ pub fn capture(opts: &CaptureOptions) -> Result<CaptureOutcome, String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     if renderer.width() != opts.width || renderer.height() != opts.height {

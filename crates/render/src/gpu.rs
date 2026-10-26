@@ -138,12 +138,13 @@ impl Renderer {
         surface: *mut c_void,
         width: u32,
         height: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, genos_window::ShutdownPermit), String> {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
         let unfilled = gpu.unfilled;
-        Ok(Self {
+        let permit = genos_window::ShutdownPermit::issue();
+        Ok((Self {
             gpu,
             width,
             height,
@@ -158,7 +159,7 @@ impl Renderer {
                 unfilled,
                 ..debug_view::DebugState::default()
             },
-        })
+        }, permit))
     }
 
     /// Answer compositor pings on a side thread during device waits and pipeline compiles.
@@ -5377,7 +5378,11 @@ impl Drop for Gpu {
             return;
         }
         if !self.lifecycle_release {
-            self.idle_device();
+            // Already unwinding. Leak the device. An idle wait here is the stall.
+            if std::thread::panicking() {
+                return;
+            }
+            panic!("genos-render: the device was dropped outside the app lifecycle");
         }
         if self.teardown < 2 {
             self.destroy_lighting();

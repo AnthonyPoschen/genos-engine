@@ -286,12 +286,12 @@ fn run() -> Result<i32, String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
         None::<genos_window::ThreadStop<bool>>,
     ));
-    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = opts.block_ms {
         owner.plant_block(stall);
     }
@@ -652,8 +652,8 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
-    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let load_world = loading_world();

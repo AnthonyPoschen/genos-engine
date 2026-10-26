@@ -20,7 +20,7 @@ mod stall;
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
     block_ms_mirror, block_ms_needs_value, exit, gap_within_budget, parse_block_ms, parse_quit_gap,
-    Lifecycle, Phase, ShutdownDevice, ThreadStop, QUIT_GAP_PREFIX,
+    Lifecycle, Phase, ShutdownDevice, ShutdownPermit, ThreadStop, QUIT_GAP_PREFIX,
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,

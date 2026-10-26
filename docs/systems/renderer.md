@@ -78,6 +78,8 @@ The camera calls `draw_profiled` in detailed profile mode. Basic mode and off mo
 
 ## Limits
 
+`Renderer::open` returns the renderer and a `genos_window::ShutdownPermit`. `Lifecycle::new` consumes that permit. Dropping the renderer any other way panics and does not call `vkDeviceWaitIdle`. The device is destroyed by the lifecycle, which pumps the seat between destroy steps.
+
 There is no skinned clip player. A mesh animates only when the game writes a new pose.
 
 A particle does not occlude. `affects_light` is not the lit flag and is not the emission flag. Emitting particles share one fire term. There is not one lamp per ember.

@@ -286,9 +286,9 @@ fn run() -> Result<i32, String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let mut owner = genos_window::Lifecycle::new(window, renderer);
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = block_ms {
         owner.plant_block(stall);
     }

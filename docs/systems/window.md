@@ -45,9 +45,11 @@ Producers are polled. A script thread is joined only after it has finished. Afte
 
 The GPU drain does not call `vkDeviceWaitIdle`. One empty submit on the graphics queue, and one on the compute queue when that queue is distinct, is ordered after the last present. The machine polls those fences, and the lighting world fence when a world submit is in flight. Each poll is one pump apart. Frame fences are not polled: a reset without a submit leaves them unsignaled. Destruction is three steps (yield, lighting resources, the rest of the device) with a pump between them. The window is unmapped only after the device is gone. `genos_window::exit` flushes stdout and is the only `process::exit`.
 
+`Renderer::open` returns a `ShutdownPermit`. `Lifecycle::new` is the constructor that consumes it. Dropping a live permit panics. Dropping the device without that release also panics, and that path does not call `vkDeviceWaitIdle`. In-frame device waits still pump the seat. A panic that is already unwinding leaks the device instead of waiting idle.
+
 The longest gap between those pumps is printed as `lifecycle_quit_gap_ms=`. `lifecycle_drain_forced=1` means a fence was still unsignaled after 30 seconds and destruction continued. The budget is 100 ms. `--lifecycle-block-ms N` waits N milliseconds inside the drain, with no pump inside the wait, so the quit-gap test can prove it catches a stall. `GENOS_LIFECYCLE_BLOCK_MS` is the mirror and applies only when the flag was omitted. It is a test hook, not a player setting.
 
-Failure modes: a gap at or above 100 ms means teardown blocked the event thread (a device wait, a thread join, or a destroy step). Exit 134 and `corrupted size vs. prev_size` mean the device was left for the driver's exit handler while other threads were still alive. The probes are the two stdout lines, the process exit code, and `crates/window/tests/lifecycle_quit.rs`.
+Failure modes: a gap at or above 100 ms means teardown blocked the event thread (a device wait, a thread join, or a destroy step). Exit 134 and `corrupted size vs. prev_size` mean the device was left for the driver's exit handler while other threads were still alive. A panic containing `dropped outside the app lifecycle` means the permit or the device was dropped without `Lifecycle`. The probes are the two stdout lines, the process exit code, `crates/window/tests/lifecycle_quit.rs`, and the permit tests in `crates/window/src/lifecycle.rs`.
 
 ## Networking
 

@@ -169,11 +169,46 @@ impl<T> Drop for ThreadStop<T> {
 
 type Stop = Box<dyn FnMut() -> bool>;
 
+/// Token from opening a device. [`Lifecycle::new`] consumes it.
+///
+/// Dropping a live permit panics. The opener returns the permit, and
+/// [`Lifecycle::new`] is the constructor that disarms it.
+#[must_use = "pass the permit to Lifecycle::new"]
+pub struct ShutdownPermit {
+    live: bool,
+}
+
+impl ShutdownPermit {
+    /// Issue a permit for a device the lifecycle will own.
+    pub fn issue() -> Self {
+        Self { live: true }
+    }
+
+    fn release(&mut self) {
+        self.live = false;
+    }
+}
+
+impl Drop for ShutdownPermit {
+    #[expect(
+        clippy::panic,
+        reason = "a live permit dropped outside Lifecycle is a programming error"
+    )]
+    fn drop(&mut self) {
+        if !self.live || std::thread::panicking() {
+            return;
+        }
+        // A live permit means the device was never handed to the lifecycle.
+        panic!("genos-window: the device permit was dropped outside the app lifecycle");
+    }
+}
+
 /// The process's window and device. Shutdown is a state machine on the event thread.
 ///
-/// Construct it with the open window and the device. Draw through [`Self::window`]
-/// and [`Self::device`]. Call [`Self::quit`] to leave. Dropping it runs the same
-/// machine and returns, so a `?` on the way out still answers pings.
+/// Construct it with the open window, the device, and the [`ShutdownPermit`] from
+/// the open. Draw through [`Self::window`] and [`Self::device`]. Call [`Self::quit`]
+/// to leave. Dropping it runs the same machine and returns, so a `?` on the way
+/// out still answers pings.
 pub struct Lifecycle<D: ShutdownDevice> {
     /// The mapped window. Safe code cannot move it out.
     pub window: ManuallyDrop<Window>,
@@ -191,8 +226,10 @@ pub struct Lifecycle<D: ShutdownDevice> {
 }
 
 impl<D: ShutdownDevice> Lifecycle<D> {
-    /// Own `window` and `device` until shutdown.
-    pub fn new(window: Window, device: D) -> Self {
+    /// Own `window` and `device` until shutdown. `permit` is the token from the open.
+    pub fn new(window: Window, device: D, mut permit: ShutdownPermit) -> Self {
+        permit.release();
+        drop(permit);
         Self {
             window: ManuallyDrop::new(window),
             device: ManuallyDrop::new(device),
@@ -651,5 +688,19 @@ mod tests {
             Duration::from_millis(15)
         );
         assert!(parse_block_ms("--lifecycle-block-ms", None).is_err());
+    }
+
+    #[test]
+    fn a_live_permit_drop_panics() {
+        let permit = ShutdownPermit::issue();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(permit)));
+        assert!(caught.is_err(), "a live permit must refuse to drop");
+    }
+
+    #[test]
+    fn a_released_permit_drops() {
+        let mut permit = ShutdownPermit::issue();
+        permit.release();
+        drop(permit);
     }
 }
