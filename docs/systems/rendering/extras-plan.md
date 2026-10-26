@@ -133,7 +133,7 @@ Foliage cards that are not in the tracer do not bounce until they have a proxy, 
 
 ### Water
 
-A water surface is a mesh with a material the support matrix already keeps (`KHR_materials_transmission`, `loaded, unsupported`). The first water commit draws it as a transparent pass after the opaque G-buffer, samples the lit colour behind it, and does not write the G-buffer. It therefore does not bounce. A planar proxy card, baked like any mesh, is what the surface cache reads if the water must tint the room. Reflections reuse the screen probes' hit directions. **Deviation.** A screen-space reflection pass of the kind games add on top of GI is not added. The probes are the reflection. A mirror is still a GI non-goal.
+A water surface is a mesh with a material the support matrix already keeps (`KHR_materials_transmission`, `loaded, unsupported`). The first water commit draws it as a transparent pass after the opaque G-buffer, samples the lit colour behind it, and does not write the G-buffer. It therefore does not bounce. A planar proxy card, baked like any mesh, is what the surface cache reads if the water must tint the room. Reflections reuse the screen probes' hit directions. **Deviation.** A screen-space reflection pass of the kind games add on top of GI is not added. The probes are the reflection. A mirror is still a GI non-goal. [ADR 0019](../../adr/0019-reflections.md) (proposed) is the design that would lift this sentence and the specular non-goal in [ADR 0012](../../adr/0012-gi.md). Until that ADR is accepted, this paragraph is the limit.
 
 The surface motion is a small vertex displacement from time. When time is frozen, the scene key is stable and frame reuse holds.
 

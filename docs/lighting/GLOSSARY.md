@@ -192,6 +192,60 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
 
+### Specular, mirrors, portals, water
+Proposed in [ADR 0019](../adr/0019-reflections.md). The picture path is not built. One term, one meaning.
+
+**Specular lobe**: the view-dependent glossy term, kept separate from diffuse GI.
+Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More detail: [../systems/reflections-design.md](../systems/reflections-design.md)
+
+**Fresnel weight**: the fraction of light reflected at a boundary. Dielectrics use the exact equations. Metals use Schlick with F0 equal to the base colour.
+Role: SAMPLE · Literature: Fresnel equations; Schlick, CGF 1994 (metals) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
+
+**Screen-space reflection**: a ray marched through the depth buffer along one specular direction.
+Role: SAMPLE · Literature: McGuire and Mara, JCGT 2014; Stachowiak, SIGGRAPH 2015 · More detail: [reflections design, passes](../systems/reflections-design.md#passes)
+
+**Reflection hit**: the first surface a specular ray accepts, stored as geometry, not as radiance.
+Role: VIS · Literature: Lumen screen-trace hit; our kept hit · More detail: [reflections design, data](../systems/reflections-design.md#data)
+
+**World-cache reflection**: specular colour read from a finished surface-cache entry when the screen trace misses.
+Role: STORE · Literature: Lumen surface cache at a reflection hit · More detail: [reflections design](../systems/reflections-design.md#fit)
+
+**Reflection ray**: an optional trace through the shared tracer, software SDF or `VK_KHR_ray_query`. The Low preset schedules none.
+Role: SAMPLE · Literature: Lumen hardware or software reflection trace · More detail: [ADR 0019](../adr/0019-reflections.md)
+
+**Glossy denoise**: one spatial filter on specular hits. It does not keep a radiance history.
+Role: DENOISE · Literature: SVGF spatial kernel (Schied, HPG 2017). The temporal accumulation is not used · More detail: [reflections design, denoise](../systems/reflections-design.md#denoise)
+
+**Planar mirror**: a flat reflector drawn by one extra camera reflected through its plane.
+Role: OUT · Literature: Diefenbach, PhD 1996 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Mirror recursion**: the cap on extra mirror and portal views in one frame. Portals share the cap.
+Role: SCHED · Literature: shipped recursive mirrors and portals (a depth budget) · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
+
+**Oblique clip**: the near plane moved onto the mirror or portal so the draw rejects geometry behind that plane.
+Role: VIS · Literature: Lengyel, Journal of Game Development 1(2), 2005 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Portal**: an opening that draws the linked view inside its frame.
+Role: OUT · Literature: Luebke and Georges, I3D 1995 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Portal transform**: the rigid map from a point on the source side of a portal to the linked side.
+Role: VIS · Literature: Luebke and Georges, I3D 1995 (the opening); the rigid map is ours · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Water surface**: the mesh that shades reflection, refraction, and absorption from a Gerstner displacement.
+Role: OUT · Literature: Finch, GPU Gems ch. 1, 2004 · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Refraction**: the bent transmitted direction through a surface, from Snell's law.
+Role: SAMPLE · Literature: Snell's law; Walter et al., EGSR 2007 (the BTDF we do not stochastic-sample) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
+
+**Caustic**: light focused onto a receiver by refraction. The image-space map is written into the surface cache.
+Role: LIGHTS · Literature: Shah, Konttinen, and Pattanaik, IEEE TVCG 13(2), 2007 · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Shoreline**: the shallow band where wave height is clamped by depth and foam coverage comes from that clamp and the displacement Jacobian.
+Role: OUT · Literature: Miche 1944 (the 0.78 height limit; our cap is 0.75); Tessendorf, SIGGRAPH 2001 (Jacobian foam) · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Reflection budget**: the per-preset ceiling on reflection milliseconds, VRAM, rays, and mirror views.
+Role: SCHED · Literature: ADR 0013 work cap; Lumen reflection scalability · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
+
 ### Historical (do not reuse)
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
