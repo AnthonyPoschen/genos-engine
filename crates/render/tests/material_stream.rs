@@ -25,7 +25,8 @@
 //!
 //! `frame_streamer` is 0 when the renderer's own streamer has the colour
 //! atlas, mip 0 is resident, the first albedo readback is that coarse page,
-//! and the storage buffer the shader samples holds the resident mip.
+//! and the device-atlas texel the transfer copied out is the resident mip.
+//! The CPU chain does not supply that texel.
 
 use genos_render::{
     identity_pose, Bounds, DebugView, DrawKind, MaterialAtlas, MaterialStats, Object, Renderer,

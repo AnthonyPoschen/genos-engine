@@ -1,8 +1,8 @@
 //! CPU mip chain and the per-frame views the streamer reads.
 //!
-//! The sampled atlas is the finest resident mip, stretched back to the full
-//! image so a surface rectangle still addresses the same texels. A missing
-//! page is that coarser mip, never an empty texel.
+//! The sampled atlas is the finest resident mip. The transfer queue stretches
+//! that mip into a device-local image; the CPU chain is not what the shader
+//! loads. A missing page is that coarser mip, never an empty texel.
 
 use genos_load::{Derivatives, TextureView};
 use genos_scene::Camera;
@@ -70,7 +70,9 @@ pub fn mip_chain(width: u32, height: u32, rgba: &[u8]) -> Option<Chain> {
 }
 
 /// Nearest stretch of `level` onto the full image. A missing level is white,
-/// which is the factor stand-in, not black.
+/// which is the factor stand-in, not black. The frame does not call this;
+/// the transfer blit is the stretch the shader sees.
+#[cfg(test)]
 #[must_use]
 pub fn expand_level(chain: &Chain, level: usize) -> Vec<u8> {
     let Some(mip) = chain.levels.get(level) else {

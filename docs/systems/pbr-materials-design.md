@@ -300,7 +300,7 @@ The binary is not a libtest harness, so it already prints. `--nocapture`, `--tes
 | `thrash` | 0 | An A/B spin where the dwell is the only thing that stops a just-loaded mip from being evicted and loaded again. The level gap does not cover that mip. The heap is over the texture target without being critical. That mip is smaller than the other texture's finest, so it fits again only after the other finest leaves. |
 | `evict_order` | 0 | Mismatches against the victim sequence: lowest screen importance, then farthest distance, then the finer level. |
 | `fence` | 0 | Mips that become resident while `transfer_ready` is false. |
-| `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the storage buffer the shader samples is not that resident mip. `cargo test -p genos-render --test material_stream`. |
+| `frame_streamer` | 0 | Misses when a headless draw's renderer has not registered the colour atlas, has not made mip 0 resident, the first albedo readback is not the coarse page, or the device-atlas texel the transfer copied out is not that resident mip. The CPU chain is not that texel. `cargo test -p genos-render --test material_stream`. |
 | `heap_shrink` | 6 | Frames until committed texture bytes sit under the texture target after `heapBudget` is replaced mid-run on the renderer, with headroom at 0. A streamer that does not evict stays over the line and the row is 7. |
 | `hot_reload_frames` | 1 | Frames from `HotReload`'s finished upload to the sample that sees the new page. The old page stays until that upload finishes. |
 | `gbuffer_ms` | 0.60 | High, RTX 4070, 1440p, basic scene. |
