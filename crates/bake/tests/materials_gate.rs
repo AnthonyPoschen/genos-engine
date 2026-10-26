@@ -844,13 +844,16 @@ fn residency_mb(reader: Reader) -> f32 {
     mib_f32(bytes)
 }
 
-/// Frames from a finished upload to the sample. The broken reader stalls.
+/// Frames from a finished upload to the sample.
+///
+/// The broken reader holds the upload and never flips, so the new page is
+/// still absent when the frame limit lands.
 fn reload_frames(reader: Reader) -> f32 {
-    if matches!(reader, Reader::Broken) {
-        return 5.0;
-    }
     let mut reload = HotReload::open(1);
-    reload.upload(2);
+    match reader {
+        Reader::Bake => reload.upload(2),
+        Reader::Broken => reload.hold(2),
+    }
     reload.frames_until_visible(5)
 }
 

@@ -155,12 +155,20 @@ fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
     }];
     let before = mib_f32(images.iter().flat_map(|image| &image.levels).sum());
     let after = mib_f32(plan_residency(&images, mib(256)).bytes);
+    let mut stuck = genos_load::HotReload::open(1);
+    stuck.hold(2);
+    let reload_before = stuck.frames_until_visible(5);
+    let mut live = genos_load::HotReload::open(1);
+    live.upload(2);
+    let reload_after = live.frames_until_visible(5);
     let (metal_before, metal_after) = score(0.25);
     eprintln!(
         "picture_residency before {before:.6} after {after:.6}\n\
-         picture_reload before 5.000000 after 1.000000\n\
+         picture_reload before {reload_before:.6} after {reload_after:.6}\n\
          picture_lambert before {metal_before:.6} after {metal_after:.6}"
     );
+    assert!((reload_before - 5.0).abs() < 1.0e-6, "{reload_before}");
+    assert!((reload_after - 1.0).abs() < 1.0e-6, "{reload_after}");
     assert!((before - 395.0).abs() < 1.0e-3, "{before}");
     assert!(after <= 256.0, "{after}");
     assert!((after - 95.0).abs() < 1.0e-3, "{after}");

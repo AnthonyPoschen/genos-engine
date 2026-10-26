@@ -161,6 +161,12 @@ impl HotReload {
         self.watch.finish_upload();
     }
 
+    /// Start an upload and never publish it. The sample stays on the old page.
+    pub fn hold(&mut self, hash: u64) {
+        self.pending = hash;
+        self.watch.begin(hash);
+    }
+
     /// Frames from the flip until the sample sees [`Self::upload`]'s hash.
     /// Stops at `limit` when the page never appears.
     #[must_use]
@@ -224,6 +230,18 @@ mod tests {
         assert_eq!(miss_colour(&resident, 0, factor), [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(miss_colour(&[None, None], 0, factor), factor);
         assert_ne!(miss_colour(&[None, None], 0, factor), [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_held_upload_never_reaches_the_new_page() {
+        let mut held = HotReload::open(1);
+        held.hold(2);
+        let stalled = held.frames_until_visible(5);
+        assert!((stalled - 5.0).abs() < 1.0e-6, "{stalled}");
+        let mut live = HotReload::open(1);
+        live.upload(2);
+        let flipped = live.frames_until_visible(5);
+        assert!((flipped - 1.0).abs() < 1.0e-6, "{flipped}");
     }
 
     #[test]
