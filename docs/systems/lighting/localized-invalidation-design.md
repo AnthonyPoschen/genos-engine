@@ -283,6 +283,8 @@ Budget mode with world-cache mode 3 reads parents of an empty 12.5 cm cell at 25
 
 The slot table stays 1,048,576 entries. A cell that already holds a finished value does not read the parent.
 
+A change in the uploaded lamp count or occluder count fills the surface cache and the probe work with zeros before that frame's passes. A move that keeps both counts is a change record only. An empty previous upload does not clear.
+
 Departures from this design:
 
 - §5.2's GPU histogram is not built. `select_refresh` picks the screen-gate count and the turn growth. The gate is still one rect, centered on the display, taken from direct, then à-trous, then trace. `merge_into_parent`, `evict_coarse`, `should_add_level`, and `should_remove_level` stay CPU functions. The GPU does not run them.

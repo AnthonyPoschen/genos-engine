@@ -1389,6 +1389,13 @@ impl Gpu {
         // (the async queue's come back with its own submission).
         self.trace_sc(self.lighting.stats[slot].memory, "frame");
         self.lighting_dump_write();
+        // An occluder or a point lamp appeared or disappeared. The cells outside
+        // those bounds still hold the previous world's finished light, and one
+        // draw would show it. A move of the same lists stays a local record.
+        if resident_lists_changed(&self.lighting.kept_bytes, &self.frame_bytes) {
+            self.lighting.cache_clear = true;
+            self.lighting.work_clear = true;
+        }
         // The sun mark is a later read of a copy the frame already made. It does
         // not update light_quiet. That was the debug print that froze a still scene.
         if self.sun_counter_due() {
@@ -3352,6 +3359,30 @@ pub(crate) fn lighting_trace_key(pack: &crate::pack::Pack) -> u64 {
     hasher.finish()
 }
 
+/// True when a point lamp or an occluder was added or removed.
+///
+/// A move of the same lists is a local change record. A different count means
+/// the finished cache describes a different world.
+fn resident_lists_changed(previous: &[u8], current: &[u8]) -> bool {
+    let count = |bytes: &[u8], word: usize| -> Option<u32> {
+        let bytes = bytes.get(word * 4..word * 4 + 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let Some(prev_lamps) = count(previous, 0) else {
+        return false;
+    };
+    let Some(next_lamps) = count(current, 0) else {
+        return false;
+    };
+    let Some(prev_occs) = count(previous, 1) else {
+        return false;
+    };
+    let Some(next_occs) = count(current, 1) else {
+        return false;
+    };
+    prev_lamps != next_lamps || prev_occs != next_occs
+}
+
 /// Hash of what lights the scene, without the camera: the lamp and occluder lists
 /// as uploaded (the tail of `bytes`, `pack::scene_bytes`), fire, smoke, floor, roof
 /// and sky.
@@ -3859,6 +3890,22 @@ mod sun_step {
         lighting.sun_live_dir = dir;
         lighting.sun_live_light = light;
         lighting
+    }
+
+    #[test]
+    fn a_different_lamp_or_occluder_count_is_a_different_world() {
+        let words = |lamps: u32, occs: u32| {
+            let mut bytes = Vec::new();
+            bytes.extend(lamps.to_le_bytes());
+            bytes.extend(occs.to_le_bytes());
+            bytes
+        };
+        let prev = words(1, 2);
+        assert!(!super::resident_lists_changed(&prev, &prev));
+        assert!(super::resident_lists_changed(&prev, &words(2, 2)));
+        assert!(super::resident_lists_changed(&prev, &words(1, 3)));
+        assert!(!super::resident_lists_changed(&[], &prev));
+        assert!(!super::resident_lists_changed(&prev, &prev[..4]));
     }
 
     #[test]

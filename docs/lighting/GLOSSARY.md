@@ -138,7 +138,7 @@ Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF
 **Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
 
-**Change record** (ADR 0013): one frame's description of what moved. A mover contributes the bounds swept between frames. A point lamp contributes each place it occupied, at that place's reach. The record dirties the world-cache cells those volumes overlap. Cells outside them keep their finished values. A directional sun is not a record. The screen gate sees the record count, not a per-item score.
+**Change record** (ADR 0013): one frame's description of what moved. A mover contributes the bounds swept between frames. A point lamp contributes each place it occupied, at that place's reach. The record dirties the world-cache cells those volumes overlap. Cells outside them keep their finished values when the lamp count and the occluder count stay the same. A different count drops the surface cache, because those cells would still describe the previous world. A directional sun is not a record. The screen gate sees the record count, not a per-item score.
 Role: SCHED · Literature: UE5 VSM caster-bounds invalidation · More detail: [localized-invalidation-design.md](../systems/lighting/localized-invalidation-design.md)
 
 **Schedule mode**: `budget` or `global`. Budget pushes the work caps, the guard band, and detail levels. Global pushes zeros and stays on the display size. `--lighting-schedule`. Presets use budget.

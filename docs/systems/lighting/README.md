@@ -103,6 +103,8 @@ The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, a
 
 A frozen scene with grants that cover the picture does not gate, so the full denoise still runs and the picture can settle. The first moving frames can sit over the cap: the scale moves on the sample from the frame before.
 
+A point lamp or an occluder that appears or disappears fills the surface cache and the probe work with zeros before that frame's passes. Cells outside the new bounds would otherwise keep the previous world's finished light. A move that keeps both counts stays a change record. The first uploaded frame does not clear.
+
 Probes: MCP `get_budgets`, `set_budgets`, `get_schedule_stats`, `lighting_lod_snapshot`, and `gi_metrics`. The Perf page rows are `schedule_stats` and `lod_snapshot`. `status.still_frames` and `status.change_records` stay the settle probes. `lighting_lod_snapshot` is the caps, not the live coarse count.
 
 Failure modes and the probe for each:
@@ -112,6 +114,7 @@ Failure modes and the probe for each:
 - A gated pixel goes black. `get_schedule_stats` gates and tile rect. Direct reuses a stored pixel. Trace keeps a finished hit or miss. An empty direct slot still traces.
 - A waiting area flickers between empty and coarse. A finished cell (`v.w >= 0.5`) does not read its parent. `lighting_lod_snapshot` says whether levels are on.
 - A coarse parent paints the other side of a wall. `a_coarse_parent_stays_on_its_own_surface` samples the outside floor beside the corridor wall. Brightness stays under 20 when the parent stays on its own surface.
+- A new scene shows the previous world's finished light. Scene words 0 and 1 are the lamp count and the occluder count. A change fills the surface cache. `the_gpu_frame_keeps_the_learned_light` reads the bounce in front of the wall.
 - Coarse cells fill the table. `lighting_lod_snapshot` `coarse_slots` is the cap. The live count is GPU word 15 and this probe does not read it.
 - A frozen scene never settles. `status.still_frames` and `a_frozen_scene_settles_and_keeps_its_light`. No change records and a covered grant leave the gates off.
 
