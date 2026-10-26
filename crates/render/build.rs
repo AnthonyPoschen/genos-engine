@@ -20,12 +20,10 @@ fn main() {
     let wire = compile("shaders/wire.frag", &out.join("wire.frag.spv"));
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
-    // Not embedded: catches errors in pieces no pass includes yet.
-    for file in ["lighting_check.comp", "media_check.comp"] {
-        let src = format!("shaders/{file}");
-        println!("cargo:rerun-if-changed={src}");
-        compile(&src, &out.join(format!("{file}.spv")));
-    }
+    // Compile check only: no pass includes lighting_check.comp yet.
+    let _lighting_check =
+        compile("shaders/lighting_check.comp", &out.join("lighting_check.comp.spv"));
+    let media_check = compile("shaders/media_check.comp", &out.join("media_check.comp.spv"));
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
@@ -73,14 +71,15 @@ fn main() {
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\n",
             vert.display(),
             frag.display(),
             depth_mask.display(),
             wire_vert.display(),
             wire.display(),
             audio.display(),
-            fxaa.display()
+            fxaa.display(),
+            media_check.display()
         ),
     )
     .unwrap();
@@ -109,6 +108,8 @@ fn main() {
         "lighting_sun_compose.comp",
         "lighting_screen.comp",
         "media.glsl",
+        "media_check.comp",
+        "lighting_check.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

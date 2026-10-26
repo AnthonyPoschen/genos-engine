@@ -55,6 +55,8 @@ use crate::world::World;
 
 include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
+mod media_check;
+
 #[path = "debug_view.rs"]
 mod debug_view;
 pub use crate::unfilled::{UnfilledControl, UnfilledStats};
@@ -570,6 +572,12 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Five closed forms from `media_check.comp`. The parity test compares them
+    /// with `genos_math::media`. This does not present.
+    pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {
+        self.gpu.media_closed_forms()
+    }
+
     /// One compute pass over the resident occluders. This does not present and does not upload them.
     pub fn transmission_gains(
         &mut self,
@@ -897,6 +905,8 @@ struct Gpu {
     audio_pipe: Handle,
     audio_cmd: Handle,
     audio_fence: Handle,
+    /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
+    media_check: Option<media_check::Pipe>,
     submit_pending: bool,
     /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
     abandon: bool,
@@ -1541,6 +1551,7 @@ impl Gpu {
                 audio_pipe: std::ptr::null_mut(),
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
+                media_check: None,
                 submit_pending: false,
                 abandon: false,
                 timestamp_period,
@@ -5401,6 +5412,7 @@ impl Drop for Gpu {
             }
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
+            self.destroy_media_check();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
             }

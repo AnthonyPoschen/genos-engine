@@ -1,5 +1,5 @@
 #version 450
-// Compile check for media.glsl. Not embedded. build.rs compiles it and discards it.
+// Parity fixture for media.glsl. build.rs embeds it. The lavapipe test dispatches it.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 1) in;
 
