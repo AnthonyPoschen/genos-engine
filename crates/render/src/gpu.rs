@@ -357,13 +357,17 @@ impl Renderer {
         (count, finest)
     }
 
-    /// First colour texel of the device atlas, copied out by the transfer.
+    /// Colour texel 0 of the device atlas, then the same texel of the page image.
     ///
-    /// Both entries are that byte. The CPU mip chain is not this value.
+    /// The atlas value is the blit of that page. The CPU chain and the staging
+    /// buffer are not either byte. A staging copy into the atlas leaves the
+    /// page at 0, or the atlas at 0 once the staging buffer has been cleared.
     #[must_use]
     pub fn material_texel(&self) -> [u8; 2] {
-        let byte = self.gpu.atlas_readback_texel();
-        [byte, byte]
+        [
+            self.gpu.atlas_readback_texel(),
+            self.gpu.page_readback_texel(),
+        ]
     }
 
     /// Replace the material knobs. The next frame streams inside the new cap.
@@ -1073,6 +1077,9 @@ struct Gpu {
     /// One texel copied from the colour atlas by the transfer. The CPU never
     /// stores a mip byte here.
     atlas_readback: Buffer,
+    /// The same texel copied from the device page that was blitted. The CPU
+    /// never stores a mip byte here either.
+    page_readback: Buffer,
     material_key: u64,
     normal_key: u64,
     /// Keys of [`crate::world::World::stream_textures`], in register order.
@@ -1212,6 +1219,14 @@ struct StreamPage {
     copied: bool,
     /// Layout after the last transfer command that touched this image.
     layout: u32,
+}
+
+/// Device mip image after the staging copy. [`Gpu::publish_resident`] is the
+/// only atlas write, and it accepts this handle rather than a buffer.
+struct ResidentPage {
+    image: Handle,
+    width: u32,
+    height: u32,
 }
 
 struct UnboundImage {
@@ -1889,6 +1904,7 @@ impl Gpu {
                 sampled_layout: [0, 0],
                 sampled_cleared: [false, false],
                 atlas_readback: Buffer::empty(),
+                page_readback: Buffer::empty(),
                 material_key: 0,
                 normal_key: 0,
                 stream_keys: Vec::new(),
@@ -3414,8 +3430,10 @@ impl Gpu {
         self.sampled_normal = self.make_atlas_image(1, 1)?;
         self.sampled_size = [(1, 1), (1, 1)];
         self.atlas_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
+        self.page_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         // The CPU never stores a mip here. A skipped copy reads back as zero.
         self.write_buffer(&self.atlas_readback, &[0, 0, 0, 0])?;
+        self.write_buffer(&self.page_readback, &[0, 0, 0, 0])?;
         // S70C: one resident scene, written by deltas in the frame's command stream.
         self.frame_scene[0] =
             self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20 | 0x2, Memory::Device)?;
@@ -4498,13 +4516,22 @@ impl Gpu {
         if packed.is_empty() {
             packed.resize(4, 0);
         }
-        let staging = self.make_buffer(packed.len() as u64, 0x1, Memory::Upload)?;
+        // TRANSFER_SRC for the page copy, TRANSFER_DST so the submit can wipe it
+        // before the atlas blit. The wipe is what makes a staging-to-atlas copy black.
+        let staging = self.make_buffer(packed.len() as u64, 0x1 | 0x2, Memory::Upload)?;
         self.write_buffer(&staging, &packed)?;
         Ok((staging, mip_offset))
     }
 
     fn atlas_readback_texel(&self) -> u8 {
-        let buffer = &self.atlas_readback;
+        self.readback_texel(&self.atlas_readback)
+    }
+
+    fn page_readback_texel(&self) -> u8 {
+        self.readback_texel(&self.page_readback)
+    }
+
+    fn readback_texel(&self, buffer: &Buffer) -> u8 {
         if buffer.memory.is_null() || buffer.size < 4 {
             return 0;
         }
@@ -5804,6 +5831,9 @@ impl Gpu {
         if due.is_empty() && republish.is_empty() {
             return Ok(());
         }
+        // The previous fill finished with the fence. Put the chain back so this
+        // submit's page copy still has bytes, then the command buffer wipes it.
+        self.restore_staging()?;
         unsafe {
             check(
                 (self.fns.reset_fences)(self.device, 1, &self.transfer_fence),
@@ -5828,6 +5858,7 @@ impl Gpu {
                 "transfer begin",
             )?;
         }
+        self.staging_barrier(0x4000, 0x1000, 0x4000, 0x800);
         let mut copied = 0u64;
         let mut filled = Vec::new();
         for (index, level) in &due {
@@ -5847,6 +5878,11 @@ impl Gpu {
                 page.layout = 6;
             }
         }
+        // The page images now hold the texels. Wipe staging before the atlas
+        // write so a buffer copy into the atlas cannot supply them.
+        self.staging_barrier(0x1000, 0x1000, 0x800, 0x1000);
+        self.scrub_staging();
+        self.staging_barrier(0x1000, 0x1000, 0x1000, 0x800);
         self.prepare_atlas_draw(true);
         self.prepare_atlas_draw(false);
         let show = self.ready_to_show();
@@ -6055,6 +6091,10 @@ impl Gpu {
         }
     }
 
+    fn copy_page_texel(&self, image: Handle) {
+        self.copy_image_texel(image, 6, &self.page_readback);
+    }
+
     fn record_mip_blit(&self, index: usize, level: u32) {
         let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
             return;
@@ -6065,26 +6105,133 @@ impl Gpu {
         let Some(mip) = source.chain.levels.get(slot) else {
             return;
         };
-        let Some(page) = self
-            .stream_pages
-            .iter()
-            .find(|page| page.index == index && page.level == level && page.copied)
+        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
         else {
             return;
         };
-        let atlas = self.sampled_image(source.color).image;
-        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!source.color)];
+        self.publish_resident(&page, source.color);
+    }
+
+    /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
+    /// handle and not a staging buffer.
+    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+        let page = self.stream_pages.iter().find(|page| {
+            page.index == index && page.level == level && page.copied && !page.image.is_null()
+        })?;
+        Some(ResidentPage {
+            image: page.image,
+            width,
+            height,
+        })
+    }
+
+    /// Blit `page` into the device atlas. This is the only atlas write.
+    fn publish_resident(&self, page: &ResidentPage, color: bool) {
+        let atlas = self.sampled_image(color).image;
+        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!color)];
         if atlas.is_null() || page.image.is_null() {
             return;
         }
         self.blit_nearest(
             page.image,
             atlas,
-            mip.width.max(1),
-            mip.height.max(1),
+            page.width,
+            page.height,
             atlas_w.max(1),
             atlas_h.max(1),
         );
+        if color {
+            self.copy_page_texel(page.image);
+        }
+    }
+
+    fn restore_staging(&self) -> Result<(), String> {
+        for source in &self.stream_sources {
+            if source.staging.buffer.is_null() {
+                continue;
+            }
+            let mut packed = Vec::new();
+            for level in &source.chain.levels {
+                packed.extend_from_slice(&level.rgba);
+            }
+            if packed.is_empty() {
+                continue;
+            }
+            self.write_buffer(&source.staging, &packed)?;
+        }
+        Ok(())
+    }
+
+    fn scrub_staging(&self) {
+        for source in &self.stream_sources {
+            let buffer = source.staging.buffer;
+            let size = source.staging.size & !3;
+            if buffer.is_null() || size < 4 {
+                continue;
+            }
+            unsafe {
+                (self.fns.cmd_fill_buffer)(self.transfer_cmd, buffer, 0, size, 0);
+            }
+        }
+    }
+
+    fn staging_barrier(&self, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        for source in &self.stream_sources {
+            let buffer = source.staging.buffer;
+            let size = source.staging.size & !3;
+            if buffer.is_null() || size < 4 {
+                continue;
+            }
+            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+        }
+    }
+
+    fn transfer_buffer_barrier(
+        &self,
+        buffer: Handle,
+        size: u64,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+    ) {
+        #[repr(C)]
+        struct Bar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+            src_queue: u32,
+            dst_queue: u32,
+            buffer: Handle,
+            offset: u64,
+            size: u64,
+        }
+        let bar = Bar {
+            s_type: 44,
+            next: std::ptr::null(),
+            src_access,
+            dst_access,
+            src_queue: u32::MAX,
+            dst_queue: u32::MAX,
+            buffer,
+            offset: 0,
+            size,
+        };
+        unsafe {
+            (self.fns.cmd_barrier)(
+                self.transfer_cmd,
+                src_stage,
+                dst_stage,
+                0,
+                0,
+                std::ptr::null(),
+                1,
+                &bar as *const Bar as *const c_void,
+                0,
+                std::ptr::null(),
+            );
+        }
     }
 
     fn clear_color(&self, cmd: Handle, image: Handle, layout: u32) {
@@ -6187,6 +6334,10 @@ impl Gpu {
     }
 
     fn copy_atlas_texel(&self, image: Handle) {
+        self.copy_image_texel(image, 1, &self.atlas_readback);
+    }
+
+    fn copy_image_texel(&self, image: Handle, layout: i32, buffer: &Buffer) {
         #[repr(C)]
         struct Layers {
             aspect: u32,
@@ -6232,8 +6383,8 @@ impl Gpu {
             (self.fns.cmd_copy_to_buffer)(
                 self.transfer_cmd,
                 image,
-                1,
-                self.atlas_readback.buffer,
+                layout,
+                buffer.buffer,
                 1,
                 &region as *const Region as *const u8,
             );
@@ -6998,9 +7149,11 @@ impl Drop for Gpu {
             let mut sampled_color = std::mem::replace(&mut self.sampled_color, Image::empty());
             let mut sampled_normal = std::mem::replace(&mut self.sampled_normal, Image::empty());
             let mut atlas_readback = std::mem::replace(&mut self.atlas_readback, Buffer::empty());
+            let mut page_readback = std::mem::replace(&mut self.page_readback, Buffer::empty());
             self.destroy_image(&mut sampled_color);
             self.destroy_image(&mut sampled_normal);
             self.destroy_buffer(&mut atlas_readback);
+            self.destroy_buffer(&mut page_readback);
             if !self.transfer_done.is_null() {
                 (self.fns.destroy_sem)(self.device, self.transfer_done, std::ptr::null());
                 self.transfer_done = std::ptr::null_mut();

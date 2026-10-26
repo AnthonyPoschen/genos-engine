@@ -25,8 +25,9 @@
 //!
 //! `frame_streamer` is 0 when the renderer's own streamer has the colour
 //! atlas, mip 0 is resident, the first albedo readback is that coarse page,
-//! and the device-atlas texel the transfer copied out is the resident mip.
-//! The CPU chain does not supply that texel.
+//! and both readbacks are the resident mip: the device atlas and the page
+//! image the blit copied. The CPU chain does not supply either texel. A
+//! staging-buffer copy into the atlas leaves those two bytes different.
 
 use genos_render::{
     identity_pose, Bounds, DebugView, DrawKind, MaterialAtlas, MaterialStats, Object, Renderer,
@@ -304,6 +305,7 @@ fn the_frame_streamer_is_read_back() {
     if !(40..=80).contains(&coarse) {
         misses += 1;
     }
+    // [atlas, page]. Both are the resident mip only when the blit sourced the page.
     if texel != [255, 255] {
         misses += 1;
     }
