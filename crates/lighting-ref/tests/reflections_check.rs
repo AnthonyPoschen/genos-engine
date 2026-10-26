@@ -31,7 +31,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (good_code, good_text) = run("--fixture", "good", &good_dir);
     assert_eq!(good_code, 0, "{good_text}");
-    assert_eq!(good_text.lines().count(), 19);
+    assert_eq!(good_text.lines().count(), 20);
     assert!(good_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(good_text
         .lines()
@@ -43,7 +43,7 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (bad_code, bad_text) = run("--case", "bad", &bad_dir);
     assert_eq!(bad_code, 1, "{bad_text}");
-    assert_eq!(bad_text.lines().count(), 19);
+    assert_eq!(bad_text.lines().count(), 20);
     assert!(bad_text.contains("denoise_lag_frames value=na threshold=2 NOT-IMPLEMENTED"));
     assert!(bad_text
         .lines()
@@ -55,11 +55,12 @@ fn reflections_good_passes_bad_fails_and_live_grades_the_picture() {
 
     let (live_code, live_text) = run("--fixture", "live", &live_dir);
     assert_eq!(live_code, 0, "{live_text}");
-    assert_eq!(live_text.lines().count(), 19);
+    assert_eq!(live_text.lines().count(), 20);
     for name in [
         "mirror_law_rad",
         "fresnel_abs",
         "fresnel_below_abs",
+        "water_f0_abs",
         "snell_rad",
         "ggx_energy",
         "mirror_view_frac",

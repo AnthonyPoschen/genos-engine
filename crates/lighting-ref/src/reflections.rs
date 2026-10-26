@@ -232,6 +232,7 @@ fn measure(kind: Kind) -> Vec<Metric> {
             0.02,
             Row::Module,
         ),
+        gate("water_f0_abs", water_f0_abs(kind), 0.005, Row::Module),
         gate("snell_rad", snell_rad(kind), 1.0e-4, Row::Module),
         gate("ggx_energy", ggx_energy_err(kind), 0.03, Row::Module),
         gate("ssr_depth_rel", ssr_depth_rel(kind), 0.02, Row::Comparator),
@@ -413,6 +414,18 @@ fn fresnel_below_abs(kind: Kind) -> f64 {
         max_err = max_err.max((value - baked).abs());
     }
     max_err
+}
+
+/// Absolute error of water F0 at normal incidence. The band is 0.005, so glass F0 (0.04) fails.
+fn water_f0_abs(kind: Kind) -> f64 {
+    // `1 - 0.979626812158`, flat-water transmittance at normal incidence.
+    const WATER_F0: f64 = 0.020_373_187_842;
+    let measured = if kind == Kind::Good {
+        f64::from(optics::fresnel_dielectric(1.333, 1.0))
+    } else {
+        0.04
+    };
+    (measured - WATER_F0).abs()
 }
 
 fn snell_rad(kind: Kind) -> f64 {
@@ -860,6 +873,26 @@ mod tests {
     }
 
     #[test]
+    fn a_glass_f0_fails_the_water_band() {
+        let report_good = grade(Fixture::Good);
+        let report_bad = grade(Fixture::Bad);
+        let good = report_good
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "water_f0_abs")
+            .unwrap_or_else(|| panic!("water_f0_abs"));
+        let bad = report_bad
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "water_f0_abs")
+            .unwrap_or_else(|| panic!("water_f0_abs"));
+        let good_value = good.value.unwrap_or_else(|| panic!("good value"));
+        let bad_value = bad.value.unwrap_or_else(|| panic!("bad value"));
+        assert!(good_value <= 0.005, "{good_value}");
+        assert!(bad_value > 0.005, "{bad_value}");
+    }
+
+    #[test]
     fn the_path_tracer_matches_the_faithful_picture() {
         let engine = genos_render::shade_picture(0, genos_render::PictureFault::default());
         let reference = crate::reflections_trace::trace();
@@ -900,7 +933,7 @@ mod tests {
     #[test]
     fn good_passes_every_implemented_gate() {
         let report = grade(Fixture::Good);
-        assert_eq!(report.metrics.len(), 19);
+        assert_eq!(report.metrics.len(), 20);
         assert_eq!(report.exit_code(), 0);
         for metric in &report.metrics {
             if metric.name == "denoise_lag_frames" {
@@ -913,7 +946,7 @@ mod tests {
             assert!(value <= metric.threshold, "{}", metric.name);
         }
         let text = report.summary();
-        assert_eq!(text.lines().count(), 19);
+        assert_eq!(text.lines().count(), 20);
         assert!(!text.contains("FAIL"));
         assert_eq!(text.matches("NOT-IMPLEMENTED").count(), 1);
     }

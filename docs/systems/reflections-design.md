@@ -61,7 +61,7 @@ These functions live in `genos-math` (`crates/math/src/optics.rs`). `crates/rend
 
 **Reflection direction.** `R = I - 2 dot(N, I) N`. A point `p` through a plane with unit normal `N` through the origin is `p - 2 dot(p, N) N`. The harness bakes both and gates the angle at `1e-4` rad and the point at `1e-5` m (`mirror_law_rad`, `mirror_point_m`).
 
-**Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water.
+**Dielectric Fresnel.** Unpolarized exact Fresnel. `eta_t_over_eta_i` is `n_transmitted / n_incident`. From air that ratio is the material IOR. Water is 1.333. Glass defaults to 1.5. From under water the ratio is `1 / 1.333`, and a ray past the critical angle returns 1 (total internal reflection). Schlick's approximation (Schlick, Computer Graphics Forum 13(3), 1994; Karis, SIGGRAPH 2013) is the metal term only, with F0 equal to the base colour, because glTF does not store a complex IOR. On water, Schlick's max absolute error against the exact equations is 0.059, which misses the 0.02 gate. Gates: `fresnel_abs` ≤ 0.02 from air, `fresnel_below_abs` ≤ 0.02 from water. `water_f0_abs` is the absolute error of water F0 at normal incidence against the baked value 0.020373187842. The band is 0.005, so a glass F0 of 0.04 fails.
 
 **Snell.** `eta = n_incident / n_transmitted`. Total internal reflection returns no transmitted direction; the pixel keeps the reflection. Gate: `snell_rad` ≤ `1e-4`. Walter et al. (EGSR 2007) supply the GGX NDF and the refraction microfacet. The runtime transmits along the single Snell direction of the shading normal. It does not draw a random BTDF sample. The Gerstner normal is what spreads water.
 
@@ -220,7 +220,7 @@ Gates: `ms_frac` ≤ 1 and `vram_frac` ≤ 1, each the max of used/cap across th
 
 Every gate is `value ≤ threshold`.
 
-Live grades the optics rows and the CPU picture. Optics rows are the module's error against a baked table: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`.
+Live grades the optics rows and the CPU picture. Optics rows are the module's error against a baked table: `mirror_law_rad`, `mirror_point_m`, `fresnel_abs`, `fresnel_below_abs`, `water_f0_abs`, `snell_rad`, `ggx_energy`, `mirror_view_frac`, `portal_point_m`, `beer_rel`.
 
 Picture rows read the CPU mirror, portal, and flat-water image, and the Low ray cap:
 
@@ -240,6 +240,7 @@ These rows only test the comparator. Live is `NOT-IMPLEMENTED`, the value is `na
 | `mirror_point_m` | 1e-5 | error of a point reflected through a plane, metres |
 | `fresnel_abs` | 0.02 | max absolute error against the Fresnel equations, from air |
 | `fresnel_below_abs` | 0.02 | the same error from under water, including total internal reflection |
+| `water_f0_abs` | 0.005 | absolute error of water F0 at normal incidence. Glass F0 0.04 fails |
 | `snell_rad` | 1e-4 | angle error of the transmitted direction, radians |
 | `ggx_energy` | 0.03 | absolute error of the GGX projected integral against 1 |
 | `ssr_depth_rel` | 0.02 | relative depth error of a screen march on a synthetic buffer |
