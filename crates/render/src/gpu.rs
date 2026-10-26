@@ -227,6 +227,14 @@ impl Renderer {
         Ok(())
     }
 
+    /// Noise-gate shade for later draws. [`LampShadeGate::Product`] is the preset.
+    ///
+    /// Not a saved setting. The exact sum, the random path, and the uniform
+    /// fault injection exist so s7 can grade the picker.
+    pub fn set_lamp_shade_gate(&mut self, gate: LampShadeGate) {
+        self.gpu.lighting.shade_gate = gate;
+    }
+
     /// Replace the draw's lighting settings until [`Renderer::clear_lighting_override`].
     ///
     /// A game that already owns the [`genos_scene::Scene`] writes `scene.lighting`

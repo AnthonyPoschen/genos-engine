@@ -51,7 +51,8 @@ use building::{Layout, LightMix, View};
 use stage::{Scale, Stage};
 
 const USAGE: &str = "genos-stress [options]
-genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME] [--out DIR]
+genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
+                          [--lamps N] [--broken] [--out DIR]
                           s7 direct-light noise grade. noise-gate --help lists it.
   --scale small|big|N|NxM   building size: small = 1 section (25 m), big = 4x4 (100 m)
   --lights N                lamps in the whole building (panel: 5/25/50/100)

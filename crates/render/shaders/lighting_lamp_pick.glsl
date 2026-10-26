@@ -95,6 +95,28 @@ bool lamp_pick_diag() {
     return ((pc.lamp.y >> 17u) & 1u) != 0u;
 }
 
+// The noise gate sets this so a still view keeps tracing the random path.
+// Production leaves it clear: a quiet held view shades the exact sum and holds.
+bool lamp_pick_hold_off() {
+    return ((pc.lamp.y >> 18u) & 1u) != 0u;
+}
+
+// Shade every point lamp. The noise gate's baseline is this sum, not lamp pick off.
+bool lamp_pick_force_exact() {
+    return ((pc.lamp.y >> 19u) & 1u) != 0u;
+}
+
+// Fault injection for the noise gate: uniform pick, shade weight 1, no MIS.
+bool lamp_pick_broken() {
+    return ((pc.lamp.y >> 20u) & 1u) != 0u;
+}
+
+// Running mean of unbiased samples while the hold is off. Past this the picture
+// stays put and the pixel keeps tracing, so the grade sees a settled integral
+// and a non-zero ray count. 128 is enough for the 16-lamp overlap to settle
+// inside the grade's ratio, and the lavapipe settle is 300 frames.
+const uint LAMP_PICK_MEAN_CAP = 128u;
+
 uint lamp_res_index(uint pixel, uint slot) {
     return (slot * pc.dims.x * pc.dims.y + pixel) * 2u;
 }
@@ -360,6 +382,33 @@ void lamp_pick_point_sum(LampList list, uint count, vec3 origin, vec3 nrm, bool 
         total += w;
         lit += w > 0.0 ? 1u : 0u;
     }
+}
+
+// One positive point lamp, each equally likely. `u` is in [0, 1). No target weight.
+uint lamp_pick_uniform(LampList list, uint count, vec3 origin, vec3 nrm, bool two_sided, uint lit, float u) {
+    if (lit == 0u) {
+        return ~0u;
+    }
+    uint want = min(uint(floor(u * float(lit))), lit - 1u);
+    uint seen = 0u;
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+            break;
+        }
+        if (k < list.suns.y) {
+            continue;
+        }
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, nrm, two_sided, target);
+        if (light.r + light.g + light.b <= 0.0) {
+            continue;
+        }
+        if (seen == want) {
+            return k;
+        }
+        seen += 1u;
+    }
+    return ~0u;
 }
 
 // One systematic sample along the point-lamp prefix (rays = 1).

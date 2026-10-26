@@ -276,7 +276,9 @@ void main() {
             // The copy goes into this frame's slot only. Writing the other slot
             // races the pixel that owns it. The next frame reads this slot.
             bool hold = pc.lamp.x != 4u;
-            if (pc.lamp.x == 4u && lighting_view_held()) {
+            // Hold off: the noise gate grades the random path on a still view.
+            // The exact record would return here with zero shadow rays.
+            if (pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
                 LampReservoir held = lamp_res_load(idx, lamp_res_slot_prev());
                 uvec4 geo = lamp_geo_load(idx, lamp_res_slot_prev());
                 hold = geo.z == LAMP_GEO_EXACT && lamp_res_frames(held) >= LIGHTING_DIRECT_HOLD;
@@ -424,6 +426,8 @@ void main() {
     bool shade_exact = false;
     bool copied = false;
     vec3 copied_rgb = vec3(0.0);
+    // Samples folded into the displayed colour while the exact-sum hold is off.
+    uint mean_count = 0u;
     uint view_only = LAMP_ALL;
     if ((scene.grid_at.w & 255u) == 6u) {
         view_only = (scene.grid_at.w >> 8u) & 0xFFFFu;
@@ -433,11 +437,14 @@ void main() {
         uint point_lit = 0u;
         lamp_pick_point_sum(list, count, origin, n, two_sided, point_total, point_lit);
         bool reuse_pix = lamp_pix && lamp_mode == 4u;
+        if (lamp_pix && lamp_pick_force_exact()) {
+            shade_exact = true;
+        }
         if (reuse_pix && view_only != LAMP_ALL) {
             shade_exact = true;
         }
         if (reuse_pix && !shade_exact && point_lit > 0u) {
-            bool quiet_held = lighting_pix_quiet() && lighting_view_held();
+            bool quiet_held = lighting_pix_quiet() && lighting_view_held() && !lamp_pick_hold_off();
             if (quiet_held || point_lit <= LAMP_PICK_EXACT_LIT) {
                 // The sum. A quiet held view writes it once and the next frame
                 // holds. Few lamps cost the same as tracing each one, and the
@@ -461,7 +468,8 @@ void main() {
                     // would drag the old integral across the picture. A sub-pixel
                     // hold (under 5 mm) is the same point, and only while the
                     // lamps still match the record (w_sum holds that signature).
-                    if (floatBitsToUint(history.w_sum) == pix_sig && lighting_surface(hp, hpos, hn, halb, htwo) && length(hpos - pos) < LAMP_PICK_COPY_M) {
+                    // The gate's still capture must trace. A copy would report 0 rays.
+                    if (!lamp_pick_hold_off() && floatBitsToUint(history.w_sum) == pix_sig && lighting_surface(hp, hpos, hn, halb, htwo) && length(hpos - pos) < LAMP_PICK_COPY_M) {
                         copied = true;
                         copied_rgb = lighting_unpack_rgb9e5(geo_h.w);
                         history.m = lamp_res_samples(history);
@@ -474,6 +482,28 @@ void main() {
                 if (!copied) {
                     bool hist_restir = reproj && geo_h.z == LAMP_GEO_RESTIR;
                     uint mixf = lamp_pick_frame_mix();
+                    // Uniform, then the raw light. Pairwise W would hide the fault.
+                    if (lamp_pick_broken()) {
+                        float ub = lighting_unit(lighting_hash(idx ^ (mixf * 0x9e3779b9u) ^ 0x51u));
+                        uint k = lamp_pick_uniform(list, count, origin, n, two_sided, point_lit, ub);
+                        uint slot = lamp_res_slot_now();
+                        if (k == ~0u) {
+                            lamp_res_store(idx, slot, lamp_res_empty());
+                            lamp_geo_store(idx, slot, uvec4(0u));
+                        } else {
+                            LampReservoir cur;
+                            cur.lamp = lamp_list_index(list, k);
+                            cur.m = 1u;
+                            cur.w_sum = 1.0;
+                            cur.target = 1.0;
+                            lamp_res_store(idx, slot, cur);
+                            if (chosen_n < 4u) {
+                                chosen_k[chosen_n] = k;
+                                chosen_s[chosen_n] = 1.0;
+                                chosen_n += 1u;
+                            }
+                        }
+                    } else {
                     uint cand = hist_restir ? 1u : lamp_pick_candidates();
                     float w_ris = 0.0;
                     uint win_k = ~0u;
@@ -579,6 +609,7 @@ void main() {
                         }
                     }
                 }
+            }
             }
         } else if (reuse_pix && !shade_exact) {
             lamp_res_store(idx, lamp_res_slot_now(), lamp_res_empty());
@@ -778,6 +809,36 @@ void main() {
             cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
         }
     }
+    // Hold off: the displayed colour is the running mean of the unbiased sample
+    // (`light * W * visibility`). Bitterli shows the current sample. This mean
+    // is only while the noise gate has the exact-sum hold off, so a still
+    // picture can be graded. Past LAMP_PICK_MEAN_CAP the colour stays and the
+    // pixel keeps tracing. Production does not set the bit.
+    if (idx < pixels && lamp_pix && lamp_pick_hold_off() && !shade_exact && !copied && chosen_n > 0u) {
+        uint hist_px = 0u;
+        float z_ignore = 0.0;
+        uint prev_count = 0u;
+        vec3 prev = e;
+        if (lamp_pick_reproject(pos, n, hist_px, z_ignore)) {
+            uvec4 hg = lamp_geo_load(hist_px, lamp_res_slot_prev());
+            if (hg.z == LAMP_GEO_RESTIR) {
+                LampReservoir prev_res = lamp_res_load(hist_px, lamp_res_slot_prev());
+                prev_count = lamp_res_frames(prev_res);
+                if (prev_count > 0u) {
+                    prev = lighting_unpack_rgb9e5(hg.w);
+                }
+            }
+        }
+        if (prev_count == 0u) {
+            mean_count = 1u;
+        } else if (prev_count >= LAMP_PICK_MEAN_CAP) {
+            e = prev;
+            mean_count = LAMP_PICK_MEAN_CAP;
+        } else {
+            mean_count = prev_count + 1u;
+            e = prev + (e - prev) / float(mean_count);
+        }
+    }
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
         // The exact sum is the integral, so a quiet pixel holds it instead of
         // a 32-frame mean (that mean was the frozen grain). A ReSTIR sample
@@ -806,7 +867,7 @@ void main() {
         } else if (chosen_n > 0u) {
             LampReservoir cur = lamp_res_load(idx, slot);
             if (cur.lamp != LAMP_ALL) {
-                cur.m = lamp_res_samples(cur);
+                cur.m = lamp_res_samples(cur) | (mean_count << 24u);
                 lamp_res_store(idx, slot, cur);
                 lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR, lighting_pack_rgb9e5(e)));
                 if (lamp_pick_diag()) {

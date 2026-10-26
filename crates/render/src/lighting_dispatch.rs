@@ -140,6 +140,34 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
     )
 }
 
+/// Which shade the noise gate asks for. Production is [`Product`](Self::Product).
+///
+/// The bits land in `pc.lamp.y`. They are not a saved setting: a game does not
+/// persist a fault injection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LampShadeGate {
+    /// The preset's shade. A quiet held view can take the exact sum and hold.
+    #[default]
+    Product,
+    /// Every point lamp, inside the reuse shade. The gate's baseline.
+    Exact,
+    /// The random path, with the exact-sum hold off, on a still view too.
+    Random,
+    /// Uniform pick and shade weight 1. No pairwise weight. The gate must fail.
+    Broken,
+}
+
+/// Bits 18–20 of `pc.lamp.y`. Combined with [`lamp_pick_push`].
+pub(crate) fn lamp_shade_bits(gate: LampShadeGate) -> u32 {
+    match gate {
+        LampShadeGate::Product => 0,
+        LampShadeGate::Exact => 1 << 19,
+        LampShadeGate::Random => 1 << 18,
+        // Hold off as well, or a still view would shade the exact sum and pass.
+        LampShadeGate::Broken => (1 << 18) | (1 << 20),
+    }
+}
+
 /// Push words for `pc.lamp`. Zero keeps the legacy shade loop.
 ///
 /// `GENOS_LIGHTING_LAMP_PICK_DIAG` sets bit 17 so the shade loop counts shadow

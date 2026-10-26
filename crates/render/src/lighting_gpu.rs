@@ -254,6 +254,8 @@ pub(crate) struct Lighting {
     lamp_res: Buffer,
     /// Fill the reservoir with empty lamps once, not every frame.
     lamp_res_clear: bool,
+    /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
+    shade_gate: LampShadeGate,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -435,6 +437,7 @@ impl Default for Lighting {
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
+            shade_gate: LampShadeGate::Product,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -2276,6 +2279,7 @@ impl Gpu {
             self.lighting.settings.probes.tile
         };
         let mut lamp = lamp_pick_push(&self.lighting.settings);
+        lamp[1] |= lamp_shade_bits(self.lighting.shade_gate);
         // The existing diag bit counts fresh shadow rays. It does not change
         // the shade. It is set only while GI metrics are recording.
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {

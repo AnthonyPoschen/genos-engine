@@ -1,12 +1,19 @@
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
-//! s7 noise gate. Settles a three-lamp scene, then grades still flicker, a
-//! frozen pattern, pan pops, and the path-traced direct error against the
-//! same binary with lamp pick off.
+//! s7 noise gate. Settles a lamp grid, then grades still flicker, a frozen
+//! pattern, pan pops, and the path-traced direct error of the random lamp
+//! path against the exact sum inside the same reuse shade.
 //!
 //! The process must set `GENOS_LIGHTING_LAMP_PICK_DIAG=1` before the first
 //! draw. The binary does that. Without it the ray counters stay zero and the
 //! settle check fails closed.
+//!
+//! Pixels with 8 or fewer positive lamps shade the exact sum, so the grid
+//! defaults to 16. The live pass turns the exact-sum hold off. A still view
+//! would otherwise return before the random path traces.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -14,38 +21,48 @@ use std::sync::Mutex;
 use genos_debug::noise_gate::{frame_luminance, grade, report_json, GateSamples};
 use genos_debug::png;
 use genos_debug::{Image, RefSetup};
-use genos_render::{DebugView, LampPickCounts, Renderer, ViewMode, World};
+use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
 use genos_scene::{
-    AmbientMode, Camera, Floor, FpsCounterSettings, LampPickMode, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Shape, Solid, Vec3,
+    AmbientMode, Camera, Floor, FpsCounterSettings, Light, LightingPreset, LightingSettings,
+    MenuSettings, Scene, Shape, Solid, Vec3,
 };
 use genos_window::Window;
 
 const EYE_Y: f32 = 1.7;
 const EYE_Z: f32 = 4.0;
+/// `LAMP_PICK_EXACT_LIT`. At or under this count the pixel shades the sum.
+const EXACT_LIT_LAMPS: u32 = 8;
 const HELP: &str = "\
 genos-stress noise-gate [options]
 
-Settle, then grade direct-light noise against lamp pick off (the full sum).
+Settle, then grade the random lamp path against the exact sum.
 Exit 0 for grade A or B. Exit 1 below B.
 
-Lavapipe (default, no --preset): 96x54, high's reservoir (8 candidates,
-radius 16, pairwise MIS), one bounce, 4 probe rays, world cache off,
-denoiser off, direct view. A quiet view can hold, which is the s6 floor.
-The picture is direct light only.
+The baseline is the exact-sum path inside the reuse shade (every point lamp,
+scale 1). It is not this binary with lamp pick off. The live pass is the
+same shade with the exact-sum hold turned off, so a still view keeps tracing.
+`--broken` picks uniformly and shades with weight 1 (no pairwise MIS). That
+run must fail.
 
-Owner, 1080p High:
+Lavapipe (default, no --preset): 96x54, 16 lamps, high's reservoir (8
+candidates, radius 16, pairwise MIS), one bounce, 4 probe rays, world cache
+off, denoiser off, direct view. The picture is direct light only.
 
-  cargo run --release -p genos-stress -- noise-gate --size 1920x1080 --preset high --out genos-debug/noise
+Owner, 1080p High, 16 lamps:
+
+  cargo run --release -p genos-stress -- noise-gate --size 1920x1080 --preset high --lamps 16 --out genos-debug/noise
 
 --preset keeps that preset's GI and reservoir, then turns the light cap off,
 ambient off, sky off, and compose reuse off, and draws the direct view.
+A preset whose lamp pick is off cannot grade the random path.
 Lavapipe times are not a result. The report is <out>/metrics.json.
 
   --size WxH       picture size (default 96x54)
   --settle N       still frames before the capture (default 300)
   --frames N       still frames, and pan frames (default 64, at least 9)
   --preset NAME    potato, day-cycle, gi-1bounce, low, medium, high
+  --lamps N        lamps on a grid (default 16, at least 9). Intensity is 3/N
+  --broken         uniform pick, shade weight 1, no pairwise weight
   --out DIR        report directory (default ./genos-debug/noise)
   --pan-yaw RAD    yaw swept over the pan (default 0.35)
   --help           this text
@@ -59,12 +76,14 @@ pub struct Config {
     pub settle: u32,
     pub frames: u32,
     pub preset: Option<LightingPreset>,
+    pub lamps: u32,
+    pub broken: bool,
     pub out: PathBuf,
     pub pan_yaw: f32,
 }
 
 impl Config {
-    /// The lavapipe gate: small picture, full settle and capture.
+    /// The lavapipe gate: small picture, 16 lamps, full settle and capture.
     #[must_use]
     pub fn lavapipe(out: PathBuf) -> Self {
         Self {
@@ -73,6 +92,8 @@ impl Config {
             settle: 300,
             frames: 64,
             preset: None,
+            lamps: 16,
+            broken: false,
             out,
             pan_yaw: 0.35,
         }
@@ -94,6 +115,8 @@ where
     let mut settle = 300u32;
     let mut frames = 64u32;
     let mut preset = None;
+    let mut lamps = 16u32;
+    let mut broken = false;
     let mut out = PathBuf::from("genos-debug/noise");
     let mut pan_yaw = 0.35f32;
     let mut it = args.into_iter();
@@ -110,12 +133,8 @@ where
                 let (w, h) = text
                     .split_once('x')
                     .ok_or_else(|| format!("--size {text} is not WxH"))?;
-                width = w
-                    .parse()
-                    .map_err(|_| format!("--size {text} is not WxH"))?;
-                height = h
-                    .parse()
-                    .map_err(|_| format!("--size {text} is not WxH"))?;
+                width = w.parse().map_err(|_| format!("--size {text} is not WxH"))?;
+                height = h.parse().map_err(|_| format!("--size {text} is not WxH"))?;
             }
             "--settle" => {
                 let text = it.next().ok_or("--settle needs a count")?;
@@ -138,6 +157,14 @@ where
                         .ok_or_else(|| format!("unknown preset {}", text.as_ref()))?,
                 );
             }
+            "--lamps" => {
+                let text = it.next().ok_or("--lamps needs a count")?;
+                lamps = text
+                    .as_ref()
+                    .parse()
+                    .map_err(|_| format!("--lamps {} is not a count", text.as_ref()))?;
+            }
+            "--broken" => broken = true,
             "--out" => {
                 let text = it.next().ok_or("--out needs a directory")?;
                 out = PathBuf::from(text.as_ref());
@@ -161,6 +188,11 @@ where
     if frames < 9 {
         return Err("--frames needs at least 9 (the pop window)".to_string());
     }
+    if lamps <= EXACT_LIT_LAMPS {
+        return Err(format!(
+            "--lamps {lamps} shades the exact sum (the threshold is {EXACT_LIT_LAMPS}); the random path needs more"
+        ));
+    }
     if !pan_yaw.is_finite() || pan_yaw < 0.0 {
         return Err("--pan-yaw needs a non-negative number".to_string());
     }
@@ -170,6 +202,8 @@ where
         settle,
         frames,
         preset,
+        lamps,
+        broken,
         out,
         pan_yaw,
     }))
@@ -205,17 +239,24 @@ pub fn run(config: &Config) -> Result<i32, String> {
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let width = renderer.width();
     let height = renderer.height();
-    let world = overlap_world();
+    let world = overlap_world(config.lamps);
     let pose = still_camera();
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
+    let live_gate = if config.broken {
+        LampShadeGate::Broken
+    } else {
+        LampShadeGate::Random
+    };
     eprintln!(
-        "noise-gate {width}x{height} settle {} frames {} preset {}",
+        "noise-gate {width}x{height} lamps {} settle {} frames {} preset {} {}",
+        config.lamps,
         config.settle,
         config.frames,
-        config.preset.map_or("direct-quiet", LightingPreset::name)
+        config.preset.map_or("direct-quiet", LightingPreset::name),
+        if config.broken { "broken" } else { "random" }
     );
     let live = capture_pass(
         &mut window,
@@ -223,19 +264,20 @@ pub fn run(config: &Config) -> Result<i32, String> {
         &world,
         &pose,
         config,
-        false,
+        live_gate,
         "live",
     )?;
-    let master = capture_pass(
+    let exact = capture_pass(
         &mut window,
         &mut renderer,
         &world,
         &pose,
         config,
-        true,
-        "master",
+        LampShadeGate::Exact,
+        "exact",
     )?;
-    renderer.set_lighting_settings(gate_lighting(config.preset, true));
+    renderer.set_lamp_shade_gate(LampShadeGate::Product);
+    renderer.set_lighting_settings(gate_lighting(config.preset));
     let solos = solo_frames(&mut window, &mut renderer, &world, &pose)?;
     let reference = reference_of(&world.scene, &pose, width, height);
     let hit = reference.hit;
@@ -250,39 +292,57 @@ pub fn run(config: &Config) -> Result<i32, String> {
             hit: hit.clone(),
             solos: solos.clone(),
             still_rays: live.still_rays,
+            still_restir: live.still_restir,
+            pan_restir: live.pan_restir,
             pan_exact: live.pan_exact,
         },
         &GateSamples {
             width,
             height,
-            still: master.still,
-            pan: master.pan,
+            still: exact.still,
+            pan: exact.pan,
             reference: reference_y,
             hit,
             solos,
-            still_rays: master.still_rays,
-            pan_exact: master.pan_exact,
+            still_rays: exact.still_rays,
+            still_restir: exact.still_restir,
+            pan_restir: exact.pan_restir,
+            pan_exact: exact.pan_exact,
         },
     )?;
     std::fs::create_dir_all(&config.out).map_err(|err| err.to_string())?;
     std::fs::write(config.out.join("metrics.json"), report_json(&report))
         .map_err(|err| err.to_string())?;
-    png::write_png(&config.out.join("live-still.png"), width, height, &live.last_still)?;
-    png::write_png(&config.out.join("live-pan.png"), width, height, &live.last_pan)?;
     png::write_png(
-        &config.out.join("master-still.png"),
+        &config.out.join("live-still.png"),
         width,
         height,
-        &master.last_still,
+        &live.last_still,
     )?;
     png::write_png(
-        &config.out.join("master-pan.png"),
+        &config.out.join("live-pan.png"),
         width,
         height,
-        &master.last_pan,
+        &live.last_pan,
+    )?;
+    png::write_png(
+        &config.out.join("exact-still.png"),
+        width,
+        height,
+        &exact.last_still,
+    )?;
+    png::write_png(
+        &config.out.join("exact-pan.png"),
+        width,
+        height,
+        &exact.last_pan,
     )?;
     println!("{report}");
-    eprintln!("noise-gate wrote {} in {:.1}s", config.out.display(), started.elapsed().as_secs_f64());
+    eprintln!(
+        "noise-gate wrote {} in {:.1}s",
+        config.out.display(),
+        started.elapsed().as_secs_f64()
+    );
     Ok(i32::from(!report.exit_ok))
 }
 
@@ -290,6 +350,8 @@ struct Pass {
     still: Vec<Vec<f32>>,
     pan: Vec<Vec<f32>>,
     still_rays: u32,
+    still_restir: u32,
+    pan_restir: u32,
     pan_exact: u32,
     last_still: Vec<u8>,
     last_pan: Vec<u8>,
@@ -301,10 +363,11 @@ fn capture_pass(
     world: &World,
     pose: &Camera,
     config: &Config,
-    off: bool,
+    gate: LampShadeGate,
     label: &str,
 ) -> Result<Pass, String> {
-    renderer.set_lighting_settings(gate_lighting(config.preset, off));
+    renderer.set_lighting_settings(gate_lighting(config.preset));
+    renderer.set_lamp_shade_gate(gate);
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         ..DebugView::default()
@@ -327,16 +390,7 @@ fn capture_pass(
     }
     let mut still = Vec::with_capacity(usize::try_from(config.frames).unwrap_or(0));
     let mut last_still = Vec::new();
-    let mut still_counts = LampPickCounts {
-        pixels: 0,
-        kept: 0,
-        fills: 0,
-        cache: 0,
-        spatial: 0,
-        copied: 0,
-        exact: 0,
-        restir: 0,
-    };
+    let mut still_counts = LampPickCounts::default();
     for _ in 0..config.frames {
         let (y, bgra, counts) = draw_frame(window, renderer, world, pose)?;
         still_counts = counts;
@@ -371,6 +425,8 @@ fn capture_pass(
         still,
         pan,
         still_rays: still_counts.pixels,
+        still_restir: still_counts.restir,
+        pan_restir: pan_counts.restir,
         pan_exact: pan_counts.exact,
         last_still,
         last_pan,
@@ -387,7 +443,11 @@ fn draw_frame(
     let bgra = renderer
         .draw(world, camera, true)?
         .ok_or_else(|| "readback returned no picture".to_string())?;
-    let y = frame_luminance(&Image::from_bgra(renderer.width(), renderer.height(), &bgra));
+    let y = frame_luminance(&Image::from_bgra(
+        renderer.width(),
+        renderer.height(),
+        &bgra,
+    ));
     Ok((y, bgra, renderer.lighting_lamp_pick_counts()))
 }
 
@@ -429,21 +489,44 @@ fn still_camera() -> Camera {
     camera
 }
 
-/// Three lamps over a floor, and a box that shadows the centre lamp from
-/// part of the ground. The open floor is an overlap: no lamp is most of the light.
-fn overlap_world() -> World {
-    let lights = [
-        Vec3::new(-1.6, 2.2, -1.5),
-        Vec3::new(0.0, 2.2, -1.5),
-        Vec3::new(1.6, 2.2, -1.5),
-    ]
-    .into_iter()
-    .map(|position| Light {
-        position,
-        color: [1.0, 1.0, 1.0],
-        direction: Vec3::ZERO,
-    })
-    .collect();
+/// Columns of a near-square lamp grid. `n` is at least 1.
+fn grid_cols(n: u32) -> u32 {
+    let mut cols = 1u32;
+    while cols.saturating_mul(cols) < n {
+        cols += 1;
+    }
+    cols
+}
+
+/// `n` lamps on a grid over a floor, and a box that shadows the centre from
+/// part of the ground. Each lamp's colour is `3/n`, so the open floor stays
+/// about as bright as the old three-lamp scene. The open floor is an overlap:
+/// no lamp is most of the light.
+fn overlap_world(n: u32) -> World {
+    let n = n.max(1);
+    let cols = grid_cols(n);
+    let rows = n.div_ceil(cols);
+    let scale = 3.0 / u32_as_f32(n);
+    let mut lights = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+    for i in 0..n {
+        let col = i % cols;
+        let row = i / cols;
+        let x = if cols <= 1 {
+            0.0
+        } else {
+            -1.6 + 3.2 * u32_as_f32(col) / u32_as_f32(cols - 1)
+        };
+        let z = if rows <= 1 {
+            -1.5
+        } else {
+            -1.5 - 2.4 * u32_as_f32(row) / u32_as_f32(rows - 1)
+        };
+        lights.push(Light {
+            position: Vec3::new(x, 2.2, z),
+            color: [scale, scale, scale],
+            direction: Vec3::ZERO,
+        });
+    }
     let scene = Scene {
         floor: Floor {
             position: Vec3::ZERO,
@@ -475,7 +558,7 @@ fn overlap_world() -> World {
     World::from_scene(scene)
 }
 
-fn gate_lighting(preset: Option<LightingPreset>, off: bool) -> LightingSettings {
+fn gate_lighting(preset: Option<LightingPreset>) -> LightingSettings {
     let mut settings = if let Some(preset) = preset {
         LightingSettings::preset(preset)
     } else {
@@ -495,15 +578,13 @@ fn gate_lighting(preset: Option<LightingPreset>, off: bool) -> LightingSettings 
     settings.ambient.mode = AmbientMode::Off;
     settings.shadows.enabled = true;
     settings.compose_reuse = false;
-    if off {
-        settings.lamp_pick.mode = LampPickMode::Off;
-    }
     settings
 }
 
 fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
     static GPU: Mutex<()> = Mutex::new(());
-    GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    GPU.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -517,6 +598,8 @@ mod tests {
         assert_eq!(config.height, 54);
         assert_eq!(config.settle, 300);
         assert_eq!(config.frames, 64);
+        assert_eq!(config.lamps, 16);
+        assert!(!config.broken);
         assert!(config.preset.is_none());
         assert!((config.pan_yaw - 0.35).abs() < 1.0e-6);
     }
@@ -525,5 +608,22 @@ mod tests {
     fn a_short_pan_is_refused() {
         let err = parse(["--frames", "4"]).unwrap_err();
         assert!(err.contains("at least 9"), "{err}");
+    }
+
+    #[test]
+    fn eight_lamps_never_reach_the_random_path() {
+        let err = parse(["--lamps", "8"]).unwrap_err();
+        assert!(err.contains("exact sum"), "{err}");
+    }
+
+    #[test]
+    fn broken_is_a_flag_and_sixteen_lamps_keep_the_three_lamp_budget() {
+        let config = parse(["--lamps", "16", "--broken"]).unwrap().unwrap();
+        assert!(config.broken);
+        assert_eq!(config.lamps, 16);
+        let world = overlap_world(16);
+        assert_eq!(world.scene.lights.len(), 16);
+        let sum: f32 = world.scene.lights.iter().map(|lamp| lamp.color[0]).sum();
+        assert!((sum - 3.0).abs() < 1.0e-4, "{sum}");
     }
 }

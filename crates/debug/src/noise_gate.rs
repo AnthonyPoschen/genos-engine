@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! s7 lamp-noise grade. Pure measurements: no window and no GPU.
 //!
@@ -13,11 +16,11 @@ use crate::image::Image;
 
 /// Still-flicker pass line: worst 1% of temporal standard deviation, overlap only.
 pub const FLICKER_P99: f32 = 1.0e-3;
-/// Fixed-pattern error may be this many times the full-sum (lamp pick off) error.
+/// Fixed-pattern error may be this many times the exact-sum error.
 pub const FIXED_RATIO: f32 = 1.1;
-/// Pan pops may be this many times the full-sum pop share.
+/// Pan pops may be this many times the exact-sum pop share.
 pub const POP_RATIO: f32 = 1.25;
-/// Path-trace `mean_rel` may be this many times the full-sum error.
+/// Path-trace `mean_rel` may be this many times the exact-sum error.
 pub const REL_RATIO: f32 = 1.05;
 /// A ratio past this, or flicker past [`FATAL_FLICKER`], is grade F.
 pub const FATAL_RATIO: f32 = 2.0;
@@ -48,8 +51,12 @@ pub struct GateSamples {
     pub hit: Vec<bool>,
     /// One linear-luminance buffer per lamp, still pose.
     pub solos: Vec<Vec<f32>>,
-    /// Fresh pixel shadow rays on the last still frame. Zero is the hold.
+    /// Fresh pixel shadow rays on the last still frame. Zero means the hold ate the path.
     pub still_rays: u32,
+    /// Pixels that shaded a reservoir sample on the last still frame.
+    pub still_restir: u32,
+    /// Pixels that shaded a reservoir sample on the last pan frame.
+    pub pan_restir: u32,
     /// Pixels that took the exact sum on the last pan frame.
     pub pan_exact: u32,
 }
@@ -62,17 +69,19 @@ pub struct GateReport {
     pub exit_ok: bool,
     pub flicker_p99: f32,
     pub fixed: f32,
-    pub master_fixed: f32,
+    pub exact_fixed: f32,
     pub fixed_ratio: f32,
     pub pops: f32,
-    pub master_pops: f32,
+    pub exact_pops: f32,
     pub pop_ratio: f32,
     pub mean_rel: f32,
-    pub master_mean_rel: f32,
+    pub exact_mean_rel: f32,
     pub rel_ratio: f32,
     pub overlap_pixels: usize,
     pub dominant_pixels: usize,
     pub still_rays: u32,
+    pub still_restir: u32,
+    pub pan_restir: u32,
     pub pan_exact: u32,
     /// Flicker p99 of each 4×4 cell, row-major. NaN where the cell is empty.
     pub grid_flicker: Vec<f32>,
@@ -96,23 +105,23 @@ impl std::fmt::Display for GateReport {
         )?;
         writeln!(
             f,
-            "fixed {:.6} / master {:.6} = {:.4} (limit {FIXED_RATIO})",
-            self.fixed, self.master_fixed, self.fixed_ratio
+            "fixed {:.6} / exact {:.6} = {:.4} (limit {FIXED_RATIO})",
+            self.fixed, self.exact_fixed, self.fixed_ratio
         )?;
         writeln!(
             f,
-            "pops {:.6} / master {:.6} = {:.4} (limit {POP_RATIO})",
-            self.pops, self.master_pops, self.pop_ratio
+            "pops {:.6} / exact {:.6} = {:.4} (limit {POP_RATIO})",
+            self.pops, self.exact_pops, self.pop_ratio
         )?;
         writeln!(
             f,
-            "mean_rel {:.6} / master {:.6} = {:.4} (limit {REL_RATIO})",
-            self.mean_rel, self.master_mean_rel, self.rel_ratio
+            "mean_rel {:.6} / exact {:.6} = {:.4} (limit {REL_RATIO})",
+            self.mean_rel, self.exact_mean_rel, self.rel_ratio
         )?;
         writeln!(
             f,
-            "still_rays {} pan_exact {}",
-            self.still_rays, self.pan_exact
+            "still_rays {} still_restir {} pan_restir {} pan_exact {}",
+            self.still_rays, self.still_restir, self.pan_restir, self.pan_exact
         )?;
         for fail in &self.failures {
             writeln!(f, "fail: {fail}")?;
@@ -236,7 +245,10 @@ fn rank_index(fraction: f32, len: usize) -> usize {
     }
     let last = len - 1;
     let clamped = fraction.clamp(0.0, 1.0);
-    if clamped.partial_cmp(&0.0).is_none_or(std::cmp::Ordering::is_le) {
+    if clamped
+        .partial_cmp(&0.0)
+        .is_none_or(std::cmp::Ordering::is_le)
+    {
         return 0;
     }
     if clamped >= 1.0 {
@@ -318,7 +330,13 @@ fn hit_on(hit: &[bool], index: usize) -> bool {
 
 /// Mean absolute high-pass (5×5 box removed) of `mean - reference`, over hit pixels.
 #[must_use]
-pub fn fixed_pattern(mean: &[f32], reference: &[f32], hit: &[bool], width: u32, height: u32) -> f32 {
+pub fn fixed_pattern(
+    mean: &[f32],
+    reference: &[f32],
+    hit: &[bool],
+    width: u32,
+    height: u32,
+) -> f32 {
     let mut diff = vec![0.0f32; mean.len()];
     for (index, (slot, sample)) in diff.iter_mut().zip(mean).enumerate() {
         if hit_on(hit, index) {
@@ -402,7 +420,10 @@ fn f32_from_f64(v: f64) -> f32 {
     // The only narrowing in this file. The sums are f64 so a 1080p frame
     // does not lose the tail of the mean.
     #[expect(clippy::as_conversions, reason = "f64 to f32 has no TryFrom")]
-    #[expect(clippy::cast_possible_truncation, reason = "the gate reports f32; the sum is f64")]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the gate reports f32; the sum is f64"
+    )]
     {
         v as f32
     }
@@ -447,14 +468,14 @@ fn same_len(label: &str, buf: &[f32], n: usize) -> Result<(), String> {
     }
 }
 
-/// Grade `live` (lamp pick on) against `master` (lamp pick off).
+/// Grade `live` (the random path) against `exact` (the exact-sum path).
 ///
 /// # Errors
 ///
 /// The picture is empty, the two captures differ in size, a buffer does not
 /// cover the picture, or the pan is shorter than 9 frames.
-pub fn grade(live: &GateSamples, master: &GateSamples) -> Result<GateReport, String> {
-    let pixels = checked_pixels(live, master)?;
+pub fn grade(live: &GateSamples, exact: &GateSamples) -> Result<GateReport, String> {
+    let pixels = checked_pixels(live, exact)?;
     let (overlap, dominant) = lamp_masks(&live.solos);
     if overlap.len() != pixels {
         return Err("solos do not cover the picture".to_string());
@@ -463,17 +484,17 @@ pub fn grade(live: &GateSamples, master: &GateSamples) -> Result<GateReport, Str
     let (flicker_p99, overlap_pixels) = masked_percentile(&live_dev, &overlap, 0.99);
     let (dominant_flicker, dominant_pixels) = masked_percentile(&live_dev, &dominant, 0.99);
     let live_mean = time_mean(&live.still);
-    let master_mean = time_mean(&master.still);
+    let exact_mean = time_mean(&exact.still);
     let hit = &live.hit;
     let fixed = fixed_pattern(&live_mean, &live.reference, hit, live.width, live.height);
-    let master_fixed = fixed_pattern(&master_mean, &live.reference, hit, live.width, live.height);
-    let fixed_ratio = error_ratio(fixed, master_fixed);
+    let exact_fixed = fixed_pattern(&exact_mean, &live.reference, hit, live.width, live.height);
+    let fixed_ratio = error_ratio(fixed, exact_fixed);
     let pops = pop_share(&live.pan);
-    let master_pops = pop_share(&master.pan);
-    let pop_ratio = error_ratio(pops, master_pops);
+    let exact_pops = pop_share(&exact.pan);
+    let pop_ratio = error_ratio(pops, exact_pops);
     let rel = mean_rel(&live_mean, &live.reference, hit);
-    let master_rel = mean_rel(&master_mean, &live.reference, hit);
-    let rel_ratio = error_ratio(rel, master_rel);
+    let exact_rel = mean_rel(&exact_mean, &live.reference, hit);
+    let rel_ratio = error_ratio(rel, exact_rel);
     let grid_flicker: Vec<f32> = cell_masks(live.width, live.height)
         .iter()
         .map(|mask| masked_percentile(&live_dev, mask, 0.99).0)
@@ -485,7 +506,8 @@ pub fn grade(live: &GateSamples, master: &GateSamples) -> Result<GateReport, Str
         pop_ratio,
         rel_ratio,
         live.still_rays,
-        live.pan_exact,
+        live.still_restir,
+        live.pan_restir,
     );
     let grade_letter = letter(failures.len(), fatal);
     Ok(GateReport {
@@ -493,17 +515,19 @@ pub fn grade(live: &GateSamples, master: &GateSamples) -> Result<GateReport, Str
         exit_ok: grade_letter == 'A' || grade_letter == 'B',
         flicker_p99,
         fixed,
-        master_fixed,
+        exact_fixed,
         fixed_ratio,
         pops,
-        master_pops,
+        exact_pops,
         pop_ratio,
         mean_rel: rel,
-        master_mean_rel: master_rel,
+        exact_mean_rel: exact_rel,
         rel_ratio,
         overlap_pixels,
         dominant_pixels,
         still_rays: live.still_rays,
+        still_restir: live.still_restir,
+        pan_restir: live.pan_restir,
         pan_exact: live.pan_exact,
         grid_flicker,
         dominant_flicker,
@@ -512,25 +536,29 @@ pub fn grade(live: &GateSamples, master: &GateSamples) -> Result<GateReport, Str
     })
 }
 
-fn checked_pixels(live: &GateSamples, master: &GateSamples) -> Result<usize, String> {
-    let pixels = usize::try_from(live.width).unwrap_or(0) * usize::try_from(live.height).unwrap_or(0);
+fn checked_pixels(live: &GateSamples, exact: &GateSamples) -> Result<usize, String> {
+    let pixels =
+        usize::try_from(live.width).unwrap_or(0) * usize::try_from(live.height).unwrap_or(0);
     if pixels == 0 {
         return Err("the picture has no pixels".to_string());
     }
-    if live.width != master.width || live.height != master.height {
-        return Err("live and master sizes differ".to_string());
+    if live.width != exact.width || live.height != exact.height {
+        return Err("live and exact sizes differ".to_string());
     }
     require_frames("live still", &live.still, pixels)?;
-    require_frames("master still", &master.still, pixels)?;
-    if live.pan.len() < 9 || master.pan.len() < 9 {
+    require_frames("exact still", &exact.still, pixels)?;
+    if live.pan.len() < 9 || exact.pan.len() < 9 {
         return Err("the pan needs at least 9 frames".to_string());
     }
-    for frame in live.pan.iter().chain(&master.pan) {
+    for frame in live.pan.iter().chain(&exact.pan) {
         same_len("pan", frame, pixels)?;
     }
     same_len("reference", &live.reference, pixels)?;
     if !live.hit.is_empty() && live.hit.len() != pixels {
-        return Err(format!("hit has {} pixels, expected {pixels}", live.hit.len()));
+        return Err(format!(
+            "hit has {} pixels, expected {pixels}",
+            live.hit.len()
+        ));
     }
     Ok(pixels)
 }
@@ -546,7 +574,9 @@ fn require_frames(label: &str, frames: &[Vec<f32>], pixels: usize) -> Result<(),
 }
 
 fn past(value: f32, limit: f32) -> bool {
-    value.partial_cmp(&limit).is_none_or(std::cmp::Ordering::is_gt)
+    value
+        .partial_cmp(&limit)
+        .is_none_or(std::cmp::Ordering::is_gt)
 }
 
 fn gate_failures(
@@ -556,7 +586,8 @@ fn gate_failures(
     pop_ratio: f32,
     rel_ratio: f32,
     still_rays: u32,
-    pan_exact: u32,
+    still_restir: u32,
+    pan_restir: u32,
 ) -> (Vec<String>, bool) {
     let mut failures = Vec::new();
     let mut fatal = false;
@@ -579,8 +610,11 @@ fn gate_failures(
         failures.push(format!("reference mean_rel ratio {rel_ratio:.4}"));
         fatal |= past(rel_ratio, FATAL_RATIO);
     }
-    if still_rays != 0 || pan_exact == 0 {
-        failures.push(format!("still rays {still_rays} pan exact {pan_exact}"));
+    // The random path has to have run. A hold, or the exact sum, leaves these at 0.
+    if still_rays == 0 || still_restir == 0 || pan_restir == 0 {
+        failures.push(format!(
+            "still rays {still_rays} restir {still_restir} pan restir {pan_restir}"
+        ));
     }
     (failures, fatal)
 }
@@ -607,23 +641,25 @@ pub fn report_json(report: &GateReport) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "{{\n  \"grade\": \"{}\",\n  \"exit_ok\": {},\n  \"flicker_p99\": {:.6},\n  \"fixed\": {:.6},\n  \"master_fixed\": {:.6},\n  \"fixed_ratio\": {:.6},\n  \"pops\": {:.6},\n  \"master_pops\": {:.6},\n  \"pop_ratio\": {:.6},\n  \"mean_rel\": {:.6},\n  \"master_mean_rel\": {:.6},\n  \"rel_ratio\": {:.6},\n  \"overlap_pixels\": {},\n  \"dominant_pixels\": {},\n  \"dominant_flicker\": {:.6},\n  \"still_rays\": {},\n  \"pan_exact\": {},\n  \"grid_flicker\": [{grid}],\n  \"failures\": [{fails}]\n}}\n",
+        "{{\n  \"grade\": \"{}\",\n  \"exit_ok\": {},\n  \"flicker_p99\": {:.6},\n  \"fixed\": {:.6},\n  \"exact_fixed\": {:.6},\n  \"fixed_ratio\": {:.6},\n  \"pops\": {:.6},\n  \"exact_pops\": {:.6},\n  \"pop_ratio\": {:.6},\n  \"mean_rel\": {:.6},\n  \"exact_mean_rel\": {:.6},\n  \"rel_ratio\": {:.6},\n  \"overlap_pixels\": {},\n  \"dominant_pixels\": {},\n  \"dominant_flicker\": {:.6},\n  \"still_rays\": {},\n  \"still_restir\": {},\n  \"pan_restir\": {},\n  \"pan_exact\": {},\n  \"grid_flicker\": [{grid}],\n  \"failures\": [{fails}]\n}}\n",
         report.grade,
         report.exit_ok,
         report.flicker_p99,
         report.fixed,
-        report.master_fixed,
+        report.exact_fixed,
         report.fixed_ratio,
         report.pops,
-        report.master_pops,
+        report.exact_pops,
         report.pop_ratio,
         report.mean_rel,
-        report.master_mean_rel,
+        report.exact_mean_rel,
         report.rel_ratio,
         report.overlap_pixels,
         report.dominant_pixels,
         report.dominant_flicker,
         report.still_rays,
+        report.still_restir,
+        report.pan_restir,
         report.pan_exact,
     )
 }
@@ -636,7 +672,7 @@ mod tests {
         vec![v; n]
     }
 
-    fn samples(still_v: f32, rays: u32, exact: u32) -> GateSamples {
+    fn samples(still_v: f32, rays: u32, restir: u32) -> GateSamples {
         let n = 16;
         let frame = flat(n, still_v);
         let solos = vec![flat(n, 0.4), flat(n, 0.4)];
@@ -649,15 +685,17 @@ mod tests {
             hit: vec![true; n],
             solos,
             still_rays: rays,
-            pan_exact: exact,
+            still_restir: restir,
+            pan_restir: restir,
+            pan_exact: 0,
         }
     }
 
     #[test]
     fn identical_captures_grade_a() {
-        let live = samples(0.2, 0, 10);
-        let master = samples(0.2, 0, 10);
-        let report = grade(&live, &master).unwrap();
+        let live = samples(0.2, 4, 4);
+        let exact = samples(0.2, 4, 4);
+        let report = grade(&live, &exact).unwrap();
         assert_eq!(report.grade, 'A', "{report}");
         assert!(report.exit_ok);
         assert!(report.flicker_p99 <= FLICKER_P99);
@@ -669,7 +707,7 @@ mod tests {
 
     #[test]
     fn one_gate_is_b_and_twice_the_line_is_f() {
-        let mut live = samples(0.2, 0, 10);
+        let mut live = samples(0.2, 4, 4);
         // Two pixels alternate by 0.0015. On a 16-pixel picture the 99th
         // percentile is the second-worst pixel, so one hot pixel would hide.
         for i in 0..2 {
@@ -678,8 +716,8 @@ mod tests {
             live.still[2][i] = 0.2015;
             live.still[3][i] = 0.1985;
         }
-        let master = samples(0.2, 0, 10);
-        let report = grade(&live, &master).unwrap();
+        let exact = samples(0.2, 4, 4);
+        let report = grade(&live, &exact).unwrap();
         assert!(
             report.flicker_p99 > FLICKER_P99 && report.flicker_p99 <= FATAL_FLICKER,
             "{report}"
@@ -690,7 +728,7 @@ mod tests {
         for v in &mut live.still[0] {
             *v += 0.01;
         }
-        let report = grade(&live, &master).unwrap();
+        let report = grade(&live, &exact).unwrap();
         assert!(report.flicker_p99 > FATAL_FLICKER, "{report}");
         assert_eq!(report.grade, 'F', "{report}");
         assert!(!report.exit_ok);
@@ -698,10 +736,10 @@ mod tests {
 
     #[test]
     fn an_empty_overlap_is_f() {
-        let mut live = samples(0.2, 0, 10);
+        let mut live = samples(0.2, 4, 4);
         live.solos = vec![flat(16, 1.0), flat(16, 0.0)];
-        let master = samples(0.2, 0, 10);
-        let report = grade(&live, &master).unwrap();
+        let exact = samples(0.2, 4, 4);
+        let report = grade(&live, &exact).unwrap();
         assert_eq!(report.overlap_pixels, 0);
         assert_eq!(report.grade, 'F');
     }
@@ -709,13 +747,13 @@ mod tests {
     #[test]
     fn a_ratio_over_two_is_f_and_a_small_pair_is_even() {
         assert!((error_ratio(1.0e-8, 1.0e-8) - 1.0).abs() < 1.0e-6);
-        let mut live = samples(0.2, 0, 10);
+        let mut live = samples(0.2, 4, 4);
         live.reference = flat(16, 0.05);
-        let mut master = samples(0.2, 0, 10);
-        master.still = vec![flat(16, 0.06); 4];
-        master.reference.clone_from(&live.reference);
-        // live sits 0.15 off the reference; master sits 0.01 off. The ratio is past 2.
-        let report = grade(&live, &master).unwrap();
+        let mut exact = samples(0.2, 4, 4);
+        exact.still = vec![flat(16, 0.06); 4];
+        exact.reference.clone_from(&live.reference);
+        // live sits 0.15 off the reference; the exact sum sits 0.01 off. The ratio is past 2.
+        let report = grade(&live, &exact).unwrap();
         assert!(report.rel_ratio > FATAL_RATIO, "{report}");
         assert_eq!(report.grade, 'F', "{report}");
     }
@@ -750,9 +788,9 @@ mod tests {
 
     #[test]
     fn unset_rays_fail_the_settle_check() {
-        let live = samples(0.2, 4, 0);
-        let master = samples(0.2, 0, 10);
-        let report = grade(&live, &master).unwrap();
+        let live = samples(0.2, 0, 0);
+        let exact = samples(0.2, 4, 4);
+        let report = grade(&live, &exact).unwrap();
         assert_eq!(report.grade, 'B', "{report}");
         assert!(report.failures.iter().any(|f| f.contains("still rays")));
     }
