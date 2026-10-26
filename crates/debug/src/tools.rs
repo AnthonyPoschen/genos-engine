@@ -1415,9 +1415,19 @@ impl Tools {
         );
     }
 
+    /// `solo_off` with no index and no `add` only clears the solo view.
+    fn light_solo_off_is_complete(args: &Args) -> Result<bool, String> {
+        Ok(args.bool("solo_off")? == Some(true)
+            && args.bool("add")? != Some(true)
+            && args.u32("index")?.is_none())
+    }
+
     fn light_cmd(&mut self, args: &Args, ctx: &mut Ctx) -> Result<Value, String> {
         if args.bool("solo_off")? == Some(true) {
             self.solo = None;
+            if Self::light_solo_off_is_complete(args)? {
+                return Ok(obj(vec![("solo", Value::Null)]));
+            }
         }
         if args.bool("add")? == Some(true) {
             let position = args.vec3("position")?.ok_or("a new light needs position")?;
@@ -2076,5 +2086,15 @@ mod tests {
         let text = settings.effective().to_text();
         assert!(text.contains("collapsed=direct"), "reply text was {text}");
         assert!(text.contains("tab=GI"), "{text}");
+    }
+
+    #[test]
+    fn solo_off_does_not_need_an_index() {
+        let only = genos_mcp::json::parse(r#"{"solo_off":true}"#).expect("json");
+        assert!(Tools::light_solo_off_is_complete(&Args(&only)).expect("solo_off"));
+        let indexed = genos_mcp::json::parse(r#"{"solo_off":true,"index":1}"#).expect("json");
+        assert!(!Tools::light_solo_off_is_complete(&Args(&indexed)).expect("index"));
+        let added = genos_mcp::json::parse(r#"{"solo_off":true,"add":true}"#).expect("json");
+        assert!(!Tools::light_solo_off_is_complete(&Args(&added)).expect("add"));
     }
 }
