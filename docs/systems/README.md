@@ -39,6 +39,7 @@ Each record uses these headings:
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
+- [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Proposed. It does not change the physics step.
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 - [Renderer performance review](rendering/perf-review.md): the 1920×1080 moving stress frame against a 5 ms budget, ranked by the lighting passes that close the gap.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.

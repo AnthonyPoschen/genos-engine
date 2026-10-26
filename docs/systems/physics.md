@@ -47,6 +47,8 @@ The camera calls this step from the scene crate. Lights have no collider.
 
 The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step.
 
+Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is proposed. It does not change this step.
+
 ## Networking
 
 The step does not replicate. Gameplay networking waits ([Architecture](../architecture.md)). The contract the pipeline will meet:
