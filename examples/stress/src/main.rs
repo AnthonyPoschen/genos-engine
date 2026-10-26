@@ -165,7 +165,7 @@ const USAGE: &str = "genos-stress [options]
   --lamp-pick-radius N      spatial radius in pixels, 0..64; 0 is temporal only
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
-  --lamp-pick-unbiased on|off  Algorithm 6 when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)

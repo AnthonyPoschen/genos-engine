@@ -290,10 +290,13 @@ pub struct LightingAtrousStats {
     pub changed_pixels: u32,
 }
 
-/// Shadow rays traced last frame, and spatial reservoir merges.
+/// Shadow rays traced last frame, spatial reservoir merges, and how pixels shaded.
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
-/// light-cache rays. Counts stay zero unless the diag push bit was set.
+/// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
+/// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
+/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
+/// surface-cache trace already uses 53..55).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
@@ -301,6 +304,9 @@ pub struct LampPickCounts {
     pub fills: u32,
     pub cache: u32,
     pub spatial: u32,
+    pub copied: u32,
+    pub exact: u32,
+    pub restir: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -978,11 +984,13 @@ impl Gpu {
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
-        // 16 bytes a pixel. Spatial reuse keeps the previous frame (32 bytes).
-        // Temporal only (radius 0) keeps one slot. Off binds a dummy so binding 12 is valid.
+        // 32 bytes a pixel: the reservoir and the geo record (depth, normal,
+        // exact/trusted kind, shaded direct). Spatial reuse keeps the previous
+        // frame. Temporal only (radius 0) keeps one slot. Off binds a dummy so
+        // binding 12 is valid.
         let slots = if settings.lamp_pick.radius > 0 { 2 } else { 1 };
         let lamp_bytes = if reuse {
-            pixels.saturating_mul(16 * slots).max(64)
+            pixels.saturating_mul(32 * slots).max(64)
         } else {
             64
         };
@@ -1149,6 +1157,9 @@ impl Gpu {
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
                 cache: w[LAMP_PICK_DIAG_WORD + 3],
                 spatial: w[LAMP_PICK_DIAG_WORD + 4],
+                copied: w[LAMP_PICK_DIAG_WORD + 9],
+                exact: w[LAMP_PICK_DIAG_WORD + 10],
+                restir: w[LAMP_PICK_DIAG_WORD + 11],
             })
             .unwrap_or_default()
     }
@@ -2893,7 +2904,7 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 const LIGHTING_STATS_WORDS: usize = 144;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
-const _: () = assert!(LAMP_PICK_DIAG_WORD + 4 < LIGHTING_STATS_WORDS);
+const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;

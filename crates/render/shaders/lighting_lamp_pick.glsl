@@ -1,21 +1,30 @@
 // Weighted point-lamp picking for the direct shade loop (lighting_direct.comp).
 //
 // The sun is not a sample. Point lamps and the flame use Talbot, Cline, and
-// Egbert, EGSR 2005: systematic samples along the unshadowed prefix. Pixel
-// reuse combines reservoirs with Bitterli et al., TOG 2020, Algorithm 6 as
-// printed (Z counts a source only when its target of the selected lamp is
-// positive). This file does not trace. The shade loop's one trace_occluded
-// is the only shadow ray.
+// Egbert, EGSR 2005: systematic samples along the unshadowed prefix. Unbiased
+// pixel reuse combines reservoirs with pairwise MIS (Bitterli et al. 2022;
+// Wyman, SIGGRAPH 2023). The Jacobian is 1 (point lamps). The biased path is
+// Bitterli et al. 2020 section 3 plus the M clamp, not Algorithm 6. This file
+// does not trace. The shade loop's one trace_occluded is the only shadow ray.
 //
 // Low keeps one reservoir (temporal only, radius 0). Medium and High keep
-// the current and previous slots. The high 8 bits of `m` are the quiet-frame
-// integration count; Algorithm 6 reads the low 24 bits. Deviations from the
-// paper are listed in docs/systems/lighting/README.md. The CPU twin is
-// crates/render/src/lamp_pick.rs.
+// the current and previous slots. Each slot is two uvec4s: the reservoir, then
+// depth along that frame's forward, the packed normal, the record kind, and
+// the shaded direct (rgb9e5). Kind 2 is the exact sum, kind 1 a trusted copy
+// of one, kind 0 a ReSTIR sample. The high 8 bits of `m` are the hold count;
+// the merge reads the low 24 bits. Deviations from the papers are listed in
+// docs/systems/lighting/README.md. The CPU twin is crates/render/src/lamp_pick.rs.
 
-// Quiet frames averaged before a still pixel holds its direct light.
-// Matches LAMP_PICK_HOLD_FRAMES in crates/scene/src/lighting.rs.
+// A settled exact record carries this in the high 8 bits of `m`, so the next
+// quiet held frame takes the S78J early-out. Matches LAMP_PICK_HOLD_FRAMES.
 const uint LIGHTING_DIRECT_HOLD = 32u;
+// At this many positive point lamps, or fewer, a pixel shades the sum. Above
+// it, one visibility sample is cheaper than the sum. Matches EXACT_LIT_LAMPS.
+const uint LAMP_PICK_EXACT_LIT = 8u;
+// Record kind in the geo word. A cleared slot is all ones, which is neither.
+const uint LAMP_GEO_RESTIR = 0u;
+const uint LAMP_GEO_COPY = 1u;
+const uint LAMP_GEO_EXACT = 2u;
 
 layout(std430, set = 0, binding = 12) buffer LampReservoirs {
     uvec4 v[];
@@ -81,8 +90,12 @@ bool lamp_pick_diag() {
     return ((pc.lamp.y >> 17u) & 1u) != 0u;
 }
 
+uint lamp_res_index(uint pixel, uint slot) {
+    return (slot * pc.dims.x * pc.dims.y + pixel) * 2u;
+}
+
 LampReservoir lamp_res_load(uint pixel, uint slot) {
-    uvec4 w = lamp_res.v[slot * pc.dims.x * pc.dims.y + pixel];
+    uvec4 w = lamp_res.v[lamp_res_index(pixel, slot)];
     LampReservoir r;
     r.lamp = w.x;
     r.w_sum = uintBitsToFloat(w.y);
@@ -99,18 +112,38 @@ LampReservoir lamp_res_load(uint pixel, uint slot) {
 }
 
 void lamp_res_store(uint pixel, uint slot, LampReservoir r) {
-    lamp_res.v[slot * pc.dims.x * pc.dims.y + pixel] =
+    lamp_res.v[lamp_res_index(pixel, slot)] =
         uvec4(r.lamp, floatBitsToUint(r.w_sum), r.m, floatBitsToUint(r.target));
 }
 
-// Same-pixel history. No motion vectors and no history G-buffer: a point that
-// leaves its pixel, or sits in a mover bound, is a miss. GI off has no last
-// camera in the work buffer, so it is a miss too.
-bool lamp_pick_history_ok(vec3 pos, uvec2 pix) {
-    if (!lighting_gi_on()) {
-        return false;
+uvec4 lamp_geo_load(uint pixel, uint slot) {
+    return lamp_res.v[lamp_res_index(pixel, slot) + 1u];
+}
+
+void lamp_geo_store(uint pixel, uint slot, uvec4 geo) {
+    lamp_res.v[lamp_res_index(pixel, slot) + 1u] = geo;
+}
+
+float lamp_res_w(LampReservoir r) {
+    uint m = lamp_res_samples(r);
+    if (m == 0u || r.target <= 0.0 || r.lamp == LAMP_ALL) {
+        return 0.0;
     }
-    if (lighting_near_change(pos)) {
+    return r.w_sum / (float(m) * r.target);
+}
+
+// Depth of `pos` along the camera that is shading this frame.
+float lamp_pick_depth(vec3 pos) {
+    return dot(pos - scene.eye.xyz, scene.view_forward.xyz);
+}
+
+// Motion vector into the previous frame. The returned pixel is in bounds.
+// Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
+// A mover bound does not reject on its own. GI off has no last camera.
+bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_now) {
+    hist_pixel = 0u;
+    z_now = 0.0;
+    if (!lighting_gi_on()) {
         return false;
     }
     vec4 eye = work.v[lighting_change_at() + 1u];
@@ -127,12 +160,30 @@ bool lamp_pick_history_ok(vec3 pos, uvec2 pix) {
     }
     vec3 rel = pos - eye.xyz;
     float z = dot(rel, fwd);
+    z_now = z;
     if (z <= 1.0e-3) {
         return false;
     }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
     vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
-    return ivec2(floor(px)) == ivec2(pix);
+    if (px.x < 0.0 || px.y < 0.0 || px.x >= float(pc.dims.x) || px.y >= float(pc.dims.y)) {
+        return false;
+    }
+    hist_pixel = uint(floor(px.y)) * pc.dims.x + uint(floor(px.x));
+    uvec4 geo = lamp_geo_load(hist_pixel, lamp_res_slot_prev());
+    float z_prev = uintBitsToFloat(geo.x);
+    if (!(z_prev > 0.0)) {
+        return false;
+    }
+    float gap = abs(z - z_prev);
+    if (gap / z > 0.02 && gap > 0.05) {
+        return false;
+    }
+    vec3 n_prev = lighting_unpack_normal(geo.y);
+    if (dot(n_prev, nrm) < 0.9) {
+        return false;
+    }
+    return true;
 }
 
 uint lamp_pick_find(LampList list, uint count, uint lamp) {
@@ -235,6 +286,55 @@ LampReservoir lamp_pick_merge(
     outr.w_sum = float(m_out) * wsum / float(z);
     outr.m = m_out;
     outr.target = target;
+    return outr;
+}
+
+// Pairwise MIS. J = 1. Identical domains with the same W keep W.
+// phat_q_* is the unshadowed luminance at the current pixel.
+// phat_hist_* is that luminance at the history pixel.
+LampReservoir lamp_pick_pairwise(
+    LampReservoir canonical,
+    LampReservoir history,
+    float phat_q_can,
+    float phat_q_hist,
+    float phat_hist_can,
+    float phat_hist_hist,
+    float u
+) {
+    canonical.m = lamp_res_samples(canonical);
+    history.m = lamp_res_samples(history);
+    if (canonical.m == 0u || canonical.lamp == LAMP_ALL) {
+        if (history.m == 0u) {
+            return lamp_res_empty();
+        }
+        return history;
+    }
+    float mass_c = float(canonical.m) * lamp_res_w(canonical) * max(phat_q_can, 0.0);
+    float mass_h = 0.0;
+    if (history.m > 0u && history.lamp != LAMP_ALL) {
+        mass_h = float(history.m) * lamp_res_w(history) * max(phat_q_hist, 0.0);
+    }
+    float area = mass_c + mass_h;
+    if (area <= 0.0) {
+        return lamp_res_empty();
+    }
+    bool pick_h = mass_h > 0.0 && u < mass_h / area;
+    float phat_q_sel = pick_h ? max(phat_q_hist, 0.0) : max(phat_q_can, 0.0);
+    float phat_src = pick_h ? max(phat_hist_hist, 0.0) : max(phat_q_can, 0.0);
+    float phat_other = pick_h ? max(phat_q_hist, 0.0) : max(phat_hist_can, 0.0);
+    uint m_sel = pick_h ? history.m : canonical.m;
+    uint m_other = pick_h ? canonical.m : history.m;
+    float denom = float(m_sel) * phat_src + float(m_other) * phat_other;
+    if (phat_q_sel <= 0.0 || phat_src <= 0.0 || denom <= 0.0) {
+        return lamp_res_empty();
+    }
+    float w_new = area * phat_src / (phat_q_sel * denom);
+    uint m_out = min(canonical.m + history.m, 0x00ffffffu);
+    LampReservoir outr;
+    outr.lamp = pick_h ? history.lamp : canonical.lamp;
+    outr.w_sum = w_new * float(m_out) * phat_q_sel;
+    outr.m = m_out;
+    outr.target = phat_q_sel;
     return outr;
 }
 

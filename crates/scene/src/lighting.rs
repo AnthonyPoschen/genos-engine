@@ -160,7 +160,7 @@ pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
 /// Previous-frame neighbour radius, in pixels, for Medium and High.
 /// Low stays at 0 (temporal only, one reservoir).
 pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
-/// Quiet frames of the unbiased shade before a still pixel holds.
+/// Hold count written into an exact reservoir so the next quiet frame skips it.
 /// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
 pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
 
@@ -226,7 +226,7 @@ pub struct LampPickSettings {
     /// Cap on reservoir `M` for the biased merge. 1..=64. Default 20.
     /// The unbiased path does not apply it.
     pub history: u32,
-    /// Algorithm 6 when true. The section-3 merge and the `M` clamp when false.
+    /// Pairwise MIS when true. The section-3 merge and the `M` clamp when false.
     pub unbiased: bool,
 }
 
@@ -247,7 +247,7 @@ impl LampPickSettings {
     /// Pixel reservoirs for `low`, `medium`, and `high`.
     ///
     /// `candidates` are the unshadowed fill. `radius` 0 is temporal reuse only
-    /// and one reservoir slot. Algorithm 6 (`unbiased`) is on.
+    /// and one reservoir slot. Pairwise MIS (`unbiased`) is on.
     pub fn reservoir(candidates: u32, radius: u32) -> Self {
         Self {
             mode: LampPickMode::Reuse,
