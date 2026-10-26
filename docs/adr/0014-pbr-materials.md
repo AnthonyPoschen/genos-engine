@@ -43,4 +43,4 @@ GI stores irradiance in the world-space surface light cache and refreshes it und
 
 ## Consequences
 
-Implementation commits edit [Loading](../systems/loading.md), [Bake](../systems/bake.md), and [Renderer](../systems/renderer.md) when a limit changes. This ADR does not. The P0 gate is `cargo test -p genos-bake --test materials_gate`. It scores `BakeMesh::surface` against the analytic shade and prints `NOT-IMPLEMENTED` for every path that is not in the tree. A later phase replaces a `NOT-IMPLEMENTED` line with a measurement. It does not retune the threshold to make a red picture pass.
+Implementation commits edit [Loading](../systems/loading.md), [Bake](../systems/bake.md), and [Renderer](../systems/renderer.md) when a limit changes. This ADR does not. The P0 gate is `cargo test -p genos-bake --test materials_gate`. It loads `panel.gltf` through `genos-load` and scores `BakeMesh::surface` against hand constants from the IEC curve and the glTF product. It prints `NOT-IMPLEMENTED` for every path that is not in the tree. A later phase replaces a `NOT-IMPLEMENTED` line with a measurement. It does not retune the threshold to make a red picture pass.

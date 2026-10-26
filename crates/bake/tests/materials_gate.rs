@@ -1,6 +1,10 @@
 //! Headless gate for the PBR material design.
 //!
-//! `cargo test -p genos-bake --test materials_gate -- --case good|bad [--out DIR]`
+//! ```text
+//! cargo test -p genos-bake --test materials_gate -- --case good
+//! cargo test -p genos-bake --test materials_gate -- --case bad
+//! cargo test -p genos-bake --test materials_gate -- --nocapture --case good
+//! ```
 //!
 //! Prints one line per metric: `name value threshold STATUS`.
 //! Writes `DIR/<case>.json`. The default directory is `genos-debug/materials`.
@@ -9,16 +13,27 @@
 //! a metric FAILs. `NOT-IMPLEMENTED` is not a failure. Exit 2 on a bad
 //! argument, a failed self-check, or a write error.
 //!
-//! `--case good` reads `BakeMesh::surface`. `--case bad` reads a shade in this
-//! file that skips sRGB, skips `(1 − metallic)`, and skips emissive strength.
-//! The good case also runs that broken shade and refuses to pass if the broken
-//! shade would pass an implemented metric.
+//! `--nocapture` is a libtest flag. `cargo test -- --nocapture` forwards it
+//! to this binary, which is not a libtest harness. The flag is accepted and
+//! ignored, as are `--test-threads`, `--skip`, and `--format`. The lines
+//! above are already printed.
+//!
+//! The fixture is `tests/fixtures/materials/panel.gltf`, loaded with
+//! `load_gltf_file`. `--case good` reads `BakeMesh::surface` and
+//! `BakeMesh::from_gltf`. `--case bad` reads a shade in this file that
+//! decodes sRGB twice, skips `(1 - metallic)`, and skips emissive strength.
+//! Expected colours are the constants below. They are the IEC 61966-2-1
+//! values worked out by hand. This file does not build them by calling the
+//! shade.
+//!
+//! The good case also runs the broken shade and exits 2 if that shade would
+//! pass a shade metric, or if a path that is not in the tree comes back as PASS.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use genos_bake::{BakeMaterial, BakeMesh};
-use genos_load::{Image, PbrMaterial, Sampler, TextureSlot};
+use genos_bake::BakeMesh;
+use genos_load::{load_gltf_file, GltfScene};
 
 const SHADE: f32 = 1.0 / 255.0;
 const SRGB: f32 = 1.0e-5;
@@ -30,23 +45,57 @@ const RESIDENCY_MB: f32 = 256.0;
 const RELOAD_FRAMES: f32 = 1.0;
 const GBUFFER_MS: f32 = 0.60;
 const NORMAL_DEG: f32 = 0.5;
+/// A sample this close to the twice-decoded constant is a double decode.
+const DOUBLE_MARGIN: f32 = 0.05;
 
-const MUST_FAIL: [&str; 4] = [
+// IEC 61966-2-1, worked by hand. c = N/255.
+// c <= 0.04045 → c/12.92, else ((c + 0.055) / 1.055)^2.4.
+// Byte 10:  c = 10/255 = 0.039215686275 <= 0.04045
+//           L = 0.039215686275 / 12.92 = 0.003035269835
+// Byte 188: c = 188/255 = 0.737254901961
+//           (c + 0.055) / 1.055 = 0.750952513707
+//           ^2.4 = 0.502886458033
+// Byte 128: c = 128/255 = 0.501960784314
+//           (c + 0.055) / 1.055 = 0.527924914041
+//           ^2.4 = 0.215860500114
+// Byte 200: c = 200/255 = 0.784313725490
+//           (c + 0.055) / 1.055 = 0.795558033640
+//           ^2.4 = 0.577580440430
+// Applying the same curve again, as a second mistaken decode:
+// Byte 188: (0.502886458033 + 0.055) / 1.055 = 0.528802329889, ^2.4 = 0.216722530978
+// Byte 128: (0.215860500114 + 0.055) / 1.055 = 0.256739810535, ^2.4 = 0.038263414225
+// Metallic texel G = 255, B = 128, factor 1. Diffuse scale is 1 - 128/255 = 127/255.
+// Emissive strength 2 times the byte-128 decode = 0.431721000228.
+const ONCE_10: f32 = 0.003_035_27;
+const ONCE_128: f32 = 0.215_860_5;
+const ONCE_188: f32 = 0.502_886_5;
+const ONCE_200: f32 = 0.577_580_45;
+const TWICE_128: f32 = 0.038_263_414;
+const TWICE_188: f32 = 0.216_722_53;
+const METAL_KEEP: f32 = 0.498_039_22;
+const EMIT_STRENGTH_2: f32 = 0.431_721;
+
+const SHADE_MAT: usize = 0;
+const BRIGHT_MAT: usize = 2;
+const METAL_MAT: usize = 3;
+
+const MUST_FAIL: [&str; 6] = [
     "shade_albedo",
     "shade_emissive",
     "srgb_decode",
+    "srgb_double",
     "metal_diffuse",
+    "mr_channels",
 ];
 
-#[derive(Clone, Copy)]
-struct Fix {
-    base: [f32; 4],
-    metallic: f32,
+/// Measured from the loaded file or from `from_gltf`, not from the broken shade.
+const FILE_METRICS: [&str; 3] = ["mask_alpha", "texcoord_set", "emissive_default"];
+
+struct Sample {
+    material: usize,
+    uv: [f32; 2],
+    albedo: [f32; 3],
     emissive: [f32; 3],
-    strength: f32,
-    base_px: Option<[u8; 4]>,
-    mr_px: Option<[u8; 4]>,
-    emissive_px: Option<[u8; 4]>,
 }
 
 struct Metric {
@@ -127,7 +176,10 @@ fn run() -> Result<ExitCode, String> {
     let Some(args) = args else {
         println!(
             "materials_gate --case good|bad [--out DIR]\n\
-             Scores BakeMesh::surface (--case good) or a broken shade (--case bad).\n\
+             Loads tests/fixtures/materials/panel.gltf through genos-load.\n\
+             --case good reads BakeMesh::surface. --case bad reads a shade that\n\
+             decodes sRGB twice, skips (1 - metallic), and skips emissive strength.\n\
+             --nocapture, --test-threads, --skip, and --format are ignored.\n\
              Writes DIR/<case>.json. Default DIR is genos-debug/materials.\n\
              GENOS_MATERIALS_GATE_CASE and GENOS_MATERIALS_GATE_OUT apply only when\n\
              the matching argument was omitted.\n\
@@ -135,12 +187,13 @@ fn run() -> Result<ExitCode, String> {
         );
         return Ok(ExitCode::SUCCESS);
     };
+    let scene = load_scene()?;
     if args.case == Case::Good {
-        if let Some(err) = broken_is_wrong(&evaluate(Reader::Broken)) {
+        if let Some(err) = broken_is_wrong(&evaluate(Reader::Broken, &scene)?) {
             return Err(err);
         }
     }
-    let metrics = evaluate(args.case.reader());
+    let metrics = evaluate(args.case.reader(), &scene)?;
     for metric in &metrics {
         println!("{}", line(metric));
     }
@@ -170,6 +223,24 @@ fn parse() -> Result<Option<Args>, String> {
                 let value = args.next().ok_or("--out needs a directory")?;
                 out = Some(PathBuf::from(value));
             }
+            // libtest flags. `cargo test -- --nocapture` forwards them here.
+            // This binary is not a libtest harness, so they are ignored.
+            "--nocapture"
+            | "--quiet"
+            | "--exact"
+            | "--ignored"
+            | "--include-ignored"
+            | "--exclude-should-panic"
+            | "--force-run"
+            | "--show-output"
+            | "--list" => {}
+            "--test-threads" | "--skip" | "--format" => {
+                let _ = args.next();
+            }
+            other
+                if other.starts_with("--test-threads=")
+                    || other.starts_with("--skip=")
+                    || other.starts_with("--format=") => {}
             "-h" | "--help" => help = true,
             other => return Err(format!("unknown option {other}")),
         }
@@ -214,20 +285,39 @@ fn env_mirror(key: &str) -> Result<Option<String>, String> {
     }
 }
 
-fn evaluate(reader: Reader) -> Vec<Metric> {
-    vec![
-        measured(
-            "shade_albedo",
-            max_albedo_error(reader, &albedo_fixtures()),
-            SHADE,
+fn load_scene() -> Result<GltfScene, String> {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/materials/panel.gltf");
+    load_gltf_file(&path).map_err(|err| format!("load {}: {err}", path.display()))
+}
+
+fn evaluate(reader: Reader, scene: &GltfScene) -> Result<Vec<Metric>, String> {
+    if scene.meshes.is_empty() {
+        return Err("fixture has no mesh".to_string());
+    }
+    let mesh = BakeMesh::from_gltf(scene, 0);
+    let albedo = colour_error(reader, scene, &mesh, Colour::Albedo)?;
+    let emissive = colour_error(reader, scene, &mesh, Colour::Emissive)?;
+    Ok(vec![
+        measured("shade_albedo", albedo, SHADE),
+        measured("shade_emissive", emissive, SHADE),
+        measured("srgb_decode", srgb_once(reader, scene, &mesh)?, SRGB),
+        measured("srgb_double", srgb_twice(reader, scene, &mesh)?, SRGB),
+        measured("metal_diffuse", metal_value(reader, scene, &mesh)?, SHADE),
+        measured("mr_channels", mr_channels(reader, scene, &mesh)?, SHADE),
+        measured("mask_alpha", mask_mistakes(&mesh), 0.0),
+        measured("texcoord_set", texcoord_mistakes(scene)?, 0.0),
+        pending(
+            "texcoord_sample",
+            0.0,
+            "BakeMesh::surface ignores TextureSlot.texcoord; the mesh keeps TEXCOORD_0 only",
         ),
-        measured(
-            "shade_emissive",
-            max_emissive_error(reader, &emissive_fixtures()),
+        measured("emissive_default", emissive_default(scene)?, 0.0),
+        pending(
+            "roughness_from_g",
             SHADE,
+            "BakeMesh::surface does not return roughness; the fixture stores it in G",
         ),
-        measured("srgb_decode", srgb_error(reader), SRGB),
-        measured("metal_diffuse", metal_value(reader), SHADE),
         pending("draw_mean", SHADE, "genos-render is not linked"),
         pending(
             "occlusion_indirect",
@@ -257,7 +347,7 @@ fn evaluate(reader: Reader) -> Vec<Metric> {
         pending("residency_mb", RESIDENCY_MB, "no page table"),
         pending("hot_reload_frames", RELOAD_FRAMES, "no watcher"),
         pending("gbuffer_ms", GBUFFER_MS, "no GPU timing in this gate"),
-    ]
+    ])
 }
 
 fn broken_is_wrong(metrics: &[Metric]) -> Option<String> {
@@ -273,7 +363,10 @@ fn broken_is_wrong(metrics: &[Metric]) -> Option<String> {
         }
     }
     for metric in metrics {
-        if MUST_FAIL.contains(&metric.name) {
+        if MUST_FAIL.contains(&metric.name) || FILE_METRICS.contains(&metric.name) {
+            if metric.value.is_none() {
+                return Some(format!("gate_self_check {} was not measured", metric.name));
+            }
             continue;
         }
         if metric.status != Status::NotImplemented {
@@ -387,36 +480,167 @@ fn metric_json(metric: &Metric) -> String {
     line
 }
 
-fn max_albedo_error(reader: Reader, fixes: &[Fix]) -> f32 {
+#[derive(Clone, Copy)]
+enum Colour {
+    Albedo,
+    Emissive,
+}
+
+fn colour_error(
+    reader: Reader,
+    scene: &GltfScene,
+    mesh: &BakeMesh<'_>,
+    colour: Colour,
+) -> Result<f32, String> {
     let mut worst = 0.0_f32;
-    for fix in fixes {
-        let (got, _) = shade(reader, fix);
-        let (want, _) = analytic(fix);
+    for sample in samples() {
+        let (albedo, emissive) = shade(reader, scene, mesh, sample.material, sample.uv)?;
+        let (got, want) = match colour {
+            Colour::Albedo => (albedo, sample.albedo),
+            Colour::Emissive => (emissive, sample.emissive),
+        };
         worst = worst.max(max_abs(got, want));
     }
-    worst
+    Ok(worst)
 }
 
-fn max_emissive_error(reader: Reader, fixes: &[Fix]) -> f32 {
-    let mut worst = 0.0_f32;
-    for fix in fixes {
-        let (_, got) = shade(reader, fix);
-        let (_, want) = analytic(fix);
-        worst = worst.max(max_abs(got, want));
+fn srgb_once(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let red = channel(
+        reader,
+        scene,
+        mesh,
+        SHADE_MAT,
+        [0.25, 0.25],
+        Channel::Albedo,
+    )?;
+    let linear = channel(
+        reader,
+        scene,
+        mesh,
+        SHADE_MAT,
+        [0.75, 0.25],
+        Channel::Albedo,
+    )?;
+    let emit = channel(
+        reader,
+        scene,
+        mesh,
+        SHADE_MAT,
+        [0.25, 0.25],
+        Channel::Emissive,
+    )?;
+    Ok((red - ONCE_188)
+        .abs()
+        .max((linear - ONCE_10).abs())
+        .max((emit - ONCE_128).abs()))
+}
+
+fn srgb_twice(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let red = channel(
+        reader,
+        scene,
+        mesh,
+        SHADE_MAT,
+        [0.25, 0.25],
+        Channel::Albedo,
+    )?;
+    let emit = channel(
+        reader,
+        scene,
+        mesh,
+        SHADE_MAT,
+        [0.25, 0.25],
+        Channel::Emissive,
+    )?;
+    Ok(double_margin(red, TWICE_188).max(double_margin(emit, TWICE_128)))
+}
+
+fn double_margin(sample: f32, twice: f32) -> f32 {
+    (DOUBLE_MARGIN - (sample - twice).abs()).max(0.0)
+}
+
+fn metal_value(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let (albedo, _) = shade(reader, scene, mesh, METAL_MAT, [0.5, 0.5])?;
+    Ok(albedo[0].max(albedo[1]).max(albedo[2]))
+}
+
+fn mr_channels(reader: Reader, scene: &GltfScene, mesh: &BakeMesh<'_>) -> Result<f32, String> {
+    let (albedo, _) = shade(reader, scene, mesh, SHADE_MAT, [0.25, 0.75])?;
+    Ok(max_abs(albedo, [METAL_KEEP; 3]))
+}
+
+fn mask_mistakes(mesh: &BakeMesh<'_>) -> f32 {
+    let mut mistakes = 0.0_f32;
+    // base alpha 0.5 times texel alpha, cutoff 0.5.
+    // 128/255 * 0.5 = 64/255 < 0.5, so that triangle drops.
+    // 1 * 0.5 = 0.5, which is kept (alpha >= cutoff). 0 drops.
+    if count_near(mesh, 7.0 / 3.0) != 0 {
+        mistakes += 1.0;
     }
-    worst
+    if count_near(mesh, 13.0 / 3.0) != 1 {
+        mistakes += 1.0;
+    }
+    if count_near(mesh, 19.0 / 3.0) != 0 {
+        mistakes += 1.0;
+    }
+    mistakes
 }
 
-fn srgb_error(reader: Reader) -> f32 {
-    let fix = srgb_fixture();
-    let (got, _) = shade(reader, &fix);
-    let (want, _) = analytic(&fix);
-    max_abs(got, want)
+fn count_near(mesh: &BakeMesh<'_>, x: f32) -> usize {
+    mesh.triangles
+        .iter()
+        .filter(|tri| {
+            let mid = (tri.positions[0][0] + tri.positions[1][0] + tri.positions[2][0]) / 3.0;
+            (mid - x).abs() < 0.2
+        })
+        .count()
 }
 
-fn metal_value(reader: Reader) -> f32 {
-    let (albedo, _) = shade(reader, &metal_fixture());
-    albedo[0].max(albedo[1]).max(albedo[2])
+fn texcoord_mistakes(scene: &GltfScene) -> Result<f32, String> {
+    let shade = scene
+        .materials
+        .first()
+        .ok_or("fixture has no shade material")?;
+    let base = shade
+        .base_color_texture
+        .ok_or("shade has no base texture")?;
+    let mr = shade
+        .metallic_roughness_texture
+        .ok_or("shade has no metallic-roughness texture")?;
+    let emissive = shade
+        .emissive_texture
+        .ok_or("shade has no emissive texture")?;
+    let uv = scene
+        .meshes
+        .first()
+        .and_then(|mesh| mesh.primitives.first())
+        .and_then(|primitive| primitive.texcoords.first())
+        .copied()
+        .ok_or("shade primitive has no TEXCOORD_0")?;
+    let mut mistakes = 0.0_f32;
+    if base.texcoord != 0 {
+        mistakes += 1.0;
+    }
+    if mr.texcoord != 0 {
+        mistakes += 1.0;
+    }
+    if emissive.texcoord != 1 {
+        mistakes += 1.0;
+    }
+    // TEXCOORD_1 at this corner is (0.75, 0.75). A loader that kept set 1
+    // would not land on the set 0 corner (0.25, 0.25).
+    if (uv[0] - 0.25).abs() > 1.0e-5 || (uv[1] - 0.25).abs() > 1.0e-5 {
+        mistakes += 1.0;
+    }
+    Ok(mistakes)
+}
+
+fn emissive_default(scene: &GltfScene) -> Result<f32, String> {
+    let shade = scene
+        .materials
+        .first()
+        .ok_or("fixture has no shade material")?;
+    Ok((shade.emissive_strength - 1.0).abs())
 }
 
 fn furnace_outgoing() -> f64 {
@@ -425,106 +649,99 @@ fn furnace_outgoing() -> f64 {
     emit / (1.0 - albedo)
 }
 
-fn shade(reader: Reader, fix: &Fix) -> ([f32; 3], [f32; 3]) {
+#[derive(Clone, Copy)]
+enum Channel {
+    Albedo,
+    Emissive,
+}
+
+fn channel(
+    reader: Reader,
+    scene: &GltfScene,
+    mesh: &BakeMesh<'_>,
+    material: usize,
+    uv: [f32; 2],
+    which: Channel,
+) -> Result<f32, String> {
+    let (albedo, emissive) = shade(reader, scene, mesh, material, uv)?;
+    Ok(match which {
+        Channel::Albedo => albedo[0],
+        Channel::Emissive => emissive[0],
+    })
+}
+
+fn shade(
+    reader: Reader,
+    scene: &GltfScene,
+    mesh: &BakeMesh<'_>,
+    material: usize,
+    uv: [f32; 2],
+) -> Result<([f32; 3], [f32; 3]), String> {
     match reader {
-        Reader::Bake => bake_shade(fix),
-        Reader::Broken => broken_shade(fix),
+        Reader::Bake => {
+            let index = u32::try_from(material).map_err(|_| "material index does not fit u32")?;
+            Ok(mesh.surface(index, uv))
+        }
+        Reader::Broken => broken_shade(scene, material, uv),
     }
 }
 
-fn analytic(fix: &Fix) -> ([f32; 3], [f32; 3]) {
-    let base_tex = match fix.base_px {
-        Some(px) => [
-            srgb_channel(px[0]),
-            srgb_channel(px[1]),
-            srgb_channel(px[2]),
-        ],
-        None => [1.0; 3],
-    };
-    let metal_tex = match fix.mr_px {
-        Some(px) => byte_unit(px[2]),
-        None => 1.0,
-    };
-    let metallic = (fix.metallic * metal_tex).clamp(0.0, 1.0);
-    let albedo =
-        std::array::from_fn(|channel| fix.base[channel] * base_tex[channel] * (1.0 - metallic));
-    let emis_tex = match fix.emissive_px {
-        Some(px) => [
-            srgb_channel(px[0]),
-            srgb_channel(px[1]),
-            srgb_channel(px[2]),
-        ],
-        None => [1.0; 3],
-    };
-    let emissive =
-        std::array::from_fn(|channel| fix.emissive[channel] * emis_tex[channel] * fix.strength);
-    (albedo, emissive)
+fn broken_shade(
+    scene: &GltfScene,
+    material: usize,
+    uv: [f32; 2],
+) -> Result<([f32; 3], [f32; 3]), String> {
+    let material = scene
+        .materials
+        .get(material)
+        .ok_or("broken shade material is missing")?;
+    let base = broken_sample(scene, material.base_color_texture, uv)?;
+    let albedo = [
+        material.base_color[0] * base[0],
+        material.base_color[1] * base[1],
+        material.base_color[2] * base[2],
+    ];
+    let emit = broken_sample(scene, material.emissive_texture, uv)?;
+    let emissive = [
+        material.emissive[0] * emit[0],
+        material.emissive[1] * emit[1],
+        material.emissive[2] * emit[2],
+    ];
+    Ok((albedo, emissive))
 }
 
-fn broken_shade(fix: &Fix) -> ([f32; 3], [f32; 3]) {
-    let base_tex = match fix.base_px {
-        Some(px) => [byte_unit(px[0]), byte_unit(px[1]), byte_unit(px[2])],
-        None => [1.0; 3],
+fn broken_sample(
+    scene: &GltfScene,
+    slot: Option<genos_load::TextureSlot>,
+    uv: [f32; 2],
+) -> Result<[f32; 4], String> {
+    let Some(slot) = slot else {
+        return Ok([1.0; 4]);
     };
-    let albedo = std::array::from_fn(|channel| fix.base[channel] * base_tex[channel]);
-    let emis_tex = match fix.emissive_px {
-        Some(px) => [byte_unit(px[0]), byte_unit(px[1]), byte_unit(px[2])],
-        None => [1.0; 3],
-    };
-    let emissive = std::array::from_fn(|channel| fix.emissive[channel] * emis_tex[channel]);
-    (albedo, emissive)
+    let image = scene
+        .images
+        .get(slot.image)
+        .ok_or("broken shade image is missing")?;
+    if image.width != 2 || image.height != 2 {
+        return Err("broken shade expected a 2x2 image".to_string());
+    }
+    let pixel = image
+        .pixel(wrap2(uv[0]), wrap2(uv[1]))
+        .ok_or("broken shade texel is outside the image")?;
+    Ok([
+        double_eotf(pixel[0]),
+        double_eotf(pixel[1]),
+        double_eotf(pixel[2]),
+        f32::from(pixel[3]) / 255.0,
+    ])
 }
 
-fn bake_shade(fix: &Fix) -> ([f32; 3], [f32; 3]) {
-    let mut images = Vec::new();
-    let mut material = PbrMaterial {
-        metallic: fix.metallic,
-        roughness: 1.0,
-        base_color: fix.base,
-        emissive: fix.emissive,
-        emissive_strength: fix.strength,
-        ..PbrMaterial::default()
-    };
-    if let Some(px) = fix.base_px {
-        material.base_color_texture = Some(slot(images.len()));
-        images.push(texel(px));
-    }
-    if let Some(px) = fix.mr_px {
-        material.metallic_roughness_texture = Some(slot(images.len()));
-        images.push(texel(px));
-    }
-    if let Some(px) = fix.emissive_px {
-        material.emissive_texture = Some(slot(images.len()));
-        images.push(texel(px));
-    }
-    let mesh = BakeMesh {
-        name: "gate".to_string(),
-        triangles: Vec::new(),
-        materials: vec![BakeMaterial { pbr: material }],
-        images: &images,
-    };
-    mesh.surface(0, [0.5, 0.5])
+/// The injected bug: the IEC curve applied twice. Not an expected value.
+fn double_eotf(byte: u8) -> f32 {
+    eotf(eotf(f32::from(byte) / 255.0))
 }
 
-fn slot(image: usize) -> TextureSlot {
-    TextureSlot {
-        image,
-        texcoord: 0,
-        sampler: Sampler::default(),
-        scale: 1.0,
-    }
-}
-
-fn texel(px: [u8; 4]) -> Image {
-    Image {
-        width: 1,
-        height: 1,
-        pixels: vec![px[0], px[1], px[2], px[3]],
-    }
-}
-
-fn srgb_channel(byte: u8) -> f32 {
-    let value = f32::from(byte) / 255.0;
+fn eotf(value: f32) -> f32 {
     if value <= 0.04045 {
         value / 12.92
     } else {
@@ -532,8 +749,9 @@ fn srgb_channel(byte: u8) -> f32 {
     }
 }
 
-fn byte_unit(byte: u8) -> f32 {
-    f32::from(byte) / 255.0
+fn wrap2(t: f32) -> u32 {
+    let frac = t - t.floor();
+    u32::from(frac * 2.0 >= 1.0)
 }
 
 fn max_abs(a: [f32; 3], b: [f32; 3]) -> f32 {
@@ -544,70 +762,33 @@ fn max_abs(a: [f32; 3], b: [f32; 3]) -> f32 {
     worst
 }
 
-fn albedo_fixtures() -> Vec<Fix> {
-    vec![
-        plain([0.2, 0.4, 0.6, 1.0], 0.0, [0.0; 3], 1.0),
-        plain([0.8, 0.8, 0.8, 1.0], 0.25, [0.0; 3], 1.0),
-        Fix {
-            base: [1.0, 1.0, 1.0, 1.0],
-            metallic: 0.0,
-            emissive: [0.0; 3],
-            strength: 1.0,
-            base_px: Some([188, 40, 220, 255]),
-            mr_px: None,
-            emissive_px: None,
-        },
-        Fix {
-            base: [1.0, 0.0, 0.0, 1.0],
-            metallic: 1.0,
-            emissive: [0.0; 3],
-            strength: 1.0,
-            base_px: None,
-            mr_px: Some([0, 0, 128, 255]),
-            emissive_px: None,
-        },
+fn samples() -> [Sample; 9] {
+    let red = [ONCE_188, 0.0, 0.0];
+    let linear = [ONCE_10, 0.0, 0.0];
+    let partial = [METAL_KEEP; 3];
+    let black = [0.0; 3];
+    let emit_128 = [ONCE_128, 0.0, 0.0];
+    let emit_200 = [ONCE_200, 0.0, 0.0];
+    let emit_full = [1.0, 0.0, 0.0];
+    let emit_x2 = [EMIT_STRENGTH_2, 0.0, 0.0];
+    [
+        sample(SHADE_MAT, [0.25, 0.25], red, emit_128),
+        sample(SHADE_MAT, [0.75, 0.25], linear, emit_200),
+        sample(SHADE_MAT, [0.25, 0.75], partial, black),
+        sample(SHADE_MAT, [0.75, 0.75], black, emit_full),
+        sample(SHADE_MAT, [1.25, 0.25], red, emit_128),
+        sample(SHADE_MAT, [1.75, 1.25], linear, emit_200),
+        sample(SHADE_MAT, [1.25, -0.25], partial, black),
+        sample(BRIGHT_MAT, [0.25, 0.25], red, emit_x2),
+        sample(METAL_MAT, [0.5, 0.5], black, black),
     ]
 }
 
-fn emissive_fixtures() -> Vec<Fix> {
-    vec![
-        plain([1.0; 4], 0.0, [0.25, 0.0, 0.5], 4.0),
-        Fix {
-            base: [1.0; 4],
-            metallic: 0.0,
-            emissive: [1.0, 0.0, 0.0],
-            strength: 2.0,
-            base_px: None,
-            mr_px: None,
-            emissive_px: Some([128, 0, 0, 255]),
-        },
-    ]
-}
-
-fn srgb_fixture() -> Fix {
-    Fix {
-        base: [1.0, 1.0, 1.0, 1.0],
-        metallic: 0.0,
-        emissive: [0.0; 3],
-        strength: 1.0,
-        base_px: Some([188, 40, 220, 255]),
-        mr_px: None,
-        emissive_px: None,
-    }
-}
-
-fn metal_fixture() -> Fix {
-    plain([1.0, 1.0, 1.0, 1.0], 1.0, [0.0; 3], 1.0)
-}
-
-fn plain(base: [f32; 4], metallic: f32, emissive: [f32; 3], strength: f32) -> Fix {
-    Fix {
-        base,
-        metallic,
+fn sample(material: usize, uv: [f32; 2], albedo: [f32; 3], emissive: [f32; 3]) -> Sample {
+    Sample {
+        material,
+        uv,
+        albedo,
         emissive,
-        strength,
-        base_px: None,
-        mr_px: None,
-        emissive_px: None,
     }
 }

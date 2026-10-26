@@ -236,21 +236,29 @@ Forbidden, and called out in review if they appear:
 
 PASS when `value ≤ threshold`. `NOT-IMPLEMENTED` when the feature is not in the tree. A missing feature does not score 0. FAIL when a measured value is above the threshold. `NOT-IMPLEMENTED` does not fail the process. One FAIL does.
 
-The gate prints one line, `name value threshold STATUS`, and writes JSON under `./genos-debug/materials/`. Numbers use six digits, so 1/255 prints as 0.003922. `--out` overrides that directory. `GENOS_MATERIALS_GATE_OUT` applies only when `--out` was omitted. `--case good` reads `BakeMesh::surface`. `--case bad` reads a deliberate broken shade in the test (no sRGB, no `(1 − metallic)`, no emissive strength). `GENOS_MATERIALS_GATE_CASE` applies only when `--case` was omitted.
+The gate prints one line, `name value threshold STATUS`, and writes JSON under `./genos-debug/materials/`. Numbers use six digits, so 1/255 prints as 0.003922. `--out` overrides that directory. `GENOS_MATERIALS_GATE_OUT` applies only when `--out` was omitted. `--case good` loads `crates/bake/tests/fixtures/materials/panel.gltf` with `load_gltf_file` and reads `BakeMesh::surface` and `BakeMesh::from_gltf`. `--case bad` reads a deliberate broken shade in the test (sRGB applied twice, no `(1 − metallic)`, no emissive strength). `GENOS_MATERIALS_GATE_CASE` applies only when `--case` was omitted. Expected colours are constants written out from the IEC curve and the glTF product. The test does not call the shade to build them.
 
 ```text
 cargo test -p genos-bake --test materials_gate -- --case good
 cargo test -p genos-bake --test materials_gate -- --case bad
+cargo test -p genos-bake --test materials_gate -- --nocapture --case good
 ```
 
-The good process also grades the broken shade and exits 2 if that shade would pass an implemented metric, or if a missing feature comes back as PASS. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
+The binary is not a libtest harness, so it already prints. `--nocapture`, `--test-threads`, `--skip`, and `--format` are accepted and ignored, because `cargo test -- --nocapture` forwards those flags to every test binary. The good process also grades the broken shade and exits 2 if that shade would pass a shade metric, or if a missing feature comes back as PASS. File checks (`mask_alpha`, `texcoord_set`, `emissive_default`) stay measured on the broken reader, because that reader does not replace the loader or the mask clip. The bad process is expected to exit 1. `cargo test` without arguments runs the good case.
 
 | Metric | Threshold | What the number is |
 |---|---|---|
-| `shade_albedo` | 1/255 | Max absolute error of diffuse albedo against the analytic product, uncompressed. P0 fixtures are 1×1, so the bake's repeat-nearest sampler and the analytic texel are the same pixel. Wrap and filter arrive in phase 1. |
-| `shade_emissive` | 1/255 | Max absolute error of emission, including strength. |
-| `srgb_decode` | 1e-5 | Max absolute error of the IEC 61966-2-1 decode on the fixture texel. |
-| `metal_diffuse` | 1/255 | Max channel of a fully metallic sample. The analytic value is 0. |
+| `shade_albedo` | 1/255 | Max absolute error of diffuse albedo against the hand constants, across the 2×2 texels and repeat samples outside 0..1. The file's sampler is nearest and repeat, which is what the bake implements. Clamp, mirror, and linear filtering stay phase 1. |
+| `shade_emissive` | 1/255 | Max absolute error of emission. The shade material has no strength extension, so the constant uses strength 1. The bright material uses strength 2. |
+| `srgb_decode` | 1e-5 | Max absolute error against the once-applied IEC 61966-2-1 decode, including the linear piece (byte 10) and the power piece (byte 188). |
+| `srgb_double` | 1e-5 | How far the sample sits inside a 0.05 margin of the twice-applied decode. 0 means it is outside that margin. A second decode lands on 0.05 and fails. |
+| `metal_diffuse` | 1/255 | Max channel of a fully metallic sample. The hand value is 0. |
+| `mr_channels` | 1/255 | Error at the texel whose metallic-roughness image is G=255, B=128. The hand value uses B (`127/255` on a white base). Reading G would be 0. |
+| `mask_alpha` | 0 | Wrong keep/drop count. Alpha is base alpha 0.5 times texture alpha, cutoff 0.5. Products: 64/255 drops, 0.5 stays (the spec keeps `alpha >= cutoff`), 0 drops. |
+| `texcoord_set` | 0 | Wrong-slot count. The emissive slot's `texCoord` is 1, the other slots are 0, and the primitive UVs are `TEXCOORD_0` `(0.25, 0.25)`, not set 1's `(0.75, 0.75)`. |
+| `texcoord_sample` | 0 | `NOT-IMPLEMENTED`. `BakeMesh::surface` takes the UV it is given and ignores `TextureSlot.texcoord`. The primitive keeps `TEXCOORD_0` only. |
+| `emissive_default` | 0 | Absolute error of the loaded strength against 1 on the material that omits `KHR_materials_emissive_strength`. |
+| `roughness_from_g` | 1/255 | `NOT-IMPLEMENTED`. `BakeMesh::surface` does not return roughness. The fixture stores it in G (byte 10 at the first texel, factor 0.5). |
 | `draw_mean` | 1/255 | `surface_mean` against the same shade. The gate does not link `genos-render`. |
 | `occlusion_indirect` | 1/255 | Occlusion scales indirect only. The bake does not return occlusion. |
 | `normal_angle_deg` | 0.5 | Angle between the shaded normal and the tangent-space reference. |
@@ -270,8 +278,8 @@ Each phase is its own commit and its own measurement. A phase that misses a thre
 
 | Phase | Change | Gate that moves off `NOT-IMPLEMENTED` |
 |---|---|---|
-| P0 | This design and `materials_gate`. | `shade_albedo`, `shade_emissive`, `srgb_decode`, `metal_diffuse` against `BakeMesh::surface`. |
-| P1 | One shade function shared by the bake and a CPU hit test. Sampler wrap and filter included. | The four live metrics stay, now on that function. |
+| P0 | This design and `materials_gate`. The fixture is a 2×2 glTF. | `shade_albedo`, `shade_emissive`, `srgb_decode`, `srgb_double`, `metal_diffuse`, `mr_channels`, `mask_alpha`, `texcoord_set`, `emissive_default`. |
+| P1 | One shade function shared by the bake and a CPU hit test. Sampler wrap and filter included. The shade reads the slot's UV set and returns roughness from G. | The P0 shade metrics stay, now on that function. `texcoord_sample` and `roughness_from_g` move off `NOT-IMPLEMENTED`. |
 | P2 | G-buffer samples metallic-roughness, normal, occlusion, and emissive. `surface_mean` uses the shade. Metallic and roughness are stored. Lambert stays. | `draw_mean`, `occlusion_indirect`, `normal_angle_deg`. |
 | P3 | The CPU path tracer samples the shade. Dielectric pictures use the reference check. | `picture_dielectric`. `picture_metal` stays unimplemented. |
 | P4 | Emission at cache hits, promoted emitters, furnace, double-count switch. | `emissive_furnace`, `double_count`. |
