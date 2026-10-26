@@ -13,7 +13,8 @@
 use genos_render::{
     aces2_rec709, agx_rec709, bloom_downsample, bloom_downsample_weight_sum, bloom_upsample,
     bloom_upsample_weight_sum, ev100_from_luminance, exposure_from_camera, exposure_from_ev100,
-    grade_peak, grade_relative, histogram_ev100, linear_from_display, near_grade,
+    exposure_adapt_outside, exposure_overshoot, exposure_still_change, grade_peak, grade_relative,
+    histogram_ev100, linear_from_display, near_grade,
     pick_hdr_output, pq_st2084, scene_peak_error, scene_referred, scrgb_code, tone, HdrSwapchain,
     ListedFormat, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB,
     FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
@@ -235,9 +236,9 @@ fn live_metrics() -> Vec<Metric> {
             histogram_error(histogram_ev100),
             HIST_MAX,
         ),
-        not_implemented("exposure_still", STILL_MAX, Compare::AtMost),
-        not_implemented("exposure_adapt", ADAPT_MAX, Compare::AtMost),
-        not_implemented("exposure_overshoot", OVERSHOOT_MAX, Compare::AtMost),
+        at_most("exposure_still", exposure_still_change(), STILL_MAX),
+        at_most("exposure_adapt", exposure_adapt_outside(), ADAPT_MAX),
+        at_most("exposure_overshoot", exposure_overshoot(), OVERSHOOT_MAX),
         at_most(
             "physical_camera",
             camera_error(exposure_from_camera),

@@ -25,6 +25,11 @@ layout(std430, set = 0, binding = 13) buffer SceneReferred {
     vec4 px[];
 } scene_lin;
 
+// x exposure (0 means 1), y display mode, z bloom intensity.
+layout(std430, set = 0, binding = 14) readonly buffer HdrPost {
+    vec4 v;
+} hdr;
+
 const float LAMBERT = 0.254647909;
 
 float tone_channel(float x) {
@@ -201,7 +206,12 @@ void main() {
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
-    // Legacy display. Exposure 1 and bloom off. Later passes replace this shoulder.
+    float exposure = hdr.v.x;
+    if (exposure == 0.0) {
+        exposure = 1.0;
+    }
+    c *= exposure;
+    // Legacy display. Exposure 1 and bloom off keep today's bytes.
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
     // Magenta on pixels whose surface-cache corners had no finished set.
     // GENOS_LIGHTING_UNFILLED_TINT, or Shift+F8. Quiet compose only tints the

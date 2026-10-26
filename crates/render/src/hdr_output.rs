@@ -342,25 +342,44 @@ pub fn exposure_from_ev100(ev100: f64) -> f64 {
 }
 
 #[must_use]
-pub fn exposure_from_camera(aperture: f64, shutter: f64, iso: f64) -> f64 {
-    let ev100 = ((aperture * aperture) / shutter * 100.0 / iso).log2();
-    exposure_from_ev100(ev100)
+pub fn camera_ev100(aperture: f64, shutter: f64, iso: f64) -> f64 {
+    ((aperture * aperture) / shutter * 100.0 / iso).log2()
 }
 
-/// Log-luminance histogram, outer 10% dropped on each tail. EV100 from the mean log.
+#[must_use]
+pub fn exposure_from_camera(aperture: f64, shutter: f64, iso: f64) -> f64 {
+    exposure_from_ev100(camera_ev100(aperture, shutter, iso))
+}
+
+/// Log-luminance histogram, 256 bins, outer 10% dropped on each tail.
 #[must_use]
 pub fn histogram_ev100(samples: &[f64]) -> f64 {
-    const BINS: usize = 256;
-    let mut counts = [0_u32; BINS];
-    let mut total = 0_u32;
+    histogram_ev100_bins(samples, 256)
+}
+
+/// Bin counts for [`histogram_ev100_bins`]. The dump writes these counts.
+#[must_use]
+pub fn histogram_counts(samples: &[f64], bins: usize) -> Vec<u32> {
+    let bins = bins.clamp(1, 4096);
+    let mut counts = vec![0_u32; bins];
     for sample in samples {
         if *sample <= 0.0 {
             continue;
         }
-        let index = bin_of(*sample, BINS);
-        counts[index] += 1;
-        total += 1;
+        let index = bin_of(*sample, bins);
+        if let Some(count) = counts.get_mut(index) {
+            *count += 1;
+        }
     }
+    counts
+}
+
+/// Same meter as [`histogram_ev100`] with `bins` (Low uses 64, Medium 128, High 256).
+#[must_use]
+pub fn histogram_ev100_bins(samples: &[f64], bins: usize) -> f64 {
+    let bins = bins.clamp(1, 4096);
+    let counts = histogram_counts(samples, bins);
+    let total: u32 = counts.iter().copied().sum();
     if total == 0 {
         return 0.0;
     }
@@ -384,13 +403,106 @@ pub fn histogram_ev100(samples: &[f64]) -> f64 {
             continue;
         }
         let take = left.min(keep - seen);
-        acc += f64::from(take) * bin_center(index, BINS);
+        acc += f64::from(take) * bin_center(index, bins);
         seen += take;
     }
     if seen == 0 {
         return 0.0;
     }
     acc / f64::from(seen) + 8.0_f64.log2()
+}
+
+/// Exposure after a compensation in stops. `+1` doubles the scale.
+#[must_use]
+pub fn exposure_with_compensation(ev100: f64, compensation: f64) -> f64 {
+    exposure_from_ev100(ev100 - compensation)
+}
+
+/// One adaptation step. Holds when the relative gap is under 0.001.
+/// `tau_down` is the scene getting brighter (scale falling).
+#[must_use]
+pub fn step_exposure(scale: f64, target: f64, dt: f64, tau_down: f64, tau_up: f64) -> f64 {
+    if !target.is_finite() || target < 0.0 {
+        return scale;
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return target;
+    }
+    let rel = (target - scale).abs() / scale.abs().max(1.0e-6);
+    if rel < 0.001 {
+        return scale;
+    }
+    let tau = if target < scale { tau_down } else { tau_up };
+    let tau = if tau > 0.0 { tau } else { dt.abs().max(1.0e-6) };
+    let gain = 1.0 - (-dt.abs() / tau).exp();
+    scale + (target - scale) * gain
+}
+
+/// Max relative change over 8 identical frames, starting on the target.
+#[must_use]
+pub fn exposure_still_change() -> f64 {
+    let target = exposure_from_ev100(0.0);
+    let mut scale = target;
+    let mut worst = 0.0;
+    let mut prev = scale;
+    for _ in 0..8 {
+        scale = step_exposure(scale, target, 1.0 / 60.0, 0.40, 0.80);
+        let step = (scale - prev).abs() / prev.abs().max(1.0e-6);
+        if step > worst {
+            worst = step;
+        }
+        prev = scale;
+    }
+    worst
+}
+
+/// Distance of the 90% time of a 4-stop darkening outside `[0.40, 2.00]` seconds.
+#[must_use]
+pub fn exposure_adapt_outside() -> f64 {
+    let (t90, _) = adapt_four_stops();
+    if t90 < 0.40 {
+        0.40 - t90
+    } else if t90 > 2.00 {
+        t90 - 2.00
+    } else {
+        0.0
+    }
+}
+
+/// How far a 4-stop adaptation steps past the target. The exponential stays short of it.
+#[must_use]
+pub fn exposure_overshoot() -> f64 {
+    adapt_four_stops().1
+}
+
+fn adapt_four_stops() -> (f64, f64) {
+    let dt = 1.0 / 60.0;
+    let start = exposure_from_ev100(0.0);
+    let target = exposure_from_ev100(4.0);
+    let span = start - target;
+    let mut scale = start;
+    let mut time = 0.0;
+    let mut t90 = 10.0;
+    let mut saw = false;
+    let mut overshoot = 0.0;
+    for _ in 0..600 {
+        scale = step_exposure(scale, target, dt, 0.40, 0.80);
+        time += dt;
+        if span != 0.0 {
+            let progress = (start - scale) / span;
+            if progress > 1.0 {
+                let past = progress - 1.0;
+                if past > overshoot {
+                    overshoot = past;
+                }
+            }
+            if !saw && progress >= 0.90 {
+                t90 = time;
+                saw = true;
+            }
+        }
+    }
+    (t90, overshoot)
 }
 
 #[must_use]

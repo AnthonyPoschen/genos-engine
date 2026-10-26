@@ -298,9 +298,9 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `grade_is_linear` | ≥ 1.5 | max channel of the buffer the grade read, on a fixture whose peak is 8 | PASS. `grade_peak` of a scene pixel whose peak is 8 |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, against `log2(0.18 × 100 / 12.5)` | PASS |
-| `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | NOT-IMPLEMENTED |
-| `exposure_adapt` | outside `[0.40, 2.00]` s is 0 | time to cover 90% of a 4-stop step. The value is the distance outside that window | NOT-IMPLEMENTED |
-| `exposure_overshoot` | ≤ 0.02 | progress past the target on that step | NOT-IMPLEMENTED |
+| `exposure_still` | ≤ 0.001 | max consecutive relative change of exposure over 8 identical frames | PASS. `exposure_still_change` holds on `step_exposure` |
+| `exposure_adapt` | outside `[0.40, 2.00]` s is 0 | time to cover 90% of a 4-stop step. The value is the distance outside that window | PASS. `exposure_adapt_outside` at τ 0.40 s |
+| `exposure_overshoot` | ≤ 0.02 | progress past the target on that step | PASS. `exposure_overshoot` on the same step |
 | `physical_camera` | ≤ 1e−9 | `exposure_from_camera` against `1 / (1.2 × N² / t × 100 / S)` | PASS |
 | `bloom_energy` | ≤ 1e−4 | downsample and upsample weights each sum to 1, and one pixel of energy 1 survives two down/up levels | PASS |
 | `bloom_firefly` | ≤ 1.0 | first downsample of a white pixel of 1000 in a field of zeros, Karis on | NOT-IMPLEMENTED. The pass does not call it yet |
@@ -326,7 +326,7 @@ The GI grade does not use `linear_grade`'s 0.02 line. GI keeps 0.12. `linear_gra
 
 HDR output is a renderer pass, not a new system. It does not add `debug/hdr/`. The lighting binary (`debug/lighting`) gains an Output page when phase 1 lands. The page is the shared scaffolding: the scene picker, checkpoints, reset, replay, screenshots, sliders, the guided-review panel, and the headless CLI. No new binary.
 
-The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, bloom intensity, and bloom levels are sliders. There is no description string and no tooltip.
+The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, bloom intensity, and bloom levels are sliders. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
 
 Probes, one per failure mode. They land with the phase that can fail that way. Names are the MCP catalogue in `crates/debug/src/commands.rs`, so MCP, `POST /cmd`, and Rhai share the JSON.
 
@@ -350,7 +350,8 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --iso F
 --aperture F
 --shutter F
---display agx|aces|legacy
+--hdr-display agx|aces|legacy
+--display agx|aces|legacy   (only when the value is one of those three; otherwise it is the Wayland display name)
 --bloom on|off
 --bloom-intensity F
 --bloom-levels N

@@ -247,6 +247,31 @@ impl Renderer {
         self.gpu.lighting.settings.clone()
     }
 
+    /// EV100 the last exposure scale was built from. Zero while legacy bytes hold the scale at 1.
+    pub fn hdr_ev100(&self) -> f64 {
+        self.gpu.lighting.last_ev100
+    }
+
+    /// Exposure scale written into the compose params. Legacy bytes stay at 1.
+    pub fn hdr_exposure(&self) -> f64 {
+        f64::from(self.gpu.lighting.exposure_scale)
+    }
+
+    /// Last eight exposure scales, oldest first.
+    pub fn hdr_scales(&self) -> Vec<f64> {
+        self.gpu.lighting.exposure_log.clone()
+    }
+
+    /// Last histogram bin counts. Empty until an auto-exposure frame meters.
+    pub fn hdr_histogram(&self) -> Vec<u32> {
+        self.gpu.lighting.histogram_counts.clone()
+    }
+
+    /// Swapchain format and color space in use. Color space stays sRGB until selection runs.
+    pub fn hdr_surface(&self) -> (i32, i32) {
+        (self.gpu.format, crate::hdr_output::COLOR_SPACE_SRGB)
+    }
+
     /// Drop the surface cache and its work list on the next draw.
     ///
     /// A scene switch calls this. Recreating the renderer would compile the

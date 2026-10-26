@@ -25,8 +25,8 @@ use std::path::PathBuf;
 use genos_mcp::json::Value;
 use genos_render::{DebugView, Renderer, SceneRead, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, HdrSettings, Light,
+    LightingPreset, LightingSettings, MenuSettings, OutputMode, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -1307,6 +1307,19 @@ impl Tools {
                 apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
                 reply(event_loop_value(&ctx.host.scene().event_loop))
             }
+            "get_hdr_settings" => {
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
+            "set_hdr_settings" => {
+                apply_hdr_update(&mut ctx.host.scene().hdr, args.0)?;
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(hdr_value(&settings, ctx.renderer))
+            }
+            "get_hdr" => {
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(hdr_value(&settings, ctx.renderer))
+            }
             "get_menu_settings" => reply(menu_value(&ctx.host.scene().menu.effective())),
             "set_menu_settings" => {
                 apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
@@ -1820,6 +1833,69 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
+    let (format, color_space) = renderer.hdr_surface();
+    let chosen = match settings.output {
+        OutputMode::Auto => "auto",
+        OutputMode::Sdr => "sdr",
+        OutputMode::Hdr10 => "hdr10",
+        OutputMode::Scrgb => "scrgb",
+    };
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("ev100", num(renderer.hdr_ev100())),
+        ("exposure", num(renderer.hdr_exposure())),
+        (
+            "scales",
+            list(renderer.hdr_scales().into_iter().map(num).collect()),
+        ),
+        ("grade", text("scene")),
+        (
+            "histogram",
+            list(
+                renderer
+                    .hdr_histogram()
+                    .into_iter()
+                    .map(|count| num(count as f64))
+                    .collect(),
+            ),
+        ),
+        (
+            "surfaces",
+            list(vec![obj(vec![
+                ("format", num(format as f64)),
+                ("color_space", num(color_space as f64)),
+            ])]),
+        ),
+        ("chosen", text(chosen)),
+    ])
+}
+
+fn apply_hdr_update(settings: &mut HdrSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("hdr settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("hdr line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
+    }
+    Ok(())
 }
 
 fn fps_counter_value(settings: &FpsCounterSettings) -> Value {

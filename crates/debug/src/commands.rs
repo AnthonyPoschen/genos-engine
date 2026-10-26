@@ -112,8 +112,26 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(hdr_specs())
     .chain(host_specs())
     .collect()
+}
+
+fn hdr_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_hdr_settings",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, and --output win over GENOS_HDR_*. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+        ),
+        spec(
+            "set_hdr_settings",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, legacy_bytes). A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+        ),
+        spec(
+            "get_hdr",
+            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {

@@ -23,6 +23,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         menu: genos_scene::MenuSettings::default(),
     };
     update(camera, &mut scene, actions, dt);

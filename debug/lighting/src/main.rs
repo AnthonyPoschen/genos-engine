@@ -57,6 +57,25 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
                          Yaw 0 looks down -Z
   --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --exposure-mode auto|camera|fixed
+                         meter, physical camera, or a fixed EV100.
+                         GENOS_HDR_EXPOSURE_MODE applies only when this is omitted
+  --ev100 F              fixed EV100. GENOS_HDR_EV100 applies only when this is omitted
+  --compensation F       stops added to exposure. GENOS_HDR_COMPENSATION applies
+                         only when this is omitted
+  --iso F                camera ISO. GENOS_HDR_ISO applies only when this is omitted
+  --aperture F           f-number. GENOS_HDR_APERTURE applies only when this is omitted
+  --shutter F            shutter seconds. GENOS_HDR_SHUTTER applies only when this is omitted
+  --hdr-display agx|aces|legacy
+                         display transform. GENOS_HDR_DISPLAY applies only when this
+                         is omitted. --display is the Wayland name; a value of
+                         agx, aces, or legacy also selects the transform
+  --bloom on|off         scene-referred bloom. GENOS_HDR_BLOOM applies only when this is omitted
+  --bloom-intensity F    bloom scale. GENOS_HDR_BLOOM_INTENSITY applies only when this is omitted
+  --bloom-levels N       pyramid levels, 0 to 6. GENOS_HDR_BLOOM_LEVELS applies
+                         only when this is omitted
+  --output auto|sdr|hdr10|scrgb
+                         swapchain choice. GENOS_HDR_OUTPUT applies only when this is omitted
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
                          (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
@@ -132,7 +151,7 @@ in <out>/menu/tab.txt.
 The groups are debug/lighting/menu.txt. A section key of - has no fold.
 GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
 the window. The pages are Scene, Pipeline, Lamps, GI, Denoise,
-Shadows, Perf, and Info. Lamps and GI keep folds because those pages
+Shadows, Perf, Output, and Info. Lamps and GI keep folds because those pages
 are tall.
 WASD fly, Space
 up, C or Ctrl down, Shift is faster. The plate shows FPS and frame ms, averaged
@@ -159,6 +178,17 @@ const ID_MENU_WHEEL: u32 = 2820;
 const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
 const ID_SWITCH: u32 = 4000;
+const ID_HDR_EXPOSURE: u32 = 5000;
+const ID_HDR_DISPLAY: u32 = 5001;
+const ID_HDR_OUTPUT: u32 = 5002;
+const ID_HDR_EV: u32 = 5100;
+const ID_HDR_COMP: u32 = 5101;
+const ID_HDR_ISO: u32 = 5102;
+const ID_HDR_APERTURE: u32 = 5103;
+const ID_HDR_SHUTTER: u32 = 5104;
+const ID_HDR_LEVELS: u32 = 5105;
+const ID_HDR_BLOOM_I: u32 = 5106;
+const ID_HDR_BLOOM: u32 = 5200;
 
 mod menu_layout;
 
@@ -776,7 +806,8 @@ enum Show {
 
 impl App {
     fn open(entries: Vec<Entry>, root: PathBuf, log: std::fs::File) -> Result<Self, String> {
-        let show = build_entry(&root, &entries[0])?;
+        let mut show = build_entry(&root, &entries[0])?;
+        adopt_show(&mut show);
         Ok(Self {
             entries,
             index: 0,
@@ -880,7 +911,26 @@ impl App {
         self.scene().debug = debug;
         self.scene().event_loop = event_loop;
         genos_window::retire(old);
+        adopt_show(&mut self.show);
         self.note(&format!("loaded {name}"));
+    }
+}
+
+fn adopt_hdr_preset(scene: &mut genos_scene::Scene) {
+    if !scene.hdr.legacy_bytes {
+        return;
+    }
+    let preset = std::env::var("GENOS_LIGHTING_PRESET")
+        .ok()
+        .and_then(|name| genos_scene::LightingPreset::parse(&name))
+        .unwrap_or(scene.lighting.preset);
+    scene.hdr = genos_scene::HdrSettings::for_preset(preset);
+}
+
+fn adopt_show(show: &mut Show) {
+    match show {
+        Show::Stress(stage) => adopt_hdr_preset(&mut stage.world.scene),
+        Show::Still(world) => adopt_hdr_preset(&mut world.scene),
     }
 }
 
@@ -935,6 +985,7 @@ impl Host for App {
         self.scene().fps_counter = fps;
         self.scene().debug = debug;
         self.scene().event_loop = event_loop;
+        adopt_show(&mut self.show);
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -991,6 +1042,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         menu: MenuSettings::default(),
     })
 }
@@ -1066,6 +1118,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
                 event_loop: EventLoopSettings::default(),
+                hdr: genos_scene::HdrSettings::legacy_bytes(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -1588,6 +1641,132 @@ fn setting_piece(
         "menu_keys" => {
             focus_row("Key focus", ID_MENU_KEYS, menu_settings(app).keys).map(Piece::Row)
         }
+        "hdr_exposure_mode" => {
+            let hdr = hdr_of(app);
+            drop_row(
+                "Exposure",
+                ID_HDR_EXPOSURE,
+                exposure_index(hdr.exposure_mode),
+                ["auto", "camera", "fixed"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+            .map(Piece::Row)
+        }
+        "hdr_ev100" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "EV100",
+                ID_HDR_EV,
+                hdr.ev100,
+                -8.0,
+                16.0,
+                0.1,
+            )))
+        }
+        "hdr_compensation" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Compensation",
+                ID_HDR_COMP,
+                hdr.compensation,
+                -8.0,
+                8.0,
+                0.1,
+            )))
+        }
+        "hdr_iso" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "ISO",
+                ID_HDR_ISO,
+                hdr.iso,
+                50.0,
+                6400.0,
+                50.0,
+            )))
+        }
+        "hdr_aperture" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Aperture",
+                ID_HDR_APERTURE,
+                hdr.aperture,
+                0.7,
+                22.0,
+                0.1,
+            )))
+        }
+        "hdr_shutter" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Shutter",
+                ID_HDR_SHUTTER,
+                hdr.shutter,
+                0.000_125,
+                1.0,
+                0.001,
+            )))
+        }
+        "hdr_display" => {
+            let hdr = hdr_of(app);
+            drop_row(
+                "Display transform",
+                ID_HDR_DISPLAY,
+                display_index(hdr.display),
+                ["agx", "aces", "legacy"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+            .map(Piece::Row)
+        }
+        "hdr_bloom" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(PanelRow {
+                label: "Bloom".into(),
+                buttons: Vec::new(),
+                slider: Some(PanelSlider::range(
+                    ID_HDR_BLOOM_I,
+                    hdr.bloom_intensity,
+                    0.0,
+                    1.0,
+                    0.01,
+                    format!("{:.2}", hdr.bloom_intensity),
+                )),
+                dropdown: None,
+                checks: vec![PanelCheck {
+                    id: ID_HDR_BLOOM,
+                    text: "Bloom".into(),
+                    on: hdr.bloom,
+                }],
+            }))
+        }
+        "hdr_bloom_levels" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Bloom",
+                ID_HDR_LEVELS,
+                f64::from(hdr.bloom_levels),
+                0.0,
+                6.0,
+                1.0,
+            )))
+        }
+        "hdr_output" => {
+            let hdr = hdr_of(app);
+            drop_row(
+                "SDR output",
+                ID_HDR_OUTPUT,
+                output_index(hdr.output),
+                ["auto", "sdr", "hdr10", "scrgb"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            )
+            .map(Piece::Row)
+        }
         name => {
             let knob = app.knobs().into_iter().find(|knob| knob.name == name)?;
             if knob.choices == ["off", "on"] {
@@ -1840,11 +2019,80 @@ fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
     }
 }
 
+fn hdr_of(app: &App) -> genos_scene::HdrSettings {
+    let stored = app.scene_ref().hdr.clone();
+    match stored.effective() {
+        Ok(value) => value,
+        Err(_) => stored,
+    }
+}
+
+fn number_row(label: &str, id: u32, value: f64, min: f64, max: f64, step: f64) -> PanelRow {
+    PanelRow {
+        label: label.into(),
+        buttons: Vec::new(),
+        slider: Some(PanelSlider::range(
+            id,
+            value,
+            min,
+            max,
+            step,
+            format!("{value:.3}"),
+        )),
+        dropdown: None,
+        checks: Vec::new(),
+    }
+}
+
+fn exposure_index(mode: genos_scene::ExposureMode) -> f64 {
+    match mode {
+        genos_scene::ExposureMode::Auto => 0.0,
+        genos_scene::ExposureMode::Camera => 1.0,
+        genos_scene::ExposureMode::Fixed => 2.0,
+    }
+}
+
+fn display_index(mode: genos_scene::DisplayTransform) -> f64 {
+    match mode {
+        genos_scene::DisplayTransform::Agx => 0.0,
+        genos_scene::DisplayTransform::Aces => 1.0,
+        genos_scene::DisplayTransform::Legacy => 2.0,
+    }
+}
+
+fn output_index(mode: genos_scene::OutputMode) -> f64 {
+    match mode {
+        genos_scene::OutputMode::Auto => 0.0,
+        genos_scene::OutputMode::Sdr => 1.0,
+        genos_scene::OutputMode::Hdr10 => 2.0,
+        genos_scene::OutputMode::Scrgb => 3.0,
+    }
+}
+
 fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
     if id == ID_FPS_HZ {
         app.scene()
             .fps_counter
             .set_key("rate_hz", &format!("{value}"))?;
+    } else if id == ID_HDR_EV {
+        app.scene().hdr.set_key("ev100", &format!("{value}"))?;
+    } else if id == ID_HDR_COMP {
+        app.scene().hdr.set_key("compensation", &format!("{value}"))?;
+    } else if id == ID_HDR_ISO {
+        app.scene().hdr.set_key("iso", &format!("{value}"))?;
+    } else if id == ID_HDR_APERTURE {
+        app.scene().hdr.set_key("aperture", &format!("{value}"))?;
+    } else if id == ID_HDR_SHUTTER {
+        app.scene().hdr.set_key("shutter", &format!("{value}"))?;
+    } else if id == ID_HDR_BLOOM_I {
+        app.scene()
+            .hdr
+            .set_key("bloom_intensity", &format!("{value}"))?;
+    } else if id == ID_HDR_LEVELS {
+        let levels = value.round().clamp(0.0, 6.0);
+        app.scene()
+            .hdr
+            .set_key("bloom_levels", &format!("{levels:.0}"))?;
     } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
         let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
         app.set_knob(name, value)?;
@@ -1890,6 +2138,18 @@ fn select(
             .unwrap_or("hover");
         let key = if id == ID_MENU_WHEEL { "wheel" } else { "keys" };
         app.scene().menu.set_key(key, name)?;
+    } else if id == ID_HDR_EXPOSURE {
+        let mode = ["auto", "camera", "fixed"].get(index).copied().unwrap_or("auto");
+        app.scene().hdr.set_key("exposure_mode", mode)?;
+    } else if id == ID_HDR_DISPLAY {
+        let mode = ["agx", "aces", "legacy"].get(index).copied().unwrap_or("legacy");
+        app.scene().hdr.set_key("display", mode)?;
+    } else if id == ID_HDR_OUTPUT {
+        let mode = ["auto", "sdr", "hdr10", "scrgb"]
+            .get(index)
+            .copied()
+            .unwrap_or("sdr");
+        app.scene().hdr.set_key("output", mode)?;
     } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
         let name = DROP_KNOBS[(id - ID_DROP) as usize];
         app.set_knob(name, value)?;
@@ -1930,6 +2190,12 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         app.scene()
             .fps_counter
             .set_key("enabled", if on { "1" } else { "0" })?;
+        return Ok(());
+    }
+    if id == ID_HDR_BLOOM {
+        app.scene()
+            .hdr
+            .set_key("bloom", if on { "on" } else { "off" })?;
         return Ok(());
     }
     let index = id.wrapping_sub(ID_SWITCH) as usize;
@@ -2149,6 +2415,11 @@ fn options() -> Result<Options, String> {
                     let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
                     genos_render::check_gpu_times_arg(other, next.as_deref())?;
+                } else if genos_scene::hdr_flag_needs_value(other).is_some() {
+                    let needs = genos_scene::hdr_flag_needs_value(other).unwrap_or(false);
+                    if needs {
+                        drop(need_arg(&mut args, other)?);
+                    }
                 } else {
                     return Err(format!("unknown argument {other}"));
                 }
@@ -2571,6 +2842,7 @@ mod tests {
                 "Denoise",
                 "Shadows",
                 "Perf",
+                "Output",
                 "Info"
             ]
         );
@@ -2650,6 +2922,29 @@ mod tests {
         assert!(super::USAGE.contains("--gi-metrics"));
         assert!(super::USAGE.contains("--script"));
         assert!(super::USAGE.contains("GENOS_GI_METRICS"));
+        assert!(super::USAGE.contains("--exposure-mode"));
+        assert!(super::USAGE.contains("--hdr-display"));
+        assert!(super::USAGE.contains("--ev100"));
+        assert!(super::USAGE.contains("--compensation"));
+        assert!(super::USAGE.contains("--iso"));
+        assert!(super::USAGE.contains("--aperture"));
+        assert!(super::USAGE.contains("--shutter"));
+        assert!(super::USAGE.contains("--bloom"));
+        assert!(super::USAGE.contains("--bloom-intensity"));
+        assert!(super::USAGE.contains("--bloom-levels"));
+        assert!(super::USAGE.contains("--output"));
+        assert!(super::USAGE.contains("GENOS_HDR_EXPOSURE_MODE"));
+        assert!(super::USAGE.contains("GENOS_HDR_EV100"));
+        assert!(super::USAGE.contains("GENOS_HDR_COMPENSATION"));
+        assert!(super::USAGE.contains("GENOS_HDR_ISO"));
+        assert!(super::USAGE.contains("GENOS_HDR_APERTURE"));
+        assert!(super::USAGE.contains("GENOS_HDR_SHUTTER"));
+        assert!(super::USAGE.contains("GENOS_HDR_DISPLAY"));
+        assert!(super::USAGE.contains("GENOS_HDR_BLOOM"));
+        assert!(super::USAGE.contains("GENOS_HDR_BLOOM_INTENSITY"));
+        assert!(super::USAGE.contains("GENOS_HDR_BLOOM_LEVELS"));
+        assert!(super::USAGE.contains("GENOS_HDR_OUTPUT"));
+        assert!(super::USAGE.contains("Output"));
     }
 
     #[test]

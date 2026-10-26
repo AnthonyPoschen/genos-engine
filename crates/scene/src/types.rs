@@ -184,6 +184,9 @@ pub struct Scene {
     /// Longest gap between window pumps, in milliseconds. The frame writes it.
     /// A value of `0` clears the mark. See `docs/systems/window.md`.
     pub event_loop: EventLoopSettings,
+    /// Exposure, bloom, display, and swapchain. `legacy_bytes` keeps the
+    /// pre-HDR picture. A lighting preset does not write this struct.
+    pub hdr: crate::HdrSettings,
 }
 
 impl Scene {
