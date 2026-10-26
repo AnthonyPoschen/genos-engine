@@ -36,7 +36,7 @@ use std::sync::OnceLock;
 const LEGACY_MAX: f64 = 1e-4;
 /// Max code delta of the plain compose picture against the stored shoulder.
 const LEGACY_CODE_MAX: f64 = 0.0;
-/// Max code delta of hdr_agx mode 0 against `tone`, after 8-bit dither.
+/// Max code delta of `hdr_agx` mode 0 against `tone`, after 8-bit dither.
 const GPU_LEGACY_MAX: f64 = 1.0;
 const EV_MAX: f64 = 1e-9;
 const HIST_MAX: f64 = 0.10;
