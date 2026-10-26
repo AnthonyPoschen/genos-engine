@@ -1,11 +1,10 @@
 //! Measures CCD metrics by running `genos_physics::step`.
 //!
 //! `good` and `bad` are the same 3 000 m/s scene. `good` asks for protection:
-//! the bullet is speculative, and the ships stay discrete until time of impact,
-//! so `tunnel_count` is still `FAIL`. `bad` leaves protection off and fails the
-//! same way. `discrete` is the 30 m/s run, scored on free-flight steps. `loss`
-//! scores that run from start to end, so the inelastic drop fails
-//! `|energy_drift| <= 0.01`.
+//! the bullet is speculative and both ships are swept, so `tunnel_count` is 0.
+//! `bad` leaves protection off and still tunnels. `discrete` is the 30 m/s run,
+//! scored on free-flight steps. `loss` scores that run from start to end, so
+//! the inelastic drop fails `|energy_drift| <= 0.01`.
 //!
 //! ```text
 //! --out DIR
@@ -69,6 +68,18 @@ const METRICS: &[Spec] = &[
         bound: Bound::AtLeast,
         threshold: 1.0,
         threshold_text: ">=1",
+    },
+    Spec {
+        name: "contacts_stored",
+        bound: Bound::AtLeast,
+        threshold: 1.0,
+        threshold_text: ">=1",
+    },
+    Spec {
+        name: "toi_deferred",
+        bound: Bound::AtMost,
+        threshold: 0.0,
+        threshold_text: "<=0",
     },
 ];
 
@@ -141,6 +152,8 @@ struct Reading {
     penetration_m: f64,
     energy_drift: f64,
     determinism_hash_match: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
     ship_speed: f32,
     bullet_speed: f32,
     protect: bool,
@@ -357,7 +370,7 @@ fn print_help() {
     proof runs all four. Default proof.
     GENOS_PHYSICS_METRICS_FIXTURE applies only when --fixture is omitted.
 good and bad both run ships and bullet at {TUNNEL_SPEED} m/s.
-    good asks for protection and marks the bullet speculative. The ships stay discrete, so good still tunnels.
+    good marks the bullet speculative and both ships swept. bad leaves protection off, so the ships tunnel.
 discrete runs ships at {CATCH_SHIP} m/s and the bullet at {CATCH_BULLET} m/s.
     energy_drift on good, bad, and discrete sums free-flight steps only.
 loss is the discrete scene scored from start to end, so an inelastic drop fails.
@@ -375,6 +388,8 @@ fn measure(setup: Setup) -> Result<Reading, String> {
         penetration_m: first.penetration_m,
         energy_drift: first.energy_drift,
         determinism_hash_match: f64::from(match_bit),
+        contacts_stored: first.contacts_stored,
+        toi_deferred: first.toi_deferred,
         ship_speed: first.ship_speed,
         bullet_speed: first.bullet_speed,
         protect: setup.protect,
@@ -388,6 +403,8 @@ struct Simulated {
     tunnel_count: f64,
     penetration_m: f64,
     energy_drift: f64,
+    contacts_stored: f64,
+    toi_deferred: f64,
     ship_speed: f32,
     bullet_speed: f32,
     ccd_in_step: bool,
@@ -400,6 +417,9 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
     let mut bullet_tunneled = false;
     let mut deepest = 0.0_f32;
     let mut free_delta = 0.0;
+    let mut toi_failed = 0_u32;
+    let mut toi_deferred = 0_u32;
+    let mut contacts_stored = false;
     for _ in 0..STEPS {
         let before = velocities(&scene.world);
         let energy_before = energy(&scene.world);
@@ -410,6 +430,9 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
         ships_tunneled |= ships_exchanged(&scene)?;
         bullet_tunneled |= bullet_past_wall(&scene)?;
         deepest = deepest.max(penetration(&scene)?);
+        toi_failed = toi_failed.saturating_add(scene.world.step_stats.toi_failed);
+        toi_deferred = toi_deferred.saturating_add(scene.world.step_stats.toi_deferred);
+        contacts_stored |= ships_stored_contact(&scene)?;
     }
     let end = energy(&scene.world);
     let scale = start.abs().max(1.0);
@@ -418,7 +441,7 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
     } else {
         free_delta / scale
     };
-    let tunnels = u32::from(ships_tunneled) + u32::from(bullet_tunneled);
+    let tunnels = u32::from(ships_tunneled) + u32::from(bullet_tunneled) + toi_failed;
     Ok(Simulated {
         ship_speed: scene.ship_speed,
         bullet_speed: scene.bullet_speed,
@@ -427,7 +450,15 @@ fn simulate(setup: &Setup) -> Result<Simulated, String> {
         tunnel_count: f64::from(tunnels),
         penetration_m: f64::from(deepest),
         energy_drift: drift,
+        contacts_stored: f64::from(u8::from(contacts_stored)),
+        toi_deferred: f64::from(toi_deferred),
     })
+}
+
+fn ships_stored_contact(scene: &Scene) -> Result<bool, String> {
+    let left = body(scene, scene.left)?;
+    let right = body(scene, scene.right)?;
+    Ok(left.normal_impulse > 0.0 && right.normal_impulse > 0.0)
 }
 
 struct VelocitySample {
@@ -494,6 +525,8 @@ fn build(setup: &Setup) -> Scene {
     bullet.velocity = genos_math::Vec3::new(bullet_speed, 0.0, 0.0);
     if setup.protect {
         bullet.motion = MotionQuality::Speculative;
+        left.motion = MotionQuality::Swept;
+        right.motion = MotionQuality::Swept;
     }
     let wall = Body::cuboid(
         genos_math::Vec3::new(0.3, 2.0, 4.0),
@@ -661,6 +694,8 @@ fn judge_all(reading: &Reading) -> Vec<Row> {
         reading.penetration_m,
         reading.energy_drift,
         reading.determinism_hash_match,
+        reading.contacts_stored,
+        reading.toi_deferred,
     ];
     METRICS
         .iter()
@@ -792,18 +827,18 @@ fn prove(out: &Path) -> Result<i32, String> {
     print!("{}", discrete.stdout);
     println!("# loss");
     print!("{}", loss.stdout);
-    if good.code != 1 || bad.code != 1 || discrete.code != 0 || loss.code != 1 {
+    if good.code != 0 || bad.code != 1 || discrete.code != 0 || loss.code != 1 {
         return Err(format!(
             "proof exits good {} bad {} discrete {} loss {}",
             good.code, bad.code, discrete.code, loss.code
         ));
     }
-    expect_tunnel_fail(&good.stdout, true)?;
-    expect_tunnel_fail(&bad.stdout, false)?;
+    expect_protected(&good.stdout)?;
+    expect_unprotected(&bad.stdout)?;
     expect_discrete(&discrete.stdout)?;
     expect_loss(&loss.stdout)?;
-    expect_file(out, "good", true, 1, "free-flight", true)?;
-    expect_file(out, "bad", false, 1, "free-flight", false)?;
+    expect_file(out, "good", true, 0, "free-flight", true)?;
+    expect_file(out, "bad", false, 2, "free-flight", false)?;
     expect_file(out, "discrete", false, 0, "free-flight", false)?;
     expect_file(out, "loss", false, 1, "full", false)?;
     Ok(0)
@@ -888,31 +923,41 @@ fn printed_rows(text: &str) -> Result<Vec<Printed>, String> {
     Ok(rows)
 }
 
-fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
-    let flag = if protect {
-        "protection=true"
-    } else {
-        "protection=false"
-    };
-    if !text.contains(flag) {
-        return Err(format!("scene missing {flag}"));
-    }
+fn expect_speed(text: &str) -> Result<(), String> {
     if !text.contains(&format!("ships_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
         || !text.contains(&format!("bullet_m_s={}", fmt_num(f64::from(TUNNEL_SPEED))))
     {
         return Err("high-speed scene did not use 3000 m/s for both bodies".into());
     }
-    let ccd = if protect {
-        "ccd_in_step=true"
-    } else {
-        "ccd_in_step=false"
-    };
-    if !text.contains("energy=free-flight") || !text.contains(ccd) {
-        return Err(format!(
-            "high-speed scene did not record free-flight energy and {ccd}"
-        ));
+    if !text.contains("energy=free-flight") {
+        return Err("high-speed scene did not record free-flight energy".into());
     }
+    Ok(())
+}
+
+fn expect_protected(text: &str) -> Result<(), String> {
+    if !text.contains("protection=true") || !text.contains("ccd_in_step=true") {
+        return Err("protected scene missing protection or ccd_in_step".into());
+    }
+    expect_speed(text)?;
+    for row in printed_rows(text)? {
+        if row.status != "PASS" {
+            return Err(format!("{} wanted PASS with protection on", row.name));
+        }
+        if row.name == "tunnel_count" && row.value > 0.0 {
+            return Err(format!("tunnel_count {} wanted 0", row.value));
+        }
+    }
+    Ok(())
+}
+
+fn expect_unprotected(text: &str) -> Result<(), String> {
+    if !text.contains("protection=false") || !text.contains("ccd_in_step=false") {
+        return Err("unprotected scene recorded protection".into());
+    }
+    expect_speed(text)?;
     let mut tunnel_failed = false;
+    let mut contacts_failed = false;
     for row in printed_rows(text)? {
         if row.name == "tunnel_count" {
             if row.status != "FAIL" || row.value <= 0.0 {
@@ -922,12 +967,20 @@ fn expect_tunnel_fail(text: &str, protect: bool) -> Result<(), String> {
                 ));
             }
             tunnel_failed = true;
+        } else if row.name == "contacts_stored" {
+            if row.status != "FAIL" || row.value >= 1.0 {
+                return Err(format!(
+                    "contacts_stored {} {} wanted FAIL below 1",
+                    row.value, row.status
+                ));
+            }
+            contacts_failed = true;
         } else if row.status != "PASS" {
             return Err(format!("{} wanted PASS beside the tunnel", row.name));
         }
     }
-    if !tunnel_failed {
-        return Err("run has no tunnel_count".into());
+    if !tunnel_failed || !contacts_failed {
+        return Err("unprotected run did not fail tunnel and contacts".into());
     }
     Ok(())
 }

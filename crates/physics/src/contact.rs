@@ -74,7 +74,7 @@ const BOUNDS_MARGIN: f32 = 0.02;
 /// X), and every bounded body against every plane. Two static bodies never move, so
 /// their pair is skipped. The pairs run in index order, the order a pass over every
 /// pair took.
-pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
+pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
     scratch.boxes.clear();
     scratch.planes.clear();
     scratch.pairs.clear();
@@ -108,15 +108,17 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
         }
     }
     scratch.pairs.sort_unstable();
+    let mut hits = 0_u32;
     for &(i, j) in &scratch.pairs {
         let (left, right) = bodies.split_at_mut(j as usize);
-        collide_pair(&mut left[i as usize], &mut right[0]);
+        hits = hits.saturating_add(collide_pair(&mut left[i as usize], &mut right[0]));
     }
+    hits
 }
 
 /// World bounds of a body: low and high corners. None for a plane, which is
 /// unbounded.
-fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
+pub(crate) fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
     let mut lo = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut hi = -lo;
     let mut add = |p: Vec3| {
@@ -160,52 +162,49 @@ fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
     Some((lo, hi))
 }
 
-fn collide_pair(a: &mut Body, b: &mut Body) {
+fn collide_pair(a: &mut Body, b: &mut Body) -> u32 {
     match (a.shape, b.shape) {
-        (Shape::Plane { .. }, Shape::Plane { .. }) => {}
-        (Shape::Plane { normal, offset }, _) => {
-            collide_plane(b, a, normal, offset);
-        }
-        (_, Shape::Plane { normal, offset }) => {
-            collide_plane(a, b, normal, offset);
-        }
+        (Shape::Plane { .. }, Shape::Plane { .. }) => 0,
+        (Shape::Plane { normal, offset }, _) => collide_plane(b, a, normal, offset),
+        (_, Shape::Plane { normal, offset }) => collide_plane(a, b, normal, offset),
         (Shape::Mesh(mesh), _) => collide_mesh(a, mesh, b),
-        (_, Shape::Mesh(mesh)) => {
-            if let Some((normal, depth)) = mesh_contact(b, &mesh, a) {
-                solve_contact(a, b, -normal, depth);
-            }
-        }
-        _ => {
-            if let Some((normal, depth)) = primitive_contact(a, b) {
-                solve_contact(a, b, normal, depth);
-            }
-        }
+        (_, Shape::Mesh(mesh)) => mesh_contact(b, &mesh, a).map_or(0, |(normal, depth)| {
+            u32::from(solve_contact(a, b, -normal, depth))
+        }),
+        _ => primitive_contact(a, b).map_or(0, |(normal, depth)| {
+            u32::from(solve_contact(a, b, normal, depth))
+        }),
     }
 }
 
-fn collide_plane(body: &mut Body, plane: &mut Body, normal: Vec3, offset: f32) {
+fn collide_plane(body: &mut Body, plane: &mut Body, normal: Vec3, offset: f32) -> u32 {
     match body.shape {
         Shape::Mesh(mesh) => {
+            let mut hits = 0_u32;
             for piece in mesh.pieces() {
                 if let Some((hit_normal, depth)) = piece_plane(body, *piece, normal, offset) {
-                    solve_contact(body, plane, hit_normal, depth);
+                    hits = hits
+                        .saturating_add(u32::from(solve_contact(body, plane, hit_normal, depth)));
                 }
             }
+            hits
         }
         _ => {
             let point = support_point(body, -normal, None);
             let dist = normal.dot(point) - offset;
             if dist < 0.0 {
-                solve_contact(body, plane, normal, -dist);
+                u32::from(solve_contact(body, plane, normal, -dist))
+            } else {
+                0
             }
         }
     }
 }
 
-fn collide_mesh(a: &mut Body, mesh: Mesh, b: &mut Body) {
-    if let Some((normal, depth)) = mesh_contact(a, &mesh, b) {
-        solve_contact(a, b, normal, depth);
-    }
+fn collide_mesh(a: &mut Body, mesh: Mesh, b: &mut Body) -> u32 {
+    mesh_contact(a, &mesh, b).map_or(0, |(normal, depth)| {
+        u32::from(solve_contact(a, b, normal, depth))
+    })
 }
 
 fn mesh_contact(owner: &Body, mesh: &Mesh, other: &Body) -> Option<(Vec3, f32)> {
@@ -977,18 +976,22 @@ fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
 }
 
 /// Contact restitution is the larger of the two bodies. Friction is the larger too.
-pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) {
+///
+/// Returns whether both bodies were dynamic and a closing impulse was stored.
+pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) -> bool {
     let normal = unit(normal);
     let inv = a.inverse_mass + b.inverse_mass;
     if inv <= 0.0 || !penetration.is_finite() || !normal.x.is_finite() {
-        return;
+        return false;
     }
     let rel = a.velocity - b.velocity;
     let vn = rel.dot(normal);
-    if vn < 0.0 {
+    let dynamic_hit = if vn < 0.0 {
         let restitution = a.restitution.max(b.restitution).clamp(0.0, 1.0);
         let j = -(1.0 + restitution) * vn / inv;
         let impulse = normal * j;
+        a.normal_impulse += j;
+        b.normal_impulse += j;
         a.velocity += impulse * a.inverse_mass;
         b.velocity -= impulse * b.inverse_mass;
 
@@ -1004,11 +1007,15 @@ pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetratio
                 b.velocity -= kick * b.inverse_mass;
             }
         }
-    }
+        a.inverse_mass > 0.0 && b.inverse_mass > 0.0
+    } else {
+        false
+    };
     let depth = penetration - SLOP;
     if depth > 0.0 {
         let correction = normal * (depth * PERCENT / inv);
         a.position += correction * a.inverse_mass;
         b.position -= correction * b.inverse_mass;
     }
+    dynamic_hit
 }

@@ -1,7 +1,16 @@
-//! Speculative contacts, and the gap query they share with time of impact.
+//! Speculative contacts and swept time of impact.
 //!
 //! The gap is a GJK distance for two convex shapes. A positive gap is
 //! separation. A negative gap is penetration from the discrete contact.
+//!
+//! A swept pair advances by `gap / (|v_a - v_b| + |ω_a| r_a + |ω_b| r_b)`.
+//! Angular velocity is not on `Body` yet, so both ω terms are 0. The advance
+//! has no scale factor. A pair whose relative travel over the tick exceeds the
+//! smaller bounding radius is sliced so each advance travels at most that
+//! radius. The loop stops at a 1 mm gap, when the tick is consumed, or after
+//! 16 advances. Hitting the cap with gap still above 1 mm clamps the pair and
+//! counts `toi_failed`. This is not closest-point velocity, not a 0.8 factor,
+//! and not a `1e-4` s minimum step.
 
 use genos_math::Vec3;
 
@@ -71,26 +80,31 @@ fn approach(body: &Body, dt: f32, margin: f32) -> f32 {
     (speed * dt).min(margin).max(0.0)
 }
 
-fn solve_indexed(bodies: &mut [Body], index: usize, other: usize, normal: Vec3, penetration: f32) {
+fn solve_indexed(
+    bodies: &mut [Body],
+    index: usize,
+    other: usize,
+    normal: Vec3,
+    penetration: f32,
+) -> bool {
     if index < other {
         let (left, right) = bodies.split_at_mut(other);
         let Some(first) = left.get_mut(index) else {
-            return;
+            return false;
         };
         let Some(second) = right.first_mut() else {
-            return;
+            return false;
         };
-        solve_contact(first, second, normal, penetration);
-        return;
+        return solve_contact(first, second, normal, penetration);
     }
     let (left, right) = bodies.split_at_mut(index);
     let Some(first) = right.first_mut() else {
-        return;
+        return false;
     };
     let Some(second) = left.get_mut(other) else {
-        return;
+        return false;
     };
-    solve_contact(first, second, normal, penetration);
+    solve_contact(first, second, normal, penetration)
 }
 
 /// Normal points from `second` toward `first`. Gap is positive when separated.
@@ -197,6 +211,13 @@ fn finish_gap(first: &Body, second: &Body, closest: Vec3) -> (Vec3, f32) {
 fn overlap_gap(first: &Body, second: &Body) -> (Vec3, f32) {
     if let Some((normal, depth)) = contact::primitive_contact(first, second) {
         return (normal, -depth);
+    }
+    // Touching without a discrete overlap. The center delta still points from
+    // the second body toward the first, which is the separating direction.
+    let delta = first.position - second.position;
+    let distance = delta.length();
+    if distance > DISTANCE_EPSILON {
+        return (delta / distance, 0.0);
     }
     (Vec3::Y, 0.0)
 }
@@ -444,12 +465,341 @@ fn tetra_contains_origin(points: [Vec3; 4]) -> bool {
     })
 }
 
+const GAP_TOLERANCE: f32 = 0.001;
+const MAX_ADVANCES: u32 = 16;
+const TIME_EPSILON: f32 = 1.0e-8;
+
+/// Pair list and coverage flags reused across steps so a discrete step allocates nothing.
+#[derive(Clone, Debug)]
+pub(crate) struct CcdScratch {
+    pairs: Vec<(usize, usize)>,
+    covered: Vec<u8>,
+}
+
+impl CcdScratch {
+    pub(crate) const fn new() -> Self {
+        Self {
+            pairs: Vec::new(),
+            covered: Vec::new(),
+        }
+    }
+
+    pub(crate) fn covers(&self, index: usize) -> bool {
+        self.covered.get(index).copied() == Some(1)
+    }
+}
+
+/// Collect swept pairs whose expanded bounds meet. Pairs past `cap` increment `toi_deferred`.
+pub(crate) fn prepare_swept(
+    bodies: &[Body],
+    scratch: &mut CcdScratch,
+    cap: u32,
+    dt: f32,
+    stats: &mut crate::StepStats,
+) {
+    scratch.pairs.clear();
+    let any_swept = bodies
+        .iter()
+        .any(|body| body.motion == MotionQuality::Swept);
+    if !any_swept {
+        if !scratch.covered.is_empty() {
+            scratch.covered.fill(0);
+        }
+        return;
+    }
+    if scratch.covered.len() < bodies.len() {
+        scratch.covered.resize(bodies.len(), 0);
+    }
+    scratch.covered.fill(0);
+    collect_pairs(bodies, scratch, dt);
+    let cap_len = usize::try_from(cap).unwrap_or(usize::MAX);
+    if scratch.pairs.len() > cap_len {
+        let dropped = scratch.pairs.len() - cap_len;
+        scratch.pairs.truncate(cap_len);
+        stats.toi_deferred = u32::try_from(dropped).unwrap_or(u32::MAX);
+    }
+    for &(first, second) in &scratch.pairs {
+        if let Some(flag) = scratch.covered.get_mut(first) {
+            *flag = 1;
+        }
+        if let Some(flag) = scratch.covered.get_mut(second) {
+            *flag = 1;
+        }
+    }
+}
+
+fn collect_pairs(bodies: &[Body], scratch: &mut CcdScratch, dt: f32) {
+    let count = bodies.len();
+    let mut first = 0;
+    while first < count {
+        let mut second = first + 1;
+        while second < count {
+            if swept_pair(bodies, first, second, dt) {
+                scratch.pairs.push((first, second));
+            }
+            second += 1;
+        }
+        first += 1;
+    }
+}
+
+fn swept_pair(bodies: &[Body], first: usize, second: usize, dt: f32) -> bool {
+    let (Some(a), Some(b)) = (bodies.get(first), bodies.get(second)) else {
+        return false;
+    };
+    let swept = a.motion == MotionQuality::Swept || b.motion == MotionQuality::Swept;
+    let dynamic = a.inverse_mass != 0.0 || b.inverse_mass != 0.0;
+    swept && dynamic && bounds_meet(a, b, dt)
+}
+
+fn bounds_meet(a: &Body, b: &Body, dt: f32) -> bool {
+    match (expanded_bounds(a, dt), expanded_bounds(b, dt)) {
+        (None, _) | (_, None) => true,
+        (Some((lo, hi)), Some((lo_b, hi_b))) => {
+            lo_b.x <= hi.x
+                && lo.x <= hi_b.x
+                && lo_b.y <= hi.y
+                && lo.y <= hi_b.y
+                && lo_b.z <= hi.z
+                && lo.z <= hi_b.z
+        }
+    }
+}
+
+fn expanded_bounds(body: &Body, dt: f32) -> Option<(Vec3, Vec3)> {
+    let (lo, hi) = contact::bounds(body)?;
+    let travel = body.velocity * dt;
+    Some((
+        Vec3::new(
+            lo.x.min(lo.x + travel.x),
+            lo.y.min(lo.y + travel.y),
+            lo.z.min(lo.z + travel.z),
+        ),
+        Vec3::new(
+            hi.x.max(hi.x + travel.x),
+            hi.y.max(hi.y + travel.y),
+            hi.z.max(hi.z + travel.z),
+        ),
+    ))
+}
+
+/// Advance accepted swept pairs. A swept body left out of those pairs uses the speculative margin.
+pub(crate) fn resolve_swept(
+    bodies: &mut [Body],
+    scratch: &CcdScratch,
+    dt: f32,
+    margin: f32,
+    stats: &mut crate::StepStats,
+) {
+    for slot in 0..scratch.pairs.len() {
+        let Some(&(first, second)) = scratch.pairs.get(slot) else {
+            continue;
+        };
+        advance_pair(bodies, first, second, dt, stats);
+    }
+    let count = bodies.len();
+    let mut index = 0;
+    while index < count {
+        let deferred = bodies
+            .get(index)
+            .is_some_and(|body| body.motion == MotionQuality::Swept && !scratch.covers(index));
+        if deferred {
+            integrate_deferred(bodies, index, count, dt, margin);
+        }
+        index += 1;
+    }
+}
+
+fn integrate_deferred(bodies: &mut [Body], index: usize, count: usize, dt: f32, margin: f32) {
+    if let Some(body) = bodies.get_mut(index) {
+        body.motion = MotionQuality::Speculative;
+    }
+    let mut other = 0;
+    while other < count {
+        if other != index {
+            speculative_pair(bodies, index, other, dt, margin);
+        }
+        other += 1;
+    }
+    let Some(body) = bodies.get_mut(index) else {
+        return;
+    };
+    body.motion = MotionQuality::Swept;
+    if body.inverse_mass != 0.0 {
+        body.position += body.velocity * dt;
+    }
+}
+
+fn advance_pair(
+    bodies: &mut [Body],
+    first: usize,
+    second: usize,
+    dt: f32,
+    stats: &mut crate::StepStats,
+) {
+    let Some(a) = bodies.get(first).copied() else {
+        return;
+    };
+    let Some(b) = bodies.get(second).copied() else {
+        return;
+    };
+    if a.inverse_mass == 0.0 && b.inverse_mass == 0.0 {
+        return;
+    }
+    let fast = fast_pair(&a, &b, dt);
+    let mut remaining = dt;
+    let mut advances = 0_u32;
+    loop {
+        if remaining <= TIME_EPSILON {
+            return;
+        }
+        let Some((normal, gap)) = gap_of(bodies, first, second) else {
+            integrate_index(bodies, first, remaining);
+            integrate_index(bodies, second, remaining);
+            return;
+        };
+        if gap <= GAP_TOLERANCE {
+            settle(bodies, first, second, normal, gap, remaining, stats);
+            return;
+        }
+        if advances >= MAX_ADVANCES {
+            stats.toi_failed = stats.toi_failed.saturating_add(1);
+            return;
+        }
+        let Some(step_dt) = next_advance(bodies, first, second, gap, remaining) else {
+            stats.toi_failed = stats.toi_failed.saturating_add(1);
+            return;
+        };
+        integrate_index(bodies, first, step_dt);
+        integrate_index(bodies, second, step_dt);
+        remaining -= step_dt;
+        advances = advances.saturating_add(1);
+        if fast {
+            stats.pair_slices = stats.pair_slices.saturating_add(1);
+        }
+    }
+}
+
+fn fast_pair(a: &Body, b: &Body, dt: f32) -> bool {
+    let radius = bounding_radius(a).min(bounding_radius(b));
+    let travel = (a.velocity - b.velocity).length() * dt;
+    radius.is_finite() && travel > radius
+}
+
+fn gap_of(bodies: &[Body], first: usize, second: usize) -> Option<(Vec3, f32)> {
+    let a = bodies.get(first)?;
+    let b = bodies.get(second)?;
+    signed_gap(a, b)
+}
+
+fn next_advance(
+    bodies: &[Body],
+    first: usize,
+    second: usize,
+    gap: f32,
+    remaining: f32,
+) -> Option<f32> {
+    let a = bodies.get(first)?;
+    let b = bodies.get(second)?;
+    let bound = closing_bound(a, b);
+    if bound <= 0.0 || !bound.is_finite() {
+        return Some(remaining);
+    }
+    let mut advance = (gap / bound).min(remaining);
+    let slice = radius_slice(a, b);
+    if slice < advance {
+        advance = slice;
+    }
+    if advance > TIME_EPSILON {
+        Some(advance)
+    } else {
+        None
+    }
+}
+
+fn settle(
+    bodies: &mut [Body],
+    first: usize,
+    second: usize,
+    normal: Vec3,
+    gap: f32,
+    remaining: f32,
+    stats: &mut crate::StepStats,
+) {
+    let penetration = if gap < 0.0 { -gap } else { 0.0 };
+    if solve_indexed(bodies, first, second, normal, penetration) {
+        stats.dynamic_pair_impulses = stats.dynamic_pair_impulses.saturating_add(1);
+    }
+    integrate_index(bodies, first, remaining);
+    integrate_index(bodies, second, remaining);
+}
+
+/// `|v_a - v_b| + |ω_a| r_a + |ω_b| r_b`. Both ω are 0 until `Body` stores angular velocity.
+fn closing_bound(a: &Body, b: &Body) -> f32 {
+    (a.velocity - b.velocity).length()
+}
+
+fn radius_slice(a: &Body, b: &Body) -> f32 {
+    let radius = bounding_radius(a).min(bounding_radius(b));
+    let rel = (a.velocity - b.velocity).length();
+    if rel > 0.0 && radius.is_finite() {
+        radius / rel
+    } else {
+        f32::INFINITY
+    }
+}
+
+fn bounding_radius(body: &Body) -> f32 {
+    match body.shape {
+        Shape::Sphere { radius } => radius.max(0.0),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => (radius + half_height).max(0.0),
+        Shape::Box { half_extents } => half_extents.length(),
+        Shape::Plane { .. } => f32::INFINITY,
+        Shape::Mesh(mesh) => mesh_radius(&mesh),
+    }
+}
+
+fn mesh_radius(mesh: &Mesh) -> f32 {
+    let mut radius = 0.0_f32;
+    for piece in mesh.pieces() {
+        let piece_radius = match piece {
+            Piece::Cuboid { center, half } => center.length() + half.length(),
+            Piece::Hull(hull) => hull_radius(hull),
+        };
+        radius = radius.max(piece_radius);
+    }
+    radius
+}
+
+fn hull_radius(hull: &crate::Hull) -> f32 {
+    let mut far = 0.0_f32;
+    for vertex in hull.verts.iter().take(usize::from(hull.vert_count)) {
+        far = far.max(vertex.length());
+    }
+    far
+}
+
+fn integrate_index(bodies: &mut [Body], index: usize, dt: f32) {
+    let Some(body) = bodies.get_mut(index) else {
+        return;
+    };
+    if body.inverse_mass == 0.0 || !(dt > 0.0) {
+        return;
+    }
+    body.position += body.velocity * dt;
+}
+
 #[cfg(test)]
 mod tests {
     use genos_math::Vec3;
 
     use super::signed_gap;
-    use crate::{Body, MotionQuality};
+    use crate::{step, Body, MotionQuality, World};
+
+    const DT: f32 = 1.0 / 60.0;
 
     fn gap_of(first: &Body, second: &Body) -> f32 {
         signed_gap(first, second).map_or(f32::NAN, |(_, gap)| gap)
@@ -470,5 +820,88 @@ mod tests {
         let right = Body::cuboid(Vec3::new(6.0, 2.0, 0.0), 1_000.0, Vec3::new(2.0, 1.0, 1.0));
         let gap = gap_of(&left, &right);
         assert!((gap - 2.0).abs() < 1.0e-3, "ship gap {gap} wanted 2");
+    }
+
+    fn ship(x: f32, speed: f32) -> Body {
+        let mut body = Body::cuboid(Vec3::new(x, 2.0, 0.0), 1_000.0, Vec3::new(2.0, 1.0, 1.0));
+        body.velocity = Vec3::new(speed, 0.0, 0.0);
+        body.motion = MotionQuality::Swept;
+        body
+    }
+
+    fn overlap(left: &Body, right: &Body) -> f32 {
+        let gap = (left.position.x - right.position.x).abs() - 4.0;
+        if gap < 0.0 {
+            -gap
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn swept_ships_at_the_harness_gap_meet_without_exchanging() {
+        let mut world = World::new(Vec3::ZERO);
+        world.insert(ship(0.0, 3_000.0));
+        world.insert(ship(6.0, -3_000.0));
+        step(&mut world, DT);
+        let left = world.bodies[0];
+        let right = world.bodies[1];
+        assert!(left.position.x < right.position.x, "centers exchanged");
+        let depth = overlap(&left, &right);
+        assert!(depth <= 0.01, "penetration {depth}");
+        assert_eq!(world.step_stats.toi_failed, 0);
+        assert!(left.normal_impulse > 0.0 && right.normal_impulse > 0.0);
+        assert!(world.step_stats.pair_slices >= 1);
+    }
+
+    #[test]
+    fn swept_ships_forty_metres_apart_need_more_than_one_slice() {
+        let mut world = World::new(Vec3::ZERO);
+        world.insert(ship(0.0, 3_000.0));
+        world.insert(ship(40.0, -3_000.0));
+        step(&mut world, DT);
+        let left = world.bodies[0];
+        let right = world.bodies[1];
+        assert!(left.position.x < right.position.x, "centers exchanged");
+        let depth = overlap(&left, &right);
+        assert!(depth <= 0.01, "penetration {depth}");
+        assert_eq!(world.step_stats.toi_failed, 0);
+        assert!(world.step_stats.pair_slices > 1);
+        assert!(left.normal_impulse > 0.0 && right.normal_impulse > 0.0);
+    }
+
+    #[test]
+    fn a_zero_pair_cap_defers_the_sweep() {
+        let mut world = World::new(Vec3::ZERO);
+        world.swept_pair_cap = 0;
+        world.insert(ship(0.0, 3_000.0));
+        world.insert(ship(6.0, -3_000.0));
+        step(&mut world, DT);
+        assert!(world.step_stats.toi_deferred >= 1);
+        assert!(
+            world.bodies[0].position.x > world.bodies[1].position.x,
+            "deferred ships should still tunnel"
+        );
+    }
+
+    #[test]
+    fn sixteen_advances_clamp_without_tunneling() {
+        let mut left = Body::sphere(Vec3::ZERO, 1.0, 0.01);
+        left.velocity = Vec3::new(3_000.0, 0.0, 0.0);
+        left.motion = MotionQuality::Swept;
+        let mut right = Body::sphere(Vec3::new(5.0, 0.0, 0.0), 1.0, 0.01);
+        right.velocity = Vec3::new(-3_000.0, 0.0, 0.0);
+        right.motion = MotionQuality::Swept;
+        let mut world = World::new(Vec3::ZERO);
+        world.insert(left);
+        world.insert(right);
+        step(&mut world, DT);
+        assert_eq!(world.step_stats.toi_failed, 1);
+        let trailing = world.bodies[0].position.x + 0.01;
+        let leading = world.bodies[1].position.x - 0.01;
+        assert!(
+            trailing < leading,
+            "clamped spheres overlapped: {trailing} vs {leading}"
+        );
     }
 }

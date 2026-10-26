@@ -190,15 +190,15 @@ pub struct Spring {
 ///
 /// `Discrete` uses the bounds at the current pose. `Speculative` grows the
 /// contact distance by `min(speed * dt, speculative margin)` and lets the
-/// solver stop the body. `Swept` is the ship path; until time of impact lands,
-/// a swept body still integrates with the discrete step.
+/// solver stop the body. `Swept` advances that body's pairs to the time of
+/// impact. Bodies that are not in a swept pair keep the one integration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MotionQuality {
     /// Overlap that already exists.
     Discrete,
     /// A margin on the approach. The bullet path.
     Speculative,
-    /// Time of impact for this body. Treated as discrete until that solve lands.
+    /// Time of impact on this body's pairs. Other bodies keep the one integration.
     Swept,
 }
 
@@ -246,6 +246,8 @@ pub struct Body {
     pub wish: Vec3,
     /// `Discrete` unless a caller asks for a bullet margin or a swept pair.
     pub motion: MotionQuality,
+    /// Normal impulse stored on this body during the last `step`. The next step replaces it.
+    pub normal_impulse: f32,
 }
 
 impl Body {
@@ -298,6 +300,7 @@ impl Body {
             motor: false,
             wish: Vec3::ZERO,
             motion: MotionQuality::Discrete,
+            normal_impulse: 0.0,
         }
     }
 
@@ -323,6 +326,8 @@ pub struct World {
     pub step_stats: StepStats,
     /// The contact pass's lists, kept so a step after the first does not allocate.
     pairs: contact::Pairs,
+    /// Swept-pair scratch, kept so a later step does not allocate.
+    ccd_scratch: ccd::CcdScratch,
 }
 
 /// Two worlds are equal when their bodies and gravity are.
@@ -341,6 +346,7 @@ impl World {
             swept_pair_cap: 8,
             step_stats: StepStats::zero(),
             pairs: contact::Pairs::new(),
+            ccd_scratch: ccd::CcdScratch::new(),
         }
     }
 
@@ -358,6 +364,7 @@ pub fn step(world: &mut World, dt: f32) {
     }
     let gravity = world.gravity;
     for body in &mut world.bodies {
+        body.normal_impulse = 0.0;
         apply_forces(body, gravity, dt);
         if body.motor {
             body.velocity.x = body.wish.x;
@@ -365,21 +372,48 @@ pub fn step(world: &mut World, dt: f32) {
         }
     }
     world.step_stats = StepStats::zero();
-    world.step_stats.ccd_applied = world
+    let speculative = world
         .bodies
         .iter()
         .any(|body| body.motion == MotionQuality::Speculative);
-    if world.step_stats.ccd_applied {
+    let swept = world
+        .bodies
+        .iter()
+        .any(|body| body.motion == MotionQuality::Swept);
+    world.step_stats.ccd_applied = speculative || swept;
+    ccd::prepare_swept(
+        &world.bodies,
+        &mut world.ccd_scratch,
+        world.swept_pair_cap,
+        dt,
+        &mut world.step_stats,
+    );
+    if speculative {
         ccd::speculative(&mut world.bodies, dt, world.speculative_margin);
     }
-    for body in &mut world.bodies {
-        if body.inverse_mass == 0.0 {
+    for index in 0..world.bodies.len() {
+        let Some(body) = world.bodies.get_mut(index) else {
+            continue;
+        };
+        if body.inverse_mass == 0.0 || world.ccd_scratch.covers(index) {
+            continue;
+        }
+        if body.motion == MotionQuality::Swept {
             continue;
         }
         body.position += body.velocity * dt;
     }
+    ccd::resolve_swept(
+        &mut world.bodies,
+        &world.ccd_scratch,
+        dt,
+        world.speculative_margin,
+        &mut world.step_stats,
+    );
     for _ in 0..4 {
-        contact::collide(&mut world.bodies, &mut world.pairs);
+        let hits = contact::collide(&mut world.bodies, &mut world.pairs);
+        world.step_stats.dynamic_pair_impulses =
+            world.step_stats.dynamic_pair_impulses.saturating_add(hits);
     }
 }
 

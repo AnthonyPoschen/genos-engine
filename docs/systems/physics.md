@@ -10,7 +10,7 @@ A game can simulate a falling mass, a bounce, a hit between two masses, friction
 
 Gravity is `GRAVITY`, along -Y. There is no air drag. `step` takes a world and a time step and updates that world in place. The first step may size the contact lists. A later step does not allocate.
 
-Each body has a motion quality. `Discrete` is the default and resolves an overlap that already exists. `Speculative` grows the contact distance by `min(speed * dt, speculative margin)` before the move, and the solver stops that approach. The default margin is 0.25 m. `Swept` is reserved for a time of impact; until that solve lands, a swept body still takes the discrete move.
+Each body has a motion quality. `Discrete` is the default and resolves an overlap that already exists. `Speculative` grows the contact distance by `min(speed * dt, speculative margin)` before the move, and the solver stops that approach. The default margin is 0.25 m. `Swept` runs time of impact on the pairs whose bounds meet that body. The advance is `gap / (|v_a − v_b| + |ω_a| r_a + |ω_b| r_b)`, with both ω terms 0 until a body stores angular velocity. There is no scale factor. A pair whose relative travel over the tick exceeds the smaller bounding radius advances in slices of at most that radius. The loop stops at a 1 mm gap or when the tick is used. After 16 advances with the gap still above 1 mm, the pair stays at the last safe time and `toi_failed` increments. Pairs past `swept_pair_cap` (default 8) use the speculative margin for that tick and increment `toi_deferred`. Bodies that are not in a swept pair keep the one integration.
 
 When `motor` is set, the step copies `wish.x` and `wish.z` into the velocity before contact. Contact then removes the part of that wish that points into a surface.
 
@@ -26,7 +26,7 @@ The crate is `crates/physics`, package `genos-physics`.
 
 - `Body`, `World`, `Spring`, `Shape`, `MotionQuality`, and `step` are in `src/lib.rs`.
 - Contact is in `src/contact.rs`.
-- Speculative contacts and the GJK gap are in `src/ccd.rs`.
+- Speculative contacts, the GJK gap, and swept time of impact are in `src/ccd.rs`.
 - Mesh build is in `src/mesh.rs`.
 - `GRAVITY` is `(0, -9.81, 0)`.
 - `World.bodies` is a `Vec`. The crate does not cap the body count.
@@ -38,13 +38,13 @@ Create a world with `World::new(GRAVITY)`. Insert each body with `World::insert`
 
 For a character, set `motor` and write the desired horizontal velocity in `wish`. Use `Body::capsule`, `Body::cuboid`, or `Body::mesh`. Build a mesh with `Shape::from_triangles` or `Body::mesh`. `contact_faces` reports the reduced face count.
 
-For a bullet whose gap at the start of the step is inside the margin, set `motion` to `MotionQuality::Speculative`. `World.speculative_margin` is the cap, 0.25 m unless a caller changes it. `step_stats.ccd_applied` is true for that step.
+For a bullet whose gap at the start of the step is inside the margin, set `motion` to `MotionQuality::Speculative`. `World.speculative_margin` is the cap, 0.25 m unless a caller changes it. For a ship, set `motion` to `MotionQuality::Swept`. `World.swept_pair_cap` is the pair cap, 8 unless a caller changes it. `step_stats.ccd_applied` is true when any body is speculative or swept. `step_stats.toi_failed`, `toi_deferred`, `pair_slices`, and `dynamic_pair_impulses` are the counters for that step.
 
 ## Limits
 
 The step does not turn a body. There is no stack solver and no air drag. A large `dt` drifts from `½gt²`.
 
-`Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin: a ship at 3 000 m/s is that miss, and `tunnel_count` on `cargo test -p genos-physics --test metrics -- --fixture good` stays above 0 until time of impact. The margin knob is `World.speculative_margin`. The same harness is the probe: `ccd_in_step` is true only when a body asked for speculative collision.
+`Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision.
 
 A mesh collider is a few convex pieces, not the source triangles. Two concave meshes do not get a triangle-versus-triangle test. The piece count stops at 6. A very thin sheet can be missed by the voxel sample.
 
@@ -54,7 +54,7 @@ The camera calls this step from the scene crate. Lights have no collider.
 
 The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step.
 
-Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is accepted. It does not change this step.
+Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is accepted. Speculative contacts and swept time of impact are in this step. Destruction is not.
 
 ## Networking
 

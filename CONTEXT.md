@@ -112,8 +112,16 @@ _Avoid_: CCD mode, collision flag
 A contact generated inside `min(speed * dt, speculative margin)` so the solver can stop a body before it overlaps.
 _Avoid_: Sweep, raycast
 
+**Time of impact**:
+The moment a swept pair's gap closes. The step advances that pair to the moment, solves the contact, and repeats.
+_Avoid_: Sweep, raycast
+
+**Conservative advancement**:
+An upper bound on how fast a gap can close: `gap / (|v_a − v_b| + |ω_a| r_a + |ω_b| r_b)`. The step uses it with no scale factor.
+_Avoid_: Closest-point velocity, time of impact scale
+
 **Physics step**:
-One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin.
+One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact.
 _Avoid_: Lighting ray, cascade
 
 **Codimation**:
