@@ -1,6 +1,6 @@
 // S5 A to B to A. Hall to room-a and back, 5 cycles, 240 frames (4 s) per leg.
 // Yaw delta -2.2006 is already the short arc. Pass --gi-metrics.
-// CSV: <out>/gi/s5-aba.csv
+// CSV: <out>/gi/s5-aba.csv, or s5-aba-2.csv when that file is already there.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("boxes", "move");
@@ -37,4 +37,6 @@ let frames = path.len - 1;
 camera(#{ path: path, frames: frames });
 wait(frames);
 wait(2);
-gi_metrics(#{ write: "s5-aba" });
+let metrics = gi_metrics(#{ write: "s5-aba" });
+let budgets = get_budgets(#{});
+check_lt(metrics.summary.lighting_ms.p99, budgets.lighting_cap_ms + 0.0001, "s5 lighting p99 stays under the preset cap");

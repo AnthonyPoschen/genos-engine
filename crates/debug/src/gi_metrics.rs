@@ -151,6 +151,25 @@ pub fn scenario_name(name: &str) -> Result<&str, String> {
     Ok(name)
 }
 
+/// `NAME.csv`, or `NAME-2.csv`, `NAME-3.csv`, … when that file is already there.
+pub fn unique_summary_path(dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let name = scenario_name(name)?;
+    let first = dir.join(format!("{name}.csv"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 2..10_000 {
+        let path = dir.join(format!("{name}-{n}.csv"));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "{}: too many {name} summaries",
+        dir.display()
+    ))
+}
+
 pub fn write_summary(
     dir: &Path,
     name: &str,
@@ -158,10 +177,13 @@ pub fn write_summary(
 ) -> Result<std::path::PathBuf, String> {
     let name = scenario_name(name)?;
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-    let path = dir.join(format!("{name}.csv"));
+    let path = unique_summary_path(dir, name)?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+        format!("{}: bad summary name", path.display())
+    })?;
     std::fs::write(&path, summary_csv(samples))
         .map_err(|err| format!("{}: {err}", path.display()))?;
-    let frames = dir.join(format!("{name}-frames.csv"));
+    let frames = dir.join(format!("{stem}-frames.csv"));
     std::fs::write(&frames, frames_csv(samples))
         .map_err(|err| format!("{}: {err}", frames.display()))?;
     Ok(path)
@@ -353,6 +375,10 @@ mod tests {
         assert!(text.contains("direct_ms,1.5000,1.5000"));
         let frames = std::fs::read_to_string(dir.join("s6-settle-frames.csv")).unwrap();
         assert!(frames.contains("1,1.5000,"));
+        let again = write_summary(&dir, "s6-settle", &samples).unwrap();
+        assert_eq!(again, dir.join("s6-settle-2.csv"));
+        assert!(dir.join("s6-settle-2-frames.csv").is_file());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("direct_ms,1.5000,1.5000"));
         append_frames(&dir, &samples).unwrap();
         append_frames(&dir, &samples).unwrap();
         let live = std::fs::read_to_string(dir.join("frames.csv")).unwrap();
@@ -386,6 +412,14 @@ mod tests {
             assert!(
                 text.contains("gi_metrics"),
                 "{name} does not record GI metrics"
+            );
+            assert!(
+                text.contains("get_budgets"),
+                "{name} does not read the lighting cap"
+            );
+            assert!(
+                text.contains("check_lt"),
+                "{name} does not assert the lighting cap"
             );
             assert!(text.contains("fixed_dt"), "{name} does not fix the step");
             engine

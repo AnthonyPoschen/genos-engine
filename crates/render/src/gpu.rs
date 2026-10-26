@@ -292,6 +292,16 @@ impl Renderer {
         times.samples.make_contiguous()
     }
 
+    /// Controller scale for the next budgeted frame. `1` is the preset cap.
+    pub fn budget_controller_scale(&self) -> f32 {
+        self.gpu.lighting.budget.scale
+    }
+
+    /// Schedule pushed on the last lighting pass. Default until that pass runs.
+    pub fn last_schedule(&self) -> crate::lighting_schedule::SchedulePush {
+        self.gpu.lighting.last_schedule
+    }
+
     /// Drop the recorded window. The next sample starts at sequence 1.
     pub fn gi_metrics_clear(&mut self) {
         if let Some(times) = self.gpu.gpu_times.as_mut() {

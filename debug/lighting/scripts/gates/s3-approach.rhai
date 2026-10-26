@@ -1,7 +1,7 @@
 // S3 approach. Lit wall at x=12.5, z=8 (lamp-wall look target).
 // Start 8 m out (z=16), walk to 0.3 m (z=8.3) at 2 m/s, then back.
 // 7.7 m is 231 frames at 1/60. Yaw 0 looks down -Z. Pitch aims at z=8, y=1.
-// Pass --gi-metrics. CSV: <out>/gi/s3-approach.csv
+// Pass --gi-metrics. CSV: <out>/gi/s3-approach.csv, or s3-approach-2.csv when that file is already there.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("boxes", "move");
@@ -25,4 +25,6 @@ let frames = path.len - 1;
 camera(#{ path: path, frames: frames });
 wait(frames);
 wait(2);
-gi_metrics(#{ write: "s3-approach" });
+let metrics = gi_metrics(#{ write: "s3-approach" });
+let budgets = get_budgets(#{});
+check_lt(metrics.summary.lighting_ms.p99, budgets.lighting_cap_ms + 0.0001, "s3 lighting p99 stays under the preset cap");

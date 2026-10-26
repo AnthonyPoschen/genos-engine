@@ -141,7 +141,8 @@ or --fps-counter turns it on. GENOS_DEBUG_KEYS replaces those keys.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 GI metrics go to <out>/gi. frames.csv is the live window. gi_metrics write NAME
-saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv.
+saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv, or
+NAME-2.csv and NAME-2-frames.csv when that name is already there.
 The binary does not write under $HOME.
 ";
 
@@ -561,6 +562,7 @@ fn run() -> Result<(), String> {
             },
         );
         note_gi(&mut app, &mut renderer);
+        note_schedule(&mut app, &mut renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts
@@ -725,6 +727,10 @@ struct App {
     gi_passes: String,
     /// Last GI work counters. Numbers only.
     gi_work: String,
+    /// Last schedule push: scale, cap, gates.
+    schedule_stats: String,
+    /// Last detail-level caps.
+    lod_snapshot: String,
 }
 
 enum Show {
@@ -745,6 +751,8 @@ impl App {
             load: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
+            schedule_stats: "scale 1.000 cap 8.0 direct off atrous off trace off".into(),
+            lod_snapshot: "lod off spawn 0 coarse 0".into(),
         })
     }
 
@@ -1540,6 +1548,20 @@ fn setting_piece(
             dropdown: None,
             checks: Vec::new(),
         })),
+        "schedule_stats" => Some(Piece::Row(PanelRow {
+            label: app.schedule_stats.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "lod_snapshot" => Some(Piece::Row(PanelRow {
+            label: app.lod_snapshot.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
         "menu_wheel" => {
             focus_row("Wheel focus", ID_MENU_WHEEL, menu_settings(app).wheel).map(Piece::Row)
         }
@@ -1946,6 +1968,30 @@ fn note_gi(app: &mut App, renderer: &mut Renderer) {
     app.gi_work = format!(
         "rays {} refreshed {} lamps {}",
         sample.rays, sample.cache_entries_refreshed, sample.lamps_shaded
+    );
+}
+
+fn gate_word(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Perf labels for the last schedule push. Numbers only.
+fn note_schedule(app: &mut App, renderer: &Renderer) {
+    let push = renderer.last_schedule();
+    app.schedule_stats = format!(
+        "scale {:.3} cap {:.1} direct {} atrous {} trace {}",
+        renderer.budget_controller_scale(),
+        push.lighting_cap_ms,
+        gate_word(push.plan.direct_gate),
+        gate_word(push.plan.atrous_gate),
+        gate_word(push.plan.trace_gate),
+    );
+    let levels = (push.words[0] & 8) != 0 && renderer.lighting_settings().world_mode() == 3;
+    app.lod_snapshot = format!(
+        "lod {} spawn {} coarse {}",
+        gate_word(levels),
+        push.tail[2],
+        push.tail[3],
     );
 }
 

@@ -2,7 +2,7 @@
 // 360 degrees of yaw in 120 frames (2 s at 1/60), repeated 3 times.
 // The sun stays frozen, as the stress scene already sets it.
 // Pass --gi-metrics. Samples are one frame behind the draw, so wait(2)
-// lands before the summary. CSV: <out>/gi/s1-spin.csv
+// lands before the summary. CSV: <out>/gi/s1-spin.csv, or s1-spin-2.csv when that file is already there.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("boxes", "move");
@@ -21,4 +21,6 @@ let frames = path.len - 1;
 camera(#{ path: path, frames: frames });
 wait(frames);
 wait(2);
-gi_metrics(#{ write: "s1-spin" });
+let metrics = gi_metrics(#{ write: "s1-spin" });
+let budgets = get_budgets(#{});
+check_lt(metrics.summary.lighting_ms.p99, budgets.lighting_cap_ms + 0.0001, "s1 lighting p99 stays under the preset cap");

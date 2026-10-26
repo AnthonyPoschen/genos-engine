@@ -2,7 +2,7 @@
 // places 3 movers in each section, and scale big is 4x4 sections, so this
 // run is 48 moving boxes and 16 moving lamps. There is no 64-box layout.
 // Hold the hall for 240 frames. Pass --gi-metrics.
-// CSV: <out>/gi/s4-many-movers.csv
+// CSV: <out>/gi/s4-many-movers.csv, or s4-many-movers-2.csv when that file is already there.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("sun", "freeze");
 knob("scale", "big");
@@ -16,4 +16,6 @@ wait(8);
 gi_metrics(#{ reset: true });
 wait(240);
 wait(2);
-gi_metrics(#{ write: "s4-many-movers" });
+let metrics = gi_metrics(#{ write: "s4-many-movers" });
+let budgets = get_budgets(#{});
+check_lt(metrics.summary.lighting_ms.p99, budgets.lighting_cap_ms + 0.0001, "s4 lighting p99 stays under the preset cap");

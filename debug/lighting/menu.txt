@@ -5,7 +5,7 @@
 # The same section key stays one fold. The first line sets the title and open or closed.
 # GENOS_MENU_LAYOUT points at another file of this shape.
 # Setting names are the config keys, plus review, scene, checkpoint, view, fps,
-# stall, gi_passes, and gi_work. gi_passes and gi_work are numbers.
+# stall, gi_passes, gi_work, schedule_stats, and lod_snapshot. Those rows are numbers.
 # Move a line to another tab or section. No code change is required.
 Scene | - | - | open | scene
 Scene | - | - | open | checkpoint
@@ -57,6 +57,8 @@ Perf | - | - | open | fps
 Perf | - | - | open | stall
 Perf | - | - | open | gi_passes
 Perf | - | - | open | gi_work
+Perf | - | - | open | schedule_stats
+Perf | - | - | open | lod_snapshot
 Perf | - | - | open | menu_wheel
 Perf | - | - | open | menu_keys
 Info | - | - | open | review
