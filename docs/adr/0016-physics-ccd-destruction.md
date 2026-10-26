@@ -1,6 +1,6 @@
 # 0016: Ships use time of impact, and destruction is a pre-fractured bond graph
 
-Status: **proposed**. Design: [`docs/systems/physics-ccd-destruction-design.md`](../systems/physics-ccd-destruction-design.md).
+Status: **accepted** (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). Design: [`docs/systems/physics-ccd-destruction-design.md`](../systems/physics-ccd-destruction-design.md).
 
 The source is the physics plan of 12 Oct 2026 ([`docs/systems/physics/plan.md`](../systems/physics/plan.md)). This ADR decides the continuous-collision and destruction slice of that plan. It does not change `step`.
 

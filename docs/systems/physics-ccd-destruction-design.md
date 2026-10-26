@@ -1,6 +1,6 @@
 # Continuous collision and destruction
 
-Status: **proposed**. ADR: [0016](../adr/0016-physics-ccd-destruction.md). Source: the physics plan of 12 Oct 2026, [`physics/plan.md`](physics/plan.md). Terms for lighting stay in [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The physics words in the glossary below are proposed. The commit that first publishes one in code adds it to `CONTEXT.md`.
+Status: **accepted**. ADR: [0016](../adr/0016-physics-ccd-destruction.md). Anthony Poschen delegated design approval to the Engine bot, which accepted it on 2026-10-26. Source: the physics plan of 12 Oct 2026, [`physics/plan.md`](physics/plan.md). Terms for lighting stay in [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The physics words in the glossary below are proposed. The commit that first publishes one in code adds it to `CONTEXT.md`.
 
 This design does not change `step`. The crate today integrates `velocity * dt` and resolves an overlap that already exists (`crates/physics/src/lib.rs`, `crates/physics/src/contact.rs`). Orientation does not integrate. A mesh collider is at most six boxes or one hull of 12 vertices (`MAX_MESH_PIECES`, `MAX_HULL_VERTS`).
 
