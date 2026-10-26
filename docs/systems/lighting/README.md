@@ -84,7 +84,12 @@ The surface light cache and the world cache are one cache ([glossary](../../ligh
 - ADR 0012's deterministic 16×16 light-tree cut, with no radiance history, is not built here and this does not amend that ADR. A GTX 1060 scales by lowering candidates and rays. There is no minimum candidate count.
 - Mode off binds a 64-byte reservoir. The screen-sized pair allocates only while reuse is on. `direct.max_lights` stays a separate hard cap.
 - Networking: replicated state is none (the reservoir stays in that frame's GPU buffer). Authority is the machine that shades the picture. Prediction / rollback is none. The pick is deterministic for a mode, a seed, and a frame. A headless server does not shade.
-- Planned, not in the shaders: fog and volumetric lighting ([design](../fog-and-volumetric-lighting-design.md), [ADR 0018](../../adr/0018-fog-and-volumetric-lighting.md), proposed). Departures from Hillaire, SIGGRAPH 2015, are listed there. This bullet does not change the frame.
+- Fog is a froxel on the lighting preset ([design](../fog-and-volumetric-lighting-design.md), [ADR 0018](../../adr/0018-fog-and-volumetric-lighting.md), accepted). The grid is Hillaire, SIGGRAPH 2015: exponential slices from 0.10 m to 64 m, height fog as the closed form averaged across the slice, local boxes and spheres added at the cell centre. History stays off on every preset. Grid sizes are the preset caps (Low 64×36×24, Medium 96×54×32, High 160×90×48); potato, day-cycle, and gi-1bounce allocate none. Indirect in-scattering from the world cache is a stub and returns zero until `cursor/lighting-p3-capped-refresh` merges. The stub does not read a lighting schedule and does not change the GI passes.
+- Replicated state: the fog settings and the local-volume list (shape, position, extents, density, albedo, phase g). Not the grid, not the history slot, not the column target.
+- Authority: the machine that owns the scene writes the settings. Each client builds its own grid.
+- Prediction / rollback: none for the grid. Settings follow the scene snapshot. A wrong volume is corrected by the snapshot.
+- Determinism: extinction follows the settings and the camera. Shadow rays follow the tracer. History stays off, so it is not in the snapshot.
+- Headless server: no grid and no picture. It replicates the settings only.
 
 ## Experiment index
 

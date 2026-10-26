@@ -1,6 +1,6 @@
 # Fog and volumetric lighting
 
-Status: **proposed**. ADR: [0018](../adr/0018-fog-and-volumetric-lighting.md), status Proposed. Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). This document does not change the frame. The metric harness is `fog-check` (`crates/fog-check`). It grades analytic fixtures and marks every renderer metric `NOT-IMPLEMENTED`.
+Status: **accepted**. ADR: [0018](../adr/0018-fog-and-volumetric-lighting.md), status Accepted. Anthony delegated design approval to the Engine bot, which accepted it. Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The metric harness is `fog-check` (`crates/fog-check`). It grades the analytic fixtures and each renderer row as that row's pass lands. `gi_inscatter_blur_rel` stays `NOT-IMPLEMENTED` until lighting phase 3 (`cursor/lighting-p3-capped-refresh`).
 
 The realtime volume is a froxel grid. Height fog, local fog volumes, and shadowed shafts share that grid. Indirect in-scattering is a read of the world cache. The path tracer is extended so the picture can be graded. Nothing here is a screen-space blur.
 
@@ -268,7 +268,7 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `image_grade_blur_rel` | 0.12 | `blur_relative` of a synthetic fog picture against itself. The lighting-ref fail line. | Graded. Broken fixture scales luminance by 1.4. |
 | `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | `NOT-IMPLEMENTED` |
 | `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | `NOT-IMPLEMENTED` |
-| `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | `NOT-IMPLEMENTED` |
+| `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded. Height density is zero and one box sits on the view axis. A write outside that box fails the gate. |
 | `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | `NOT-IMPLEMENTED` |
 | `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
 | `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |

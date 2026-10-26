@@ -1,5 +1,6 @@
 mod aa;
 mod budget;
+mod fog;
 mod gltf_draw;
 mod gpu;
 #[cfg(test)]
@@ -17,6 +18,10 @@ mod wire;
 mod world;
 
 pub use aa::Antialias;
+pub use fog::{
+    grid_size, inject, leak_broken, leak_fixture, local_volume_leak, puff_volume, slice_edge,
+    world_cache_inscatter, FogView, FroxelGrid, GridSize, Z_FAR, Z_NEAR,
+};
 pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};

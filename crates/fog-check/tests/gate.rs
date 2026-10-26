@@ -38,21 +38,30 @@ fn analytic_broken_fails_each_metric() {
 }
 
 #[test]
-fn feature_metrics_are_not_implemented() {
+fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
     let report = evaluate(Suite::Feature, Fixture::Good);
     let lines = format_lines(&report);
     assert_eq!(exit_code(&report), 0, "{lines}");
     assert!(report.metrics.len() > 5);
-    for line in lines.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 4, "{line}");
-        assert_eq!(fields[1], "-", "{line}");
-        assert_eq!(fields[3], "NOT-IMPLEMENTED", "{line}");
-    }
+    let leak = metric(&report, "local_volume_leak");
+    assert_eq!(leak.status, Status::Pass, "{leak:?}");
+    assert!(leak.value.unwrap() <= leak.threshold);
+    let gi = metric(&report, "gi_inscatter_blur_rel");
+    assert_eq!(gi.value, None);
+    assert_eq!(gi.status, Status::NotImplemented);
     for metric in &report.metrics {
-        assert_eq!(metric.value, None, "{}", metric.name);
-        assert!(!metric.note.is_empty(), "{}", metric.name);
+        if metric.status == Status::NotImplemented {
+            assert_eq!(metric.value, None, "{}", metric.name);
+            assert!(!metric.note.is_empty(), "{}", metric.name);
+        }
     }
+}
+
+#[test]
+fn a_leaking_volume_fails_the_leak_gate() {
+    let broken = f64::from(genos_render::leak_broken());
+    assert!(broken > 1.0e-4, "{broken}");
+    assert_eq!(judge(true, Some(broken), 1.0e-4), Status::Fail);
 }
 
 #[test]

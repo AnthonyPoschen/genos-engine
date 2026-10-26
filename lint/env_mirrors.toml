@@ -1209,3 +1209,18 @@ name = "GENOS_GI_DEBUG"
 kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
 
+[[var]]
+name = "GENOS_FOG_SUITE"
+kind = "mirror"
+detail = "--suite"
+
+[[var]]
+name = "GENOS_FOG_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_FOG_OUT"
+kind = "mirror"
+detail = "--out"
+

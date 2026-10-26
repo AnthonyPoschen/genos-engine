@@ -31,7 +31,7 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem, KeyB
 use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
-    DebugSettings, EventLoopSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings,
+    DebugSettings, EventLoopSettings, FogSettings, Floor, FocusPolicy, FpsCounterSettings, Light, MenuSettings,
     Scene, Sky, Vec3,
     PITCH_LIMIT,
 };
@@ -991,6 +991,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1066,6 +1067,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 debug: DebugSettings::default(),
                 fps_counter: FpsCounterSettings::default(),
                 event_loop: EventLoopSettings::default(),
+                fog: FogSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {

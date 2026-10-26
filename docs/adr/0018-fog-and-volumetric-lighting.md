@@ -1,6 +1,6 @@
 # 0018: Fog is a budgeted froxel volume
 
-Status: **Proposed**. Design: [`docs/systems/fog-and-volumetric-lighting-design.md`](../systems/fog-and-volumetric-lighting-design.md).
+Status: **Accepted**. Anthony delegated design approval to the Engine bot, which accepted it. Design: [`docs/systems/fog-and-volumetric-lighting-design.md`](../systems/fog-and-volumetric-lighting-design.md).
 
 ## Context
 

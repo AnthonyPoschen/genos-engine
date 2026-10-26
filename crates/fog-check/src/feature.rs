@@ -1,5 +1,5 @@
-//! Renderer metrics. The froxel pass and the media path tracer are not in
-//! this tree, so every row is `NOT-IMPLEMENTED`. A zero is not substituted.
+//! Renderer metrics. A row stays `NOT-IMPLEMENTED` until that pass exists.
+//! A zero is not substituted for a missing pass.
 
 use crate::report::{judge, Metric};
 
@@ -22,7 +22,8 @@ const FROXEL_MS_HIGH: f64 = 1.20;
 
 const NO_FROXEL: &str = "froxel pass is not in the tree";
 const NO_MEDIA: &str = "path tracer does not trace participating media";
-const NO_GI: &str = "fog does not read the world cache";
+const NO_GI: &str =
+    "world-cache in-scattering waits for lighting phase 3 (cursor/lighting-p3-capped-refresh)";
 const NO_ALLOC: &str = "froxel buffers are not allocated";
 const NO_TIME: &str = "froxel pass is not timed";
 
@@ -34,7 +35,11 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
             NO_FROXEL,
         ),
         absent("fog_yaw_pop_rel", FOG_YAW_POP_REL, NO_FROXEL),
-        absent("local_volume_leak", LOCAL_VOLUME_LEAK, NO_FROXEL),
+        present(
+            "local_volume_leak",
+            f64::from(genos_render::leak_fixture()),
+            LOCAL_VOLUME_LEAK,
+        ),
         absent("shaft_shadow_blur_rel", SHAFT_SHADOW_BLUR_REL, NO_FROXEL),
         absent("gi_inscatter_blur_rel", GI_INSCATTER_BLUR_REL, NO_GI),
         absent("media_path_blur_rel", MEDIA_PATH_BLUR_REL, NO_MEDIA),
@@ -49,6 +54,16 @@ pub(crate) fn evaluate_feature() -> Vec<Metric> {
         absent("froxel_ms_medium", FROXEL_MS_MEDIUM, NO_TIME),
         absent("froxel_ms_high", FROXEL_MS_HIGH, NO_TIME),
     ]
+}
+
+fn present(name: &'static str, value: f64, threshold: f64) -> Metric {
+    Metric {
+        name,
+        value: Some(value),
+        threshold,
+        status: judge(true, Some(value), threshold),
+        note: "",
+    }
 }
 
 fn absent(name: &'static str, threshold: f64, note: &'static str) -> Metric {
