@@ -153,14 +153,11 @@ impl Default for PbrMaterial {
 }
 
 impl PbrMaterial {
-    /// The diffuse albedo GI uses: base colour x (1 - metallic), ignoring textures.
+    /// Diffuse albedo with no textures: base colour times (1 - metallic).
+    ///
+    /// Textured hits use [`crate::shade_uv`], which is this product per texel.
     pub fn diffuse_albedo(&self) -> [f32; 3] {
-        let k = 1.0 - self.metallic.clamp(0.0, 1.0);
-        [
-            self.base_color[0] * k,
-            self.base_color[1] * k,
-            self.base_color[2] * k,
-        ]
+        crate::shade_uv(self, &[], [0.0, 0.0]).diffuse_albedo()
     }
 }
 

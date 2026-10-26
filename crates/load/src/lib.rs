@@ -14,6 +14,7 @@ mod jpeg;
 mod material;
 mod mesh;
 mod png;
+mod shade;
 mod source;
 mod texture;
 mod ttf;
@@ -28,6 +29,7 @@ pub use gltf::{
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
+pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
 pub use ttf::{Font, Glyph, OutlinePoint};

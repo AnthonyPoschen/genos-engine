@@ -1,6 +1,6 @@
 # PBR materials and glTF 2.0 import
 
-Status: **proposed**. ADR: [0014](../adr/0014-pbr-materials.md). This is a design. It adds no renderer, loader, or cook behaviour. The only code in the same change is the measurement gate `crates/bake/tests/materials_gate.rs`.
+Status: **accepted**. ADR: [0014](../adr/0014-pbr-materials.md). The Engine bot accepted the design. Implementation follows the phased rollout below. The measurement gate is `crates/bake/tests/materials_gate.rs`.
 
 Terms used here are defined in [the lighting glossary](../lighting/GLOSSARY.md). New entries from this design live in that file under Materials. One term has one meaning.
 

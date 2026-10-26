@@ -85,6 +85,18 @@ A composite TrueType glyph returns an error. The loader does not hint, kern, or 
 
 This crate does not upload pixels or triangles to Vulkan.
 
+## Networking
+
+Gameplay networking still waits. These lines are the contract for the shade.
+
+- **Replicated state.** `AssetId` (SHA-256 of the source bytes) and the material-record hash for assets referenced by bodies in interest. Texture pages stay on the client. A BC7 package and an ASTC package share the sim hash and differ in the render hash.
+- **Authority.** The server names the `AssetId`. The client loads it. A local sim hash that differs from the snapshot is a fault.
+- **Prediction / rollback.** None for a material. Until the render subset arrives, the draw uses the factor colour. A rollback leaves resident pages where they are.
+- **Determinism.** The same source bytes and the same cook settings produce the same shade factors on every machine. Block compression may differ by `bc7_colour_rmse` and stays out of the sim hash. The picture is not a sim input.
+- **Headless server.** `LoadProfile::Sim`. No texture upload, no Vulkan device, no page table. Factors are not drawn.
+
 ## Decisions
 
 [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device and the network. This crate does not link those devices. Inflate lives in this crate.
+
+[ADR 0014](../adr/0014-pbr-materials.md) is the shade. `shade_uv` is the one metallic-roughness sample. Diffuse albedo is base colour times (1 − metallic).

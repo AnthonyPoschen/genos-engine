@@ -80,6 +80,9 @@ void main() {
     if (v_shade < 0.5 || v_shade > 1.5) {
         discard;
     }
+    // v_albedo is the base-colour factor (or the untextured shade mean). The atlas
+    // is linear(base texture) × (1 − metallic) from the shared shade, so this
+    // product is the diffuse albedo. The world-space cache multiplies that albedo.
     vec3 albedo = v_albedo;
     vec3 n = normalize(v_normal);
     if (v_uv.x >= 0.0 && v_atlas.z > 0.5) {

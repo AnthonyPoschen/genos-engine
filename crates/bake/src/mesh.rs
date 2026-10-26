@@ -2,8 +2,6 @@
 #![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -12,7 +10,7 @@
 
 //! The bake's input: object-space triangles and the material data cards capture.
 
-use genos_load::{AlphaMode, GltfScene, Image, PbrMaterial, TextureSlot};
+use genos_load::{shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, ShadeSample};
 use genos_mesh::MeshTriangle;
 
 use crate::BakeSettings;
@@ -128,42 +126,18 @@ impl<'a> BakeMesh<'a> {
         b
     }
 
-    /// Diffuse albedo (base colour x (1 - metallic), linear) and emission at a hit.
-    pub fn surface(&self, material: u32, uv: [f32; 2]) -> ([f32; 3], [f32; 3]) {
+    /// The shared shade at `uv`. Every texture slot is read at that coordinate.
+    pub fn shade(&self, material: u32, uv: [f32; 2]) -> ShadeSample {
         let Some(m) = self.materials.get(material as usize) else {
-            return ([0.8; 3], [0.0; 3]);
+            return ShadeSample::paint([0.8; 3]);
         };
-        let m = &m.pbr;
-        let base = self.sample(m.base_color_texture, uv, true);
-        let mr = self.sample(m.metallic_roughness_texture, uv, false);
-        let metallic = (m.metallic * mr[2]).clamp(0.0, 1.0);
-        let albedo = std::array::from_fn(|c| m.base_color[c] * base[c] * (1.0 - metallic));
-        let e = self.sample(m.emissive_texture, uv, true);
-        let emissive = std::array::from_fn(|c| m.emissive[c] * e[c] * m.emissive_strength);
-        (albedo, emissive)
+        shade_uv(&m.pbr, self.images, uv)
     }
 
-    /// Nearest texel with repeat wrapping (cards are coarser than texels, and the
-    /// card capture averages several samples). White when there is no texture.
-    fn sample(&self, slot: Option<TextureSlot>, uv: [f32; 2], srgb: bool) -> [f32; 4] {
-        let Some(img) = slot.and_then(|s| self.images.get(s.image)) else {
-            return [1.0; 4];
-        };
-        let wrap = |t: f32, n: u32| ((t - t.floor()) * n as f32).min(n as f32 - 1.0) as u32;
-        let (x, y) = (wrap(uv[0], img.width), wrap(uv[1], img.height));
-        let p = img.pixel(x, y).unwrap_or([255; 4]);
-        std::array::from_fn(|c| {
-            let v = p[c] as f32 / 255.0;
-            if srgb && c < 3 {
-                if v <= 0.04045 {
-                    v / 12.92
-                } else {
-                    ((v + 0.055) / 1.055).powf(2.4)
-                }
-            } else {
-                v
-            }
-        })
+    /// Diffuse albedo (base colour x (1 - metallic), linear) and emission at a hit.
+    pub fn surface(&self, material: u32, uv: [f32; 2]) -> ([f32; 3], [f32; 3]) {
+        let sample = self.shade(material, uv);
+        (sample.diffuse_albedo(), sample.emissive)
     }
 
     /// FNV-1a over everything that changes the result: triangles, materials,
@@ -234,20 +208,7 @@ fn clip_mask(
 }
 
 fn sample_alpha(images: &[Image], material: &PbrMaterial, uv: [f32; 2]) -> f32 {
-    let Some(slot) = material.base_color_texture else {
-        return material.base_color[3];
-    };
-    let Some(img) = images.get(slot.image) else {
-        return material.base_color[3];
-    };
-    if img.width == 0 || img.height == 0 {
-        return material.base_color[3];
-    }
-    let wrap = |t: f32, n: u32| ((t - t.floor()) * n as f32).min(n as f32 - 1.0) as u32;
-    let texel = img
-        .pixel(wrap(uv[0], img.width), wrap(uv[1], img.height))
-        .unwrap_or([255; 4]);
-    (texel[3] as f32 / 255.0) * material.base_color[3]
+    shade_uv(material, images, uv).alpha
 }
 
 fn split4(tri: &MeshTriangle) -> [MeshTriangle; 4] {
