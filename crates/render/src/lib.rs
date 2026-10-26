@@ -25,8 +25,8 @@ pub use fog_pass::{
     yaw_pop_fixture, FogImage, FogPointLamp,
 };
 pub use fog_budget::{
-    allocation_mb, allocation_mb_doubled, fit_pass, millisecond_ceiling, sample_cap,
-    unfitted_milliseconds, PassCost,
+    allocation_bytes, allocation_mb, allocation_mb_doubled, fit_pass, fog_probe,
+    millisecond_ceiling, sample_cap, unfitted_milliseconds, FogProbe, PassCost,
 };
 pub use fog::{
     apply_fog, compose_camera_medium, compose_pixel_medium, grid_size, inject,

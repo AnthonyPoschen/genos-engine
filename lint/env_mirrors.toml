@@ -1210,6 +1210,46 @@ kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
 
 [[var]]
+name = "GENOS_FOG"
+kind = "mirror"
+detail = "--fog"
+
+[[var]]
+name = "GENOS_FOG_DENSITY"
+kind = "mirror"
+detail = "--fog-density"
+
+[[var]]
+name = "GENOS_FOG_HEIGHT"
+kind = "mirror"
+detail = "--fog-height"
+
+[[var]]
+name = "GENOS_FOG_THICKNESS"
+kind = "mirror"
+detail = "--fog-thickness"
+
+[[var]]
+name = "GENOS_FOG_ALBEDO"
+kind = "mirror"
+detail = "--fog-albedo"
+
+[[var]]
+name = "GENOS_FOG_PHASE"
+kind = "mirror"
+detail = "--fog-phase"
+
+[[var]]
+name = "GENOS_FOG_GI"
+kind = "mirror"
+detail = "--fog-gi"
+
+[[var]]
+name = "GENOS_FOG_HISTORY"
+kind = "mirror"
+detail = "--fog-history"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"

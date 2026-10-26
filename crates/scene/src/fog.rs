@@ -43,6 +43,80 @@ impl FogShape {
     }
 }
 
+/// Which froxel field the lighting debug page shows.
+///
+/// The name is the menu key. The pass does not read it, and the text form
+/// does not store it, so it is not replicated.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FogInspect {
+    /// Extinction in the cell.
+    #[default]
+    Extinction,
+    /// In-scattering in the cell.
+    Inscatter,
+    /// Transmittance along the column.
+    Transmittance,
+    /// History accept weight. Zero while history is off.
+    History,
+    /// Frames since the last history accept. Zero while history is off.
+    Age,
+    /// Samples, slices, and bytes the preset keeps.
+    Budget,
+    /// Local volume bounds.
+    Volumes,
+}
+
+impl FogInspect {
+    /// Menu keys, in slider order.
+    pub const NAMES: [&str; 7] = [
+        "extinction",
+        "inscatter",
+        "transmittance",
+        "history",
+        "age",
+        "budget",
+        "volumes",
+    ];
+
+    /// The menu key.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        Self::NAMES
+            .get(self.index())
+            .copied()
+            .unwrap_or("extinction")
+    }
+
+    /// Slider index of `name`.
+    #[must_use]
+    pub fn index(self) -> usize {
+        match self {
+            Self::Extinction => 0,
+            Self::Inscatter => 1,
+            Self::Transmittance => 2,
+            Self::History => 3,
+            Self::Age => 4,
+            Self::Budget => 5,
+            Self::Volumes => 6,
+        }
+    }
+
+    /// Parse a menu key.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "extinction" => Some(Self::Extinction),
+            "inscatter" => Some(Self::Inscatter),
+            "transmittance" => Some(Self::Transmittance),
+            "history" => Some(Self::History),
+            "age" => Some(Self::Age),
+            "budget" => Some(Self::Budget),
+            "volumes" => Some(Self::Volumes),
+            _ => None,
+        }
+    }
+}
+
 /// One local volume. Outside the bound the weight is zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FogVolume {
@@ -86,6 +160,8 @@ pub struct FogSettings {
     pub gi: bool,
     /// Reserved. The pass does not blend history, whatever this flag says.
     pub history: bool,
+    /// Debug page. Not part of the replicated text.
+    pub inspect: FogInspect,
     /// Local boxes and spheres. They add to the height field.
     pub volumes: Vec<FogVolume>,
 }
@@ -122,6 +198,7 @@ impl Default for FogSettings {
             phase_g: 0.4,
             gi: false,
             history: false,
+            inspect: FogInspect::Extinction,
             volumes: Vec::new(),
         }
     }
@@ -207,6 +284,10 @@ impl FogSettings {
             "phase_g" => self.phase_g = parse_f32("phase_g", value)?.clamp(-0.99, 0.99),
             "gi" => self.gi = parse_on(value)?,
             "history" => self.history = parse_on(value)?,
+            "view" => {
+                self.inspect = FogInspect::parse(value)
+                    .ok_or_else(|| format!("view is one of the fog page keys, got {value}"))?;
+            }
             "clear_volumes" => {
                 if parse_on(value)? {
                     self.volumes.clear();
@@ -227,11 +308,134 @@ impl FogSettings {
         out.density = cli.density.or(env.density).unwrap_or(out.density);
         out.height = cli.height.or(env.height).unwrap_or(out.height);
         out.thickness = cli.thickness.or(env.thickness).unwrap_or(out.thickness);
-        out.albedo = cli.albedo.or(env.albedo).unwrap_or(out.albedo);
-        out.phase_g = cli.phase_g.or(env.phase_g).unwrap_or(out.phase_g);
+        out.albedo = cli
+            .albedo
+            .or(env.albedo)
+            .unwrap_or(out.albedo)
+            .clamp(0.0, 1.0);
+        out.phase_g = cli
+            .phase_g
+            .or(env.phase_g)
+            .unwrap_or(out.phase_g)
+            .clamp(-0.99, 0.99);
         out.gi = cli.gi.or(env.gi).unwrap_or(out.gi);
         out.history = cli.history.or(env.history).unwrap_or(out.history);
         out
+    }
+
+    /// One line for the open debug view. Numbers and keys only.
+    #[must_use]
+    pub fn inspect_line(&self) -> String {
+        match self.inspect {
+            FogInspect::Extinction => format!(
+                "density={} height={} thickness={}",
+                num(self.density),
+                num(self.height),
+                num(self.thickness)
+            ),
+            FogInspect::Inscatter => {
+                format!("albedo={} phase_g={}", num(self.albedo), num(self.phase_g))
+            }
+            FogInspect::Transmittance => {
+                if self.dispatches() {
+                    "dispatches=1".to_string()
+                } else {
+                    "dispatches=0".to_string()
+                }
+            }
+            FogInspect::History => "weight=0".to_string(),
+            FogInspect::Age => "age=0".to_string(),
+            FogInspect::Budget => "samples capped=0 history=0".to_string(),
+            FogInspect::Volumes => format!("volumes={}", self.volumes.len()),
+        }
+    }
+}
+
+/// `Some(true)` when `arg` is a fog flag that reads the next argument.
+/// `Some(false)` when the value is after `=`. `None` for any other flag.
+#[must_use]
+pub fn fog_flag_needs_value(arg: &str) -> Option<bool> {
+    let (name, inline) = fog_dash(arg)?;
+    fog_key(name)?;
+    Some(inline.is_none())
+}
+
+/// Write one `--fog*` flag into `cli`.
+///
+/// # Errors
+///
+/// Returns an error when `arg` is a fog flag with a missing or bad value,
+/// or when `arg` is not a fog flag.
+pub fn apply_fog_arg(cli: &mut FogCli, arg: &str, next: Option<&str>) -> Result<(), String> {
+    let (name, inline) = fog_dash(arg).ok_or_else(|| format!("unknown argument {arg}"))?;
+    let key = fog_key(name).ok_or_else(|| format!("unknown argument {arg}"))?;
+    let value = match inline {
+        Some(value) => value,
+        None => next.ok_or_else(|| format!("--{name} needs a value"))?,
+    };
+    let bad = |err: String| format!("bad --{name}: {err}");
+    match key {
+        "enabled" => cli.enabled = Some(parse_on(value).map_err(bad)?),
+        "density" => cli.density = Some(parse_f32(key, value).map_err(bad)?),
+        "height" => cli.height = Some(parse_f32(key, value).map_err(bad)?),
+        "thickness" => cli.thickness = Some(parse_f32(key, value).map_err(bad)?),
+        "albedo" => cli.albedo = Some(parse_f32(key, value).map_err(bad)?),
+        "phase_g" => cli.phase_g = Some(parse_f32(key, value).map_err(bad)?),
+        "gi" => cli.gi = Some(parse_on(value).map_err(bad)?),
+        "history" => cli.history = Some(parse_on(value).map_err(bad)?),
+        _ => return Err(format!("unknown argument {arg}")),
+    }
+    Ok(())
+}
+
+/// Reject a bad fog argument. `next` is the following argument when
+/// [`fog_flag_needs_value`] is `Some(true)`.
+///
+/// # Errors
+///
+/// Returns an error on an unknown flag or a value that does not match.
+pub fn check_fog_arg(arg: &str, next: Option<&str>) -> Result<(), String> {
+    apply_fog_arg(&mut FogCli::default(), arg, next)
+}
+
+/// `on` / `off` as the process edge parsed it.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not a switch.
+pub fn parse_fog_switch(value: &str) -> Result<bool, String> {
+    parse_on(value)
+}
+
+/// A fog number as the process edge parsed it.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not a number.
+pub fn parse_fog_number(key: &str, value: &str) -> Result<f32, String> {
+    parse_f32(key, value)
+}
+
+fn fog_dash(arg: &str) -> Option<(&str, Option<&str>)> {
+    let rest = arg.strip_prefix("--")?;
+    if let Some((name, value)) = rest.split_once('=') {
+        Some((name, Some(value)))
+    } else {
+        Some((rest, None))
+    }
+}
+
+fn fog_key(name: &str) -> Option<&'static str> {
+    match name {
+        "fog" => Some("enabled"),
+        "fog-density" => Some("density"),
+        "fog-height" => Some("height"),
+        "fog-thickness" => Some("thickness"),
+        "fog-albedo" => Some("albedo"),
+        "fog-phase" => Some("phase_g"),
+        "fog-gi" => Some("gi"),
+        "fog-history" => Some("history"),
+        _ => None,
     }
 }
 
@@ -344,6 +548,7 @@ mod tests {
             phase_g: 0.4,
             gi: false,
             history: false,
+            inspect: FogInspect::Extinction,
             volumes: vec![FogVolume {
                 shape: FogShape::Box,
                 position: [0.0, 1.0, -5.0],
@@ -371,5 +576,34 @@ mod tests {
         );
         assert!(resolved.enabled);
         assert!((resolved.density - 0.2).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn the_argument_wins_and_a_bad_flag_fails() {
+        let mut cli = FogCli::default();
+        apply_fog_arg(&mut cli, "--fog", Some("on")).expect("fog");
+        apply_fog_arg(&mut cli, "--fog-density=0.2", None).expect("density");
+        let resolved = FogSettings::default().resolve(
+            &cli,
+            &FogEnv {
+                density: Some(9.0),
+                enabled: Some(false),
+                ..FogEnv::default()
+            },
+        );
+        assert!(resolved.enabled);
+        assert!((resolved.density - 0.2).abs() < 1.0e-6);
+        assert!(check_fog_arg("--fog", Some("maybe")).is_err());
+        assert!(check_fog_arg("--not-fog", None).is_err());
+        let mut page = FogSettings::default();
+        page.set_key("view", "history").expect("view");
+        assert_eq!(page.inspect_line(), "weight=0");
+        assert!(!page.to_text().contains("view="));
+        page.history = true;
+        page.enabled = true;
+        page.density = 0.08;
+        assert_eq!(page.inspect, FogInspect::History);
+        page.set_key("view", "transmittance").expect("view");
+        assert_eq!(page.inspect_line(), "dispatches=1");
     }
 }

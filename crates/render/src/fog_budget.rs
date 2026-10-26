@@ -5,7 +5,7 @@
 //! loses samples first, then far slices. Near slices stay. Potato does not
 //! dispatch.
 
-use genos_scene::LightingPreset;
+use genos_scene::{FogSettings, LightingPreset};
 
 use crate::fog::{grid_size, GridSize};
 
@@ -107,14 +107,74 @@ pub fn fit_pass(preset: LightingPreset, mut time_groups: impl FnMut(u32) -> f64)
     }
 }
 
-fn megabytes(size: GridSize) -> f64 {
+/// Bytes of the preset grid. Zero when the preset allocates no froxel.
+#[must_use]
+pub fn allocation_bytes(preset: LightingPreset) -> u64 {
+    byte_count(grid_size(preset))
+}
+
+/// Counters the debug page and `get_fog_stats` share.
+///
+/// `pass_ms` stays 0. The lighting frame does not dispatch the froxel.
+/// Lavapipe timestamps live on `fog-check`, and they are labelled as lavapipe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FogProbe {
+    /// 1 when the pass would run, otherwise 0.
+    pub dispatches: u32,
+    /// Sample cap when the pass runs, otherwise 0.
+    pub samples_used: u32,
+    /// Samples dropped by the controller. The frame path does not time a pass,
+    /// so this stays 0.
+    pub samples_capped: u32,
+    /// History accepts. History is off, so this stays 0.
+    pub history_accepts: u32,
+    /// History rejects. History is off, so this stays 0.
+    pub history_rejects: u32,
+    /// Grid plus column bytes when the pass runs, otherwise 0.
+    pub vram_bytes: u64,
+    /// Frame pass time. The frame path does not dispatch, so this stays 0.
+    pub pass_ms: f64,
+}
+
+/// Probe for `fog` on `preset`. A density of zero with no volumes reports
+/// `dispatches` 0 and zero bytes, including when `history` is on.
+#[must_use]
+pub fn fog_probe(fog: &FogSettings, preset: LightingPreset) -> FogProbe {
+    if !fog.dispatches() {
+        return FogProbe {
+            dispatches: 0,
+            samples_used: 0,
+            samples_capped: 0,
+            history_accepts: 0,
+            history_rejects: 0,
+            vram_bytes: 0,
+            pass_ms: 0.0,
+        };
+    }
+    FogProbe {
+        dispatches: 1,
+        samples_used: sample_cap(preset),
+        samples_capped: 0,
+        history_accepts: 0,
+        history_rejects: 0,
+        vram_bytes: allocation_bytes(preset),
+        pass_ms: 0.0,
+    }
+}
+
+fn byte_count(size: GridSize) -> u64 {
     let width = u64::from(size.width);
     let height = u64::from(size.height);
     let slices = u64::from(size.slices);
     let froxels = width.saturating_mul(height).saturating_mul(slices);
     let columns = width.saturating_mul(height);
-    let bytes = froxels.saturating_mul(16).saturating_add(columns.saturating_mul(8));
-    let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
+    froxels
+        .saturating_mul(16)
+        .saturating_add(columns.saturating_mul(8))
+}
+
+fn megabytes(size: GridSize) -> f64 {
+    let bytes = u32::try_from(byte_count(size)).unwrap_or(u32::MAX);
     f64::from(bytes) / 1_000_000.0
 }
 
@@ -153,5 +213,31 @@ mod tests {
         assert_eq!(fitted.milliseconds, 0.0);
         assert_eq!(fitted.samples, 0);
         assert_eq!(fitted.vram_mb, 0.0);
+    }
+
+    #[test]
+    fn a_zero_density_and_a_history_flag_do_not_dispatch_or_accept() {
+        let quiet = FogSettings {
+            enabled: true,
+            ..FogSettings::default()
+        };
+        let probe = fog_probe(&quiet, LightingPreset::High);
+        assert_eq!(probe.dispatches, 0);
+        assert_eq!(probe.vram_bytes, 0);
+        assert_eq!(probe.samples_used, 0);
+        let live = FogSettings {
+            enabled: true,
+            density: 0.08,
+            history: true,
+            ..FogSettings::default()
+        };
+        let probe = fog_probe(&live, LightingPreset::Low);
+        assert_eq!(probe.dispatches, 1);
+        assert_eq!(probe.history_accepts, 0);
+        assert_eq!(probe.history_rejects, 0);
+        assert_eq!(probe.pass_ms, 0.0);
+        assert_eq!(probe.samples_capped, 0);
+        assert_eq!(probe.samples_used, 4_000);
+        assert_eq!(probe.vram_bytes, 903_168);
     }
 }

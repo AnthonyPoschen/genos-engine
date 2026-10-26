@@ -112,8 +112,26 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(fog_specs())
     .chain(host_specs())
     .collect()
+}
+
+fn fog_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_fog_settings",
+            "The fog settings in force (text form): enabled, density, height, thickness, albedo, phase_g, gi, history, and volume lines. view is the debug page (extinction, inscatter, transmittance, history, age, budget, volumes) and is not in the text. --fog and the other fog flags win over GENOS_FOG and the other mirrors, which win over the scene value. History is stored and is not blended.",
+        ),
+        spec(
+            "set_fog_settings",
+            "Partial fog update. Keys match the settings text, plus view and clear_volumes. A text field overlays key=value lines. Writes the scene. Launch flags and their mirrors overlay the fields they set on the next frame.",
+        ),
+        spec(
+            "get_fog_stats",
+            "Fog counters: dispatches, samples_used, samples_capped, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. Accepts, rejects, and pass_ms stay 0: history is off, and the frame does not dispatch the froxel. Lavapipe timestamps are fog-check.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {
