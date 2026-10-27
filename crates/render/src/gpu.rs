@@ -701,6 +701,13 @@ impl Renderer {
         self.gpu.fail_device_allocs.set(count);
     }
 
+    /// What kind of device this renderer runs on. A check that grades a timing
+    /// or a real-GPU picture asks this first: a software device cannot prove it.
+    #[must_use]
+    pub fn gpu_kind(&self) -> GpuKind {
+        self.gpu.gpu_kind
+    }
+
     /// Device bytes still held. This drops only when a free reaches the driver.
     #[must_use]
     pub fn device_bytes(&self) -> u64 {
@@ -1511,6 +1518,7 @@ struct Gpu {
     abandon: bool,
     timestamp_period: f32,
     timestamp_bits: u32,
+    gpu_kind: GpuKind,
     query_pool: Handle,
     /// Two timestamps per frame, bloom start and display end. Independent of `--gpu-times`.
     hdr_time_pool: Handle,
@@ -2046,6 +2054,10 @@ impl Gpu {
             );
             let mut prop_bytes = vec![0u8; 1024];
             get_props(physical, prop_bytes.as_mut_ptr());
+            // VkPhysicalDeviceProperties.deviceType sits at byte 16.
+            let gpu_kind = GpuKind::from_vk_device_type(u32::from_ne_bytes(
+                prop_bytes[16..20].try_into().unwrap(),
+            ));
             let timestamp_flag = u32::from_ne_bytes(prop_bytes[716..720].try_into().unwrap());
             let mut timestamp_period = f32::from_ne_bytes(prop_bytes[720..724].try_into().unwrap());
             if timestamp_flag == 0
@@ -2357,6 +2369,7 @@ impl Gpu {
                 abandon: false,
                 timestamp_period,
                 timestamp_bits,
+                gpu_kind,
                 query_pool: std::ptr::null_mut(),
                 hdr_time_pool: std::ptr::null_mut(),
                 gpu_times: {
@@ -8692,5 +8705,26 @@ mod memory_props {
         listed[..name.len()].copy_from_slice(name);
         assert!(extension_listed(&listed, 1, name));
         assert!(!extension_listed(&listed, 1, b"VK_KHR_swapchain"));
+    }
+}
+
+/// The device a frame was drawn on. Results from `Software` (lavapipe) prove
+/// correctness on that driver only; timings and real-GPU picture gates need `Hardware`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuKind {
+    /// `VK_PHYSICAL_DEVICE_TYPE_CPU`, e.g. lavapipe.
+    Software,
+    /// Integrated, discrete or virtual GPU.
+    Hardware,
+}
+
+impl GpuKind {
+    fn from_vk_device_type(device_type: u32) -> Self {
+        // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
+        if device_type == 4 {
+            Self::Software
+        } else {
+            Self::Hardware
+        }
     }
 }
