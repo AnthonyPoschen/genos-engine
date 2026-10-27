@@ -232,5 +232,15 @@ void main() {
     if (lighting_px_unfilled && lighting_unfilled_tint()) {
         shown = mix(shown, vec3(1.0, 0.0, 1.0), 0.75);
     }
-    outc.px[index] = pack_rgb(dither8(shown, p));
+    // The guard band shifts this pixel off the swapchain. Dither the swapchain
+    // coordinate so the grain matches a frame with no crop.
+    uvec2 grain = p;
+    if (pc.frame.x != 0u && pc.frame.y != 0u) {
+        uint crop = pc.schedule.w;
+        uvec2 origin = uvec2(crop & 0xffffu, crop >> 16u);
+        if (all(greaterThanEqual(p, origin))) {
+            grain = p - origin;
+        }
+    }
+    outc.px[index] = pack_rgb(dither8(shown, grain));
 }

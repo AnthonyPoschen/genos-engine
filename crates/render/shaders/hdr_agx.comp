@@ -11,6 +11,10 @@ layout(push_constant) uniform Push {
     uvec4 dims;
     uvec4 params;
     uvec4 lamp;
+    // Same words the lighting passes push. `schedule.w` is the display crop.
+    // `frame.xy` is the swapchain size. Zero frame size means the lit target.
+    uvec4 schedule;
+    uvec4 frame;
 } pc;
 
 layout(std430, set = 0, binding = 8) buffer Out {
@@ -175,12 +179,23 @@ uint pack_rgb(vec3 rgb) {
 
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
-    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
+    // The lit image keeps the guard band. This pass grades the swapchain crop
+    // and writes that crop back in place, so the present copy is unchanged.
+    uint dw = pc.frame.x != 0u ? pc.frame.x : pc.dims.x;
+    uint dh = pc.frame.y != 0u ? pc.frame.y : pc.dims.y;
+    if (p.x >= dw || p.y >= dh) {
         return;
     }
-    uint index = p.y * pc.dims.x + p.x;
+    uint crop = pc.schedule.w;
+    uint sx = p.x + (crop & 0xffffu);
+    uint sy = p.y + (crop >> 16u);
+    if (sx >= pc.dims.x || sy >= pc.dims.y) {
+        return;
+    }
+    uint index = sy * pc.dims.x + sx;
+    uint shown = p.y * dw + p.x;
     vec3 scene = scene_lin.px[index].rgb;
-    vec3 c = add_bloom(scene, index);
+    vec3 c = add_bloom(scene, shown);
     // The display pass's bloom add, before exposure. An HDR encode overwrites it.
     vec3 bloom_added = c - scene;
     float exposure = hdr.v.x;
@@ -196,7 +211,7 @@ void main() {
         vec3 linear = pow(max(formed, vec3(0.0)), vec3(DISPLAY_GAMMA));
         float white = hdr.extra.x;
         vec3 encoded = hdr.v.w < MODE_HI ? hdr10_of(linear, white) : scrgb_of(linear, white);
-        uint at = index * 4u;
+        uint at = shown * 4u;
         encode.words[at] = floatBitsToUint(encoded.r);
         encode.words[at + 1u] = floatBitsToUint(encoded.g);
         encode.words[at + 2u] = floatBitsToUint(encoded.b);
@@ -207,12 +222,12 @@ void main() {
         } else if (abs(fmt - FMT_A2R10) < 1.0) {
             outc.px[index] = pack_a2r10(encoded);
         } else if (abs(fmt - FMT_R16F) < 1.0) {
-            uint base = pc.dims.x * pc.dims.y * 4u + index * 2u;
+            uint base = pc.dims.x * pc.dims.y * 4u + shown * 2u;
             encode.words[base] = packHalf2x16(encoded.rg);
             encode.words[base + 1u] = packHalf2x16(vec2(encoded.b, 1.0));
         }
     } else {
-        uint at = index * 4u;
+        uint at = shown * 4u;
         encode.words[at] = floatBitsToUint(bloom_added.r);
         encode.words[at + 1u] = floatBitsToUint(bloom_added.g);
         encode.words[at + 2u] = floatBitsToUint(bloom_added.b);

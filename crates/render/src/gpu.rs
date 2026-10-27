@@ -3873,31 +3873,56 @@ impl Gpu {
     }
 
     fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
-        let pixels = self.extent_w as usize * self.extent_h as usize;
-        let bytes = pixels.saturating_mul(16);
-        if bytes == 0
+        let empty = crate::hdr_output::SceneRead {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+            distance_m: Vec::new(),
+        };
+        let lit_w = if self.lit_w == 0 {
+            self.extent_w.max(1)
+        } else {
+            self.lit_w
+        };
+        let lit_h = if self.lit_h == 0 {
+            self.extent_h.max(1)
+        } else {
+            self.lit_h
+        };
+        let src_pixels = (lit_w as usize).saturating_mul(lit_h as usize);
+        let src_bytes = (src_pixels.saturating_mul(16)) as u64;
+        if src_pixels == 0
             || self.lighting.scene_host.memory.is_null()
-            || self.lighting.scene_host.size < bytes as u64
+            || self.lighting.scene_host.size < src_bytes
         {
-            return Ok(crate::hdr_output::SceneRead {
-                width: 0,
-                height: 0,
-                rgb: Vec::new(),
-                distance_m: Vec::new(),
-            });
+            return Ok(empty);
         }
         let values = read_f32s(
             self.fns.map_mem,
             self.fns.unmap_mem,
             self.device,
             self.lighting.scene_host.memory,
-            pixels.saturating_mul(4),
+            src_pixels.saturating_mul(4),
         )?;
-        Ok(crate::hdr_output::scene_read_from_rgba(
-            self.extent_w,
-            self.extent_h,
-            &values,
-        ))
+        let (dw, dh, ox, oy, _) = self.display_sample(lit_w, lit_h);
+        if ox == 0 && oy == 0 && dw == lit_w && dh == lit_h {
+            return Ok(crate::hdr_output::scene_read_from_rgba(dw, dh, &values));
+        }
+        let dst_pixels = (dw as usize).saturating_mul(dh as usize);
+        let mut cropped = vec![0.0f32; dst_pixels.saturating_mul(4)];
+        let stride = lit_w as usize;
+        for row in 0..dh as usize {
+            let src_row = (row + oy as usize).saturating_mul(stride) + ox as usize;
+            let dst_row = row.saturating_mul(dw as usize);
+            for col in 0..dw as usize {
+                let src = src_row.saturating_add(col).saturating_mul(4);
+                let dst = dst_row.saturating_add(col).saturating_mul(4);
+                if src.saturating_add(4) <= values.len() && dst.saturating_add(4) <= cropped.len() {
+                    cropped[dst..dst + 4].copy_from_slice(&values[src..src + 4]);
+                }
+            }
+        }
+        Ok(crate::hdr_output::scene_read_from_rgba(dw, dh, &cropped))
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {

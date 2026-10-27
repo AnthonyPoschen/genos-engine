@@ -2498,9 +2498,30 @@ impl Gpu {
         !hdr.legacy_bytes && hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0
     }
 
+    /// Swapchain rectangle inside the lit image. The origin and stride let a
+    /// post pass read that crop out of a guard-band buffer. A missing lit
+    /// target returns the size passed in, with a zero origin and stride.
+    fn display_sample(&self, lit_w: u32, lit_h: u32) -> (u32, u32, u32, u32, u32) {
+        let dw = self.extent_w;
+        let dh = self.extent_h;
+        let ox = self.crop_x;
+        let oy = self.crop_y;
+        if self.lit_w == 0
+            || dw == 0
+            || dh == 0
+            || ox.saturating_add(dw) > lit_w
+            || oy.saturating_add(dh) > lit_h
+        {
+            return (lit_w, lit_h, 0, 0, 0);
+        }
+        (dw, dh, ox, oy, lit_w)
+    }
+
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
+    /// The pyramid is the swapchain crop, so a CPU pyramid of that crop matches.
     /// The intensity word is updated after the chain so the display pass adds it.
-    fn record_gpu_bloom(&mut self, width: u32, height: u32) {
+    fn record_gpu_bloom(&mut self, lit_w: u32, lit_h: u32) {
+        let (width, height, origin_x, origin_y, stride) = self.display_sample(lit_w, lit_h);
         if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
             return;
         }
@@ -2530,7 +2551,9 @@ impl Gpu {
         let Some(&(first_w, first_h, first_dst)) = mips.first() else {
             return;
         };
-        self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
+        self.bloom_dispatch(
+            first_w, first_h, width, height, 0, first_dst, 0, 0, origin_x, origin_y, stride,
+        );
         for index in 1..mips.len() {
             let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
                 return;
@@ -2538,7 +2561,7 @@ impl Gpu {
             let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
                 return;
             };
-            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
+            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0, 0, 0, 0);
         }
         let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
             return;
@@ -2550,13 +2573,13 @@ impl Gpu {
                 return;
             };
             let dst = if ping == 0 { scratch_a } else { scratch_b };
-            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
+            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off, 0, 0, 0);
             src_w = finer_w;
             src_h = finer_h;
             src = dst;
             ping ^= 1;
         }
-        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
+        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0, 0, 0, 0);
         let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
         unsafe {
             (self.fns.cmd_update_buffer)(
@@ -2581,9 +2604,23 @@ impl Gpu {
         dst: u32,
         mode: u32,
         finer: u32,
+        origin_x: u32,
+        origin_y: u32,
+        scene_stride: u32,
     ) {
         let pc = [
-            dst_w, dst_h, src_w, src_h, src, dst, mode, finer, 0, 0, 0, 0,
+            dst_w,
+            dst_h,
+            src_w,
+            src_h,
+            src,
+            dst,
+            mode,
+            finer,
+            origin_x,
+            origin_y,
+            scene_stride,
+            0,
         ];
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.bloom_pipe);
@@ -2749,7 +2786,8 @@ impl Gpu {
 
     /// Histogram of every pixel, and a stride-32 still check. The header is copied
     /// for the next frame. Luma halves stay on the device.
-    fn record_gpu_meter(&mut self, width: u32, height: u32) {
+    fn record_gpu_meter(&mut self, lit_w: u32, lit_h: u32) {
+        let (width, height, origin_x, origin_y, stride) = self.display_sample(lit_w, lit_h);
         if self.lighting.hdr.legacy_bytes
             || self.lighting.meter_pipe.is_null()
             || self.lighting.meter_dev.buffer.is_null()
@@ -2787,9 +2825,9 @@ impl Gpu {
             self.lighting.meter_ping & 1,
             STILL_STRIDE,
             do_hist,
-            0,
-            0,
-            0,
+            origin_x,
+            origin_y,
+            stride,
             0,
         ];
         let groups = u32::try_from(pixels.div_ceil(64)).unwrap_or(u32::MAX).max(1);
@@ -3632,10 +3670,11 @@ impl Gpu {
                     LIGHTING_PC_BYTES,
                     pc.as_ptr() as *const c_void,
                 );
+                let (post_w, post_h, _, _, _) = self.display_sample(w, h);
                 (self.fns.cmd_dispatch)(
                     self.cmd,
-                    w.div_ceil(8).max(1),
-                    h.div_ceil(8).max(1),
+                    post_w.div_ceil(8).max(1),
+                    post_h.div_ceil(8).max(1),
                     1,
                 );
             }
