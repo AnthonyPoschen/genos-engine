@@ -306,7 +306,7 @@ Departures from this design:
 - §11's `priority`, `age`, `lod`, `budget`, and `coarsen` views are not built. The probes are `get_budgets`, `set_budgets`, `get_schedule_stats`, and `lighting_lod_snapshot`, plus the Perf rows `schedule_stats` and `lod_snapshot`.
 - The phase table above is the original cut. This change lands the screen gates, the guard crop, the controller, and the parent levels together.
 
-`a_turn_toward_the_lamp_does_not_pop_the_bounce` is still over its limit of 16. Lavapipe, 1280×720, release, controller off (the picture path), head `976ae57`. The second toward-frame's red channel on the box face sits near 40. The first toward-frame is one of two values: 14.28 (gap about 25.6) or about 22–26 (gap about 14–18). The third toward-frame matches the second. The 25.6 gap is the same figure as dropping the 2 m and 4 m reads. A 4070 run under load, rough, was 17.9 on this branch and 21.4 on master. Both fail the same limit. This branch is not claimed to have fixed it.
+`a_turn_toward_the_lamp_does_not_pop_the_bounce` is under its limit of 16. Lavapipe, 1280×720, release, controller off, head `ed1c041`. Worst channel gap 11.0, red 27.24 to 38.2 at [0.5, 0, 0], 48 samples. Before the handover, head `976ae57`, the second toward-frame's red sat near 40 and the first was 14.28 (gap about 25.6) or about 22–26 (gap about 14–18). A 4070 run under load, rough, before this repair, was 17.9 on this branch and 21.4 on master.
 
 The red step is the second bounce through the surface cache. One bounce, or a cache irradiance of zero, removes the pure red. Screen probes are required for that red. Denoise off, fill off, the compose-seed flag, prefill off, and the hash wavelet each left the second frame near 40.
 
@@ -314,11 +314,11 @@ The reveal frame is the first shade of that face. The away pose (yaw π at (0.2,
 
 Picture checks set `controller` off. At High the grants cover the picture, so the screen gates stay off. `screen_items` writes the turn exposure as `change_mag`, and `visible_error` orders tiles from it. With the gates off that order does not pick this picture's tiles. §5.1's irradiance delta is still not a per-tile input.
 
-Probe hits are shaded in the light pass, before this frame's cache update. A new cell's first write replaces the texel (`old.w < 0.5` or a sample count of 0, weight 1). The next frame's probes read that cell. The red step is that extra bounce, published in one frame. §7 asks for a finished value, blended once. §6.5's seed from the parent's mean is the departure that leaves the reveal on a short parent or on an empty cell. A read-side blend of a young cell toward its parent left the second frame near 40: one frame of rays is already past the young test, or the prior is already the settled red. Capping the MSME `k` and the S72N dark-fill cubic on a cell that already had samples did the same. Scaling every cache read by 0.25 moved both frames and kept the gap. Those edits are reverted.
+Probe hits are shaded in the light pass, before this frame's cache update. Before the handover, a new cell's first write replaced the texel (`old.w < 0.5` or a sample count of 0, weight 1). The next frame's probes read that cell. The red step is that extra bounce, published in one frame. §7 asks for a finished value, blended once. §6.5's seed from the parent's mean is the departure that leaves the reveal on a short parent or on an empty cell. A read-side blend of a young cell toward its parent left the second frame near 40: one frame of rays is already past the young test, or the prior is already the settled red. Capping the MSME `k` and the S72N dark-fill cubic on a cell that already had samples did the same. Scaling every cache read by 0.25 moved both frames and kept the gap. Those edits are reverted.
 
 History reads `pc.schedule.w`, this frame's crop, with last frame's camera. A crop that jumps by more than the ±2 tile search misses last frame's probe. The lamp-turn face was not in the previous picture, so storing last frame's crop does not put a finished value on that face. The still-camera picture allows one crop add.
 
-Anthony (27 Oct 2026) skipped a second light iteration. The first-write handover is in `lighting_cache.comp` and on the close-hit and 25 cm returns in `lighting_cache.glsl`. A new cell stores `mix(parent, e, a)` with `a = 1 / (1 + K c f)` at n = 1 (`K = 2`, `f = 1 - 1/16`) and count 1. Later sets use the existing blend. A read with fewer than 16 sets mixes the stored mean with that same parent, so the probe shows one blended value. A missing parent stores the set. The plane projection inside `lighting_level_valid` stays out unless this handover alone leaves the lamp turn at 16 or over. Accepting every parent fails `a_coarse_parent_stays_on_its_own_surface` (far-floor brightness about 160–212, limit 130).
+Anthony (27 Oct 2026) skipped a second light iteration. The first-write handover is in `lighting_cache.comp` and on the close-hit and 25 cm returns in `lighting_cache.glsl`. A new cell stores `mix(parent, e, a)` with `a = 1 / (1 + K c f)` at n = 1 (`K = 2`, `f = 1 - 1/16`) and count 1. Later sets use the existing blend. A read with fewer than 16 sets mixes the stored mean with that same parent, so the probe shows one blended value. A missing parent stores the set. That handover alone brings the lamp-turn gap to 11.0, under 16. The plane projection inside `lighting_level_valid` stays out. Accepting every parent fails `a_coarse_parent_stays_on_its_own_surface` (far-floor brightness about 160–212, limit 130).
 
 Postmortem of the reverted trials:
 
@@ -347,5 +347,21 @@ Lavapipe per-pass times for the s1 spin, 27 Oct 2026. Both binaries are release,
 The lit frame in that measurement was 2496×1408. The guard then was 15% on each edge (30% extra on a side) and the height rounded up to the 16 px tile. Area ratio 3,514,368 / 2,073,600 = 1.695, about 30% per edge. Anthony's band is 10–20% wider per edge plus turn bias. The same High value 0.15 is now the symmetric extra on the axis (7.5% each edge) plus up to 10% on the turning side, about 1.32× still and 1.45× at a half-turn. Direct, gather, filter, and the screen wavelet dispatched that old lit size. Master High already runs 5 screen à-trous iterations, so the iteration count is not new. Trace and the cache refresh did not follow the area ratio. Compose stays under 1 ms.
 
 A 4070 s1-spin reported lighting_ms p50/p99 31.6/47.9 against master 21.3/34.7, and direct 18.2 against 9.6 (ratios 1.48 and 1.90). The script's exit 1 is `check_lt` of p99 against the 8 ms cap, and that check runs after `gi_metrics` writes the CSV. Lavapipe's smaller total ratio matches a trace pass that dominates here and did not grow. The 1.695× band was out of spec. `bias_guard` now keeps the 1.32×–1.45× band above. Direct and gather stay on that band. The five wavelet passes, the variance pass, and the push run on the displayed crop plus a 32 px margin (the widest à-trous tap, radius 2 at step 16). Stage 0 still gathers the lit picture so the slot under each pixel stays filled. The table above is the full-band dispatch, before the guard shrink and before that crop.
+
+The same window after the shrink, head `ed1c041`, controller off, against the same master CSV (`620d89f`, not re-run). Wall clock 209 s here and 211 s on master.
+
+| Pass | Master p50 | This branch p50 | Ratio | Master p99 | This branch p99 |
+|---|---:|---:|---:|---:|---:|
+| direct_ms | 340.5 | 469.8 | 1.38 | 372.8 | 535.2 |
+| atrous_ms | 1105.9 | 1289.0 | 1.17 | 1195.1 | 1381.5 |
+| trace_ms | 1654.5 | 1620.6 | 0.98 | 1758.6 | 1656.8 |
+| filter_ms | 32.3 | 39.2 | 1.22 | 42.8 | 49.5 |
+| gather_ms | 14.6 | 19.7 | 1.34 | 18.6 | 25.9 |
+| compose_ms | 0.38 | 0.47 | 1.22 | 0.90 | 0.87 |
+| lighting_ms | 4009.0 | 4350.3 | 1.09 | 4113.8 | 4513.8 |
+| rays | 4,994,155 | 5,363,451 | 1.07 |  |  |
+| cache_entries_refreshed | 23,196 | 23,011 | 0.99 |  |  |
+
+`lighting_ms` p50 is 1.09× master, inside the 1.15× target. Compact + place + cache is 912 ms here against 861 ms on master. Direct and à-trous are 312 ms of the 341 ms added to the total. Trace is 34 ms under master. The s1 yaw step is about 0.052 rad per frame, so the turn extra is a small fraction of the 10% and the lit area stays near the still 1.32×.
 
 A turn changes the lit size, and that reallocates the work buffer to zeros. The trace gate keeps a slot with `x >= 0` as a finished hit, so a zeroed slot outside the rect did not trace (`an_empty_probe_outside_the_refresh_still_traces`, bright pixels about 60k against a pass at about 206k). Schedule bit 4 is set when an existing grid is resized after a draw, not before the first pass (a fresh picture still builds probe history from the rect). A slot that is all zeros then traces. A real hit is not all zeros. `LIGHTING_NO_RAY` still traces when the bit is clear.
