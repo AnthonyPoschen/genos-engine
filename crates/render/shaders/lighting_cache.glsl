@@ -2000,6 +2000,7 @@ const float LIGHTING_SC_SPARSE_OWN = 4.0;
 // S72K handover: interpolation fades out over this many own sets (weight K).
 const float LIGHTING_SC_HANDOVER = 16.0;
 const float LIGHTING_SC_HANDOVER_K = 2.0;
+const float LIGHTING_SC_HANDOVER_EPS = 1.0e-4;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -2286,11 +2287,11 @@ vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) 
     }
     float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
     vec4 up = lighting_sc_parent(pos, nrm, cell);
-    if (!(up.w > 0.5)) {
+    if (!(up.w > LIGHTING_LEVEL_READY)) {
         return own;
     }
     float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
-    float a = n > 0.0 ? n / max(n + k, 1.0e-4) : 0.0;
+    float a = n > 0.0 ? n / max(n + k, LIGHTING_SC_HANDOVER_EPS) : 0.0;
     return mix(up.rgb, own, a);
 }
 
