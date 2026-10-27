@@ -973,6 +973,8 @@ const float LIGHTING_LEVEL_MAX = 4.0;
 // A parent is the light of one surface. The reader has to sit on that plane,
 // and the open segment between them has to stay clear of a wall.
 const float LIGHTING_LEVEL_HALF = 0.5;
+// Half a set: the set count is a float, so a mature parent rounds to the minimum.
+const float LIGHTING_SETS_HALF = 0.5;
 
 bool lighting_level_valid(vec3 pos, vec3 at, vec3 n, float size) {
     float cell = max(size, LIGHTING_LEVEL_HALF);
@@ -1591,7 +1593,7 @@ const float LIGHTING_DN_MIN_SETS = 8.0;
 // LIGHTING_DN_MIN_SETS sets. A one-set parent is a single noisy sample
 // stretched over 8 children: the blocky patches on PR #70.
 bool lighting_sc_parent_mature(vec4 up) {
-    return up.w >= LIGHTING_DN_MIN_SETS - 0.5;
+    return up.w >= LIGHTING_DN_MIN_SETS - LIGHTING_SETS_HALF;
 }
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
