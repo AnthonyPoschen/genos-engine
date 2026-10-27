@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "reflections.glsl"
+// One invocation per reflection ray the preset scheduled. The count is the
+// number of atomic adds, not the cap stored beside them.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) buffer Stats {
+    uint rays;
+    uint views;
+    uint pad0;
+    uint pad1;
+} stats;
+layout(push_constant) uniform Pc {
+    uint preset;
+    uint pad_a;
+    uint pad_b;
+    uint pad_c;
+} pc;
+
+// The launch covers the cap. A thread past `reflection_ray_cap` is not a ray.
+void main() {
+    uint cap = reflection_ray_cap(pc.preset);
+    if (gl_GlobalInvocationID.x >= cap) {
+        return;
+    }
+    atomicAdd(stats.rays, 1u);
+}

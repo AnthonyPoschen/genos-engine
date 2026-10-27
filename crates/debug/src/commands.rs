@@ -27,7 +27,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(
             "light",
-            "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo.",
+            "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
         spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), reset."),
@@ -113,6 +113,7 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
     .into_iter()
     .chain(schedule_specs())
+    .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
     .chain(host_specs())
@@ -137,6 +138,23 @@ fn schedule_specs() -> Vec<CommandSpec> {
         spec(
             "lighting_lod_snapshot",
             "Detail levels for the last schedule push. enabled is budget mode with world-cache mode 3. levels_m is 0.25, 0.5, 1, 2, 4. base_m is the 0.125 lattice. spawn_cap and coarse_slots are the frame's caps.",
+        ),
+    ]
+}
+
+fn reflection_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_reflection_settings",
+            "The reflection settings in force (text form): enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics, tracer, and water. --reflections, --reflection-rays, --mirror-views, --water, --caustics, and --reflection-tracer win over GENOS_REFLECTIONS, GENOS_REFLECTION_RAYS, GENOS_MIRROR_VIEWS, GENOS_WATER, GENOS_CAUSTICS, and GENOS_REFLECTION_TRACER, which win over the scene value.",
+        ),
+        spec(
+            "set_reflection_settings",
+            "Partial reflection update. Keys are enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics (off, image, cache), tracer (off, software, ray_query), and water. A text field overlays key=value lines. Writes the scene. The command-line arguments and GENOS_REFLECTION_* mirrors still overlay the value the picture uses.",
+        ),
+        spec(
+            "get_reflection_stats",
+            "The last reflection pass: ran, rays, views, gpu_ns, and vram_bytes. gpu_ns is the timestamp query around that pass. vram_bytes is the reflection images and grade buffers. ms_frac and vram_frac stay NOT-IMPLEMENTED: lavapipe time is not the 4070 or 1060 cap. Settings stay on get_reflection_settings.",
         ),
     ]
 }

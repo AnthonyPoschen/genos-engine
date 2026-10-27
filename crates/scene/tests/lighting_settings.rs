@@ -1,11 +1,25 @@
-#![cfg_attr(test, expect(clippy::expect_fun_call, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::expect_fun_call,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Lighting settings: presets, the text form, and a scene file that overrides them.
 
 use genos_scene::{
     load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
+    LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
+    LAMP_PICK_SPATIAL_RADIUS,
     SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED,
 };
 
@@ -61,12 +75,16 @@ fn surface_cache_blend_and_firefly_sigma_round_trip() {
         .set_key("surface_cache.firefly_sigma", "8")
         .unwrap();
     assert_eq!(settings.preset_label(), "high");
-    settings.set_key("surface_cache.ray_budget", "2048").unwrap();
+    settings
+        .set_key("surface_cache.ray_budget", "2048")
+        .unwrap();
     settings.set_key("surface_cache.dormant_rays", "4").unwrap();
     let budget = LightingSettings::parse(&settings.to_text()).unwrap();
     assert_eq!(budget.surface_cache.ray_budget, 2048);
     assert_eq!(budget.surface_cache.dormant_rays, 4);
-    settings.set_key("surface_cache.dormant_rays", "20").unwrap();
+    settings
+        .set_key("surface_cache.dormant_rays", "20")
+        .unwrap();
     assert_eq!(settings.surface_cache.dormant_rays, 16);
     assert_eq!(budget.preset_label(), "custom");
 }
@@ -108,7 +126,10 @@ fn the_engine_settings_trait_reads_and_writes_lighting() {
 #[test]
 fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
     let mut settings = LightingSettings::preset(LightingPreset::High);
-    assert_eq!(settings.lamp_pick.mode, LampPickMode::Hits);
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
+    assert_eq!(settings.lamp_pick.candidates, LAMP_PICK_CANDIDATES_HIGH);
+    assert_eq!(settings.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
+    assert!(settings.lamp_pick.unbiased);
     assert_eq!(settings.direct.max_lights, 0);
     settings.set_key("lamp_pick", "hits").unwrap();
     settings.set_key("lamp_pick_candidates", "8").unwrap();
@@ -137,36 +158,38 @@ fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
 }
 
 #[test]
-fn gi_presets_sample_hits_and_reuse_is_not_a_preset() {
-    for preset in [
-        LightingPreset::High,
-        LightingPreset::Gi1Bounce,
-        LightingPreset::Low,
-        LightingPreset::Medium,
-    ] {
-        assert_eq!(
-            LightingSettings::preset(preset).lamp_pick.mode,
-            LampPickMode::Hits,
-            "{}",
-            preset.name()
-        );
-    }
+fn gi_presets_sample_pixels_from_a_reservoir() {
+    let low = LightingSettings::preset(LightingPreset::Low);
+    assert_eq!(low.lamp_pick.mode, LampPickMode::Reuse);
+    assert_eq!(low.lamp_pick.candidates, LAMP_PICK_CANDIDATES_LOW);
+    assert_eq!(low.lamp_pick.radius, 0, "low is temporal only");
+    assert!(low.lamp_pick.unbiased);
+    let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert_eq!(medium.lamp_pick.mode, LampPickMode::Reuse);
+    assert_eq!(medium.lamp_pick.candidates, LAMP_PICK_CANDIDATES_MEDIUM);
+    assert_eq!(medium.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(high.lamp_pick.mode, LampPickMode::Reuse);
+    assert_eq!(high.lamp_pick.candidates, LAMP_PICK_CANDIDATES_HIGH);
+    assert_eq!(high.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Gi1Bounce)
+            .lamp_pick
+            .mode,
+        LampPickMode::Hits
+    );
     for preset in [LightingPreset::Potato, LightingPreset::DayCycle] {
+        let settings = LightingSettings::preset(preset);
         assert_eq!(
-            LightingSettings::preset(preset).lamp_pick.mode,
+            settings.lamp_pick.mode,
             LampPickMode::Off,
             "{}",
             preset.name()
         );
     }
-    for preset in LightingPreset::all() {
-        assert_ne!(
-            LightingSettings::preset(*preset).lamp_pick.mode,
-            LampPickMode::Reuse,
-            "{}",
-            preset.name()
-        );
-    }
+    let potato = LightingSettings::preset(LightingPreset::Potato);
+    assert_eq!(potato.direct.max_lights, 8);
+    assert!(!potato.gi.enabled);
 }
 
 #[test]

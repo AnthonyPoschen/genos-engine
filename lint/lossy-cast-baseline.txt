@@ -13,6 +13,7 @@ crates/bake/src/format.rs 3
 crates/bake/src/mesh.rs 2
 crates/bake/src/sdf.rs 5
 crates/debug/src/image.rs 20
+crates/debug/src/noise_gate.rs 1
 crates/debug/src/png.rs 3
 crates/debug/src/reference.rs 24
 crates/debug/src/script.rs 2

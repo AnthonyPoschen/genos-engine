@@ -204,14 +204,14 @@ Role: SCHED · More detail: `lit_target`; `--guard-edge`
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off`; `hits` (preset default, GI hits only); `pixels`; `both`; `reuse` (experimental reservoir reuse).
-Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI; GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
+**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (potato, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). At 8 positive lamps or fewer, and on a quiet held view, `reuse` shades the sum. `reuse (experimental)` is a deprecated value and logs a warning.
+Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI (Bitterli et al. 2020) with pairwise MIS (Bitterli et al. 2022); GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
-**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and tries that reservoir again next frame (`lamp_pick_reuse`). Off fills a new reservoir each frame. The menu switch is this key.
-Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020) · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
+**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and merges it again next frame (`lamp_pick_reuse`). Low is temporal only. Medium and High also merge one neighbour. History is the previous frame's pixel under the motion vector, rejected on depth and normal. A quiet held pixel stores the exact sum and then holds. Off fills a new reservoir each frame. The menu switch is this key.
+Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020); motion vectors with depth/normal rejection · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
 
-**Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On follows Algorithm 6 (a source counts only when its target weight for the selected lamp is positive) and does not clamp M. Off divides by the sum of M and clamps M. The menu switch is this key.
-Role: LIGHTS · Literature: Bitterli et al. 2020 Algorithm 6; Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
+**Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On is pairwise MIS and does not clamp M. The shade is `light * W`. Off divides by the sum of M, clamps M, and shades with `point_total / phat`. The menu switch is this key.
+Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 2023); the off path is Bitterli et al. 2020 section 3 and Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
 
 **Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
 Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
@@ -296,6 +296,60 @@ Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../
 **Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
+
+### Specular, mirrors, portals, water
+Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. One term, one meaning.
+
+**Specular lobe**: the view-dependent glossy term, kept separate from diffuse GI.
+Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More detail: [../systems/reflections-design.md](../systems/reflections-design.md)
+
+**Fresnel weight**: the fraction of light reflected at a boundary. Dielectrics use the exact equations. From under water the index ratio is inverted, and total internal reflection returns 1. Metals use Schlick with F0 equal to the base colour.
+Role: SAMPLE · Literature: Fresnel equations; Schlick, CGF 1994 (metals) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
+
+**Screen-space reflection**: a ray marched through the depth buffer along one specular direction.
+Role: SAMPLE · Literature: McGuire and Mara, JCGT 2014; Stachowiak, SIGGRAPH 2015 · More detail: [reflections design, passes](../systems/reflections-design.md#passes)
+
+**Reflection hit**: the first surface a specular ray accepts, stored as geometry, not as radiance.
+Role: VIS · Literature: Lumen screen-trace hit; our kept hit · More detail: [reflections design, data](../systems/reflections-design.md#data)
+
+**World-cache reflection**: specular colour read from a finished surface-cache entry when the screen trace misses.
+Role: STORE · Literature: Lumen surface cache at a reflection hit · More detail: [reflections design](../systems/reflections-design.md#fit)
+
+**Reflection ray**: an optional trace through the shared tracer, software SDF or `VK_KHR_ray_query`. The Low preset schedules none.
+Role: SAMPLE · Literature: Lumen hardware or software reflection trace · More detail: [ADR 0019](../adr/0019-reflections.md)
+
+**Glossy denoise**: one spatial filter on specular hits. It does not keep a radiance history.
+Role: DENOISE · Literature: SVGF spatial kernel (Schied, HPG 2017). The temporal accumulation is not used · More detail: [reflections design, denoise](../systems/reflections-design.md#denoise)
+
+**Planar mirror**: a flat reflector drawn by one extra camera reflected through its plane.
+Role: OUT · Literature: Diefenbach, PhD 1996 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Mirror recursion**: extra mirror and portal views in one frame. A further view is drawn when the running Fresnel product stays at least 0.02 and the shared cap still has room. Portals share the cap.
+Role: SCHED · Literature: shipped recursive mirrors and portals (a depth budget) · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
+
+**Oblique clip**: the near plane moved onto the mirror or portal so the draw rejects geometry behind that plane.
+Role: VIS · Literature: Lengyel, Journal of Game Development 1(2), 2005 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Portal**: an opening that draws the linked view inside its frame.
+Role: OUT · Literature: Luebke and Georges, I3D 1995 · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Portal transform**: the rigid map from a point on the source side of a portal to the linked side.
+Role: VIS · Literature: Luebke and Georges, I3D 1995 (the opening); the rigid map is ours · More detail: [reflections design, mirrors](../systems/reflections-design.md#mirrors)
+
+**Water surface**: the mesh that shades reflection, refraction, and absorption from a Gerstner displacement.
+Role: OUT · Literature: Finch, GPU Gems ch. 1, 2004 · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Refraction**: the bent transmitted direction through a surface, from Snell's law.
+Role: SAMPLE · Literature: Snell's law; Walter et al., EGSR 2007 (the BTDF we do not stochastic-sample) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
+
+**Caustic**: light focused onto a receiver by refraction. The image-space map is written into the surface cache.
+Role: LIGHTS · Literature: Shah, Konttinen, and Pattanaik, IEEE TVCG 13(2), 2007 · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Shoreline**: the shallow band where wave height is clamped by depth and foam coverage comes from that clamp and the displacement Jacobian.
+Role: OUT · Literature: McCowan, Philosophical Magazine 32, 1891 (H/d = 0.78; our cap is 0.75); Tessendorf, SIGGRAPH 2001 (Jacobian foam) · More detail: [reflections design, water](../systems/reflections-design.md#water)
+
+**Reflection budget**: the per-preset ceiling on reflection milliseconds, VRAM, rays, and mirror views.
+Role: SCHED · Literature: ADR 0013 work cap; Lumen reflection scalability · More detail: [reflections design, budgets](../systems/reflections-design.md#budgets)
 
 ### Materials
 **Material record**: one glTF material's factors, texture slots, and alpha mode, before any texel is read. The code type is `PbrMaterial`.
