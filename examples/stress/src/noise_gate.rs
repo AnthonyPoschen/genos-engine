@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use genos_debug::noise_gate::{frame_luminance, grade, report_json, GateSamples};
+use genos_debug::noise_gate::{frame_luminance, grade, report_json, GateReport, GateSamples};
 use genos_debug::png;
 use genos_debug::{Image, RefSetup};
 use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
@@ -258,7 +258,7 @@ pub fn run(config: &Config) -> Result<i32, String> {
         config.preset.map_or("direct-quiet", LightingPreset::name),
         if config.broken { "broken" } else { "random" }
     );
-    let live = capture_pass(
+    let mut live = capture_pass(
         &mut window,
         &mut renderer,
         &world,
@@ -267,7 +267,7 @@ pub fn run(config: &Config) -> Result<i32, String> {
         live_gate,
         "live",
     )?;
-    let exact = capture_pass(
+    let mut exact = capture_pass(
         &mut window,
         &mut renderer,
         &world,
@@ -280,63 +280,16 @@ pub fn run(config: &Config) -> Result<i32, String> {
     renderer.set_lighting_settings(gate_lighting(config.preset));
     let solos = solo_frames(&mut window, &mut renderer, &world, &pose)?;
     let reference = reference_of(&world.scene, &pose, width, height);
-    let hit = reference.hit;
-    let reference_y = frame_luminance(&reference.image);
-    let report = grade(
-        &GateSamples {
-            width,
-            height,
-            still: live.still,
-            pan: live.pan,
-            reference: reference_y.clone(),
-            hit: hit.clone(),
-            solos: solos.clone(),
-            still_rays: live.still_rays,
-            still_restir: live.still_restir,
-            pan_restir: live.pan_restir,
-            pan_exact: live.pan_exact,
-        },
-        &GateSamples {
-            width,
-            height,
-            still: exact.still,
-            pan: exact.pan,
-            reference: reference_y,
-            hit,
-            solos,
-            still_rays: exact.still_rays,
-            still_restir: exact.still_restir,
-            pan_restir: exact.pan_restir,
-            pan_exact: exact.pan_exact,
-        },
-    )?;
-    std::fs::create_dir_all(&config.out).map_err(|err| err.to_string())?;
-    std::fs::write(config.out.join("metrics.json"), report_json(&report))
-        .map_err(|err| err.to_string())?;
-    png::write_png(
-        &config.out.join("live-still.png"),
+    let report = grade_captures(
         width,
         height,
-        &live.last_still,
+        &mut live,
+        &mut exact,
+        frame_luminance(&reference.image),
+        reference.hit,
+        solos,
     )?;
-    png::write_png(
-        &config.out.join("live-pan.png"),
-        width,
-        height,
-        &live.last_pan,
-    )?;
-    png::write_png(
-        &config.out.join("exact-still.png"),
-        width,
-        height,
-        &exact.last_still,
-    )?;
-    png::write_png(
-        &config.out.join("exact-pan.png"),
-        width,
-        height,
-        &exact.last_pan,
-    )?;
+    write_gate_files(&config.out, width, height, &report, &live, &exact)?;
     println!("{report}");
     eprintln!(
         "noise-gate wrote {} in {:.1}s",
@@ -344,6 +297,68 @@ pub fn run(config: &Config) -> Result<i32, String> {
         started.elapsed().as_secs_f64()
     );
     Ok(i32::from(!report.exit_ok))
+}
+
+fn grade_captures(
+    width: u32,
+    height: u32,
+    live: &mut Pass,
+    exact: &mut Pass,
+    reference_y: Vec<f32>,
+    hit: Vec<bool>,
+    solos: Vec<Vec<f32>>,
+) -> Result<GateReport, String> {
+    grade(
+        &capture_samples(
+            width,
+            height,
+            live,
+            reference_y.clone(),
+            hit.clone(),
+            solos.clone(),
+        ),
+        &capture_samples(width, height, exact, reference_y, hit, solos),
+    )
+}
+
+fn capture_samples(
+    width: u32,
+    height: u32,
+    pass: &mut Pass,
+    reference: Vec<f32>,
+    hit: Vec<bool>,
+    solos: Vec<Vec<f32>>,
+) -> GateSamples {
+    GateSamples {
+        width,
+        height,
+        still: std::mem::take(&mut pass.still),
+        pan: std::mem::take(&mut pass.pan),
+        reference,
+        hit,
+        solos,
+        still_rays: pass.still_rays,
+        still_restir: pass.still_restir,
+        pan_restir: pass.pan_restir,
+        pan_exact: pass.pan_exact,
+    }
+}
+
+fn write_gate_files(
+    out: &std::path::Path,
+    width: u32,
+    height: u32,
+    report: &GateReport,
+    live: &Pass,
+    exact: &Pass,
+) -> Result<(), String> {
+    std::fs::create_dir_all(out).map_err(|err| err.to_string())?;
+    std::fs::write(out.join("metrics.json"), report_json(report)).map_err(|err| err.to_string())?;
+    png::write_png(&out.join("live-still.png"), width, height, &live.last_still)?;
+    png::write_png(&out.join("live-pan.png"), width, height, &live.last_pan)?;
+    png::write_png(&out.join("exact-still.png"), width, height, &exact.last_still)?;
+    png::write_png(&out.join("exact-pan.png"), width, height, &exact.last_pan)?;
+    Ok(())
 }
 
 struct Pass {
@@ -554,6 +569,7 @@ fn overlap_world(n: u32) -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         menu: MenuSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
         hdr: HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
     };

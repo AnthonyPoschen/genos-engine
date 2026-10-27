@@ -505,9 +505,11 @@ pub fn grade(live: &GateSamples, exact: &GateSamples) -> Result<GateReport, Stri
         fixed_ratio,
         pop_ratio,
         rel_ratio,
-        live.still_rays,
-        live.still_restir,
-        live.pan_restir,
+        GateRays {
+            still_rays: live.still_rays,
+            still_restir: live.still_restir,
+            pan_restir: live.pan_restir,
+        },
     );
     let grade_letter = letter(failures.len(), fatal);
     Ok(GateReport {
@@ -579,16 +581,26 @@ fn past(value: f32, limit: f32) -> bool {
         .is_none_or(std::cmp::Ordering::is_gt)
 }
 
+#[derive(Clone, Copy)]
+struct GateRays {
+    still_rays: u32,
+    still_restir: u32,
+    pan_restir: u32,
+}
+
 fn gate_failures(
     overlap_pixels: usize,
     flicker_p99: f32,
     fixed_ratio: f32,
     pop_ratio: f32,
     rel_ratio: f32,
-    still_rays: u32,
-    still_restir: u32,
-    pan_restir: u32,
+    rays: GateRays,
 ) -> (Vec<String>, bool) {
+    let GateRays {
+        still_rays,
+        still_restir,
+        pan_restir,
+    } = rays;
     let mut failures = Vec::new();
     let mut fatal = false;
     if overlap_pixels == 0 {
