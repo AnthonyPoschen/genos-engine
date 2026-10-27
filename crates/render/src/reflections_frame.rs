@@ -1071,7 +1071,12 @@ impl Gpu {
     }
 
     fn set_scissor(&self, x: u32, y: u32, w: u32, h: u32) {
-        let scissor = [x as i32, y as i32, w as i32, h as i32];
+        let scissor = [
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+            i32::try_from(w).unwrap_or(i32::MAX),
+            i32::try_from(h).unwrap_or(i32::MAX),
+        ];
         unsafe {
             (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
         }
@@ -2044,7 +2049,7 @@ impl Gpu {
         if !nanos.is_finite() || nanos < 0.0 {
             return 0;
         }
-        nanos.round() as u64
+        format!("{:.0}", nanos.round()).parse::<u64>().unwrap_or(u64::MAX)
     }
 
     fn destroy_reflection_targets(&mut self) {
