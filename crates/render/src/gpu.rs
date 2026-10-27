@@ -6576,7 +6576,13 @@ impl Gpu {
         }
         let due = self.uncopied_pages();
         let republish = self.ready_to_show();
-        if due.is_empty() && republish.is_empty() {
+        // A fresh atlas (startup, or a resize) starts UNDEFINED, but the main
+        // pass descriptors name it GENERAL. Submit once to clear it and move it
+        // to GENERAL even with nothing streamed (VUID-vkCmdDraw-None-09600).
+        let atlas_fresh = [true, false]
+            .into_iter()
+            .any(|color| self.sampled_layout[usize::from(!color)] != 1 && !self.sampled_image(color).image.is_null());
+        if due.is_empty() && republish.is_empty() && !atlas_fresh {
             return Ok(());
         }
         // The previous fill finished with the fence. Put the chain back so this
@@ -6831,7 +6837,10 @@ impl Gpu {
             0x1000,
             0x1000,
             0x1000,
-            0x800 | 0x20,
+            // Transfer read for the texel readback. The fragment read waits on
+            // this submit; a shader read is not a transfer-stage access
+            // (VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820).
+            0x800,
         );
         self.sampled_layout[slot] = 1;
         if readback {
