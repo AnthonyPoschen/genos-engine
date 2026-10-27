@@ -700,7 +700,7 @@ fn screen_items(tiles_x: u32, tiles_y: u32, display: (u32, u32, u32, u32), turn_
                 zone,
                 level: 0,
                 converged: if below { 0.0 } else { 1.0 },
-                change_mag: 0.0,
+                change_mag: screen_change_mag(tx, ty, display, turn_x, turn_y, in_display),
                 distance_m: tile_f32(dist_x.max(dist_y)),
                 age_frames: dist_x.max(dist_y),
             });
@@ -712,6 +712,52 @@ fn screen_items(tiles_x: u32, tiles_y: u32, display: (u32, u32, u32, u32), turn_
 
 fn tile_f32(value: u32) -> f32 {
     f32::from(u16::try_from(value).unwrap_or(u16::MAX))
+}
+
+/// Turn exposure for one screen tile. A still camera is 0. A tile outside the
+/// display on the turn side is 1 (newly revealed). Inside the display, the
+/// value is the fraction toward the leading edge. Off the turn it stays 0.
+/// This is not an irradiance delta. There is no per-tile light on the CPU.
+fn screen_change_mag(
+    tx: u32,
+    ty: u32,
+    display: (u32, u32, u32, u32),
+    turn_x: i32,
+    turn_y: i32,
+    in_display: bool,
+) -> f32 {
+    if turn_x == 0 && turn_y == 0 {
+        return 0.0;
+    }
+    if !in_display {
+        return if tile_on_turn(tx, ty, display, (turn_x, turn_y)) {
+            1.0
+        } else {
+            0.0
+        };
+    }
+    let (dx, dy, dw, dh) = display;
+    let mut mag = 0.0f32;
+    if turn_x != 0 {
+        mag = mag.max(edge_fraction(tx, dx, dw, turn_x > 0));
+    }
+    if turn_y != 0 {
+        mag = mag.max(edge_fraction(ty, dy, dh, turn_y > 0));
+    }
+    mag.clamp(0.0, 1.0)
+}
+
+fn edge_fraction(tile: u32, origin: u32, span: u32, toward_high: bool) -> f32 {
+    let span = span.max(1);
+    if span == 1 {
+        return 1.0;
+    }
+    let along = if toward_high {
+        tile.saturating_sub(origin)
+    } else {
+        origin.saturating_add(span - 1).saturating_sub(tile)
+    };
+    (tile_f32(along) / tile_f32(span - 1)).clamp(0.0, 1.0)
 }
 
 fn tile_on_turn(tx: u32, ty: u32, display: (u32, u32, u32, u32), turn: (i32, i32)) -> bool {
@@ -1074,6 +1120,26 @@ mod tests {
         ];
         let picked = select_refresh(&items, 1, floor);
         assert_eq!(picked, vec![2]);
+    }
+
+    #[test]
+    fn a_turn_writes_the_leading_change_and_a_still_camera_writes_none() {
+        let display = (2u32, 1u32, 4u32, 2u32);
+        let still = screen_items(8, 4, display, 0, 0);
+        assert!(still.iter().all(|item| item.change_mag == 0.0));
+        let turning = screen_items(8, 4, display, 1, 0);
+        let at = |tx: u32, ty: u32| {
+            turning
+                .iter()
+                .find(|item| item.index == ty * 8 + tx)
+                .map(|item| item.change_mag)
+                .unwrap_or(-1.0)
+        };
+        assert!((at(6, 1) - 1.0).abs() < 1.0e-4, "turn-side tile");
+        assert_eq!(at(0, 1), 0.0, "off the turn");
+        assert!(at(5, 1) > at(2, 1), "leading edge ranks above the trailing edge");
+        assert!((at(5, 1) - 1.0).abs() < 1.0e-4);
+        assert!(at(2, 1).abs() < 1.0e-4);
     }
 
     #[test]
