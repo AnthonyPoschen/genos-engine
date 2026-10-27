@@ -93,6 +93,20 @@ fn lighting_pipelines_build_quickly() {
     );
 }
 
+#[test]
+fn agx_display_draws_a_frame() {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut world = shipped_hall();
+    world.scene.hdr = genos_scene::HdrSettings::for_preset(LightingPreset::High);
+    let camera = Camera::opening();
+    let _ = window.pump();
+    let pixels = renderer.draw(&world, &camera, true).expect("draw");
+    let pixels = pixels.expect("pixels");
+    assert!(!pixels.is_empty());
+    assert!(renderer.hdr_exposure() > 0.0);
+    assert!(!renderer.hdr_legacy_display());
+}
+
 fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> Vec<u8> {
     let _ = window.pump();
     renderer
@@ -151,6 +165,8 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
             reflections: genos_scene::ReflectionSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         });
         let mut lit = gltf.clone();
@@ -1217,6 +1233,8 @@ fn shadow_floor_world() -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
@@ -1459,6 +1477,8 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1816,6 +1836,8 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1876,6 +1898,8 @@ fn white_lamps(n: usize) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }

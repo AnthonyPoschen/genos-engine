@@ -40,6 +40,8 @@ fn a_profiled_draw_reports_device_time_for_the_draw() {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     let camera = Camera::opening();

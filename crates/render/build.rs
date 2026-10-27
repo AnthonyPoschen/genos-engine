@@ -36,12 +36,22 @@ fn main() {
     let audio = compile("shaders/transmit.comp", &out.join("transmit.comp.spv"));
     let fxaa = compile("shaders/fxaa.comp", &out.join("fxaa.comp.spv"));
     let reflection_spv = reflection_shaders(&out);
-    // Not embedded: catches errors in pieces no pass includes yet.
-    for file in ["lighting_check.comp", "media_check.comp", "reflections_check.comp"] {
-        let src = format!("shaders/{file}");
-        println!("cargo:rerun-if-changed={src}");
-        compile(&src, &out.join(format!("{file}.spv")));
-    }
+    // Compile check only: no pass includes lighting_check.comp yet.
+    let _lighting_check =
+        compile("shaders/lighting_check.comp", &out.join("lighting_check.comp.spv"));
+    let media_check = compile("shaders/media_check.comp", &out.join("media_check.comp.spv"));
+    let froxel_inject = compile("shaders/froxel_inject.comp", &out.join("froxel_inject.comp.spv"));
+    let froxel_integrate = compile(
+        "shaders/froxel_integrate.comp",
+        &out.join("froxel_integrate.comp.spv"),
+    );
+    // Not embedded: catches errors in a piece no pass includes yet.
+    let reflections_check = "shaders/reflections_check.comp";
+    println!("cargo:rerun-if-changed={reflections_check}");
+    compile(
+        reflections_check,
+        &out.join("reflections_check.comp.spv"),
+    );
     // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
     // The screen launch calls that kernel with the adaptive bit clear: high
     // does not set it, and the branch is the same test the plain pipeline
@@ -77,6 +87,9 @@ fn main() {
         // small sun step asks for it, not at startup, so the nine lighting
         // pipelines and their compile stay the lighting set.
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
+        ("HDR_AGX_SPV", "hdr_agx.comp"),
+        ("HDR_BLOOM_SPV", "hdr_bloom.comp"),
+        ("HDR_METER_SPV", "hdr_meter.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -89,14 +102,17 @@ fn main() {
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\n",
             vert.display(),
             frag.display(),
             depth_mask.display(),
             wire_vert.display(),
             wire.display(),
             audio.display(),
-            fxaa.display()
+            fxaa.display(),
+            media_check.display(),
+            froxel_inject.display(),
+            froxel_integrate.display()
         ),
     )
     .unwrap();
@@ -121,8 +137,9 @@ fn main() {
             path.display()
         ));
     }
+    append_hdr_compose(&mut glue_text, &out);
     std::fs::write(&glue, glue_text).unwrap();
-    watch_shaders();
+    rerun_shader_pieces();
 }
 
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
@@ -143,7 +160,7 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
     .collect()
 }
 
-fn watch_shaders() {
+fn rerun_shader_pieces() {
     for piece in [
         "lighting_common.glsl",
         "lighting_pack.glsl",
@@ -153,6 +170,12 @@ fn watch_shaders() {
         "lighting_sun_compose.comp",
         "lighting_screen.comp",
         "media.glsl",
+        "media_check.comp",
+        "froxel_common.glsl",
+        "froxel_inject.comp",
+        "froxel_integrate.comp",
+        "froxel_compose.glsl",
+        "lighting_check.comp",
         "scene.vert",
         "overlay.frag",
         "depth_mask.frag",
@@ -169,13 +192,40 @@ fn watch_shaders() {
         "reflections_portal.vert",
         "reflections_composite.frag",
         "reflections_ggx.frag",
+        "reflections_check.comp",
         "scene_data.glsl",
         "dither.glsl",
+        "hdr_shoulder.glsl",
+        "hdr_meter.comp",
+        "hdr_display.glsl",
+        "hdr_agx.comp",
         "transmit.comp",
         "fxaa.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
+}
+
+/// HDR compose stores scene radiance. The plain compile does not declare it.
+fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
+    let compose_hdr = compile_define(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    let sun_hdr = compile_define(
+        "shaders/lighting_sun_compose.comp",
+        &out.join("lighting_sun_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        compose_hdr.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        sun_hdr.display()
+    ));
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {

@@ -26,8 +26,8 @@ use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 const SHOW_PARTICLES: bool = false;
 use genos_scene::{
     load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
-    Floor, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings,
-    Scene, Sky, Vec3,
+    Floor, FogSettings, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings,
+    ReflectionSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
     apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
@@ -822,6 +822,8 @@ fn loading_world() -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
         reflections: ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }

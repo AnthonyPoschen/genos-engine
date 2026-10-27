@@ -1,5 +1,5 @@
 #version 450
-// Compile check for media.glsl. Not embedded. build.rs compiles it and discards it.
+// Parity fixture for media.glsl. build.rs embeds it. The lavapipe test dispatches it.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 1) in;
 
@@ -9,10 +9,35 @@ layout(std430, set = 0, binding = 0) buffer Out {
 
 #include "media.glsl"
 
+const float CHECK_DEPTH = 0.5;
+const float CHECK_SIGMA = 0.08;
+const float CHECK_THICKNESS = 40.0;
+const float CHECK_HEIGHT = 10.0;
+const float CHECK_PHASE_G = 0.4;
+const float CHECK_PHASE_MU = 0.5;
+const float CHECK_SCATTER_SIGMA = 0.2;
+const float CHECK_SCATTER_SOURCE = 0.15;
+const float CHECK_SCATTER_DISTANCE = 2.0;
+const float CHECK_DY = 20.0;
+const float CHECK_COS = 0.5;
+const float CHECK_PATH = 40.0;
+
 void main() {
-    result.values[0] = media_transmittance(0.5);
-    result.values[1] = media_height_density(0.08, 40.0, 10.0, 0.0);
-    result.values[2] = media_phase_hg(0.4, 0.5);
-    result.values[3] = media_homogeneous_inscatter(0.2, 0.15, 2.0);
-    result.values[4] = media_height_optical_depth(0.08, 40.0, 0.0, 10.0, 20.0, 0.5, 40.0);
+    result.values[0] = media_transmittance(CHECK_DEPTH);
+    result.values[1] = media_height_density(CHECK_SIGMA, CHECK_THICKNESS, CHECK_HEIGHT, 0.0);
+    result.values[2] = media_phase_hg(CHECK_PHASE_G, CHECK_PHASE_MU);
+    result.values[3] = media_homogeneous_inscatter(
+        CHECK_SCATTER_SIGMA,
+        CHECK_SCATTER_SOURCE,
+        CHECK_SCATTER_DISTANCE
+    );
+    result.values[4] = media_height_optical_depth(
+        CHECK_SIGMA,
+        CHECK_THICKNESS,
+        0.0,
+        CHECK_HEIGHT,
+        CHECK_DY,
+        CHECK_COS,
+        CHECK_PATH
+    );
 }

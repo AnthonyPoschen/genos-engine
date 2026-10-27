@@ -14,9 +14,8 @@ use genos_debug::{Ctx, Tools};
 use genos_mcp::json::{self, Value};
 use genos_render::{Renderer, World};
 use genos_scene::{
-    Camera, EngineSettings, EventLoopSettings, Floor, FpsCounterSettings, Light, MenuSettings,
-    ReflectionSettings, Scene,
-    Vec3,
+    Camera, EngineSettings, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light,
+    MenuSettings, ReflectionSettings, Scene, Vec3,
 };
 use genos_window::Window;
 
@@ -50,6 +49,8 @@ fn room() -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
         reflections: ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }

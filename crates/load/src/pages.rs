@@ -1,77 +1,9 @@
-//! Texture pages, the residency cap, and the miss rule.
+//! Texture pages and the miss rule.
 //!
 //! A page that is not resident is the finest coarser mip that is, or the factor
-//! colour. It is never black and never a half-written page. When the budget is
-//! full, the farthest image's finest mip is the one that drops. `--watch` flips
-//! to the new page on the next sample, after the upload has finished.
-
-/// One image's mip sizes in bytes, finest first. `rank` is distance: higher drops first.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ImageChain {
-    pub levels: Vec<u64>,
-    pub rank: u32,
-}
-
-/// Which finest mips were dropped, and the bytes that remain.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResidencyPlan {
-    pub bytes: u64,
-    /// Finest levels dropped from each image. Parallel to `images`.
-    pub dropped: Vec<usize>,
-}
-
-/// Drop the farthest finest mips until the bytes fit `cap`.
-#[must_use]
-pub fn plan_residency(images: &[ImageChain], cap: u64) -> ResidencyPlan {
-    let mut dropped = vec![0_usize; images.len()];
-    loop {
-        let sum = kept_bytes(images, &dropped);
-        if sum <= cap {
-            return ResidencyPlan {
-                bytes: sum,
-                dropped,
-            };
-        }
-        let mut choice: Option<usize> = None;
-        for (index, image) in images.iter().enumerate() {
-            if dropped[index] >= image.levels.len() {
-                continue;
-            }
-            let replace = match choice {
-                None => true,
-                Some(best) => {
-                    image.rank > images[best].rank
-                        || (image.rank == images[best].rank
-                            && image.levels[dropped[index]] > images[best].levels[dropped[best]])
-                }
-            };
-            if replace {
-                choice = Some(index);
-            }
-        }
-        let Some(index) = choice else {
-            return ResidencyPlan {
-                bytes: sum,
-                dropped,
-            };
-        };
-        dropped[index] += 1;
-    }
-}
-
-/// Bytes that stay under `cap`, dropping finest mips of the farthest images.
-#[must_use]
-pub fn resident_bytes(images: &[ImageChain], cap: u64) -> u64 {
-    plan_residency(images, cap).bytes
-}
-
-fn kept_bytes(images: &[ImageChain], dropped: &[usize]) -> u64 {
-    images
-        .iter()
-        .zip(dropped)
-        .map(|(image, skip)| image.levels.iter().skip(*skip).sum::<u64>())
-        .sum()
-}
+//! colour. It is never black and never a half-written page. Which mips stay
+//! resident is [`crate::stream`], inside the VRAM budget. `--watch` flips to
+//! the new page on the next sample, after the upload has finished.
 
 /// `resident[0]` is the finest mip. A hole is `None`.
 #[must_use]
@@ -200,28 +132,6 @@ pub fn mib_f32(bytes: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn mib(n: u64) -> u64 {
-        n * 1024 * 1024
-    }
-
-    #[test]
-    fn the_farthest_finest_mip_drops_until_the_cap() {
-        let images = [
-            ImageChain {
-                levels: vec![mib(300), mib(75), mib(20)],
-                rank: 2,
-            },
-            ImageChain {
-                levels: vec![mib(10)],
-                rank: 0,
-            },
-        ];
-        let resident = resident_bytes(&images, mib(256));
-        assert!(resident <= mib(256), "{resident}");
-        assert_eq!(resident, mib(105));
-        assert!(images.iter().map(|image| image.levels.iter().sum::<u64>()).sum::<u64>() > mib(256));
-    }
 
     #[test]
     fn a_miss_uses_the_coarser_mip_or_the_factor() {

@@ -48,6 +48,8 @@ fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }

@@ -107,6 +107,8 @@ pub fn grade_world(preset: ReflectionPreset) -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
         reflections: ReflectionSettings::for_preset(preset),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
         menu: MenuSettings::default(),
     });
     world.reflection_swatch = true;

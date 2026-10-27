@@ -6,8 +6,8 @@
 use genos_math::Vec3;
 
 use crate::{
-    DebugSettings, EventLoopSettings, FpsCounterSettings, LightingSettings, MenuSettings,
-    ReflectionSettings,
+    DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, LightingSettings,
+    MenuSettings, ReflectionSettings,
 };
 
 /// Share of the incoming light a white painted surface sends back out.
@@ -192,6 +192,12 @@ pub struct Scene {
     pub event_loop: EventLoopSettings,
     /// Planar mirrors, portals, and water. The default is the High cap.
     pub reflections: ReflectionSettings,
+    /// Exposure, bloom, display, and swapchain. `legacy_bytes` keeps the
+    /// pre-HDR picture. A lighting preset does not write this struct.
+    pub hdr: crate::HdrSettings,
+    /// Height fog, local volumes, and the froxel switches. Off and density
+    /// zero dispatch nothing, so an existing picture is unchanged.
+    pub fog: FogSettings,
 }
 
 impl Scene {

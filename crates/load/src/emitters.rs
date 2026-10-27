@@ -146,29 +146,87 @@ pub fn double_count(albedo: f32, strip_emission: f32, strip_fraction: f32, cache
     (promoted - cache_only).abs() / scale
 }
 
+/// Sharpest mip the player allows. Ultra is the full mip. This does not follow VRAM.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureQuality {
+    Ultra,
+    High,
+    Medium,
+    Low,
+}
+
+impl TextureQuality {
+    /// Mip index of the finest page this quality will stream. 0 is the full mip.
+    #[must_use]
+    pub fn mip_floor(self) -> u32 {
+        match self {
+            Self::Ultra => 0,
+            Self::High => 1,
+            Self::Medium => 2,
+            Self::Low => 3,
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ultra => "ultra",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+}
+
 /// Material knobs. Menu labels are these names and carry no description line.
-/// MCP and the debug menu wait on the lighting branch's command catalogue.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSettings {
-    pub residency_mb: u32,
+    pub texture_quality: TextureQuality,
     pub mip_bias: f32,
     pub anisotropy: u32,
     pub occlusion: bool,
     pub emissive_promote: bool,
     /// Fraction of the brightest lamp.
     pub emissive_promote_flux: f32,
+    pub headroom_percent: u32,
+    pub headroom_floor_mb: u32,
+    pub dwell_frames: u32,
 }
 
 /// Environment mirrors. Each applies only when its argument was omitted.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SettingEnv<'a> {
-    pub residency_mb: Option<&'a str>,
+    pub texture_quality: Option<&'a str>,
     pub mip_bias: Option<&'a str>,
     pub anisotropy: Option<&'a str>,
     pub occlusion: Option<&'a str>,
     pub promote: Option<&'a str>,
     pub flux: Option<&'a str>,
+    pub headroom_percent: Option<&'a str>,
+    pub headroom_floor_mb: Option<&'a str>,
+    pub dwell_frames: Option<&'a str>,
     pub watch: Option<&'a str>,
+    /// Deprecated. Logged once and ignored.
+    pub residency_mb: Option<&'a str>,
+}
+
+/// `Some(true)` when `flag` is a material argument that takes the next token.
+#[must_use]
+pub fn material_flag_needs_value(flag: &str) -> Option<bool> {
+    match flag {
+        "--material-texture-quality"
+        | "--material-mip-bias"
+        | "--material-anisotropy"
+        | "--material-occlusion"
+        | "--material-emissive-promote"
+        | "--material-emissive-promote-flux"
+        | "--material-headroom-percent"
+        | "--material-headroom-floor-mb"
+        | "--material-dwell-frames"
+        | "--material-residency-mb"
+        | "--watch" => Some(true),
+        _ => None,
+    }
 }
 
 impl Default for MaterialSettings {
@@ -180,32 +238,44 @@ impl Default for MaterialSettings {
 impl MaterialSettings {
     #[must_use]
     pub fn preset(preset: PromotePreset) -> Self {
-        let (residency_mb, mip_bias, anisotropy, occlusion, emissive_promote) = match preset {
-            PromotePreset::Potato => (32, 2.0, 1, false, false),
-            PromotePreset::Low => (64, 1.0, 2, true, true),
-            PromotePreset::Medium => (128, 0.0, 4, true, true),
-            PromotePreset::High => (256, 0.0, 8, true, true),
+        let (mip_bias, anisotropy, occlusion, emissive_promote) = match preset {
+            PromotePreset::Potato => (2.0, 1, false, false),
+            PromotePreset::Low => (1.0, 2, true, true),
+            PromotePreset::Medium => (0.0, 4, true, true),
+            PromotePreset::High => (0.0, 8, true, true),
         };
         Self {
-            residency_mb,
+            texture_quality: TextureQuality::Ultra,
             mip_bias,
             anisotropy,
             occlusion,
             emissive_promote,
             emissive_promote_flux: 0.01,
+            headroom_percent: crate::vram::DEFAULT_HEADROOM_PERCENT,
+            headroom_floor_mb: crate::vram::DEFAULT_HEADROOM_FLOOR_MB,
+            dwell_frames: crate::stream::DEFAULT_DWELL,
         }
+    }
+
+    /// Finest mip index `texture_quality` allows.
+    #[must_use]
+    pub fn quality_floor(self) -> u32 {
+        self.texture_quality.mip_floor()
     }
 
     #[must_use]
     pub fn to_text(self) -> String {
         format!(
-            "residency_mb {}\nmip_bias {}\nanisotropy {}\nocclusion {}\nemissive_promote {}\nemissive_promote_flux {}\n",
-            self.residency_mb,
+            "texture_quality {}\nmip_bias {}\nanisotropy {}\nocclusion {}\nemissive_promote {}\nemissive_promote_flux {}\nheadroom_percent {}\nheadroom_floor_mb {}\ndwell_frames {}\n",
+            self.texture_quality.name(),
             self.mip_bias,
             self.anisotropy,
             on_off(self.occlusion),
             on_off(self.emissive_promote),
-            self.emissive_promote_flux
+            self.emissive_promote_flux,
+            self.headroom_percent,
+            self.headroom_floor_mb,
+            self.dwell_frames
         )
     }
 
@@ -229,7 +299,7 @@ impl MaterialSettings {
 
     pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
         match key {
-            "residency_mb" => self.residency_mb = parse_u32(value, "residency_mb")?,
+            "texture_quality" => self.texture_quality = parse_quality(value)?,
             "mip_bias" => self.mip_bias = parse_f32(value, "mip_bias")?,
             "anisotropy" => self.anisotropy = parse_u32(value, "anisotropy")?,
             "occlusion" => self.occlusion = parse_on(value)?,
@@ -237,6 +307,14 @@ impl MaterialSettings {
             "emissive_promote_flux" => {
                 self.emissive_promote_flux = parse_f32(value, "emissive_promote_flux")?;
             }
+            "headroom_percent" => {
+                self.headroom_percent = parse_u32(value, "headroom_percent")?;
+            }
+            "headroom_floor_mb" => {
+                self.headroom_floor_mb = parse_u32(value, "headroom_floor_mb")?;
+            }
+            "dwell_frames" => self.dwell_frames = parse_u32(value, "dwell_frames")?,
+            "residency_mb" => warn_residency(),
             _ => return Err(format!("unknown material setting {key}")),
         }
         Ok(())
@@ -250,87 +328,126 @@ impl MaterialSettings {
         args: &[&str],
         env: SettingEnv<'_>,
     ) -> Result<Option<String>, String> {
-        let mut saw_residency = false;
-        let mut saw_bias = false;
-        let mut saw_anisotropy = false;
-        let mut saw_occlusion = false;
-        let mut saw_promote = false;
-        let mut saw_flux = false;
+        let mut seen = 0u16;
         let mut watch = None;
         let mut index = 0;
         while index < args.len() {
-            let value = |index: usize, flag: &str| {
-                args.get(index + 1)
-                    .copied()
-                    .ok_or_else(|| format!("{flag} needs a value"))
-            };
-            match args[index] {
+            let flag = args[index];
+            let next = args.get(index + 1).copied();
+            match flag {
+                "--material-texture-quality" => {
+                    self.texture_quality = parse_quality(required(flag, next)?)?;
+                    seen |= SAW_QUALITY;
+                    index += 2;
+                }
                 "--material-residency-mb" => {
-                    self.residency_mb = parse_u32(value(index, args[index])?, "residency_mb")?;
-                    saw_residency = true;
+                    let _ignored = required(flag, next)?;
+                    warn_residency();
+                    seen |= SAW_RESIDENCY;
                     index += 2;
                 }
                 "--material-mip-bias" => {
-                    self.mip_bias = parse_f32(value(index, args[index])?, "mip_bias")?;
-                    saw_bias = true;
+                    self.mip_bias = parse_f32(required(flag, next)?, "mip_bias")?;
+                    seen |= SAW_BIAS;
                     index += 2;
                 }
                 "--material-anisotropy" => {
-                    self.anisotropy = parse_u32(value(index, args[index])?, "anisotropy")?;
-                    saw_anisotropy = true;
+                    self.anisotropy = parse_u32(required(flag, next)?, "anisotropy")?;
+                    seen |= SAW_ANISOTROPY;
                     index += 2;
                 }
                 "--material-occlusion" => {
-                    self.occlusion = parse_on(value(index, args[index])?)?;
-                    saw_occlusion = true;
+                    self.occlusion = parse_on(required(flag, next)?)?;
+                    seen |= SAW_OCCLUSION;
                     index += 2;
                 }
                 "--material-emissive-promote" => {
-                    self.emissive_promote = parse_on(value(index, args[index])?)?;
-                    saw_promote = true;
+                    self.emissive_promote = parse_on(required(flag, next)?)?;
+                    seen |= SAW_PROMOTE;
                     index += 2;
                 }
                 "--material-emissive-promote-flux" => {
-                    self.emissive_promote_flux =
-                        parse_f32(value(index, args[index])?, "emissive_promote_flux")?;
-                    saw_flux = true;
+                    self.emissive_promote_flux = parse_f32(required(flag, next)?, "emissive_promote_flux")?;
+                    seen |= SAW_FLUX;
+                    index += 2;
+                }
+                "--material-headroom-percent" => {
+                    self.headroom_percent = parse_u32(required(flag, next)?, "headroom_percent")?;
+                    seen |= SAW_HEADROOM;
+                    index += 2;
+                }
+                "--material-headroom-floor-mb" => {
+                    self.headroom_floor_mb = parse_u32(required(flag, next)?, "headroom_floor_mb")?;
+                    seen |= SAW_FLOOR;
+                    index += 2;
+                }
+                "--material-dwell-frames" => {
+                    self.dwell_frames = parse_u32(required(flag, next)?, "dwell_frames")?;
+                    seen |= SAW_DWELL;
                     index += 2;
                 }
                 "--watch" => {
-                    watch = Some(value(index, "--watch")?.to_string());
+                    watch = Some(required(flag, next)?.to_string());
                     index += 2;
                 }
                 _ => index += 1,
             }
         }
-        if !saw_residency {
-            if let Some(value) = env.residency_mb {
-                self.residency_mb = parse_u32(value, "residency_mb")?;
+        self.apply_omitted(env, seen, watch)
+    }
+
+    fn apply_omitted(
+        &mut self,
+        env: SettingEnv<'_>,
+        seen: u16,
+        mut watch: Option<String>,
+    ) -> Result<Option<String>, String> {
+        if seen & SAW_QUALITY == 0 {
+            if let Some(value) = env.texture_quality {
+                self.texture_quality = parse_quality(value)?;
             }
         }
-        if !saw_bias {
+        if seen & SAW_RESIDENCY == 0 && env.residency_mb.is_some() {
+            warn_residency();
+        }
+        if seen & SAW_BIAS == 0 {
             if let Some(value) = env.mip_bias {
                 self.mip_bias = parse_f32(value, "mip_bias")?;
             }
         }
-        if !saw_anisotropy {
+        if seen & SAW_ANISOTROPY == 0 {
             if let Some(value) = env.anisotropy {
                 self.anisotropy = parse_u32(value, "anisotropy")?;
             }
         }
-        if !saw_occlusion {
+        if seen & SAW_OCCLUSION == 0 {
             if let Some(value) = env.occlusion {
                 self.occlusion = parse_on(value)?;
             }
         }
-        if !saw_promote {
+        if seen & SAW_PROMOTE == 0 {
             if let Some(value) = env.promote {
                 self.emissive_promote = parse_on(value)?;
             }
         }
-        if !saw_flux {
+        if seen & SAW_FLUX == 0 {
             if let Some(value) = env.flux {
                 self.emissive_promote_flux = parse_f32(value, "emissive_promote_flux")?;
+            }
+        }
+        if seen & SAW_HEADROOM == 0 {
+            if let Some(value) = env.headroom_percent {
+                self.headroom_percent = parse_u32(value, "headroom_percent")?;
+            }
+        }
+        if seen & SAW_FLOOR == 0 {
+            if let Some(value) = env.headroom_floor_mb {
+                self.headroom_floor_mb = parse_u32(value, "headroom_floor_mb")?;
+            }
+        }
+        if seen & SAW_DWELL == 0 {
+            if let Some(value) = env.dwell_frames {
+                self.dwell_frames = parse_u32(value, "dwell_frames")?;
             }
         }
         if watch.is_none() {
@@ -339,6 +456,17 @@ impl MaterialSettings {
         Ok(watch)
     }
 }
+
+const SAW_QUALITY: u16 = 1;
+const SAW_BIAS: u16 = 1 << 1;
+const SAW_ANISOTROPY: u16 = 1 << 2;
+const SAW_OCCLUSION: u16 = 1 << 3;
+const SAW_PROMOTE: u16 = 1 << 4;
+const SAW_FLUX: u16 = 1 << 5;
+const SAW_HEADROOM: u16 = 1 << 6;
+const SAW_FLOOR: u16 = 1 << 7;
+const SAW_DWELL: u16 = 1 << 8;
+const SAW_RESIDENCY: u16 = 1 << 9;
 
 fn on_off(enabled: bool) -> &'static str {
     if enabled {
@@ -366,6 +494,32 @@ fn parse_u32(value: &str, key: &str) -> Result<u32, String> {
     value
         .parse::<u32>()
         .map_err(|_| format!("{key} wants a whole number, got {value}"))
+}
+
+fn required<'a>(flag: &str, next: Option<&'a str>) -> Result<&'a str, String> {
+    next.ok_or_else(|| format!("{flag} needs a value"))
+}
+
+fn parse_quality(value: &str) -> Result<TextureQuality, String> {
+    match value {
+        "ultra" => Ok(TextureQuality::Ultra),
+        "high" => Ok(TextureQuality::High),
+        "medium" => Ok(TextureQuality::Medium),
+        "low" => Ok(TextureQuality::Low),
+        _ => Err(format!(
+            "texture_quality wants ultra, high, medium, or low, got {value}"
+        )),
+    }
+}
+
+fn warn_residency() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "residency_mb is deprecated and does not set a pool; texture_quality and the VRAM budget decide which mips stay"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +569,8 @@ mod tests {
                 &[
                     "--material-emissive-promote",
                     "on",
+                    "--material-texture-quality",
+                    "high",
                     "--material-residency-mb",
                     "64",
                     "--watch",
@@ -425,14 +581,20 @@ mod tests {
                 SettingEnv {
                     promote: Some("off"),
                     flux: Some("0.5"),
+                    texture_quality: Some("low"),
                     residency_mb: Some("32"),
+                    headroom_percent: Some("9"),
+                    dwell_frames: Some("3"),
                     watch: Some("from-env.png"),
                     ..SettingEnv::default()
                 },
             )
             .expect("overlay");
         assert!(settings.emissive_promote);
-        assert_eq!(settings.residency_mb, 64);
+        assert_eq!(settings.texture_quality, TextureQuality::High);
+        assert_eq!(settings.quality_floor(), 1);
+        assert_eq!(settings.headroom_percent, 9);
+        assert_eq!(settings.dwell_frames, 3);
         assert_eq!(watch.as_deref(), Some("from-arg.png"));
         assert!((settings.emissive_promote_flux - 0.5).abs() < 1.0e-6);
         let watch = settings
@@ -444,8 +606,11 @@ mod tests {
         let parsed = MaterialSettings::parse(&text).expect("round trip");
         assert_eq!(parsed, settings);
         let potato = MaterialSettings::preset(PromotePreset::Potato);
-        assert_eq!(potato.residency_mb, 32);
+        assert_eq!(potato.texture_quality, TextureQuality::Ultra);
+        assert!((potato.mip_bias - 2.0).abs() < 1.0e-6);
         assert!(!potato.occlusion);
         assert!(!potato.emissive_promote);
+        assert!(material_flag_needs_value("--material-dwell-frames").unwrap_or(false));
+        assert!(material_flag_needs_value("--preset").is_none());
     }
 }

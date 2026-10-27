@@ -319,6 +319,16 @@ pub struct World {
     pub color_atlas: MaterialAtlas,
     /// Tangent-space normals (linear RGB) for every surface that has one.
     pub normal_atlas: MaterialAtlas,
+    /// More mip chains the frame streams, after the colour and normal atlases.
+    /// Each names the object that supplies its distance and derivatives.
+    pub stream_textures: Vec<StreamedTexture>,
+}
+
+/// A mip chain the frame registers, viewed through one object.
+#[derive(Clone, Debug)]
+pub struct StreamedTexture {
+    pub atlas: MaterialAtlas,
+    pub object: usize,
 }
 
 impl World {
@@ -352,6 +362,7 @@ impl World {
             surfaces: Vec::new(),
             color_atlas: MaterialAtlas::empty(),
             normal_atlas: MaterialAtlas::empty(),
+            stream_textures: Vec::new(),
         }
     }
 
@@ -497,6 +508,8 @@ mod tests {
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
             reflections: genos_scene::ReflectionSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         }
     }

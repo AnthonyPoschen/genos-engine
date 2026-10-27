@@ -1,0 +1,26 @@
+#version 450
+// Extinction inject. One cell writes the height-fog closed form averaged across
+// the slice, plus local boxes and spheres at the cell centre. History is not
+// written. The world cache is not read.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "media.glsl"
+#include "froxel_common.glsl"
+
+layout(r32f, set = 0, binding = 2) uniform writeonly image3D froxel_ext;
+
+void main() {
+    uvec3 c = gl_GlobalInvocationID;
+    if (c.x >= fog.size.x || c.y >= fog.size.y || c.z >= fog.size.z) {
+        return;
+    }
+    float z0 = froxel_slice_edge(c.z, fog.size.z);
+    float z1 = froxel_slice_edge(c.z + 1u, fog.size.z);
+    vec3 p0 = froxel_point(c.xy, z0);
+    vec3 p1 = froxel_point(c.xy, z1);
+    vec3 delta = p1 - p0;
+    float distance = length(delta);
+    vec3 centre = froxel_point(c.xy, FROXEL_HALF * (z0 + z1));
+    imageStore(froxel_ext, ivec3(c), vec4(froxel_sigma(p0, delta, distance, centre), 0.0, 0.0, 0.0));
+}
