@@ -12,16 +12,17 @@
 // the hold never spread. That was the ceiling, wall, and floor blotch.
 //
 // The launch is the picture, not the million-slot table. Stage 0 stores the
-// fine slot under each pixel and one pixel claims that cell. The claimer
-// lists the cells the hash wavelet reads from it: the five a-trous
-// footprints. A cell between pixel centres (a grazing floor, a far wall) and
-// a cell just past an edge are in that footprint. The hash launch filters
-// them; leaving their level empty makes the normalised convolution and the
-// push certainty differ, and the whole face shifts. Later stages run the
-// hash variance, iterations, and push on the list. Compose bilerps the
-// pushed field with the hash launch's weights. A plane weight on the screen
-// blend alone moved the hall off that picture. A second hop past those taps
-// walks onto other faces and the list no longer fits the picture.
+// fine slot under each pixel of the lit picture and one pixel claims that
+// cell. The claimer lists the cells the hash wavelet reads from it: the five
+// a-trous footprints. A cell between pixel centres (a grazing floor, a far
+// wall) and a cell just past an edge are in that footprint. The hash launch
+// filters them; leaving their level empty makes the normalised convolution
+// and the push certainty differ, and the whole face shifts. Later stages run
+// the hash variance, iterations, and push on the list. Those stages dispatch
+// the display crop plus SCREEN_FILTER_MARGIN, not the guard band. Compose
+// bilerps the pushed field with the hash launch's weights. A plane weight on
+// the screen blend alone moved the hall off that picture. A second hop past
+// those taps walks onto other faces and the list no longer fits the picture.
 //
 // A still camera with nothing moving reuses the list and appends cells that
 // become active after the first build (a bilinear corner compose claims).
@@ -55,6 +56,38 @@ uint screen_wg_sum(uint bit) {
 
 uint screen_pixels() {
     return pc.dims.x * pc.dims.y;
+}
+
+// Widest à-trous tap: radius 2 at step 16. Same count as SCREEN_FILTER_MARGIN
+// in lighting_dispatch.rs.
+const uint SCREEN_FILTER_MARGIN = 32u;
+
+// Display crop expanded by the filter footprint, clamped to the lit picture.
+// Zero display size is the whole picture. xy is the origin, zw the size.
+uvec4 screen_denoise_rect() {
+    if (pc.frame.x == 0u || pc.frame.y == 0u) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    uint crop_x = pc.schedule.w & 0xffffu;
+    uint crop_y = pc.schedule.w >> 16u;
+    uint x0 = crop_x > SCREEN_FILTER_MARGIN ? crop_x - SCREEN_FILTER_MARGIN : 0u;
+    uint y0 = crop_y > SCREEN_FILTER_MARGIN ? crop_y - SCREEN_FILTER_MARGIN : 0u;
+    uint x1 = min(pc.dims.x, crop_x + pc.frame.x + SCREEN_FILTER_MARGIN);
+    uint y1 = min(pc.dims.y, crop_y + pc.frame.y + SCREEN_FILTER_MARGIN);
+    if (x1 <= x0 || y1 <= y0) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    return uvec4(x0, y0, x1 - x0, y1 - y0);
+}
+
+bool screen_in_denoise(uvec2 p) {
+    uvec4 r = screen_denoise_rect();
+    return p.x >= r.x && p.y >= r.y && p.x < r.x + r.z && p.y < r.y + r.w;
+}
+
+uint screen_list_cap() {
+    uvec4 r = screen_denoise_rect();
+    return r.z * r.w;
 }
 
 uint screen_at(uint slice, uint index) {
@@ -204,7 +237,7 @@ bool screen_list_add(uint slot) {
     uint at = screen_appending
         ? screen_list_base() + atomicAdd(gstats.diag[41], 1u)
         : atomicAdd(gstats.diag[40], 1u);
-    if (at < screen_pixels()) {
+    if (at < screen_list_cap()) {
         outc.px[screen_at(1u, at)] = slot;
     }
     return true;
@@ -293,6 +326,11 @@ void main() {
             }
         }
         // The workgroup sums above are the barrier. The list walk is after it.
+        // Pixels outside the crop-plus-margin still store a slot. They do not
+        // add cells: the list cap is that rect, and the later stages dispatch it.
+        if (!screen_in_denoise(p)) {
+            return;
+        }
         if (screen_list_reuse()) {
             // A cell compose claimed after the build is not in the list yet.
             // One pixel appends it and its taps. The old entries stay put.
@@ -323,11 +361,10 @@ void main() {
     if (stage == 1u && p.x == 0u && p.y == 0u) {
         screen_list_commit(n, screen_list_reuse());
     }
-    if (!inside) {
-        return;
-    }
     uint iters = lighting_denoise_iters();
-    uint index = p.y * pc.dims.x + p.x;
+    // The list is dense. A row stride of pc.dims would skip entries once the
+    // dispatch is the crop plus the filter margin rather than the lit picture.
+    uint index = p.x + p.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
     uint step = 0u;
     if (stage == 2u + iters) {
         step = 6u;

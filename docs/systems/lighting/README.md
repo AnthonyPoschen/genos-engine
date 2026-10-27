@@ -103,7 +103,7 @@ The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, a
 
 A frozen scene with grants that cover the picture does not gate, so the full denoise still runs and the picture can settle. The first moving frames can sit over the cap: the scale moves on the sample from the frame before.
 
-Lavapipe, 1920×1080, High, controller off, 20 yaw frames of the s1 spin against master `620d89f`, before the guard shrink: lighting_ms p50 4912 against 4009 (1.23×). Direct 523 against 340 (1.54×). À-trous 1491 against 1106 (1.35×). Trace 1715 against 1655 (1.04×). That lit frame was 2496×1408, 1.695× the display. `guard_edge` is now the symmetric extra on each axis, High 0.15, plus up to 10% on the leading edge. The pass table is in design §16.
+Lavapipe, 1920×1080, High, controller off, 20 yaw frames of the s1 spin against master `620d89f`, before the guard shrink: lighting_ms p50 4912 against 4009 (1.23×). Direct 523 against 340 (1.54×). À-trous 1491 against 1106 (1.35×). Trace 1715 against 1655 (1.04×). That lit frame was 2496×1408, 1.695× the display. `guard_edge` is now the symmetric extra on each axis, High 0.15, plus up to 10% on the leading edge. Direct and gather stay on that band. The five wavelet passes run on the displayed crop plus a 32 px margin. The pass table is in design §16.
 
 A point lamp or an occluder that appears or disappears fills the surface cache and the probe work with zeros before that frame's passes. Cells outside the new bounds would otherwise keep the previous world's finished light. A move that keeps both counts stays a change record. The first uploaded frame does not clear.
 

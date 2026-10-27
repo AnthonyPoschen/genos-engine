@@ -3315,6 +3315,14 @@ impl Gpu {
             pc[6] |= 1 << 8;
         }
         let kept = probe_rays * LIGHTING_STRATA;
+        let (filter_w, filter_h) = screen_filter_extent(
+            lit.lit_w,
+            lit.lit_h,
+            lit.crop_x,
+            lit.crop_y,
+            lit.display_w,
+            lit.display_h,
+        );
         let planned = light_groups(
             &self.lighting.settings,
             self.lighting.frame,
@@ -3325,6 +3333,8 @@ impl Gpu {
             probes,
             probe_rays,
             kept,
+            filter_w,
+            filter_h,
         );
         self.lighting.ctrl_bytes = pack_lighting_ctrl(
             &self.lighting.settings,

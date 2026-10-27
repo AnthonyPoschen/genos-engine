@@ -326,6 +326,8 @@ pub(crate) fn light_groups(
     probes: u32,
     probe_ray_count: u32,
     kept: u32,
+    filter_w: u32,
+    filter_h: u32,
 ) -> LightGroups {
     let mut out = LightGroups {
         groups: Vec::new(),
@@ -397,7 +399,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
-        push_denoise(settings, w, h, slots, &mut out);
+        push_denoise(settings, w, h, slots, filter_w, filter_h, &mut out);
         out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
     } else {
         gated(
@@ -409,6 +411,8 @@ pub(crate) fn light_groups(
             probes,
             probe_ray_count,
             kept,
+            filter_w,
+            filter_h,
             &mut out,
         );
     }
@@ -421,13 +425,67 @@ pub(crate) fn light_groups(
     out
 }
 
+/// Widest screen à-trous tap: radius 2 at step 16. The shader's
+/// `SCREEN_FILTER_MARGIN` is this same count.
+pub(crate) const SCREEN_FILTER_MARGIN: u32 = 32;
+
+/// Pixel size of the screen-wavelet list after stage 0.
+/// `(0, 0)` means the whole lit picture.
+///
+/// Stage 0 still covers `lit_w` × `lit_h`. The five iterations, the variance
+/// pass, and the push cover the display crop expanded by [`SCREEN_FILTER_MARGIN`]
+/// and clamped to the lit picture. Direct and gather stay on the lit picture.
+#[must_use]
+pub(crate) fn screen_filter_extent(
+    lit_w: u32,
+    lit_h: u32,
+    crop_x: u32,
+    crop_y: u32,
+    display_w: u32,
+    display_h: u32,
+) -> (u32, u32) {
+    if lit_w == 0 || lit_h == 0 || display_w == 0 || display_h == 0 {
+        return (0, 0);
+    }
+    let x0 = crop_x.saturating_sub(SCREEN_FILTER_MARGIN);
+    let y0 = crop_y.saturating_sub(SCREEN_FILTER_MARGIN);
+    let x1 = crop_x
+        .saturating_add(display_w)
+        .saturating_add(SCREEN_FILTER_MARGIN)
+        .min(lit_w);
+    let y1 = crop_y
+        .saturating_add(display_h)
+        .saturating_add(SCREEN_FILTER_MARGIN)
+        .min(lit_h);
+    if x1 <= x0 || y1 <= y0 {
+        return (0, 0);
+    }
+    let fw = x1 - x0;
+    let fh = y1 - y0;
+    if fw >= lit_w && fh >= lit_h {
+        (0, 0)
+    } else {
+        (fw, fh)
+    }
+}
+
 /// Screen wavelet: one 8×8 group per picture block. Hash wavelet: one group
 /// per 64 cache slots.
 ///
-/// Screen stages: 0 stores the visible slot, 1 picks one pixel per cell and
-/// runs the hash variance, then one stage per wavelet iteration, then the
-/// push. The hash stages stay 0, the iterations, and 6.
-fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &mut LightGroups) {
+/// Screen stages: 0 stores the visible slot on the lit picture, 1 picks one
+/// pixel per cell and runs the hash variance, then one stage per wavelet
+/// iteration, then the push. `filter_w` and `filter_h` size those list stages.
+/// Zero keeps them on the lit picture. The hash stages stay 0, the iterations,
+/// and 6, and they ignore the filter size.
+fn push_denoise(
+    settings: &LightingSettings,
+    w: u32,
+    h: u32,
+    slots: u32,
+    filter_w: u32,
+    filter_h: u32,
+    out: &mut LightGroups,
+) {
     let iters = settings.denoiser.iterations;
     let (gx, gy) = if settings.denoiser.screen {
         (w.div_ceil(8).max(1), h.div_ceil(8).max(1))
@@ -435,15 +493,20 @@ fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &m
         (slots, 1)
     };
     if settings.denoiser.screen {
+        let (fx, fy) = if filter_w == 0 || filter_h == 0 {
+            (gx, gy)
+        } else {
+            (filter_w.div_ceil(8).max(1), filter_h.div_ceil(8).max(1))
+        };
         out.push(8, gx, gy, B_ATROUS);
         out.atrous_stages.push(0);
-        out.push(8, gx, gy, B_ATROUS);
+        out.push(8, fx, fy, B_ATROUS);
         out.atrous_stages.push(1);
         for i in 0..iters {
-            out.push(8, gx, gy, B_ATROUS);
+            out.push(8, fx, fy, B_ATROUS);
             out.atrous_stages.push(2 + i);
         }
-        out.push(8, gx, gy, B_ATROUS);
+        out.push(8, fx, fy, B_ATROUS);
         out.atrous_stages.push(2 + iters);
         return;
     }
@@ -475,6 +538,8 @@ fn gated(
     probes: u32,
     probe_ray_count: u32,
     kept: u32,
+    filter_w: u32,
+    filter_h: u32,
     out: &mut LightGroups,
 ) {
     let buckets = settings.gpu_buckets(frame);
@@ -539,7 +604,7 @@ fn gated(
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
     }
     if buckets.atrous {
-        push_denoise(settings, w, h, slots, out);
+        push_denoise(settings, w, h, slots, filter_w, filter_h, out);
     }
     out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
 }
@@ -564,7 +629,7 @@ mod probe_still_tests {
     use genos_scene::LightingPreset;
 
     fn groups(settings: &LightingSettings, frozen: bool, round: bool) -> LightGroups {
-        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0)
+        light_groups(settings, 8, frozen, round, 320, 180, 40, 40 * 64, 0, 0, 0)
     }
 
     #[test]
@@ -609,7 +674,7 @@ mod probe_still_tests {
         let counts = |bounce: u32| {
             let mut settings = LightingSettings::preset(LightingPreset::High);
             settings.bounce.count = bounce;
-            light_groups(&settings, 1, false, true, 320, 180, 40, 40 * 64, 8).counts
+            light_groups(&settings, 1, false, true, 320, 180, 40, 40 * 64, 8, 0, 0).counts
         };
         let zero = counts(0);
         let one = counts(1);
@@ -714,6 +779,62 @@ mod probe_still_tests {
         let off = pack_lighting_ctrl(&hash_settings, 0, 1.0, 0, 0);
         let off_bits = u32::from_le_bytes(off[0..4].try_into().unwrap());
         assert_eq!(off_bits & CTRL_DENOISE_SCREEN, 0);
+    }
+
+    #[test]
+    fn a_zero_filter_extent_is_the_whole_picture() {
+        assert_eq!(screen_filter_extent(320, 180, 0, 0, 320, 180), (0, 0));
+        assert_eq!(screen_filter_extent(320, 180, 0, 0, 0, 0), (0, 0));
+    }
+
+    #[test]
+    fn screen_wavelet_iterations_launch_the_crop_margin() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let lit = crate::lighting_schedule::lit_frame(
+            1920,
+            1080,
+            crate::lighting_schedule::bias_guard(0.15, 0.0, 0.0),
+            16,
+        );
+        let (fw, fh) = screen_filter_extent(
+            lit.lit_w,
+            lit.lit_h,
+            lit.crop_x,
+            lit.crop_y,
+            lit.display_w,
+            lit.display_h,
+        );
+        assert!(fw >= lit.display_w && fh >= lit.display_h, "{fw}x{fh}");
+        assert!(fw < lit.lit_w && fh < lit.lit_h, "{fw}x{fh} vs {}x{}", lit.lit_w, lit.lit_h);
+        let planned = light_groups(
+            &high,
+            8,
+            false,
+            true,
+            lit.lit_w,
+            lit.lit_h,
+            40,
+            40 * 64,
+            0,
+            fw,
+            fh,
+        );
+        let picture: Vec<_> = planned.groups.iter().filter(|(pass, _, _)| *pass == 8).collect();
+        assert_eq!(picture.len(), 8, "gather, variance, five iterations, push");
+        assert_eq!(picture[0].1, lit.lit_w.div_ceil(8));
+        assert_eq!(picture[0].2, lit.lit_h.div_ceil(8));
+        for (_, gx, gy) in picture.iter().skip(1) {
+            assert_eq!(*gx, fw.div_ceil(8));
+            assert_eq!(*gy, fh.div_ceil(8));
+        }
+        let pixels = lit.lit_w.saturating_mul(lit.lit_h);
+        let direct = planned
+            .groups
+            .iter()
+            .any(|(pass, gx, gy)| *pass == 3 && *gy > 1 && *gx == pixels.div_ceil(64));
+        assert!(direct, "direct stays on the lit band");
+        let gather = planned.groups.iter().any(|(pass, gx, _)| *pass == 4 && *gx == 40);
+        assert!(gather, "gather stays on the probe grid");
     }
 
     #[test]
