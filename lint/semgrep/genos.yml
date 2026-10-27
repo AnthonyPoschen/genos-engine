@@ -109,6 +109,26 @@ rules:
       date: "2026-10-14"
     pattern-regex: '"(HDMI-A-1|DP-1)"'
 
+  - id: genos-stream-no-wait
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Streaming polls the transfer fence, including its helpers. Those
+      functions do not call wait_for_fences, queue_wait_idle, wait_fences,
+      or the Vulkan wait and idle entry points.
+    metadata:
+      date: "2026-10-26"
+    patterns:
+      - pattern-inside: |
+          fn $FN(...) {
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $FN
+          regex: >-
+            ^(tick_materials|submit_transfer|transfer_signaled|refresh_vram|reclaim_unheld|allocate_texture|allocate_texture_pages|evict_for_device|record_mip_copy|transfer_to_image|prepare_unbacked|fund_stream_pages|prepare_atlas_draw|finish_atlas_draw|record_mip_blit|publish_resident|copied_page|scrub_staging|restore_staging|staging_barrier|transfer_buffer_barrier|clear_color|blit_nearest|copy_atlas_texel|copy_page_texel|copy_image_texel|ready_to_show|bind_atlas|ensure_sampled|free_page|release_device|retry_texture_alloc|copies_due|uncopied_pages|page_copied|page_has|stage_chain|drop_stream_resources|create_unbound_image|bind_next_unbacked|has_unbacked|next_unbacked|apply_material_settings|query_heaps|sampled_image|atlas_readback_texel|page_readback_texel|fail_next_device_allocs|device_bytes|material_page_bytes|make_atlas_image)$
+      - pattern-regex: 'wait_for_fences|queue_wait_idle|vkWaitForFences|vkQueueWaitIdle|wait_fences|idle_device|device_wait'
+
   - id: genos-no-hyprctl
     languages: [rust]
     severity: ERROR

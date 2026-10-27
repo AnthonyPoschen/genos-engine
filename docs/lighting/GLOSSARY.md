@@ -313,7 +313,25 @@ Role: STORE · Literature: Mittring virtual-texture page (SIGGRAPH 2008) · More
 **Material residency**: which texture pages are on the GPU.
 Role: SCHED · Literature: Mittring physical page pool · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
+**Texture quality**: the sharpest mip the player allows. Ultra is mip 0. High, Medium, and Low are one, two, and three levels coarser. It does not follow free VRAM.
+Role: SCHED · Literature: a sampler LOD clamp · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Mip demand**: the finest mip a texture needs this frame. λ = log₂(ρ) from the screen-space UV derivatives of its draws, plus `mip_bias`, then clamped by texture quality. A texture that was not drawn keeps its last demand.
+Role: SCHED · Literature: Vulkan image level of detail · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**VRAM budget**: `heapBudget` of the device-local heaps, minus the other engine allocations and the headroom. Texture streaming and later GPU users read one helper.
+Role: SCHED · Literature: `VK_EXT_memory_budget` · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Headroom**: bytes kept free under `heapBudget`. Default `max(5% of heapBudget, 256 MB)`.
+Role: SCHED · Literature: `VK_EXT_memory_budget` heapBudget · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Dwell**: frames a mip that just became resident cannot be evicted, unless usage is over `heapBudget`.
+Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
 ### Historical (do not reuse)
+
+**residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.
+
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
 ---

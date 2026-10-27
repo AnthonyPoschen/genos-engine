@@ -70,6 +70,9 @@ const API_VERSION: u32 = 1 << 22;
 const VK_SUCCESS: i32 = 0;
 const VK_NOT_READY: i32 = 1;
 const VK_TIMEOUT: i32 = 2;
+/// `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
+const VK_ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
+const FRAME_BUDGET_MS: f32 = 16.0;
 /// A fence wait on the frame thread before the seat pump takes over.
 const FENCE_BUDGET_NS: u64 = 50_000_000;
 /// A mapped copy above this runs while the seat pump answers pings.
@@ -116,6 +119,37 @@ const OUT_OF_DATE: i32 = -1000001004;
 type VkResult = i32;
 type Handle = *mut c_void;
 type Pfn = *const c_void;
+
+/// Live streamer counters. `budget` is the texture target for this frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialStats {
+    pub committed: u64,
+    pub budget: u64,
+    pub refused: u32,
+    pub evictions: u32,
+    pub thrash: u32,
+    pub holes: u32,
+    pub rate: u64,
+    pub stream_ms: f32,
+}
+
+impl MaterialStats {
+    /// One line for the stress log and the finish line.
+    #[must_use]
+    pub fn line(self) -> String {
+        format!(
+            "materials committed={} budget={} refused={} evictions={} thrash={} holes={} rate={} stream_ms={:.3}",
+            self.committed,
+            self.budget,
+            self.refused,
+            self.evictions,
+            self.thrash,
+            self.holes,
+            self.rate,
+            self.stream_ms,
+        )
+    }
+}
 
 pub struct Renderer {
     gpu: Gpu,
@@ -399,6 +433,180 @@ impl Renderer {
         }
     }
 
+    /// Material knobs in force. `texture_quality` does not follow the VRAM size.
+    pub fn material_settings(&self) -> genos_load::MaterialSettings {
+        self.gpu.materials
+    }
+
+    /// Atlases the frame registered, and the finest resident mip of the first.
+    ///
+    /// The colour atlas is index 0 when it is loaded. `None` is the coarsest
+    /// page only, or no texture at all when the count is 0.
+    #[must_use]
+    pub fn material_residency(&self) -> (usize, Option<u32>) {
+        let count = self.gpu.streamer.texture_count();
+        let finest = if count == 0 {
+            None
+        } else {
+            self.gpu.streamer.finest_resident(0)
+        };
+        (count, finest)
+    }
+
+    /// Colour texel 0 of the device atlas, then the same texel of the page image.
+    ///
+    /// The atlas value is the blit of that page. The CPU chain and the staging
+    /// buffer are not either byte. A staging copy into the atlas leaves the
+    /// page at 0, or the atlas at 0 once the staging buffer has been cleared.
+    #[must_use]
+    pub fn material_texel(&self) -> [u8; 2] {
+        [
+            self.gpu.atlas_readback_texel(),
+            self.gpu.page_readback_texel(),
+        ]
+    }
+
+    /// Replace the material knobs. The next frame streams inside the new cap.
+    pub fn set_material_settings(&mut self, settings: genos_load::MaterialSettings) {
+        self.gpu.apply_material_settings(settings);
+    }
+
+    /// Device-local budget after headroom. Lighting can read this later.
+    pub fn vram_budget(&self) -> genos_load::VramBudget {
+        self.gpu.vram
+    }
+
+    /// Bytes other systems have allocated, on top of the render targets and the frame budget.
+    pub fn set_non_texture_bytes(&mut self, bytes: u64) {
+        self.gpu.non_texture_extra = bytes;
+    }
+
+    /// A finished disk read. The admit follows the slowest measured path.
+    pub fn observe_material_disk(&mut self, bytes: u64, ms: u32) {
+        self.gpu.streamer.observe_disk(bytes, ms);
+    }
+
+    /// A finished decode or transcode.
+    pub fn observe_material_decode(&mut self, bytes: u64, ms: u32) {
+        self.gpu.streamer.observe_decode(bytes, ms);
+    }
+
+    /// Texture bytes the streamer is holding, including a mip still in flight.
+    #[must_use]
+    pub fn material_committed(&self) -> u64 {
+        self.gpu.streamer.committed()
+    }
+
+    /// Textures the frame has registered.
+    #[must_use]
+    pub fn material_texture_count(&self) -> usize {
+        self.gpu.streamer.texture_count()
+    }
+
+    /// Finest resident mip of one registered texture.
+    #[must_use]
+    pub fn material_finest(&self, index: usize) -> Option<u32> {
+        self.gpu.streamer.finest_resident(index)
+    }
+
+    /// Bytes per millisecond of the slowest measured path.
+    #[must_use]
+    pub fn material_bytes_per_ms(&self) -> u64 {
+        self.gpu.streamer.bytes_per_ms()
+    }
+
+    /// Bytes the last step was willing to admit, after the sustainable cap.
+    #[must_use]
+    pub fn material_last_admit(&self) -> u64 {
+        self.gpu.streamer.last_admit()
+    }
+
+    /// Base frame time the last step measured, in milliseconds.
+    #[must_use]
+    pub fn material_frame_ms(&self) -> f32 {
+        self.gpu.streamer.frame_ms()
+    }
+
+    /// Eviction victims in the order they were dropped.
+    #[must_use]
+    pub fn material_evicted(&self) -> Vec<(usize, u32)> {
+        self.gpu.streamer.evicted().to_vec()
+    }
+
+    /// Counters the next auto-tune reads: committed bytes, the texture target, and the streamer meters.
+    #[must_use]
+    pub fn material_stats(&self) -> MaterialStats {
+        let stream = &self.gpu.streamer;
+        MaterialStats {
+            committed: stream.committed(),
+            budget: self.gpu.vram.texture_target(),
+            refused: stream.refused(),
+            evictions: stream.evictions(),
+            thrash: stream.thrash(),
+            holes: stream.holes(),
+            rate: stream.rate(),
+            stream_ms: stream.frame_ms(),
+        }
+    }
+
+    /// Replace the queried `heapBudget` and `heapUsage`. `None` uses the device again.
+    ///
+    /// The pair is `(heap_budget, heap_usage)`. The next frame's texture target
+    /// is that budget minus non-texture bytes minus headroom.
+    pub fn set_heap_budget_override(&mut self, budget_and_usage: Option<(u64, u64)>) {
+        self.gpu.heap_override = budget_and_usage;
+    }
+
+    /// Device memory for a texture page. An out-of-device-memory error evicts,
+    /// frees that mip's device memory, and retries.
+    pub fn allocate_texture_pages(&mut self, size: u64, type_bits: u32) -> Result<(), String> {
+        let memory = self.gpu.allocate_texture(size, type_bits)?;
+        self.gpu.bind_next_unbacked(memory)
+    }
+
+    /// The next `count` device allocations return out of device memory and do
+    /// not call the driver.
+    pub fn fail_next_device_allocs(&self, count: u32) {
+        self.gpu.fail_device_allocs.set(count);
+    }
+
+    /// Device bytes still held. This drops only when a free reaches the driver.
+    #[must_use]
+    pub fn device_bytes(&self) -> u64 {
+        self.gpu.device_bytes.get()
+    }
+
+    /// Bytes of device memory still bound to streamed mip pages.
+    #[must_use]
+    pub fn material_page_bytes(&self) -> u64 {
+        self.gpu
+            .stream_pages
+            .iter()
+            .filter(|page| !page.memory.is_null())
+            .map(|page| page.bytes)
+            .sum()
+    }
+
+    /// Allocate one device page through the out-of-memory retry, then release
+    /// that probe. A drop in `device_bytes` is the mip the retry freed.
+    pub fn retry_texture_alloc(&mut self) -> Result<(), String> {
+        let memory = self.gpu.allocate_texture(4096, u32::MAX)?;
+        self.gpu.release_device(memory, 4096);
+        Ok(())
+    }
+
+    fn fund_stream_pages(&mut self) -> Result<(), String> {
+        if self.gpu.transfer_busy {
+            return Ok(());
+        }
+        self.gpu.prepare_unbacked()?;
+        while self.gpu.has_unbacked() {
+            let (size, bits) = self.gpu.next_unbacked()?;
+            self.allocate_texture_pages(size, bits)?;
+        }
+        Ok(())
+    }
+
     /// Bucket names, in the order of [`Renderer::lighting_dispatches`].
     pub fn lighting_bucket_names() -> &'static [&'static str] {
         &LIGHTING_BUCKET_NAMES
@@ -476,6 +684,10 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
+        let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
+        self.gpu.tick_materials(self.memory.accounted(), &views)?;
+        self.fund_stream_pages()?;
+        self.gpu.submit_transfer()?;
         let overlay_count = overlay_verts.len() as u32;
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
@@ -1063,12 +1275,32 @@ struct Gpu {
     /// differ (vkCmdUpdateBuffer, in the frame's command stream).
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
-    /// Base-colour atlas (binding 4) and normal atlas (binding 7). Uploaded when
-    /// [`crate::world::MaterialAtlas::key`] changes, not every frame.
-    material_color: Buffer,
-    material_normal: Buffer,
+    /// Device-local atlases the fragment shader loads (bindings 4 and 7).
+    /// The transfer queue copies a resident mip and blits it here. The CPU
+    /// does not write these texels.
+    sampled_color: Image,
+    sampled_normal: Image,
+    sampled_size: [(u32, u32); 2],
+    sampled_layout: [u32; 2],
+    sampled_cleared: [bool; 2],
+    /// One texel copied from the colour atlas by the transfer. The CPU never
+    /// stores a mip byte here.
+    atlas_readback: Buffer,
+    /// The same texel copied from the device page that was blitted. The CPU
+    /// never stores a mip byte here either.
+    page_readback: Buffer,
     material_key: u64,
     normal_key: u64,
+    /// Keys of [`crate::world::World::stream_textures`], in register order.
+    stream_keys: Vec<u64>,
+    /// Mip chains registered with the streamer. Parallel to its texture indices.
+    stream_sources: Vec<StreamSource>,
+    /// Device images that received a real transfer copy.
+    stream_pages: Vec<StreamPage>,
+    /// Signalled by a transfer submit the next graphics submit must see.
+    transfer_done: Handle,
+    /// The graphics submit waits on `transfer_done` once.
+    transfer_wait: bool,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
     /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
@@ -1156,6 +1388,32 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// Device allocations to fail with out-of-device-memory before the driver.
+    fail_device_allocs: std::cell::Cell<u32>,
+    /// Device bytes allocated minus the bytes passed to the free that calls
+    /// the driver. Bookkeeping that drops a mip without that free does not move.
+    device_bytes: std::cell::Cell<u64>,
+    /// Dedicated transfer queue when the device has one, otherwise the graphics queue.
+    transfer_queue: Handle,
+    transfer_family: u32,
+    transfer_pool: Handle,
+    transfer_cmd: Handle,
+    transfer_fence: Handle,
+    transfer_busy: bool,
+    transfer_bytes: u64,
+    transfer_submitted: Option<Instant>,
+    materials: genos_load::MaterialSettings,
+    vram: genos_load::VramBudget,
+    streamer: genos_load::Streamer,
+    non_texture_extra: u64,
+    budget_tick: u32,
+    cached_budget: u64,
+    cached_usage: u64,
+    /// `(heapBudget, heapUsage)` in place of the device query.
+    heap_override: Option<(u64, u64)>,
+    budget_extension: bool,
+    memory_budget_query: Option<FnMemProps>,
+    frame_mark: Option<Instant>,
 }
 
 struct Image {
@@ -1170,10 +1428,47 @@ struct Buffer {
     size: u64,
 }
 
+struct StreamSource {
+    index: usize,
+    color: bool,
+    chain: crate::material_stream::Chain,
+    staging: Buffer,
+    mip_offset: Vec<u64>,
+    /// Mip last blitted into the device atlas. `None` until the first copy.
+    shown: Option<u32>,
+}
+
+struct StreamPage {
+    index: usize,
+    level: u32,
+    image: Handle,
+    memory: Handle,
+    bytes: u64,
+    type_bits: u32,
+    copied: bool,
+    /// Layout after the last transfer command that touched this image.
+    layout: u32,
+}
+
+/// Device mip image after the staging copy. [`Gpu::publish_resident`] is the
+/// only atlas write, and it accepts this handle rather than a buffer.
+struct ResidentPage {
+    image: Handle,
+    width: u32,
+    height: u32,
+}
+
+struct UnboundImage {
+    image: Handle,
+    bytes: u64,
+    type_bits: u32,
+}
+
 #[derive(Clone, Copy)]
 struct MemProps {
     count: u32,
     types: [u32; 32],
+    device_local_bytes: u64,
 }
 
 #[allow(dead_code)]
@@ -1222,6 +1517,8 @@ struct Fns {
     cmd_copy_to_buffer: FnCopyBuf,
     cmd_copy_buffer: FnCopyBuffer,
     cmd_copy_to_image: FnCopyToImage,
+    cmd_blit: FnBlit,
+    cmd_clear_color: FnClearColor,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
     create_fence: FnFence,
@@ -1337,6 +1634,8 @@ type FnCopyImage = unsafe extern "system" fn(Handle, Handle, i32, Handle, i32, u
 type FnCopyBuf = unsafe extern "system" fn(Handle, Handle, i32, Handle, u32, *const u8);
 type FnCopyBuffer = unsafe extern "system" fn(Handle, Handle, Handle, u32, *const u8);
 type FnCopyToImage = unsafe extern "system" fn(Handle, Handle, Handle, i32, u32, *const u8);
+type FnBlit = unsafe extern "system" fn(Handle, Handle, i32, Handle, i32, u32, *const u8, u32);
+type FnClearColor = unsafe extern "system" fn(Handle, Handle, i32, *const u8, u32, *const u8);
 type FnCreateSem =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnFence = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -1410,21 +1709,30 @@ impl Gpu {
                 enumerate_ext(std::ptr::null(), &mut ext_count, std::ptr::null_mut()),
                 "extensions",
             )?;
-            let mut ext_bytes = vec![0u8; ext_count as usize * 260];
+            let mut inst_listed = vec![0u8; ext_count as usize * 260];
             if ext_count > 0 {
                 check(
-                    enumerate_ext(std::ptr::null(), &mut ext_count, ext_bytes.as_mut_ptr()),
-                    "extension list",
+                    enumerate_ext(std::ptr::null(), &mut ext_count, inst_listed.as_mut_ptr()),
+                    "instance extension list",
                 )?;
             }
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
             let color_ext = b"VK_EXT_swapchain_colorspace\0";
+            let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
+            let has_props2 = extension_listed(
+                &inst_listed,
+                ext_count,
+                b"VK_KHR_get_physical_device_properties2",
+            );
             let mut ext_ptrs = vec![
                 surface_ext.as_ptr() as *const c_char,
                 wayland_ext.as_ptr() as *const c_char,
             ];
-            if extension_present(&ext_bytes, ext_count, b"VK_EXT_swapchain_colorspace") {
+            if has_props2 {
+                ext_ptrs.push(props2_ext.as_ptr() as *const c_char);
+            }
+            if extension_listed(&inst_listed, ext_count, b"VK_EXT_swapchain_colorspace") {
                 ext_ptrs.push(color_ext.as_ptr() as *const c_char);
             }
             let app_name = b"genos-camera\0";
@@ -1465,7 +1773,7 @@ impl Gpu {
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
-                enabled_exts: ext_ptrs.len() as u32,
+                enabled_exts: u32::try_from(ext_ptrs.len()).unwrap_or(0),
                 ext_names: ext_ptrs.as_ptr(),
             };
             let mut instance = std::ptr::null_mut();
@@ -1598,7 +1906,24 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let priorities = [1.0f32, 0.0f32];
+            let mut transfer_family = queue_family;
+            let mut transfer_dedicated = false;
+            for index in 0..family_count {
+                if index == queue_family || index == compute_family {
+                    continue;
+                }
+                let base = index as usize * 24;
+                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
+                let queues =
+                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
+                // Transfer without graphics. A shared graphics family keeps the graphics queue.
+                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
+                    transfer_family = index;
+                    transfer_dedicated = true;
+                    break;
+                }
+            }
+            let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
                 s_type: i32,
@@ -1626,8 +1951,16 @@ impl Gpu {
                     count: 1,
                     priorities: priorities.as_ptr().add(1),
                 },
+                QueueInfo {
+                    s_type: 2,
+                    next: std::ptr::null(),
+                    flags: 0,
+                    family: transfer_family,
+                    count: 1,
+                    priorities: priorities.as_ptr().add(2),
+                },
             ];
-            let queue_info_count = if separate {
+            let mut queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -1635,19 +1968,63 @@ impl Gpu {
             } else {
                 1
             };
+            if transfer_dedicated {
+                queue_info_count += 1;
+            }
+            let enumerate_device_ext: unsafe extern "system" fn(
+                Handle,
+                *const c_char,
+                *mut u32,
+                *mut u8,
+            ) -> VkResult = transmute(load(b"vkEnumerateDeviceExtensionProperties\0"));
+            let mut dev_ext_count = 0u32;
+            check(
+                enumerate_device_ext(
+                    physical,
+                    std::ptr::null(),
+                    &mut dev_ext_count,
+                    std::ptr::null_mut(),
+                ),
+                "device extensions",
+            )?;
+            let mut dev_listed = vec![0u8; dev_ext_count as usize * 260];
+            if dev_ext_count > 0 {
+                check(
+                    enumerate_device_ext(
+                        physical,
+                        std::ptr::null(),
+                        &mut dev_ext_count,
+                        dev_listed.as_mut_ptr(),
+                    ),
+                    "device extension list",
+                )?;
+            }
+            let budget_query_ptr = load(if has_props2 {
+                b"vkGetPhysicalDeviceMemoryProperties2KHR\0"
+            } else {
+                b"vkGetPhysicalDeviceMemoryProperties2\0"
+            });
+            let budget_extension =
+                extension_listed(&dev_listed, dev_ext_count, b"VK_EXT_memory_budget")
+                    && !budget_query_ptr.is_null();
+            let memory_budget_query = if budget_extension {
+                Some(transmute::<FnMemProps>(budget_query_ptr))
+            } else {
+                None
+            };
             // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
             // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
             let mut features = [0u32; 55];
             features[26] = 1;
             let swap_ext = b"VK_KHR_swapchain\0";
+            let budget_ext = b"VK_EXT_memory_budget\0";
             let hdr_meta_ext = b"VK_EXT_hdr_metadata\0";
             let mut dev_exts = vec![swap_ext.as_ptr() as *const c_char];
-            let hdr_meta = device_extension_present(
-                get_instance,
-                instance,
-                physical,
-                b"VK_EXT_hdr_metadata",
-            );
+            if budget_extension {
+                dev_exts.push(budget_ext.as_ptr() as *const c_char);
+            }
+            let hdr_meta =
+                device_extension_present(get_instance, instance, physical, b"VK_EXT_hdr_metadata");
             if hdr_meta {
                 dev_exts.push(hdr_meta_ext.as_ptr() as *const c_char);
             }
@@ -1696,6 +2073,11 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
+            let mut transfer_queue = queue;
+            if transfer_dedicated {
+                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
+            }
+            let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
                 get_instance,
@@ -1764,10 +2146,20 @@ impl Gpu {
                 flight: 0,
                 scene_buf: Buffer::empty(),
                 particle_buf: Buffer::empty(),
-                material_color: Buffer::empty(),
-                material_normal: Buffer::empty(),
+                sampled_color: Image::empty(),
+                sampled_normal: Image::empty(),
+                sampled_size: [(0, 0), (0, 0)],
+                sampled_layout: [0, 0],
+                sampled_cleared: [false, false],
+                atlas_readback: Buffer::empty(),
+                page_readback: Buffer::empty(),
                 material_key: 0,
                 normal_key: 0,
+                stream_keys: Vec::new(),
+                stream_sources: Vec::new(),
+                stream_pages: Vec::new(),
+                transfer_done: std::ptr::null_mut(),
+                transfer_wait: false,
                 mesh_field: Buffer::empty(),
                 mesh_field_cap: 0,
                 mesh_field_key: 0,
@@ -1859,6 +2251,31 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                fail_device_allocs: std::cell::Cell::new(0),
+                device_bytes: std::cell::Cell::new(0),
+                transfer_queue,
+                transfer_family,
+                transfer_pool: std::ptr::null_mut(),
+                transfer_cmd: std::ptr::null_mut(),
+                transfer_fence: std::ptr::null_mut(),
+                transfer_busy: false,
+                transfer_bytes: 0,
+                transfer_submitted: None,
+                materials,
+                vram: genos_load::VramBudget::default(),
+                streamer: genos_load::Streamer::new(
+                    materials.quality_floor(),
+                    materials.mip_bias,
+                    materials.dwell_frames,
+                ),
+                non_texture_extra: 0,
+                budget_tick: 0,
+                cached_budget: 0,
+                cached_usage: 0,
+                heap_override: None,
+                budget_extension,
+                memory_budget_query,
+                frame_mark: None,
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -1957,6 +2374,46 @@ impl Gpu {
             self.image_ready = self.image_readies[0];
             self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
+            let transfer_pool = PoolInfo {
+                s_type: 39,
+                next: std::ptr::null(),
+                flags: 0x2,
+                family: self.transfer_family,
+            };
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &transfer_pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.transfer_pool,
+                ),
+                "transfer pool",
+            )?;
+            let transfer_alloc = AllocInfo {
+                s_type: 40,
+                next: std::ptr::null(),
+                pool: self.transfer_pool,
+                level: 0,
+                count: 1,
+            };
+            check(
+                (self.fns.alloc_cmd)(
+                    self.device,
+                    &transfer_alloc as *const AllocInfo as *const u8,
+                    &mut self.transfer_cmd,
+                ),
+                "transfer command buffer",
+            )?;
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &fence as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut self.transfer_fence,
+                ),
+                "transfer fence",
+            )?;
+            self.transfer_done = self.make_sem()?;
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
                 self.hdr_time_pool = self.make_query_pool_n(4)?;
@@ -2647,7 +3104,7 @@ impl Gpu {
             }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
 
-            let wait_stage = [0x400u32, 0x80];
+            let mut wait_stage = [0x400u32, 0x80];
             #[repr(C)]
             struct Submit {
                 s_type: i32,
@@ -2660,8 +3117,13 @@ impl Gpu {
                 signal_count: u32,
                 signals: *const Handle,
             }
-            let wait_sem = [self.image_ready];
-            let wait_count = 1u32;
+            let wait_sem = [self.image_ready, self.transfer_done];
+            let mut wait_count = 1u32;
+            if self.transfer_wait {
+                wait_stage[1] = 0x80;
+                wait_count = 2;
+                self.transfer_wait = false;
+            }
             let signal_sem = [self.render_done];
             let cmd = [self.cmd];
             let submit = Submit {
@@ -3435,10 +3897,10 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
-            // Material colour atlas. Fragment only: the depth mask and the G-buffer.
+            // Device-local colour atlas. Fragment only: the depth mask and the G-buffer.
             Binding {
                 binding: 4,
-                kind: 7,
+                kind: 3,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -3458,10 +3920,10 @@ impl Gpu {
                 stages: 0x10,
                 samplers: std::ptr::null(),
             },
-            // Tangent-space normal atlas. Same readers as binding 4.
+            // Device-local normal atlas. Same readers as binding 4.
             Binding {
                 binding: 7,
-                kind: 7,
+                kind: 3,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -3498,10 +3960,14 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
-        self.material_color = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
-        self.material_normal = self.make_buffer_queues(16, 0x20, Memory::Upload, &share)?;
-        self.write_buffer(&self.material_color, &[0u8; 16])?;
-        self.write_buffer(&self.material_normal, &[0u8; 16])?;
+        self.sampled_color = self.make_atlas_image(1, 1)?;
+        self.sampled_normal = self.make_atlas_image(1, 1)?;
+        self.sampled_size = [(1, 1), (1, 1)];
+        self.atlas_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
+        self.page_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
+        // The CPU never stores a mip here. A skipped copy reads back as zero.
+        self.write_buffer(&self.atlas_readback, &[0, 0, 0, 0])?;
+        self.write_buffer(&self.page_readback, &[0, 0, 0, 0])?;
         // S70C: one resident scene, written by deltas in the frame's command stream.
         self.frame_scene[0] =
             self.make_buffer(pack::SCENE_CAPACITY as u64, 0x20 | 0x2, Memory::Device)?;
@@ -3529,16 +3995,15 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        // Two raster sets times seven storage buffers (scene, particles,
-        // instances, material colour, mesh field, G-buffer, material normal).
-        let size = Size { kind: 7, count: 16 };
+        // Two raster sets: five storage buffers plus the two material images.
+        let sizes = [Size { kind: 7, count: 16 }, Size { kind: 3, count: 8 }];
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
             flags: 0,
             max_sets: 2,
-            size_count: 1,
-            sizes: &size,
+            size_count: sizes.len() as u32,
+            sizes: sizes.as_ptr(),
         };
         unsafe {
             check(
@@ -3624,7 +4089,7 @@ impl Gpu {
     }
 
     /// Point both frames' raster sets at the scene, the particle image, that frame's
-    /// instances, the traced meshes and the G-buffer.
+    /// instances, the traced meshes, the G-buffer, and the device atlases.
     fn write_raster_sets(&self) -> Result<(), String> {
         for slot in 0..2 {
             self.write_descriptors(
@@ -3692,17 +4157,23 @@ impl Gpu {
                 offset: 0,
                 range: u64::MAX,
             },
-            BufInfo {
-                buffer: self.material_color.buffer,
-                offset: 0,
-                range: u64::MAX,
-            },
-            BufInfo {
-                buffer: self.material_normal.buffer,
-                offset: 0,
-                range: u64::MAX,
-            },
         ];
+        #[repr(C)]
+        struct ImageInfo {
+            sampler: Handle,
+            view: Handle,
+            layout: u32,
+        }
+        let color_info = ImageInfo {
+            sampler: std::ptr::null_mut(),
+            view: self.sampled_color.view,
+            layout: 1,
+        };
+        let normal_info = ImageInfo {
+            sampler: std::ptr::null_mut(),
+            view: self.sampled_normal.view,
+            layout: 1,
+        };
         let writes = [
             Write {
                 s_type: 35,
@@ -3771,9 +4242,9 @@ impl Gpu {
                 binding: 4,
                 element: 0,
                 count: 1,
-                kind: 7,
-                image: std::ptr::null(),
-                buffer: &infos[5],
+                kind: 3,
+                image: &color_info as *const ImageInfo as *const c_void,
+                buffer: std::ptr::null(),
                 texel: std::ptr::null(),
             },
             Write {
@@ -3783,9 +4254,9 @@ impl Gpu {
                 binding: 7,
                 element: 0,
                 count: 1,
-                kind: 7,
-                image: std::ptr::null(),
-                buffer: &infos[6],
+                kind: 3,
+                image: &normal_info as *const ImageInfo as *const c_void,
+                buffer: std::ptr::null(),
                 texel: std::ptr::null(),
             },
         ];
@@ -4472,55 +4943,143 @@ impl Gpu {
     }
 
     fn sync_materials(&mut self, world: &World) -> Result<(), String> {
-        if self.material_key == world.color_atlas.key && self.normal_key == world.normal_atlas.key {
+        if self.materials_current(world) {
             return Ok(());
         }
         self.idle_device();
-        self.store_atlas(true, &world.color_atlas)?;
-        self.store_atlas(false, &world.normal_atlas)?;
+        self.drop_stream_resources();
+        self.streamer.clear();
+        self.bind_atlas(true, &world.color_atlas, true)?;
+        self.bind_atlas(false, &world.normal_atlas, true)?;
+        self.stream_keys.clear();
+        for streamed in &world.stream_textures {
+            self.bind_atlas(true, &streamed.atlas, false)?;
+            self.stream_keys.push(streamed.atlas.key);
+        }
         self.material_key = world.color_atlas.key;
         self.normal_key = world.normal_atlas.key;
         self.write_raster_sets()
     }
 
-    /// `color` selects the base-colour atlas. The other slot is the normal atlas.
-    fn store_atlas(
+    fn materials_current(&self, world: &World) -> bool {
+        self.material_key == world.color_atlas.key
+            && self.normal_key == world.normal_atlas.key
+            && self.stream_keys.len() == world.stream_textures.len()
+            && self
+                .stream_keys
+                .iter()
+                .zip(&world.stream_textures)
+                .all(|(key, streamed)| *key == streamed.atlas.key)
+    }
+
+    /// Register the atlas mip chain. The device image starts empty; the transfer fills it.
+    /// `sampled` is the colour or normal image the fragment shader loads. Extra
+    /// chains still get device mips; they do not replace that image.
+    fn bind_atlas(
         &mut self,
         color: bool,
         atlas: &crate::world::MaterialAtlas,
+        sampled: bool,
     ) -> Result<(), String> {
-        let texels = atlas.width as usize * atlas.height as usize;
-        let mut bytes = Vec::with_capacity(16 + texels * 4);
-        bytes.extend_from_slice(&atlas.width.to_ne_bytes());
-        bytes.extend_from_slice(&atlas.height.to_ne_bytes());
-        bytes.extend_from_slice(&0u32.to_ne_bytes());
-        bytes.extend_from_slice(&0u32.to_ne_bytes());
-        let pixels = texels * 4;
-        if atlas.rgba.len() >= pixels {
-            bytes.extend_from_slice(&atlas.rgba[..pixels]);
-        }
-        let size = if color {
-            self.material_color.size
-        } else {
-            self.material_normal.size
+        let Some(chain) = crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
+        else {
+            return Ok(());
         };
-        if size < bytes.len() as u64 {
-            let share = self.light_families();
-            let next = self.make_buffer_queues(bytes.len() as u64, 0x20, Memory::Upload, &share)?;
-            let slot = if color {
-                &mut self.material_color
-            } else {
-                &mut self.material_normal
-            };
-            let mut old = std::mem::replace(slot, next);
-            self.destroy_buffer(&mut old);
+        if sampled {
+            self.ensure_sampled(color, chain.width, chain.height)?;
         }
-        let memory = if color {
-            self.material_color.memory
+        let started = Instant::now();
+        let bytes = chain.level_bytes();
+        let total = chain.total_bytes();
+        let index = self.streamer.texture_count();
+        self.streamer
+            .add_texture(chain.width, chain.height, &bytes);
+        let elapsed = started.elapsed().as_millis().max(1);
+        let ms = u32::try_from(elapsed).unwrap_or(u32::MAX);
+        self.streamer.observe_disk(total, ms);
+        self.streamer.observe_decode(total, ms);
+        let (staging, mip_offset) = self.stage_chain(&chain)?;
+        self.stream_sources.push(StreamSource {
+            index,
+            color,
+            chain,
+            staging,
+            mip_offset,
+            shown: None,
+        });
+        Ok(())
+    }
+
+    fn ensure_sampled(&mut self, color: bool, width: u32, height: u32) -> Result<(), String> {
+        let slot = usize::from(!color);
+        if self.sampled_size[slot] == (width, height) && !self.sampled_image(color).image.is_null()
+        {
+            return Ok(());
+        }
+        let image = self.make_atlas_image(width, height)?;
+        let mut old = if color {
+            std::mem::replace(&mut self.sampled_color, image)
         } else {
-            self.material_normal.memory
+            std::mem::replace(&mut self.sampled_normal, image)
         };
-        self.write_memory(memory, &bytes)
+        self.destroy_image(&mut old);
+        self.sampled_size[slot] = (width, height);
+        self.sampled_layout[slot] = 0;
+        self.sampled_cleared[slot] = false;
+        Ok(())
+    }
+
+    fn sampled_image(&self, color: bool) -> &Image {
+        if color {
+            &self.sampled_color
+        } else {
+            &self.sampled_normal
+        }
+    }
+
+    fn stage_chain(
+        &self,
+        chain: &crate::material_stream::Chain,
+    ) -> Result<(Buffer, Vec<u64>), String> {
+        let mut packed = Vec::new();
+        let mut mip_offset = Vec::new();
+        for level in &chain.levels {
+            mip_offset.push(packed.len() as u64);
+            packed.extend_from_slice(&level.rgba);
+        }
+        if packed.is_empty() {
+            packed.resize(4, 0);
+        }
+        // TRANSFER_SRC for the page copy, TRANSFER_DST so the submit can wipe it
+        // before the atlas blit. The wipe is what makes a staging-to-atlas copy black.
+        let staging = self.make_buffer(packed.len() as u64, 0x1 | 0x2, Memory::Upload)?;
+        self.write_buffer(&staging, &packed)?;
+        Ok((staging, mip_offset))
+    }
+
+    fn atlas_readback_texel(&self) -> u8 {
+        self.readback_texel(&self.atlas_readback)
+    }
+
+    fn page_readback_texel(&self) -> u8 {
+        self.readback_texel(&self.page_readback)
+    }
+
+    fn readback_texel(&self, buffer: &Buffer) -> u8 {
+        if buffer.memory.is_null() || buffer.size < 4 {
+            return 0;
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 0, 4, 0, &mut mapped) != 0
+                || mapped.is_null()
+            {
+                return 0;
+            }
+            let byte = *mapped.cast::<u8>();
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+            byte
+        }
     }
 
     fn write_memory(&self, memory: Handle, bytes: &[u8]) -> Result<(), String> {
@@ -5308,6 +5867,88 @@ impl Gpu {
         }
     }
 
+    /// Device-local atlas the fragment shader loads. Transfer is the only writer.
+    fn make_atlas_image(&self, width: u32, height: u32) -> Result<Image, String> {
+        #[repr(C)]
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            image_type: u32,
+            format: i32,
+            extent: Extent,
+            mips: u32,
+            layers: u32,
+            samples: u32,
+            tiling: u32,
+            usage: u32,
+            sharing: u32,
+            queue_count: u32,
+            queues: *const u32,
+            initial: u32,
+        }
+        let families = [self.queue_family, self.transfer_family];
+        let shared = self.queue_family != self.transfer_family;
+        let info = Info {
+            s_type: 14,
+            next: std::ptr::null(),
+            flags: 0,
+            image_type: 1,
+            format: 37,
+            extent: Extent {
+                w: width.max(1),
+                h: height.max(1),
+                d: 1,
+            },
+            mips: 1,
+            layers: 1,
+            samples: 1,
+            tiling: 0,
+            usage: 0x1 | 0x2 | 0x8,
+            sharing: u32::from(shared),
+            queue_count: if shared { 2 } else { 0 },
+            queues: if shared {
+                families.as_ptr()
+            } else {
+                std::ptr::null()
+            },
+            initial: 0,
+        };
+        let mut image = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_image)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut image,
+                ),
+                "atlas image",
+            )?;
+            let mut req = [0u8; 24];
+            (self.fns.image_reqs)(self.device, image, req.as_mut_ptr());
+            let size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
+            let memory = self.alloc(size, bits, Memory::Device)?;
+            check(
+                (self.fns.bind_image)(self.device, image, memory, 0),
+                "bind atlas",
+            )?;
+            let view = self.make_view(image, 37, 1)?;
+            Ok(Image {
+                image,
+                view,
+                memory,
+            })
+        }
+    }
+
     fn make_view(&self, image: Handle, format: i32, aspect: u32) -> Result<Handle, String> {
         #[repr(C)]
         struct Comp {
@@ -5495,6 +6136,13 @@ impl Gpu {
     }
 
     fn alloc(&self, size: u64, type_bits: u32, memory: Memory) -> Result<Handle, String> {
+        if memory == Memory::Device {
+            let pending = self.fail_device_allocs.get();
+            if pending > 0 {
+                self.fail_device_allocs.set(pending - 1);
+                return Err("out of device memory".into());
+            }
+        }
         // Buffers the CPU only writes go in memory the GPU reads at full speed when the
         // device has it (resizable BAR, or the 256 MB BAR window): from plain host memory
         // every probe, scene and tier read crossed PCIe. Readbacks want cached host memory.
@@ -5532,7 +6180,12 @@ impl Gpu {
         let Some(index) = index else {
             return Err("no memory type".into());
         };
-        self.alloc_index(size, index)
+        let handle = self.alloc_index(size, index)?;
+        if memory == Memory::Device {
+            self.device_bytes
+                .set(self.device_bytes.get().saturating_add(size));
+        }
+        Ok(handle)
     }
 
     /// The first memory type allowed by `type_bits` with every flag in `want`.
@@ -5558,21 +6211,1143 @@ impl Gpu {
         };
         let mut memory = std::ptr::null_mut();
         unsafe {
-            check(
-                (self.fns.alloc_mem)(
-                    self.device,
-                    &info as *const Info as *const u8,
-                    std::ptr::null(),
-                    &mut memory,
-                ),
-                "allocate",
-            )?;
+            let result = (self.fns.alloc_mem)(
+                self.device,
+                &info as *const Info as *const u8,
+                std::ptr::null(),
+                &mut memory,
+            );
+            if result == VK_ERROR_OUT_OF_DEVICE_MEMORY {
+                return Err("out of device memory".into());
+            }
+            check(result, "allocate")?;
         }
         Ok(memory)
     }
 
+    fn apply_material_settings(&mut self, settings: genos_load::MaterialSettings) {
+        self.streamer.set_quality_floor(settings.quality_floor());
+        self.streamer.set_bias(settings.mip_bias);
+        self.streamer.set_dwell(settings.dwell_frames);
+        self.materials = settings;
+    }
+
+    /// Poll the transfer fence, refresh the budget, and admit what the frame can hold.
+    fn tick_materials(
+        &mut self,
+        accounted: u64,
+        views: &[genos_load::TextureView],
+    ) -> Result<(), String> {
+        let now = Instant::now();
+        let base_ms = self.frame_mark.map_or(8.0, |then| {
+            now.saturating_duration_since(then).as_secs_f32() * 1000.0
+        });
+        self.frame_mark = Some(now);
+        let pixels = u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(16);
+        let non_texture = accounted
+            .saturating_add(self.non_texture_extra)
+            .saturating_add(pixels);
+        self.refresh_vram(non_texture);
+        let ready = self.transfer_signaled();
+        if self.transfer_busy && ready {
+            if self.transfer_bytes > 0 {
+                let elapsed = self
+                    .transfer_submitted
+                    .map_or(1, |start| start.elapsed().as_millis());
+                let ms = u32::try_from(elapsed).unwrap_or(u32::MAX).max(1);
+                self.streamer.observe_transfer(self.transfer_bytes, ms);
+            }
+            self.transfer_busy = false;
+            self.transfer_bytes = 0;
+        }
+        self.streamer
+            .set_transfer_ready(!self.transfer_busy || ready);
+        let budget = self.vram;
+        self.streamer.step(&budget, views, base_ms, FRAME_BUDGET_MS);
+        self.reclaim_unheld();
+        Ok(())
+    }
+
+    fn refresh_vram(&mut self, non_texture: u64) {
+        self.budget_tick = self.budget_tick.wrapping_add(1);
+        if self.heap_override.is_none()
+            && (self.budget_tick == 1 || self.budget_tick.is_multiple_of(4))
+        {
+            self.query_heaps();
+        }
+        let headroom = genos_load::Headroom::from_mb(
+            self.materials.headroom_percent,
+            self.materials.headroom_floor_mb,
+        );
+        if let Some((budget, usage)) = self.heap_override {
+            self.vram = genos_load::VramBudget::from_heaps(
+                &[genos_load::HeapSlice {
+                    budget,
+                    usage,
+                    device_local: true,
+                }],
+                non_texture,
+                headroom,
+                true,
+            );
+            return;
+        }
+        self.vram = if self.budget_extension {
+            genos_load::VramBudget::from_heaps(
+                &[genos_load::HeapSlice {
+                    budget: self.cached_budget,
+                    usage: self.cached_usage,
+                    device_local: true,
+                }],
+                non_texture,
+                headroom,
+                true,
+            )
+        } else {
+            genos_load::VramBudget::from_heap_size(
+                self.memory_props.device_local_bytes,
+                self.cached_usage,
+                non_texture,
+                headroom,
+            )
+        };
+    }
+
+    fn query_heaps(&mut self) {
+        let Some(query) = self.memory_budget_query else {
+            self.budget_extension = false;
+            return;
+        };
+        #[repr(C)]
+        struct BudgetProps {
+            s_type: i32,
+            pad: u32,
+            next: *const c_void,
+            heap_budget: [u64; 16],
+            heap_usage: [u64; 16],
+        }
+        let mut budget = BudgetProps {
+            s_type: 1000237000,
+            pad: 0,
+            next: std::ptr::null(),
+            heap_budget: [0; 16],
+            heap_usage: [0; 16],
+        };
+        let mut raw = vec![0u8; 16 + 520];
+        raw[..4].copy_from_slice(&1_000_059_006i32.to_ne_bytes());
+        let next = &mut budget as *mut BudgetProps as usize;
+        raw[8..16].copy_from_slice(&next.to_ne_bytes());
+        unsafe { query(self.physical, raw.as_mut_ptr()) };
+        let props = parse_mem_props(&raw[16..]);
+        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let mut heap_budget = 0u64;
+        let mut heap_usage = 0u64;
+        for index in 0..heap_count {
+            let base = 16 + 264 + index as usize * 16;
+            if raw.len() < base + 12 {
+                break;
+            }
+            let flags = u32::from_ne_bytes(raw[base + 8..base + 12].try_into().unwrap_or([0; 4]));
+            if flags & 1 == 0 {
+                continue;
+            }
+            let slot = index as usize;
+            heap_budget = heap_budget.saturating_add(budget.heap_budget[slot]);
+            heap_usage = heap_usage.saturating_add(budget.heap_usage[slot]);
+        }
+        let _ = props;
+        self.cached_budget = heap_budget;
+        self.cached_usage = heap_usage;
+        self.budget_extension = true;
+    }
+
+    fn transfer_signaled(&self) -> bool {
+        if self.transfer_fence.is_null() {
+            return true;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, self.transfer_fence) };
+        status == VK_SUCCESS
+    }
+
+    /// Copy staging mip bytes into device images, then blit the finest resident
+    /// mip into the device atlas. The fence is polled on the next tick.
+    fn submit_transfer(&mut self) -> Result<(), String> {
+        if self.transfer_cmd.is_null() || self.transfer_fence.is_null() {
+            return Ok(());
+        }
+        if self.transfer_busy && !self.transfer_signaled() {
+            return Ok(());
+        }
+        let due = self.uncopied_pages();
+        let republish = self.ready_to_show();
+        if due.is_empty() && republish.is_empty() {
+            return Ok(());
+        }
+        // The previous fill finished with the fence. Put the chain back so this
+        // submit's page copy still has bytes, then the command buffer wipes it.
+        self.restore_staging()?;
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, &self.transfer_fence),
+                "transfer reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.transfer_cmd, 0), "transfer reset")?;
+            #[repr(C)]
+            struct BeginInfo {
+                s_type: i32,
+                next: *const c_void,
+                flags: u32,
+                inheritance: *const c_void,
+            }
+            let begin = BeginInfo {
+                s_type: 42,
+                next: std::ptr::null(),
+                flags: 0x1,
+                inheritance: std::ptr::null(),
+            };
+            check(
+                (self.fns.begin_cmd)(self.transfer_cmd, &begin as *const BeginInfo as *const u8),
+                "transfer begin",
+            )?;
+        }
+        self.staging_barrier(0x4000, 0x1000, 0x4000, 0x800);
+        let mut copied = 0u64;
+        let mut filled = Vec::new();
+        for (index, level) in &due {
+            let bytes = self.record_mip_copy(*index, *level);
+            if bytes > 0 {
+                copied = copied.saturating_add(bytes);
+                filled.push((*index, *level));
+            }
+        }
+        for (index, level) in filled {
+            if let Some(page) = self
+                .stream_pages
+                .iter_mut()
+                .find(|page| page.index == index && page.level == level)
+            {
+                page.copied = true;
+                page.layout = 6;
+            }
+        }
+        // The page images now hold the texels. Wipe staging before the atlas
+        // write so a buffer copy into the atlas cannot supply them.
+        self.staging_barrier(0x1000, 0x1000, 0x800, 0x1000);
+        self.scrub_staging();
+        self.staging_barrier(0x1000, 0x1000, 0x1000, 0x800);
+        self.prepare_atlas_draw(true);
+        self.prepare_atlas_draw(false);
+        let show = self.ready_to_show();
+        for (index, level) in &show {
+            self.record_mip_blit(*index, *level);
+        }
+        for (index, level) in show {
+            if let Some(source) = self
+                .stream_sources
+                .iter_mut()
+                .find(|source| source.index == index)
+            {
+                source.shown = Some(level);
+            }
+        }
+        self.finish_atlas_draw(true, true);
+        self.finish_atlas_draw(false, false);
+        unsafe {
+            check((self.fns.end_cmd)(self.transfer_cmd), "transfer end")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.transfer_cmd];
+            let signal = [self.transfer_done];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 1,
+                signals: signal.as_ptr(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.transfer_queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.transfer_fence,
+                ),
+                "transfer submit",
+            )?;
+        }
+        self.transfer_wait = true;
+        self.transfer_busy = true;
+        self.transfer_bytes = copied;
+        self.transfer_submitted = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Finest resident mips whose device image already holds a copy and whose
+    /// atlas blit is stale.
+    fn ready_to_show(&self) -> Vec<(usize, u32)> {
+        let mut out = Vec::new();
+        for source in &self.stream_sources {
+            let Some(level) = self.streamer.finest_resident(source.index) else {
+                continue;
+            };
+            if source.shown == Some(level) {
+                continue;
+            }
+            if self.page_copied(source.index, level) {
+                out.push((source.index, level));
+            }
+        }
+        out
+    }
+
+    fn page_copied(&self, index: usize, level: u32) -> bool {
+        self.stream_pages
+            .iter()
+            .any(|page| page.index == index && page.level == level && page.copied)
+    }
+
+    fn uncopied_pages(&self) -> Vec<(usize, u32)> {
+        self.stream_pages
+            .iter()
+            .filter(|page| !page.memory.is_null() && !page.copied)
+            .map(|page| (page.index, page.level))
+            .collect()
+    }
+
+    fn copies_due(&self) -> Vec<(usize, u32)> {
+        let mut due = Vec::new();
+        for copy in self.streamer.pending_copies() {
+            if !self.page_has(copy.index, copy.level) {
+                due.push((copy.index, copy.level));
+            }
+        }
+        let count = self.streamer.texture_count();
+        for index in 0..count {
+            let levels = self.streamer.level_count(index);
+            for level in 0..levels {
+                if self.streamer.is_resident(index, level)
+                    && !self.page_has(index, level)
+                    && !due.contains(&(index, level))
+                {
+                    due.push((index, level));
+                }
+            }
+        }
+        due
+    }
+
+    fn page_has(&self, index: usize, level: u32) -> bool {
+        self.stream_pages
+            .iter()
+            .any(|page| page.index == index && page.level == level)
+    }
+
+    fn record_mip_copy(&self, index: usize, level: u32) -> u64 {
+        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+            return 0;
+        };
+        let Some(slot) = usize::try_from(level).ok() else {
+            return 0;
+        };
+        let Some(mip) = source.chain.levels.get(slot) else {
+            return 0;
+        };
+        let Some(page) = self
+            .stream_pages
+            .iter()
+            .find(|page| page.index == index && page.level == level)
+        else {
+            return 0;
+        };
+        let offset = source.mip_offset.get(slot).copied().unwrap_or(0);
+        let width = mip.width.max(1);
+        let height = mip.height.max(1);
+        self.transfer_to_image(
+            source.staging.buffer,
+            offset,
+            page.image,
+            page.layout,
+            width,
+            height,
+        );
+        u64::from(width) * u64::from(height) * 4
+    }
+
+    /// Move the atlas to transfer-dest and clear it once. A later blit overwrites
+    /// the texels a copy actually delivered. A skipped copy leaves this clear.
+    fn prepare_atlas_draw(&mut self, color: bool) {
+        let slot = usize::from(!color);
+        let image = self.sampled_image(color).image;
+        if image.is_null() {
+            return;
+        }
+        let old = self.sampled_layout[slot];
+        if old != 7 {
+            let src_access = if old == 0 { 0 } else { 0x20 };
+            self.cmd_image_barrier(
+                self.transfer_cmd,
+                image,
+                old,
+                7,
+                0x1000,
+                0x1000,
+                src_access,
+                0x1000,
+            );
+            self.sampled_layout[slot] = 7;
+        }
+        if !self.sampled_cleared[slot] {
+            self.clear_color(self.transfer_cmd, image, 7);
+            self.sampled_cleared[slot] = true;
+        }
+    }
+
+    /// Leave the atlas in general layout so the fragment shader can load it.
+    /// The colour atlas also copies texel (0, 0) into the readback buffer.
+    fn finish_atlas_draw(&mut self, color: bool, readback: bool) {
+        let slot = usize::from(!color);
+        if self.sampled_layout[slot] != 7 {
+            return;
+        }
+        let image = self.sampled_image(color).image;
+        if image.is_null() {
+            return;
+        }
+        self.cmd_image_barrier(
+            self.transfer_cmd,
+            image,
+            7,
+            1,
+            0x1000,
+            0x1000,
+            0x1000,
+            0x800 | 0x20,
+        );
+        self.sampled_layout[slot] = 1;
+        if readback {
+            self.copy_atlas_texel(image);
+        }
+    }
+
+    fn copy_page_texel(&self, image: Handle) {
+        self.copy_image_texel(image, 6, &self.page_readback);
+    }
+
+    fn record_mip_blit(&self, index: usize, level: u32) {
+        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+            return;
+        };
+        let Some(slot) = usize::try_from(level).ok() else {
+            return;
+        };
+        let Some(mip) = source.chain.levels.get(slot) else {
+            return;
+        };
+        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
+        else {
+            return;
+        };
+        self.publish_resident(&page, source.color);
+    }
+
+    /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
+    /// handle and not a staging buffer.
+    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+        let page = self.stream_pages.iter().find(|page| {
+            page.index == index && page.level == level && page.copied && !page.image.is_null()
+        })?;
+        Some(ResidentPage {
+            image: page.image,
+            width,
+            height,
+        })
+    }
+
+    /// Blit `page` into the device atlas. This is the only atlas write.
+    fn publish_resident(&self, page: &ResidentPage, color: bool) {
+        let atlas = self.sampled_image(color).image;
+        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!color)];
+        if atlas.is_null() || page.image.is_null() {
+            return;
+        }
+        self.blit_nearest(
+            page.image,
+            atlas,
+            page.width,
+            page.height,
+            atlas_w.max(1),
+            atlas_h.max(1),
+        );
+        if color {
+            self.copy_page_texel(page.image);
+        }
+    }
+
+    fn restore_staging(&self) -> Result<(), String> {
+        for source in &self.stream_sources {
+            if source.staging.buffer.is_null() {
+                continue;
+            }
+            let mut packed = Vec::new();
+            for level in &source.chain.levels {
+                packed.extend_from_slice(&level.rgba);
+            }
+            if packed.is_empty() {
+                continue;
+            }
+            self.write_buffer(&source.staging, &packed)?;
+        }
+        Ok(())
+    }
+
+    fn scrub_staging(&self) {
+        for source in &self.stream_sources {
+            let buffer = source.staging.buffer;
+            let size = source.staging.size & !3;
+            if buffer.is_null() || size < 4 {
+                continue;
+            }
+            unsafe {
+                (self.fns.cmd_fill_buffer)(self.transfer_cmd, buffer, 0, size, 0);
+            }
+        }
+    }
+
+    fn staging_barrier(&self, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        for source in &self.stream_sources {
+            let buffer = source.staging.buffer;
+            let size = source.staging.size & !3;
+            if buffer.is_null() || size < 4 {
+                continue;
+            }
+            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+        }
+    }
+
+    fn transfer_buffer_barrier(
+        &self,
+        buffer: Handle,
+        size: u64,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+    ) {
+        #[repr(C)]
+        struct Bar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+            src_queue: u32,
+            dst_queue: u32,
+            buffer: Handle,
+            offset: u64,
+            size: u64,
+        }
+        let bar = Bar {
+            s_type: 44,
+            next: std::ptr::null(),
+            src_access,
+            dst_access,
+            src_queue: u32::MAX,
+            dst_queue: u32::MAX,
+            buffer,
+            offset: 0,
+            size,
+        };
+        unsafe {
+            (self.fns.cmd_barrier)(
+                self.transfer_cmd,
+                src_stage,
+                dst_stage,
+                0,
+                0,
+                std::ptr::null(),
+                1,
+                &bar as *const Bar as *const c_void,
+                0,
+                std::ptr::null(),
+            );
+        }
+    }
+
+    fn clear_color(&self, cmd: Handle, image: Handle, layout: u32) {
+        let color = [0.0f32; 4];
+        #[repr(C)]
+        struct Range {
+            aspect: u32,
+            mip: u32,
+            levels: u32,
+            layer: u32,
+            layers: u32,
+        }
+        let range = Range {
+            aspect: 1,
+            mip: 0,
+            levels: 1,
+            layer: 0,
+            layers: 1,
+        };
+        unsafe {
+            (self.fns.cmd_clear_color)(
+                cmd,
+                image,
+                layout as i32,
+                color.as_ptr().cast(),
+                1,
+                &range as *const Range as *const u8,
+            );
+        }
+    }
+
+    fn blit_nearest(
+        &self,
+        src: Handle,
+        dst: Handle,
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+    ) {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Layers {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Offset {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        #[repr(C)]
+        struct Blit {
+            src_layers: Layers,
+            src_off: [Offset; 2],
+            dst_layers: Layers,
+            dst_off: [Offset; 2],
+        }
+        let layers = Layers {
+            aspect: 1,
+            mip: 0,
+            layer: 0,
+            count: 1,
+        };
+        let blit = Blit {
+            src_layers: layers,
+            src_off: [
+                Offset { x: 0, y: 0, z: 0 },
+                Offset {
+                    x: src_w as i32,
+                    y: src_h as i32,
+                    z: 1,
+                },
+            ],
+            dst_layers: layers,
+            dst_off: [
+                Offset { x: 0, y: 0, z: 0 },
+                Offset {
+                    x: dst_w as i32,
+                    y: dst_h as i32,
+                    z: 1,
+                },
+            ],
+        };
+        unsafe {
+            (self.fns.cmd_blit)(
+                self.transfer_cmd,
+                src,
+                6,
+                dst,
+                7,
+                1,
+                &blit as *const Blit as *const u8,
+                0,
+            );
+        }
+    }
+
+    fn copy_atlas_texel(&self, image: Handle) {
+        self.copy_image_texel(image, 1, &self.atlas_readback);
+    }
+
+    fn copy_image_texel(&self, image: Handle, layout: i32, buffer: &Buffer) {
+        #[repr(C)]
+        struct Layers {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Offset {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        #[repr(C)]
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Region {
+            offset: u64,
+            row: u32,
+            height: u32,
+            layers: Layers,
+            image_offset: Offset,
+            extent: Extent,
+        }
+        let region = Region {
+            offset: 0,
+            row: 0,
+            height: 0,
+            layers: Layers {
+                aspect: 1,
+                mip: 0,
+                layer: 0,
+                count: 1,
+            },
+            image_offset: Offset { x: 0, y: 0, z: 0 },
+            extent: Extent { w: 1, h: 1, d: 1 },
+        };
+        unsafe {
+            (self.fns.cmd_copy_to_buffer)(
+                self.transfer_cmd,
+                image,
+                layout,
+                buffer.buffer,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
+    }
+
+    fn create_unbound_image(&self, width: u32, height: u32) -> Result<UnboundImage, String> {
+        #[repr(C)]
+        struct Extent {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            image_type: u32,
+            format: i32,
+            extent: Extent,
+            mips: u32,
+            layers: u32,
+            samples: u32,
+            tiling: u32,
+            usage: u32,
+            sharing: u32,
+            queue_count: u32,
+            queues: *const u32,
+            initial: u32,
+        }
+        let info = Info {
+            s_type: 14,
+            next: std::ptr::null(),
+            flags: 0,
+            image_type: 1,
+            format: 37,
+            extent: Extent {
+                w: width,
+                h: height,
+                d: 1,
+            },
+            mips: 1,
+            layers: 1,
+            samples: 1,
+            tiling: 0,
+            usage: 0x1 | 0x2,
+            sharing: 0,
+            queue_count: 0,
+            queues: std::ptr::null(),
+            initial: 0,
+        };
+        let mut image = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_image)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut image,
+                ),
+                "mip image",
+            )?;
+            let mut req = [0u8; 24];
+            (self.fns.image_reqs)(self.device, image, req.as_mut_ptr());
+            let bytes = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let type_bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
+            Ok(UnboundImage {
+                image,
+                bytes,
+                type_bits,
+            })
+        }
+    }
+
+    fn transfer_to_image(
+        &self,
+        buffer: Handle,
+        offset: u64,
+        image: Handle,
+        old_layout: u32,
+        width: u32,
+        height: u32,
+    ) {
+        #[repr(C)]
+        struct Range {
+            aspect: u32,
+            mip: u32,
+            levels: u32,
+            layer: u32,
+            layers: u32,
+        }
+        #[repr(C)]
+        struct Barrier {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+            old: u32,
+            new: u32,
+            src_queue: u32,
+            dst_queue: u32,
+            image: Handle,
+            range: Range,
+        }
+        let barrier = Barrier {
+            s_type: 45,
+            next: std::ptr::null(),
+            src_access: 0,
+            dst_access: 0x1000,
+            old: old_layout,
+            new: 7,
+            src_queue: u32::MAX,
+            dst_queue: u32::MAX,
+            image,
+            range: Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            },
+        };
+        let order = Barrier {
+            s_type: 45,
+            next: std::ptr::null(),
+            src_access: 0x1000,
+            dst_access: 0x1000,
+            old: 7,
+            new: 7,
+            src_queue: u32::MAX,
+            dst_queue: u32::MAX,
+            image,
+            range: Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            },
+        };
+        let to_src = Barrier {
+            s_type: 45,
+            next: std::ptr::null(),
+            src_access: 0x1000,
+            dst_access: 0x800,
+            old: 7,
+            new: 6,
+            src_queue: u32::MAX,
+            dst_queue: u32::MAX,
+            image,
+            range: Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            },
+        };
+        #[repr(C)]
+        struct Region {
+            buffer_offset: u64,
+            row_length: u32,
+            image_height: u32,
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            layers: u32,
+            x: i32,
+            y: i32,
+            z: i32,
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        let region = Region {
+            buffer_offset: offset,
+            row_length: 0,
+            image_height: 0,
+            aspect: 1,
+            mip: 0,
+            layer: 0,
+            layers: 1,
+            x: 0,
+            y: 0,
+            z: 0,
+            w: width,
+            h: height,
+            d: 1,
+        };
+        unsafe {
+            if old_layout != 7 {
+                (self.fns.cmd_barrier)(
+                    self.transfer_cmd,
+                    0x1,
+                    0x1000,
+                    0,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                    1,
+                    &barrier as *const Barrier as *const u8,
+                );
+            }
+            // Zero first. The buffer copy is the only writer of a real texel.
+            // Skipping that copy leaves the clear, and the blit publishes black.
+            self.clear_color(self.transfer_cmd, image, 7);
+            (self.fns.cmd_barrier)(
+                self.transfer_cmd,
+                0x1000,
+                0x1000,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &order as *const Barrier as *const u8,
+            );
+            (self.fns.cmd_copy_to_image)(
+                self.transfer_cmd,
+                buffer,
+                image,
+                7,
+                1,
+                &region as *const Region as *const u8,
+            );
+            (self.fns.cmd_barrier)(
+                self.transfer_cmd,
+                0x1000,
+                0x1000,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                1,
+                &to_src as *const Barrier as *const u8,
+            );
+        }
+    }
+
+    fn drop_stream_resources(&mut self) {
+        let pages = std::mem::take(&mut self.stream_pages);
+        for mut page in pages {
+            self.free_page(&mut page);
+        }
+        let sources = std::mem::take(&mut self.stream_sources);
+        for mut source in sources {
+            self.destroy_buffer(&mut source.staging);
+        }
+    }
+
+    fn free_page(&self, page: &mut StreamPage) {
+        unsafe {
+            if !page.image.is_null() {
+                (self.fns.destroy_image)(self.device, page.image, std::ptr::null());
+                page.image = std::ptr::null_mut();
+            }
+            if !page.memory.is_null() {
+                self.release_device(page.memory, page.bytes);
+                page.memory = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Free device memory and drop those bytes from the running total.
+    fn release_device(&self, memory: Handle, bytes: u64) {
+        if memory.is_null() {
+            return;
+        }
+        unsafe { (self.fns.free_mem)(self.device, memory, std::ptr::null()) };
+        self.device_bytes
+            .set(self.device_bytes.get().saturating_sub(bytes));
+    }
+
+    fn allocate_texture(&mut self, size: u64, type_bits: u32) -> Result<Handle, String> {
+        let mut left = 4u32;
+        loop {
+            match self.alloc(size, type_bits, Memory::Device) {
+                Ok(memory) => return Ok(memory),
+                Err(err)
+                    if err == "out of device memory" && left > 0 && self.evict_for_device() =>
+                {
+                    left -= 1;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Drop the lowest-priority mip and release its device memory.
+    fn evict_for_device(&mut self) -> bool {
+        if !self.streamer.evict_for_oom() {
+            return false;
+        }
+        self.reclaim_unheld();
+        true
+    }
+
+    fn reclaim_unheld(&mut self) {
+        let pages = std::mem::take(&mut self.stream_pages);
+        let mut keep = Vec::new();
+        for mut page in pages {
+            if self.streamer.holds_memory(page.index, page.level) {
+                keep.push(page);
+            } else {
+                self.free_page(&mut page);
+            }
+        }
+        self.stream_pages = keep;
+    }
+
+    fn has_unbacked(&self) -> bool {
+        self.stream_pages.iter().any(|page| page.memory.is_null())
+    }
+
+    fn next_unbacked(&self) -> Result<(u64, u32), String> {
+        self.stream_pages
+            .iter()
+            .find(|page| page.memory.is_null())
+            .map(|page| (page.bytes, page.type_bits))
+            .ok_or_else(|| "no mip is waiting for memory".to_string())
+    }
+
+    fn bind_next_unbacked(&mut self, memory: Handle) -> Result<(), String> {
+        let Some(page) = self
+            .stream_pages
+            .iter_mut()
+            .find(|page| page.memory.is_null())
+        else {
+            unsafe { (self.fns.free_mem)(self.device, memory, std::ptr::null()) };
+            return Err("no mip is waiting for memory".into());
+        };
+        let image = page.image;
+        page.memory = memory;
+        unsafe {
+            check(
+                (self.fns.bind_image)(self.device, image, memory, 0),
+                "bind mip",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn prepare_unbacked(&mut self) -> Result<(), String> {
+        let due = self.copies_due();
+        for (index, level) in due {
+            if self
+                .stream_pages
+                .iter()
+                .any(|page| page.index == index && page.level == level)
+            {
+                continue;
+            }
+            let Some(source) = self
+                .stream_sources
+                .iter()
+                .find(|source| source.index == index)
+            else {
+                continue;
+            };
+            let Some(slot) = usize::try_from(level).ok() else {
+                continue;
+            };
+            let Some(mip) = source.chain.levels.get(slot) else {
+                continue;
+            };
+            let image = self.create_unbound_image(mip.width.max(1), mip.height.max(1))?;
+            self.stream_pages.push(StreamPage {
+                index,
+                level,
+                image: image.image,
+                memory: std::ptr::null_mut(),
+                bytes: image.bytes,
+                type_bits: image.type_bits,
+                copied: false,
+                layout: 0,
+            });
+        }
+        Ok(())
+    }
+
     fn image_barrier(
         &self,
+        image: Handle,
+        old: u32,
+        new: u32,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+    ) {
+        self.cmd_image_barrier(
+            self.cmd,
+            image,
+            old,
+            new,
+            src_stage,
+            dst_stage,
+            src_access,
+            dst_access,
+        );
+    }
+
+    fn cmd_image_barrier(
+        &self,
+        cmd: Handle,
         image: Handle,
         old: u32,
         new: u32,
@@ -5622,7 +7397,7 @@ impl Gpu {
         };
         unsafe {
             (self.fns.cmd_barrier)(
-                self.cmd,
+                cmd,
                 src_stage,
                 dst_stage,
                 0,
@@ -5900,6 +7675,7 @@ impl Drop for Gpu {
                 return;
             }
             self.idle_device();
+            self.drop_stream_resources();
             self.destroy_lighting();
             self.destroy_targets();
             self.vertex = Buffer::empty();
@@ -5924,10 +7700,18 @@ impl Drop for Gpu {
             // [1] names the same buffer as [0] (S70C).
             self.destroy_buffer(&mut frame_scene[0]);
             self.destroy_buffer(&mut particle_buf);
-            let mut material_color = std::mem::replace(&mut self.material_color, Buffer::empty());
-            let mut material_normal = std::mem::replace(&mut self.material_normal, Buffer::empty());
-            self.destroy_buffer(&mut material_color);
-            self.destroy_buffer(&mut material_normal);
+            let mut sampled_color = std::mem::replace(&mut self.sampled_color, Image::empty());
+            let mut sampled_normal = std::mem::replace(&mut self.sampled_normal, Image::empty());
+            let mut atlas_readback = std::mem::replace(&mut self.atlas_readback, Buffer::empty());
+            let mut page_readback = std::mem::replace(&mut self.page_readback, Buffer::empty());
+            self.destroy_image(&mut sampled_color);
+            self.destroy_image(&mut sampled_normal);
+            self.destroy_buffer(&mut atlas_readback);
+            self.destroy_buffer(&mut page_readback);
+            if !self.transfer_done.is_null() {
+                (self.fns.destroy_sem)(self.device, self.transfer_done, std::ptr::null());
+                self.transfer_done = std::ptr::null_mut();
+            }
             self.destroy_buffer(&mut mesh_field);
             if let Some(times) = self.gpu_times.as_ref() {
                 if !times.pool.is_null() {
@@ -5939,6 +7723,12 @@ impl Drop for Gpu {
             }
             if !self.compute_pool.is_null() {
                 (self.fns.destroy_pool)(self.device, self.compute_pool, std::ptr::null());
+            }
+            if !self.transfer_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.transfer_fence, std::ptr::null());
+            }
+            if !self.transfer_pool.is_null() {
+                (self.fns.destroy_pool)(self.device, self.transfer_pool, std::ptr::null());
             }
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
@@ -6099,13 +7889,56 @@ unsafe fn transmute<T>(ptr: Pfn) -> T {
 }
 
 fn parse_mem_props(raw: &[u8]) -> MemProps {
+    if raw.len() < 4 {
+        return MemProps {
+            count: 0,
+            types: [0; 32],
+            device_local_bytes: 0,
+        };
+    }
     let count = u32::from_ne_bytes(raw[0..4].try_into().unwrap()).min(32);
     let mut types = [0u32; 32];
     for i in 0..count as usize {
         let offset = 4 + i * 8;
+        if raw.len() < offset + 4 {
+            break;
+        }
         types[i] = u32::from_ne_bytes(raw[offset..offset + 4].try_into().unwrap());
     }
-    MemProps { count, types }
+    let mut device_local_bytes = 0u64;
+    if raw.len() >= 264 {
+        let heap_count = u32::from_ne_bytes(raw[260..264].try_into().unwrap()).min(16);
+        for index in 0..heap_count as usize {
+            let base = 264 + index * 16;
+            if raw.len() < base + 12 {
+                break;
+            }
+            let size = u64::from_ne_bytes(raw[base..base + 8].try_into().unwrap());
+            let flags = u32::from_ne_bytes(raw[base + 8..base + 12].try_into().unwrap());
+            if flags & 1 != 0 {
+                device_local_bytes = device_local_bytes.saturating_add(size);
+            }
+        }
+    }
+    MemProps {
+        count,
+        types,
+        device_local_bytes,
+    }
+}
+
+fn extension_listed(bytes: &[u8], count: u32, name: &[u8]) -> bool {
+    for index in 0..count as usize {
+        let start = index * 260;
+        let end = start + name.len();
+        if bytes.len() <= end {
+            return false;
+        }
+        if &bytes[start..end] == name && bytes[end] == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 fn load_fns(
@@ -6172,6 +8005,8 @@ fn load_fns(
             cmd_copy_to_buffer: d!("vkCmdCopyImageToBuffer"),
             cmd_copy_buffer: d!("vkCmdCopyBuffer"),
             cmd_copy_to_image: d!("vkCmdCopyBufferToImage"),
+            cmd_blit: d!("vkCmdBlitImage"),
+            cmd_clear_color: d!("vkCmdClearColorImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
             create_fence: d!("vkCreateFence"),
@@ -6636,5 +8471,30 @@ mod gi_metrics_launch {
         );
         assert!(check_gi_metrics_arg("--gi-metrics", None).is_ok());
         assert!(check_gi_metrics_arg("--gi-metrics=off", None).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod memory_props {
+    use super::{extension_listed, parse_mem_props};
+
+    #[test]
+    fn a_device_local_heap_is_counted_and_a_host_heap_is_not() {
+        let mut raw = vec![0u8; 520];
+        raw[0..4].copy_from_slice(&1u32.to_ne_bytes());
+        raw[4..8].copy_from_slice(&1u32.to_ne_bytes());
+        raw[260..264].copy_from_slice(&2u32.to_ne_bytes());
+        raw[264..272].copy_from_slice(&1000u64.to_ne_bytes());
+        raw[272..276].copy_from_slice(&1u32.to_ne_bytes());
+        raw[280..288].copy_from_slice(&50u64.to_ne_bytes());
+        let props = parse_mem_props(&raw);
+        assert_eq!(props.count, 1);
+        assert_eq!(props.types[0], 1);
+        assert_eq!(props.device_local_bytes, 1000);
+        let name = b"VK_EXT_memory_budget";
+        let mut listed = vec![0u8; 260];
+        listed[..name.len()].copy_from_slice(name);
+        assert!(extension_listed(&listed, 1, name));
+        assert!(!extension_listed(&listed, 1, b"VK_KHR_swapchain"));
     }
 }

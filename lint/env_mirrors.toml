@@ -1351,6 +1351,61 @@ kind = "mirror"
 detail = "--out"
 
 [[var]]
+name = "GENOS_MATERIAL_ANISOTROPY"
+kind = "mirror"
+detail = "--material-anisotropy"
+
+[[var]]
+name = "GENOS_MATERIAL_DWELL_FRAMES"
+kind = "mirror"
+detail = "--material-dwell-frames"
+
+[[var]]
+name = "GENOS_MATERIAL_EMISSIVE_PROMOTE"
+kind = "mirror"
+detail = "--material-emissive-promote"
+
+[[var]]
+name = "GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX"
+kind = "mirror"
+detail = "--material-emissive-promote-flux"
+
+[[var]]
+name = "GENOS_MATERIAL_HEADROOM_FLOOR_MB"
+kind = "mirror"
+detail = "--material-headroom-floor-mb"
+
+[[var]]
+name = "GENOS_MATERIAL_HEADROOM_PERCENT"
+kind = "mirror"
+detail = "--material-headroom-percent"
+
+[[var]]
+name = "GENOS_MATERIAL_MIP_BIAS"
+kind = "mirror"
+detail = "--material-mip-bias"
+
+[[var]]
+name = "GENOS_MATERIAL_OCCLUSION"
+kind = "mirror"
+detail = "--material-occlusion"
+
+[[var]]
+name = "GENOS_MATERIAL_RESIDENCY_MB"
+kind = "mirror"
+detail = "--material-residency-mb"
+
+[[var]]
+name = "GENOS_MATERIAL_TEXTURE_QUALITY"
+kind = "mirror"
+detail = "--material-texture-quality"
+
+[[var]]
+name = "GENOS_MATERIAL_WATCH"
+kind = "mirror"
+detail = "--watch"
+
+[[var]]
 name = "GENOS_MATERIALS_GATE_CASE"
 kind = "mirror"
 detail = "--case"

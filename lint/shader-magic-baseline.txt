@@ -4,7 +4,7 @@
 crates/gpuref/shaders/path.comp 19
 crates/render/shaders/dither.glsl 4
 crates/render/shaders/fxaa.comp 30
-crates/render/shaders/gbuffer.frag 14
+crates/render/shaders/gbuffer.frag 8
 crates/render/shaders/lighting_atrous.comp 1
 crates/render/shaders/lighting_cache.comp 89
 crates/render/shaders/lighting_cache.glsl 338
@@ -21,7 +21,7 @@ crates/render/shaders/lighting_place.comp 8
 crates/render/shaders/lighting_screen.comp 10
 crates/render/shaders/lighting_sun_compose.comp 43
 crates/render/shaders/lighting_trace.comp 12
-crates/render/shaders/material_atlas.glsl 10
+crates/render/shaders/material_atlas.glsl 9
 crates/render/shaders/mesh_field.glsl 18
 crates/render/shaders/overlay.frag 10
 crates/render/shaders/scene_rays.glsl 46
