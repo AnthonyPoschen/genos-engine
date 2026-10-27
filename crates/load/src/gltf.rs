@@ -18,7 +18,8 @@
 //! metallic-roughness materials, decoded images (PNG or JPEG), and one instance
 //! per node that carries a mesh, with the node's world matrix. Triangle strips
 //! and fans become lists; points and lines are skipped. A primitive without
-//! normals gets flat normals, as the specification asks.
+//! normals gets flat normals, as the specification asks. `TEXCOORD_0` through
+//! `TEXCOORD_7` are kept. A slot's `texCoord` selects the set.
 //!
 //! Supported extensions: `KHR_materials_emissive_strength`. A file that
 //! requires any other extension (Draco, meshopt, KHR_texture_basisu, ...) is
@@ -27,7 +28,21 @@
 use genos_json::Value;
 
 use crate::error::LoadError;
+use crate::mips::{mip_chain, Mip, MipSpace};
+use crate::pages::miss_colour;
 use crate::png::Image;
+
+/// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
+const TEXCOORD_KEYS: [&str; 8] = [
+    "TEXCOORD_0",
+    "TEXCOORD_1",
+    "TEXCOORD_2",
+    "TEXCOORD_3",
+    "TEXCOORD_4",
+    "TEXCOORD_5",
+    "TEXCOORD_6",
+    "TEXCOORD_7",
+];
 
 /// A loaded glTF scene.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,6 +52,14 @@ pub struct GltfScene {
     pub images: Vec<Image>,
     /// Every node with a mesh in the chosen scene, in depth-first node order.
     pub instances: Vec<MeshInstance>,
+    /// Mip chain for each image, finest first, down to 1×1. Parallel to
+    /// [`Self::images`] after a file load. A scene built by hand leaves this empty.
+    pub mips: Vec<Vec<Mip>>,
+    /// Bytes still resident after the material cap. 0 on a scene built by hand.
+    pub resident_bytes: u64,
+    /// Colour a sample uses when the finest mip of that image was dropped.
+    /// Parallel to [`Self::images`] after a file load.
+    pub mip_fallback: Vec<[f32; 4]>,
 }
 
 /// One glTF mesh: a list of primitives, each with one material.
@@ -51,8 +74,12 @@ pub struct GltfMesh {
 pub struct Primitive {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
-    /// `TEXCOORD_0`, or empty.
+    /// `TEXCOORD_0`, or empty. Set 0 of [`Self::texcoord_sets`] when that set is present.
     pub texcoords: Vec<[f32; 2]>,
+    /// `TEXCOORD_0` through `TEXCOORD_7`, indexed by set number.
+    /// An absent set is an empty vec, including a gap below a later set.
+    /// A present set has one UV per vertex.
+    pub texcoord_sets: Vec<Vec<[f32; 2]>>,
     /// `TANGENT` (xyz and handedness w), or empty.
     pub tangents: Vec<[f32; 4]>,
     /// Three per triangle.
@@ -153,14 +180,11 @@ impl Default for PbrMaterial {
 }
 
 impl PbrMaterial {
-    /// The diffuse albedo GI uses: base colour x (1 - metallic), ignoring textures.
+    /// Diffuse albedo with no textures: base colour times (1 - metallic).
+    ///
+    /// Textured hits use [`crate::shade_uv`], which is this product per texel.
     pub fn diffuse_albedo(&self) -> [f32; 3] {
-        let k = 1.0 - self.metallic.clamp(0.0, 1.0);
-        [
-            self.base_color[0] * k,
-            self.base_color[1] * k,
-            self.base_color[2] * k,
-        ]
+        crate::shade_uv(self, &[], [0.0, 0.0]).diffuse_albedo()
     }
 }
 
@@ -335,12 +359,70 @@ pub(crate) fn decode_gltf(
             stack.push((index(c)?, world, depth + 1));
         }
     }
+    let mips = cook_mips(&images, &materials);
+    let (resident_bytes, mip_fallback) = fit_mips(&mips);
     Ok(GltfScene {
         meshes,
         materials,
         images,
         instances,
+        mips,
+        resident_bytes,
+        mip_fallback,
     })
+}
+
+/// The coarsest mip is resident at load. Finer mips wait for the view.
+fn fit_mips(mips: &[Vec<Mip>]) -> (u64, Vec<[f32; 4]>) {
+    let mut bytes = 0u64;
+    let fallback = mips
+        .iter()
+        .map(|chain| {
+            let Some(mip) = chain.last() else {
+                return [1.0; 4];
+            };
+            bytes = bytes.saturating_add(u64::try_from(mip.pixels.len()).unwrap_or(0));
+            miss_colour(&[Some(level_colour(mip))], 0, [1.0; 4])
+        })
+        .collect();
+    (bytes, fallback)
+}
+
+fn level_colour(mip: &Mip) -> [f32; 4] {
+    if mip.pixels.len() < 4 {
+        return [1.0; 4];
+    }
+    [
+        f32::from(mip.pixels[0]) / 255.0,
+        f32::from(mip.pixels[1]) / 255.0,
+        f32::from(mip.pixels[2]) / 255.0,
+        f32::from(mip.pixels[3]) / 255.0,
+    ]
+}
+
+fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
+    let mut spaces = vec![MipSpace::Linear; images.len()];
+    for material in materials {
+        paint_space(&mut spaces, material.metallic_roughness_texture, MipSpace::Linear);
+        paint_space(&mut spaces, material.occlusion_texture, MipSpace::Linear);
+        paint_space(&mut spaces, material.base_color_texture, MipSpace::Srgb);
+        paint_space(&mut spaces, material.emissive_texture, MipSpace::Srgb);
+        paint_space(&mut spaces, material.normal_texture, MipSpace::Normal);
+    }
+    images
+        .iter()
+        .zip(spaces)
+        .map(|(image, space)| mip_chain(image, space))
+        .collect()
+}
+
+fn paint_space(spaces: &mut [MipSpace], slot: Option<TextureSlot>, space: MipSpace) {
+    let Some(slot) = slot else {
+        return;
+    };
+    if let Some(entry) = spaces.get_mut(slot.image) {
+        *entry = space;
+    }
 }
 
 fn split_glb(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), LoadError> {
@@ -722,19 +804,35 @@ impl Reader<'_> {
             .map(|a| self.floats(a))
             .transpose()?
             .unwrap_or_default();
-        let texcoords: Vec<[f32; 2]> = attr("TEXCOORD_0")?
-            .map(|a| self.floats(a))
-            .transpose()?
-            .unwrap_or_default();
         let tangents: Vec<[f32; 4]> = attr("TANGENT")?
             .map(|a| self.floats(a))
             .transpose()?
             .unwrap_or_default();
-        for len in [normals.len(), texcoords.len(), tangents.len()] {
+        for len in [normals.len(), tangents.len()] {
             if len != 0 && len != n {
                 return Err(LoadError::Unrecognized);
             }
         }
+        // A missing lower set stays an empty vec so the index is the set number.
+        let mut texcoord_sets = Vec::new();
+        for (set, key) in TEXCOORD_KEYS.iter().enumerate() {
+            let Some(accessor) = attr(key)? else {
+                continue;
+            };
+            let coords: Vec<[f32; 2]> = self.floats(accessor)?;
+            if coords.len() != n {
+                return Err(LoadError::Unrecognized);
+            }
+            while texcoord_sets.len() < set {
+                texcoord_sets.push(Vec::new());
+            }
+            texcoord_sets.push(coords);
+        }
+        let texcoords = texcoord_sets
+            .first()
+            .filter(|set| !set.is_empty())
+            .cloned()
+            .unwrap_or_default();
         let raw: Vec<u32> = match opt_usize(p, "indices")? {
             Some(a) => self.read(a, 1)?.into_iter().map(|i| i as u32).collect(),
             None => (0..n as u32).collect(),
@@ -769,6 +867,7 @@ impl Reader<'_> {
             positions,
             normals: Vec::new(),
             texcoords,
+            texcoord_sets,
             tangents,
             indices,
             material,
@@ -786,6 +885,7 @@ impl Reader<'_> {
 fn flat_shaded(p: Primitive) -> Primitive {
     let mut out = Primitive {
         material: p.material,
+        texcoord_sets: vec![Vec::new(); p.texcoord_sets.len()],
         ..Primitive::default()
     };
     for tri in p.indices.chunks_exact(3) {
@@ -809,6 +909,11 @@ fn flat_shaded(p: Primitive) -> Primitive {
             out.normals.push(n);
             if !p.texcoords.is_empty() {
                 out.texcoords.push(p.texcoords[i as usize]);
+            }
+            for (set_index, set) in p.texcoord_sets.iter().enumerate() {
+                if !set.is_empty() {
+                    out.texcoord_sets[set_index].push(set[i as usize]);
+                }
             }
             if !p.tangents.is_empty() {
                 out.tangents.push(p.tangents[i as usize]);

@@ -9,6 +9,7 @@ pub mod baseline;
 pub mod catalog;
 pub mod config;
 pub mod flip;
+pub mod layering;
 pub mod metrics;
 pub mod paths;
 pub mod picture;

@@ -170,8 +170,11 @@ because a mapped window missed `xdg_wm_base.ping`.
 The ping is answered only inside the seat dispatch. A scene load runs on
 `genos-scene-load` and the frame draws a loading picture. Device waits and
 pipeline compiles keep a side thread answering pings, and that thread is joined
-before the next present. Quit destroys the window, skips the device idle, and
-exits. The old scene is dropped on `genos-retire`.
+before the next present. Quit joins the script thread (it is still freeing the
+rhai engine after the report and the `quit` reply), stops the MCP listener,
+idles the device while the window is mapped, destroys the device on the frame
+thread, then destroys the window and exits. The old scene is dropped on
+`genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
 pump gap (a synchronous load, a device wait, or a teardown). The probes are the
@@ -232,7 +235,9 @@ Every command is a function taking a map: `capture(#{ mode: "albedo" })`. Short
 forms: `wait(n)`, `step(n)`, `view("direct")`, `knob(name, value)`, `knob(name)`,
 `shot(name)`, `shot(name, mode)`, `log(text)`, `out_dir()`. Checks: `check(bool,
 msg)`, `require(bool, msg)` (stops the script), `check_lt(a, b, msg)`,
-`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`.
+`check_gt(a, b, msg)`, `check_near(a, b, tol, msg)`. `wait(n)` asks for one
+second per frame, and at least two minutes, so a 600-frame soak finishes
+on lavapipe. The cap is one hour.
 
 ```rhai
 time(#{ pause: true });
@@ -605,7 +610,8 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   in the tree are `genos-stress --proof` and `genos-lighting --headless`.
 - The reference knows floors, ceilings, walls and solids. It does not trace fog,
   particle cards, textures or per-material reflectance and colour mix (the stress
-  scene uses the defaults). It does not cut lamps at their range as the engine does.
+  scene uses the defaults). Participating media is phase 7 of
+  [fog and volumetric lighting](fog-and-volumetric-lighting-design.md). It does not cut lamps at their range as the engine does.
 - Stress at 160x90 needs about 3000 paths per pixel (4 minutes on 8 cores) for 3 %
   noise. Interiors lit only by bounce light converge slowest.
 - `nobounce` is `full:0`: sky light reaches the picture only through probes, so

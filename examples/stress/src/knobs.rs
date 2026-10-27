@@ -13,9 +13,10 @@
 //! sliders all set them through here.
 
 use genos_debug::{Host, Knob};
+use genos_load::{MaterialSettings, TextureQuality};
 use genos_scene::{
-    AmbientMode, LampPickMode, LightingPreset, LightingSettings, Scene, ShadowFilter,
-    SurfaceCacheBlend,
+    AmbientMode, FogInspect, FogSettings, LampPickMode, LightingPreset, LightingSettings, Scene,
+    ShadowFilter, SurfaceCacheBlend,
 };
 
 use crate::building::{self, Layout};
@@ -134,12 +135,22 @@ impl Host for Stage {
                 &["spread", "first"],
             ),
         ];
+        knobs.extend(material_knobs(&self.materials));
         knobs.extend(lighting_knobs(lighting));
+        knobs.extend(fog_knobs(&self.world.scene.fog));
         knobs
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
+        if apply_fog_knob(&mut self.world.scene.fog, name, v)? {
+            return Ok(());
+        }
         if apply_lighting_knob(&mut self.world.scene.lighting, name, v)? {
+            self.apply();
+            return Ok(());
+        }
+        if apply_material_knob(&mut self.materials, name, v)? {
+            self.materials_dirty = true;
             self.apply();
             return Ok(());
         }
@@ -176,6 +187,127 @@ impl Host for Stage {
         self.apply();
         Ok(())
     }
+}
+
+fn quality_index(quality: TextureQuality) -> usize {
+    match quality {
+        TextureQuality::Ultra => 0,
+        TextureQuality::High => 1,
+        TextureQuality::Medium => 2,
+        TextureQuality::Low => 3,
+    }
+}
+
+fn material_knobs(materials: &MaterialSettings) -> Vec<Knob> {
+    vec![
+        Knob::choice(
+            "texture_quality",
+            "texture_quality",
+            quality_index(materials.texture_quality),
+            &["ultra", "high", "medium", "low"],
+        ),
+        Knob::number(
+            "mip_bias",
+            "mip_bias",
+            f64::from(materials.mip_bias),
+            (-8.0, 8.0),
+            0.5,
+            "",
+        ),
+        Knob::number(
+            "anisotropy",
+            "anisotropy",
+            f64::from(materials.anisotropy),
+            (1.0, 16.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("occlusion", "occlusion", materials.occlusion),
+        Knob::switch(
+            "emissive_promote",
+            "emissive_promote",
+            materials.emissive_promote,
+        ),
+        Knob::number(
+            "emissive_promote_flux",
+            "emissive_promote_flux",
+            f64::from(materials.emissive_promote_flux),
+            (0.0, 1.0),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "headroom_percent",
+            "headroom_percent",
+            f64::from(materials.headroom_percent),
+            (0.0, 50.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "headroom_floor_mb",
+            "headroom_floor_mb",
+            f64::from(materials.headroom_floor_mb),
+            (0.0, 4096.0),
+            16.0,
+            "",
+        ),
+        Knob::number(
+            "dwell_frames",
+            "dwell_frames",
+            f64::from(materials.dwell_frames),
+            (0.0, 120.0),
+            1.0,
+            "",
+        ),
+    ]
+}
+
+fn apply_material_knob(materials: &mut MaterialSettings, name: &str, v: f64) -> Result<bool, String> {
+    let whole = |value: f64| {
+        if value < 0.0 {
+            0
+        } else {
+            let mut out = 0u32;
+            let mut left = value;
+            while left >= 1.0 && out < u32::MAX {
+                out += 1;
+                left -= 1.0;
+            }
+            out
+        }
+    };
+    let key = match name {
+        "texture_quality" => {
+            let label = ["ultra", "high", "medium", "low"]
+                .get(whole(v) as usize)
+                .copied()
+                .unwrap_or("ultra");
+            materials.set_key("texture_quality", label)?;
+            return Ok(true);
+        }
+        "mip_bias" => "mip_bias",
+        "anisotropy" => "anisotropy",
+        "occlusion" => {
+            materials.set_key("occlusion", if v >= 0.5 { "on" } else { "off" })?;
+            return Ok(true);
+        }
+        "emissive_promote" => {
+            materials.set_key("emissive_promote", if v >= 0.5 { "on" } else { "off" })?;
+            return Ok(true);
+        }
+        "emissive_promote_flux" => "emissive_promote_flux",
+        "headroom_percent" => "headroom_percent",
+        "headroom_floor_mb" => "headroom_floor_mb",
+        "dwell_frames" => "dwell_frames",
+        _ => return Ok(false),
+    };
+    let text = match key {
+        "mip_bias" | "emissive_promote_flux" => format!("{v}"),
+        _ => format!("{}", whole(v)),
+    };
+    materials.set_key(key, &text)?;
+    Ok(true)
 }
 
 /// The lighting knobs shared with the lighting debug binary.
@@ -552,6 +684,133 @@ pub fn apply_lighting_knob(
     Ok(true)
 }
 
+/// Fog keys for the lighting debug page. Labels are the keys.
+pub fn fog_knobs(fog: &FogSettings) -> Vec<Knob> {
+    vec![
+        Knob::switch("enabled", "enabled", fog.enabled),
+        Knob::number(
+            "density",
+            "density",
+            f64::from(fog.density),
+            (0.0, 4.0),
+            0.001,
+            "",
+        ),
+        Knob::number(
+            "height",
+            "height",
+            f64::from(fog.height),
+            (-64.0, 256.0),
+            0.1,
+            "",
+        ),
+        Knob::number(
+            "thickness",
+            "thickness",
+            f64::from(fog.thickness),
+            (0.1, 200.0),
+            0.1,
+            "",
+        ),
+        Knob::number(
+            "albedo",
+            "albedo",
+            f64::from(fog.albedo),
+            (0.0, 1.0),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "phase_g",
+            "phase_g",
+            f64::from(fog.phase_g),
+            (-0.99, 0.99),
+            0.01,
+            "",
+        ),
+        Knob::switch("gi", "gi", fog.gi),
+        Knob::switch("history", "history", fog.history),
+        Knob::number(
+            "grid_width",
+            "grid_width",
+            f64::from(fog.grid_width),
+            (0.0, 256.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "grid_height",
+            "grid_height",
+            f64::from(fog.grid_height),
+            (0.0, 256.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "grid_slices",
+            "grid_slices",
+            f64::from(fog.grid_slices),
+            (0.0, 64.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "samples",
+            "samples",
+            f64::from(fog.samples),
+            (0.0, 691_200.0),
+            1.0,
+            "",
+        ),
+        Knob::choice(
+            "fog_view",
+            "view",
+            fog.inspect.index(),
+            &FogInspect::NAMES,
+        ),
+    ]
+}
+
+/// Write one fog knob through [`FogSettings::set_key`].
+///
+/// Returns false when `name` is not a fog knob.
+pub fn apply_fog_knob(settings: &mut FogSettings, name: &str, v: f64) -> Result<bool, String> {
+    let switch = if v >= 0.5 { "on" } else { "off" };
+    match name {
+        "enabled" => settings.set_key("enabled", switch)?,
+        "density" => settings.set_key("density", &format!("{v}"))?,
+        "height" => settings.set_key("height", &format!("{v}"))?,
+        "thickness" => settings.set_key("thickness", &format!("{v}"))?,
+        "albedo" => settings.set_key("albedo", &format!("{v}"))?,
+        "phase_g" => settings.set_key("phase_g", &format!("{v}"))?,
+        "gi" => settings.set_key("gi", switch)?,
+        "history" => settings.set_key("history", switch)?,
+        "grid_width" => settings.set_key("grid_width", &format!("{v:.0}"))?,
+        "grid_height" => settings.set_key("grid_height", &format!("{v:.0}"))?,
+        "grid_slices" => settings.set_key("grid_slices", &format!("{v:.0}"))?,
+        "samples" => settings.set_key("samples", &format!("{v:.0}"))?,
+        "fog_view" => {
+            let label = FogInspect::NAMES
+                .get(choice_index(v, FogInspect::NAMES.len()))
+                .copied()
+                .unwrap_or("extinction");
+            settings.set_key("view", label)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn choice_index(value: f64, len: usize) -> usize {
+    let mut index = 0;
+    let mut cursor = 0.0;
+    while index + 1 < len && value >= cursor + 0.5 {
+        index += 1;
+        cursor += 1.0;
+    }
+    index
+}
+
 fn on_off(v: f64) -> String {
     if v >= 0.5 {
         "on".into()
@@ -641,5 +900,19 @@ mod tests {
                 .value;
             stage.set_knob(name, value).expect(name);
         }
+    }
+
+    #[test]
+    fn a_fog_knob_writes_the_setting_and_history_stays_a_flag() {
+        let mut fog = FogSettings::default();
+        assert!(apply_fog_knob(&mut fog, "enabled", 1.0).expect("enabled"));
+        assert!(apply_fog_knob(&mut fog, "density", 0.08).expect("density"));
+        assert!(apply_fog_knob(&mut fog, "history", 1.0).expect("history"));
+        assert!(apply_fog_knob(&mut fog, "fog_view", 3.0).expect("view"));
+        assert!(fog.enabled);
+        assert!((fog.density - 0.08).abs() < 1.0e-4);
+        assert!(fog.history);
+        assert_eq!(fog.inspect_line(), "weight=0");
+        assert!(!apply_fog_knob(&mut fog, "lighting_gi", 1.0).expect("skip"));
     }
 }

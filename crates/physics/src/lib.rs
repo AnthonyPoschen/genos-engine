@@ -1,9 +1,27 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::large_types_passed_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::neg_cmp_op_on_partial_ord, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_enum_variant,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_types_passed_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! One collision step for dynamic bodies.
 //!
@@ -14,8 +32,17 @@
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
 
+mod ccd;
 mod contact;
+mod destruction;
 mod mesh;
+
+pub use destruction::{
+    allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
+    spawn_breakable, CHANGE_RECORDS_AWAIT_LIGHTING, ChunkChange, ChunkChangeKind,
+    DestructionReport,
+};
+pub use genos_fracture::{cook, Asset, CookRequest};
 
 use genos_math::{Quat, Vec3};
 
@@ -167,6 +194,60 @@ pub struct Spring {
     pub damping: f32,
 }
 
+/// How far one body's collision looks ahead in a single step.
+///
+/// Whether the step still moves a body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Presence {
+    /// Forces, contact, and integration run.
+    Live,
+    /// Debris that has slept. The body stays in the list.
+    Asleep,
+    /// Removed from the step. The index stays so other bodies do not move.
+    Culled,
+}
+
+/// `Discrete` uses the bounds at the current pose. `Speculative` grows the
+/// contact distance by `min(speed * dt, speculative margin)` and lets the
+/// solver stop the body. `Swept` advances that body's pairs to the time of
+/// impact. Bodies that are not in a swept pair keep the one integration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotionQuality {
+    /// Overlap that already exists.
+    Discrete,
+    /// A margin on the approach. The bullet path.
+    Speculative,
+    /// Time of impact on this body's pairs. Other bodies keep the one integration.
+    Swept,
+}
+
+/// Counters from the last `step`. A later step replaces them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StepStats {
+    /// A body asked for speculative or swept collision.
+    pub ccd_applied: bool,
+    /// Swept pairs clamped because 16 advances left a gap above 1 mm.
+    pub toi_failed: u32,
+    /// Swept pairs that used the speculative margin because the pair cap was full.
+    pub toi_deferred: u32,
+    /// Contacts between two dynamic bodies that stored a normal impulse.
+    pub dynamic_pair_impulses: u32,
+    /// Advances taken by fast pairs whose travel exceeded the smaller radius.
+    pub pair_slices: u32,
+}
+
+impl StepStats {
+    const fn zero() -> Self {
+        Self {
+            ccd_applied: false,
+            toi_failed: 0,
+            toi_deferred: 0,
+            dynamic_pair_impulses: 0,
+            pair_slices: 0,
+        }
+    }
+}
+
 /// A simulated mass. Position and orientation use the math types.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Body {
@@ -182,6 +263,16 @@ pub struct Body {
     pub motor: bool,
     /// Desired horizontal velocity. Contact can remove the blocked part.
     pub wish: Vec3,
+    /// `Discrete` unless a caller asks for a bullet margin or a swept pair.
+    pub motion: MotionQuality,
+    /// Normal impulse stored on this body during the last `step`. The next step replaces it.
+    pub normal_impulse: f32,
+    /// World-space angular velocity, radians per second.
+    pub angular_velocity: Vec3,
+    /// `Live` until debris sleeps or a culled chunk is tombstoned.
+    pub presence: Presence,
+    /// Spawned chunk under the debris volume. Two debris bodies do not collide.
+    pub debris: bool,
 }
 
 impl Body {
@@ -233,7 +324,24 @@ impl Body {
             spring: None,
             motor: false,
             wish: Vec3::ZERO,
+            motion: MotionQuality::Discrete,
+            normal_impulse: 0.0,
+            angular_velocity: Vec3::ZERO,
+            presence: Presence::Live,
+            debris: false,
         }
+    }
+
+    /// `½ ωᵀ I ω` in joules. `I` is diagonal in the body frame. Zero when `ω` is zero.
+    pub fn rotational_energy(self) -> f32 {
+        if self.inverse_mass == 0.0 || self.angular_velocity.length_squared() <= 0.0 {
+            return 0.0;
+        }
+        let local = conjugate(self.orientation).rotate(self.angular_velocity);
+        let inertia = inertia_diagonal(self);
+        0.5 * (inertia.x * local.x * local.x
+            + inertia.y * local.y * local.y
+            + inertia.z * local.z * local.z)
     }
 
     pub fn mass(self) -> f32 {
@@ -250,8 +358,23 @@ impl Body {
 pub struct World {
     pub bodies: Vec<Body>,
     pub gravity: Vec3,
+    /// Cap on `min(speed * dt, margin)` for `MotionQuality::Speculative`. Default 0.25 m.
+    pub speculative_margin: f32,
+    /// Swept pairs past this count use the speculative margin for that step. Default 8.
+    pub swept_pair_cap: u32,
+    /// Fracture assets. Empty for a world that does not break.
+    pub(crate) breakables: Vec<destruction::Breakable>,
+    /// Chunk bounds records for this step, in `(breakable, chunk)` order.
+    /// Cleared at the start of the next `step`. Lighting does not read them.
+    pub change_records: Vec<destruction::ChunkChange>,
+    /// A client emits [`change_records`](Self::change_records). A headless server sets this false.
+    pub emit_change_records: bool,
+    /// Replaced at the start of each `step`.
+    pub step_stats: StepStats,
     /// The contact pass's lists, kept so a step after the first does not allocate.
     pairs: contact::Pairs,
+    /// Swept-pair scratch, kept so a later step does not allocate.
+    ccd_scratch: ccd::CcdScratch,
 }
 
 /// Two worlds are equal when their bodies and gravity are.
@@ -266,7 +389,14 @@ impl World {
         Self {
             bodies: Vec::new(),
             gravity,
+            speculative_margin: 0.25,
+            swept_pair_cap: 8,
+            breakables: Vec::new(),
+            change_records: Vec::new(),
+            emit_change_records: true,
+            step_stats: StepStats::zero(),
             pairs: contact::Pairs::new(),
+            ccd_scratch: ccd::CcdScratch::new(),
         }
     }
 
@@ -282,27 +412,163 @@ pub fn step(world: &mut World, dt: f32) {
     if !(dt > 0.0) {
         return;
     }
+    world.change_records.clear();
     let gravity = world.gravity;
     for body in &mut world.bodies {
+        body.normal_impulse = 0.0;
         apply_forces(body, gravity, dt);
         if body.motor {
             body.velocity.x = body.wish.x;
             body.velocity.z = body.wish.z;
         }
     }
-    for body in &mut world.bodies {
-        if body.inverse_mass == 0.0 {
+    world.step_stats = StepStats::zero();
+    let speculative = world
+        .bodies
+        .iter()
+        .any(|body| body.motion == MotionQuality::Speculative);
+    let swept = world
+        .bodies
+        .iter()
+        .any(|body| body.motion == MotionQuality::Swept);
+    world.step_stats.ccd_applied = speculative || swept;
+    ccd::prepare_swept(
+        &world.bodies,
+        &mut world.ccd_scratch,
+        world.swept_pair_cap,
+        dt,
+        &mut world.step_stats,
+    );
+    if speculative {
+        ccd::speculative(&mut world.bodies, dt, world.speculative_margin);
+    }
+    for index in 0..world.bodies.len() {
+        let Some(body) = world.bodies.get_mut(index) else {
+            continue;
+        };
+        if body.inverse_mass == 0.0 || world.ccd_scratch.covers(index) {
             continue;
         }
-        body.position += body.velocity * dt;
+        if body.motion == MotionQuality::Swept {
+            continue;
+        }
+        integrate_body(body, dt);
     }
+    ccd::resolve_swept(
+        &mut world.bodies,
+        &world.ccd_scratch,
+        dt,
+        world.speculative_margin,
+        &mut world.step_stats,
+    );
     for _ in 0..4 {
-        contact::collide(&mut world.bodies, &mut world.pairs);
+        let hits = contact::collide(&mut world.bodies, &mut world.pairs);
+        world.step_stats.dynamic_pair_impulses =
+            world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    }
+    if !world.breakables.is_empty() {
+        destruction::after_step(world, dt);
     }
 }
 
+pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || !(dt > 0.0) {
+        return;
+    }
+    body.position += body.velocity * dt;
+    let spin = body.angular_velocity;
+    if spin.length_squared() <= 0.0 {
+        return;
+    }
+    // World-space ω: dq/dt = ½ ω q.
+    let omega = Quat::new(spin.x, spin.y, spin.z, 0.0);
+    let delta = quat_mul(omega, body.orientation) * (0.5 * dt);
+    body.orientation = (body.orientation + delta).normalize();
+}
+
+fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
+    Quat::new(
+        lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
+        lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
+        lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
+        lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z,
+    )
+}
+
+fn conjugate(q: Quat) -> Quat {
+    Quat::new(-q.x, -q.y, -q.z, q.w)
+}
+
+/// Body-frame principal moments `(Ixx, Iyy, Izz)`.
+fn inertia_diagonal(body: Body) -> Vec3 {
+    let mass = body.mass();
+    if !mass.is_finite() {
+        return Vec3::ZERO;
+    }
+    match body.shape {
+        Shape::Sphere { radius } => {
+            let moment = 0.4 * mass * radius * radius;
+            Vec3::new(moment, moment, moment)
+        }
+        Shape::Box { half_extents } => box_inertia(mass, half_extents),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => capsule_inertia(mass, radius, half_height),
+        Shape::Plane { .. } => Vec3::ZERO,
+        Shape::Mesh(mesh) => {
+            let radius = mesh_extent(&mesh);
+            let moment = 0.4 * mass * radius * radius;
+            Vec3::new(moment, moment, moment)
+        }
+    }
+}
+
+/// `Ixx = m/3 (hy² + hz²)` with half extents, which is `m/12` of the full side squares.
+fn box_inertia(mass: f32, half: Vec3) -> Vec3 {
+    let scale = mass / 3.0;
+    Vec3::new(
+        scale * (half.y * half.y + half.z * half.z),
+        scale * (half.x * half.x + half.z * half.z),
+        scale * (half.x * half.x + half.y * half.y),
+    )
+}
+
+fn capsule_inertia(mass: f32, radius: f32, half_height: f32) -> Vec3 {
+    let r = radius.max(0.0);
+    let h = half_height.max(0.0) * 2.0;
+    let cylinder = std::f32::consts::PI * r * r * h;
+    let hemispheres = (4.0 / 3.0) * std::f32::consts::PI * r * r * r;
+    let volume = cylinder + hemispheres;
+    if volume <= f32::MIN_POSITIVE {
+        return Vec3::ZERO;
+    }
+    let cylinder_mass = mass * (cylinder / volume);
+    let sphere_mass = mass * (hemispheres / volume);
+    let axial = 0.5 * cylinder_mass * r * r + 0.4 * sphere_mass * r * r;
+    let perp = cylinder_mass * (0.25 * r * r + h * h / 12.0)
+        + sphere_mass * (0.4 * r * r + 0.5 * h * h + 0.375 * h * r);
+    Vec3::new(perp, axial, perp)
+}
+
+fn mesh_extent(mesh: &Mesh) -> f32 {
+    let mut far = 0.0_f32;
+    for piece in mesh.pieces() {
+        let radius = match piece {
+            Piece::Cuboid { center, half } => center.length() + half.length(),
+            Piece::Hull(hull) => hull
+                .verts
+                .iter()
+                .take(usize::from(hull.vert_count))
+                .fold(0.0_f32, |best, vertex| best.max(vertex.length())),
+        };
+        far = far.max(radius);
+    }
+    far
+}
+
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
-    if body.inverse_mass == 0.0 {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 {
         return;
     }
     let mut acceleration = gravity;

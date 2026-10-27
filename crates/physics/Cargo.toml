@@ -9,6 +9,11 @@ workspace = true
 
 [dependencies]
 genos-math = { path = "../math" }
+genos-fracture = { path = "../fracture" }
 
 [dev-dependencies]
 genos-math = { path = "../math" }
+
+[[test]]
+name = "metrics"
+harness = false

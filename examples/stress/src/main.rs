@@ -40,7 +40,7 @@ use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor,
+    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, FogSettings, Floor,
     FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
     PITCH_LIMIT,
 };
@@ -182,7 +182,30 @@ const USAGE: &str = "genos-stress [options]
   --lighting-catch-up N     kept-hit frames after a point lamp stops, 0..16
                             (GENOS_LIGHTING_CATCH_UP, default 4)
   --lighting-debug          read lighting counters (GENOS_LIGHTING_DEBUG).
-                            Not an fps run: it reads the GPU back every frame";
+                            Not an fps run: it reads the GPU back every frame
+  --material-texture-quality ultra|high|medium|low
+                            finest mip the player streams (default ultra on every preset).
+                            GENOS_MATERIAL_TEXTURE_QUALITY applies only when this is omitted.
+                            Quality does not follow VRAM size
+  --material-mip-bias N     mip bias (GENOS_MATERIAL_MIP_BIAS)
+  --material-anisotropy N   anisotropy (GENOS_MATERIAL_ANISOTROPY)
+  --material-occlusion on|off
+                            (GENOS_MATERIAL_OCCLUSION)
+  --material-emissive-promote on|off
+                            (GENOS_MATERIAL_EMISSIVE_PROMOTE)
+  --material-emissive-promote-flux F
+                            fraction of the brightest lamp (GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX)
+  --material-headroom-percent N
+                            percent of heapBudget left unused (default 5)
+                            (GENOS_MATERIAL_HEADROOM_PERCENT)
+  --material-headroom-floor-mb N
+                            minimum headroom in MiB (default 256)
+                            (GENOS_MATERIAL_HEADROOM_FLOOR_MB)
+  --material-dwell-frames N frames a new mip stays before it can be evicted (default 8)
+                            (GENOS_MATERIAL_DWELL_FRAMES)
+  --material-residency-mb N deprecated alias. Warns once and does not set a pool
+                            (GENOS_MATERIAL_RESIDENCY_MB)
+  --watch PATH              texture to reload (GENOS_MATERIAL_WATCH)";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
@@ -256,6 +279,8 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
+    /// Material flags, in order, including the values. The argument wins over the environment.
+    material_args: Vec<String>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -305,6 +330,39 @@ fn time_control(
         }
     }
     Ok((step, fixed_dt))
+}
+
+fn material_settings(args: &[String]) -> Result<genos_load::MaterialSettings, String> {
+    let mut settings = genos_load::MaterialSettings::default();
+    let quality = std::env::var("GENOS_MATERIAL_TEXTURE_QUALITY").ok();
+    let bias = std::env::var("GENOS_MATERIAL_MIP_BIAS").ok();
+    let anisotropy = std::env::var("GENOS_MATERIAL_ANISOTROPY").ok();
+    let occlusion = std::env::var("GENOS_MATERIAL_OCCLUSION").ok();
+    let promote = std::env::var("GENOS_MATERIAL_EMISSIVE_PROMOTE").ok();
+    let flux = std::env::var("GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX").ok();
+    let headroom = std::env::var("GENOS_MATERIAL_HEADROOM_PERCENT").ok();
+    let floor = std::env::var("GENOS_MATERIAL_HEADROOM_FLOOR_MB").ok();
+    let dwell = std::env::var("GENOS_MATERIAL_DWELL_FRAMES").ok();
+    let watch = std::env::var("GENOS_MATERIAL_WATCH").ok();
+    let residency = std::env::var("GENOS_MATERIAL_RESIDENCY_MB").ok();
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let _watch = settings.overlay_args(
+        &refs,
+        genos_load::SettingEnv {
+            texture_quality: quality.as_deref(),
+            mip_bias: bias.as_deref(),
+            anisotropy: anisotropy.as_deref(),
+            occlusion: occlusion.as_deref(),
+            promote: promote.as_deref(),
+            flux: flux.as_deref(),
+            headroom_percent: headroom.as_deref(),
+            headroom_floor_mb: floor.as_deref(),
+            dwell_frames: dwell.as_deref(),
+            watch: watch.as_deref(),
+            residency_mb: residency.as_deref(),
+        },
+    )?;
+    Ok(settings)
 }
 
 fn env<T: std::str::FromStr>(name: &str) -> Result<Option<T>, String> {
@@ -366,6 +424,7 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
+        material_args: Vec::new(),
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -477,6 +536,11 @@ fn options() -> Result<Options, String> {
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
+            }
+            other if genos_load::material_flag_needs_value(other) == Some(true) => {
+                let next = value()?;
+                opts.material_args.push(other.to_string());
+                opts.material_args.push(next);
             }
             other => match genos_render::unfilled_flag_needs_value(other) {
                 Some(true) => {
@@ -772,6 +836,7 @@ fn run() -> Result<(), String> {
     stage.sun_frozen = opts.freeze_sun;
     stage.sky_on = !opts.no_sky;
     stage.boxes_still = opts.still_boxes;
+    stage.materials = material_settings(&opts.material_args)?;
     if let Some(path) = &opts.scene {
         stage.set_room(genos_scene::load_path(path)?);
         stage.lamp_stop = opts.lamp_stop;
@@ -808,6 +873,8 @@ fn run() -> Result<(), String> {
     }
     let first = window.pump();
     let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    renderer.set_material_settings(stage.materials);
+    stage.materials_dirty = false;
     if !opts.gltf.is_empty() {
         match load_gltf_pumped(
             &mut window,
@@ -1023,6 +1090,10 @@ fn run() -> Result<(), String> {
             renderer.set_overlay_lines(&lines);
         }
 
+        if stage.materials_dirty {
+            renderer.set_material_settings(stage.materials);
+            stage.materials_dirty = false;
+        }
         let mut unfilled = renderer.unfilled();
         unfilled.count = stage.unfilled_count;
         unfilled.tint = stage.unfilled_tint;
@@ -1050,9 +1121,10 @@ fn run() -> Result<(), String> {
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if opts.step && dt > 0.0 {
             eprintln!(
-                "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {}",
+                "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {} {}",
                 run_started.elapsed().as_secs_f64(),
-                renderer.picture_settled()
+                renderer.picture_settled(),
+                renderer.material_stats().line()
             );
         }
         tools.after_draw(
@@ -1100,7 +1172,10 @@ fn run() -> Result<(), String> {
                     }
                 }
             }
-            println!("genos-stress frames={drawn}");
+            println!(
+                "genos-stress frames={drawn} {}",
+                renderer.material_stats().line()
+            );
             finish(window, renderer, code);
         }
     }
@@ -1133,6 +1208,8 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
 }

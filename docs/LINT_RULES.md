@@ -301,6 +301,7 @@ The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighti
 | `genos-no-gi-v1-term` | 2026-10-14 | GI v1 names stay in the glossary Historical section. Do not put radiance cascade, radiance field, lightmap, light probe, product "GI v2", `archive-v1.md`, ADR 0008, or `gi_v2_floor` back into Rust or shader code. | `lint/fail/gi_v1_term.rs` | 0. Extended 2026-10-14 for leftover product labels and deleted paths. |
 | `genos-no-hardcoded-display` | 2026-10-14 | HDMI-A-1 is the proof display and DP-1 is the main display. Only `--proof` selects a proof window, and it must not hard-code either connector. | `lint/fail/hardcoded_display.rs` | 0. |
 | `genos-no-hyprctl` | 2026-10-14 | A proof run does not resize or focus unrelated windows. Shipping code does not spawn `hyprctl`. | `lint/fail/hyprctl.rs` | 6 call sites, all in the pointer-lock test in `crates/window/src/lib.rs`. |
+| `genos-stream-no-wait` | 2026-10-26 | Streaming functions poll the transfer fence, including helpers such as `transfer_signaled`. They do not call `wait_for_fences`, `queue_wait_idle`, `vkWaitForFences`, `vkQueueWaitIdle`, `wait_fences`, `idle_device`, or `device_wait`. | `lint/fail/stream_wait.rs` | 0. |
 
 ### TODO: semgrep excludes
 

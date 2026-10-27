@@ -113,7 +113,7 @@ A picture verdict of fail in that folder means the checker caught the plant. The
 Printed in every summary:
 
 - The FLIP number is not NVIDIA's `flip` tool. The paper is Andersson, Nilsson, and Akenine-Möller, "FLIP: A Difference Evaluator for Alternating Images", PACMCGIT 3(2), 2020, doi 10.1145/3406183. The kernel and the color difference differ (`crates/lighting-ref/src/flip.rs`). A disagreement between FLIP and relative luminance is a human review.
-- The path tracer does not trace fog, particle cards, or textures.
+- The path tracer does not trace fog, particle cards, or textures. Participating media in the tracer is phase 7 of [fog and volumetric lighting](../fog-and-volumetric-lighting-design.md). Until that lands, `fog-check` grades Beer-Lambert, a synthetic picture, the froxel readback, and the composed frame. `gi_inscatter_blur_rel` stays `NOT-IMPLEMENTED`.
 - Sponza is skipped until an asset is in the repository.
 - Unfilled pixels are holes: candidate luminance near black where the reference is lit. The surface-cache set counter is not read.
 - Flicker is temporal variance on a still camera. A moving camera is not scored for flicker.

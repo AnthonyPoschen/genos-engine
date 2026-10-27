@@ -1,0 +1,19 @@
+[package]
+name = "genos-fog-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Metric harness for fog. Milliseconds need a lavapipe window; the rest do not."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fog-check"
+path = "src/main.rs"
+
+[dependencies]
+genos-lighting-ref = { path = "../lighting-ref" }
+genos-math = { path = "../math" }
+genos-render = { path = "../render" }
+genos-window = { path = "../window" }

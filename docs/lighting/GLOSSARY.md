@@ -37,7 +37,48 @@ Role: LIGHTS · Literature: GIBS treats it as a shadow-ray light · More detail:
 Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode`
 
 **Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
-Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces)
+Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+### Display (accepted, ADR 0015)
+
+**Scene-referred image**: Rec.709 linear radiance compose writes, before exposure, bloom, and the display transform. A value above 1 is in range.
+Role: OUT · Literature: scene-referred colour (ACES, Frostbite) · More detail: [../systems/hdr-output-design.md](../systems/hdr-output-design.md)
+
+**Exposure**: the scale from scene-referred radiance to the sensor, `1 / (1.2 × 2^EV100)`.
+Role: OUT · Literature: Frostbite / Filament saturation exposure · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**EV100**: exposure value at ISO 100. A meter uses `log2(L × 100 / 12.5)`. A camera uses `log2(N² / t × 100 / S)`.
+Role: TOOL · Literature: ISO 2720 reflected-light meter, K = 12.5 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Auto-exposure**: the EV100 taken from a log-luminance histogram after the tails are clipped.
+Role: OUT · Literature: Reinhard log-average, with a histogram instead of one mean · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Compensation**: stops added to exposure. Positive one stop multiplies exposure by two.
+Role: TOOL · Literature: camera EV compensation · More detail: `HdrSettings.compensation`
+
+**Display transform**: the map from exposed linear colour to the code the swapchain stores. AgX is the default.
+Role: OUT · Literature: AgX; ACES output transform · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**AgX**: Sobotka's image formation, the Eary Chow generator. Inset, a log sigmoid from −10 to +6.5, a 40% hue mix, then outset. The default display transform.
+Role: OUT · Literature: Sobotka; Blender AgX (Eary Chow) · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**ACES**: the Academy output transform, kept as an alternate display transform.
+Role: OUT · Literature: Academy ACES 2.0 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Legacy shoulder**: the display curve in the tree today. At or below 0.64 it is the identity. Above that it is a shoulder. The `legacy` display mode.
+Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compose.comp`](../../crates/render/shaders/lighting_compose.comp); `linear_from_display` in [`trace.rs`](../../crates/render/src/trace.rs)
+
+**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
+Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The sigmoid top maps to 1000 nits when the surface reports no peak. The Linux/Wayland preference.
+Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**scRGB**: a linear extended-sRGB swapchain image. Code 1.0 is 80 nits. Graphics white is 203 nits, code 2.54. The Windows preference.
+Role: OUT · Literature: IEC 61966-2-2; `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**SDR output**: an 8-bit UNORM swapchain image in the sRGB nonlinear color space. Used when HDR is not selected.
+Role: OUT · Literature: `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` · More detail: `create_targets` in [`gpu.rs`](../../crates/render/src/gpu.rs)
 
 ### Screen probes (final gather)
 **Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
@@ -172,6 +213,21 @@ Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020) · More detail: `
 **Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On follows Algorithm 6 (a source counts only when its target weight for the selected lamp is positive) and does not clamp M. Off divides by the sum of M and clamps M. The menu switch is this key.
 Role: LIGHTS · Literature: Bitterli et al. 2020 Algorithm 6; Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
 
+**Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
+Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer weight** (proposed): the RGB intensity multiplied onto a lamp layer. Off, on, a dim, and a glow change the weight. They do not rebake the layer.
+Role: LIGHTS · Literature: Enlighten runtime light scale · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Live layer** (proposed): the one indirect cache written by every light that has no lamp layer. That is moving lamps, unflagged static lamps, the sun's indirect, and emissive.
+Role: STORE · Literature: Lumen's single surface cache · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Fast-blend** (proposed): the live layer's published irradiance closing on a confirmed new mean with a fixed time constant, after the multi-scale mean estimator says the short mean has moved. It is not a display fade.
+Role: TEMPORAL · Literature: MSME catch-up (Barré-Brisebois, Ray Tracing Gems ch. 25); the time floor is not in that listing · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
+**Layer combine** (proposed): the pass that writes published irradiance as the live layer plus each published lamp layer times its layer weight. Readers see that sum only.
+Role: OUT · Literature: — · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
+
 **Candidates / samples**: candidates are lamps considered without shadows. Samples are the shadow rays actually traced.
 Role: SAMPLE · Literature: ReSTIR M candidates / visible samples
 
@@ -188,6 +244,49 @@ Role: SAMPLE · Literature: GIBS 6×6 guiding (§1.13); Müller path guiding · 
 **Sun band**: the slice of the cache relit for the sun each frame while the sun moves. **Catch-up**: extra relight rounds when lamps stop, so corners converge.
 Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`lighting_gpu.rs`](../../crates/render/src/lighting_gpu.rs) ~L3025
 
+### Participating media
+**Participating medium**: a volume that absorbs and scatters light along a ray.
+Role: OUT · Literature: Hillaire, Frostbite, SIGGRAPH 2015; Novák et al., SIGGRAPH 2018 course · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Extinction**: how much light a ray loses per metre (`σ_t`).
+Role: STORE · Literature: Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Optical depth**: extinction integrated along a path. Transmittance is `exp` of its negation.
+Role: STORE · Literature: Beer-Lambert, as used by Hillaire 2015 · More detail: `fog_along` in [`particles.rs`](../../crates/render/src/particles.rs)
+
+**Transmittance**: the fraction of light that survives a path.
+Role: OUT · Literature: Beer-Lambert · More detail: `FogHit::transmittance`
+
+**In-scattering**: light the medium adds to a ray.
+Role: OUT · Literature: Hillaire 2015 · More detail: `FogHit::inscatter`; [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Phase function**: the directional pattern of one scatter. Ours is Henyey-Greenstein.
+Role: SAMPLE · Literature: Henyey and Greenstein 1941; Hillaire 2015 · More detail: [fog design](../systems/fog-and-volumetric-lighting-design.md)
+
+**Froxel**: one cell of the frustum-aligned volume grid.
+Role: STORE · Literature: Hillaire 2015 (frustum voxel); Wronski, SIGGRAPH 2014 · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Froxel grid**: the 3D grid of froxels. Zero width, height, or slices keeps that axis of the lighting preset (Low 64×36×24, Medium 96×54×32, High 160×90×48). A set axis replaces it. The size is not the picture size.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**Froxel sample count**: the cell budget for that grid. Zero dispatches every cell. A positive count drops slices, then rows, then columns until the grid fits, so a later auto-tune can write it.
+Role: TOOL · Literature: Hillaire 2015 (froxel resolution) · More detail: [fog design §13](../systems/fog-and-volumetric-lighting-design.md)
+
+**Height fog**: extinction that depends only on world height.
+Role: STORE · Literature: Hillaire 2015; Wronski 2014 · More detail: `density * exp(-(y - height) / thickness)`
+
+**Local fog volume**: a box or a sphere of analytic density added into the froxel grid.
+Role: STORE · Literature: Hillaire 2015 local media; Epic local fog volumes · More detail: [fog design §6](../systems/fog-and-volumetric-lighting-design.md)
+
+**View-aligned volume sample**: a local-volume in-scatter tap moved onto the line parallel to the view through that volume's screen position. Extinction stays on the view ray.
+Role: SAMPLE · Literature: departure from Hillaire 2015, who samples the view ray · More detail: `froxel_align` in [`froxel_common.glsl`](../../crates/render/shaders/froxel_common.glsl)
+
+**Light shaft**: a beam made visible by shadowed direct light in the medium.
+Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 (not the method we use) · More detail: [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md)
+
+**Fog history**: a reserved slot for the previous froxel's in-scattering. The setting is off on every preset. Whether to enable it is open.
+Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../adr/0012-gi.md) stores no radiance history · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
+
 ### Quality and tooling
 **Preset**: a named full set of settings: potato, day-cycle, gi-1bounce, low, medium, high. **Potato** is direct light plus flat ambient, with no GI. Role: TOOL
 **Full effort**: one-shot action that pushes every effort knob to max for comparison. Role: TOOL
@@ -198,7 +297,47 @@ Role: SCHED · Literature: — · More detail: S63–S65, SUN-small-sun-step; [`
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
 
+### Materials
+**Material record**: one glTF material's factors, texture slots, and alpha mode, before any texel is read. The code type is `PbrMaterial`.
+Role: STORE · Literature: glTF 2.0 material; Filament `Material` parameters · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Shade sample**: the linear values of one material record at one UV. Base colour, metallic, roughness, tangent-space normal, occlusion, emissive, and alpha.
+Role: SAMPLE · Literature: glTF 2.0 Appendix B inputs; Filament `PixelParams` · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Diffuse albedo**: base colour times (1 − metallic). It is the weight on irradiance. The base colour is a different value.
+Role: OUT · Literature: glTF 2.0 Appendix B diffuse term; Filament diffuse albedo · More detail: `BakeMesh::surface`; [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Ambient occlusion**: the glTF occlusion texture. It scales indirect irradiance and does not scale direct light.
+Role: VIS · Literature: glTF 2.0 occlusion texture · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Promoted emitter**: an emissive region extracted at import and placed in the light tree.
+Role: LIGHTS · Literature: Lumen emissive cards promoted to lights · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Texture page**: one fixed block of one mip of a texture. The word page alone remains the 8×8 surface-cache block.
+Role: STORE · Literature: Mittring virtual-texture page (SIGGRAPH 2008) · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md); [assets/plan.md](../systems/assets/plan.md)
+
+**Material residency**: which texture pages are on the GPU.
+Role: SCHED · Literature: Mittring physical page pool · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Texture quality**: the sharpest mip the player allows. Ultra is mip 0. High, Medium, and Low are one, two, and three levels coarser. It does not follow free VRAM.
+Role: SCHED · Literature: a sampler LOD clamp · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Mip demand**: the finest mip a texture needs this frame. λ = log₂(ρ) from the screen-space UV derivatives of its draws, plus `mip_bias`, then clamped by texture quality. A texture that was not drawn keeps its last demand.
+Role: SCHED · Literature: Vulkan image level of detail · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**VRAM budget**: `heapBudget` of the device-local heaps, minus the other engine allocations and the headroom. Texture streaming and later GPU users read one helper.
+Role: SCHED · Literature: `VK_EXT_memory_budget` · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Headroom**: bytes kept free under `heapBudget`. Default `max(5% of heapBudget, 256 MB)`.
+Role: SCHED · Literature: `VK_EXT_memory_budget` heapBudget · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+**Dwell**: frames a mip that just became resident cannot be evicted, unless usage is over `heapBudget`.
+Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
 ### Historical (do not reuse)
+
+**residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.
+
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
 ---

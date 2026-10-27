@@ -1,4 +1,6 @@
 /target/
 /genos-camera.profile
 # Reference pictures, check reports, and lighting debug dumps. Large, and not for git.
-/genos-debug/
+# Unanchored. `cargo test` runs with the package as its cwd, so a gate
+# under a crate directory is ignored too.
+genos-debug/

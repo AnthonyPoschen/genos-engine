@@ -33,12 +33,14 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── scene.md
     │   ├── math.md
     │   ├── physics.md
+    │   ├── fracture.md
     │   ├── physics/
     │   │   └── plan.md
     │   ├── renderer.md
     │   ├── ui.md
     │   ├── lighting/ (README.md, debug-standard.md, experiments/)
     │   ├── gi-design.md
+    │   ├── fog-and-volumetric-lighting-design.md
     │   ├── loading.md
     │   ├── audio.md
     │   └── scripting.md

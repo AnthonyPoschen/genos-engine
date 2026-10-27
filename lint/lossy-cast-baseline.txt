@@ -10,7 +10,7 @@ crates/audio/tests/mix_scene.rs 5
 crates/audio/tests/play.rs 3
 crates/bake/src/cards.rs 4
 crates/bake/src/format.rs 3
-crates/bake/src/mesh.rs 4
+crates/bake/src/mesh.rs 2
 crates/bake/src/sdf.rs 5
 crates/debug/src/image.rs 20
 crates/debug/src/png.rs 3
@@ -33,7 +33,9 @@ crates/load/src/gltf.rs 16
 crates/load/src/inflate.rs 10
 crates/load/src/jpeg.rs 23
 crates/load/src/mesh.rs 3
+crates/load/src/mips.rs 1
 crates/load/src/png.rs 1
+crates/load/src/shade.rs 2
 crates/load/src/texture.rs 2
 crates/load/src/ttf.rs 7
 crates/load/src/wav.rs 1
@@ -41,14 +43,15 @@ crates/load/tests/load_assets.rs 5
 crates/mcp/src/discover.rs 3
 crates/mcp/src/live.rs 1
 crates/mcp/tests/live_session.rs 1
+crates/math/src/media.rs 1
 crates/mesh/src/bvh.rs 5
 crates/mesh/tests/bvh.rs 2
 crates/physics/src/contact.rs 2
 crates/physics/src/mesh.rs 8
 crates/render/src/aa_gpu.rs 2
 crates/render/src/debug_view.rs 1
-crates/render/src/gltf_draw.rs 8
-crates/render/src/gpu.rs 28
+crates/render/src/gltf_draw.rs 6
+crates/render/src/gpu.rs 33
 crates/render/src/lamp_pick.rs 2
 crates/render/src/lighting_dispatch.rs 4
 crates/render/src/lighting_gpu.rs 9

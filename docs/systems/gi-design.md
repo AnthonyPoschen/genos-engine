@@ -54,7 +54,7 @@ Where Lumen is still ahead and we accept it for now: specular reflections, trans
 ## Non-goals (for v2)
 
 - Specular reflections and mirrors. We store roughness and metallic now so they can come later.
-- Fog, volumetrics and god rays. GI leaves room for a froxel volume that reads the same caches.
+- Fog, volumetrics and god rays. GI leaves room for a froxel volume that reads the same caches. That volume is [fog and volumetric lighting](fog-and-volumetric-lighting-design.md) ([ADR 0018](../adr/0018-fog-and-volumetric-lighting.md), proposed). It is not part of this GI path.
 - Translucent surfaces receiving GI.
 - Exact GI from skinned (animated) meshes. They use proxies.
 - Baked lightmaps. Everything stays dynamic.

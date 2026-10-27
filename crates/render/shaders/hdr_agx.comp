@@ -1,0 +1,221 @@
+#version 450
+// Display pass. The lattice sample stays out of the GI compose shader so the
+// plain compile stays the pre-HDR shader. This pass reads the scene radiance
+// compose stored, adds the same-frame bloom, applies exposure, and replaces
+// the 8-bit picture. Mode 1 is AgX. Mode 0 and mode 2 keep the shoulder.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "dither.glsl"
+
+layout(push_constant) uniform Push {
+    uvec4 dims;
+    uvec4 params;
+    uvec4 lamp;
+} pc;
+
+layout(std430, set = 0, binding = 8) buffer Out {
+    uint px[];
+} outc;
+
+layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
+    vec4 px[];
+} scene_lin;
+
+layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
+    vec4 v;
+    vec4 extra;
+} hdr;
+
+// PQ or scRGB codes. The fp16 tail, used when the swapchain is RGBA16F, starts
+// after one vec4 per pixel.
+layout(std430, set = 0, binding = 17) buffer HdrEncode {
+    uint words[];
+} encode;
+
+#include "hdr_display.glsl"
+
+// Lattice of agx_rec709. N = 32, log2 from -12 to 10, x-fastest.
+const float AGX_LOG_MIN = -12.0;
+const float AGX_LOG_SPAN = 22.0;
+const float AGX_LAST = 31.0;
+const float PQ_C1_NUM = 3424.0;
+const float PQ_C1_DEN = 4096.0;
+const float PQ_C2_NUM = 2413.0;
+const float PQ_C2_DEN = 128.0;
+const float PQ_C3_NUM = 2392.0;
+const float PQ_C3_DEN = 128.0;
+const float PQ_M1_NUM = 2610.0;
+const float PQ_M1_DEN = 16384.0;
+const float PQ_M2_NUM = 2523.0;
+const float PQ_M2_DEN = 32.0;
+const float PQ_PEAK_NITS = 10000.0;
+const float WHITE_TOP = 0.999;
+const float GRAPHICS_WHITE_NITS = 203.0;
+const float HDR_PEAK_NITS = 1000.0;
+const float REC2020_R0 = 0.6274019247;
+const float REC2020_R1 = 0.3292919718;
+const float REC2020_R2 = 0.0433061035;
+const float REC2020_G0 = 0.0690954897;
+const float REC2020_G1 = 0.9195442813;
+const float REC2020_G2 = 0.0113602290;
+const float REC2020_B0 = 0.0163937091;
+const float REC2020_B1 = 0.0880281624;
+const float REC2020_B2 = 0.8955781285;
+const float SCRGB_NITS = 80.0;
+const float CODE_10BIT = 1023.0;
+const float CODE_8BIT = 255.0;
+const float CODE_ROUND = 0.5;
+const float MODE_LO = 0.5;
+const float MODE_HI = 1.5;
+const float DISPLAY_GAMMA = 2.4;
+const float FMT_A2B10 = 64.0;
+const float FMT_A2R10 = 58.0;
+const float FMT_R16F = 97.0;
+layout(std430, set = 0, binding = 15) restrict readonly buffer AgxLut {
+    vec4 texel[];
+} agx_lut;
+
+vec3 agx_fetch(int x, int y, int z) {
+    int index = (z * 32 + y) * 32 + x;
+    return agx_lut.texel[index].rgb;
+}
+
+vec3 agx_sample(vec3 c) {
+    vec3 p = (log2(max(c, vec3(1e-8))) - vec3(AGX_LOG_MIN)) / AGX_LOG_SPAN;
+    p = clamp(p, 0.0, 1.0);
+    vec3 g = p * AGX_LAST;
+    ivec3 i0 = clamp(ivec3(floor(g)), ivec3(0), ivec3(31));
+    ivec3 i1 = min(i0 + ivec3(1), ivec3(31));
+    vec3 f = g - vec3(i0);
+    vec3 c000 = agx_fetch(i0.x, i0.y, i0.z);
+    vec3 c100 = agx_fetch(i1.x, i0.y, i0.z);
+    vec3 c010 = agx_fetch(i0.x, i1.y, i0.z);
+    vec3 c110 = agx_fetch(i1.x, i1.y, i0.z);
+    vec3 c001 = agx_fetch(i0.x, i0.y, i1.z);
+    vec3 c101 = agx_fetch(i1.x, i0.y, i1.z);
+    vec3 c011 = agx_fetch(i0.x, i1.y, i1.z);
+    vec3 c111 = agx_fetch(i1.x, i1.y, i1.z);
+    vec3 c00 = mix(c000, c100, f.x);
+    vec3 c10 = mix(c010, c110, f.x);
+    vec3 c01 = mix(c001, c101, f.x);
+    vec3 c11 = mix(c011, c111, f.x);
+    vec3 c0 = mix(c00, c10, f.y);
+    vec3 c1 = mix(c01, c11, f.y);
+    return mix(c0, c1, f.z);
+}
+
+#include "hdr_shoulder.glsl"
+
+float pq_st2084(float nits) {
+    float c1 = PQ_C1_NUM / PQ_C1_DEN;
+    float c2 = PQ_C2_NUM / PQ_C2_DEN;
+    float c3 = PQ_C3_NUM / PQ_C3_DEN;
+    float m1 = PQ_M1_NUM / PQ_M1_DEN;
+    float m2 = PQ_M2_NUM / PQ_M2_DEN;
+    float y = max(nits, 0.0) / PQ_PEAK_NITS;
+    float y_m = y <= 0.0 ? 0.0 : pow(y, m1);
+    return pow((c1 + c2 * y_m) / (1.0 + c3 * y_m), m2);
+}
+
+float nits_of(float d, float white) {
+    if (!(d > 0.0)) {
+        return 0.0;
+    }
+    d = min(d, 1.0);
+    white = clamp(white, 1e-4, WHITE_TOP);
+    if (d <= white) {
+        return d / white * GRAPHICS_WHITE_NITS;
+    }
+    float t = (d - white) / (1.0 - white);
+    return GRAPHICS_WHITE_NITS + t * (HDR_PEAK_NITS - GRAPHICS_WHITE_NITS);
+}
+
+vec3 rec2020_from_rec709(vec3 c) {
+    return vec3(
+        dot(c, vec3(REC2020_R0, REC2020_R1, REC2020_R2)),
+        dot(c, vec3(REC2020_G0, REC2020_G1, REC2020_G2)),
+        dot(c, vec3(REC2020_B0, REC2020_B1, REC2020_B2))
+    );
+}
+
+vec3 hdr10_of(vec3 linear, float white) {
+    vec3 rec2020 = rec2020_from_rec709(linear);
+    return vec3(
+        pq_st2084(nits_of(rec2020.r, white)),
+        pq_st2084(nits_of(rec2020.g, white)),
+        pq_st2084(nits_of(rec2020.b, white))
+    );
+}
+
+vec3 scrgb_of(vec3 linear, float white) {
+    return vec3(
+        nits_of(linear.r, white),
+        nits_of(linear.g, white),
+        nits_of(linear.b, white)
+    ) / SCRGB_NITS;
+}
+
+uint pack_a2b10(vec3 code) {
+    uvec3 q = uvec3(clamp(code, 0.0, 1.0) * CODE_10BIT + CODE_ROUND);
+    return q.r | (q.g << 10u) | (q.b << 20u) | (3u << 30u);
+}
+
+uint pack_a2r10(vec3 code) {
+    uvec3 q = uvec3(clamp(code, 0.0, 1.0) * CODE_10BIT + CODE_ROUND);
+    return q.b | (q.g << 10u) | (q.r << 20u) | (3u << 30u);
+}
+
+uint pack_rgb(vec3 rgb) {
+    uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * CODE_8BIT + CODE_ROUND);
+    if ((pc.params.z & 1u) == 1u) {
+        return c.b | (c.g << 8u) | (c.r << 16u) | (255u << 24u);
+    }
+    return c.r | (c.g << 8u) | (c.b << 16u) | (255u << 24u);
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
+        return;
+    }
+    uint index = p.y * pc.dims.x + p.x;
+    vec3 scene = scene_lin.px[index].rgb;
+    vec3 c = add_bloom(scene, index);
+    // The display pass's bloom add, before exposure. An HDR encode overwrites it.
+    vec3 bloom_added = c - scene;
+    float exposure = hdr.v.x;
+    if (exposure == 0.0) {
+        exposure = 1.0;
+    }
+    c *= exposure;
+    vec3 formed = (hdr.v.y > MODE_LO && hdr.v.y < MODE_HI)
+        ? agx_sample(c)
+        : vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
+    outc.px[index] = pack_rgb(dither8(formed, p));
+    if (hdr.v.w > MODE_LO) {
+        vec3 linear = pow(max(formed, vec3(0.0)), vec3(DISPLAY_GAMMA));
+        float white = hdr.extra.x;
+        vec3 encoded = hdr.v.w < MODE_HI ? hdr10_of(linear, white) : scrgb_of(linear, white);
+        uint at = index * 4u;
+        encode.words[at] = floatBitsToUint(encoded.r);
+        encode.words[at + 1u] = floatBitsToUint(encoded.g);
+        encode.words[at + 2u] = floatBitsToUint(encoded.b);
+        encode.words[at + 3u] = 0u;
+        float fmt = hdr.extra.z;
+        if (abs(fmt - FMT_A2B10) < 1.0) {
+            outc.px[index] = pack_a2b10(encoded);
+        } else if (abs(fmt - FMT_A2R10) < 1.0) {
+            outc.px[index] = pack_a2r10(encoded);
+        } else if (abs(fmt - FMT_R16F) < 1.0) {
+            uint base = pc.dims.x * pc.dims.y * 4u + index * 2u;
+            encode.words[base] = packHalf2x16(encoded.rg);
+            encode.words[base + 1u] = packHalf2x16(vec2(encoded.b, 1.0));
+        }
+    } else {
+        uint at = index * 4u;
+        encode.words[at] = floatBitsToUint(bloom_added.r);
+        encode.words[at + 1u] = floatBitsToUint(bloom_added.g);
+        encode.words[at + 2u] = floatBitsToUint(bloom_added.b);
+        encode.words[at + 3u] = 0u;
+    }
+}

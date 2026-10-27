@@ -149,6 +149,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-fog-check"
+version = "0.1.0"
+dependencies = [
+ "genos-lighting-ref",
+ "genos-math",
+ "genos-render",
+ "genos-window",
+]
+
+[[package]]
+name = "genos-fracture"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
+]
+
+[[package]]
 name = "genos-gpuref"
 version = "0.1.0"
 dependencies = [
@@ -220,6 +237,7 @@ version = "0.1.0"
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [
+ "genos-fracture",
  "genos-math",
 ]
 
@@ -229,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "genos-bake",
  "genos-load",
+ "genos-math",
  "genos-mesh",
  "genos-scene",
  "genos-ui",

@@ -10,9 +10,14 @@ workspace = true
 [dependencies]
 genos-load = { path = "../load" }
 genos-bake = { path = "../bake" }
+genos-math = { path = "../math" }
 genos-mesh = { path = "../mesh" }
 genos-scene = { path = "../scene" }
 
 [dev-dependencies]
 genos-ui = { path = "../ui" }
 genos-window = { path = "../window" }
+
+[[test]]
+name = "hdr_output_gate"
+harness = false

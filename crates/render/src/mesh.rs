@@ -12,7 +12,11 @@ pub(crate) fn compose(albedo: [f32; 3], direct: f32, bounce: [f32; 3], _level: b
 }
 
 /// A shadow stays linear. A hot corridor wall bends instead of clipping.
-pub(crate) fn tone(channel: f32) -> f32 {
+///
+/// Public so the HDR gate, an integration test, can call this curve.
+/// `pub(crate)` is not visible to `crates/render/tests`.
+#[must_use]
+pub const fn tone(channel: f32) -> f32 {
     if channel <= 0.64 {
         return channel.max(0.0);
     }
