@@ -1224,6 +1224,10 @@ impl genos_window::ShutdownDevice for Renderer {
     fn plant_slow_fence(&mut self, stall: Duration) {
         self.slow_fence = Some(stall);
     }
+
+    fn frames_presented(&self) -> u64 {
+        self.gpu.presented
+    }
 }
 
 /// Wait out `duration` without dispatching the seat.
@@ -1551,6 +1555,8 @@ struct Gpu {
     /// Frame-slot fence has a submit that has not been waited. A reset fence
     /// with no submit stays false: polling it would wait forever.
     flight_live: [bool; 2],
+    /// Presents the driver accepted (success or suboptimal).
+    presented: u64,
     /// The lifecycle is draining and destroying. Lighting waits must not block.
     lifecycle_release: bool,
     /// The instance has been destroyed.
@@ -2410,6 +2416,7 @@ impl Gpu {
                 froxel_wrote: false,
                 submit_pending: false,
                 flight_live: [false, false],
+                presented: 0,
                 lifecycle_release: false,
                 torn_down: false,
                 teardown: 0,
@@ -3905,6 +3912,9 @@ impl Gpu {
             let result = (self.fns.present)(self.queue, &info as *const Present as *const u8);
             if result != VK_SUCCESS && result != SUBOPTIMAL && result != OUT_OF_DATE {
                 return Err(format!("present failed: {result}"));
+            }
+            if result != OUT_OF_DATE {
+                self.presented += 1;
             }
             Ok(result)
         }

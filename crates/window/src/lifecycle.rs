@@ -38,6 +38,9 @@ pub const QUIT_GAP_PREFIX: &str = "lifecycle_quit_gap_ms=";
 /// One finished shutdown phase: `lifecycle_phase=<name> ms=<milliseconds>`.
 pub const PHASE_PREFIX: &str = "lifecycle_phase=";
 
+/// Printed when shutdown starts: presents the device completed before quit.
+pub const PRESENTED_PREFIX: &str = "lifecycle_frames_presented=";
+
 /// Printed immediately before the process image is replaced. Wall time from
 /// the quit request through every drop after the window unmaps.
 pub const QUIT_TOTAL_PREFIX: &str = "lifecycle_quit_total_ms=";
@@ -104,6 +107,12 @@ pub trait ShutdownDevice {
     /// immediately, so a regression that waits inside the poll still has to
     /// show up in that phase's time.
     fn plant_slow_fence(&mut self, _stall: Duration) {}
+
+    /// Presents the driver accepted. The quit line reports it, so a run that
+    /// lost its surface before the first frame cannot pass as a clean quit.
+    fn frames_presented(&self) -> u64 {
+        0
+    }
 }
 
 /// A worker the lifecycle joins without blocking the seat.
@@ -352,6 +361,7 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         if self.released {
             return;
         }
+        println!("{PRESENTED_PREFIX}{}", self.device.frames_presented());
         begin_quit_clock();
         let prepared = Instant::now();
         phase_begin("prepare");
@@ -455,6 +465,13 @@ pub fn parse_quit_phases(text: &str) -> Vec<PhaseSample> {
         });
     }
     out
+}
+
+/// Read [`PRESENTED_PREFIX`] from a child's stdout or stderr.
+pub fn parse_frames_presented(text: &str) -> Option<u64> {
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(PRESENTED_PREFIX))
+        .and_then(|value| value.trim().parse().ok())
 }
 
 /// Read [`QUIT_TOTAL_PREFIX`] from a child's stdout or stderr.

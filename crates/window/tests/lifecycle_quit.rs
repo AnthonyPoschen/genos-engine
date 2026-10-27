@@ -34,6 +34,14 @@ struct Spec {
     codes: &'static [i32],
 }
 
+impl Spec {
+    /// The frame-loop binaries print `<name> frames=N` when they finish.
+    /// The lighting-ref self-test grades planted pictures and has no such line.
+    fn wants_frames_line(&self) -> bool {
+        self.label != "lighting_ref"
+    }
+}
+
 struct Finished {
     code: Option<i32>,
     stdout: String,
@@ -158,13 +166,23 @@ fn assert_rendered(spec: &Spec, run: &Finished) {
             run.stderr
         );
     }
+    let presented = genos_window::parse_frames_presented(&text).unwrap_or(0);
     assert!(
-        text.contains("frames="),
-        "{} printed no frames= line, so it never rendered\nstdout {}\nstderr {}",
+        presented > 0,
+        "{} presented no frame before quit, so it never rendered\nstdout {}\nstderr {}",
         spec.label,
         run.stdout,
         run.stderr
     );
+    if spec.wants_frames_line() {
+        assert!(
+            text.contains("frames="),
+            "{} printed no frames= line\nstdout {}\nstderr {}",
+            spec.label,
+            run.stdout,
+            run.stderr
+        );
+    }
 }
 
 fn assert_finished(spec: &Spec, run: &Finished) {
