@@ -23,8 +23,8 @@ use genos_debug::png;
 use genos_debug::{Image, RefSetup};
 use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
 use genos_scene::{
-    AmbientMode, Camera, Floor, FpsCounterSettings, Light, LightingPreset, LightingSettings,
-    MenuSettings, Scene, Shape, Solid, Vec3,
+    AmbientMode, Camera, Floor, FogSettings, FpsCounterSettings, HdrSettings, Light, LightingPreset,
+    LightingSettings, MenuSettings, Scene, Shape, Solid, Vec3,
 };
 use genos_window::Window;
 
@@ -554,6 +554,8 @@ fn overlap_world(n: u32) -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         menu: MenuSettings::default(),
+        hdr: HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
     };
     World::from_scene(scene)
 }
