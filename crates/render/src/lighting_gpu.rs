@@ -1192,12 +1192,18 @@ impl Gpu {
         let lamp_bytes = if reuse { pixels.saturating_mul(32).max(64) } else { 64 };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        let had_grid = self.lighting.dims[0] != 0 && self.lighting.dims[1] != 0;
+        let grid_changed = self.lighting.dims[0] != w || self.lighting.dims[1] != h;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
+        // The first allocation stays zeros: a fresh picture's outside slots are
+        // not hits, and history builds from the rect. A later size change wipes
+        // slots that already held NO_RAY. Those zeros must trace.
+        self.lighting.work_cleared = gi && had_grid && grid_changed;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
@@ -1695,7 +1701,6 @@ impl Gpu {
             }
             if self.lighting.work_clear {
                 self.lighting.work_clear = false;
-                self.lighting.work_cleared = true;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.work.buffer, 0, u64::MAX, 0);
             }
             self.lighting.gbuf_clear = false;
