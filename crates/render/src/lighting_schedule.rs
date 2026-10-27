@@ -418,11 +418,12 @@ fn within_order(left: &WorkItem, right: &WorkItem, floor: QualityFloor) -> std::
     }
 }
 
-/// Cone in front of the camera is the viewport. The guard widens that cone.
-/// Outside it, `near_radius` is the catch-up shell. The rest is far.
+/// Cone in front of the camera is the viewport. `guard_edge` is the extra on
+/// the axis, so the cone grows by that fraction. Outside it, `near_radius` is
+/// the catch-up shell. The rest is far.
 #[must_use]
 pub fn zone_of(forward_dot: f32, distance_m: f32, near_radius: f32, guard_edge: f32) -> ItemZone {
-    let widen = (1.0 + 2.0 * guard_edge.max(0.0)).max(1.0);
+    let widen = (1.0 + guard_edge.max(0.0)).max(1.0);
     // 60° vertical fov. The guard grows the half-angle. A facing point is in view.
     let half = (30.0_f32.to_radians() * widen).min(89.0_f32.to_radians());
     let limit = half.cos();
@@ -438,37 +439,29 @@ pub fn zone_of(forward_dot: f32, distance_m: f32, near_radius: f32, guard_edge: 
     }
 }
 
-/// Bias the guard toward the turn. `yaw_delta` > 0 turns toward +X (screen right).
-/// `pitch_delta` > 0 looks up. Left+right and top+bottom stay `2 * base`.
+/// Half-turn per frame that takes the whole leading-edge extra.
+const GUARD_TURN_FULL_RAD: f32 = std::f32::consts::PI;
+/// Extra fraction of the display added on the leading edge at that rate.
+const GUARD_TURN_EXTRA: f32 = 0.10;
+
+/// `base` is the symmetric extra on each axis (High 0.15), split across the
+/// two edges. A turn adds up to [`GUARD_TURN_EXTRA`] on the leading edge.
+/// The share is `yaw / π`, so 0.05 rad does not saturate. `yaw_delta` > 0
+/// turns toward +X (screen right). `pitch_delta` > 0 looks up.
 #[must_use]
 pub fn bias_guard(base: f32, yaw_delta: f32, pitch_delta: f32) -> GuardEdges {
     let base = if base.is_finite() { base.clamp(0.0, 0.5) } else { 0.0 };
-    if base <= 0.0 {
-        return GuardEdges {
-            left: 0.0,
-            right: 0.0,
-            top: 0.0,
-            bottom: 0.0,
-        };
-    }
+    let half = base * 0.5;
     let yaw = if yaw_delta.is_finite() { yaw_delta } else { 0.0 };
     let pitch = if pitch_delta.is_finite() { pitch_delta } else { 0.0 };
-    let shift_x = (yaw / 0.05).clamp(-1.0, 1.0) * base * 0.5;
-    let shift_y = (pitch / 0.05).clamp(-1.0, 1.0) * base * 0.5;
-    let (left, right) = renormalize_pair(base - shift_x, base + shift_x, base * 2.0);
-    let (bottom, top) = renormalize_pair(base - shift_y, base + shift_y, base * 2.0);
-    GuardEdges { left, right, top, bottom }
-}
-
-fn renormalize_pair(a: f32, b: f32, sum: f32) -> (f32, f32) {
-    let mut a = a.clamp(0.05, 0.35);
-    let mut b = b.clamp(0.05, 0.35);
-    let scale = a + b;
-    if scale > 0.0 && sum > 0.0 {
-        a *= sum / scale;
-        b *= sum / scale;
+    let turn_x = (yaw / GUARD_TURN_FULL_RAD).clamp(-1.0, 1.0) * GUARD_TURN_EXTRA;
+    let turn_y = (pitch / GUARD_TURN_FULL_RAD).clamp(-1.0, 1.0) * GUARD_TURN_EXTRA;
+    GuardEdges {
+        left: half + (-turn_x).max(0.0),
+        right: half + turn_x.max(0.0),
+        bottom: half + (-turn_y).max(0.0),
+        top: half + turn_y.max(0.0),
     }
-    (a, b)
 }
 
 #[must_use]
@@ -1143,24 +1136,40 @@ mod tests {
     }
 
     #[test]
-    fn guard_bias_keeps_the_margin_sum_and_leads_the_turn() {
-        let edges = bias_guard(0.15, 0.2, 0.0);
-        assert!((edges.left + edges.right - 0.30).abs() < 1.0e-4);
-        assert!(edges.right > edges.left);
+    fn guard_bias_splits_the_axis_and_leads_the_turn() {
+        let full = bias_guard(0.15, std::f32::consts::PI, 0.0);
+        assert!((full.left - 0.075).abs() < 1.0e-4);
+        assert!((full.right - 0.175).abs() < 1.0e-4);
+        let slow = bias_guard(0.15, 0.05, 0.0);
+        assert!(slow.right > slow.left);
+        assert!(slow.left + slow.right < 0.17, "0.05 rad no longer takes the whole extra");
         let still = bias_guard(0.15, 0.0, 0.0);
         assert!((still.left - still.right).abs() < 1.0e-4);
-        assert!((still.top + still.bottom - 0.30).abs() < 1.0e-4);
+        assert!((still.top + still.bottom - 0.15).abs() < 1.0e-4);
     }
 
     #[test]
-    fn a_turn_does_not_change_the_lit_size() {
+    fn a_full_turn_grows_only_the_leading_edge() {
         let tile = 16;
         let still = lit_frame(320, 180, bias_guard(0.15, 0.0, 0.0), tile);
-        let turning = lit_frame(320, 180, bias_guard(0.15, 0.2, 0.0), tile);
-        assert_eq!(still.lit_w, turning.lit_w);
+        let turning = lit_frame(320, 180, bias_guard(0.15, std::f32::consts::PI, 0.0), tile);
+        assert!(turning.lit_w > still.lit_w);
         assert_eq!(still.lit_h, turning.lit_h);
-        assert_ne!(still.crop_x, turning.crop_x);
         assert_eq!(still.crop_x % tile, 0);
+        assert_eq!(turning.crop_x % tile, 0);
+    }
+
+    #[test]
+    fn high_guard_stays_inside_the_area_band() {
+        let tile = 16;
+        let still = lit_frame(1920, 1080, bias_guard(0.15, 0.0, 0.0), tile);
+        let turning = lit_frame(1920, 1080, bias_guard(0.15, std::f32::consts::PI, 0.0), tile);
+        let display = 1920.0_f64 * 1080.0;
+        let still_area = f64::from(still.lit_w) * f64::from(still.lit_h) / display;
+        let turn_area = f64::from(turning.lit_w) * f64::from(turning.lit_h) / display;
+        assert!(still_area > 1.25 && still_area < 1.40, "{still_area}");
+        assert!(turn_area > still_area && turn_area < 1.50, "{turn_area}");
+        assert_eq!(turning.lit_h, still.lit_h);
     }
 
     #[test]

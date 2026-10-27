@@ -487,7 +487,8 @@ pub struct LightingSettings {
     pub controller: bool,
     /// Multiplies every work cap. `1` is the preset. Test knob.
     pub budget_scale: f32,
-    /// Extra field of view on each edge of the displayed frame, before turn bias.
+    /// Symmetric extra on each axis of the displayed frame, split across the two
+    /// edges, before the turn adds up to 10% on the leading side. High is 0.15.
     pub guard_edge: f32,
     /// How many times looser removal is than the 1.5× add threshold.
     pub cache_loosen: f32,

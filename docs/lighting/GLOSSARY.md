@@ -197,7 +197,7 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Tail view**: the bounce picture with the 25 cm and 50 cm parents skipped. The pixel reads the 1 m to 4 m tail and falls back to screen probes when that parent has no finished sample. `view tail`.
 Role: TOOL · Literature: — · More detail: `ViewMode::Tail` in [`debug_view.rs`](../../crates/render/src/debug_view.rs); `a_tail_view_skips_an_unfinished_parent`
 
-**Guard band**: extra pixels around the display. Lighting renders that larger picture and the window shows the crop. The eye stays put. Probe picks and lamp-pick history project that displayed camera through the crop. The band is wider toward the turn. High starts at 15% of the display on each edge. A zero edge, or global mode, stays on the display size.
+**Guard band**: extra pixels around the display. Lighting renders that larger picture and the window shows the crop. The eye stays put. Probe picks and lamp-pick history project that displayed camera through the crop. High adds 15% of the display across each axis, split on the two edges, and up to 10% more on the turning side. A half-turn in one frame takes that whole extra. A slower yaw takes a smaller share. A zero edge, or global mode, stays on the display size.
 Role: SCHED · More detail: `lit_target`; `--guard-edge`
 
 ### Lamps and shadows
