@@ -1161,9 +1161,15 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
         // S72K: a texel with no sets yet that shows its keys' interpolation
         // counts too (it used to drop out, the pixel took the other corners, and
         // it popped in with its first set).
+        // One surface test per corner: each inlined copy of the scene walk adds
+        // seconds to the driver compile of every pipeline that reads the cache.
+        bool keyed = v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on();
+        bool lit = v.w > 0.5 && fract(v.w) < 0.1;
+        if (!(keyed || lit) || !lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+            continue;
+        }
         vec4 shown_s = vec4(0.0);
-        if (v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on()
-            && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+        if (keyed) {
             shown_s = lighting_sc_shown(s);
             if (shown_s.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
@@ -1173,8 +1179,7 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
             }
             continue;
         }
-        if (v.w > 0.5 && fract(v.w) < 0.1
-            && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+        {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
             sum += bil * lighting_sc_shown(s).rgb;
             fsum += bil * lighting_sc_sunfrac_now(s);
@@ -2285,6 +2290,17 @@ vec4 lighting_sc_own_shown(uint slot) {
 // texel is not replaced outright. No parent, or a cell past the handover,
 // returns `own`. One call to lighting_sc_parent; a second copy of that body
 // overflowed lavapipe.
+// The handover blend onto a parent `up` already looked up.
+vec3 lighting_sc_handover_up(vec3 own, float sets, vec4 up) {
+    float n = max(sets, 0.0);
+    float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    if (fade <= 0.0 || lighting_world_mode() != 3u || !lighting_sc_parent_mature(up)) {
+        return own;
+    }
+    float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
+    float a = n > 0.0 ? n / max(n + k, LIGHTING_SC_HANDOVER_EPS) : 0.0;
+    return mix(up.rgb, own, a);
+}
 vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) {
     float n = max(sets, 0.0);
     float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
@@ -2292,13 +2308,7 @@ vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) 
         return own;
     }
     float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
-    vec4 up = lighting_sc_parent(pos, nrm, cell);
-    if (!lighting_sc_parent_mature(up)) {
-        return own;
-    }
-    float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
-    float a = n > 0.0 ? n / max(n + k, LIGHTING_SC_HANDOVER_EPS) : 0.0;
-    return mix(up.rgb, own, a);
+    return lighting_sc_handover_up(own, sets, lighting_sc_parent(pos, nrm, cell));
 }
 
 // Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache
@@ -2364,10 +2374,17 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // new cells is not black until the next round relights it.
     // Flag 32768 (surface cache): every round, not only the round that claimed it.
     bool fill_any = lighting_world_mode() == 3u && (lighting_sc_flags() & 32768u) != 0u;
-    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
+    bool fill = e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u);
+    // One parent lookup serves the fill and the handover (same cell, and the two
+    // never both run). Each call site inlines the whole parent walk with its
+    // wall tests; two sites doubled the compose compile on the 4070.
+    vec4 up = vec4(0.0);
+    if (lighting_world_mode() == 3u && (fill || max(floor(e.w), 0.0) < LIGHTING_SC_HANDOVER)) {
+        up = lighting_sc_parent(pos, n, hsize);
+    }
+    if (fill) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {
-            vec4 up = lighting_sc_parent(pos, n, hsize);
             if (lighting_sc_parent_mature(up)) {
                 lighting_bounce_path = 3u;
                 return up.rgb;
@@ -2397,7 +2414,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         // 25 cm hit patch, and any mode-3 cell this read returns. A young mean
         // still hands over from the parent; a finished count returns itself.
-        vec3 own = lighting_sc_handover(e.rgb, floor(e.w), pos, n, hsize);
+        vec3 own = lighting_sc_handover_up(e.rgb, floor(e.w), up);
         return own * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
@@ -2997,20 +3014,28 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // surface reads texels keyed in the mover's frame, which move and turn with
     // it and keep their light (relit fast while it moves, as near any change).
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    if (om != ~0u) {
-        lighting_obj_salt = lighting_mover(om, 1u).w;
-        vec4 r = lighting_world_irradiance_in(lighting_mover_to_local(om, pos, false), lighting_mover_to_local(om, n, true), pos, true);
-        lighting_obj_salt = 0.0;
-        return r;
-    }
     // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
     // (an object that moved in the last LIGHTING_MOVER_KEEP frames) takes the screen
     // probes, which trace it as it is now, instead of world texels it sweeps
     // through.
-    if (mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
+    if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    return lighting_world_irradiance_in(pos, n, pos, false);
+    // One call site: the driver inlines the whole cache walk (and its wall
+    // tests) once per call, and a second copy doubled the compose compile.
+    bool obj = om != ~0u;
+    vec3 lpos = pos;
+    vec3 ln = n;
+    if (obj) {
+        lighting_obj_salt = lighting_mover(om, 1u).w;
+        lpos = lighting_mover_to_local(om, pos, false);
+        ln = lighting_mover_to_local(om, n, true);
+    }
+    vec4 r = lighting_world_irradiance_in(lpos, ln, pos, obj);
+    if (obj) {
+        lighting_obj_salt = 0.0;
+    }
+    return r;
 }
 // Debug view "texels" (lighting_compose.comp mode 9): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).
