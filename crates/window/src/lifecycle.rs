@@ -34,6 +34,13 @@ use crate::{Window, PUMP_BUDGET};
 /// Printed on stdout when shutdown finishes. The quit-gap test reads it.
 pub const QUIT_GAP_PREFIX: &str = "lifecycle_quit_gap_ms=";
 
+/// One finished shutdown phase: `lifecycle_phase=<name> ms=<milliseconds>`.
+pub const PHASE_PREFIX: &str = "lifecycle_phase=";
+
+/// Printed immediately before the process image is replaced. Wall time from
+/// the quit request through every drop after the window unmaps.
+pub const QUIT_TOTAL_PREFIX: &str = "lifecycle_quit_total_ms=";
+
 /// How long a producer may stay unfinished before shutdown detaches it.
 const PRODUCER_LIMIT: Duration = Duration::from_secs(2);
 
@@ -83,6 +90,11 @@ pub trait ShutdownDevice {
 
     /// Destroy the next resource group. `true` when the device is gone.
     fn destroy_step(&mut self) -> bool;
+
+    /// Name of the group [`ShutdownDevice::destroy_step`] will destroy next.
+    fn next_phase(&self) -> &'static str {
+        "destroy"
+    }
 }
 
 /// A worker the lifecycle joins without blocking the seat.
@@ -304,11 +316,8 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 ManuallyDrop::drop(&mut self.window);
                 self.window_alive = false;
             }
-            if !self.device_dropped {
-                ManuallyDrop::drop(&mut self.device);
-                self.device_dropped = true;
-            }
         }
+        self.drop_device();
         std::mem::forget(self);
         exit(code);
     }
@@ -317,16 +326,20 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         if self.released {
             return;
         }
+        begin_quit_clock();
+        let prepared = Instant::now();
+        phase_begin("prepare");
         self.device.prepare_shutdown();
         if self.window_alive {
             self.window.clear_seat_pump();
         }
+        phase_end("prepare", prepared.elapsed());
         let device = &mut *self.device;
         let stops = &mut self.stops;
         let stall = &mut self.stall;
         let window = &mut self.window;
         let alive = &mut self.window_alive;
-        let (gap, forced) = drive_machine(device, stops, stall, |op| match op {
+        let stop = drive_machine(device, stops, stall, |op| match op {
             SeatOp::Dispatch => {
                 if *alive {
                     let _ = window.pump();
@@ -342,10 +355,24 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 }
             }
         });
-        self.longest = gap;
-        self.drain_forced = forced;
-        report(gap, forced);
+        self.longest = stop.gap;
+        self.drain_forced = stop.forced;
+        report_gap(stop.gap, stop.forced);
         self.released = true;
+    }
+
+    fn drop_device(&mut self) {
+        if self.device_dropped {
+            return;
+        }
+        let started = Instant::now();
+        phase_begin("device_drop");
+        // SAFETY: the flag is the only other drop of this device.
+        // Shutdown already destroyed the GPU objects when it ran.
+        unsafe { ManuallyDrop::drop(&mut self.device) };
+        self.device_dropped = true;
+        phase_end("device_drop", started.elapsed());
+        mark_quit_tail();
     }
 }
 
@@ -360,13 +387,8 @@ impl<D: ShutdownDevice> Drop for Lifecycle<D> {
                 ManuallyDrop::drop(&mut self.window);
                 self.window_alive = false;
             }
-            if !self.device_dropped {
-                // SAFETY: the flag is the only other drop of this device.
-                // Shutdown already destroyed the GPU objects when it ran.
-                ManuallyDrop::drop(&mut self.device);
-                self.device_dropped = true;
-            }
         }
+        self.drop_device();
     }
 }
 
@@ -378,9 +400,52 @@ pub fn gap_within_budget(ms: f64) -> bool {
 
 /// Read [`QUIT_GAP_PREFIX`] from a child's stdout or stderr.
 pub fn parse_quit_gap(text: &str) -> Option<f64> {
+    prefixed_f64(text, QUIT_GAP_PREFIX)
+}
+
+/// One `lifecycle_phase=<name> ms=<milliseconds>` line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhaseSample {
+    pub name: String,
+    pub ms: f64,
+}
+
+/// Every finished phase line in `text`, in order.
+pub fn parse_quit_phases(text: &str) -> Vec<PhaseSample> {
+    let mut out = Vec::new();
     for line in text.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix(QUIT_GAP_PREFIX) else {
+        let Some(rest) = line.strip_prefix(PHASE_PREFIX) else {
+            continue;
+        };
+        let Some((name, ms)) = rest.split_once(" ms=") else {
+            continue;
+        };
+        let Ok(ms) = ms.parse() else {
+            continue;
+        };
+        out.push(PhaseSample {
+            name: name.to_string(),
+            ms,
+        });
+    }
+    out
+}
+
+/// Read [`QUIT_TOTAL_PREFIX`] from a child's stdout or stderr.
+pub fn parse_quit_total(text: &str) -> Option<f64> {
+    prefixed_f64(text, QUIT_TOTAL_PREFIX)
+}
+
+/// `true` when every phase and the total stay inside the seat budget.
+pub fn phases_within_budget(phases: &[PhaseSample], total_ms: f64) -> bool {
+    gap_within_budget(total_ms) && phases.iter().all(|phase| gap_within_budget(phase.ms))
+}
+
+fn prefixed_f64(text: &str, prefix: &str) -> Option<f64> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(prefix) else {
             continue;
         };
         return rest.parse().ok();
@@ -445,10 +510,28 @@ pub fn block_ms_mirror(cli: Option<Duration>) -> Option<Duration> {
 /// Leave the process. Binaries call this instead of `std::process::exit`.
 ///
 /// Rust buffers stdout. `process::exit` does not flush it, so this flushes first.
+/// The total line is the wall time from the quit request to this call, including
+/// drops that ran after the window unmapped.
 pub fn exit(code: i32) -> ! {
+    if let Some(tail) = take_quit_tail() {
+        phase_end("exit_tail", tail);
+    }
+    if let Some(total) = quit_total() {
+        println!("{QUIT_TOTAL_PREFIX}{:.3}", duration_ms(total));
+    }
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     std::process::exit(code);
+}
+
+struct MachineStop {
+    gap: Duration,
+    forced: bool,
+}
+
+struct OpenPhase {
+    name: &'static str,
+    started: Instant,
 }
 
 fn drive_machine<D: ShutdownDevice>(
@@ -456,12 +539,14 @@ fn drive_machine<D: ShutdownDevice>(
     stops: &mut [Stop],
     stall: &mut Option<Duration>,
     mut seat: impl FnMut(SeatOp),
-) -> (Duration, bool) {
+) -> MachineStop {
     let mut last = Instant::now();
     let mut longest = Duration::ZERO;
     let mut phase = Phase::StopProducers;
     let mut forced = false;
-    let phase_deadline = Instant::now() + PHASE_LIMIT;
+    let mut phase_deadline = Instant::now() + PHASE_LIMIT;
+    let mut open: Option<OpenPhase> = None;
+    let mut destroys = 0u8;
     let note = |last: &mut Instant, longest: &mut Duration| {
         let gap = last.elapsed();
         if gap > *longest {
@@ -469,53 +554,135 @@ fn drive_machine<D: ShutdownDevice>(
         }
         *last = Instant::now();
     };
+    let close_open = |open: &mut Option<OpenPhase>| {
+        if let Some(phase) = open.take() {
+            phase_end(phase.name, phase.started.elapsed());
+        }
+    };
+    let open_phase = |open: &mut Option<OpenPhase>, name: &'static str| {
+        if open.as_ref().is_some_and(|phase| phase.name == name) {
+            return;
+        }
+        if let Some(phase) = open.take() {
+            phase_end(phase.name, phase.started.elapsed());
+        }
+        phase_begin(name);
+        *open = Some(OpenPhase {
+            name,
+            started: Instant::now(),
+        });
+    };
     loop {
         seat(SeatOp::Dispatch);
         note(&mut last, &mut longest);
         match phase {
-            Phase::Running | Phase::Exit => return (longest, forced),
+            Phase::Running | Phase::Exit => {
+                close_open(&mut open);
+                return MachineStop {
+                    gap: longest,
+                    forced,
+                };
+            }
             Phase::StopProducers => {
+                open_phase(&mut open, "stop_producers");
                 let done = stops.iter_mut().all(|stop| stop());
                 if done || Instant::now() >= phase_deadline {
+                    close_open(&mut open);
                     phase = Phase::DrainGpu;
+                    phase_deadline = Instant::now() + PHASE_LIMIT;
                 } else {
                     wait_for(SLICE);
                 }
             }
             Phase::DrainGpu => {
+                open_phase(&mut open, "drain_gpu");
                 if let Some(stall) = stall.take() {
                     // No dispatch inside this wait. The next iteration records it.
                     wait_for(stall);
                 }
                 if device.poll_idle() {
+                    close_open(&mut open);
                     phase = Phase::DestroyResources;
                 } else if Instant::now() >= phase_deadline {
                     forced = true;
+                    close_open(&mut open);
                     phase = Phase::DestroyResources;
                 } else {
                     wait_for(SLICE);
                 }
             }
             Phase::DestroyResources => {
-                if device.destroy_step() {
+                let name = device.next_phase();
+                open_phase(&mut open, name);
+                let done = device.destroy_step();
+                destroys = destroys.saturating_add(1);
+                close_open(&mut open);
+                if done || destroys >= 32 {
                     phase = Phase::Unmap;
                 }
             }
             Phase::Unmap => {
+                close_open(&mut open);
+                open_phase(&mut open, "unmap");
                 seat(SeatOp::Unmap);
+                close_open(&mut open);
                 phase = Phase::Exit;
             }
         }
     }
 }
 
-fn report(gap: Duration, forced: bool) {
+fn phase_begin(name: &str) {
+    println!("lifecycle_phase_begin={name}");
+    let _ = std::io::stdout().flush();
+}
+
+fn phase_end(name: &str, took: Duration) {
+    println!("{PHASE_PREFIX}{name} ms={:.3}", duration_ms(took));
+    let _ = std::io::stdout().flush();
+}
+
+fn report_gap(gap: Duration, forced: bool) {
     let ms = duration_ms(gap);
     println!("{QUIT_GAP_PREFIX}{ms:.3}");
     if forced {
         println!("lifecycle_drain_forced=1");
     }
     let _ = std::io::stdout().flush();
+}
+
+struct QuitClock {
+    start: Option<Instant>,
+    tail: Option<Instant>,
+}
+
+fn quit_clock() -> std::sync::MutexGuard<'static, QuitClock> {
+    static CLOCK: std::sync::Mutex<QuitClock> = std::sync::Mutex::new(QuitClock {
+        start: None,
+        tail: None,
+    });
+    CLOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn begin_quit_clock() {
+    let mut clock = quit_clock();
+    let now = Instant::now();
+    clock.start = Some(now);
+    clock.tail = None;
+}
+
+fn mark_quit_tail() {
+    quit_clock().tail = Some(Instant::now());
+}
+
+fn take_quit_tail() -> Option<Duration> {
+    quit_clock().tail.take().map(|start| start.elapsed())
+}
+
+fn quit_total() -> Option<Duration> {
+    quit_clock().start.map(|start| start.elapsed())
 }
 
 fn duration_ms(gap: Duration) -> f64 {
@@ -601,10 +768,12 @@ mod tests {
         })];
         let mut stall = None;
         let mut seat_log = Vec::new();
-        let (gap, forced) = drive_machine(&mut device, &mut stops, &mut stall, |op| match op {
+        let stop = drive_machine(&mut device, &mut stops, &mut stall, |op| match op {
             SeatOp::Dispatch => seat_log.push("dispatch"),
             SeatOp::Unmap => seat_log.push("unmap"),
         });
+        let gap = stop.gap;
+        let forced = stop.forced;
         assert!(!forced);
         assert!(
             gap_within_budget(duration_ms(gap)),
@@ -639,8 +808,8 @@ mod tests {
         };
         let mut stops: Vec<Stop> = Vec::new();
         let mut stall = None;
-        let (gap, _) = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
-        let ms = duration_ms(gap);
+        let stop = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let ms = duration_ms(stop.gap);
         println!("MEASURE planted_gap_ms={ms:.1}");
         assert!(
             !gap_within_budget(ms),
@@ -660,15 +829,22 @@ mod tests {
         };
         let mut stops: Vec<Stop> = Vec::new();
         let mut stall = Some(Duration::from_millis(2000));
-        let (gap, _) = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
-        let ms = duration_ms(gap);
+        let stop = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let ms = duration_ms(stop.gap);
         assert!(!gap_within_budget(ms), "stall gap {ms:.1} ms");
     }
 
     #[test]
     fn the_gap_line_parses() {
-        let text = "noise\nlifecycle_quit_gap_ms=12.500\n";
+        let text = "noise\nlifecycle_phase_begin=drain_gpu\nlifecycle_phase=drain_gpu ms=4.000\nlifecycle_phase=destroy_swapchain ms=80.500\nlifecycle_quit_gap_ms=12.500\nlifecycle_quit_total_ms=90.250\n";
         assert_eq!(parse_quit_gap(text), Some(12.5));
+        assert_eq!(parse_quit_total(text), Some(90.25));
+        let phases = parse_quit_phases(text);
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].name, "drain_gpu");
+        assert_eq!(phases[1].name, "destroy_swapchain");
+        assert!(phases_within_budget(&phases, 90.25));
+        assert!(!phases_within_budget(&phases, 2000.0));
         assert!(gap_within_budget(12.5));
         assert!(!gap_within_budget(100.0));
         assert!(!gap_within_budget(2000.0));

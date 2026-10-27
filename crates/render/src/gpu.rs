@@ -1064,6 +1064,10 @@ impl genos_window::ShutdownDevice for Renderer {
     fn destroy_step(&mut self) -> bool {
         self.gpu.destroy_step()
     }
+
+    fn next_phase(&self) -> &'static str {
+        self.gpu.next_shutdown_phase()
+    }
 }
 
 /// Host time and device time for one profiled draw.
@@ -7723,6 +7727,18 @@ impl Gpu {
         self.fence_retired(self.shutdown_fence)
             && self.fence_retired(self.shutdown_compute)
             && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
+    }
+
+    /// Name of the group the next [`Self::destroy_step`] call destroys.
+    pub(crate) fn next_shutdown_phase(&self) -> &'static str {
+        match self.teardown {
+            0 => "destroy_yield",
+            1 => "destroy_lighting",
+            2 => "destroy_objects",
+            3 => "destroy_device",
+            4 => "destroy_surface",
+            _ => "destroy_instance",
+        }
     }
 
     /// Destroy one group and return. `true` when the instance is gone.

@@ -178,8 +178,8 @@ seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
 pump gap (a synchronous load, a device wait, or a teardown). The probes are the
-Perf row, `get_event_loop`, `lifecycle_quit_gap_ms` on stdout, and the quit-gap
-test in `genos-window`.
+Perf row, `get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
+`lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
 
 ### Debug menu
 

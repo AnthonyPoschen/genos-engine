@@ -80,7 +80,7 @@ The camera calls `draw_profiled` in detailed profile mode. Basic mode and off mo
 
 ## Limits
 
-`Renderer::open` returns the renderer and a `genos_window::ShutdownPermit`. `Lifecycle::new` consumes that permit. Dropping the renderer any other way panics and does not call `vkDeviceWaitIdle`. The device is destroyed by the lifecycle, which pumps the seat between destroy steps: the lighting resources (including the HDR post buffers and pipelines), the images and pipelines (including stream pages, transfer objects, and the froxel grid), `vkDestroyDevice`, the surface, and `vkDestroyInstance`.
+`Renderer::open` returns the renderer and a `genos_window::ShutdownPermit`. `Lifecycle::new` consumes that permit. Dropping the renderer any other way panics and does not call `vkDeviceWaitIdle`. The device is destroyed by the lifecycle, which pumps the seat between destroy steps: the lighting resources (including the HDR post buffers and pipelines), the images and pipelines (including stream pages, transfer objects, and the froxel grid), `vkDestroyDevice`, the surface, and `vkDestroyInstance`. Each of those steps prints `lifecycle_phase=<name> ms=`.
 
 There is no skinned clip player. A mesh animates only when the game writes a new pose.
 
