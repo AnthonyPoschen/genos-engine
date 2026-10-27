@@ -18,5 +18,7 @@ mod value;
 
 pub use image::{Diff, Flicker, FlickerReport, Image, Luminance, Region};
 pub use knobs::{CheckpointPose, Host, Knob, LoadPace};
-pub use reference::{compare, render as render_reference, Compare, RefSetup, Reference};
+pub use reference::{
+    compare, compare_linear, render as render_reference, Compare, RefSetup, Reference,
+};
 pub use tools::{Ctx, FrameTiming, Look, Tools, DEFAULT_STEP};

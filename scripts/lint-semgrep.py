@@ -22,6 +22,7 @@ RULES = (
     "genos-no-hyprctl",
     "genos-no-process-exit",
     "genos-no-device-teardown",
+    "genos-stream-no-wait",
 )
 
 

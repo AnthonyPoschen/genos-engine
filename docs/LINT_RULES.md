@@ -270,12 +270,12 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 
 | Kind | Count | Meaning |
 |---|---|---|
-| `mirror` | 39 | A CLI argument exists and wins when both are set. `detail` is the flag. |
+| `mirror` | 74 | A CLI argument exists and wins when both are set. `detail` is the flag. |
 | `todo` | 94 | Read today, and still has no argument. |
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
-| `build` | 2 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`. |
+| `build` | 3 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, and `GENOS_HDR_COMPOSE` (the HDR compose shader compile). |
 
 Do not add a new `kind = "todo"`. Add a `mirror` whose `detail` is the flag, or do not read the variable.
 
@@ -303,6 +303,7 @@ The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighti
 | `genos-no-hyprctl` | 2026-10-14 | A proof run does not resize or focus unrelated windows. Shipping code does not spawn `hyprctl`. | `lint/fail/hyprctl.rs` | 6 call sites, all in the pointer-lock test in `crates/window/src/lib.rs`. |
 | `genos-no-process-exit` | 2026-10-26 | The process leaves through `genos_window::exit`, after the app lifecycle has destroyed the device. `std::process::exit` skips that. | `lint/fail/process_exit.rs` | 0. The one call is `crates/window/src/lifecycle.rs`. |
 | `genos-no-device-teardown` | 2026-10-26 | Fence drain and device destruction stay on the app lifecycle. Do not call `vkDeviceWaitIdle` or abandon the device from a binary. A `drop` of the renderer is refused by `ShutdownPermit` and by `Gpu`'s `Drop`, which panics instead of waiting idle. | `lint/fail/device_teardown.rs` | The Vulkan load and the idle path stay in `crates/render/src/gpu.rs` and `crates/render/src/lighting_gpu.rs`. `crates/gpuref` is the offline reference. |
+| `genos-stream-no-wait` | 2026-10-26 | Streaming functions poll the transfer fence, including helpers such as `transfer_signaled`. They do not call `wait_for_fences`, `queue_wait_idle`, `vkWaitForFences`, `vkQueueWaitIdle`, `wait_fences`, `idle_device`, or `device_wait`. | `lint/fail/stream_wait.rs` | 0. |
 
 ### TODO: semgrep excludes
 

@@ -27,10 +27,9 @@
 
 use genos_json::Value;
 
-use crate::emitters::MaterialSettings;
 use crate::error::LoadError;
 use crate::mips::{mip_chain, Mip, MipSpace};
-use crate::pages::{miss_colour, plan_residency, ImageChain};
+use crate::pages::miss_colour;
 use crate::png::Image;
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
@@ -373,39 +372,20 @@ pub(crate) fn decode_gltf(
     })
 }
 
+/// The coarsest mip is resident at load. Finer mips wait for the view.
 fn fit_mips(mips: &[Vec<Mip>]) -> (u64, Vec<[f32; 4]>) {
-    let chains: Vec<ImageChain> = mips
-        .iter()
-        .enumerate()
-        .map(|(rank, chain)| ImageChain {
-            levels: chain
-                .iter()
-                .map(|mip| u64::try_from(mip.pixels.len()).unwrap_or(0))
-                .collect(),
-            rank: u32::try_from(rank).unwrap_or(u32::MAX),
-        })
-        .collect();
-    let cap = u64::from(MaterialSettings::default().residency_mb) * 1024 * 1024;
-    let plan = plan_residency(&chains, cap);
+    let mut bytes = 0u64;
     let fallback = mips
         .iter()
-        .zip(&plan.dropped)
-        .map(|(chain, dropped)| {
-            let resident: Vec<Option<[f32; 4]>> = chain
-                .iter()
-                .enumerate()
-                .map(|(level, mip)| {
-                    if level < *dropped {
-                        None
-                    } else {
-                        Some(level_colour(mip))
-                    }
-                })
-                .collect();
-            miss_colour(&resident, 0, [1.0; 4])
+        .map(|chain| {
+            let Some(mip) = chain.last() else {
+                return [1.0; 4];
+            };
+            bytes = bytes.saturating_add(u64::try_from(mip.pixels.len()).unwrap_or(0));
+            miss_colour(&[Some(level_colour(mip))], 0, [1.0; 4])
         })
         .collect();
-    (plan.bytes, fallback)
+    (bytes, fallback)
 }
 
 fn level_colour(mip: &Mip) -> [f32; 4] {

@@ -22,11 +22,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
+use genos_load::MaterialSettings;
 use genos_mcp::json::Value;
-use genos_render::{DebugView, Renderer, ScreenRect, ViewMode};
+use genos_render::{DebugView, MaterialStats, Renderer, SceneRead, ScreenRect, ViewMode};
 use genos_scene::{
-    Camera, DebugSettings, EventLoopSettings, FpsCounterSettings, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Vec3, PITCH_LIMIT,
+    Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings, Light,
+    LightingPreset, LightingSettings, MenuSettings, OutputMode, Scene, Vec3, PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -250,6 +251,10 @@ struct RefJob {
     grid: (u32, u32),
     region: Region,
     paused: bool,
+    /// Scene-referred read of the live frame. None falls back to the display image.
+    scene: Option<SceneRead>,
+    /// The live picture used the legacy shoulder, so a missing scene image may undo it.
+    legacy_display: bool,
 }
 
 struct Running {
@@ -549,6 +554,11 @@ impl Tools {
                     {
                         if let Some(img) = &image {
                             job.live = Some(img.clone());
+                            job.scene = renderer
+                                .read_scene()
+                                .ok()
+                                .filter(|read| !read.rgb.is_empty());
+                            job.legacy_display = renderer.hdr_legacy_display();
                             image_used = true;
                         }
                     }
@@ -559,11 +569,13 @@ impl Tools {
                     if failed {
                         Some(Err("the reference trace panicked".to_string()))
                     } else if ready {
+                        let legacy_display = job.legacy_display;
                         Some(finish_reference(
                             job,
                             &self.out_dir,
                             &mut self.captures,
                             &mut self.references,
+                            legacy_display,
                         ))
                     } else {
                         None
@@ -1193,6 +1205,8 @@ impl Tools {
                     grid,
                     region: region_arg(args)?,
                     paused: self.paused,
+                    scene: None,
+                    legacy_display: true,
                 };
                 // Reuse a stored reference instead of tracing again.
                 if let Some(stored) = args.str("reference")? {
@@ -1257,6 +1271,20 @@ impl Tools {
                 ctx.renderer.clear_lighting_override();
                 reply(lighting_report(&written, ctx.renderer))
             }
+            "get_material_settings" => {
+                reply(obj(vec![(
+                    "text",
+                    text(ctx.renderer.material_settings().to_text()),
+                )]))
+            }
+            "get_material_stats" => reply(material_stats_value(ctx.renderer.material_stats())),
+            "set_material_settings" => {
+                let mut settings = ctx.renderer.material_settings();
+                apply_material_update(&mut settings, args.0)?;
+                let written = settings.to_text();
+                ctx.renderer.set_material_settings(settings);
+                reply(obj(vec![("text", text(written))]))
+            }
             "list_presets" => {
                 let presets = LightingPreset::all()
                     .iter()
@@ -1300,6 +1328,25 @@ impl Tools {
                 apply_event_loop_update(&mut ctx.host.scene().event_loop, args.0)?;
                 reply(event_loop_value(&ctx.host.scene().event_loop))
             }
+            "get_hdr_settings" => {
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(obj(vec![("text", text(settings.to_text()))]))
+            }
+            "set_hdr_settings" => {
+                apply_hdr_update(&mut ctx.host.scene().hdr, args.0)?;
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(hdr_value(&settings, ctx.renderer))
+            }
+            "get_hdr" => {
+                let settings = ctx.host.scene().hdr.effective()?;
+                reply(hdr_value(&settings, ctx.renderer))
+            }
+            "get_fog_settings" => reply(fog_settings_value(&ctx.host.scene().fog)),
+            "set_fog_settings" => {
+                apply_fog_update(&mut ctx.host.scene().fog, args.0)?;
+                reply(fog_settings_value(&ctx.host.scene().fog))
+            }
+            "get_fog_stats" => reply(fog_stats_value(ctx.host.scene(), ctx.renderer)),
             "get_menu_settings" => reply(menu_value(&ctx.host.scene().menu.effective())),
             "set_menu_settings" => {
                 apply_menu_update(&mut ctx.host.scene().menu, args.0)?;
@@ -1563,6 +1610,7 @@ fn finish_reference(
     out_dir: &std::path::Path,
     captures: &mut HashMap<String, Image>,
     references: &mut HashMap<String, Reference>,
+    legacy_display: bool,
 ) -> Result<Value, String> {
     let r = job.reference.take().ok_or("no reference")?;
     let prefix = job.prefix.clone().unwrap_or_else(|| "reference".into());
@@ -1588,7 +1636,17 @@ fn finish_reference(
         ),
     ];
     if let Some(live) = &job.live {
-        let (c, heat) = reference::compare(live, &r, job.region, job.grid, job.block);
+        let (c, heat, grade) = if let Some(scene) = &job.scene {
+            let (c, heat) = reference::compare_linear(scene, &r, job.region, job.grid, job.block);
+            (c, heat, "scene")
+        } else if legacy_display {
+            let (c, heat) = reference::compare(live, &r, job.region, job.grid, job.block);
+            (c, heat, "display")
+        } else {
+            return Err(
+                "the scene image is missing, so this display transform is not graded".into(),
+            );
+        };
         live.resized(r.image.width, r.image.height)
             .save(&path("live"))?;
         heat.save(&path("heatmap"))?;
@@ -1598,6 +1656,7 @@ fn finish_reference(
             .map(|(e, b)| obj(vec![("mean_rel", num(*e as f64)), ("bias", num(*b as f64))]))
             .collect();
         fields.extend([
+            ("grade", text(grade)),
             ("live", text(path("live").display().to_string())),
             ("heatmap", text(path("heatmap").display().to_string())),
             ("mean_abs", num(c.mean_abs as f64)),
@@ -1737,7 +1796,12 @@ fn lighting_report(body: &str, renderer: &Renderer) -> Value {
             ])
         })
         .collect();
-    obj(vec![("text", text(body)), ("passes", list(passes))])
+    obj(vec![
+        ("text", text(body)),
+        ("passes", list(passes)),
+        ("post_ms_device", num(renderer.post_ms_device())),
+        ("post_vram_device", num(renderer.post_vram_device())),
+    ])
 }
 
 fn lighting_value_text(value: &Value) -> Result<String, String> {
@@ -1806,6 +1870,169 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
+    let (format, color_space) = renderer.hdr_surface();
+    let chosen = match settings.output {
+        OutputMode::Auto => "auto",
+        OutputMode::Sdr => "sdr",
+        OutputMode::Hdr10 => "hdr10",
+        OutputMode::Scrgb => "scrgb",
+    };
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("ev100", num(renderer.hdr_ev100())),
+        ("exposure", num(renderer.hdr_exposure())),
+        (
+            "scales",
+            list(renderer.hdr_scales().into_iter().map(num).collect()),
+        ),
+        ("grade", text("scene")),
+        ("still_pop", num(renderer.hdr_still_pop())),
+        (
+            "histogram",
+            list(
+                renderer
+                    .hdr_histogram()
+                    .into_iter()
+                    .map(|count| num(count as f64))
+                    .collect(),
+            ),
+        ),
+        (
+            "surfaces",
+            list(vec![obj(vec![
+                ("format", num(format as f64)),
+                ("color_space", num(color_space as f64)),
+            ])]),
+        ),
+        ("chosen", text(chosen)),
+        ("resolved", text(renderer.hdr_resolved())),
+        ("pq_white", num(renderer.hdr_pq_white())),
+        ("scrgb_white", num(renderer.hdr_scrgb_white())),
+        ("hdr_ms", num(renderer.hdr_ms())),
+        ("hdr_vram_bytes", num(renderer.hdr_vram_bytes())),
+        ("post_ms_device", num(renderer.post_ms_device())),
+        ("post_vram_device", num(renderer.post_vram_device())),
+    ])
+}
+
+fn apply_hdr_update(settings: &mut HdrSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("hdr settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("hdr line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+
+fn fog_settings_value(settings: &FogSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("density", num(f64::from(settings.density))),
+        ("height", num(f64::from(settings.height))),
+        ("thickness", num(f64::from(settings.thickness))),
+        ("albedo", num(f64::from(settings.albedo))),
+        ("phase_g", num(f64::from(settings.phase_g))),
+        ("gi", Value::Bool(settings.gi)),
+        ("history", Value::Bool(settings.history)),
+        ("grid_width", num(f64::from(settings.grid_width))),
+        ("grid_height", num(f64::from(settings.grid_height))),
+        ("grid_slices", num(f64::from(settings.grid_slices))),
+        ("samples", num(f64::from(settings.samples))),
+        ("view", text(settings.inspect.name())),
+        ("view_line", text(settings.inspect_line())),
+    ])
+}
+
+fn apply_fog_update(settings: &mut FogSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("fog settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("fog line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fog_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn fog_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on".into() } else { "off".into() });
+    }
+    if let Some(n) = value.as_f64() {
+        if n.fract() == 0.0 && n.abs() < 1.0e15 {
+            return Ok(format!("{n:.0}"));
+        }
+        return Ok(format!("{n:?}"));
+    }
+    Err("a fog value is a string, number, or bool".into())
+}
+
+fn fog_stats_value(scene: &Scene, renderer: &Renderer) -> Value {
+    let probe = renderer.fog_frame_probe(&scene.fog, scene.lighting.preset);
+    let bytes = u32::try_from(probe.vram_bytes).unwrap_or(u32::MAX);
+    obj(vec![
+        ("dispatches", num(f64::from(probe.dispatches))),
+        ("samples_used", num(f64::from(probe.samples_used))),
+        ("samples_capped", num(f64::from(probe.samples_capped))),
+        ("grid_width", num(f64::from(probe.grid_width))),
+        ("grid_height", num(f64::from(probe.grid_height))),
+        ("grid_slices", num(f64::from(probe.grid_slices))),
+        ("dispatched_width", num(f64::from(probe.dispatched_width))),
+        ("dispatched_height", num(f64::from(probe.dispatched_height))),
+        (
+            "dispatched_slices",
+            num(f64::from(probe.dispatched_slices)),
+        ),
+        ("history_accepts", num(f64::from(probe.history_accepts))),
+        ("history_rejects", num(f64::from(probe.history_rejects))),
+        ("vram_bytes", num(f64::from(bytes))),
+        ("pass_ms", num(probe.pass_ms)),
+        (
+            "pass_ms_label",
+            text("last frame lavapipe timestamp when fog dispatched; 0 before that frame. Not graded against an RTX 4070 ceiling. History stays off."),
+        ),
+        ("view", text(scene.fog.inspect.name())),
+        ("view_line", text(scene.fog.inspect_line())),
+        ("history_weight", num(0.0)),
+    ])
 }
 
 fn fps_counter_value(settings: &FpsCounterSettings) -> Value {
@@ -1951,6 +2178,45 @@ fn apply_debug_update(settings: &mut DebugSettings, args: &Value) -> Result<(), 
             return Err(format!("debug setting {key} is a string or a bool"));
         };
         settings.set_key(key, &text)?;
+    }
+    Ok(())
+}
+
+fn material_stats_value(stats: MaterialStats) -> Value {
+    obj(vec![
+        ("committed", num(stats.committed as f64)),
+        ("budget", num(stats.budget as f64)),
+        ("refused", num(f64::from(stats.refused))),
+        ("evictions", num(f64::from(stats.evictions))),
+        ("thrash", num(f64::from(stats.thrash))),
+        ("holes", num(f64::from(stats.holes))),
+        ("rate", num(stats.rate as f64)),
+        ("stream_ms", num(f64::from(stats.stream_ms))),
+        ("text", text(stats.line())),
+    ])
+}
+
+fn apply_material_update(settings: &mut MaterialSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("material settings are an object".into());
+    };
+    if let Some(text) = args.get("text").and_then(|v| v.as_str()) {
+        for line in text.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("material line needs key=value, got {line}"));
+            };
+            settings.set_key(key.trim(), value.trim())?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &lighting_value_text(value)?)?;
     }
     Ok(())
 }

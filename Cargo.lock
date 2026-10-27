@@ -156,6 +156,8 @@ version = "0.1.0"
 dependencies = [
  "genos-lighting-ref",
  "genos-math",
+ "genos-render",
+ "genos-window",
 ]
 
 [[package]]

@@ -8,13 +8,6 @@
 #![cfg_attr(
     test,
     expect(
-        clippy::expect_used,
-        reason = "a fixture test aborts when the grader itself errors"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
         clippy::unwrap_used,
         reason = "a fixture test aborts when the grader itself errors"
     )
@@ -1429,7 +1422,7 @@ mod tests {
             "- off trace spp 64 noise 0.025 seconds 1.0\n- on trace spp 64 noise 0.020 seconds 1.0\n",
         )
         .unwrap();
-        let report = evaluate_capture(&dir).expect("noise at the line is a grade");
+        let report = evaluate_capture(&dir).unwrap();
         assert_eq!(report.exit_code(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

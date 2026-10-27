@@ -10,6 +10,7 @@
 //! The running stress scene: the building at one scale, the lamp mix, the clocks, and
 //! the [`World`] the renderer draws.
 
+use genos_load::MaterialSettings;
 use genos_render::World;
 
 use crate::building::{self, Building, LightMix};
@@ -97,6 +98,9 @@ pub struct Stage {
     /// on the first draw that holds.
     pub lamp_stop: bool,
     lamp_stop_frame: u32,
+    /// Material knobs. Pushed to the renderer when [`Self::materials_dirty`] is set.
+    pub materials: MaterialSettings,
+    pub materials_dirty: bool,
 }
 
 /// Draws at the file position before the point lamp steps.
@@ -149,6 +153,8 @@ impl Stage {
             room: None,
             lamp_stop: false,
             lamp_stop_frame: 0,
+            materials: MaterialSettings::default(),
+            materials_dirty: false,
         };
         stage.apply();
         stage

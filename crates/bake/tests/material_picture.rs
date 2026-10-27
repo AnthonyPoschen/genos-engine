@@ -146,15 +146,44 @@ fn the_furnace_picture_settles_and_the_lambert_picture_stays() {
 
 #[test]
 fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
-    use genos_load::{mib_f32, plan_residency, ImageChain};
+    use genos_load::{
+        mib_f32, Headroom, HeapSlice, Streamer, TextureView, VramBudget,
+    };
 
     let mib = |n: u64| n * 1024 * 1024;
-    let images = [ImageChain {
-        levels: vec![mib(300), mib(75), mib(20)],
-        rank: 1,
+    let levels = [mib(300), mib(75), mib(20)];
+    let before = mib_f32(levels.iter().sum());
+    let mut stream = Streamer::new(0, 0.0, 0);
+    stream.add_texture(1024, 1024, &levels);
+    let fast = mib(4096);
+    stream.observe_disk(fast, 1);
+    stream.observe_decode(fast, 1);
+    stream.observe_transfer(fast, 1);
+    let budget = VramBudget::from_heaps(
+        &[HeapSlice {
+            budget: mib(256),
+            usage: 0,
+            device_local: true,
+        }],
+        0,
+        Headroom::from_mb(0, 0),
+        true,
+    );
+    let step = 0.25 / 1024.0;
+    let views = [TextureView {
+        index: 0,
+        distance: 1.0,
+        visible: true,
+        derivatives: Some(genos_load::Derivatives {
+            dudx: step,
+            dvdx: 0.0,
+            dudy: 0.0,
+            dvdy: 0.0,
+        }),
     }];
-    let before = mib_f32(images.iter().flat_map(|image| &image.levels).sum());
-    let after = mib_f32(plan_residency(&images, mib(256)).bytes);
+    stream.step(&budget, &views, 8.0, 16.0);
+    stream.step(&budget, &views, 8.0, 16.0);
+    let after = mib_f32(stream.committed());
     let mut stuck = genos_load::HotReload::open(1);
     stuck.hold(2);
     let reload_before = stuck.frames_until_visible(5);
