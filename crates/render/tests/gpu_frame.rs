@@ -16,6 +16,8 @@
 
 //! The real Vulkan draw. Pixel checks use the presented readback, not the CPU bake.
 
+use std::fmt::Write;
+
 use genos_render::{DebugView, Renderer, SchedulePush, ViewMode, World};
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
@@ -138,7 +140,13 @@ struct FillOff;
 
 impl Drop for FillOff {
     fn drop(&mut self) {
-        std::env::remove_var("GENOS_LIGHTING_FILL");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+        )]
+        {
+            std::env::remove_var("GENOS_LIGHTING_FILL");
+        }
     }
 }
 
@@ -1229,7 +1237,13 @@ fn check_hall_wall(
 fn an_empty_probe_outside_the_refresh_still_traces() {
     let (_gpu, mut window, mut renderer) = open();
     let _fill = FillOff;
-    std::env::set_var("GENOS_LIGHTING_FILL", "0");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )]
+    {
+        std::env::set_var("GENOS_LIGHTING_FILL", "0");
+    }
     let width = renderer.width();
     let height = renderer.height();
     show_bounce(&mut renderer);
@@ -1423,9 +1437,8 @@ fn a_coarse_parent_stays_on_its_own_surface() {
         cam.pitch = -1.4;
         let px = draw(&mut window, &mut renderer, &world, &cam);
         lit = viewport_uv(&cam, width as f32 / height as f32, [2.2, 0.0, 0.4])
-            .map(|_| brightness(sample(&px, width, height, &cam, [2.2, 0.0, 0.4])))
-            .unwrap_or(-1.0);
-        lit_line.push_str(&format!(" f{i}:{lit:.0}"));
+            .map_or(-1.0, |_| brightness(sample(&px, width, height, &cam, [2.2, 0.0, 0.4])));
+        let _ = write!(lit_line, " f{i}:{lit:.0}");
     }
     world = gated(world);
     let mut far = look_down(2.65, 0.4);

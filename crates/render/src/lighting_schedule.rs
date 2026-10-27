@@ -1125,8 +1125,7 @@ mod tests {
             turning
                 .iter()
                 .find(|item| item.index == ty * 8 + tx)
-                .map(|item| item.change_mag)
-                .unwrap_or(-1.0)
+                .map_or(-1.0, |item| item.change_mag)
         };
         assert!((at(6, 1) - 1.0).abs() < 1.0e-4, "turn-side tile");
         assert_eq!(at(0, 1), 0.0, "off the turn");
