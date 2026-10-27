@@ -26,6 +26,8 @@ layout(std430, set = 0, binding = 0) readonly buffer WaterData {
     vec4 right;
     vec4 up;
     vec4 params;
+    // xy is the crop. zw is the lit picture. The depth copy is the crop.
+    vec4 frame;
     vec4 sky;
     Plane planes[PLANE_CAP];
 } water;
@@ -81,6 +83,10 @@ vec3 nearest_plane(vec3 origin, vec3 dir, vec3 miss) {
     return color;
 }
 
+vec2 display_frag(vec2 frag) {
+    return frag - water.frame.xy;
+}
+
 vec3 reconstruct(float depth, vec2 frag) {
     vec2 size = max(water.params.zw, vec2(1.0));
     vec2 uv = frag / size;
@@ -119,7 +125,7 @@ void main() {
         transmitted = nearest_plane(v_pos, transmitted_dir, v_albedo);
     }
     float beer_dist = 0.0;
-    vec2 frag = gl_FragCoord.xy;
+    vec2 frag = display_frag(gl_FragCoord.xy);
     vec2 uv = frag / max(water.params.zw, vec2(1.0));
     float depth = texture(scene_depth, uv).r;
     if (depth < CLEAR_DEPTH) {

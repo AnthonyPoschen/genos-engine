@@ -11,6 +11,8 @@ layout(set = 0, binding = 1) uniform sampler2D refl_depth;
 
 layout(push_constant) uniform Pc {
     layout(offset = 64) vec4 params;
+    // xy is the crop. A guard band draws this pass into the lit picture.
+    layout(offset = 80) vec4 frame;
 } pc;
 
 // The depth test uses the reflector's own window depth. The shader then writes
@@ -26,7 +28,7 @@ void main() {
         gl_FragDepth = gl_FragCoord.z;
         return;
     }
-    vec2 uv = gl_FragCoord.xy / max(pc.params.xy, vec2(1.0));
+    vec2 uv = (gl_FragCoord.xy - pc.frame.xy) / max(pc.params.xy, vec2(1.0));
     float depth = texture(refl_depth, uv).r;
     if (depth > CLEAR_DEPTH) {
         out_color = vec4(v_albedo, 1.0);

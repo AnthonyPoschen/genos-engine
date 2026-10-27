@@ -14,8 +14,8 @@ use crate::world::{Reflector, ReflectorKind, ShadePlane};
 
 /// Reflectors and shade planes share [`crate::reflections::REFLECTOR_CAP`].
 const PLANES: usize = crate::reflections::REFLECTOR_CAP;
-const WATER_BYTES: u64 = 96 + 12 * 80;
-const _: () = assert!(WATER_BYTES == 96 + (PLANES as u64) * 80);
+const WATER_BYTES: u64 = 112 + 12 * 80;
+const _: () = assert!(WATER_BYTES == 112 + (PLANES as u64) * 80);
 const LINK_BYTES: u64 = 13 * 16;
 const GGX_BYTES: u64 = 6 * 48;
 
@@ -406,12 +406,13 @@ impl Gpu {
                 0,
                 std::ptr::null(),
             );
-            self.set_viewport(self.extent_w, self.extent_h);
+            let (lit_w, lit_h) = self.lit_extent();
+            self.set_viewport(lit_w, lit_h);
             let scissor = plane.scissor;
             if scissor[2] == 0 || scissor[3] == 0 {
-                self.set_scissor(0, 0, self.extent_w, self.extent_h);
+                self.set_display_scissor(0, 0, self.extent_w, self.extent_h);
             } else {
-                self.set_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+                self.set_display_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
             }
             (self.fns.cmd_push)(
                 self.cmd,
@@ -429,6 +430,16 @@ impl Gpu {
                 64,
                 16,
                 params.as_ptr() as *const c_void,
+            );
+            let (ox, oy) = self.display_origin();
+            let frame = [ox as f32, oy as f32, 0.0, 0.0];
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.reflection.composite_layout,
+                0x10,
+                80,
+                16,
+                frame.as_ptr() as *const c_void,
             );
             self.bind_dynamic_verts();
             (self.fns.cmd_draw)(self.cmd, 6, 1, self.reflection.quad_first + index * 6, 0);
@@ -459,7 +470,8 @@ impl Gpu {
                         0,
                         std::ptr::null(),
                     );
-                    self.set_viewport(self.extent_w, self.extent_h);
+                    let (lit_w, lit_h) = self.lit_extent();
+                    self.set_viewport(lit_w, lit_h);
                     (self.fns.cmd_push)(
                         self.cmd,
                         self.reflection.water_layout,
@@ -474,9 +486,9 @@ impl Gpu {
             }
             let scissor = plane.scissor;
             if scissor[2] == 0 || scissor[3] == 0 {
-                self.set_scissor(0, 0, self.extent_w, self.extent_h);
+                self.set_display_scissor(0, 0, self.extent_w, self.extent_h);
             } else {
-                self.set_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+                self.set_display_scissor(scissor[0], scissor[1], scissor[2], scissor[3]);
             }
             unsafe {
                 (self.fns.cmd_draw)(self.cmd, 6, 1, self.reflection.quad_first + index * 6, 0);
@@ -495,8 +507,14 @@ impl Gpu {
         let identity = crate::world::identity_pose();
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.reflection.ggx_pipe);
-            self.set_viewport(self.extent_w, self.extent_h);
-            self.set_scissor(0, 0, 8, 8);
+            let (ox, oy) = self.display_origin();
+            self.set_viewport_rect(
+                ox as f32,
+                oy as f32,
+                self.extent_w as f32,
+                self.extent_h as f32,
+            );
+            self.set_scissor(ox, oy, 8, 8);
             (self.fns.cmd_push)(
                 self.cmd,
                 self.reflection.ggx_layout,
@@ -614,6 +632,13 @@ impl Gpu {
             &mut bytes,
             &mut at,
             [0.55, tan_half, self.extent_w as f32, self.extent_h as f32],
+        );
+        let (ox, oy) = self.display_origin();
+        let (lit_w, lit_h) = self.lit_extent();
+        push4(
+            &mut bytes,
+            &mut at,
+            [ox as f32, oy as f32, lit_w as f32, lit_h as f32],
         );
         push4(
             &mut bytes,
@@ -889,9 +914,14 @@ impl Gpu {
             layer: 0,
             count: 1,
         };
+        let (ox, oy) = self.display_origin();
         let region = Region {
             src_layers: layers,
-            src_offset: Offset { x: 0, y: 0, z: 0 },
+            src_offset: Offset {
+                x: i32::try_from(ox).unwrap_or(0),
+                y: i32::try_from(oy).unwrap_or(0),
+                z: 0,
+            },
             dst_layers: layers,
             dst_offset: Offset { x: 0, y: 0, z: 0 },
             extent: Extent {
@@ -1064,10 +1094,38 @@ impl Gpu {
     }
 
     fn set_viewport(&self, width: u32, height: u32) {
-        let viewport = [0.0f32, 0.0, width as f32, height as f32, 0.0, 1.0];
+        self.set_viewport_rect(0.0, 0.0, width as f32, height as f32);
+    }
+
+    fn set_viewport_rect(&self, x: f32, y: f32, width: f32, height: f32) {
+        let viewport = [x, y, width, height, 0.0, 1.0];
         unsafe {
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
         }
+    }
+
+    /// Display size inside the lit picture. A zero lit target is the swapchain.
+    fn lit_extent(&self) -> (u32, u32) {
+        if self.lit_w == 0 || self.lit_h == 0 {
+            (self.extent_w.max(1), self.extent_h.max(1))
+        } else {
+            (self.lit_w, self.lit_h)
+        }
+    }
+
+    /// Crop origin. The presented pixel `(x, y)` is lit pixel `(x + ox, y + oy)`.
+    fn display_origin(&self) -> (u32, u32) {
+        if self.lit_w == 0 || self.lit_h == 0 {
+            (0, 0)
+        } else {
+            (self.crop_x, self.crop_y)
+        }
+    }
+
+    /// A display-space scissor, shifted onto the lit picture.
+    fn set_display_scissor(&self, x: u32, y: u32, w: u32, h: u32) {
+        let (ox, oy) = self.display_origin();
+        self.set_scissor(x.saturating_add(ox), y.saturating_add(oy), w, h);
     }
 
     fn set_scissor(&self, x: u32, y: u32, w: u32, h: u32) {
@@ -1313,7 +1371,7 @@ impl Gpu {
     fn make_composite_pipeline(&mut self) -> Result<(), String> {
         self.reflection.composite_set_layout = self.two_sampler_layout()?;
         self.reflection.composite_layout =
-            self.push_layout(self.reflection.composite_set_layout, 0x11, 0, 80)?;
+            self.push_layout(self.reflection.composite_set_layout, 0x11, 0, 96)?;
         self.reflection.composite_pool = self.desc_pool_kind(1, 2)?;
         self.reflection.composite_set = self.alloc_one(
             self.reflection.composite_pool,
