@@ -907,7 +907,7 @@ fn run() -> Result<i32, String> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             match guard.as_mut() {
-                Some(stop) => stop.poll(),
+                Some(stop) => stop.release(),
                 None => true,
             }
         });

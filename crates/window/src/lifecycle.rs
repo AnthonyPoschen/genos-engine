@@ -21,7 +21,8 @@
 //! between steps, so the gap between dispatches stays inside [`PUMP_BUDGET`].
 //!
 //! Safe code cannot move the window or the device out. Both sit in
-//! [`ManuallyDrop`]. [`exit`] is the only `process::exit`.
+//! [`ManuallyDrop`]. [`exit`] is the only way out of the process. It flushes
+//! and calls `_exit`, so the driver's atexit handler does not run.
 
 use std::io::Write;
 use std::mem::ManuallyDrop;
@@ -44,9 +45,10 @@ pub const QUIT_TOTAL_PREFIX: &str = "lifecycle_quit_total_ms=";
 /// How long a producer may stay unfinished before shutdown detaches it.
 const PRODUCER_LIMIT: Duration = Duration::from_secs(2);
 
-/// Bound on one phase. Past this the machine moves on. Pings were answered
-/// the whole time. A stuck fence must not hang the process.
-const PHASE_LIMIT: Duration = Duration::from_secs(30);
+/// Bound on the producer stop and the fence drain. A stuck fence must not
+/// hold quit: destruction runs anyway, with the seat thread covering the
+/// driver call. Two frames fit under the 100 ms ping budget.
+const PHASE_LIMIT: Duration = Duration::from_millis(48);
 
 /// Pause between polls. Short enough that the dispatch gap stays inside the budget.
 const SLICE: Duration = Duration::from_millis(16);
@@ -99,9 +101,10 @@ pub trait ShutdownDevice {
 
 /// A worker the lifecycle joins without blocking the seat.
 ///
-/// [`ThreadStop::poll`] joins once the worker has finished. After two seconds
-/// it detaches. [`Drop`] does the same, so a leftover handle does not join on
-/// the event thread.
+/// [`ThreadStop::release`] joins once the worker has finished and otherwise
+/// detaches. [`ThreadStop::poll`] waits up to two seconds first. [`Drop`]
+/// detaches a worker that is still running, so a leftover handle does not
+/// join on the event thread.
 pub struct ThreadStop<T> {
     handle: Option<JoinHandle<T>>,
     result: Option<T>,
@@ -131,6 +134,24 @@ impl<T> ThreadStop<T> {
             return true;
         }
         self.take_finished()
+    }
+
+    /// Join if the worker has finished. Otherwise detach. Does not wait.
+    ///
+    /// Shutdown uses this. Waiting out [`PRODUCER_LIMIT`] holds quit past the
+    /// seat budget, and joining a worker blocked on the frame thread deadlocks.
+    pub fn release(&mut self) -> bool {
+        if self.handle.is_none() {
+            return true;
+        }
+        if self.take_finished() {
+            return true;
+        }
+        if let Some(handle) = self.handle.take() {
+            // Detach. The process is leaving; the worker must not be joined here.
+            std::mem::forget(handle);
+        }
+        true
     }
 
     /// Join, or detach once [`PRODUCER_LIMIT`] has passed. `true` when done.
@@ -300,7 +321,7 @@ impl<D: ShutdownDevice> Lifecycle<D> {
     ///
     /// Producers registered with [`Self::add_stop`] run first. The device is
     /// destroyed while the window is still mapped. The window is unmapped only
-    /// after that. `process::exit` does not run destructors, so this drops the
+    /// after that. `_exit` does not run destructors, so this drops the
     /// device and the window first.
     pub fn quit(mut self, code: i32) -> ! {
         if !self.quit {
@@ -329,10 +350,10 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         begin_quit_clock();
         let prepared = Instant::now();
         phase_begin("prepare");
+        // The seat stays installed. Destroy calls dispatch it from a side
+        // thread so a driver round-trip can finish. It is cleared when the
+        // window is unmapped.
         self.device.prepare_shutdown();
-        if self.window_alive {
-            self.window.clear_seat_pump();
-        }
         phase_end("prepare", prepared.elapsed());
         let device = &mut *self.device;
         let stops = &mut self.stops;
@@ -507,11 +528,17 @@ pub fn block_ms_mirror(cli: Option<Duration>) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
+extern "C" {
+    fn _exit(code: i32) -> !;
+}
+
 /// Leave the process. Binaries call this instead of `std::process::exit`.
 ///
-/// Rust buffers stdout. `process::exit` does not flush it, so this flushes first.
-/// The total line is the wall time from the quit request to this call, including
-/// drops that ran after the window unmapped.
+/// Rust buffers stdout, so this flushes first. The total line is the wall time
+/// from the quit request to this call, including drops after the window
+/// unmapped. `_exit` skips the Vulkan driver's atexit handler. That handler
+/// waits again after `vkDestroyInstance`, and on a real device the wait is the
+/// multi-second tail after the quit lines.
 pub fn exit(code: i32) -> ! {
     if let Some(tail) = take_quit_tail() {
         phase_end("exit_tail", tail);
@@ -521,7 +548,9 @@ pub fn exit(code: i32) -> ! {
     }
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    std::process::exit(code);
+    // SAFETY: stdout is flushed. The lifecycle has destroyed the device and
+    // unmapped the window before this call. `_exit` does not run atexit.
+    unsafe { _exit(code) }
 }
 
 struct MachineStop {

@@ -1053,10 +1053,6 @@ impl Renderer {
 }
 
 impl genos_window::ShutdownDevice for Renderer {
-    fn prepare_shutdown(&mut self) {
-        Self::clear_blocker();
-    }
-
     fn poll_idle(&mut self) -> bool {
         self.gpu.poll_idle()
     }
@@ -1366,12 +1362,15 @@ struct Gpu {
     /// This frame's `record_froxel` copied columns and wrote the compose header.
     froxel_wrote: bool,
     submit_pending: bool,
+    /// Frame-slot fence has a submit that has not been waited. A reset fence
+    /// with no submit stays false: polling it would wait forever.
+    flight_live: [bool; 2],
     /// The lifecycle is draining and destroying. Lighting waits must not block.
     lifecycle_release: bool,
     /// The instance has been destroyed.
     torn_down: bool,
-    /// 0 yields, 1 destroys lighting, 2 releases images and pipelines,
-    /// 3 destroys the device, 4 the surface, then the instance.
+    /// 0 yields, 1 destroys lighting, 2 destroys the swapchain, 3 releases
+    /// images and pipelines, 4 destroys the device, 5 the surface, then the instance.
     teardown: u8,
     /// The drain submits have been queued.
     shutdown_armed: bool,
@@ -2218,6 +2217,7 @@ impl Gpu {
                 froxel_pending: false,
                 froxel_wrote: false,
                 submit_pending: false,
+                flight_live: [false, false],
                 lifecycle_release: false,
                 torn_down: false,
                 teardown: 0,
@@ -3020,6 +3020,7 @@ impl Gpu {
         self.bind_flight();
         let slot = self.flight;
         self.wait_fence(self.fence, "wait fence")?;
+        self.flight_live[slot] = false;
         let fences = [self.fence];
         unsafe {
             self.collect_slot_after_wait(slot)?;
@@ -3171,6 +3172,7 @@ impl Gpu {
                 ),
                 "submit",
             )?;
+            self.flight_live[slot] = true;
             self.present_index = index;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
@@ -7580,12 +7582,24 @@ impl Gpu {
             self.color = Image::empty();
             self.depth = Image::empty();
             self.host = Buffer::empty();
-            if !self.swapchain.is_null() {
-                (self.fns.destroy_swapchain)(self.device, self.swapchain, std::ptr::null());
-                self.swapchain = std::ptr::null_mut();
-            }
-            self.swap_images.clear();
         }
+    }
+
+    /// Presentation images. The seat is dispatched around this call: the
+    /// driver round-trips the Wayland socket before it returns, and a client
+    /// that does not read the socket waits out the driver timeout.
+    fn destroy_swapchain(&mut self) {
+        if self.device.is_null() || self.swapchain.is_null() {
+            self.swapchain = std::ptr::null_mut();
+            self.swap_images.clear();
+            return;
+        }
+        let swapchain = self.swapchain;
+        self.swapchain = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_swapchain)(self.device, swapchain, std::ptr::null());
+        }
+        self.swap_images.clear();
     }
 
     fn destroy_image(&self, image: &mut Image) {
@@ -7715,8 +7729,9 @@ impl Gpu {
     /// `true` when the queues that presented and built lighting have retired.
     ///
     /// An empty submit on each queue, after the last present, is ordered after
-    /// that present. The frame fences are not polled: a reset without a submit
-    /// leaves them unsignaled forever.
+    /// that present. Frame fences are polled only when a submit is in flight.
+    /// A reset fence with no submit stays unsignaled, so it is not polled.
+    /// The transfer queue is separate from graphics and compute.
     pub(crate) fn poll_idle(&mut self) -> bool {
         if self.device.is_null() || self.torn_down {
             return true;
@@ -7724,9 +7739,19 @@ impl Gpu {
         if !self.shutdown_armed && !self.arm_shutdown() {
             return false;
         }
-        self.fence_retired(self.shutdown_fence)
+        self.frames_retired()
+            && self.transfer_retired()
+            && self.fence_retired(self.shutdown_fence)
             && self.fence_retired(self.shutdown_compute)
             && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
+    }
+
+    fn frames_retired(&self) -> bool {
+        (0..2).all(|slot| !self.flight_live[slot] || self.fence_retired(self.fences[slot]))
+    }
+
+    fn transfer_retired(&self) -> bool {
+        !self.transfer_busy || self.fence_retired(self.transfer_fence)
     }
 
     /// Name of the group the next [`Self::destroy_step`] call destroys.
@@ -7734,9 +7759,10 @@ impl Gpu {
         match self.teardown {
             0 => "destroy_yield",
             1 => "destroy_lighting",
-            2 => "destroy_objects",
-            3 => "destroy_device",
-            4 => "destroy_surface",
+            2 => "destroy_swapchain",
+            3 => "destroy_objects",
+            4 => "destroy_device",
+            5 => "destroy_surface",
             _ => "destroy_instance",
         }
     }
@@ -7753,27 +7779,35 @@ impl Gpu {
                 false
             }
             1 => {
-                self.destroy_lighting();
+                // The seat thread dispatches while the driver call runs. On a
+                // real device these calls wait for the compositor, and a missed
+                // ping makes that wait hit the driver timeout.
+                block(|| self.destroy_lighting());
                 self.teardown = 2;
                 false
             }
             2 => {
-                self.destroy_gpu_objects();
+                block(|| self.destroy_swapchain());
                 self.teardown = 3;
                 false
             }
             3 => {
-                self.destroy_device_handle();
+                block(|| self.destroy_gpu_objects());
                 self.teardown = 4;
                 false
             }
             4 => {
-                self.destroy_surface_handle();
+                block(|| self.destroy_device_handle());
                 self.teardown = 5;
                 false
             }
+            5 => {
+                block(|| self.destroy_surface_handle());
+                self.teardown = 6;
+                false
+            }
             _ => {
-                self.destroy_instance_handle();
+                block(|| self.destroy_instance_handle());
                 true
             }
         }
@@ -7785,16 +7819,20 @@ impl Gpu {
             self.teardown = 2;
         }
         if self.teardown < 3 {
-            self.destroy_gpu_objects();
+            self.destroy_swapchain();
             self.teardown = 3;
         }
         if self.teardown < 4 {
-            self.destroy_device_handle();
+            self.destroy_gpu_objects();
             self.teardown = 4;
         }
         if self.teardown < 5 {
-            self.destroy_surface_handle();
+            self.destroy_device_handle();
             self.teardown = 5;
+        }
+        if self.teardown < 6 {
+            self.destroy_surface_handle();
+            self.teardown = 6;
         }
         self.destroy_instance_handle();
     }
@@ -7823,11 +7861,16 @@ impl Gpu {
             };
             self.shutdown_compute = fence;
         }
-        if !self.submit_empty(self.queue, self.shutdown_fence) {
+        // The queue can block in the driver until the compositor releases a
+        // buffer. The seat thread answers that while this thread waits.
+        let graphics_submitted = block(|| self.submit_empty(self.queue, self.shutdown_fence));
+        if !graphics_submitted {
             self.destroy_shutdown_fences();
             return false;
         }
-        if distinct && !self.submit_empty(self.compute_queue, self.shutdown_compute) {
+        let compute_submitted = !distinct
+            || block(|| self.submit_empty(self.compute_queue, self.shutdown_compute));
+        if distinct && !compute_submitted {
             unsafe {
                 (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
             }
