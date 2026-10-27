@@ -4,7 +4,6 @@
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::items_after_statements, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -22,16 +21,19 @@
 //! object-space normals, texture coordinates, and a shelf in the world's material
 //! atlases. The instance colour is the base-colour factor. The colour atlas stores
 //! sRGB of linear(base texture) × (1 − metallic), so the shader's multiply is the
-//! diffuse albedo and metal is not applied twice. There is no specular lobe;
-//! roughness stays on the glTF and is not shaded. A mesh with no texture keeps
-//! [`surface_mean`], which does not darken by metal.
+//! diffuse albedo from [`genos_load::shade_uv`] and metal is not applied twice.
+//! There is no specular lobe; roughness stays on the shade sample and is not
+//! lit. A mesh with no texture keeps [`surface_mean`], which is that same shade,
+//! so metal darkens it. The G-buffer and the world-space cache multiply this
+//! albedo; they do not keep a second material formula. The path tracer's Lambert
+//! weight is the shade's diffuse albedo.
 //!
 //! A mesh that `affects_light` stands in as its bounding box for the analytic
 //! tracer (`World::light_scene`). `add_gltf_traced` also stores the baked SDF.
 
 use std::collections::HashMap;
 
-use genos_load::{AlphaMode, GltfScene, Image, PbrMaterial, Primitive, TextureSlot};
+use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive};
 
 use crate::world::{
     transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World,
@@ -383,7 +385,9 @@ fn fit_shelf(w: u32, h: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
 }
 
 /// sRGB bytes of linear(base) × (1 − metallic). Alpha stays the base texture's alpha.
-/// The base-colour factor is the instance colour, not baked here.
+/// The base-colour factor is the instance colour, not baked here. The product is
+/// [`genos_load::shade_uv`] with that factor held at 1, so the shader's multiply
+/// is the shade's diffuse albedo.
 fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
     let slot = m.base_color_texture?;
     let img = images.get(slot.image)?;
@@ -391,39 +395,23 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)
     if img.width == 0 || img.height == 0 || img.pixels.len() < pixels {
         return None;
     }
-    let lut = srgb_lut();
-    let factor = m.metallic.clamp(0.0, 1.0);
+    let mut unfactored = m.clone();
+    unfactored.base_color = [1.0, 1.0, 1.0, m.base_color[3]];
     let mut out = vec![0u8; pixels];
     for y in 0..img.height {
         for x in 0..img.width {
             let u = (x as f32 + 0.5) / img.width as f32;
             let v = (y as f32 + 0.5) / img.height as f32;
             let i = ((y * img.width + x) * 4) as usize;
-            let px = [
-                img.pixels[i],
-                img.pixels[i + 1],
-                img.pixels[i + 2],
-                img.pixels[i + 3],
-            ];
-            let metal = metal_at(m, images, u, v, factor);
-            let keep = 1.0 - metal;
+            let sample = shade_uv(&unfactored, images, [u, v]);
+            let albedo = sample.diffuse_albedo();
             for c in 0..3 {
-                out[i + c] = linear_to_srgb_u8(lut[px[c] as usize] * keep);
+                out[i + c] = linear_to_srgb_u8(albedo[c]);
             }
-            out[i + 3] = px[3];
+            out[i + 3] = img.pixels[i + 3];
         }
     }
     Some((img.width, img.height, out))
-}
-
-fn metal_at(m: &PbrMaterial, images: &[Image], u: f32, v: f32, factor: f32) -> f32 {
-    let Some(slot) = m.metallic_roughness_texture else {
-        return factor;
-    };
-    let Some(px) = slot_texel(&slot, images, u, v) else {
-        return factor;
-    };
-    (factor * (px[2] as f32 / 255.0)).clamp(0.0, 1.0)
 }
 
 fn copy_normal(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
@@ -460,17 +448,13 @@ struct GltfPart {
     triangles: usize,
 }
 
-/// Mean diffuse albedo and emitted light of one primitive (linear), its textures
-/// reduced to one colour by sampling them where the surface actually maps
-/// (area-weighted points on its triangles), so unused atlas space does not count.
+/// Mean diffuse albedo and emitted light of one primitive (linear).
 ///
-/// The engine has no specular yet, so a surface's whole reflectance shows as
-/// diffuse: its hemispherical albedo, which for metal and dielectric alike is about
-/// the base colour (a metal's reflectance is its base colour; a dielectric loses a
-/// few percent to its specular). Metallic and roughness only shape the lobe, which
-/// the engine cannot draw, so they do not darken the mean. (Dropping metal to
-/// zero, as a diffuse-only reading of the glTF model does, turned DamagedHelmet
-/// black.)
+/// Each sample is [`genos_load::shade_sets`]: base colour times (1 - metallic),
+/// and emission with strength, at that slot's `texCoord`. A metal's Lambert
+/// picture is darker than a specular reference until that lobe exists.
+/// Painting the metal with its base colour fails `metal_diffuse`. The raster
+/// still fetches the atlas with `TEXCOORD_0` only.
 pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f32; 3], [f32; 3]) {
     let textured = m.base_color_texture.is_some()
         || m.metallic_roughness_texture.is_some()
@@ -478,7 +462,6 @@ pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f3
     if !textured || prim.texcoords.len() < prim.positions.len() {
         return (diffuse(m, images), emission(m, images));
     }
-    let lut = srgb_lut();
     let tris: Vec<[usize; 3]> = prim
         .indices
         .chunks_exact(3)
@@ -514,12 +497,10 @@ pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f3
     for (t, area) in tris.iter().zip(&areas) {
         let w = area / total / POINTS.len() as f64;
         for b in POINTS {
-            let uv: [f32; 2] = std::array::from_fn(|k| {
-                b[0] * prim.texcoords[t[0]][k]
-                    + b[1] * prim.texcoords[t[1]][k]
-                    + b[2] * prim.texcoords[t[2]][k]
-            });
-            let (d, e) = texel_light(m, images, &lut, uv[0], uv[1]);
+            let uvs = texcoord_sample(prim, t, b);
+            let sample = shade_sets(m, images, &uvs);
+            let d = sample.diffuse_albedo();
+            let e = sample.emissive;
             for c in 0..3 {
                 dsum[c] += w * d[c] as f64;
                 esum[c] += w * e[c] as f64;
@@ -529,32 +510,36 @@ pub fn surface_mean(m: &PbrMaterial, images: &[Image], prim: &Primitive) -> ([f3
     (dsum.map(|v| v as f32), esum.map(|v| v as f32))
 }
 
-/// Diffuse albedo and emitted light of a material at one texture coordinate.
-fn texel_light(
-    m: &PbrMaterial,
-    images: &[Image],
-    lut: &[f32],
-    u: f32,
-    v: f32,
-) -> ([f32; 3], [f32; 3]) {
-    let srgb = |slot: Option<TextureSlot>| {
-        slot.and_then(|t| slot_texel(&t, images, u, v))
-            .map_or([1.0; 3], |p| {
-                [lut[p[0] as usize], lut[p[1] as usize], lut[p[2] as usize]]
-            })
+/// Interpolate each TEXCOORD set at barycentric `b` (weights of the three corners).
+///
+/// A primitive that only filled `texcoords` is set 0. An empty set is `None`,
+/// so the shade falls back to set 0.
+fn texcoord_sample(prim: &Primitive, corners: &[usize; 3], b: [f32; 3]) -> Vec<Option<[f32; 2]>> {
+    let interp = |set: &[[f32; 2]]| -> Option<[f32; 2]> {
+        if set.len() != prim.positions.len() {
+            return None;
+        }
+        Some(std::array::from_fn(|axis| {
+            b[0] * set[corners[0]][axis]
+                + b[1] * set[corners[1]][axis]
+                + b[2] * set[corners[2]][axis]
+        }))
     };
-    let base = srgb(m.base_color_texture);
-    let glow = srgb(m.emissive_texture);
-    (
-        std::array::from_fn(|c| m.base_color[c] * base[c]),
-        std::array::from_fn(|c| m.emissive[c] * glow[c] * m.emissive_strength),
-    )
+    if prim.texcoord_sets.is_empty() {
+        return vec![interp(&prim.texcoords)];
+    }
+    prim.texcoord_sets.iter().map(|set| interp(set)).collect()
+}
+
+/// Diffuse albedo and emitted light of a material at one texture coordinate.
+fn texel_light(m: &PbrMaterial, images: &[Image], u: f32, v: f32) -> ([f32; 3], [f32; 3]) {
+    let sample = shade_uv(m, images, [u, v]);
+    (sample.diffuse_albedo(), sample.emissive)
 }
 
 /// Mean diffuse albedo of a material over its whole texture space (see
 /// [`surface_mean`], used when a primitive has no texture coordinates).
 pub fn diffuse(m: &PbrMaterial, images: &[Image]) -> [f32; 3] {
-    let lut = srgb_lut();
     // A grid over texture space, fine enough for a mean and cheap on 4k textures.
     const GRID: u32 = 256;
     let mut sum = [0.0f64; 3];
@@ -562,7 +547,7 @@ pub fn diffuse(m: &PbrMaterial, images: &[Image]) -> [f32; 3] {
         for gx in 0..GRID {
             let u = (gx as f32 + 0.5) / GRID as f32;
             let v = (gy as f32 + 0.5) / GRID as f32;
-            let (d, _) = texel_light(m, images, &lut, u, v);
+            let (d, _) = texel_light(m, images, u, v);
             for c in 0..3 {
                 sum[c] += d[c] as f64;
             }
@@ -579,48 +564,6 @@ pub fn emission(m: &PbrMaterial, images: &[Image]) -> [f32; 3] {
         .and_then(|t| images.get(t.image))
         .map_or([1.0; 3], mean_linear);
     std::array::from_fn(|c| m.emissive[c] * tex[c] * m.emissive_strength)
-}
-
-const REPEAT: u32 = 10497;
-const MIRRORED_REPEAT: u32 = 33648;
-
-/// glTF wrap modes: repeat, mirrored repeat, else clamp to edge.
-fn wrap(t: f32, mode: u32) -> f32 {
-    match mode {
-        REPEAT => t - t.floor(),
-        MIRRORED_REPEAT => {
-            let f = t.rem_euclid(2.0);
-            if f > 1.0 {
-                2.0 - f
-            } else {
-                f
-            }
-        }
-        _ => t.clamp(0.0, 1.0),
-    }
-}
-
-fn texel_wrapped(img: &Image, u: f32, v: f32, wrap_s: u32, wrap_t: u32) -> [u8; 4] {
-    let (u, v) = (wrap(u, wrap_s), wrap(v, wrap_t));
-    let x = ((u * img.width as f32) as u32).min(img.width.saturating_sub(1));
-    let y = ((v * img.height as f32) as u32).min(img.height.saturating_sub(1));
-    let i = ((y * img.width + x) * 4) as usize;
-    match img.pixels.get(i..i + 4) {
-        Some(p) => [p[0], p[1], p[2], p[3]],
-        None => [0; 4],
-    }
-}
-
-/// The texel a texture slot shows at (u, v), with its sampler's wrap modes.
-fn slot_texel(slot: &TextureSlot, images: &[Image], u: f32, v: f32) -> Option<[u8; 4]> {
-    let img = images.get(slot.image)?;
-    Some(texel_wrapped(
-        img,
-        u,
-        v,
-        slot.sampler.wrap_s,
-        slot.sampler.wrap_t,
-    ))
 }
 
 fn srgb_lut() -> Vec<f32> {
@@ -689,6 +632,8 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         });
         let before = world.objects.len();
@@ -707,14 +652,54 @@ mod tests {
             panic!("not a mesh");
         };
         assert_eq!(vertices.len(), 36);
-        // base 0.8, 0.1, 0.1; metallic 0.25 does not darken it (no specular yet)
-        assert!((color[0] - 0.8).abs() < 1e-6 && (color[1] - 0.1).abs() < 1e-6);
+        // base 0.8, 0.1, 0.1 times (1 - metallic 0.25). The shade darkens the metal.
+        assert!((color[0] - 0.6).abs() < 1e-5 && (color[1] - 0.075).abs() < 1e-5);
         // parent T(10,0,0), child R90 S2, then lifted: the cube spans x 8..12, y -1..3.
         assert!(
             (o.bounds.center[0] - 10.0).abs() < 1e-4 && (o.bounds.center[1] - 1.0).abs() < 1e-4
         );
         assert!((o.bounds.half[0] - 2.0).abs() < 1e-4 && (o.bounds.half[1] - 2.0).abs() < 1e-4);
         assert!((pose[13] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_mean_reads_emissive_from_its_texcoord() {
+        use genos_load::{Sampler, TextureSlot};
+        let base = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
+        };
+        let emissive = Image {
+            width: 2,
+            height: 2,
+            pixels: vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255],
+        };
+        let slot = |image, texcoord| TextureSlot {
+            image,
+            texcoord,
+            sampler: Sampler::default(),
+            scale: 1.0,
+        };
+        let material = genos_load::PbrMaterial {
+            base_color_texture: Some(slot(0, 0)),
+            metallic: 0.0,
+            emissive: [1.0, 0.0, 0.0],
+            emissive_texture: Some(slot(1, 1)),
+            ..genos_load::PbrMaterial::default()
+        };
+        let set0 = vec![[0.25, 0.25]; 3];
+        let set1 = vec![[0.75, 0.75]; 3];
+        let primitive = genos_load::Primitive {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            texcoords: set0.clone(),
+            texcoord_sets: vec![set0, set1],
+            indices: vec![0, 1, 2],
+            ..genos_load::Primitive::default()
+        };
+        let (_albedo, glow) = surface_mean(&material, &[base, emissive], &primitive);
+        assert!((glow[0] - 1.0).abs() < 1.0e-5, "emissive mean {}", glow[0]);
     }
 
     #[test]
@@ -744,6 +729,8 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         })
     }

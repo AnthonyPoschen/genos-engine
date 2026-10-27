@@ -1209,3 +1209,219 @@ name = "GENOS_GI_DEBUG"
 kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_DEBUG; one-release warning"
 
+[[var]]
+name = "GENOS_HDR_EXPOSURE_MODE"
+kind = "mirror"
+detail = "--exposure-mode"
+
+[[var]]
+name = "GENOS_HDR_EV100"
+kind = "mirror"
+detail = "--ev100"
+
+[[var]]
+name = "GENOS_HDR_COMPENSATION"
+kind = "mirror"
+detail = "--compensation"
+
+[[var]]
+name = "GENOS_HDR_ISO"
+kind = "mirror"
+detail = "--iso"
+
+[[var]]
+name = "GENOS_HDR_APERTURE"
+kind = "mirror"
+detail = "--aperture"
+
+[[var]]
+name = "GENOS_HDR_SHUTTER"
+kind = "mirror"
+detail = "--shutter"
+
+[[var]]
+name = "GENOS_HDR_ADAPT_DOWN"
+kind = "mirror"
+detail = "--adapt-down"
+
+[[var]]
+name = "GENOS_HDR_ADAPT_UP"
+kind = "mirror"
+detail = "--adapt-up"
+
+[[var]]
+name = "GENOS_HDR_DISPLAY"
+kind = "mirror"
+detail = "--hdr-display"
+
+[[var]]
+name = "GENOS_HDR_BLOOM"
+kind = "mirror"
+detail = "--bloom"
+
+[[var]]
+name = "GENOS_HDR_BLOOM_INTENSITY"
+kind = "mirror"
+detail = "--bloom-intensity"
+
+[[var]]
+name = "GENOS_HDR_BLOOM_LEVELS"
+kind = "mirror"
+detail = "--bloom-levels"
+
+[[var]]
+name = "GENOS_HDR_OUTPUT"
+kind = "mirror"
+detail = "--output"
+
+[[var]]
+name = "GENOS_HDR_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_HDR_COMPOSE"
+kind = "build"
+detail = "glslang -D for the HDR compose compile; not a process environment variable"
+
+
+[[var]]
+name = "GENOS_FOG"
+kind = "mirror"
+detail = "--fog"
+
+[[var]]
+name = "GENOS_FOG_DENSITY"
+kind = "mirror"
+detail = "--fog-density"
+
+[[var]]
+name = "GENOS_FOG_HEIGHT"
+kind = "mirror"
+detail = "--fog-height"
+
+[[var]]
+name = "GENOS_FOG_THICKNESS"
+kind = "mirror"
+detail = "--fog-thickness"
+
+[[var]]
+name = "GENOS_FOG_ALBEDO"
+kind = "mirror"
+detail = "--fog-albedo"
+
+[[var]]
+name = "GENOS_FOG_PHASE"
+kind = "mirror"
+detail = "--fog-phase"
+
+[[var]]
+name = "GENOS_FOG_GI"
+kind = "mirror"
+detail = "--fog-gi"
+
+[[var]]
+name = "GENOS_FOG_HISTORY"
+kind = "mirror"
+detail = "--fog-history"
+
+[[var]]
+name = "GENOS_FOG_GRID"
+kind = "mirror"
+detail = "--fog-grid"
+
+[[var]]
+name = "GENOS_FOG_SAMPLES"
+kind = "mirror"
+detail = "--fog-samples"
+
+[[var]]
+name = "GENOS_FOG_SUITE"
+kind = "mirror"
+detail = "--suite"
+
+[[var]]
+name = "GENOS_FOG_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_FOG_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_MATERIAL_ANISOTROPY"
+kind = "mirror"
+detail = "--material-anisotropy"
+
+[[var]]
+name = "GENOS_MATERIAL_DWELL_FRAMES"
+kind = "mirror"
+detail = "--material-dwell-frames"
+
+[[var]]
+name = "GENOS_MATERIAL_EMISSIVE_PROMOTE"
+kind = "mirror"
+detail = "--material-emissive-promote"
+
+[[var]]
+name = "GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX"
+kind = "mirror"
+detail = "--material-emissive-promote-flux"
+
+[[var]]
+name = "GENOS_MATERIAL_HEADROOM_FLOOR_MB"
+kind = "mirror"
+detail = "--material-headroom-floor-mb"
+
+[[var]]
+name = "GENOS_MATERIAL_HEADROOM_PERCENT"
+kind = "mirror"
+detail = "--material-headroom-percent"
+
+[[var]]
+name = "GENOS_MATERIAL_MIP_BIAS"
+kind = "mirror"
+detail = "--material-mip-bias"
+
+[[var]]
+name = "GENOS_MATERIAL_OCCLUSION"
+kind = "mirror"
+detail = "--material-occlusion"
+
+[[var]]
+name = "GENOS_MATERIAL_RESIDENCY_MB"
+kind = "mirror"
+detail = "--material-residency-mb"
+
+[[var]]
+name = "GENOS_MATERIAL_TEXTURE_QUALITY"
+kind = "mirror"
+detail = "--material-texture-quality"
+
+[[var]]
+name = "GENOS_MATERIAL_WATCH"
+kind = "mirror"
+detail = "--watch"
+
+[[var]]
+name = "GENOS_MATERIALS_GATE_CASE"
+kind = "mirror"
+detail = "--case"
+
+[[var]]
+name = "GENOS_MATERIALS_GATE_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_FIXTURE"
+kind = "mirror"
+detail = "--fixture"
+
+[[var]]
+name = "GENOS_PHYSICS_METRICS_OUT"
+kind = "mirror"
+detail = "--out"
+

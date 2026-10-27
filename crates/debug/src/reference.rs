@@ -24,11 +24,19 @@
 //! bounce limit: every pixel's primary hit gathers next-event direct light at each
 //! vertex and continues along cosine-sampled paths, ended by Russian roulette after
 //! three bounces (capped at `max_bounces`). It runs on the CPU, so it is exact up to
-//! its noise, whatever the GPU path does. Not traced: fog, particle cards, textures.
+//! its noise, whatever the GPU path does. The camera ray carries fog when the
+//! scene dispatches it. Surface bounces do not march the medium. Not traced:
+//! particle cards.
+//! A hit's albedo is the shared shade's diffuse albedo (`genos_load::ShadeSample`).
+//! Analytic paint is that shade with metallic 0. A glTF hit passes the textured shade.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use genos_render::{direct_light_in, linear_from_display, SceneMesh, Surfaces, TraceHit};
+use genos_load::ShadeSample;
+use genos_render::{
+    direct_light_in, linear_from_display, pack_f32, rec709_y, scene_luma, SceneMesh, SceneRead,
+    Surfaces, TraceHit,
+};
 use genos_scene::{look_direction, Camera, Scene};
 
 use crate::image::{Image, Region};
@@ -190,8 +198,15 @@ fn path_from(
 ) -> [f32; 3] {
     let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let mut at = *first;
-    let mut weight = scale(first.albedo, LAMBERT);
-    let mut sum = mul(weight, direct_light_in(scene, surfaces, lift(&at), at.normal));
+    // Analytic hits are paint. A caller that already shaded a glTF material stores
+    // the diffuse albedo here, which is the same product with metallic applied.
+    let primary = ShadeSample::paint(first.albedo);
+    let mut weight = scale(primary.diffuse_albedo(), LAMBERT);
+    let mut sum = primary.outgoing(
+        LAMBERT,
+        direct_light_in(scene, surfaces, lift(&at), at.normal),
+        [0.0; 3],
+    );
     for bounce in 0..max_bounces {
         let (u, v) = if bounce == 0 {
             stratum
@@ -206,7 +221,9 @@ fn path_from(
             sum = add(sum, mul(weight, sky));
             break;
         };
-        weight = mul(weight, scale(next.albedo, LAMBERT));
+        let next_shade = ShadeSample::paint(next.albedo);
+        sum = add(sum, mul(weight, next_shade.emissive));
+        weight = mul(weight, scale(next_shade.diffuse_albedo(), LAMBERT));
         sum = add(
             sum,
             mul(weight, direct_light_in(scene, surfaces, lift(&next), next.normal)),
@@ -314,6 +331,23 @@ pub fn render(setup: &RefSetup) -> Reference {
                                         setup.max_bounces,
                                         stratum,
                                         &mut rng,
+                                    );
+                                    let l = genos_render::compose_pixel_medium(
+                                        &setup.scene.fog,
+                                        &genos_render::PixelRay {
+                                            eye: setup.eye,
+                                            forward,
+                                            right,
+                                            up,
+                                            tan_half_y: tan_y,
+                                            aspect,
+                                            x: u32::try_from(x).unwrap_or(u32::MAX),
+                                            y: u32::try_from(y).unwrap_or(u32::MAX),
+                                            width: u32::try_from(w).unwrap_or(u32::MAX),
+                                            height: u32::try_from(h).unwrap_or(u32::MAX),
+                                        },
+                                        first.point,
+                                        l,
                                     );
                                     let y = luma(l) as f64;
                                     row_sq[x] += y * y;
@@ -600,6 +634,25 @@ pub struct Compare {
     pub grid: (u32, u32),
 }
 
+/// One scene-referred texel, nearest when the grade size differs from the read.
+fn scene_texel(scene: &SceneRead, x: u32, y: u32, dst_w: u32, dst_h: u32) -> [f64; 3] {
+    if scene.width == 0 || scene.height == 0 || scene.rgb.is_empty() {
+        return [0.0; 3];
+    }
+    let sx = (u64::from(x) * u64::from(scene.width) / u64::from(dst_w.max(1)))
+        .min(u64::from(scene.width) - 1);
+    let sy = (u64::from(y) * u64::from(scene.height) / u64::from(dst_h.max(1)))
+        .min(u64::from(scene.height) - 1);
+    let index = usize::try_from(sy.saturating_mul(u64::from(scene.width)).saturating_add(sx))
+        .unwrap_or(0)
+        .saturating_mul(3);
+    [
+        scene.rgb.get(index).copied().unwrap_or(0.0),
+        scene.rgb.get(index + 1).copied().unwrap_or(0.0),
+        scene.rgb.get(index + 2).copied().unwrap_or(0.0),
+    ]
+}
+
 /// Linear luminance of a displayed pixel, the tone curve undone.
 fn display_y(p: &[u8]) -> f32 {
     let c = [0, 1, 2].map(|i| linear_from_display(p[i] as f32 / 255.0));
@@ -614,6 +667,31 @@ fn display_y(p: &[u8]) -> f32 {
 pub fn compare(
     live: &Image,
     reference: &Reference,
+    region: Region,
+    grid: (u32, u32),
+    block: u32,
+) -> (Compare, Image) {
+    grade(live, reference, None, region, grid, block)
+}
+
+/// Grade the scene-referred image against the path trace's linear radiance.
+///
+/// `linear_from_display` is not applied. A shoulder stored in `scene` fails
+/// `grade_is_linear` and raises this error.
+pub fn compare_linear(
+    scene: &SceneRead,
+    reference: &Reference,
+    region: Region,
+    grid: (u32, u32),
+    block: u32,
+) -> (Compare, Image) {
+    grade(&reference.image, reference, Some(scene), region, grid, block)
+}
+
+fn grade(
+    live: &Image,
+    reference: &Reference,
+    scene: Option<&SceneRead>,
     region: Region,
     grid: (u32, u32),
     block: u32,
@@ -639,8 +717,24 @@ pub fn compare(
                 for x in bx..ex {
                     let i = (y * w + x) as usize;
                     if reference.hit[i] {
-                        ly += display_y(&live.rgb[i * 3..i * 3 + 3]);
-                        ry += display_y(&r.rgb[i * 3..i * 3 + 3]);
+                        let (sample_live, sample_ref) = match scene {
+                            Some(scene) => {
+                                let got = scene_luma(scene_texel(scene, x, y, w, h));
+                                let rgb = reference.linear.get(i).copied().unwrap_or([0.0; 3]);
+                                let want = rec709_y([
+                                    f64::from(rgb[0]),
+                                    f64::from(rgb[1]),
+                                    f64::from(rgb[2]),
+                                ]);
+                                (pack_f32(got), pack_f32(want))
+                            }
+                            None => (
+                                display_y(&live.rgb[i * 3..i * 3 + 3]),
+                                display_y(&r.rgb[i * 3..i * 3 + 3]),
+                            ),
+                        };
+                        ly += sample_live;
+                        ry += sample_ref;
                         n += 1;
                     }
                 }
@@ -726,8 +820,29 @@ pub fn compare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genos_scene::{Ceiling, Floor, Light, Sky, Vec3, Wall};
+    use genos_load::shade_uv;
     use genos_render::trace_ray;
+    use genos_scene::{Ceiling, Floor, Light, Sky, Vec3, Wall};
+
+    #[test]
+    fn the_path_weight_is_the_shade_diffuse_albedo() {
+        let paint = ShadeSample::paint([0.5, 0.25, 0.125]);
+        assert_eq!(paint.diffuse_albedo(), [0.5, 0.25, 0.125]);
+        let metal = shade_uv(
+            &genos_load::PbrMaterial {
+                base_color: [0.8, 0.1, 0.1, 1.0],
+                metallic: 0.25,
+                ..genos_load::PbrMaterial::default()
+            },
+            &[],
+            [0.0, 0.0],
+        );
+        let irradiance = [1.0; 3];
+        let shared = metal.outgoing(LAMBERT, irradiance, [0.0; 3]);
+        let legacy = ShadeSample::paint([0.8, 0.1, 0.1]).outgoing(LAMBERT, irradiance, [0.0; 3]);
+        assert!(shared[0] < legacy[0]);
+        assert!((shared[0] / legacy[0] - 0.75).abs() < 1.0e-5);
+    }
 
     fn lamp(x: f32, y: f32, z: f32) -> Light {
         Light {
@@ -768,6 +883,8 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         }
     }
@@ -799,6 +916,8 @@ mod tests {
             debug: genos_scene::DebugSettings::default(),
             fps_counter: genos_scene::FpsCounterSettings::default(),
             event_loop: genos_scene::EventLoopSettings::default(),
+            hdr: genos_scene::HdrSettings::legacy_bytes(),
+            fog: genos_scene::FogSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         }
     }
@@ -1079,5 +1198,42 @@ mod tests {
         };
         let (c, _) = compare(&brighter, &reference, Region::default(), (2, 1), 1);
         assert!(c.bias > 0.0 && c.regions[0].1 > 0.0 && c.regions[1].1 == 0.0);
+    }
+
+    #[test]
+    fn a_scene_grade_uses_linear_radiance_not_the_shoulder() {
+        let reference = Reference {
+            image: Image {
+                width: 1,
+                height: 1,
+                rgb: vec![200, 200, 200],
+            },
+            linear: vec![[4.0; 3]],
+            hit: vec![true],
+            spp: 1,
+            seconds: 0.0,
+            noise: 0.0,
+        };
+        let scene = SceneRead {
+            width: 1,
+            height: 1,
+            rgb: vec![4.0, 4.0, 4.0],
+            distance_m: vec![1.0],
+        };
+        let (matched, _) = compare_linear(&scene, &reference, Region::default(), (1, 1), 1);
+        assert!(matched.mean_rel < 1.0e-5, "linear grade {}", matched.mean_rel);
+        let shoulder = genos_render::legacy_display([4.0, 4.0, 4.0]);
+        let toned = SceneRead {
+            width: 1,
+            height: 1,
+            rgb: vec![shoulder[0], shoulder[1], shoulder[2]],
+            distance_m: vec![1.0],
+        };
+        let (wrong, _) = compare_linear(&toned, &reference, Region::default(), (1, 1), 1);
+        assert!(
+            wrong.mean_rel > 0.5,
+            "a shoulder must not grade as linear, mean_rel {}",
+            wrong.mean_rel
+        );
     }
 }

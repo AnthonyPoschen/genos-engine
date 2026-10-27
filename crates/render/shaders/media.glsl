@@ -2,6 +2,11 @@
 // HEIGHT_FOG_HORIZONTAL_COS is 1e-4 there and here.
 
 const float MEDIA_HORIZONTAL_COS = 1.0e-4;
+const float MEDIA_HG_TWO = 2.0;
+const float MEDIA_HG_FOUR = 4.0;
+const float MEDIA_PI = 3.141592653589793;
+const float MEDIA_HG_POW = 1.5;
+const float MEDIA_SIGMA_FLOOR = 1.0e-8;
 
 float media_transmittance(float optical_depth) {
     return exp(-optical_depth);
@@ -15,15 +20,15 @@ float media_height_density(float sigma0, float thickness, float y, float base_he
 }
 
 float media_phase_hg(float g, float mu) {
-    float denom = 1.0 + g * g - 2.0 * g * mu;
+    float denom = 1.0 + g * g - MEDIA_HG_TWO * g * mu;
     if (denom <= 0.0) {
         return 0.0;
     }
-    return (1.0 - g * g) / (4.0 * 3.141592653589793 * pow(denom, 1.5));
+    return (1.0 - g * g) / (MEDIA_HG_FOUR * MEDIA_PI * pow(denom, MEDIA_HG_POW));
 }
 
 float media_homogeneous_inscatter(float sigma, float source, float distance) {
-    if (abs(sigma) <= 1.0e-8) {
+    if (abs(sigma) <= MEDIA_SIGMA_FLOOR) {
         return source * distance;
     }
     return (source / sigma) * (1.0 - media_transmittance(sigma * distance));

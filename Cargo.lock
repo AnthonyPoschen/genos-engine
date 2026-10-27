@@ -154,6 +154,15 @@ version = "0.1.0"
 dependencies = [
  "genos-lighting-ref",
  "genos-math",
+ "genos-render",
+ "genos-window",
+]
+
+[[package]]
+name = "genos-fracture"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
 ]
 
 [[package]]
@@ -228,6 +237,7 @@ version = "0.1.0"
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [
+ "genos-fracture",
  "genos-math",
 ]
 

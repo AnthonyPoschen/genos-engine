@@ -154,7 +154,10 @@ fn engine(run: &ScriptRun, report: Rc<RefCell<Report>>) -> Engine {
             trace,
             ctx.call_position(),
             "wait",
-            json::object([("frames", json::int(n))]),
+            json::object([
+                ("frames", json::int(n)),
+                ("timeout_s", json::float(wait_timeout_s(n))),
+            ]),
         )
     });
     let r = report.clone();
@@ -506,6 +509,13 @@ fn dynamic_value(v: Dynamic) -> Value {
     }
 }
 
+/// A long soak has to outlast the two-minute command default.
+/// One second per frame, and at least two minutes, capped at one hour.
+fn wait_timeout_s(frames: INT) -> f64 {
+    let frames = frames.max(1) as f64;
+    frames.clamp(120.0, 3600.0)
+}
+
 fn value_dynamic(v: &Value) -> Dynamic {
     match v {
         Value::Null => Dynamic::UNIT,
@@ -562,6 +572,13 @@ mod tests {
             log.push("device");
         });
         assert_eq!(lock(&log).as_slice(), ["script", "device"]);
+    }
+
+    #[test]
+    fn a_long_wait_is_allowed_a_second_per_frame() {
+        assert_eq!(wait_timeout_s(1), 120.0);
+        assert_eq!(wait_timeout_s(600), 600.0);
+        assert_eq!(wait_timeout_s(10_000), 3600.0);
     }
 
     #[test]

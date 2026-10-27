@@ -27,31 +27,6 @@ layout(location = 0) out vec4 out_color;
 #include "lighting_pack.glsl"
 #include "material_atlas.glsl"
 
-layout(std430, set = 0, binding = 7) readonly buffer MaterialNormal {
-    uint width;
-    uint height;
-    uint pad0;
-    uint pad1;
-    uint texels[];
-} material_normal;
-
-vec3 material_normal_at(vec4 rect, vec2 uv) {
-    if (uv.x < 0.0 || rect.z <= 0.5 || material_normal.width == 0u) {
-        return vec3(0.5, 0.5, 1.0);
-    }
-    float u = uv.x - floor(uv.x);
-    float v = uv.y - floor(uv.y);
-    uint x = uint(rect.x) + uint(min(u * rect.z, rect.z - 1.0));
-    uint y = uint(rect.y) + uint(min(v * rect.w, rect.w - 1.0));
-    x = min(x, material_normal.width - 1u);
-    y = min(y, material_normal.height - 1u);
-    uint packed = material_normal.texels[y * material_normal.width + x];
-    return vec3(
-        float(packed & 255u) / 255.0,
-        float((packed >> 8u) & 255u) / 255.0,
-        float((packed >> 16u) & 255u) / 255.0);
-}
-
 // Screen-space tangent from the position and the uv. No stored tangents.
 vec3 material_perturb(vec3 n, vec3 pos, vec2 uv, vec3 mapped) {
     vec3 tn = mapped * 2.0 - 1.0;
@@ -80,6 +55,9 @@ void main() {
     if (v_shade < 0.5 || v_shade > 1.5) {
         discard;
     }
+    // v_albedo is the base-colour factor (or the untextured shade mean). The atlas
+    // is linear(base texture) × (1 − metallic) from the shared shade, so this
+    // product is the diffuse albedo. The world-space cache multiplies that albedo.
     vec3 albedo = v_albedo;
     vec3 n = normalize(v_normal);
     if (v_uv.x >= 0.0 && v_atlas.z > 0.5) {

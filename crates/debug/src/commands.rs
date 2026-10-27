@@ -112,8 +112,62 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(hdr_specs())
+    .chain(fog_specs())
     .chain(host_specs())
+    .chain(material_specs())
     .collect()
+}
+
+fn hdr_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_hdr_settings",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, and --output win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+        ),
+        spec(
+            "set_hdr_settings",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, legacy_bytes). A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+        ),
+        spec(
+            "get_hdr",
+            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms and 96 MiB ceilings are the 4070 budget, not a lavapipe score.",
+        ),
+    ]
+}
+
+fn fog_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_fog_settings",
+            "The fog settings in force (text form): enabled, density, height, thickness, albedo, phase_g, gi, history, grid_width, grid_height, grid_slices, samples, and volume lines. Zero on a grid axis keeps the preset axis. Zero samples dispatches that grid whole. view is the debug page (extinction, inscatter, transmittance, history, age, budget, volumes) and is not in the text. --fog and the other fog flags win over GENOS_FOG and the other mirrors, which win over the scene value. History is stored and is not blended.",
+        ),
+        spec(
+            "set_fog_settings",
+            "Partial fog update. Keys match the settings text, plus view and clear_volumes. A text field overlays key=value lines. Writes the scene. Launch flags and their mirrors overlay the fields they set on the next frame.",
+        ),
+        spec(
+            "get_fog_stats",
+            "Fog counters: dispatches, samples_used, samples_capped, grid_width, grid_height, grid_slices, dispatched_width, dispatched_height, dispatched_slices, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. samples_used is the samples setting (0 keeps every cell). The dispatched_* fields are the grid the frame runs. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not graded against an RTX 4070 ceiling.",
+        ),
+    ]
+}
+
+fn material_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_material_settings",
+            "The material settings in force (text form): texture_quality, mip_bias, anisotropy, occlusion, emissive_promote, emissive_promote_flux, headroom_percent, headroom_floor_mb, dwell_frames. texture_quality does not follow VRAM size.",
+        ),
+        spec(
+            "set_material_settings",
+            "Partial material update. Keys match the settings text. A text field overlays key=value lines. residency_mb is a deprecated alias: it warns once and does not set a pool. Applies on the next draw.",
+        ),
+        spec(
+            "get_material_stats",
+            "Streamer counters for the frame in force: committed, budget, refused, evictions, thrash, holes, rate, stream_ms. budget is the texture target. rate is the bytes the last step admitted. stream_ms is the base frame time that step saw.",
+        ),
+    ]
 }
 
 fn host_specs() -> Vec<CommandSpec> {

@@ -1,15 +1,17 @@
 //! Metric harness for fog and volumetric lighting.
 //!
-//! Closed-form fixtures are graded here. Renderer metrics stay
-//! `NOT-IMPLEMENTED` until the froxel pass and the media path tracer exist.
-//! This crate does not draw and does not allocate a froxel.
+//! Closed-form fixtures are graded here. Renderer rows become live as each
+//! pass lands. Millisecond rows time the dispatched grid on lavapipe and stay
+//! `NOT-IMPLEMENTED`: those times are not graded against the RTX 4070 ceilings.
 
 mod analytic;
 mod cli;
+mod device;
 mod feature;
 mod report;
 
 pub use cli::{resolve, Config, HELP};
+pub use feature::planted_scores;
 pub use report::{exit_code, format_lines, judge, write_metrics, Metric, Report, Status};
 
 /// Which metrics to score.
@@ -23,7 +25,7 @@ pub enum Suite {
     All,
 }
 
-/// Analytic input. Feature metrics ignore it.
+/// Analytic input. The feature suite uses it too: `broken` runs the `*_broken` helpers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fixture {
     /// A candidate that matches the closed form.
@@ -59,7 +61,7 @@ pub fn evaluate(suite: Suite, fixture: Fixture) -> Report {
         metrics.extend(analytic::evaluate_analytic(fixture));
     }
     if matches!(suite, Suite::Feature | Suite::All) {
-        metrics.extend(feature::evaluate_feature());
+        metrics.extend(feature::evaluate_feature(fixture));
     }
     Report {
         suite,

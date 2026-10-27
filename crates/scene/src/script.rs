@@ -15,6 +15,8 @@ use genos_math::Vec3;
 
 use crate::debug_settings::DebugSettings;
 use crate::event_loop::EventLoopSettings;
+use crate::fog::FogSettings;
+use crate::hdr::HdrSettings;
 use crate::fps_counter::FpsCounterSettings;
 use crate::lighting::LightingSettings;
 use crate::menu::MenuSettings;
@@ -385,6 +387,8 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         fps_counter: built.fps_counter,
         menu: built.menu.clone(),
         event_loop: built.event_loop,
+        hdr: built.hdr.clone(),
+        fog: built.fog.clone(),
     })
 }
 
@@ -410,4 +414,6 @@ struct Builder {
     fps_counter: FpsCounterSettings,
     menu: MenuSettings,
     event_loop: EventLoopSettings,
+    hdr: HdrSettings,
+    fog: FogSettings,
 }

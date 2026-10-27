@@ -1,12 +1,39 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::large_types_passed_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_field_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::large_types_passed_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_field_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Contact between the shapes on two bodies.
 //!
@@ -47,11 +74,14 @@ const BOUNDS_MARGIN: f32 = 0.02;
 /// X), and every bounded body against every plane. Two static bodies never move, so
 /// their pair is skipped. The pairs run in index order, the order a pass over every
 /// pair took.
-pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
+pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
     scratch.boxes.clear();
     scratch.planes.clear();
     scratch.pairs.clear();
     for (index, body) in bodies.iter().enumerate() {
+        if body.presence != crate::Presence::Live {
+            continue;
+        }
         match bounds(body) {
             Some((lo, hi)) => {
                 let margin = Vec3::new(BOUNDS_MARGIN, BOUNDS_MARGIN, BOUNDS_MARGIN);
@@ -68,7 +98,8 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
                 break;
             }
             let meet = lo2.y <= hi.y && lo.y <= hi2.y && lo2.z <= hi.z && lo.z <= hi2.z;
-            if meet && (moving(i) || moving(j)) {
+            let debris_pair = bodies[i as usize].debris && bodies[j as usize].debris;
+            if meet && (moving(i) || moving(j)) && !debris_pair {
                 scratch.pairs.push((i.min(j), i.max(j)));
             }
         }
@@ -81,15 +112,17 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) {
         }
     }
     scratch.pairs.sort_unstable();
+    let mut hits = 0_u32;
     for &(i, j) in &scratch.pairs {
         let (left, right) = bodies.split_at_mut(j as usize);
-        collide_pair(&mut left[i as usize], &mut right[0]);
+        hits = hits.saturating_add(collide_pair(&mut left[i as usize], &mut right[0]));
     }
+    hits
 }
 
 /// World bounds of a body: low and high corners. None for a plane, which is
 /// unbounded.
-fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
+pub(crate) fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
     let mut lo = Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut hi = -lo;
     let mut add = |p: Vec3| {
@@ -133,52 +166,49 @@ fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
     Some((lo, hi))
 }
 
-fn collide_pair(a: &mut Body, b: &mut Body) {
+fn collide_pair(a: &mut Body, b: &mut Body) -> u32 {
     match (a.shape, b.shape) {
-        (Shape::Plane { .. }, Shape::Plane { .. }) => {}
-        (Shape::Plane { normal, offset }, _) => {
-            collide_plane(b, a, normal, offset);
-        }
-        (_, Shape::Plane { normal, offset }) => {
-            collide_plane(a, b, normal, offset);
-        }
+        (Shape::Plane { .. }, Shape::Plane { .. }) => 0,
+        (Shape::Plane { normal, offset }, _) => collide_plane(b, a, normal, offset),
+        (_, Shape::Plane { normal, offset }) => collide_plane(a, b, normal, offset),
         (Shape::Mesh(mesh), _) => collide_mesh(a, mesh, b),
-        (_, Shape::Mesh(mesh)) => {
-            if let Some((normal, depth)) = mesh_contact(b, &mesh, a) {
-                solve_contact(a, b, -normal, depth);
-            }
-        }
-        _ => {
-            if let Some((normal, depth)) = primitive_contact(a, b) {
-                solve_contact(a, b, normal, depth);
-            }
-        }
+        (_, Shape::Mesh(mesh)) => mesh_contact(b, &mesh, a).map_or(0, |(normal, depth)| {
+            u32::from(solve_contact(a, b, -normal, depth))
+        }),
+        _ => primitive_contact(a, b).map_or(0, |(normal, depth)| {
+            u32::from(solve_contact(a, b, normal, depth))
+        }),
     }
 }
 
-fn collide_plane(body: &mut Body, plane: &mut Body, normal: Vec3, offset: f32) {
+fn collide_plane(body: &mut Body, plane: &mut Body, normal: Vec3, offset: f32) -> u32 {
     match body.shape {
         Shape::Mesh(mesh) => {
+            let mut hits = 0_u32;
             for piece in mesh.pieces() {
                 if let Some((hit_normal, depth)) = piece_plane(body, *piece, normal, offset) {
-                    solve_contact(body, plane, hit_normal, depth);
+                    hits = hits
+                        .saturating_add(u32::from(solve_contact(body, plane, hit_normal, depth)));
                 }
             }
+            hits
         }
         _ => {
             let point = support_point(body, -normal, None);
             let dist = normal.dot(point) - offset;
             if dist < 0.0 {
-                solve_contact(body, plane, normal, -dist);
+                u32::from(solve_contact(body, plane, normal, -dist))
+            } else {
+                0
             }
         }
     }
 }
 
-fn collide_mesh(a: &mut Body, mesh: Mesh, b: &mut Body) {
-    if let Some((normal, depth)) = mesh_contact(a, &mesh, b) {
-        solve_contact(a, b, normal, depth);
-    }
+fn collide_mesh(a: &mut Body, mesh: Mesh, b: &mut Body) -> u32 {
+    mesh_contact(a, &mesh, b).map_or(0, |(normal, depth)| {
+        u32::from(solve_contact(a, b, normal, depth))
+    })
 }
 
 fn mesh_contact(owner: &Body, mesh: &Mesh, other: &Body) -> Option<(Vec3, f32)> {
@@ -282,7 +312,7 @@ fn piece_plane(body: &Body, piece: Piece, normal: Vec3, offset: f32) -> Option<(
     }
 }
 
-fn primitive_contact(a: &Body, b: &Body) -> Option<(Vec3, f32)> {
+pub(crate) fn primitive_contact(a: &Body, b: &Body) -> Option<(Vec3, f32)> {
     match (a.shape, b.shape) {
         (Shape::Sphere { radius: ra }, Shape::Sphere { radius: rb }) => {
             spheres(a.position, ra, b.position, rb)
@@ -806,6 +836,46 @@ fn segment(body: &Body, half_height: f32) -> (Vec3, Vec3) {
     (body.position - axis, body.position + axis)
 }
 
+pub(crate) fn shape_support(body: &Body, dir: Vec3) -> Vec3 {
+    match body.shape {
+        Shape::Mesh(mesh) => {
+            let mut best = body.position;
+            let mut best_dot = f32::NEG_INFINITY;
+            let mut found = false;
+            for piece in mesh.pieces() {
+                let point = piece_support(body, piece, dir);
+                let score = point.dot(dir);
+                if !found || score > best_dot {
+                    best = point;
+                    best_dot = score;
+                    found = true;
+                }
+            }
+            best
+        }
+        Shape::Plane { .. } => body.position,
+        Shape::Sphere { .. } | Shape::Capsule { .. } | Shape::Box { .. } => {
+            support_point(body, dir, None)
+        }
+    }
+}
+
+fn piece_support(body: &Body, piece: &Piece, dir: Vec3) -> Vec3 {
+    let dir = unit(dir);
+    match piece {
+        Piece::Cuboid { center, half } => {
+            let local = conjugate(body.orientation).rotate(dir);
+            let support = Vec3::new(
+                half.x.copysign(local.x),
+                half.y.copysign(local.y),
+                half.z.copysign(local.z),
+            );
+            body.position + body.orientation.rotate(*center + support)
+        }
+        Piece::Hull(hull) => hull_support(body, hull, dir),
+    }
+}
+
 fn support_point(body: &Body, dir: Vec3, piece: Option<&Hull>) -> Vec3 {
     let dir = unit(dir);
     if let Some(hull) = piece {
@@ -910,18 +980,22 @@ fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
 }
 
 /// Contact restitution is the larger of the two bodies. Friction is the larger too.
-pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) {
+///
+/// Returns whether both bodies were dynamic and a closing impulse was stored.
+pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) -> bool {
     let normal = unit(normal);
     let inv = a.inverse_mass + b.inverse_mass;
     if inv <= 0.0 || !penetration.is_finite() || !normal.x.is_finite() {
-        return;
+        return false;
     }
     let rel = a.velocity - b.velocity;
     let vn = rel.dot(normal);
-    if vn < 0.0 {
+    let dynamic_hit = if vn < 0.0 {
         let restitution = a.restitution.max(b.restitution).clamp(0.0, 1.0);
         let j = -(1.0 + restitution) * vn / inv;
         let impulse = normal * j;
+        a.normal_impulse += j;
+        b.normal_impulse += j;
         a.velocity += impulse * a.inverse_mass;
         b.velocity -= impulse * b.inverse_mass;
 
@@ -937,11 +1011,15 @@ pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetratio
                 b.velocity -= kick * b.inverse_mass;
             }
         }
-    }
+        a.inverse_mass > 0.0 && b.inverse_mass > 0.0
+    } else {
+        false
+    };
     let depth = penetration - SLOP;
     if depth > 0.0 {
         let correction = normal * (depth * PERCENT / inv);
         a.position += correction * a.inverse_mass;
         b.position -= correction * b.inverse_mass;
     }
+    dynamic_hit
 }

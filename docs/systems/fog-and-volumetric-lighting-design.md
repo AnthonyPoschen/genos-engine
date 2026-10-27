@@ -1,6 +1,6 @@
 # Fog and volumetric lighting
 
-Status: **proposed**. ADR: [0018](../adr/0018-fog-and-volumetric-lighting.md), status Proposed. Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). This document does not change the frame. The metric harness is `fog-check` (`crates/fog-check`). It grades analytic fixtures and marks every renderer metric `NOT-IMPLEMENTED`.
+Status: **accepted**. ADR: [0018](../adr/0018-fog-and-volumetric-lighting.md), status Accepted. Anthony delegated design approval to the Engine bot, which accepted it. Terms follow [`docs/lighting/GLOSSARY.md`](../lighting/GLOSSARY.md). The metric harness is `fog-check` (`crates/fog-check`). It grades the analytic fixtures and each renderer row as that row's pass lands. `gi_inscatter_blur_rel` stays `NOT-IMPLEMENTED` until lighting phase 3 (`cursor/lighting-p3-capped-refresh`).
 
 The realtime volume is a froxel grid. Height fog, local fog volumes, and shadowed shafts share that grid. Indirect in-scattering is a read of the world cache. The path tracer is extended so the picture can be graded. Nothing here is a screen-space blur.
 
@@ -109,7 +109,7 @@ Departures from Hillaire 2015, by name:
 6. **Height fog uses the closed form per slice** (`σ(y) = σ0 exp(-(y - y0) / H)`, and `σ0 * H * exp(-y0 / H) * (1 - exp(-dy / H)) / cos θ` along a slanted ray). Hillaire samples density. Those functions live in `genos_math::media`. `fog-check` grades that module.
 7. **Single scatter only.** The multi-scatter lobe in the Frostbite course is out of v1.
 8. **World-cache in-scattering.** The 2015 course has no world-space GI cache. A refreshed cell adds `σ_s * p(ω) * L_cache`. That read is the GI feed. It is not in the paper.
-9. **Grid sizes are preset caps,** not a fixed 160×90×64. High is 160×90×48 so the allocation stays under 12 MB. Slice counts: Low 24, Medium 32, High 48. Near 0.10 m, far 64 m, exponential.
+9. **Grid sizes default to the preset caps,** not a fixed 160×90×64. High is 160×90×48 so the allocation stays under 12 MB. Slice counts: Low 24, Medium 32, High 48. Near 0.10 m, far 64 m, exponential. `grid_width`, `grid_height`, `grid_slices`, and `samples` override that default. Zero keeps it.
 
 `RGBA16F` is the texture format. It does not require `shaderFloat16`. Shaders do not assume a subgroup size.
 
@@ -144,7 +144,7 @@ Height fog at a sample height `y`:
 
 `density`, `height`, and `thickness` are settings. The integral of `σ_t` across a slice has a closed form because the ray's `y` is linear in distance and `σ_t` is exponential in `y`. Absorption and scattering share `σ_t`. Single-scatter albedo is the `albedo` setting, so `σ_s = albedo * σ_t` and `σ_a = σ_t - σ_s`. Albedo is clamped to `[0, 1]`.
 
-A local fog volume is a box or a sphere in world space, with its own density, albedo, and falloff in metres. A cell whose center is inside contributes `density * falloff(distance to the bound)`. Volumes add. They do not replace the height field.
+A local fog volume is a box or a sphere in world space, with its own density, albedo, and falloff in metres. A cell whose center is inside contributes `density * falloff(distance to the bound)`. Volumes add. They do not replace the height field. Extinction is that centre sample on the view ray. The in-scatter taps are slid onto the line parallel to the view through the volume's screen position, so a slice thicker than the volume does not shear it across the cell. Hillaire samples the view ray; this is the departure.
 
 Puff spheres from the particle step are local spheres of radius `SMOKE_RADIUS` (0.42 m) and density `SMOKE_DENSITY` (1.7) when the froxel is on. The puff composite is then skipped.
 
@@ -199,7 +199,7 @@ The column target is 160×90 on High, not 2560×1440. The composite samples it w
 
 Fog history is off on Potato, Low, Medium, and High. [ADR 0012](../adr/0012-gi.md) stores no radiance history. The grid layout reserves a history slot so a later decision can turn the setting on without a second allocation. While the setting is off the pass does not read that slot and does not blend a previous frame. An unsampled cell uses the unshadowed closed form (departure 3).
 
-Enabling fog history is an open decision for Anthony. This document does not choose it. The evidence is `froxel_temporal_smear_px` (centroid lag of a static shaft during a 90° yaw, threshold 0.50 px at 1440p) and `fog_yaw_pop_rel` (frame-to-frame relative luminance of the fog term on that yaw, threshold 0.05).
+Enabling fog history is an open decision for Anthony. This document does not choose it. The evidence is `froxel_temporal_smear_px` (centroid lag of a static shaft during a 90° yaw, threshold 0.50 px at 1440p, the worse of stride 1 and stride 16) and `fog_yaw_pop_rel` (frame-to-frame relative luminance of the fog term on that yaw, threshold 0.05).
 
 Extinction is recomputed every frame.
 
@@ -243,7 +243,7 @@ VRAM is the grid plus the column target. 16 bytes per froxel, 8 bytes per column
 | Fog history | off | off | off | off |
 | ms ceiling, 4070, 1440p | 0.05 | 0.40 | 0.80 | 1.20 |
 
-High fog at the ceiling is 11.2 MB. [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) puts High lighting near 140 MB of the ~200 MB soft budget. 152 MB still fits a 4 GB card. Low on a GTX 1060 at 1080p uses the same 0.903 MB grid. Its millisecond ceiling on that card is 1.00 ms, so the 60 fps Low frame (16.7 ms) keeps a margin. The 4070 Low ceiling stays 0.40 ms. The controller moves the sample cap, not the grid, when a card misses its ceiling.
+High fog at the ceiling is 11.2 MB. [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) puts High lighting near 140 MB of the ~200 MB soft budget. 152 MB still fits a 4 GB card. Low on a GTX 1060 at 1080p uses the same 0.903 MB grid. Its millisecond ceiling on that card is 1.00 ms, so the 60 fps Low frame (16.7 ms) keeps a margin. The 4070 Low ceiling stays 0.40 ms. A later auto-tune writes `grid_width`, `grid_height`, `grid_slices`, and `samples` when a card misses its ceiling. The frame dispatches that resolved grid and does not shrink on its own. Lavapipe times are not graded against the 4070 ceilings.
 
 Work that scales with the picture is the upsample. It is one full-resolution gather of a few taps, gated by density. It is inside the ceiling, not added on top.
 
@@ -266,26 +266,29 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `phase_hg_integral_abs` | 1e-4 | Max abs error of the sphere integral of Henyey-Greenstein against 1, Simpson in μ times `2π`, at g = 0, 0.4, and 0.7 | Graded. The good fixture integrates `phase_hg`. Broken fixture drops the `4π`. |
 | `homogeneous_inscatter_max_abs` | 1e-3 | Max abs error of `(S/σ)(1-exp(-σ D))` against piecewise steps, σ = 0.2, S = 0.15 | Graded. The good fixture calls `homogeneous_inscatter`. Broken fixture adds `S*D` with no transmittance. |
 | `image_grade_blur_rel` | 0.12 | `blur_relative` of a synthetic fog picture against itself. The lighting-ref fail line. | Graded. Broken fixture scales luminance by 1.4. |
-| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | `NOT-IMPLEMENTED` |
-| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | `NOT-IMPLEMENTED` |
-| `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | `NOT-IMPLEMENTED` |
-| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance inside the shaft mask, against the media reference | `NOT-IMPLEMENTED` |
-| `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` |
-| `media_path_blur_rel` | 0.12 | Full picture against the media path trace | `NOT-IMPLEMENTED` |
-| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | `NOT-IMPLEMENTED` |
-| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | `NOT-IMPLEMENTED` |
-| `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_vram_high_mb` | 12 | Allocated fog VRAM | `NOT-IMPLEMENTED` |
-| `froxel_ms_potato` | 0.05 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_low` | 0.40 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
-| `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED` |
+| `froxel_temporal_smear_px` | 0.50 | Centroid lag, in picture pixels at 1440p, of a static shaft during a 90° yaw | Graded from lavapipe column readback at High 160×90×48. The row is the worse of stride 1 and stride 16 across the 320 yaw frames. History is off. Holding the first frame fails. |
+| `fog_yaw_pop_rel` | 0.05 | Max frame-to-frame relative luminance of the fog term on that yaw, after frame 8 | Graded from lavapipe column luma across the High yaw, 320 frames. History is off. Scaling each frame by `1 + 0.5 sin(yaw * 48)` fails. |
+| `local_volume_leak` | 1e-4 | Peak extinction outside a local box, divided by the peak inside | Graded from the lavapipe extinction image of one box. Height density is zero. Ignoring the box bound fails the gate. |
+| `sphere_volume_leak` | 1e-4 | Peak extinction outside a local sphere, divided by the peak inside | Graded from the lavapipe extinction image. Ignoring the sphere bound fails the gate. |
+| `shaft_shadow_blur_rel` | 0.12 | Blurred relative luminance of the shadowed GPU columns against the CPU shadowed integral | Graded. The CPU model is the reference. Skipping the shadow lookup fails. `--fixture broken` compares the unshadowed CPU integral with the shadowed one. |
+| `gi_inscatter_blur_rel` | 0.12 | Same grade where the only light in the medium is the world cache | `NOT-IMPLEMENTED` until lighting phase 3 |
+| `media_path_blur_rel` | 0.12 | Full picture against a local closed form, not `genos_math` | Graded from lavapipe columns. The broken fixture scales the CPU picture by 1.4. |
+| `near_fog_blur_rel` | 0.08 | The same grade on the nearest quarter of the slices | Graded from lavapipe columns against that segment's local closed form. The planted skip of per-slice extinction keeps density 0.08 and integrates every slice, and that picture fails this ceiling. |
+| `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded from two lavapipe frames. History is off. Scaling the second frame by 1.4 fails. |
+| `frame_column_abs` | 1e-3 | Peak abs error of the frame's own column buffer against the CPU shadowed integral of that frame | Graded from the Low frame after the depth prepass. The frame traces the resident scene, so the reference does too. An empty buffer fails. A separate `run_fog` dispatch is not this row. |
+| `frame_picture_unchanged` | 0 | 0 when fog changes the composed picture, 1 when the fog-on and fog-off pictures match | Graded from two Low frames. The compose header is written on the device only inside the frame dispatch, so a missing dispatch and a compose that ignores fog both score 1. |
+| `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
+| `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_vram_high_mb` | 12 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
+| `froxel_ms_potato` | 0.05 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Potato does not dispatch, so the lavapipe value is 0. The 4070 ceiling is not graded. |
+| `froxel_ms_low` | 0.40 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. The value is the lavapipe timestamp of the dispatched Low grid, 64×36×24 unless settings override it. |
+| `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Lavapipe timestamp of the dispatched Medium grid, 96×54×32 unless settings override it. |
+| `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Lavapipe timestamp of the dispatched High grid, 160×90×48 unless settings override it. |
 
-Exit status: 0 when no selected metric failed, including a run whose rows are `NOT-IMPLEMENTED`. 1 when any metric failed. 2 when an argument is bad. `--suite analytic` is the closed forms plus the synthetic picture. `--suite feature` is the renderer metrics. `--suite all` is both. `--fixture good` and `--fixture broken` select the analytic inputs. The feature suite ignores the fixture.
+Exit status: 0 when no selected metric failed, including a run whose rows are `NOT-IMPLEMENTED`. 1 when any metric failed. 2 when an argument is bad. `--suite analytic` is the closed forms plus the synthetic picture. `--suite feature` is the renderer metrics. `--suite all` is both. `--fixture good` grades lavapipe readback against the CPU model and the local closed form. `--fixture broken` runs the `*_broken` helpers. The millisecond ceilings are RTX 4070 figures. A lavapipe timestamp of the dispatched grid is recorded on the row and is not graded against those ceilings. The real 4070 numbers come later.
 
-The good analytic run exits 0. The broken analytic run exits 1. The feature run exits 0. A measured 0 on a feature that is absent is still `NOT-IMPLEMENTED`.
+The good analytic run exits 0. The broken analytic run exits 1. A measured 0 on a feature that is absent is still `NOT-IMPLEMENTED`. `gi_inscatter_blur_rel` stays absent.
 
 Phase 0 on this tree (`cargo run -p genos-fog-check --offline --locked`):
 
@@ -299,13 +302,13 @@ Phase 0 on this tree (`cargo run -p genos-fog-check --offline --locked`):
 | `homogeneous_inscatter_max_abs` | 7.216450e-16 PASS | 6.014224e-1 FAIL |
 | `image_grade_blur_rel` | 0 PASS | 4.000000e-1 FAIL |
 
-Good exits 0. Broken exits 1. `--suite feature` prints 16 lines, each `NOT-IMPLEMENTED`, and exits 0. `--suite all` with the good fixture exits 0. JSON is `genos-debug/fog/<fixture>/metrics.json`.
+Good exits 0. Broken exits 1. That table is the phase-0 analytic run. The feature suite now grades the froxel. JSON is `genos-debug/fog/<fixture>/metrics.json`.
 
 ## 12. Debug tool and tests
 
-Fog is a lighting feature. Later phases extend `debug/lighting` (`genos-lighting`). They do not add `debug/fog`. Scenes stay in `debug/scenes/`. The menu page is `Fog`. Controls are the setting keys: sliders for density, height, thickness, albedo, and phase g; checkboxes for enabled, gi, and history; a preset dropdown. No help text.
+Fog is a lighting feature. Later phases extend `debug/lighting` (`genos-lighting`). They do not add `debug/fog`. Scenes stay in `debug/scenes/`. The menu page is `Fog`. Controls are the setting keys: sliders for density, height, thickness, albedo, phase g, grid width, grid height, grid slices, and samples; checkboxes for enabled, gi, and history; a preset dropdown. No help text.
 
-Views, with no help text, labelled by the key: `extinction`, `inscatter`, `transmittance`, `history` (accept weight, zero while the setting is off), `age`, `budget`, `volumes` (box edges). Counters: dispatches, samples used, samples capped, history accepts, history rejects, VRAM bytes, pass milliseconds. Accepts and rejects stay at zero while history is off. MCP: `get_fog_settings`, `set_fog_settings`, `get_fog_stats`. The catalogue entry is `crates/debug/src/commands.rs`, same JSON for MCP, `POST /cmd`, and Rhai.
+Views, with no help text, labelled by the key: `extinction`, `inscatter`, `transmittance`, `history` (accept weight, zero while the setting is off), `age`, `budget`, `volumes` (box edges). Counters: dispatches, samples used (the `samples` setting), the dispatched grid, history accepts, history rejects, VRAM bytes, pass milliseconds. Accepts and rejects stay at zero while history is off. MCP: `get_fog_settings`, `set_fog_settings`, `get_fog_stats`. The catalogue entry is `crates/debug/src/commands.rs`, same JSON for MCP, `POST /cmd`, and Rhai.
 
 | Failure | Probe |
 |---|---|
@@ -313,11 +316,13 @@ Views, with no help text, labelled by the key: `extinction`, `inscatter`, `trans
 | Shaft smears on a yaw | `froxel_temporal_smear_px` |
 | Yaw pops | `fog_yaw_pop_rel` |
 | Density outside a box | `local_volume_leak` |
+| Density outside a sphere | `sphere_volume_leak` |
 | Shaft ignores a wall | `shaft_shadow_blur_rel` |
 | Cache light missing in the medium | `gi_inscatter_blur_rel` |
 | Picture misses the reference | `media_path_blur_rel`, `near_fog_blur_rel` |
 | Still camera flickers | `fog_still_flicker` |
-| Over the ceiling | `froxel_ms_*`, `froxel_vram_*` |
+| Over the VRAM ceiling | `froxel_vram_*` |
+| Lavapipe pass time | `froxel_ms_*` records the dispatched grid and stays `NOT-IMPLEMENTED` |
 | History smears or pops, if a later decision enables it | `froxel_temporal_smear_px`, `fog_yaw_pop_rel` |
 
 Rhai gates, added with the phase that can run them, under `debug/lighting/scripts/gates/`:
@@ -339,19 +344,19 @@ cargo run -p genos-fog-check -- --suite analytic --fixture broken --out genos-de
 cargo run -p genos-fog-check -- --suite feature --out genos-debug/fog/feature
 ```
 
-`cargo test -p genos-fog-check` is the fast check. It does not need a GPU. The media path trace and the 4070 timings stay commands for the owner machine. Lavapipe, when a later phase draws, is a wiring check only.
+`cargo test -p genos-fog-check` grades the feature rows on lavapipe. The analytic rows do not need a GPU. The millisecond ceilings stay the 4070 figures. A lavapipe time of the dispatched grid is recorded and is not graded.
 
 ## 13. Settings and arguments
 
-`FogSettings` is a public `EngineSettings` value on the scene, beside lighting. Keys: `enabled`, `density`, `height`, `thickness`, `albedo`, `phase_g`, `gi`, `history`. Preset applies the table in §10. A game may map its own names onto these keys.
+`FogSettings` is a public `EngineSettings` value on the scene, beside lighting. Keys: `enabled`, `density`, `height`, `thickness`, `albedo`, `phase_g`, `gi`, `history`, `grid_width`, `grid_height`, `grid_slices`, `samples`. Zero on a grid axis keeps that axis of the preset in §10. Zero `samples` dispatches every cell. A positive `samples` drops slices, then rows, then columns. Preset applies the table in §10. A game may map its own names onto these keys.
 
-Arguments on `genos-lighting`, later phases: `--fog on|off`, `--fog-density`, `--fog-height`, `--fog-thickness`, `--fog-albedo`, `--fog-phase`, `--fog-gi on|off`, `--fog-history on|off`. Mirrors, only when the argument was omitted: `GENOS_FOG`, `GENOS_FOG_DENSITY`, `GENOS_FOG_HEIGHT`, `GENOS_FOG_THICKNESS`, `GENOS_FOG_ALBEDO`, `GENOS_FOG_PHASE`, `GENOS_FOG_GI`, `GENOS_FOG_HISTORY`.
+Arguments on `genos-lighting`: `--fog on|off`, `--fog-density`, `--fog-height`, `--fog-thickness`, `--fog-albedo`, `--fog-phase`, `--fog-gi on|off`, `--fog-history on|off`, `--fog-grid WxHxS`, `--fog-samples N`. Mirrors, only when the argument was omitted: `GENOS_FOG`, `GENOS_FOG_DENSITY`, `GENOS_FOG_HEIGHT`, `GENOS_FOG_THICKNESS`, `GENOS_FOG_ALBEDO`, `GENOS_FOG_PHASE`, `GENOS_FOG_GI`, `GENOS_FOG_HISTORY`, `GENOS_FOG_GRID`, `GENOS_FOG_SAMPLES`.
 
 `fog-check` arguments: `--suite analytic|feature|all`, `--fixture good|broken`, `--out DIR`, `--help`. Mirrors: `GENOS_FOG_SUITE`, `GENOS_FOG_FIXTURE`, `GENOS_FOG_OUT`. The argument wins. Output is `./genos-debug/fog/` unless `--out` is set. The tool does not write under `$HOME`.
 
 ## 14. Networking
 
-- Replicated state: the fog settings and the local-volume list (shape, position, radius or extents, density, albedo, phase g). Not the grid, not the history, not the column target.
+- Replicated state: the fog settings, including grid width, height, slices, and the sample count (zero means the preset grid, dispatched in full), and the local-volume list (shape, position, radius or extents, density, albedo, phase g). Not the history slot, not the column target.
 - Authority: the machine that owns the scene writes the settings. Each client builds its own grid.
 - Prediction / rollback: none for the grid. Settings follow the scene snapshot. A wrong volume is corrected by the snapshot. The grid is not rolled back.
 - Determinism: extinction is determined by the settings and the camera. Shadow rays follow the tracer. History, if a later decision enables it, is per client and is not in the snapshot. The default is off.
@@ -395,7 +400,8 @@ New entries, one meaning each, added to [`docs/lighting/GLOSSARY.md`](../lightin
 | In-scattering | OUT | Light the medium adds to a ray. |
 | Phase function | SAMPLE | Directional pattern of one scatter. Henyey-Greenstein. |
 | Froxel | STORE | One cell of the frustum-aligned volume. |
-| Froxel grid | STORE | The 3D grid of froxels. Preset-sized, not picture-sized. |
+| Froxel grid | STORE | The 3D grid of froxels. Zero on an axis keeps the preset. Not picture-sized. |
+| Froxel sample count | TOOL | Cell budget. Zero dispatches the whole grid. A positive count limits cells for a later auto-tune. |
 | Height fog | STORE | Extinction that depends only on world height. |
 | Local fog volume | STORE | A box or sphere of analytic density added into the grid. |
 | Light shaft | LIGHTS | A beam made visible by shadowed direct light in the medium. |
@@ -405,7 +411,7 @@ Comparison against the glossary roles: the grid is new storage (no cache entry d
 
 ## 18. Networking copy
 
-- Replicated state: fog settings and the local-volume list. Not the grid.
+- Replicated state: fog settings, including grid width, height, slices, and the sample count (zero means the preset grid). Not the history slot. Not the column target.
 - Authority: the scene owner writes settings. Clients build grids.
 - Prediction / rollback: none for the grid.
 - Determinism: extinction follows the settings and the camera. History stays off unless a later decision enables it, and then it stays on the client.

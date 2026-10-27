@@ -9,7 +9,7 @@ use crate::{Fixture, Suite};
 pub struct Config {
     /// Which metrics to score.
     pub suite: Suite,
-    /// Analytic fixture. Ignored by the feature suite.
+    /// `broken` runs the `*_broken` helpers. `good` is the live grade.
     pub fixture: Fixture,
     /// Directory for `metrics.json`.
     pub out: PathBuf,
@@ -169,7 +169,7 @@ fog-check — fog and volumetric lighting metrics
 
 Arguments:
   --suite analytic|feature|all   metrics to score (default all)
-  --fixture good|broken          analytic input (default good)
+  --fixture good|broken          good or the broken helpers (default good)
   --out DIR                      directory for metrics.json (default genos-debug/fog)
   --help                         this text
 
