@@ -305,3 +305,29 @@ Departures from this design:
 - `--report` is the script report directory. The unique file is `<out>/gi/NAME.csv`, then `NAME-2.csv`.
 - §11's `priority`, `age`, `lod`, `budget`, and `coarsen` views are not built. The probes are `get_budgets`, `set_budgets`, `get_schedule_stats`, and `lighting_lod_snapshot`, plus the Perf rows `schedule_stats` and `lod_snapshot`.
 - The phase table above is the original cut. This change lands the screen gates, the guard crop, the controller, and the parent levels together.
+
+`a_turn_toward_the_lamp_does_not_pop_the_bounce` is still over its limit of 16. Lavapipe, 1280×720, release, controller off (the picture path), head `976ae57`. The second toward-frame's red channel on the box face sits near 40. The first toward-frame is one of two values: 14.28 (gap about 25.6) or about 22–26 (gap about 14–18). The third toward-frame matches the second. The 25.6 gap is the same figure as dropping the 2 m and 4 m reads. A 4070 run under load, rough, was 17.9 on this branch and 21.4 on master. Both fail the same limit. This branch is not claimed to have fixed it.
+
+The red step is the second bounce through the surface cache. One bounce, or a cache irradiance of zero, removes the pure red. Screen probes are required for that red. Denoise off, fill off, the compose-seed flag, prefill off, and the hash wavelet each left the second frame near 40.
+
+The reveal frame is the first shade of that face. The away pose (yaw π at (0.2, 3.2)) looks away from the box, so the sampled +Z face sits behind the camera. High's guard is 15% of the display on each edge. `bias_guard` moves that whole extra width onto the turn once the yaw delta reaches 0.05 rad, and a π turn saturates there. `GENOS_LIGHTING_GUARD_EDGE=0` made the first frame darker (gap about 24). The guard does not hold a finished value for a face that was behind the camera.
+
+Picture checks set `controller` off. At High the grants cover the picture, so the screen gates stay off. `screen_items` writes `change_mag` 0 on every tile, so `visible_error` is 0 across the rect. Visible-error order does not pick this picture's tiles.
+
+Probe hits are shaded in the light pass, before this frame's cache update. A new cell's first write replaces the texel (`old.w < 0.5` or a sample count of 0, weight 1). The next frame's probes read that cell. The red step is that extra bounce, published in one frame. §7 asks for a finished value, blended once. §6.5's seed from the parent's mean is the departure that leaves the reveal on a short parent or on an empty cell. A read-side blend of a young cell toward its parent left the second frame near 40: one frame of rays is already past the young test, or the prior is already the settled red. Capping the MSME `k` and the S72N dark-fill cubic on a cell that already had samples did the same. Scaling every cache read by 0.25 moved both frames and kept the gap. Those edits are reverted.
+
+History reads `pc.schedule.w`, this frame's crop, with last frame's camera. A crop that jumps by more than the ±2 tile search misses last frame's probe. The lamp-turn face was not in the previous picture, so storing last frame's crop does not put a finished value on that face. The still-camera picture allows one crop add.
+
+Left for review. Not landed, because each one changes the lighting core:
+
+1. A second light iteration, so the reveal frame's hits are shaded with a cache that already holds this frame's bounce.
+2. The S72K handover on the first sets of a new cell, including the 25 cm hit cell and the close-hit return (`v.w >= 4`), with the parent prior held so it does not step in the same frame.
+3. A projection of an interior parent centre onto the reader's plane inside `lighting_level_valid`. The 14.28 mode is that test rejecting a 2 m or 4 m centre that falls inside the red box. Accepting every parent fails `a_coarse_parent_stays_on_its_own_surface` (far-floor brightness about 160–212, limit 130).
+
+Postmortem of the reverted trials:
+
+1. Claim: capping the MSME or world-radiance blend, or mixing a young cell with its parent at the read, brings the lamp-turn gap under 16.
+2. Check: `a_turn_toward_the_lamp_does_not_pop_the_bounce` on lavapipe, 1280×720, release.
+3. Fault: the second frame stayed near 40. A global scale of the cache read moved both frames and kept the gap. Zeroing the cache irradiance removed the red.
+4. First seen: 27 Oct 2026, head `976ae57`.
+5. Left reverted: `lighting_cache.comp`, `lighting_cache.glsl`, and `crates/render/tests/gpu_frame.rs` are back at `976ae57`.
