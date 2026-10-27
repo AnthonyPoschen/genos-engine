@@ -128,6 +128,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --display NAME         Wayland display name. Omit it to use the session compositor.
   --lifecycle-block-ms N stall shutdown once, for the quit-gap test.
                          GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
+  --lifecycle-close-early quit before the first frame. GENOS_LIFECYCLE_CLOSE_EARLY
+                         applies only when this is omitted
   --frames N             quit after N frames. The last frame PNG leaves out
                          the debug menu, the menu tab, the frame-rate plate,
                          and tool overlays
@@ -281,6 +283,8 @@ struct Options {
     mcp_port: Option<u16>,
     /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
     block_ms: Option<std::time::Duration>,
+    /// `--lifecycle-close-early`. The mirror applies when this stays false.
+    close_early: bool,
     /// `--fog*`. Empty fields were omitted.
     fog_cli: FogCli,
     /// Mirrors for the fog flags this launch left empty.
@@ -345,6 +349,9 @@ fn run() -> Result<i32, String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
+    if first.closing {
+        return Ok(0);
+    }
     let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
@@ -353,6 +360,9 @@ fn run() -> Result<i32, String> {
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = opts.block_ms {
         owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
     }
     {
         let hold = std::sync::Arc::clone(&server_hold);
@@ -712,10 +722,16 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
+    if first.closing {
+        return Ok(());
+    }
     let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = opts.block_ms {
         owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
     }
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -2429,6 +2445,7 @@ fn options() -> Result<Options, String> {
     let mut check = false;
     let mut mcp_port = None;
     let mut block_ms = None;
+    let mut close_early = false;
     let mut fog_cli = FogCli::default();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
@@ -2508,6 +2525,7 @@ fn options() -> Result<Options, String> {
                     Some(&need_arg(&mut args, "--lifecycle-block-ms")?),
                 )?);
             }
+            "--lifecycle-close-early" => close_early = true,
             "--fog" | "--fog-density" | "--fog-height" | "--fog-thickness" | "--fog-albedo"
             | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid"
             | "--fog-samples" => {
@@ -2601,6 +2619,7 @@ fn options() -> Result<Options, String> {
         check,
         mcp_port,
         block_ms: genos_window::block_ms_mirror(block_ms),
+        close_early: genos_window::close_early_mirror(close_early),
         fog_cli: fog_cli.clone(),
         fog_env: fog_env_from_process(&fog_cli)?,
     })
@@ -2766,6 +2785,7 @@ mod tests {
             check: false,
             mcp_port: None,
             block_ms: None,
+            close_early: false,
             fog_cli: genos_scene::FogCli::default(),
             fog_env: genos_scene::FogEnv::default(),
         };

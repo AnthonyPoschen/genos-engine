@@ -149,6 +149,7 @@ fn run() -> Result<i32, String> {
     let mut size = (1280u32, 720u32);
     let mut time_of_day = None;
     let mut block_ms = None;
+    let mut close_early = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -269,6 +270,7 @@ fn run() -> Result<i32, String> {
                     Some(&value),
                 )?);
             }
+            "--lifecycle-close-early" => close_early = true,
             other if genos_window::block_ms_needs_value(other) == Some(false) => {
                 block_ms = Some(genos_window::parse_block_ms(other, None)?);
             }
@@ -277,6 +279,7 @@ fn run() -> Result<i32, String> {
     }
 
     let block_ms = genos_window::block_ms_mirror(block_ms);
+    let close_early = genos_window::close_early_mirror(close_early);
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
@@ -286,11 +289,17 @@ fn run() -> Result<i32, String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
+    if first.closing {
+        return Ok(0);
+    }
     let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = block_ms {
         owner.plant_block(stall);
+    }
+    if close_early || owner.window.pump().closing {
+        owner.quit(0);
     }
     {
         let hold = std::sync::Arc::clone(&server_hold);

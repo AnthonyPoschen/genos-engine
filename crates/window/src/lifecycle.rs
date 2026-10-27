@@ -507,6 +507,31 @@ pub fn parse_block_ms(arg: &str, next: Option<&str>) -> Result<Duration, String>
     Ok(Duration::from_millis(ms))
 }
 
+
+/// `true` when the argument is the early-close test hook.
+pub fn close_early_flag(arg: &str) -> bool {
+    arg == "--lifecycle-close-early"
+}
+
+/// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_CLOSE_EARLY`
+/// set to `1` or `true`.
+///
+/// A value that is anything else is ignored. The flag wins when both are set,
+/// because the caller passes `true` only for the argument.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_LIFECYCLE_CLOSE_EARLY mirrors --lifecycle-close-early. The argument wins when cli is true. docs/LINT_RULES.md"
+)]
+pub fn close_early_mirror(cli: bool) -> bool {
+    if cli {
+        return true;
+    }
+    matches!(
+        std::env::var("GENOS_LIFECYCLE_CLOSE_EARLY").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_BLOCK_MS`.
 ///
 /// A value that does not parse is ignored. The flag wins when both are set,
@@ -893,6 +918,9 @@ mod tests {
             Duration::from_millis(15)
         );
         assert!(parse_block_ms("--lifecycle-block-ms", None).is_err());
+        assert!(close_early_flag("--lifecycle-close-early"));
+        assert!(!close_early_flag("--frames"));
+        assert!(close_early_mirror(true));
     }
 
     #[test]

@@ -1430,3 +1430,8 @@ detail = "--out"
 name = "GENOS_LIFECYCLE_BLOCK_MS"
 kind = "mirror"
 detail = "--lifecycle-block-ms"
+
+[[var]]
+name = "GENOS_LIFECYCLE_CLOSE_EARLY"
+kind = "mirror"
+detail = "--lifecycle-close-early"

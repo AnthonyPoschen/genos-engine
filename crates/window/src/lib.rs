@@ -19,7 +19,8 @@ mod stall;
 
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
-    block_ms_mirror, block_ms_needs_value, exit, gap_within_budget, parse_block_ms, parse_quit_gap,
+    block_ms_mirror, block_ms_needs_value, close_early_flag, close_early_mirror, exit,
+    gap_within_budget, parse_block_ms, parse_quit_gap,
     parse_quit_phases, parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample,
     ShutdownDevice, ShutdownPermit, ThreadStop, PHASE_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
 };

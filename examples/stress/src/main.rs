@@ -83,6 +83,8 @@ const USAGE: &str = "genos-stress [options]
   --display NAME            Wayland display name. Omit it to use the session compositor.
   --lifecycle-block-ms N    stall shutdown once, for the quit-gap test.
                             GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
+  --lifecycle-close-early   quit before the first frame. GENOS_LIFECYCLE_CLOSE_EARLY
+                            applies only when this is omitted
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
@@ -273,6 +275,8 @@ struct Options {
     lamp_pick_unbiased: Option<String>,
     /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
     block_ms: Option<Duration>,
+    /// `--lifecycle-close-early`. The mirror applies when this stays false.
+    close_early: bool,
     /// Material flags, in order, including the values. The argument wins over the environment.
     material_args: Vec<String>,
 }
@@ -419,6 +423,7 @@ fn options() -> Result<Options, String> {
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
         block_ms: None,
+        close_early: false,
         material_args: Vec::new(),
     };
     let mut report: Option<PathBuf> = None;
@@ -538,6 +543,7 @@ fn options() -> Result<Options, String> {
                     Some(&value()?),
                 )?);
             }
+            "--lifecycle-close-early" => opts.close_early = true,
             other if genos_load::material_flag_needs_value(other) == Some(true) => {
                 let next = value()?;
                 opts.material_args.push(other.to_string());
@@ -627,6 +633,7 @@ fn options() -> Result<Options, String> {
         });
     }
     opts.block_ms = genos_window::block_ms_mirror(opts.block_ms);
+    opts.close_early = genos_window::close_early_mirror(opts.close_early);
     Ok(opts)
 }
 
@@ -881,6 +888,9 @@ fn run() -> Result<i32, String> {
         window.set_title(&title_base);
     }
     let first = window.pump();
+    if first.closing {
+        return Ok(0);
+    }
     let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
@@ -889,6 +899,9 @@ fn run() -> Result<i32, String> {
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = opts.block_ms {
         owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
     }
     {
         let hold = std::sync::Arc::clone(&server_hold);
