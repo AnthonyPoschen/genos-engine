@@ -82,6 +82,7 @@ layout(push_constant) uniform Push {
     // w: M cap for the biased merge
     uvec4 lamp;
     // x: bit 0 direct gate, bit 1 atrous gate, bit 2 trace gate, bit 3 detail levels.
+    //    Bit 4: the work buffer was zeroed this frame. A zero ray slot is not a hit.
     //    Bits 8-31 are the cache-ray grant. Zero keeps the whole batch.
     // y: tile rect, one byte each of x, y, width, height.
     // z: starvation band, y then height.

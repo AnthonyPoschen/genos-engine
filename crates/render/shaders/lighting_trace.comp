@@ -159,7 +159,11 @@ void main() {
         uvec2 pix = uvec2((pr % cols) * tile_px, (pr / cols) * tile_px);
         if (!lighting_tile_kept(pix)) {
             vec4 cur = work.v[at];
-            if (cur.x >= 0.0 || cur.x < LIGHTING_MISS_LIMIT) {
+            // A resized grid zeros the work buffer. x = 0 is the cleared slot,
+            // which this gate would otherwise keep as a finished hit. Bit 4 is
+            // that frame. LIGHTING_NO_RAY (x = -0.5) still traces either way.
+            bool wiped = (pc.schedule.x & 16u) != 0u && cur == vec4(0.0);
+            if (!wiped && (cur.x >= 0.0 || cur.x < LIGHTING_MISS_LIMIT)) {
                 return;
             }
         }

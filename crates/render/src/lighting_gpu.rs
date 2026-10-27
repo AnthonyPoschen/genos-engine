@@ -166,6 +166,8 @@ pub(crate) struct Lighting {
     gbuf_clear: bool,
     /// The work buffer is new: zeroed first, so no probe keeps a stratum.
     work_clear: bool,
+    /// This frame's passes see that zero fill. A zero ray slot is not a hit.
+    work_cleared: bool,
     /// The picture in the output buffer was drawn for this size. A new buffer
     /// has no picture yet, so the next compose covers every pixel.
     compose_valid: bool,
@@ -467,6 +469,7 @@ impl Default for Lighting {
             cache_clear: false,
             gbuf_clear: false,
             work_clear: false,
+            work_cleared: false,
             compose_valid: false,
             kept_bytes: Vec::new(),
             kept_key: 0,
@@ -1692,6 +1695,7 @@ impl Gpu {
             }
             if self.lighting.work_clear {
                 self.lighting.work_clear = false;
+                self.lighting.work_cleared = true;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.work.buffer, 0, u64::MAX, 0);
             }
             self.lighting.gbuf_clear = false;
@@ -3260,6 +3264,13 @@ impl Gpu {
         pc[..12].copy_from_slice(&head);
         pc[12..16].copy_from_slice(&sched.words);
         pc[16..20].copy_from_slice(&sched.tail);
+        // Bit 4: the work buffer was zeroed this frame (a lit-size change, a new
+        // scene). The trace gate keeps a finished hit, and a zero slot looks like
+        // a hit at distance 0. That bit tells the gate to trace it.
+        if self.lighting.work_cleared {
+            pc[12] |= 16;
+            self.lighting.work_cleared = false;
+        }
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the camera or the
