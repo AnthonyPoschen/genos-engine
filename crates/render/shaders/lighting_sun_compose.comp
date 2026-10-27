@@ -22,15 +22,22 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #include "dither.glsl"
 #include "froxel_compose.glsl"
 
+#ifdef GENOS_HDR_COMPOSE
+// Scene-referred radiance, before the display transform. w is eye distance in metres.
+layout(std430, set = 0, binding = 13) restrict buffer SceneReferred {
+    vec4 px[];
+} scene_lin;
+
+layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
+    vec4 v;
+} hdr;
+
+#include "hdr_display.glsl"
+#endif
+
 const float LAMBERT = 0.254647909;
 
-float tone_channel(float x) {
-    if (x <= 0.64) {
-        return max(x, 0.0);
-    }
-    float extra = x - 0.64;
-    return 0.64 + 0.14 * (extra / (extra + 1.1));
-}
+#include "hdr_shoulder.glsl"
 
 uint pack_rgb(vec3 rgb) {
     uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * 255.0 + 0.5);
@@ -110,6 +117,9 @@ void main() {
     bool two_sided;
     uint index = p.y * pc.dims.x + p.x;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+#ifdef GENOS_HDR_COMPOSE
+        scene_lin.px[index] = vec4(scene.sky.rgb, 1000.0);
+#endif
         return;
     }
     uint scale = max(gstats.ctrl_scale, 1u);
@@ -201,6 +211,15 @@ void main() {
     }
     vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
     c = froxel_compose(c, p, pc.dims.xy);
+#ifdef GENOS_HDR_COMPOSE
+    scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
+    c = add_bloom(c, index);
+    float exposure = hdr.v.x;
+    if (exposure == 0.0) {
+        exposure = 1.0;
+    }
+    c *= exposure;
+#endif
     shown = vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
     outc.px[index] = pack_rgb(dither8(shown, p));
 }

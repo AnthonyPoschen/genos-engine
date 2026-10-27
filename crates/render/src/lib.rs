@@ -5,6 +5,7 @@ mod fog_budget;
 mod fog_pass;
 mod gltf_draw;
 mod gpu;
+mod hdr_output;
 mod material_stream;
 #[cfg(test)]
 mod lamp_pick;
@@ -54,6 +55,28 @@ pub use gpu::{
     LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, MaterialStats, Renderer,
     ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
+pub use hdr_output::{
+    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,
+    bloom_pyramid, bloom_upsample,
+    bloom_upsample_weight_sum, camera_ev100, display_transform, ev100_from_luminance,
+    exposure_from_camera,
+    exposure_from_ev100, exposure_adapt_outside, exposure_overshoot, exposure_still_change,
+    exposure_with_compensation, grade_peak, grade_relative, grade_weight, histogram_ev100,
+    histogram_ev100_bins, histogram_ev100_from_counts, karis_downsample_rgb,
+    karis_firefly_response, karis_weight,
+    step_exposure, agx_display_linear, graphics_white_linear, hdr10_pq, nits_from_display,
+    rec2020_from_rec709, scrgb_from_display,
+    legacy_display, legacy_display_channel, near_grade, pack_f32, pick_hdr_output, present_host, pq_st2084,
+    rec709_y, resolve_swapchain, surface_choice, swapchain_format_code, swapchain_nits,
+    swapchain_pair,
+    scene_luma, scene_peak_error, scene_read_from_rgba, scene_referred, scrgb_code, still_pop_share,
+    DisplayMode,
+    HdrSwapchain, Image, ListedFormat, SceneRead, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    COLOR_SPACE_SRGB, FORMAT_A2B10,
+    FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS,
+    SCRGB_NITS_PER_CODE,
+};
+pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};

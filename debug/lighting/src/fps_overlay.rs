@@ -43,6 +43,7 @@ fn room() -> World {
             rate_hz: 4.0,
         },
         event_loop: EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })

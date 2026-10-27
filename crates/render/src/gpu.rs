@@ -284,6 +284,99 @@ impl Renderer {
         self.gpu.lighting.settings.clone()
     }
 
+    /// EV100 the last exposure scale was built from. Zero while legacy bytes hold the scale at 1.
+    pub fn hdr_ev100(&self) -> f64 {
+        self.gpu.lighting.last_ev100
+    }
+
+    /// Exposure scale written into the compose params. Legacy bytes stay at 1.
+    pub fn hdr_exposure(&self) -> f64 {
+        f64::from(self.gpu.lighting.exposure_scale)
+    }
+
+    /// Last eight exposure scales, oldest first.
+    pub fn hdr_scales(&self) -> Vec<f64> {
+        self.gpu.lighting.exposure_log.clone()
+    }
+
+    /// Last histogram bin counts. Empty until an auto-exposure frame meters.
+    pub fn hdr_histogram(&self) -> Vec<u32> {
+        self.gpu.lighting.histogram_counts.clone()
+    }
+
+    /// Share of subsampled scene luma that moved by more than 0.01 since the previous copy.
+    pub fn hdr_still_pop(&self) -> f64 {
+        self.gpu.lighting.still_pop
+    }
+
+    /// Swapchain format and color space in use.
+    pub fn hdr_surface(&self) -> (i32, i32) {
+        (self.gpu.format, self.gpu.color_space)
+    }
+
+    /// HDR10 PQ code of graphics white, from `swapchain_nits`.
+    pub fn hdr_pq_white(&self) -> f64 {
+        self.gpu.pq_white
+    }
+
+    /// scRGB code of graphics white, from `swapchain_nits`.
+    pub fn hdr_scrgb_white(&self) -> f64 {
+        self.gpu.scrgb_white
+    }
+
+    /// Mode the swapchain was created for. SDR when the asked pair is not listed.
+    pub fn hdr_resolved(&self) -> &'static str {
+        match self.gpu.hdr_output {
+            crate::hdr_output::HdrSwapchain::Sdr => "sdr",
+            crate::hdr_output::HdrSwapchain::Hdr10 => "hdr10",
+            crate::hdr_output::HdrSwapchain::Scrgb => "scrgb",
+        }
+    }
+
+    /// GPU milliseconds of bloom plus the display pass on the last collected frame.
+    ///
+    /// One frame behind the draw that just returned. Zero when the device has no
+    /// timestamp queries. Lavapipe time is not a 4070 score.
+    pub fn hdr_ms(&self) -> f64 {
+        self.gpu.lighting.hdr_ms
+    }
+
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    pub fn post_ms_device(&self) -> f64 {
+        self.hdr_ms()
+    }
+
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
+    pub fn hdr_vram_bytes(&self) -> f64 {
+        let lighting = &self.gpu.lighting;
+        let bytes = lighting
+            .scene_lin
+            .size
+            .saturating_add(lighting.scene_host.size)
+            .saturating_add(lighting.bloom.size)
+            .saturating_add(lighting.hdr_encode.size)
+            .saturating_add(lighting.agx_lut.size)
+            .saturating_add(lighting.hdr_params.size)
+            .saturating_add(lighting.meter_dev.size)
+            .saturating_add(lighting.meter_host.size);
+        bytes as f64
+    }
+
+    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    pub fn post_vram_device(&self) -> f64 {
+        self.hdr_vram_bytes() / (1024.0 * 1024.0)
+    }
+
+    /// The legacy shoulder is the display curve, so a missing scene image may undo it.
+    /// `AgX` and ACES are not inverted.
+    pub fn hdr_legacy_display(&self) -> bool {
+        self.gpu.lighting.hdr.legacy_bytes
+            || matches!(
+                self.gpu.lighting.hdr.display,
+                genos_scene::DisplayTransform::Legacy
+            )
+    }
+
     /// Drop the surface cache and its work list on the next draw.
     ///
     /// A scene switch calls this. Recreating the renderer would compile the
@@ -538,6 +631,27 @@ impl Renderer {
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
         self.gpu.copy_last_picture()?;
         self.gpu.read_color()
+    }
+
+    /// Scene-referred radiance of the last compose, before the display transform.
+    ///
+    /// Empty when lighting has not allocated the image. Each texel goes through
+    /// [`scene_read_from_rgba`], which calls [`scene_referred`].
+    pub fn read_scene(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
+        self.gpu.copy_last_picture()?;
+        self.gpu.read_scene_host()
+    }
+
+    /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
+    /// intensity scale. The mip chain sits past this image and is not returned.
+    pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_bloom_host()
+    }
+
+    /// HDR10 PQ or scRGB codes from the display pass. RGBA32F, one texel per pixel.
+    /// Empty when that pass did not encode.
+    pub fn read_hdr_encode(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_hdr_encode_host()
     }
 
     /// Draw the world, then screen rectangles. The rectangles ignore the depth test.
@@ -1082,6 +1196,15 @@ struct Gpu {
     surface: Handle,
     swapchain: Handle,
     format: i32,
+    /// Swapchain color space. sRGB nonlinear until an HDR pair is selected.
+    color_space: i32,
+    /// Resolved swapchain. SDR until `create_targets` runs.
+    hdr_output: crate::hdr_output::HdrSwapchain,
+    /// `swapchain_nits` of graphics white for HDR10 and for scRGB.
+    pq_white: f64,
+    scrgb_white: f64,
+    /// `VK_EXT_hdr_metadata` was enabled on the device.
+    hdr_metadata: bool,
     extent_w: u32,
     extent_h: u32,
     /// Swapchain present mode: 0 immediate, 1 mailbox, 2 FIFO.
@@ -1239,6 +1362,8 @@ struct Gpu {
     timestamp_period: f32,
     timestamp_bits: u32,
     query_pool: Handle,
+    /// Two timestamps per frame, bloom start and display end. Independent of `--gpu-times`.
+    hdr_time_pool: Handle,
     /// `--gpu-times N`, or `GENOS_GPU_TIMES` when that argument was omitted:
     /// per-pass GPU times of every frame and light build,
     /// averaged and printed every `frames` frames ([`GPU_TIMES_FRAMES`] by default).
@@ -1593,15 +1718,23 @@ impl Gpu {
             }
             let surface_ext = b"VK_KHR_surface\0";
             let wayland_ext = b"VK_KHR_wayland_surface\0";
+            let color_ext = b"VK_EXT_swapchain_colorspace\0";
             let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
-            let has_props2 =
-                extension_listed(&inst_listed, ext_count, b"VK_KHR_get_physical_device_properties2");
-            let exts = [
+            let has_props2 = extension_listed(
+                &inst_listed,
+                ext_count,
+                b"VK_KHR_get_physical_device_properties2",
+            );
+            let mut ext_ptrs = vec![
                 surface_ext.as_ptr() as *const c_char,
                 wayland_ext.as_ptr() as *const c_char,
-                props2_ext.as_ptr() as *const c_char,
             ];
-            let inst_ext_count = if has_props2 { 3u32 } else { 2 };
+            if has_props2 {
+                ext_ptrs.push(props2_ext.as_ptr() as *const c_char);
+            }
+            if extension_listed(&inst_listed, ext_count, b"VK_EXT_swapchain_colorspace") {
+                ext_ptrs.push(color_ext.as_ptr() as *const c_char);
+            }
             let app_name = b"genos-camera\0";
             #[repr(C)]
             struct AppInfo {
@@ -1640,8 +1773,8 @@ impl Gpu {
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
-                enabled_exts: inst_ext_count,
-                ext_names: exts.as_ptr(),
+                enabled_exts: u32::try_from(ext_ptrs.len()).unwrap_or(0),
+                ext_names: ext_ptrs.as_ptr(),
             };
             let mut instance = std::ptr::null_mut();
             check(
@@ -1871,8 +2004,9 @@ impl Gpu {
             } else {
                 b"vkGetPhysicalDeviceMemoryProperties2\0"
             });
-            let budget_extension = extension_listed(&dev_listed, dev_ext_count, b"VK_EXT_memory_budget")
-                && !budget_query_ptr.is_null();
+            let budget_extension =
+                extension_listed(&dev_listed, dev_ext_count, b"VK_EXT_memory_budget")
+                    && !budget_query_ptr.is_null();
             let memory_budget_query = if budget_extension {
                 Some(transmute::<FnMemProps>(budget_query_ptr))
             } else {
@@ -1884,11 +2018,16 @@ impl Gpu {
             features[26] = 1;
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
-            let dev_ext_ptrs = [
-                swap_ext.as_ptr() as *const c_char,
-                budget_ext.as_ptr() as *const c_char,
-            ];
-            let dev_ext_enabled = if budget_extension { 2u32 } else { 1 };
+            let hdr_meta_ext = b"VK_EXT_hdr_metadata\0";
+            let mut dev_exts = vec![swap_ext.as_ptr() as *const c_char];
+            if budget_extension {
+                dev_exts.push(budget_ext.as_ptr() as *const c_char);
+            }
+            let hdr_meta =
+                device_extension_present(get_instance, instance, physical, b"VK_EXT_hdr_metadata");
+            if hdr_meta {
+                dev_exts.push(hdr_meta_ext.as_ptr() as *const c_char);
+            }
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -1910,8 +2049,8 @@ impl Gpu {
                 queues: queue_infos.as_ptr(),
                 layer_count: 0,
                 layers: std::ptr::null(),
-                ext_count: dev_ext_enabled,
-                exts: dev_ext_ptrs.as_ptr(),
+                ext_count: u32::try_from(dev_exts.len()).unwrap_or(0),
+                exts: dev_exts.as_ptr(),
                 features: features.as_ptr() as *const c_void,
             };
             let mut device = std::ptr::null_mut();
@@ -1953,6 +2092,11 @@ impl Gpu {
                 surface: vk_surface,
                 swapchain: std::ptr::null_mut(),
                 format: 44,
+                color_space: crate::hdr_output::COLOR_SPACE_SRGB,
+                hdr_output: crate::hdr_output::HdrSwapchain::Sdr,
+                pq_white: 0.0,
+                scrgb_white: 0.0,
+                hdr_metadata: hdr_meta,
                 extent_w: width.max(1),
                 extent_h: height.max(1),
                 present_mode: 2,
@@ -2058,6 +2202,7 @@ impl Gpu {
                 timestamp_period,
                 timestamp_bits,
                 query_pool: std::ptr::null_mut(),
+                hdr_time_pool: std::ptr::null_mut(),
                 gpu_times: {
                     let args: Vec<String> = std::env::args().skip(1).collect();
                     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -2271,6 +2416,7 @@ impl Gpu {
             self.transfer_done = self.make_sem()?;
             if self.timestamp_period > 0.0 {
                 self.query_pool = self.make_query_pool()?;
+                self.hdr_time_pool = self.make_query_pool_n(4)?;
                 if self.gpu_times.is_some() {
                     let pool = self.make_query_pool_n(2 * FRAME_STAMPS)?;
                     let lighting_pool = self.make_query_pool_n(2 * LIGHTING_STAMPS)?;
@@ -2340,6 +2486,178 @@ impl Gpu {
         }
     }
 
+    fn query_surface_formats(&self) -> Result<Vec<u8>, String> {
+        unsafe {
+            let mut format_count = 0u32;
+            check(
+                (self.fns.surface_formats)(
+                    self.physical,
+                    self.surface,
+                    &mut format_count,
+                    std::ptr::null_mut(),
+                ),
+                "formats",
+            )?;
+            let mut formats = vec![0u8; format_count as usize * 8];
+            if format_count > 0 {
+                check(
+                    (self.fns.surface_formats)(
+                        self.physical,
+                        self.surface,
+                        &mut format_count,
+                        formats.as_mut_ptr(),
+                    ),
+                    "format list",
+                )?;
+            }
+            Ok(formats)
+        }
+    }
+
+    /// 44, then 37, ignoring color space. An HDR pair replaces that only when listed.
+    fn choose_surface(&self, formats: &[u8]) -> (i32, i32, crate::hdr_output::HdrSwapchain) {
+        let mut sdr_format = 44;
+        let mut found = false;
+        for chunk in formats.chunks(8) {
+            let Ok(bytes) = chunk[0..4].try_into() else {
+                continue;
+            };
+            let format = i32::from_ne_bytes(bytes);
+            if format == 44 || format == 37 {
+                sdr_format = format;
+                found = true;
+                if format == 44 {
+                    break;
+                }
+            }
+        }
+        if !found && formats.len() >= 4 {
+            sdr_format = i32::from_ne_bytes(formats[0..4].try_into().unwrap());
+        }
+        let mut listed = Vec::new();
+        for chunk in formats.chunks(8) {
+            if chunk.len() < 8 {
+                continue;
+            }
+            let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
+            let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
+            listed.push(crate::hdr_output::ListedFormat { format, color_space });
+        }
+        let force_sdr = self.lighting.hdr.legacy_bytes
+            || matches!(
+                self.lighting.settings.preset,
+                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+            );
+        crate::hdr_output::surface_choice(
+            sdr_format,
+            &listed,
+            crate::hdr_output::present_host(),
+            self.lighting.hdr.output,
+            force_sdr,
+        )
+    }
+
+    /// Recreate the color targets when the listed pair is not the one in use.
+    fn refresh_hdr_surface(&mut self) -> Result<(), String> {
+        let formats = self.query_surface_formats()?;
+        let (format, space, mode) = self.choose_surface(&formats);
+        if format == self.format && space == self.color_space && mode == self.hdr_output {
+            return Ok(());
+        }
+        self.idle_device();
+        self.destroy_targets();
+        self.destroy_color_pipelines();
+        self.format = format;
+        self.color_space = space;
+        self.hdr_output = mode;
+        self.render_pass = self.make_render_pass(false)?;
+        self.keep_pass = self.make_render_pass(true)?;
+        self.pipeline = block(|| self.make_pipeline(true, true, false))?;
+        self.depth_pipeline = block(|| self.make_depth_pipeline())?;
+        self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
+        self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
+        self.remake_gbuffer_pipe()?;
+        self.create_targets(self.extent_w, self.extent_h)
+    }
+
+    fn destroy_color_pipelines(&mut self) {
+        unsafe {
+            for pipe in [
+                &mut self.pipeline,
+                &mut self.depth_pipeline,
+                &mut self.overlay_pipeline,
+                &mut self.wire_pipeline,
+                &mut self.lighting.gbuffer_pipe,
+            ] {
+                if !pipe.is_null() {
+                    (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
+                    *pipe = std::ptr::null_mut();
+                }
+            }
+            if !self.render_pass.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null());
+                self.render_pass = std::ptr::null_mut();
+            }
+            if !self.keep_pass.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass, std::ptr::null());
+                self.keep_pass = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// BT.2020 primaries, peak 1000 nits. Only when the created image is HDR10.
+    fn write_hdr_metadata(&self) {
+        if !self.hdr_metadata || self.hdr_output != crate::hdr_output::HdrSwapchain::Hdr10 {
+            return;
+        }
+        unsafe {
+            let raw = (self.get_device)(
+                self.device,
+                b"vkSetHdrMetadataEXT\0".as_ptr() as *const c_char,
+            );
+            if raw.is_null() {
+                return;
+            }
+            type SetMeta = unsafe extern "system" fn(Handle, u32, *const Handle, *const HdrMeta);
+            let set: SetMeta = transmute(raw);
+            #[repr(C)]
+            struct Xy {
+                x: f32,
+                y: f32,
+            }
+            #[repr(C)]
+            struct HdrMeta {
+                s_type: i32,
+                next: *const c_void,
+                red: Xy,
+                green: Xy,
+                blue: Xy,
+                white: Xy,
+                max_luminance: f32,
+                min_luminance: f32,
+                max_cll: f32,
+                max_fall: f32,
+            }
+            let meta = HdrMeta {
+                s_type: 1_000_105_000,
+                next: std::ptr::null(),
+                red: Xy { x: 0.708, y: 0.292 },
+                green: Xy { x: 0.170, y: 0.797 },
+                blue: Xy { x: 0.131, y: 0.046 },
+                white: Xy {
+                    x: 0.3127,
+                    y: 0.3290,
+                },
+                max_luminance: 1000.0,
+                min_luminance: 0.0,
+                max_cll: 1000.0,
+                max_fall: 1000.0,
+            };
+            let swap = self.swapchain;
+            set(self.device, 1, &swap, &meta);
+        }
+    }
+
     fn create_targets(&mut self, width: u32, height: u32) -> Result<(), String> {
         unsafe {
             let mut caps = [0u8; 64];
@@ -2382,21 +2700,20 @@ impl Gpu {
                 ),
                 "format list",
             )?;
-            self.format = 44;
-            let mut found = false;
-            for chunk in formats.chunks(8) {
-                let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
-                if format == 44 || format == 37 {
-                    self.format = format;
-                    found = true;
-                    if format == 44 {
-                        break;
-                    }
-                }
-            }
-            if !found && format_count > 0 {
-                self.format = i32::from_ne_bytes(formats[0..4].try_into().unwrap());
-            }
+            let (format, space, mode) = self.choose_surface(&formats);
+            self.format = format;
+            self.color_space = space;
+            self.hdr_output = mode;
+            // HDR replaces the SDR search only when that pair is listed. The search
+            // itself still takes 44, then 37, and does not look at the color space.
+            self.pq_white = crate::hdr_output::swapchain_nits(
+                crate::hdr_output::HdrSwapchain::Hdr10,
+                crate::hdr_output::GRAPHICS_WHITE_NITS,
+            );
+            self.scrgb_white = crate::hdr_output::swapchain_nits(
+                crate::hdr_output::HdrSwapchain::Scrgb,
+                crate::hdr_output::GRAPHICS_WHITE_NITS,
+            );
 
             #[repr(C)]
             struct SwapInfo {
@@ -2437,7 +2754,7 @@ impl Gpu {
                 surface: self.surface,
                 min_count: image_count,
                 format: self.format,
-                color_space: 0,
+                color_space: self.color_space,
                 width: self.extent_w,
                 height: self.extent_h,
                 layers: 1,
@@ -2460,6 +2777,7 @@ impl Gpu {
                 ),
                 "swapchain",
             )?;
+            self.write_hdr_metadata();
             let mut count = 0u32;
             check(
                 (self.fns.swapchain_images)(
@@ -2481,7 +2799,12 @@ impl Gpu {
                 "image list",
             )?;
 
-            let bytes = self.extent_w as u64 * self.extent_h as u64 * 4;
+            let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
+                8
+            } else {
+                4
+            };
+            let bytes = self.extent_w as u64 * self.extent_h as u64 * bpp;
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
                     self.format,
@@ -2678,6 +3001,7 @@ impl Gpu {
             if self.lighting_active() {
                 self.take_unfilled(slot);
             }
+            self.collect_hdr_time(slot);
             self.collect_froxel_time();
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
@@ -2891,6 +3215,36 @@ impl Gpu {
         }
     }
 
+    /// Bloom and display timestamps from the previous frame. Zero when the device
+    /// has no timestamp queries or the pair was not written.
+    fn collect_hdr_time(&mut self, slot: usize) {
+        let base = self.lighting.hdr_query[slot];
+        if self.hdr_time_pool.is_null() || base == u32::MAX || self.timestamp_period <= 0.0 {
+            self.lighting.hdr_ms = 0.0;
+            return;
+        }
+        let mut raw = [0u64; 2];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.hdr_time_pool,
+                base,
+                2,
+                16,
+                raw.as_mut_ptr() as *mut c_void,
+                8,
+                0x1,
+            )
+        };
+        self.lighting.hdr_ms = if got == 0 {
+            tick_delta(raw[0], raw[1], self.timestamp_bits) as f64
+                * f64::from(self.timestamp_period)
+                / 1.0e6
+        } else {
+            0.0
+        };
+    }
+
     /// Read a finished frame's stamps (its fence has been waited) and print the averages
     /// every `every` frames.
     #[allow(
@@ -3041,7 +3395,7 @@ impl Gpu {
         let f = times.frame.map(|v| v / n);
         let passes = pass_times(&f);
         eprintln!(
-            "GPU_MS frames={} size={}x{} present={} setup={:.3} gbuffer={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} nonlight={:.3} lighting={:.3} frame={:.3} | fps={:.0}",
+            "GPU_MS frames={} size={}x{} present={} setup={:.3} gbuffer={:.3} aa({:?})={:.3} overlay={:.3} copy={:.3} nonlight={:.3} lighting={:.3} frame={:.3} hdr={:.3} | fps={:.0}",
             times.frames,
             self.extent_w,
             self.extent_h,
@@ -3055,6 +3409,7 @@ impl Gpu {
             passes.nonlight,
             passes.lighting,
             passes.frame,
+            self.lighting.hdr_ms,
             n / seconds,
         );
         if times.lighting_frames > 0 && std::env::var_os("GENOS_GPU_DISPATCH").is_some() {
@@ -3358,6 +3713,7 @@ impl Gpu {
                 "begin cmd",
             )?;
             self.copy_color_to_buffer();
+            self.copy_scene_for_readback();
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
             #[repr(C)]
             struct Submit {
@@ -3416,6 +3772,63 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, self.host.memory);
         }
         Ok(out)
+    }
+
+    /// Device scene image to the host buffer. The fence has already waited.
+    fn copy_scene_for_readback(&mut self) {
+        let src = self.lighting.scene_lin.buffer;
+        let dst = self.lighting.scene_host.buffer;
+        if src.is_null() || dst.is_null() {
+            return;
+        }
+        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        if size == 0 {
+            return;
+        }
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region { src: 0, dst: 0, size };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                self.cmd,
+                src,
+                dst,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
+    }
+
+    fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
+        let pixels = self.extent_w as usize * self.extent_h as usize;
+        let bytes = pixels.saturating_mul(16);
+        if bytes == 0
+            || self.lighting.scene_host.memory.is_null()
+            || self.lighting.scene_host.size < bytes as u64
+        {
+            return Ok(crate::hdr_output::SceneRead {
+                width: 0,
+                height: 0,
+                rgb: Vec::new(),
+                distance_m: Vec::new(),
+            });
+        }
+        let values = read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            self.lighting.scene_host.memory,
+            pixels.saturating_mul(4),
+        )?;
+        Ok(crate::hdr_output::scene_read_from_rgba(
+            self.extent_w,
+            self.extent_h,
+            &values,
+        ))
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -7363,6 +7776,9 @@ impl Drop for Gpu {
             if !self.query_pool.is_null() {
                 (self.fns.destroy_query_pool)(self.device, self.query_pool, std::ptr::null());
             }
+            if !self.hdr_time_pool.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.hdr_time_pool, std::ptr::null());
+            }
             if !self.wire_pipeline.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.wire_pipeline, std::ptr::null());
             }
@@ -7402,6 +7818,58 @@ impl Drop for Gpu {
             }
             (self.fns.destroy_instance)(self.instance, std::ptr::null());
         }
+    }
+}
+
+fn extension_name_eq(row: &[u8], name: &[u8]) -> bool {
+    row.len() >= name.len()
+        && row.get(..name.len()) == Some(name)
+        && row.get(name.len()).copied().unwrap_or(1) == 0
+}
+
+fn extension_present(bytes: &[u8], count: u32, name: &[u8]) -> bool {
+    let stride = 260usize;
+    let listed = usize::try_from(count).unwrap_or(0);
+    for index in 0..listed {
+        let start = index.saturating_mul(stride);
+        let Some(row) = bytes.get(start..start.saturating_add(256)) else {
+            break;
+        };
+        if extension_name_eq(row, name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn device_extension_present(
+    get_instance: GetProc,
+    instance: Handle,
+    physical: Handle,
+    name: &[u8],
+) -> bool {
+    unsafe {
+        let raw = get_instance(
+            instance,
+            b"vkEnumerateDeviceExtensionProperties\0".as_ptr() as *const c_char,
+        );
+        if raw.is_null() {
+            return false;
+        }
+        type Enumerate =
+            unsafe extern "system" fn(Handle, *const c_void, *mut u32, *mut u8) -> VkResult;
+        let enumerate: Enumerate = transmute(raw);
+        let mut count = 0u32;
+        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0 || count == 0
+        {
+            return false;
+        }
+        let bytes_len = usize::try_from(count).unwrap_or(0).saturating_mul(260);
+        let mut bytes = vec![0u8; bytes_len];
+        if enumerate(physical, std::ptr::null(), &mut count, bytes.as_mut_ptr()) != 0 {
+            return false;
+        }
+        extension_present(&bytes, count, name)
     }
 }
 
@@ -7848,9 +8316,9 @@ struct GpuTimes {
     light_spans: Vec<(u64, u64)>,
 }
 
-/// Stamps per frame for the GI passes: one before, one after each of the 10
-/// dispatches (the filter runs three rounds).
-const LIGHTING_STAMPS: u32 = 24;
+/// Stamps per frame for the GI passes, plus two for bloom and the display pass.
+/// One before the passes, one after each dispatch, then the HDR pair when it fits.
+const LIGHTING_STAMPS: u32 = 28;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;

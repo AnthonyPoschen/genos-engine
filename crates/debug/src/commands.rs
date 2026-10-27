@@ -112,10 +112,28 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(hdr_specs())
     .chain(fog_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+fn hdr_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_hdr_settings",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, and --output win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+        ),
+        spec(
+            "set_hdr_settings",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, legacy_bytes). A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+        ),
+        spec(
+            "get_hdr",
+            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms and 96 MiB ceilings are the 4070 budget, not a lavapipe score.",
+        ),
+    ]
 }
 
 fn fog_specs() -> Vec<CommandSpec> {

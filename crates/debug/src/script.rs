@@ -513,7 +513,7 @@ fn dynamic_value(v: Dynamic) -> Value {
 /// One second per frame, and at least two minutes, capped at one hour.
 fn wait_timeout_s(frames: INT) -> f64 {
     let frames = frames.max(1) as f64;
-    frames.max(120.0).min(3600.0)
+    frames.clamp(120.0, 3600.0)
 }
 
 fn value_dynamic(v: &Value) -> Dynamic {

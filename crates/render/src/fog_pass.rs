@@ -461,6 +461,7 @@ fn shaft_scene() -> (
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -484,6 +485,7 @@ fn empty_scene() -> Scene {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }
@@ -914,6 +916,7 @@ pub fn composed_frame_scene(enabled: bool) -> Scene {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings {
             enabled,
             density: if enabled { 0.08 } else { 0.0 },

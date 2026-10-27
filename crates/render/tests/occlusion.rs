@@ -200,6 +200,7 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -236,6 +237,7 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -264,6 +266,7 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -292,6 +295,7 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -331,6 +335,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };

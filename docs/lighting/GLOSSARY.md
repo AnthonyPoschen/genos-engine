@@ -39,6 +39,47 @@ Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode
 **Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
 Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
+### Display (accepted, ADR 0015)
+
+**Scene-referred image**: Rec.709 linear radiance compose writes, before exposure, bloom, and the display transform. A value above 1 is in range.
+Role: OUT · Literature: scene-referred colour (ACES, Frostbite) · More detail: [../systems/hdr-output-design.md](../systems/hdr-output-design.md)
+
+**Exposure**: the scale from scene-referred radiance to the sensor, `1 / (1.2 × 2^EV100)`.
+Role: OUT · Literature: Frostbite / Filament saturation exposure · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**EV100**: exposure value at ISO 100. A meter uses `log2(L × 100 / 12.5)`. A camera uses `log2(N² / t × 100 / S)`.
+Role: TOOL · Literature: ISO 2720 reflected-light meter, K = 12.5 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Auto-exposure**: the EV100 taken from a log-luminance histogram after the tails are clipped.
+Role: OUT · Literature: Reinhard log-average, with a histogram instead of one mean · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Compensation**: stops added to exposure. Positive one stop multiplies exposure by two.
+Role: TOOL · Literature: camera EV compensation · More detail: `HdrSettings.compensation`
+
+**Display transform**: the map from exposed linear colour to the code the swapchain stores. AgX is the default.
+Role: OUT · Literature: AgX; ACES output transform · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**AgX**: Sobotka's image formation, the Eary Chow generator. Inset, a log sigmoid from −10 to +6.5, a 40% hue mix, then outset. The default display transform.
+Role: OUT · Literature: Sobotka; Blender AgX (Eary Chow) · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**ACES**: the Academy output transform, kept as an alternate display transform.
+Role: OUT · Literature: Academy ACES 2.0 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Legacy shoulder**: the display curve in the tree today. At or below 0.64 it is the identity. Above that it is a shoulder. The `legacy` display mode.
+Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compose.comp`](../../crates/render/shaders/lighting_compose.comp); `linear_from_display` in [`trace.rs`](../../crates/render/src/trace.rs)
+
+**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
+Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The sigmoid top maps to 1000 nits when the surface reports no peak. The Linux/Wayland preference.
+Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**scRGB**: a linear extended-sRGB swapchain image. Code 1.0 is 80 nits. Graphics white is 203 nits, code 2.54. The Windows preference.
+Role: OUT · Literature: IEC 61966-2-2; `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**SDR output**: an 8-bit UNORM swapchain image in the sRGB nonlinear color space. Used when HDR is not selected.
+Role: OUT · Literature: `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` · More detail: `create_targets` in [`gpu.rs`](../../crates/render/src/gpu.rs)
+
 ### Screen probes (final gather)
 **Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
 Role: SAMPLE · Literature: Lumen screen probe; DDGI probe is world-space (different); GIBS — (surfels play this role) · More detail: [`lighting_place.comp`](../../crates/render/shaders/lighting_place.comp), [`lighting_trace.comp`](../../crates/render/shaders/lighting_trace.comp); [../systems/gi-design.md#final-gather-screen-probes](../systems/gi-design.md#final-gather-screen-probes)

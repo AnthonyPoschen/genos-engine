@@ -59,6 +59,16 @@ Perf | - | - | open | gi_passes
 Perf | - | - | open | gi_work
 Perf | - | - | open | menu_wheel
 Perf | - | - | open | menu_keys
+Output | - | - | open | hdr_exposure_mode
+Output | - | - | open | hdr_ev100
+Output | - | - | open | hdr_compensation
+Output | - | - | open | hdr_iso
+Output | - | - | open | hdr_aperture
+Output | - | - | open | hdr_shutter
+Output | - | - | open | hdr_display
+Output | - | - | open | hdr_bloom
+Output | - | - | open | hdr_bloom_levels
+Output | - | - | open | hdr_output
 Fog | - | - | open | lighting_preset
 Fog | - | - | open | enabled
 Fog | - | - | open | density

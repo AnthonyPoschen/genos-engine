@@ -500,6 +500,7 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             true,
+            0,
         );
         self.buffer_barrier(self.aa_src[slot].buffer, 0x1000, 0x800, 0x1000, 0x20);
         self.dispatch_aa(
@@ -518,6 +519,7 @@ impl Gpu {
             self.extent_w,
             self.extent_h,
             false,
+            0,
         );
         self.image_barrier(image, 7, 6, 0x1000, 0x1000, 0x1000, 0x800);
         self.color_layout[slot] = 6;
@@ -599,6 +601,7 @@ impl Gpu {
         w: u32,
         h: u32,
         to_buffer: bool,
+        offset: u64,
     ) {
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -630,7 +633,7 @@ impl Gpu {
             extent: Extent,
         }
         let region = Region {
-            offset: 0,
+            offset,
             row: 0,
             height: 0,
             layers: Layers {

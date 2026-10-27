@@ -64,6 +64,9 @@ fn main() {
         // small sun step asks for it, not at startup, so the nine lighting
         // pipelines and their compile stay the lighting set.
         ("SUN_COMPOSE_SPV", "lighting_sun_compose.comp"),
+        ("HDR_AGX_SPV", "hdr_agx.comp"),
+        ("HDR_BLOOM_SPV", "hdr_bloom.comp"),
+        ("HDR_METER_SPV", "hdr_meter.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -105,11 +108,12 @@ fn main() {
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         screen.display()
     ));
+    append_hdr_compose(&mut glue_text, &out);
     std::fs::write(&glue, glue_text).unwrap();
-    watch_shaders();
+    rerun_shader_pieces();
 }
 
-fn watch_shaders() {
+fn rerun_shader_pieces() {
     for piece in [
         "lighting_common.glsl",
         "lighting_pack.glsl",
@@ -135,11 +139,37 @@ fn watch_shaders() {
         "mesh_field.glsl",
         "scene_data.glsl",
         "dither.glsl",
+        "hdr_shoulder.glsl",
+        "hdr_meter.comp",
+        "hdr_display.glsl",
+        "hdr_agx.comp",
         "transmit.comp",
         "fxaa.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }
+}
+
+/// HDR compose stores scene radiance. The plain compile does not declare it.
+fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
+    let compose_hdr = compile_define(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    let sun_hdr = compile_define(
+        "shaders/lighting_sun_compose.comp",
+        &out.join("lighting_sun_compose_hdr.comp.spv"),
+        "GENOS_HDR_COMPOSE",
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        compose_hdr.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        sun_hdr.display()
+    ));
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {

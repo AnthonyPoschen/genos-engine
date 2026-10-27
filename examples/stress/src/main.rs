@@ -1198,6 +1198,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: MenuSettings::default(),
     })
