@@ -922,7 +922,7 @@ pub fn refresh_budget_shift(settings_shift: u32, controller: bool, scale: f64) -
     let extra = if controller && scale.is_finite() && scale > 0.0 && scale < 1.0 {
         let halvings = (1.0 / scale.max(f64::from(SCALE_FLOOR))).log2().floor();
         // In 0..=6 after the floor clamp.
-        halvings.clamp(0.0, 7.0) as u32
+        trunc_u32(halvings.clamp(0.0, 7.0))
     } else {
         0
     };
