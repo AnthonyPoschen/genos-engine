@@ -2569,8 +2569,10 @@ impl Gpu {
             std::ptr::copy_nonoverlapping(words.as_ptr(), mapped as *mut f32, 8);
             (self.fns.unmap_mem)(self.device, self.lighting.hdr_params.memory);
         }
-        // Host-coherent upload, finished before submit.
-        self.memory_barrier(0x4000, 0x20, 0x4000, 0x20);
+        // Host-coherent upload, finished before submit. Compute (compose) and
+        // fragment (output) read it. 0x20 is the tessellation-evaluation
+        // stage, not a shader read (VUID-vkCmdPipelineBarrier-dstStageMask-04091).
+        self.memory_barrier(0x4000, 0x800 | 0x80, 0x4000, 0x20);
     }
 
     fn write_agx_lut(&mut self) {
@@ -3210,7 +3212,10 @@ impl Gpu {
                     sun_words.as_ptr() as *const c_void,
                 );
             }
-            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
+            // The sun words are read by compute and as indirect args: the
+            // indirect read needs the draw-indirect stage
+            // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
+            self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
