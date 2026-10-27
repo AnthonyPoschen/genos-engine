@@ -560,7 +560,7 @@ pub struct LightingSettings {
     /// Multiplies every work cap. `1` is the preset. Test knob.
     pub budget_scale: f32,
     /// Symmetric extra on each axis of the displayed frame, split across the two
-    /// edges, before the turn adds up to 10% on the leading side. High is 0.15.
+    /// edges, before the turn adds up to 10% on the leading side. High is 0.08 (0.15 cost s5 1.7x direct).
     pub guard_edge: f32,
     /// How many times looser removal is than the 1.5× add threshold.
     pub cache_loosen: f32,
@@ -690,9 +690,9 @@ impl LightingSettings {
         self.controller = true;
         self.budget_scale = 1.0;
         self.guard_edge = match name {
-            "medium" => 0.12,
-            "high" => 0.15,
-            _ => 0.10,
+            "medium" => 0.06,
+            "high" => 0.08,
+            _ => 0.05,
         };
         self.cache_loosen = match name {
             "medium" => 3.0,
@@ -792,7 +792,7 @@ impl LightingSettings {
             schedule: ScheduleMode::Budget,
             controller: true,
             budget_scale: 1.0,
-            guard_edge: 0.15,
+            guard_edge: 0.08,
             cache_loosen: 4.0,
             floor_level: 1,
             floor_converged: 0.35,
@@ -862,7 +862,7 @@ impl LightingSettings {
         self.guard_edge = if self.guard_edge.is_finite() {
             self.guard_edge.clamp(0.0, 0.35)
         } else {
-            0.15
+            0.08
         };
         self.cache_loosen = if self.cache_loosen.is_finite() {
             self.cache_loosen.clamp(1.0, 8.0)

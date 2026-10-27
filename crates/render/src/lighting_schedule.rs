@@ -306,9 +306,9 @@ pub fn near_radius_for(preset: &str) -> f32 {
 #[must_use]
 pub fn guard_edge_for(preset: &str) -> f32 {
     match preset {
-        "medium" => 0.12,
-        "high" => 0.15,
-        _ => 0.10,
+        "medium" => 0.06,
+        "high" => 0.08,
+        _ => 0.05,
     }
 }
 
@@ -444,7 +444,7 @@ const GUARD_TURN_FULL_RAD: f32 = std::f32::consts::PI;
 /// Extra fraction of the display added on the leading edge at that rate.
 const GUARD_TURN_EXTRA: f32 = 0.10;
 
-/// `base` is the symmetric extra on each axis (High 0.15), split across the
+/// `base` is the symmetric extra on each axis (High 0.08), split across the
 /// two edges. A turn adds up to [`GUARD_TURN_EXTRA`] on the leading edge.
 /// The share is `yaw / π`, so 0.05 rad does not saturate. `yaw_delta` > 0
 /// turns toward +X (screen right). `pitch_delta` > 0 looks up.
