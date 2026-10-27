@@ -5414,10 +5414,15 @@ impl Gpu {
         let depth_load = if keep { 2 } else { 1 };
         // Final layout cannot be undefined. The overlay pass discards depth.
         let depth_final = 3;
-        let in_stage = if keep { 0x1000 } else { 0x400 };
-        // The filter leaves the color image visible to a transfer read.
-        let in_access = if keep { 0x800 } else { 0 };
-        let in_dst = if keep { 0x180 } else { 0x100 };
+        // Both variants share one external dependency so the keep and clear
+        // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
+        // VUID-vkCmdDraw-renderPass-02684): framebuffers and pipelines are made
+        // against one variant and used with the other. The filter leaves the
+        // color image visible to a transfer read; the clear pass waits on the
+        // previous frame's color output.
+        let in_stage = 0x1000 | 0x400;
+        let in_access = 0x800 | 0x100;
+        let in_dst = 0x180;
         let atts = [
             Att {
                 flags: 0,
