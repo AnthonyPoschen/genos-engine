@@ -2026,14 +2026,24 @@ fn lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count() {
     );
 }
 
-/// Reuse reconnects a moved lamp. Radius 0 merges no neighbour. Radius 8 does.
+/// Reuse reconnects a moved lamp, then a still view settles on the exact sum.
+///
+/// Twelve lamps sit above the exact-shade threshold, so a moving camera stays
+/// on one visibility ray and can merge a neighbour. Radius 0 merges none.
+/// Radius 8 does, on a frame that is not quiet-held (the camera is turning, so
+/// the pixel is not the exact sum). Once the camera and the lamps stop, the
+/// pixel shades that sum and the next frame holds it.
+///
+/// Probes stay on and the world cache stays off. Bounce 1 with the world-cache
+/// bit set makes `lighting_pix_cache_ok` false, so `lighting_pix_quiet` never
+/// becomes true and the hold cannot run.
 #[test]
 fn lamp_pick_reuse_follows_a_moved_lamp() {
     let (_gpu, mut window, mut renderer) = open();
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
-    let mut world = white_lamps(3);
-    let camera = lamp_camera();
+    let mut world = white_lamps(12);
+    let mut camera = lamp_camera();
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         ..DebugView::default()
@@ -2045,8 +2055,10 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     settings.shadows.enabled = true;
     settings.gi.enabled = true;
     settings.bounce.count = 1;
-    settings.probes.enabled = false;
-    settings.world_cache.enabled = true;
+    settings.probes.enabled = true;
+    settings.probes.rays = 4;
+    settings.probes.tile = 64;
+    settings.world_cache.enabled = false;
     settings.denoiser.enabled = false;
     settings.prefill = false;
     settings.compose_reuse = false;
@@ -2055,24 +2067,59 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     settings.lamp_pick.radius = 0;
     settings.lamp_pick.unbiased = true;
     renderer.set_lighting_settings(settings.clone());
+    let pose = genos_scene::Vec3::new(0.0, 1.7, 4.0);
+    // The first frame has no previous camera. The turn keeps the view from
+    // being held, so twelve lamps stay on ReSTIR instead of the exact sum.
     let _ = draw(&mut window, &mut renderer, &world, &camera);
+    camera.set_pose(pose, 0.05, 0.0);
     world.scene.lights[0].position.x += 3.0;
-    let moved = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
     let spatial = renderer.lighting_lamp_pick_counts().spatial;
     assert_eq!(spatial, 0, "radius 0 merged a neighbour");
     settings.lamp_pick.radius = 8;
     renderer.set_lighting_settings(settings.clone());
+    camera.set_pose(pose, 0.10, 0.0);
     let _ = draw(&mut window, &mut renderer, &world, &camera);
-    let spatial = renderer.lighting_lamp_pick_counts().spatial;
-    assert!(spatial > 0, "radius 8 merged no neighbour");
+    camera.set_pose(pose, 0.15, 0.0);
+    world.scene.lights[1].position.x += 3.0;
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let moving = renderer.lighting_lamp_pick_counts();
+    assert!(
+        moving.spatial > 0,
+        "radius 8 merged no neighbour (restir {} exact {})",
+        moving.restir,
+        moving.exact
+    );
+    let mut settled = Vec::new();
+    let mut last_counts = moving;
+    for _ in 0..6 {
+        settled = draw(&mut window, &mut renderer, &world, &camera);
+        last_counts = renderer.lighting_lamp_pick_counts();
+    }
     settings.lamp_pick.mode = LampPickMode::Off;
     renderer.set_lighting_settings(settings);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
     let full = draw(&mut window, &mut renderer, &world, &camera);
-    eprintln!("lamp pick reuse mean_abs {:.4}", mean_abs(&moved, &full));
+    let err = mean_abs(&settled, &full);
+    eprintln!(
+        "lamp pick reuse settled mean_abs {err:.4} mean {} vs {} rays {} exact {} restir {}",
+        mean_byte(&settled),
+        mean_byte(&full),
+        last_counts.pixels,
+        last_counts.exact,
+        last_counts.restir
+    );
     assert!(mean_byte(&full) > 1.0, "the moved lamps are black");
     assert!(
-        mean_abs(&moved, &full) < 1.5,
-        "reuse left the old lamp shadow"
+        last_counts.pixels == 0,
+        "a still view kept tracing (rays {} exact {} restir {})",
+        last_counts.pixels,
+        last_counts.exact,
+        last_counts.restir
+    );
+    assert!(
+        err < 1.5,
+        "settled reuse left the old lamp shadow ({err:.4})"
     );
 }
 
@@ -2119,9 +2166,9 @@ fn history_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
 
 /// Each mode against off, direct view, one lamp shadowed.
 ///
-/// Hits, pixels, and both match off when the shadow-ray count covers the lamps,
-/// because pixels stay on the full sum. Reuse does not. Radius 0, so the miss
-/// is one visibility bit times the unshadowed sum, not a neighbour reservoir.
+/// Hits, pixels, and both match off when the shadow-ray count covers the lamps.
+/// Reuse of a few lamps shades that same sum, then holds it. A 12-lamp reuse
+/// frame stays on one visibility ray; that ray drop is `preset_direct_scales_with_samples_not_lamps`.
 #[test]
 fn lamp_pick_each_mode_against_off() {
     let (_gpu, mut window, mut renderer) = open();
@@ -2164,17 +2211,168 @@ fn lamp_pick_each_mode_against_off() {
     let counts = renderer.lighting_lamp_pick_counts();
     let err = mean_abs(&off, &reused);
     eprintln!(
-        "lamp pick occluded box {boxed:.4} max hits={hits} pixels={pixels} both={both} reuse {err:.4} rays {} / {off_rays} spatial {}",
-        counts.pixels, counts.spatial
+        "lamp pick occluded box {boxed:.4} max hits={hits} pixels={pixels} both={both} reuse {err:.4} rays {} / {off_rays} spatial {} exact {}",
+        counts.pixels, counts.spatial, counts.exact
     );
     assert_eq!(counts.spatial, 0, "radius 0 merged a neighbour");
     assert!(
-        counts.pixels * 2 < off_rays,
-        "reuse did not drop to one shadow ray ({} vs {off_rays})",
+        counts.pixels <= off_rays,
+        "settled reuse traced more than the full sum ({} vs {off_rays})",
         counts.pixels
     );
     assert!(
-        err > 10.0,
-        "reuse matched off ({err:.4}); the one-sample visibility error did not show"
+        err < 1.0,
+        "settled reuse left the full sum ({err:.4})"
+    );
+}
+
+/// `light:I` shades that scene lamp and not the others.
+#[test]
+fn light_view_shades_only_that_lamp() {
+    let (_gpu, mut window, mut renderer) = open();
+    let mut world = white_lamps(2);
+    world.scene.lights[0].color = [4.0, 0.2, 0.2];
+    world.scene.lights[1].color = [0.2, 0.2, 4.0];
+    let camera = lamp_camera();
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Light,
+        lamp: 0,
+    });
+    let red = draw(&mut window, &mut renderer, &world, &camera);
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Light,
+        lamp: 1,
+    });
+    let blue = draw(&mut window, &mut renderer, &world, &camera);
+    let split = mean_abs(&red, &blue);
+    eprintln!("light view split {split:.3}");
+    assert!(split > 2.0, "light:0 and light:1 matched ({split:.3})");
+    let mut only = white_lamps(1);
+    only.scene.lights[0].color = [4.0, 0.2, 0.2];
+    only.scene.lights[0].position = world.scene.lights[0].position;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let solo = draw(&mut window, &mut renderer, &only, &camera);
+    let err = mean_abs(&red, &solo);
+    assert!(
+        err < 1.0,
+        "light:0 did not match the lamp on its own ({err:.3})"
+    );
+}
+
+/// Preset reservoirs trace one point-lamp shadow ray per pixel.
+///
+/// Off grows with the lamp count. High does not. `lamps_shaded` is those rays.
+#[test]
+fn preset_direct_scales_with_samples_not_lamps() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let slim = |preset: LightingPreset| {
+        let mut settings = LightingSettings::preset(preset);
+        settings.denoiser.enabled = false;
+        settings.probes.enabled = false;
+        settings.prefill = false;
+        settings.bounce.count = 1;
+        settings.sky = false;
+        settings.ambient.mode = AmbientMode::Off;
+        settings.direct.max_lights = 0;
+        if preset != LightingPreset::Potato {
+            settings.world_cache.enabled = true;
+            settings.gi.enabled = true;
+        }
+        settings
+    };
+    let count_of = |renderer: &mut Renderer,
+                    window: &mut Window,
+                    lights: usize,
+                    preset: LightingPreset,
+                    camera: &Camera| {
+        let world = white_lamps(lights);
+        renderer.set_lighting_settings(slim(preset));
+        let _ = draw(window, renderer, &world, camera);
+        traced_rays(renderer.lighting_lamp_pick_counts())
+    };
+    let off3 = count_of(&mut renderer, &mut window, 3, LightingPreset::Potato, &camera);
+    let off12 = count_of(&mut renderer, &mut window, 12, LightingPreset::Potato, &camera);
+    eprintln!("preset potato rays 3={off3} 12={off12}");
+    assert!(off3 > 0, "potato traced nothing");
+    assert!(
+        off12 > off3.saturating_mul(2),
+        "potato did not grow with the lamps ({off3} -> {off12})"
+    );
+    let high3 = count_of(&mut renderer, &mut window, 3, LightingPreset::High, &camera);
+    // A yaw keeps this frame off the quiet held path, which would shade every lamp once.
+    let mut moving = camera.clone();
+    moving.set_pose(genos_scene::Vec3::new(0.4, 1.7, 4.0), 0.2, 0.0);
+    let high12 = count_of(
+        &mut renderer,
+        &mut window,
+        12,
+        LightingPreset::High,
+        &moving,
+    );
+    eprintln!("preset high rays 3={high3} 12={high12}");
+    assert!(high3 > 0 && high12 > 0, "high traced nothing");
+    assert!(
+        high12 < high3 + high3 / 2,
+        "high grew with the lamps ({high3} -> {high12})"
+    );
+    assert!(
+        high12 * 2 < off12,
+        "high did not stay under the full sum ({high12} vs {off12})"
+    );
+}
+
+/// A quiet occluded pixel's mean moves toward the full sum and then holds still.
+///
+/// Probes stay on and the world cache stays off: bounce 1 with the world-cache
+/// bit set keeps `lighting_pix_quiet` false, so the mean would never run.
+#[test]
+fn preset_direct_converges_without_flicker() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = shadowed_lamps();
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let mut settings = LightingSettings::preset(LightingPreset::Low);
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.direct.max_lights = 0;
+    settings.compose_reuse = false;
+    settings.probes.rays = 4;
+    settings.probes.tile = 64;
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
+    let off = draw(&mut window, &mut renderer, &world, &camera);
+    assert!(mean_byte(&off) > 1.0, "the full sum is black");
+    renderer.set_lighting_settings(settings);
+    let mut frames = Vec::new();
+    for _ in 0..12 {
+        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+    }
+    let first = mean_abs(&off, &frames[0]);
+    let last = mean_abs(&off, frames.last().expect("frames"));
+    let early = mean_abs(&frames[0], &frames[1]);
+    let late = mean_abs(&frames[10], &frames[11]);
+    eprintln!("preset converge first {first:.3} last {last:.3} early {early:.3} late {late:.3}");
+    assert!(
+        last <= first + 0.05,
+        "the settled frame left the sum ({first:.3} -> {last:.3})"
+    );
+    assert!(
+        late < 0.05,
+        "a still pixel flickered ({early:.3} -> {late:.3})"
     );
 }

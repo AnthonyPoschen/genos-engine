@@ -151,11 +151,25 @@ impl ShadowFilter {
     }
 }
 
+/// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
+pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
+/// Unshadowed reservoir candidates per pixel on Medium.
+pub const LAMP_PICK_CANDIDATES_MEDIUM: u32 = 4;
+/// Unshadowed reservoir candidates per pixel on High.
+pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
+/// Previous-frame neighbour radius, in pixels, for Medium and High.
+/// Low stays at 0 (temporal only, one reservoir).
+pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
+/// Hold count written into an exact reservoir so the next quiet frame skips it.
+/// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
+pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
+
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. GI presets use
-/// [`Hits`](Self::Hits). Potato and day-cycle stay [`Off`](Self::Off).
-/// [`Reuse`](Self::Reuse) is experimental and is not a preset.
+/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
+/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
+/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
+/// stay [`Off`](Self::Off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
@@ -167,8 +181,8 @@ pub enum LampPickMode {
     Pixels = 2,
     /// Hits and pixels, no reservoir.
     Both = 3,
-    /// Experimental. Hits, plus pixels with a temporal reservoir.
-    /// Spatial only if the radius is above 0. Not used by a preset.
+    /// Hits, plus pixels with a temporal reservoir. Spatial only if the radius
+    /// is above 0. `low`, `medium`, and `high`.
     Reuse = 4,
 }
 
@@ -179,7 +193,7 @@ impl LampPickMode {
             Self::Hits => "hits",
             Self::Pixels => "pixels",
             Self::Both => "both",
-            Self::Reuse => "reuse (experimental)",
+            Self::Reuse => "reuse",
         }
     }
 
@@ -212,7 +226,7 @@ pub struct LampPickSettings {
     /// Cap on reservoir `M` for the biased merge. 1..=64. Default 20.
     /// The unbiased path does not apply it.
     pub history: u32,
-    /// Algorithm 6 when true. The section-3 merge and the `M` clamp when false.
+    /// Pairwise MIS when true. The section-3 merge and the `M` clamp when false.
     pub unbiased: bool,
 }
 
@@ -230,6 +244,21 @@ impl Default for LampPickSettings {
 }
 
 impl LampPickSettings {
+    /// Pixel reservoirs for `low`, `medium`, and `high`.
+    ///
+    /// `candidates` are the unshadowed fill. `radius` 0 is temporal reuse only
+    /// and one reservoir slot. Pairwise MIS (`unbiased`) is on.
+    pub fn reservoir(candidates: u32, radius: u32) -> Self {
+        Self {
+            mode: LampPickMode::Reuse,
+            candidates,
+            rays: 1,
+            radius,
+            history: 20,
+            unbiased: true,
+        }
+    }
+
     pub fn reuse(self) -> bool {
         self.mode == LampPickMode::Reuse
     }
@@ -449,8 +478,9 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. GI presets sample hits, and pixels stay on the full
-    /// sum. `reuse (experimental)` is not a preset.
+    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
+    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
+    /// Potato and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -469,7 +499,8 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick =
+                    LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_SPATIAL_RADIUS);
                 // Picture wavelet. The other presets keep the hash launch
                 // stored in `high_defaults`.
                 s.denoiser.screen = true;
@@ -533,7 +564,7 @@ impl LightingSettings {
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
                 s.direct.max_lights = 8;
@@ -545,7 +576,10 @@ impl LightingSettings {
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick = LampPickSettings::reservoir(
+                    LAMP_PICK_CANDIDATES_MEDIUM,
+                    LAMP_PICK_SPATIAL_RADIUS,
+                );
             }
         }
         s.sanitize();
@@ -1191,11 +1225,12 @@ impl LightingSettings {
             "dusk_intensity" => self.ambient.dusk_intensity = num_f32(value)?,
             "time_of_day" => self.time_of_day = num_f32(value)?,
             "lamp_pick" => {
+                if value.trim().eq_ignore_ascii_case("reuse (experimental)") {
+                    warn_lamp_pick_reuse_alias();
+                }
                 self.lamp_pick.mode = LampPickMode::parse(value).ok_or_else(|| {
-                    format!(
-                        "lamp_pick is off, hits, pixels, both, or reuse (experimental), got {value}"
-                    )
-                })?
+                    format!("lamp_pick is off, hits, pixels, both, or reuse, got {value}")
+                })?;
             }
             "lamp_pick_candidates" => self.lamp_pick.candidates = num_u32(value)?,
             "lamp_pick_rays" | "lamp_pick_samples" => self.lamp_pick.rays = num_u32(value)?,
@@ -1778,6 +1813,16 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_YOUNG_ONLY", "GENOS_LIGHTING_YOUNG_ONLY"),
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
+
+fn warn_lamp_pick_reuse_alias() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "warning: lamp_pick value \"reuse (experimental)\" is deprecated; use \"reuse\" (alias kept for one release)"
+        );
+    });
+}
 
 fn warn_gi2_alias(old: &'static str, neu: &'static str) {
     use std::collections::HashSet;

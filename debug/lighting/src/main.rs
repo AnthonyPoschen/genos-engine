@@ -2806,7 +2806,7 @@ mod tests {
             .collect();
         assert_eq!(
             lamp_names,
-            ["off", "hits", "pixels", "both", "reuse (experimental)"]
+            ["off", "hits", "pixels", "both", "reuse"]
         );
         assert_eq!(lamp.value, 1.0, "high samples hits");
         let sliders: Vec<&str> = rows

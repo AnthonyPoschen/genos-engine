@@ -48,6 +48,15 @@ fn main() {
         &out.join("lighting_atrous_plain.comp.spv"),
         "LIGHTING_DENOISE_PLAIN",
     );
+    // glslc forwards -D. The plain direct module is the pre-reservoir shade:
+    // the reservoir block is not in the SPIR-V, so a quiet few-lamp view holds
+    // at the same cost as the shade before ReSTIR. glslangValidator is not used
+    // here; that path emitted a newer SPIR-V for another kernel and faulted.
+    let direct_plain = compile_glslc_define(
+        "shaders/lighting_direct.comp",
+        &out.join("lighting_direct_plain.comp.spv"),
+        "LIGHTING_DIRECT_PLAIN",
+    );
     let lighting: Vec<(&str, PathBuf)> = [
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
@@ -103,6 +112,10 @@ fn main() {
     glue_text.push_str(&format!(
         "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         atrous_plain.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_DIRECT_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        direct_plain.display()
     ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
@@ -173,12 +186,23 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
 }
 
 fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
-    let status = Command::new("glslc")
-        .args([src, "-o", dest.to_str().unwrap()])
-        .status()
-        .expect("glslc");
+    compile_args(src, dest, &[])
+}
+
+/// `glslc -D`. The macro has to change the module: a ignored `-D` would ship
+/// the reservoir shade under the plain name.
+fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
+    let flag = format!("-D{define}");
+    compile_args(src, dest, &[&flag])
+}
+
+fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
+    let mut args = vec![src];
+    args.extend(extra);
+    args.extend(["-o", dest.to_str().unwrap()]);
+    let status = Command::new("glslc").args(&args).status().expect("glslc");
     if !status.success() {
-        panic!("glslc failed for {src}");
+        panic!("glslc failed for {src} {extra:?}");
     }
     dest.to_path_buf()
 }
