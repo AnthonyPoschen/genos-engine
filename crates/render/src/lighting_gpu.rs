@@ -1200,10 +1200,10 @@ impl Gpu {
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
-        // The first allocation stays zeros: a fresh picture's outside slots are
-        // not hits, and history builds from the rect. A later size change wipes
-        // slots that already held NO_RAY. Those zeros must trace.
-        self.lighting.work_cleared = gi && had_grid && grid_changed;
+        // The first allocation, including the size change before any draw, stays
+        // zeros: a fresh picture builds history from the rect. A later size
+        // change wipes slots that already held NO_RAY. Those zeros must trace.
+        self.lighting.work_cleared = gi && had_grid && grid_changed && self.lighting.frame > 0;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
