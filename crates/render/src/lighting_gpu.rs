@@ -3150,7 +3150,13 @@ impl Gpu {
         // The camera up's w (head 3.w) is unread: the flags' high bits.
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
-        let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
+        // The budget controller also halves the cache refresh budget per halving of
+        // its scale, so cache-entry refreshes shrink with trace and a-trous.
+        let budget_shift = crate::lighting_schedule::refresh_budget_shift(
+            self.lighting.settings.gi.budget_shift,
+            self.lighting.settings.controller,
+            self.lighting.budget.scale,
+        );
         block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.

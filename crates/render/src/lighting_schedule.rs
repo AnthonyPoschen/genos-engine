@@ -915,6 +915,20 @@ pub fn lit_target(
     lit_frame(display_w, display_h, edges, tile)
 }
 
+/// Cache refresh budget shift: the settings shift plus one per halving of the
+/// controller scale (each step halves every per-round refresh budget), capped at 7.
+#[must_use]
+pub fn refresh_budget_shift(settings_shift: u32, controller: bool, scale: f64) -> u32 {
+    let extra = if controller && scale.is_finite() && scale > 0.0 && scale < 1.0 {
+        let halvings = (1.0 / scale.max(f64::from(SCALE_FLOOR))).log2().floor();
+        // In 0..=6 after the floor clamp.
+        halvings.clamp(0.0, 7.0) as u32
+    } else {
+        0
+    };
+    settings_shift.saturating_add(extra).min(7)
+}
+
 /// Gates, crop, and caps for the frame. Global mode pushes zeros.
 #[must_use]
 pub fn schedule_push(
@@ -1407,6 +1421,17 @@ mod tests {
         assert!((held.scale - 0.5).abs() < 1.0e-6);
         assert_eq!(held.plan.tile_w, full.plan.tile_w);
         assert_eq!(held.plan.tile_h, full.plan.tile_h);
+    }
+
+    #[test]
+    fn the_controller_scale_halves_the_cache_refresh_budget() {
+        assert_eq!(refresh_budget_shift(0, true, 1.0), 0);
+        assert_eq!(refresh_budget_shift(0, true, 0.6), 0);
+        assert_eq!(refresh_budget_shift(0, true, 0.5), 1);
+        assert_eq!(refresh_budget_shift(1, true, 0.25), 3);
+        assert_eq!(refresh_budget_shift(0, false, 0.25), 0);
+        assert_eq!(refresh_budget_shift(5, true, 0.0), 5);
+        assert_eq!(refresh_budget_shift(2, true, 1.0 / 64.0), 7);
     }
 
     #[test]
