@@ -554,6 +554,7 @@ fn overlap_world(n: u32) -> World {
         fps_counter: FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         menu: MenuSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
         hdr: HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
     };
