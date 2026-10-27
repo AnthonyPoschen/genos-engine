@@ -208,6 +208,15 @@ void main() {
         atomicMax(gstats.mature_change, millionths);
         atomicAdd(gstats.mature_relit, 1u);
     }
+    // First write of an empty cell. The set blends once with the parent prior
+    // (lighting_sc_handover, n = 1) and the count stays 1, so the next sets use
+    // the normal blend. Storing the set outright published one bounce in a frame.
+    if (lighting_world_mode() == 3u && old.w < 0.5) {
+        float cell = cache.v[3u * slot + 1u].w;
+        vec3 mean = lighting_sc_handover(e, 1.0, tp, n, cell);
+        lighting_tex_put(slot, vec4(mean, 1.0));
+        return;
+    }
     // Flag 131072: hit patches (25 cm and up) take each relight whole, as the
     // light cache of the other modes does (no running mean of sets).
     if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {

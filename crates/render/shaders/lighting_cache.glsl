@@ -2271,6 +2271,29 @@ vec4 lighting_sc_own_shown(uint slot) {
     return own.w > 0.5 ? vec4(own.rgb * ls, 1.0) : vec4(0.0);
 }
 
+// S72K handover onto the parent prior (design §6.5). `sets` is the cell's own
+// sample count. Own weight is n / (n + K c f), and f reaches 0 at
+// LIGHTING_SC_HANDOVER, so a finished cell is its own mean. A first write passes
+// n = 1: the new set blends once with the parent held in this frame, and the
+// texel is not replaced outright. No parent, or a cell past the handover,
+// returns `own`. One call to lighting_sc_parent; a second copy of that body
+// overflowed lavapipe.
+vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) {
+    float n = max(sets, 0.0);
+    float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    if (fade <= 0.0 || lighting_world_mode() != 3u) {
+        return own;
+    }
+    float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
+    vec4 up = lighting_sc_parent(pos, nrm, cell);
+    if (!(up.w > 0.5)) {
+        return own;
+    }
+    float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
+    float a = n > 0.0 ? n / max(n + k, 1.0e-4) : 0.0;
+    return mix(up.rgb, own, a);
+}
+
 // Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache
 // cell answers a ray only if it is small against the distance, t > size sqrt 3,
 // and holds enough samples): a near hit reads the finest lit texel with
@@ -2296,7 +2319,8 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
-                    return v.rgb * lighting_sc_sun_gain(s);
+                    vec3 own = lighting_sc_handover(v.rgb, floor(v.w), pos, n, fs);
+                    return own * lighting_sc_sun_gain(s);
                 }
             }
         }
@@ -2364,7 +2388,10 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        return e.rgb * lighting_sc_sun_gain(slot);
+        // 25 cm hit patch, and any mode-3 cell this read returns. A young mean
+        // still hands over from the parent; a finished count returns itself.
+        vec3 own = lighting_sc_handover(e.rgb, floor(e.w), pos, n, hsize);
+        return own * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
 }
