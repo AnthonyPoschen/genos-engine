@@ -7,6 +7,7 @@
 
 mod mat;
 mod media;
+pub mod optics;
 mod quat;
 mod vec;
 

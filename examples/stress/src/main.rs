@@ -40,9 +40,9 @@ use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, FogSettings, Floor,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
-    PITCH_LIMIT,
+    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
@@ -51,6 +51,9 @@ use building::{Layout, LightMix, View};
 use stage::{Scale, Stage};
 
 const USAGE: &str = "genos-stress [options]
+genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
+                          [--lamps N] [--broken] [--out DIR]
+                          s7 direct-light noise grade. noise-gate --help lists it.
   --scale small|big|N|NxM   building size: small = 1 section (25 m), big = 4x4 (100 m)
   --lights N                lamps in the whole building (panel: 5/25/50/100)
   --dynamic PCT             share of lamps that move, 0-100 (panel: 0/25/50/75/100)
@@ -159,7 +162,7 @@ const USAGE: &str = "genos-stress [options]
                             variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
-  --lamp-pick MODE          off, hits, pixels, both, or reuse (experimental)
+  --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
   --lamp-pick-rays N        same knob as --lamp-pick-samples
@@ -169,7 +172,7 @@ const USAGE: &str = "genos-stress [options]
   --lamp-pick-radius N      spatial radius in pixels, 0..64; 0 is temporal only
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
-  --lamp-pick-unbiased on|off  Algorithm 6 when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
@@ -555,7 +558,12 @@ fn options() -> Result<Options, String> {
                     genos_render::check_unfilled_arg(other, Some(&next))?;
                 }
                 Some(false) => genos_render::check_unfilled_arg(other, None)?,
-                None => match genos_scene::lighting_flag_needs_value(other) {
+                None => match genos_scene::reflection_flag_needs_value(other) {
+                    Some(needs) => {
+                        let next = needs.then(|| value()).transpose()?;
+                        genos_scene::check_reflection_arg(other, next.as_deref())?;
+                    }
+                    None => match genos_scene::lighting_flag_needs_value(other) {
                     Some(needs) => {
                         let next = needs.then(|| value()).transpose()?;
                         genos_scene::check_lighting_arg(other, next.as_deref())?;
@@ -586,6 +594,7 @@ fn options() -> Result<Options, String> {
                                 }
                             }
                         },
+                    },
                     },
                 },
             },
@@ -832,6 +841,17 @@ fn run() -> Result<i32, String> {
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
         return genos_stress::lighting_ref::run(std::env::args().skip(2));
+    }
+    if std::env::args().nth(1).as_deref() == Some("noise-gate") {
+        // The settle check reads the lamp-pick diag counters. The argument is
+        // this subcommand; the variable is how the renderer already publishes them.
+        std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+        return match genos_stress::noise_gate::run_args(std::env::args().skip(2)) {
+            Ok(code) => {
+                genos_window::exit(code);
+            }
+            Err(err) => Err(err),
+        };
     }
     let opts = options()?;
     apply_lighting_cli(&opts)?;
@@ -1260,6 +1280,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: MenuSettings::default(),

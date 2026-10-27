@@ -1,9 +1,27 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::match_result_ok, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::match_result_ok,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -20,6 +38,7 @@ use crate::hdr::HdrSettings;
 use crate::fps_counter::FpsCounterSettings;
 use crate::lighting::LightingSettings;
 use crate::menu::MenuSettings;
+use crate::reflections::ReflectionSettings;
 use crate::types::{Ceiling, Floor, Light, Scene, Shape, Solid, Wall, MAX_LAMPS, MAX_OCCLUDERS};
 
 /// Load the shipped scene file through the Rhai host.
@@ -257,84 +276,96 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
     }
     {
         let builder = builder.clone();
-        engine.register_fn("lighting", move |text: &str| -> Result<(), Box<EvalAltResult>> {
-            let mut settings = builder.borrow().lighting.clone();
-            for raw in text.split(['\n', ';']) {
-                let line = raw.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
+        engine.register_fn(
+            "lighting",
+            move |text: &str| -> Result<(), Box<EvalAltResult>> {
+                let mut settings = builder.borrow().lighting.clone();
+                for raw in text.split(['\n', ';']) {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let Some((key, value)) = line.split_once('=') else {
+                        return Err(format!("use key=value, got {line}").into());
+                    };
+                    settings
+                        .set_key(key.trim(), value.trim())
+                        .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
                 }
-                let Some((key, value)) = line.split_once('=') else {
-                    return Err(format!("use key=value, got {line}").into());
-                };
-                settings
-                    .set_key(key.trim(), value.trim())
-                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
-            }
-            builder.borrow_mut().lighting = settings;
-            Ok(())
-        });
+                builder.borrow_mut().lighting = settings;
+                Ok(())
+            },
+        );
     }
     {
         let builder = builder.clone();
         // `debug` is Rhai's string printer, so the settings call cannot use that name.
-        engine.register_fn("debug_settings", move |text: &str| -> Result<(), Box<EvalAltResult>> {
-            let mut settings = builder.borrow().debug.clone();
-            for raw in text.split(['\n', ';']) {
-                let line = raw.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
+        engine.register_fn(
+            "debug_settings",
+            move |text: &str| -> Result<(), Box<EvalAltResult>> {
+                let mut settings = builder.borrow().debug.clone();
+                for raw in text.split(['\n', ';']) {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let Some((key, value)) = line.split_once('=') else {
+                        return Err(format!("use key=value, got {line}").into());
+                    };
+                    settings
+                        .set_key(key.trim(), value.trim())
+                        .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
                 }
-                let Some((key, value)) = line.split_once('=') else {
-                    return Err(format!("use key=value, got {line}").into());
-                };
-                settings
-                    .set_key(key.trim(), value.trim())
-                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
-            }
-            builder.borrow_mut().debug = settings;
-            Ok(())
-        });
+                builder.borrow_mut().debug = settings;
+                Ok(())
+            },
+        );
     }
     {
         let builder = builder.clone();
-        engine.register_fn("fps_counter", move |text: &str| -> Result<(), Box<EvalAltResult>> {
-            let mut settings = builder.borrow().fps_counter;
-            for raw in text.split(['\n', ';']) {
-                let line = raw.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
+        engine.register_fn(
+            "fps_counter",
+            move |text: &str| -> Result<(), Box<EvalAltResult>> {
+                let mut settings = builder.borrow().fps_counter;
+                for raw in text.split(['\n', ';']) {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let Some((key, value)) = line.split_once('=') else {
+                        return Err(format!("use key=value, got {line}").into());
+                    };
+                    settings
+                        .set_key(key.trim(), value.trim())
+                        .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
                 }
-                let Some((key, value)) = line.split_once('=') else {
-                    return Err(format!("use key=value, got {line}").into());
-                };
-                settings
-                    .set_key(key.trim(), value.trim())
-                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
-            }
-            builder.borrow_mut().fps_counter = settings;
-            Ok(())
-        });
+                builder.borrow_mut().fps_counter = settings;
+                Ok(())
+            },
+        );
     }
     {
         let builder = builder.clone();
-        engine.register_fn("menu", move |text: &str| -> Result<(), Box<EvalAltResult>> {
-            let mut settings = builder.borrow().menu.clone();
-            for raw in text.split(['\n', ';']) {
-                let line = raw.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
+        engine.register_fn(
+            "menu",
+            move |text: &str| -> Result<(), Box<EvalAltResult>> {
+                let mut settings = builder.borrow().menu.clone();
+                for raw in text.split(['\n', ';']) {
+                    let line = raw.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let Some((key, value)) = line.split_once('=') else {
+                        return Err(format!("use key=value, got {line}").into());
+                    };
+                    settings
+                        .set_key(key.trim(), value.trim())
+                        .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
                 }
-                let Some((key, value)) = line.split_once('=') else {
-                    return Err(format!("use key=value, got {line}").into());
-                };
-                settings
-                    .set_key(key.trim(), value.trim())
-                    .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
-            }
-            builder.borrow_mut().menu = settings;
-            Ok(())
-        });
+                builder.borrow_mut().menu = settings;
+                Ok(())
+            },
+        );
     }
 
     engine.run(source).map_err(|err| err.to_string())?;
@@ -366,7 +397,11 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         ));
     }
     if let Some(ceiling) = &built.ceiling {
-        let top = built.walls.iter().map(|wall| wall.height).fold(0.0_f32, f32::max);
+        let top = built
+            .walls
+            .iter()
+            .map(|wall| wall.height)
+            .fold(0.0_f32, f32::max);
         // The baked light volumes cover the first 3 m above the floor.
         if ceiling.height <= 0.5 || ceiling.height > 3.0 {
             return Err("roof height must be above 0.5 m and at most 3 m".into());
@@ -387,6 +422,7 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         fps_counter: built.fps_counter,
         menu: built.menu.clone(),
         event_loop: built.event_loop,
+        reflections: built.reflections,
         hdr: built.hdr.clone(),
         fog: built.fog.clone(),
     })
@@ -414,6 +450,7 @@ struct Builder {
     fps_counter: FpsCounterSettings,
     menu: MenuSettings,
     event_loop: EventLoopSettings,
+    reflections: ReflectionSettings,
     hdr: HdrSettings,
     fog: FogSettings,
 }

@@ -27,3 +27,4 @@ crates/render/shaders/overlay.frag 10
 crates/render/shaders/scene_rays.glsl 46
 crates/render/shaders/transmit.comp 1
 crates/render/shaders/wire.frag 3
+crates/render/shaders/reflections_check.comp 71

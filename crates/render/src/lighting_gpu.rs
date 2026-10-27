@@ -115,6 +115,8 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
+    /// Pre-reservoir direct shade. Bound when reuse would only sum a few lamps.
+    direct_plain: Handle,
     screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
@@ -315,6 +317,10 @@ pub(crate) struct Lighting {
     lamp_res: Buffer,
     /// Fill the reservoir with empty lamps once, not every frame.
     lamp_res_clear: bool,
+    /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
+    shade_gate: LampShadeGate,
+    /// Positive point lamps in the uploaded scene. The sun is not counted.
+    point_lamps: u32,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -355,10 +361,13 @@ pub struct LightingAtrousStats {
     pub changed_pixels: u32,
 }
 
-/// Shadow rays traced last frame, and spatial reservoir merges.
+/// Shadow rays traced last frame, spatial reservoir merges, and how pixels shaded.
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
-/// light-cache rays. Counts stay zero unless the diag push bit was set.
+/// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
+/// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
+/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
+/// surface-cache trace already uses 53..55).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
@@ -366,6 +375,9 @@ pub struct LampPickCounts {
     pub fills: u32,
     pub cache: u32,
     pub spatial: u32,
+    pub copied: u32,
+    pub exact: u32,
+    pub restir: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -406,6 +418,7 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
+            direct_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
@@ -517,6 +530,8 @@ impl Default for Lighting {
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
+            shade_gate: LampShadeGate::Product,
+            point_lamps: 0,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -772,6 +787,13 @@ impl Gpu {
             "atrous-plain",
         )?;
         self.note_pipeline_time("atrous-plain", start);
+        let start = Instant::now();
+        self.lighting.direct_plain = self.make_compute_pipe(
+            LIGHTING_DIRECT_PLAIN_SPV,
+            self.lighting.layout,
+            "direct-plain",
+        )?;
+        self.note_pipeline_time("direct-plain", start);
         let start = Instant::now();
         self.lighting.screen_pipe = self.make_compute_pipe(
             LIGHTING_SCREEN_SPV,
@@ -1118,8 +1140,16 @@ impl Gpu {
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         self.destroy_buffer(&mut lamp_res);
         let reuse = settings.lamp_pick.reuse();
-        // Two frames of 16-byte records. Off keeps a dummy so binding 12 is valid.
-        let lamp_bytes = if reuse { pixels.saturating_mul(32).max(64) } else { 64 };
+        // 32 bytes a pixel: the reservoir and the geo record (depth, normal,
+        // exact/trusted kind, shaded direct). Spatial reuse keeps the previous
+        // frame. Temporal only (radius 0) keeps one slot. Off binds a dummy so
+        // binding 12 is valid.
+        let slots = if settings.lamp_pick.radius > 0 { 2 } else { 1 };
+        let lamp_bytes = if reuse {
+            pixels.saturating_mul(32 * slots).max(64)
+        } else {
+            64
+        };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
         self.lighting.dims = [w, h, cols, rows];
@@ -1289,6 +1319,9 @@ impl Gpu {
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
                 cache: w[LAMP_PICK_DIAG_WORD + 3],
                 spatial: w[LAMP_PICK_DIAG_WORD + 4],
+                copied: w[LAMP_PICK_DIAG_WORD + 9],
+                exact: w[LAMP_PICK_DIAG_WORD + 10],
+                restir: w[LAMP_PICK_DIAG_WORD + 11],
             })
             .unwrap_or_default()
     }
@@ -1396,6 +1429,10 @@ impl Gpu {
     /// arms the corner catch-up for the frame the lamps stop.
     pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
         self.lighting.view_content_key = lighting_view_content_key(pack);
+        self.lighting.point_lamps = u32::try_from(
+            pack.lamps.iter().filter(|lamp| !lamp.directional).count(),
+        )
+        .unwrap_or(u32::MAX);
         let (dir, light, n) = lighting_sun_live(pack);
         self.lighting.sun_live_dir = dir;
         self.lighting.sun_live_light = light;
@@ -1792,6 +1829,19 @@ impl Gpu {
         }
     }
 
+    /// Reservoir shade, or the pre-reservoir sum when that sum is what reuse would do.
+    fn direct_pipe(&self) -> Handle {
+        if direct_shade_plain(
+            self.lighting.settings.lamp_pick.mode,
+            self.lighting.point_lamps,
+            self.lighting.shade_gate,
+        ) {
+            self.lighting.direct_plain
+        } else {
+            self.lighting.pipes[3]
+        }
+    }
+
     /// Record and submit one light cache round on the async compute queue: list
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
@@ -1883,7 +1933,12 @@ impl Gpu {
             (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
             (self.fns.cmd_push)(cmd, self.lighting.layout, 0x20, 0, LIGHTING_PC_BYTES, pc.as_ptr() as *const c_void);
             for (k, (pass, gx)) in groups.into_iter().enumerate() {
-                (self.fns.cmd_bind_pipe)(cmd, 1, self.lighting.pipes[pass]);
+                let pipe = if pass == 3 {
+                    self.direct_pipe()
+                } else {
+                    self.lighting.pipes[pass]
+                };
+                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
                 (self.fns.cmd_dispatch)(cmd, gx.max(1), 1, 1);
                 self.barrier_on(cmd, 0x800, 0x800, 0x40, 0x20 | 0x40);
                 if !qp.is_null() {
@@ -2941,6 +2996,7 @@ impl Gpu {
             self.lighting.settings.probes.tile
         };
         let mut lamp = lamp_pick_push(&self.lighting.settings);
+        lamp[1] |= lamp_shade_bits(self.lighting.shade_gate);
         // The existing diag bit counts fresh shadow rays. It does not change
         // the shade. It is set only while GI metrics are recording.
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
@@ -3271,7 +3327,9 @@ impl Gpu {
                 // Pass 7 is compose: the sun path binds its own pipeline.
                 // Pass 8 is a-trous: the plain kernel has no adaptive branch.
                 // Adaptive uses the scalar shader that still reads the bit.
-                let pipe = if pass == 7 && sun_compose {
+                let pipe = if pass == 3 {
+                    self.direct_pipe()
+                } else if pass == 7 && sun_compose {
                     if self.lighting.hdr.legacy_bytes {
                         self.lighting.sun_pipe
                     } else {
@@ -3635,6 +3693,7 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
+                .chain(std::iter::once(&mut self.lighting.direct_plain))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
@@ -3693,7 +3752,7 @@ const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
 const LIGHTING_STATS_WORDS: usize = 144;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
-const _: () = assert!(LAMP_PICK_DIAG_WORD + 4 < LIGHTING_STATS_WORDS);
+const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;

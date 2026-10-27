@@ -5,7 +5,9 @@
 # The same section key stays one fold. The first line sets the title and open or closed.
 # GENOS_MENU_LAYOUT points at another file of this shape.
 # Setting names are the config keys, plus review, scene, checkpoint, view, fps,
-# stall, gi_passes, and gi_work. gi_passes and gi_work are numbers.
+# stall, gi_passes, gi_work, enabled, water, rough_cutoff, mirror_cutoff,
+# mirror_views, rays, shore_cap, caustics, and tracer.
+# gi_passes and gi_work are numbers.
 # Move a line to another tab or section. No code change is required.
 Scene | - | - | open | scene
 Scene | - | - | open | checkpoint
@@ -53,6 +55,15 @@ Shadows | - | - | open | lighting_ambient
 Perf | - | - | open | lighting_full_effort
 Perf | - | - | open | unfilled
 Perf | - | - | open | unfilled_tint
+Reflections | - | - | open | enabled
+Reflections | - | - | open | water
+Reflections | - | - | open | rough_cutoff
+Reflections | - | - | open | mirror_cutoff
+Reflections | - | - | open | mirror_views
+Reflections | - | - | open | rays
+Reflections | - | - | open | shore_cap
+Reflections | - | - | open | caustics
+Reflections | - | - | open | tracer
 Perf | - | - | open | fps
 Perf | - | - | open | stall
 Perf | - | - | open | gi_passes

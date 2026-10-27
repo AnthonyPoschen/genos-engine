@@ -1416,6 +1416,41 @@ kind = "mirror"
 detail = "--out"
 
 [[var]]
+name = "GENOS_REFLECTIONS"
+kind = "mirror"
+detail = "--reflections"
+
+[[var]]
+name = "GENOS_REFLECTION_RAYS"
+kind = "mirror"
+detail = "--reflection-rays"
+
+[[var]]
+name = "GENOS_MIRROR_VIEWS"
+kind = "mirror"
+detail = "--mirror-views"
+
+[[var]]
+name = "GENOS_WATER"
+kind = "mirror"
+detail = "--water"
+
+[[var]]
+name = "GENOS_CAUSTICS"
+kind = "mirror"
+detail = "--caustics"
+
+[[var]]
+name = "GENOS_REFLECTION_TRACER"
+kind = "mirror"
+detail = "--reflection-tracer"
+
+[[var]]
+name = "GENOS_REFLECTIONS_OUT"
+kind = "mirror"
+detail = "--out on reflections-check"
+
+[[var]]
 name = "GENOS_PHYSICS_METRICS_FIXTURE"
 kind = "mirror"
 detail = "--fixture"

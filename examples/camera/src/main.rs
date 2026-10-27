@@ -25,8 +25,9 @@ use genos_render::{Antialias, Renderer, ScreenRect, Simulation, World};
 /// The flame, the smoke, and the flame lamp stay off.
 const SHOW_PARTICLES: bool = false;
 use genos_scene::{
-    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings, FogSettings,
-    Floor, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
+    load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
+    Floor, FogSettings, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings,
+    ReflectionSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
     apply_frame_action, lighting_frame, Action, OpenFrame, Pointer, ProfileGraph, ProfileStream,
@@ -212,6 +213,18 @@ fn run() -> Result<i32, String> {
                     None
                 };
                 genos_render::check_unfilled_arg(other, next.as_deref())?;
+            }
+            other if genos_scene::reflection_flag_needs_value(other).is_some() => {
+                let needs = genos_scene::reflection_flag_needs_value(other).unwrap_or(false);
+                let next = if needs {
+                    Some(
+                        args.next()
+                            .ok_or_else(|| format!("{other} needs a value"))?,
+                    )
+                } else {
+                    None
+                };
+                genos_scene::check_reflection_arg(other, next.as_deref())?;
             }
             other if genos_scene::lighting_flag_needs_value(other).is_some() => {
                 let needs = genos_scene::lighting_flag_needs_value(other).unwrap_or(false);
@@ -845,6 +858,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: MenuSettings::default(),

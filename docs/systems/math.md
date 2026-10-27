@@ -19,6 +19,7 @@ The crate is `crates/math`, package `genos-math`.
 - `Vec2`, `Vec3`, and `Vec4` are in `src/vec.rs`.
 - `Mat3` and `Mat4` are in `src/mat.rs`.
 - `Quat` is in `src/quat.rs`.
+- Fresnel, Snell, GGX, Beer–Lambert, mirror and portal maps, flat-water transmittance, and the Fresnel mirror-view budget are in `src/optics.rs`. The GLSL mirror is `crates/render/shaders/reflections.glsl`.
 - Participating-medium closed forms are in `src/media.rs`: transmittance, height-fog density, Henyey-Greenstein, the homogeneous in-scatter integral, and height-fog optical depth along a ray. `crates/render/shaders/media.glsl` is the GLSL mirror. `fog_along` and `height_fog_along` call the `f32` wrappers.
 
 ## Game use

@@ -15,6 +15,8 @@ mod occ_grid;
 mod pack;
 mod particles;
 mod pool;
+mod reflections;
+mod reflections_grade;
 mod scene_mesh;
 mod trace;
 mod unfilled;
@@ -52,7 +54,8 @@ pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
-    LampPickCounts, LampReport, LightingAtrousStats, LightingSunStats, MaterialStats, Renderer,
+    LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
+    MaterialStats, Renderer,
     ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use hdr_output::{
@@ -86,6 +89,13 @@ pub use particles::{
     FogHit, FogLamp, Kind, LiveParticle, Puff, Simulation, FIRE_COLOR, PROOF_STEPS, SMOKE_ALBEDO,
     SMOKE_DENSITY, SMOKE_RADIUS, STEP_DT,
 };
+pub use reflections::{
+    frame_ray_count, lighting_reflection_preset, mirror_view_proj, portal_leak, portal_view_proj,
+    reflection_frame_active, reflection_grade_from_bytes, scheduled_low_rays, shade_picture,
+    shoreline_deep_ratio, shoreline_ratio, water_quad, water_vertices, PictureFault,
+    ReflectionGrade, ReflectionPicture, GRADE_BYTES, TILE,
+};
+pub use reflections_grade::{grade_camera, grade_world, GRADE_HEIGHT, GRADE_WIDTH};
 pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
     agreement, direct_light, direct_light_in, first_outgoing, linear_from_display, luminance,
@@ -95,8 +105,8 @@ pub use trace::{
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
-    MaterialAtlas, Object, ParticleFrame, ParticleImage, ShaderSpace, StreamedTexture, Surface,
-    World,
+    MaterialAtlas, Object, ParticleFrame, ParticleImage, Reflector, ReflectorKind, ShadePlane,
+    ShaderSpace, StreamedTexture, Surface, World,
 };
 
 /// `GENOS_SCENE_DELTA=1`: print each frame's resident scene update (S70C).

@@ -1,10 +1,13 @@
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 use genos_math::Vec3;
 
 use crate::{
     DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, LightingSettings,
-    MenuSettings,
+    MenuSettings, ReflectionSettings,
 };
 
 /// Share of the incoming light a white painted surface sends back out.
@@ -187,6 +190,8 @@ pub struct Scene {
     /// Longest gap between window pumps, in milliseconds. The frame writes it.
     /// A value of `0` clears the mark. See `docs/systems/window.md`.
     pub event_loop: EventLoopSettings,
+    /// Planar mirrors, portals, and water. The default is the High cap.
+    pub reflections: ReflectionSettings,
     /// Exposure, bloom, display, and swapchain. `legacy_bytes` keeps the
     /// pre-HDR picture. A lighting preset does not write this struct.
     pub hdr: crate::HdrSettings,

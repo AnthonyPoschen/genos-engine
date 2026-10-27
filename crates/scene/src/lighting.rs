@@ -1,16 +1,58 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::field_reassign_with_default, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::manual_is_multiple_of, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::semicolon_if_nothing_returned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::field_reassign_with_default,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::manual_is_multiple_of,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_pass_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Lighting settings: the reference [`crate::EngineSettings`] value.
 //!
@@ -151,11 +193,25 @@ impl ShadowFilter {
     }
 }
 
+/// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
+pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
+/// Unshadowed reservoir candidates per pixel on Medium.
+pub const LAMP_PICK_CANDIDATES_MEDIUM: u32 = 4;
+/// Unshadowed reservoir candidates per pixel on High.
+pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
+/// Previous-frame neighbour radius, in pixels, for Medium and High.
+/// Low stays at 0 (temporal only, one reservoir).
+pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
+/// Hold count written into an exact reservoir so the next quiet frame skips it.
+/// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
+pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
+
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. GI presets use
-/// [`Hits`](Self::Hits). Potato and day-cycle stay [`Off`](Self::Off).
-/// [`Reuse`](Self::Reuse) is experimental and is not a preset.
+/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
+/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
+/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
+/// stay [`Off`](Self::Off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
@@ -167,8 +223,8 @@ pub enum LampPickMode {
     Pixels = 2,
     /// Hits and pixels, no reservoir.
     Both = 3,
-    /// Experimental. Hits, plus pixels with a temporal reservoir.
-    /// Spatial only if the radius is above 0. Not used by a preset.
+    /// Hits, plus pixels with a temporal reservoir. Spatial only if the radius
+    /// is above 0. `low`, `medium`, and `high`.
     Reuse = 4,
 }
 
@@ -179,7 +235,7 @@ impl LampPickMode {
             Self::Hits => "hits",
             Self::Pixels => "pixels",
             Self::Both => "both",
-            Self::Reuse => "reuse (experimental)",
+            Self::Reuse => "reuse",
         }
     }
 
@@ -212,7 +268,7 @@ pub struct LampPickSettings {
     /// Cap on reservoir `M` for the biased merge. 1..=64. Default 20.
     /// The unbiased path does not apply it.
     pub history: u32,
-    /// Algorithm 6 when true. The section-3 merge and the `M` clamp when false.
+    /// Pairwise MIS when true. The section-3 merge and the `M` clamp when false.
     pub unbiased: bool,
 }
 
@@ -230,6 +286,21 @@ impl Default for LampPickSettings {
 }
 
 impl LampPickSettings {
+    /// Pixel reservoirs for `low`, `medium`, and `high`.
+    ///
+    /// `candidates` are the unshadowed fill. `radius` 0 is temporal reuse only
+    /// and one reservoir slot. Pairwise MIS (`unbiased`) is on.
+    pub fn reservoir(candidates: u32, radius: u32) -> Self {
+        Self {
+            mode: LampPickMode::Reuse,
+            candidates,
+            rays: 1,
+            radius,
+            history: 20,
+            unbiased: true,
+        }
+    }
+
     pub fn reuse(self) -> bool {
         self.mode == LampPickMode::Reuse
     }
@@ -449,8 +520,9 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. GI presets sample hits, and pixels stay on the full
-    /// sum. `reuse (experimental)` is not a preset.
+    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
+    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
+    /// Potato and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -469,7 +541,8 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick =
+                    LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_SPATIAL_RADIUS);
                 // Picture wavelet. The other presets keep the hash launch
                 // stored in `high_defaults`.
                 s.denoiser.screen = true;
@@ -533,7 +606,7 @@ impl LightingSettings {
                 s.gi.budget_shift = 2;
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
                 s.direct.max_lights = 8;
@@ -545,7 +618,10 @@ impl LightingSettings {
                 s.denoiser.adaptive = false;
                 s.gi.budget_shift = 1;
                 s.ambient.mode = AmbientMode::Day;
-                s.lamp_pick.mode = LampPickMode::Hits;
+                s.lamp_pick = LampPickSettings::reservoir(
+                    LAMP_PICK_CANDIDATES_MEDIUM,
+                    LAMP_PICK_SPATIAL_RADIUS,
+                );
             }
         }
         s.sanitize();
@@ -1120,9 +1196,8 @@ impl LightingSettings {
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.blend" => {
-                self.surface_cache.blend = SurfaceCacheBlend::parse(value).ok_or_else(|| {
-                    format!("surface_cache.blend is msme or hold, got {value}")
-                })?
+                self.surface_cache.blend = SurfaceCacheBlend::parse(value)
+                    .ok_or_else(|| format!("surface_cache.blend is msme or hold, got {value}"))?
             }
             "surface_cache.firefly_sigma" => {
                 let sigma = num_f32(value)?;
@@ -1191,11 +1266,12 @@ impl LightingSettings {
             "dusk_intensity" => self.ambient.dusk_intensity = num_f32(value)?,
             "time_of_day" => self.time_of_day = num_f32(value)?,
             "lamp_pick" => {
+                if value.trim().eq_ignore_ascii_case("reuse (experimental)") {
+                    warn_lamp_pick_reuse_alias();
+                }
                 self.lamp_pick.mode = LampPickMode::parse(value).ok_or_else(|| {
-                    format!(
-                        "lamp_pick is off, hits, pixels, both, or reuse (experimental), got {value}"
-                    )
-                })?
+                    format!("lamp_pick is off, hits, pixels, both, or reuse, got {value}")
+                })?;
             }
             "lamp_pick_candidates" => self.lamp_pick.candidates = num_u32(value)?,
             "lamp_pick_rays" | "lamp_pick_samples" => self.lamp_pick.rays = num_u32(value)?,
@@ -1537,7 +1613,8 @@ fn resolve_lighting_launch(
             .blend
             .or_else(|| env.blend.and_then(SurfaceCacheBlend::parse)),
         firefly_sigma: chosen.firefly_sigma.or_else(|| {
-            env.firefly_sigma.and_then(|value| parse_firefly_sigma(value).ok())
+            env.firefly_sigma
+                .and_then(|value| parse_firefly_sigma(value).ok())
         }),
         ray_budget: chosen
             .ray_budget
@@ -1642,9 +1719,10 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
             SurfaceCacheBlend::parse(value)
                 .ok_or_else(|| format!("{flag} {value} is not msme or hold"))?,
         ),
-        LightingKind::FireflySigma => LightingFlag::FireflySigma(parse_firefly_sigma(value).map_err(
-            |_| format!("{flag} {value} is not a non-negative number"),
-        )?),
+        LightingKind::FireflySigma => LightingFlag::FireflySigma(
+            parse_firefly_sigma(value)
+                .map_err(|_| format!("{flag} {value} is not a non-negative number"))?,
+        ),
         LightingKind::RayBudget => LightingFlag::RayBudget(
             num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
         ),
@@ -1681,7 +1759,6 @@ fn bit(v: bool) -> u32 {
     u32::from(v)
 }
 
-
 /// Deprecated `GENOS_GI2_*` (and historical `GENOS_GI_DEBUG`) aliases.
 ///
 /// Canonical names are `GENOS_LIGHTING_*`. Old names still apply for one release
@@ -1690,7 +1767,10 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_AMBIENT", "GENOS_LIGHTING_AMBIENT"),
     ("GENOS_GI2_AMBIENT_COLOR", "GENOS_LIGHTING_AMBIENT_COLOR"),
     ("GENOS_GI2_AMBIENT_GROUND", "GENOS_LIGHTING_AMBIENT_GROUND"),
-    ("GENOS_GI2_AMBIENT_INTENSITY", "GENOS_LIGHTING_AMBIENT_INTENSITY"),
+    (
+        "GENOS_GI2_AMBIENT_INTENSITY",
+        "GENOS_LIGHTING_AMBIENT_INTENSITY",
+    ),
     ("GENOS_GI2_ASYNC", "GENOS_LIGHTING_ASYNC"),
     ("GENOS_GI2_ATROUS_DIRTY", "GENOS_LIGHTING_ATROUS_DIRTY"),
     ("GENOS_GI2_BORROW", "GENOS_LIGHTING_BORROW"),
@@ -1706,11 +1786,17 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_DAY_INTENSITY", "GENOS_LIGHTING_DAY_INTENSITY"),
     ("GENOS_GI2_DEBUG", "GENOS_LIGHTING_DEBUG"),
     ("GENOS_GI2_DENOISE", "GENOS_LIGHTING_DENOISE"),
-    ("GENOS_GI2_DENOISE_ADAPTIVE", "GENOS_LIGHTING_DENOISE_ADAPTIVE"),
+    (
+        "GENOS_GI2_DENOISE_ADAPTIVE",
+        "GENOS_LIGHTING_DENOISE_ADAPTIVE",
+    ),
     ("GENOS_GI2_DENOISE_ITERS", "GENOS_LIGHTING_DENOISE_ITERS"),
     ("GENOS_GI2_DENOISE_LAUNCH", "GENOS_LIGHTING_DENOISE_LAUNCH"),
     ("GENOS_GI2_DENOISE_SCREEN", "GENOS_LIGHTING_DENOISE_SCREEN"),
-    ("GENOS_GI2_DENOISE_VARIANCE", "GENOS_LIGHTING_DENOISE_VARIANCE"),
+    (
+        "GENOS_GI2_DENOISE_VARIANCE",
+        "GENOS_LIGHTING_DENOISE_VARIANCE",
+    ),
     ("GENOS_GI2_DIRECT", "GENOS_LIGHTING_DIRECT"),
     ("GENOS_GI2_DIRECT_LIGHTS", "GENOS_LIGHTING_DIRECT_LIGHTS"),
     ("GENOS_GI2_DIRECT_REFRESH", "GENOS_LIGHTING_DIRECT_REFRESH"),
@@ -1725,17 +1811,38 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_GI", "GENOS_LIGHTING_GI"),
     ("GENOS_GI2_GI_REFRESH", "GENOS_LIGHTING_GI_REFRESH"),
     ("GENOS_GI2_LAMP_PICK", "GENOS_LIGHTING_LAMP_PICK"),
-    ("GENOS_GI2_LAMP_PICK_CANDIDATES", "GENOS_LIGHTING_LAMP_PICK_CANDIDATES"),
+    (
+        "GENOS_GI2_LAMP_PICK_CANDIDATES",
+        "GENOS_LIGHTING_LAMP_PICK_CANDIDATES",
+    ),
     ("GENOS_GI2_LAMP_PICK_DIAG", "GENOS_LIGHTING_LAMP_PICK_DIAG"),
-    ("GENOS_GI2_LAMP_PICK_HISTORY", "GENOS_LIGHTING_LAMP_PICK_HISTORY"),
-    ("GENOS_GI2_LAMP_PICK_RADIUS", "GENOS_LIGHTING_LAMP_PICK_RADIUS"),
+    (
+        "GENOS_GI2_LAMP_PICK_HISTORY",
+        "GENOS_LIGHTING_LAMP_PICK_HISTORY",
+    ),
+    (
+        "GENOS_GI2_LAMP_PICK_RADIUS",
+        "GENOS_LIGHTING_LAMP_PICK_RADIUS",
+    ),
     ("GENOS_GI2_LAMP_PICK_RAYS", "GENOS_LIGHTING_LAMP_PICK_RAYS"),
-    ("GENOS_GI2_LAMP_PICK_REUSE", "GENOS_LIGHTING_LAMP_PICK_REUSE"),
-    ("GENOS_GI2_LAMP_PICK_SAMPLES", "GENOS_LIGHTING_LAMP_PICK_SAMPLES"),
-    ("GENOS_GI2_LAMP_PICK_UNBIASED", "GENOS_LIGHTING_LAMP_PICK_UNBIASED"),
+    (
+        "GENOS_GI2_LAMP_PICK_REUSE",
+        "GENOS_LIGHTING_LAMP_PICK_REUSE",
+    ),
+    (
+        "GENOS_GI2_LAMP_PICK_SAMPLES",
+        "GENOS_LIGHTING_LAMP_PICK_SAMPLES",
+    ),
+    (
+        "GENOS_GI2_LAMP_PICK_UNBIASED",
+        "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
+    ),
     ("GENOS_GI2_MOVED_DROP", "GENOS_LIGHTING_MOVED_DROP"),
     ("GENOS_GI2_NIGHT_COLOR", "GENOS_LIGHTING_NIGHT_COLOR"),
-    ("GENOS_GI2_NIGHT_INTENSITY", "GENOS_LIGHTING_NIGHT_INTENSITY"),
+    (
+        "GENOS_GI2_NIGHT_INTENSITY",
+        "GENOS_LIGHTING_NIGHT_INTENSITY",
+    ),
     ("GENOS_GI2_NOON_COLOR", "GENOS_LIGHTING_NOON_COLOR"),
     ("GENOS_GI2_NOON_INTENSITY", "GENOS_LIGHTING_NOON_INTENSITY"),
     ("GENOS_GI2_PREFILL", "GENOS_LIGHTING_PREFILL"),
@@ -1744,7 +1851,10 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_PROBE_REFRESH", "GENOS_LIGHTING_PROBE_REFRESH"),
     ("GENOS_GI2_PROBES", "GENOS_LIGHTING_PROBES"),
     ("GENOS_GI2_PROBE_STALE", "GENOS_LIGHTING_PROBE_STALE"),
-    ("GENOS_GI2_SC_BUDGET_SHIFT", "GENOS_LIGHTING_SC_BUDGET_SHIFT"),
+    (
+        "GENOS_GI2_SC_BUDGET_SHIFT",
+        "GENOS_LIGHTING_SC_BUDGET_SHIFT",
+    ),
     ("GENOS_GI2_SC_FLAGS", "GENOS_LIGHTING_SC_FLAGS"),
     ("GENOS_GI2_SC_LOCAL", "GENOS_LIGHTING_SC_LOCAL"),
     ("GENOS_GI2_SC_SETTLE", "GENOS_LIGHTING_SC_SETTLE"),
@@ -1756,11 +1866,26 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_SKY", "GENOS_LIGHTING_SKY"),
     ("GENOS_GI2_SUN", "GENOS_LIGHTING_SUN"),
     ("GENOS_GI2_SUN_BANDS", "GENOS_LIGHTING_SUN_BANDS"),
-    ("GENOS_GI2_SURFACE_CACHE_ATTACH_MOVERS", "GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS"),
-    ("GENOS_GI2_SURFACE_CACHE_BLEND", "GENOS_LIGHTING_SURFACE_CACHE_BLEND"),
-    ("GENOS_GI2_SURFACE_CACHE_DORMANT_RAYS", "GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS"),
-    ("GENOS_GI2_SURFACE_CACHE_FIREFLY_SIGMA", "GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA"),
-    ("GENOS_GI2_SURFACE_CACHE_RAY_BUDGET", "GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET"),
+    (
+        "GENOS_GI2_SURFACE_CACHE_ATTACH_MOVERS",
+        "GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS",
+    ),
+    (
+        "GENOS_GI2_SURFACE_CACHE_BLEND",
+        "GENOS_LIGHTING_SURFACE_CACHE_BLEND",
+    ),
+    (
+        "GENOS_GI2_SURFACE_CACHE_DORMANT_RAYS",
+        "GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS",
+    ),
+    (
+        "GENOS_GI2_SURFACE_CACHE_FIREFLY_SIGMA",
+        "GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA",
+    ),
+    (
+        "GENOS_GI2_SURFACE_CACHE_RAY_BUDGET",
+        "GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET",
+    ),
     ("GENOS_GI2_TILE", "GENOS_LIGHTING_TILE"),
     ("GENOS_GI2_TIME", "GENOS_LIGHTING_TIME"),
     ("GENOS_GI2_TOGGLES", "GENOS_LIGHTING_TOGGLES"),
@@ -1779,16 +1904,26 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
 
+fn warn_lamp_pick_reuse_alias() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        eprintln!(
+            "warning: lamp_pick value \"reuse (experimental)\" is deprecated; use \"reuse\" (alias kept for one release)"
+        );
+    });
+}
+
 fn warn_gi2_alias(old: &'static str, neu: &'static str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
     static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
-    let mut guard = warned.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.insert(old) {
-        eprintln!(
-            "warning: {old} is deprecated; use {neu} (alias kept for one release)"
-        );
+        eprintln!("warning: {old} is deprecated; use {neu} (alias kept for one release)");
     }
 }
 
@@ -2070,8 +2205,7 @@ mod launch_tests {
         settings.apply_launch(&from_old);
         assert!(!settings.surface_cache.attach_movers);
 
-        let cli =
-            resolve_lighting_launch(&["--surface-cache-attach-movers=on"], &env).unwrap();
+        let cli = resolve_lighting_launch(&["--surface-cache-attach-movers=on"], &env).unwrap();
         settings.apply_launch(&cli);
         assert!(settings.surface_cache.attach_movers);
         assert!(check_lighting_arg("--surface-cache-attach-movers", Some("maybe")).is_err());
@@ -2109,7 +2243,11 @@ mod launch_tests {
         assert!(check_lighting_arg("--surface-cache-firefly-sigma", Some("0")).is_ok());
 
         let rays = resolve_lighting_launch(
-            &["--surface-cache-ray-budget", "4096", "--surface-cache-dormant-rays=4"],
+            &[
+                "--surface-cache-ray-budget",
+                "4096",
+                "--surface-cache-dormant-rays=4",
+            ],
             &empty(),
         )
         .unwrap();
@@ -2117,7 +2255,8 @@ mod launch_tests {
         settings.apply_launch(&rays);
         assert_eq!(settings.surface_cache.ray_budget, 4096);
         assert_eq!(settings.surface_cache.dormant_rays, 4);
-        let clamped = resolve_lighting_launch(&["--surface-cache-dormant-rays=20"], &empty()).unwrap();
+        let clamped =
+            resolve_lighting_launch(&["--surface-cache-dormant-rays=20"], &empty()).unwrap();
         settings = LightingSettings::default();
         settings.apply_launch(&clamped);
         assert_eq!(settings.surface_cache.dormant_rays, 16);
@@ -2138,15 +2277,9 @@ mod launch_tests {
 
         assert!(lighting_env("GENOS_LIGHTING_WORLD_CACHE").is_err());
         std::env::set_var("GENOS_GI2_WORLD_CACHE", "0");
-        assert_eq!(
-            lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(),
-            "0"
-        );
+        assert_eq!(lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(), "0");
         std::env::set_var("GENOS_LIGHTING_WORLD_CACHE", "1");
-        assert_eq!(
-            lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(),
-            "1"
-        );
+        assert_eq!(lighting_env("GENOS_LIGHTING_WORLD_CACHE").unwrap(), "1");
 
         std::env::set_var("GENOS_GI_DEBUG", "1");
         assert!(lighting_env_os("GENOS_LIGHTING_DEBUG").is_some());
@@ -2162,9 +2295,9 @@ mod launch_tests {
 
     #[test]
     fn gi2_alias_table_covers_every_lighting_env_and_gi_debug() {
-        assert!(GI2_ENV_ALIASES
-            .iter()
-            .any(|&(old, neu)| old == "GENOS_GI2_WORLD_CACHE" && neu == "GENOS_LIGHTING_WORLD_CACHE"));
+        assert!(GI2_ENV_ALIASES.iter().any(
+            |&(old, neu)| old == "GENOS_GI2_WORLD_CACHE" && neu == "GENOS_LIGHTING_WORLD_CACHE"
+        ));
         assert!(GI2_ENV_ALIASES
             .iter()
             .any(|&(old, neu)| old == "GENOS_GI_DEBUG" && neu == "GENOS_LIGHTING_DEBUG"));

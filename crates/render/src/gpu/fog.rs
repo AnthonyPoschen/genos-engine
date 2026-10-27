@@ -1614,6 +1614,7 @@ fn empty_scene() -> Scene {
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }
 }
