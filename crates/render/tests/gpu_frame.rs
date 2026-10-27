@@ -248,7 +248,9 @@ fn the_budget_controller_scales_without_gi_metrics() {
         !renderer.gi_metrics_enabled(),
         "the sample log is on; this test is normal play"
     );
-    let mut world = scene(Vec::new(), Vec::new(), Vec::new());
+    // The shipped hall (lamp, flame, solids): an empty room retires inside the
+    // 8 ms cap once refreshes are budgeted, and the controller has nothing to do.
+    let mut world = shipped_hall();
     world.scene.lighting.controller = true;
     let camera = Camera::opening();
     let _ = draw(&mut window, &mut renderer, &world, &camera);
