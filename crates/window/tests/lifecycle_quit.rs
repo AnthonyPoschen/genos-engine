@@ -75,6 +75,7 @@ fn every_binary_answers_pings_while_it_quits() {
         print_phases(spec.label, gap, total, &phases);
         measured.push((spec.label, gap, total));
         assert_finished(&spec, &run);
+        assert_rendered(&spec, &run);
         assert_clean(spec.label, gap, total, &phases, &run);
     }
     for spec in plants() {
@@ -84,6 +85,7 @@ fn every_binary_answers_pings_while_it_quits() {
         let phases = phases_of(&run);
         print_phases(spec.label, gap, total, &phases);
         assert_finished(&spec, &run);
+        assert_rendered(&spec, &run);
         assert!(
             !gap_within_budget(gap),
             "{} planted stall must fail the budget, gap {gap:.1} ms; clean runs {measured:?}",
@@ -140,6 +142,29 @@ fn every_binary_answers_pings_while_it_quits() {
             run.stderr
         );
     }
+}
+
+/// A quit is only measured on a run that presented frames. A lost surface
+/// or a second swapchain on one wl_surface exits early, and a fast quit
+/// from a binary that never rendered proves nothing.
+fn assert_rendered(spec: &Spec, run: &Finished) {
+    let text = format!("{}\n{}", run.stdout, run.stderr);
+    for bad in ["swapchain failed", "already has a fifo", "-1000000000", "previous swapchain"] {
+        assert!(
+            !text.contains(bad),
+            "{} swapchain creation failed ({bad})\nstdout {}\nstderr {}",
+            spec.label,
+            run.stdout,
+            run.stderr
+        );
+    }
+    assert!(
+        text.contains("frames="),
+        "{} printed no frames= line, so it never rendered\nstdout {}\nstderr {}",
+        spec.label,
+        run.stdout,
+        run.stderr
+    );
 }
 
 fn assert_finished(spec: &Spec, run: &Finished) {
