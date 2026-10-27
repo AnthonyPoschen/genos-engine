@@ -32,6 +32,7 @@ Each record uses these headings:
 - [Reflections design](reflections-design.md): specular reflections, planar mirrors, portals, and water ([ADR 0019](../adr/0019-reflections.md), accepted).
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
+- [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the probes, the commands, the scripts, the captures, and the ground-truth reference.
@@ -40,6 +41,8 @@ Each record uses these headings:
 
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
+- [Job system](job-system.md): a fiber-free work-stealing pool, serial when the server or a replay needs one order. Proposed.
+- [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Proposed.
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Accepted. Speculative contacts, swept time of impact, and the hot-swap are in the physics step. `slice_chunk` is not.
 - [PBR materials design](pbr-materials-design.md): glTF metallic-roughness, the shared shade, textures, and emissive lights ([ADR 0014](../adr/0014-pbr-materials.md)). Proposed. It does not copy the mesh-loading parsers.

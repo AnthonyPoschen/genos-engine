@@ -177,6 +177,12 @@ uint pack_rgb(vec3 rgb) {
     return c.r | (c.g << 8u) | (c.b << 16u) | (255u << 24u);
 }
 
+// The SDR picture in BGRA8 for a host readback, whatever the swapchain holds.
+uint pack_bgra(vec3 rgb) {
+    uvec3 c = uvec3(clamp(rgb, 0.0, 1.0) * CODE_8BIT + CODE_ROUND);
+    return c.b | (c.g << 8u) | (c.r << 16u) | (255u << 24u);
+}
+
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     // The lit image keeps the guard band. This pass grades the swapchain crop
@@ -215,7 +221,9 @@ void main() {
         encode.words[at] = floatBitsToUint(encoded.r);
         encode.words[at + 1u] = floatBitsToUint(encoded.g);
         encode.words[at + 2u] = floatBitsToUint(encoded.b);
-        encode.words[at + 3u] = 0u;
+        // The fourth word carries the SDR bytes: a readback of an HDR10 or scRGB
+        // swapchain would otherwise hand PQ or fp16 words to a BGRA8 reader.
+        encode.words[at + 3u] = pack_bgra(dither8(formed, p));
         float fmt = hdr.extra.z;
         if (abs(fmt - FMT_A2B10) < 1.0) {
             outc.px[index] = pack_a2b10(encoded);
