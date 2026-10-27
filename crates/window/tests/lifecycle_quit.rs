@@ -145,7 +145,7 @@ fn every_binary_answers_pings_while_it_quits() {
 }
 
 /// A quit is only measured on a run that presented frames. A lost surface
-/// or a second swapchain on one wl_surface exits early, and a fast quit
+/// or a second swapchain on one `wl_surface` exits early, and a fast quit
 /// from a binary that never rendered proves nothing.
 fn assert_rendered(spec: &Spec, run: &Finished) {
     let text = format!("{}\n{}", run.stdout, run.stderr);
@@ -504,8 +504,7 @@ fn phase_ms(phases: &[PhaseSample], name: &str) -> f64 {
     phases
         .iter()
         .find(|phase| phase.name == name)
-        .map(|phase| phase.ms)
-        .unwrap_or(0.0)
+        .map_or(0.0, |phase| phase.ms)
 }
 
 fn print_phases(label: &str, gap: f64, total: f64, phases: &[PhaseSample]) {

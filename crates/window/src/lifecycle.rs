@@ -531,7 +531,7 @@ pub fn close_early_mirror(cli: bool) -> bool {
     }
     matches!(
         std::env::var("GENOS_LIFECYCLE_CLOSE_EARLY").as_deref(),
-        Ok("1") | Ok("true")
+        Ok("1" | "true")
     )
 }
 
