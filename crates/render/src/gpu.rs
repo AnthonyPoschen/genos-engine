@@ -276,6 +276,8 @@ impl MaterialStats {
 
 pub struct Renderer {
     gpu: Gpu,
+    /// The world identity drawn last (0 before the first draw).
+    world_identity: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -308,6 +310,7 @@ impl Renderer {
             width,
             height,
             wire_on: false,
+            world_identity: 0,
             memory: FrameMemory::default(),
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
@@ -804,6 +807,14 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        // A different world is a scene switch: the cached texels belong to the
+        // old one (docs/systems/lighting/surface-cache-wall-leak.md).
+        if world.identity() != self.world_identity {
+            if self.world_identity != 0 {
+                self.reset_lighting_cache();
+            }
+            self.world_identity = world.identity();
+        }
         self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);

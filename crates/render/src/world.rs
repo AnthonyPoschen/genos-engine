@@ -299,6 +299,12 @@ pub struct ShadePlane {
     pub color: [f32; 3],
 }
 
+/// Never 0, so a renderer that has drawn nothing yet is told apart.
+fn next_world_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     pub scene: Scene,
@@ -322,6 +328,11 @@ pub struct World {
     /// More mip chains the frame streams, after the colour and normal atlases.
     /// Each names the object that supplies its distance and derivatives.
     pub stream_textures: Vec<StreamedTexture>,
+    /// Which scene this is, not what it holds. Each `from_scene` takes a new
+    /// value and a clone keeps it. The renderer drops the surface cache when the
+    /// value changes. The light key cannot do that: it changes every frame with
+    /// the fire and the puffs.
+    identity: u64,
 }
 
 /// A mip chain the frame registers, viewed through one object.
@@ -363,7 +374,13 @@ impl World {
             color_atlas: MaterialAtlas::empty(),
             normal_atlas: MaterialAtlas::empty(),
             stream_textures: Vec::new(),
+            identity: next_world_identity(),
         }
+    }
+
+    /// See the `identity` field.
+    pub fn identity(&self) -> u64 {
+        self.identity
     }
 
     /// Scene the lighting traces. Hidden and off-screen objects stay in it.
