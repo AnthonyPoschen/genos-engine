@@ -97,6 +97,13 @@ pub trait ShutdownDevice {
     fn next_phase(&self) -> &'static str {
         "destroy"
     }
+
+    /// Block once inside [`ShutdownDevice::poll_idle`], with no seat dispatch.
+    ///
+    /// The quit harness uses this as a slow fence. Lavapipe signals real fences
+    /// immediately, so a regression that waits inside the poll still has to
+    /// show up in that phase's time.
+    fn plant_slow_fence(&mut self, _stall: Duration) {}
 }
 
 /// A worker the lifecycle joins without blocking the seat.
@@ -248,7 +255,6 @@ pub struct Lifecycle<D: ShutdownDevice> {
     /// The device. Safe code cannot move it out. Only shutdown destroys it.
     pub device: ManuallyDrop<D>,
     stops: Vec<Stop>,
-    stall: Option<Duration>,
     quit: bool,
     exit_code: i32,
     window_alive: bool,
@@ -267,7 +273,6 @@ impl<D: ShutdownDevice> Lifecycle<D> {
             window: ManuallyDrop::new(window),
             device: ManuallyDrop::new(device),
             stops: Vec::new(),
-            stall: None,
             quit: false,
             exit_code: 0,
             window_alive: true,
@@ -286,12 +291,12 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         self.stops.push(Box::new(step));
     }
 
-    /// Block the event thread once, during drain, with no seat dispatch inside the wait.
+    /// Block once inside the device's fence poll, with no seat dispatch.
     ///
     /// The quit-gap test passes `--lifecycle-block-ms` so a regression that
     /// stalls teardown fails the 100 ms budget. Shipping runs leave this unset.
     pub fn plant_block(&mut self, stall: Duration) {
-        self.stall = Some(stall);
+        self.device.plant_slow_fence(stall);
     }
 
     /// Remember a quit request. The caller still has to [`Self::quit`] or drop.
@@ -357,10 +362,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         phase_end("prepare", prepared.elapsed());
         let device = &mut *self.device;
         let stops = &mut self.stops;
-        let stall = &mut self.stall;
         let window = &mut self.window;
         let alive = &mut self.window_alive;
-        let stop = drive_machine(device, stops, stall, |op| match op {
+        let stop = drive_machine(device, stops, |op| match op {
             SeatOp::Dispatch => {
                 if *alive {
                     let _ = window.pump();
@@ -507,7 +511,6 @@ pub fn parse_block_ms(arg: &str, next: Option<&str>) -> Result<Duration, String>
     Ok(Duration::from_millis(ms))
 }
 
-
 /// `true` when the argument is the early-close test hook.
 pub fn close_early_flag(arg: &str) -> bool {
     arg == "--lifecycle-close-early"
@@ -591,7 +594,6 @@ struct OpenPhase {
 fn drive_machine<D: ShutdownDevice>(
     device: &mut D,
     stops: &mut [Stop],
-    stall: &mut Option<Duration>,
     mut seat: impl FnMut(SeatOp),
 ) -> MachineStop {
     let mut last = Instant::now();
@@ -650,10 +652,6 @@ fn drive_machine<D: ShutdownDevice>(
             }
             Phase::DrainGpu => {
                 open_phase(&mut open, "drain_gpu");
-                if let Some(stall) = stall.take() {
-                    // No dispatch inside this wait. The next iteration records it.
-                    wait_for(stall);
-                }
                 if device.poll_idle() {
                     close_open(&mut open);
                     phase = Phase::DestroyResources;
@@ -768,6 +766,7 @@ mod tests {
         steps: u8,
         log: std::sync::Arc<Mutex<Vec<&'static str>>>,
         block: Option<Duration>,
+        fence: Option<Duration>,
     }
 
     impl ShutdownDevice for Scripted {
@@ -776,6 +775,10 @@ mod tests {
         }
 
         fn poll_idle(&mut self) -> bool {
+            if let Some(fence) = self.fence.take() {
+                // No seat dispatch. This is the slow-fence plant.
+                wait_for(fence);
+            }
             self.push("poll");
             self.polls = self.polls.saturating_add(1);
             self.polls >= 2
@@ -788,6 +791,10 @@ mod tests {
             self.push("destroy");
             self.steps = self.steps.saturating_add(1);
             self.steps >= 2
+        }
+
+        fn plant_slow_fence(&mut self, stall: Duration) {
+            self.fence = Some(stall);
         }
     }
 
@@ -814,15 +821,15 @@ mod tests {
             steps: 0,
             log: std::sync::Arc::clone(&log),
             block: None,
+            fence: None,
         };
         let mut hits = 0u8;
         let mut stops: Vec<Stop> = vec![Box::new(move || {
             hits = hits.saturating_add(1);
             hits >= 2
         })];
-        let mut stall = None;
         let mut seat_log = Vec::new();
-        let stop = drive_machine(&mut device, &mut stops, &mut stall, |op| match op {
+        let stop = drive_machine(&mut device, &mut stops, |op| match op {
             SeatOp::Dispatch => seat_log.push("dispatch"),
             SeatOp::Unmap => seat_log.push("unmap"),
         });
@@ -859,10 +866,10 @@ mod tests {
             steps: 1,
             log,
             block: Some(Duration::from_millis(2000)),
+            fence: None,
         };
         let mut stops: Vec<Stop> = Vec::new();
-        let mut stall = None;
-        let stop = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let stop = drive_machine(&mut device, &mut stops, |_| {});
         let ms = duration_ms(stop.gap);
         println!("MEASURE planted_gap_ms={ms:.1}");
         assert!(
@@ -880,10 +887,10 @@ mod tests {
             steps: 1,
             log,
             block: None,
+            fence: Some(Duration::from_millis(2000)),
         };
         let mut stops: Vec<Stop> = Vec::new();
-        let mut stall = Some(Duration::from_millis(2000));
-        let stop = drive_machine(&mut device, &mut stops, &mut stall, |_| {});
+        let stop = drive_machine(&mut device, &mut stops, |_| {});
         let ms = duration_ms(stop.gap);
         assert!(!gap_within_budget(ms), "stall gap {ms:.1} ms");
     }

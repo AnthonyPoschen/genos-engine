@@ -44,6 +44,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_scene::{view_proj, Camera, LightingPreset};
@@ -167,6 +168,11 @@ pub struct Renderer {
     keep_pictures: bool,
     /// Debug view and lighting overrides ([`debug_view`]).
     debug: debug_view::DebugState,
+    /// One wait inside `poll_idle`, planted by the quit harness.
+    ///
+    /// Real fences signal immediately on lavapipe. This wait is the slow fence
+    /// the harness uses so a blocked drain still fails the 100 ms budget.
+    slow_fence: Option<Duration>,
 }
 
 impl Renderer {
@@ -196,6 +202,7 @@ impl Renderer {
                 unfilled,
                 ..debug_view::DebugState::default()
             },
+            slow_fence: None,
         }, permit))
     }
 
@@ -1054,6 +1061,11 @@ impl Renderer {
 
 impl genos_window::ShutdownDevice for Renderer {
     fn poll_idle(&mut self) -> bool {
+        if let Some(stall) = self.slow_fence.take() {
+            // No seat thread. The drain phase's clock includes this wait, and
+            // the next seat dispatch records it as the quit gap.
+            wait_unpumped(stall);
+        }
         self.gpu.poll_idle()
     }
 
@@ -1063,6 +1075,30 @@ impl genos_window::ShutdownDevice for Renderer {
 
     fn next_phase(&self) -> &'static str {
         self.gpu.next_shutdown_phase()
+    }
+
+    fn plant_slow_fence(&mut self, stall: Duration) {
+        self.slow_fence = Some(stall);
+    }
+}
+
+/// Wait out `duration` without dispatching the seat.
+///
+/// A condvar timeout is the wait. `std::thread::sleep` is denied, and this
+/// must not run inside `block()`, or the seat thread would hide the stall.
+fn wait_unpumped(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
     }
 }
 

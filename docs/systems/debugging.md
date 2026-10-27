@@ -177,9 +177,12 @@ lifecycle panics and does not wait idle. The event thread dispatches the
 seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
-pump gap (a synchronous load, a device wait, or a teardown). The probes are the
-Perf row, `get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
+pump gap (a synchronous load, a device wait, or a teardown). A phase line at
+or above 100 ms names that shutdown step. The probes are the Perf row,
+`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
 `lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
+That test plants a 2000 ms fence inside the drain so lavapipe's instant fences
+cannot hide a blocked phase.
 
 ### Debug menu
 

@@ -15,7 +15,10 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use genos_window::{gap_within_budget, parse_quit_gap};
+use genos_window::{
+    gap_within_budget, parse_quit_gap, parse_quit_phases, parse_quit_total, phases_within_budget,
+    PhaseSample, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
+};
 
 const ICD: &str = "/usr/share/vulkan/icd.d/lvp_icd.json";
 const LIMIT: Duration = Duration::from_secs(600);
@@ -43,6 +46,23 @@ struct Seat {
     child: Child,
 }
 
+/// Phases a full device teardown must print, including the post-unmap tail.
+const FULL_PHASES: &[&str] = &[
+    "prepare",
+    "stop_producers",
+    "drain_gpu",
+    "destroy_yield",
+    "destroy_lighting",
+    "destroy_swapchain",
+    "destroy_objects",
+    "destroy_device",
+    "destroy_surface",
+    "destroy_instance",
+    "unmap",
+    "device_drop",
+    "exit_tail",
+];
+
 #[test]
 fn every_binary_answers_pings_while_it_quits() {
     let seat = Seat::open("genos-quit").expect("weston");
@@ -50,19 +70,19 @@ fn every_binary_answers_pings_while_it_quits() {
     for spec in paths() {
         let run = launch(&seat, &spec, None).expect(spec.label);
         let gap = must_gap(spec.label, &run);
-        println!("MEASURE {}_gap_ms={gap:.1} exit={:?}", spec.label, run.code);
-        measured.push((spec.label, gap));
+        let total = must_total(spec.label, &run);
+        let phases = phases_of(&run);
+        print_phases(spec.label, gap, total, &phases);
+        measured.push((spec.label, gap, total));
         assert_finished(&spec, &run);
-        assert!(
-            gap_within_budget(gap),
-            "{} quit gap {gap:.1} ms is outside the 100 ms ping budget",
-            spec.label
-        );
+        assert_clean(spec.label, gap, total, &phases, &run);
     }
     for spec in plants() {
         let run = launch(&seat, &spec, Some("2000")).expect(spec.label);
         let gap = must_gap(spec.label, &run);
-        println!("MEASURE {}_gap_ms={gap:.1} exit={:?}", spec.label, run.code);
+        let total = must_total(spec.label, &run);
+        let phases = phases_of(&run);
+        print_phases(spec.label, gap, total, &phases);
         assert_finished(&spec, &run);
         assert!(
             !gap_within_budget(gap),
@@ -73,6 +93,51 @@ fn every_binary_answers_pings_while_it_quits() {
             gap >= 1000.0,
             "{} planted gap was only {gap:.1} ms",
             spec.label
+        );
+        let drain = phase_ms(&phases, "drain_gpu");
+        assert!(
+            drain >= 1000.0,
+            "{} planted drain_gpu was only {drain:.1} ms; phases {phases:?}",
+            spec.label
+        );
+        assert!(
+            !phases_within_budget(&phases, total),
+            "{} planted phases stayed inside the budget",
+            spec.label
+        );
+        for phase in &phases {
+            if phase.name == "drain_gpu" {
+                continue;
+            }
+            assert!(
+                gap_within_budget(phase.ms),
+                "{} phase {} took {:.1} ms during the plant; only drain_gpu may block",
+                spec.label,
+                phase.name,
+                phase.ms
+            );
+        }
+    }
+    for spec in early_closes() {
+        let run = launch(&seat, &spec, None).expect(spec.label);
+        let gap = must_gap(spec.label, &run);
+        let total = must_total(spec.label, &run);
+        let phases = phases_of(&run);
+        print_phases(spec.label, gap, total, &phases);
+        assert_finished(&spec, &run);
+        assert_clean(spec.label, gap, total, &phases, &run);
+        assert!(
+            !run.stdout.contains("frames=") && !run.stderr.contains("frames="),
+            "{} printed a frame line, so close-early ran the frame loop\nstdout {}\nstderr {}",
+            spec.label,
+            run.stdout,
+            run.stderr
+        );
+        assert!(
+            !run.stderr.contains("genos-lighting: loading"),
+            "{} loaded a scene before quit\nstderr {}",
+            spec.label,
+            run.stderr
         );
     }
 }
@@ -245,6 +310,65 @@ fn later_paths() -> Vec<Spec> {
     ]
 }
 
+fn early_closes() -> Vec<Spec> {
+    vec![
+        spec(
+            "camera_close_early",
+            "genos-camera",
+            18780,
+            &[
+                "--proof",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--lifecycle-close-early",
+            ],
+            None,
+            &[0],
+        ),
+        spec(
+            "stress_close_early",
+            "genos-stress",
+            18781,
+            &[
+                "--proof",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scale",
+                "small",
+                "--no-panel",
+                "--lifecycle-close-early",
+            ],
+            None,
+            &[0],
+        ),
+        spec(
+            "lighting_close_early",
+            "genos-lighting",
+            18782,
+            &[
+                "--headless",
+                "--frames",
+                "3",
+                "--size",
+                "320x180",
+                "--preset",
+                "potato",
+                "--scene",
+                "stress",
+                "--lifecycle-close-early",
+            ],
+            None,
+            &[0],
+        ),
+    ]
+}
+
 fn plants() -> Vec<Spec> {
     vec![
         spec(
@@ -317,17 +441,79 @@ fn gap_of(run: &Finished) -> Option<f64> {
     parse_quit_gap(&run.stdout).or_else(|| parse_quit_gap(&run.stderr))
 }
 
+fn total_of(run: &Finished) -> Option<f64> {
+    parse_quit_total(&run.stdout).or_else(|| parse_quit_total(&run.stderr))
+}
+
+fn phases_of(run: &Finished) -> Vec<PhaseSample> {
+    let mut phases = parse_quit_phases(&run.stdout);
+    if phases.is_empty() {
+        phases = parse_quit_phases(&run.stderr);
+    }
+    phases
+}
+
 fn must_gap(name: &str, run: &Finished) -> f64 {
     gap_of(run)
         .ok_or_else(|| {
             format!(
-                "{name} printed no {}: stdout {} stderr {}",
-                genos_window::QUIT_GAP_PREFIX,
-                run.stdout,
-                run.stderr
+                "{name} printed no {QUIT_GAP_PREFIX}: stdout {} stderr {}",
+                run.stdout, run.stderr
             )
         })
         .expect("quit gap line")
+}
+
+fn must_total(name: &str, run: &Finished) -> f64 {
+    total_of(run)
+        .ok_or_else(|| {
+            format!(
+                "{name} printed no {QUIT_TOTAL_PREFIX}: stdout {} stderr {}",
+                run.stdout, run.stderr
+            )
+        })
+        .expect("quit total line")
+}
+
+fn phase_ms(phases: &[PhaseSample], name: &str) -> f64 {
+    phases
+        .iter()
+        .find(|phase| phase.name == name)
+        .map(|phase| phase.ms)
+        .unwrap_or(0.0)
+}
+
+fn print_phases(label: &str, gap: f64, total: f64, phases: &[PhaseSample]) {
+    println!("MEASURE {label}_gap_ms={gap:.3} total_ms={total:.3}");
+    for phase in phases {
+        println!("MEASURE {label}_phase_{}={:.3}", phase.name, phase.ms);
+    }
+}
+
+fn assert_clean(label: &str, gap: f64, total: f64, phases: &[PhaseSample], run: &Finished) {
+    assert!(
+        gap_within_budget(gap),
+        "{label} quit gap {gap:.1} ms is outside the 100 ms ping budget"
+    );
+    assert!(
+        phases_within_budget(phases, total),
+        "{label} phase or total is outside the 100 ms budget, total {total:.1} phases {phases:?}"
+    );
+    for name in FULL_PHASES {
+        assert!(
+            phases.iter().any(|phase| phase.name == *name),
+            "{label} missing phase {name}; phases {phases:?}\nstdout {}\nstderr {}",
+            run.stdout,
+            run.stderr
+        );
+    }
+    assert!(
+        !run.stdout.contains("lifecycle_drain_forced")
+            && !run.stderr.contains("lifecycle_drain_forced"),
+        "{label} forced the fence drain\nstdout {}\nstderr {}",
+        run.stdout,
+        run.stderr
+    );
 }
 
 fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, String> {
