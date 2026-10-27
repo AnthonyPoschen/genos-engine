@@ -2500,6 +2500,7 @@ impl Gpu {
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.create_targets(width, height)
     }
 
@@ -2627,6 +2628,7 @@ impl Gpu {
         }
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.destroy_color_pipelines();
         self.format = format;
         self.color_space = space;
@@ -2797,6 +2799,12 @@ impl Gpu {
                 present: i32,
                 clipped: u32,
                 old: Handle,
+            }
+            // One wl_surface carries one wp_fifo. A second live swapchain on
+            // the same surface is a protocol error on drivers that use
+            // fifo-v1, and the surface is lost.
+            if !self.swapchain.is_null() {
+                return Err("swapchain: the previous swapchain is still live".into());
             }
             let present = self.choose_present()?;
             self.present_mode = present;
