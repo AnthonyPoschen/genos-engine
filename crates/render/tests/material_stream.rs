@@ -67,6 +67,7 @@ fn scene() -> Scene {
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::default(),
         fog: genos_scene::FogSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }
 }

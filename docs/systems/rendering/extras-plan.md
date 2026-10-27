@@ -73,7 +73,7 @@ The branch list is in the asset plan. For this plan the extra findings are:
 
 ### Materials
 
-The raster samples `baseColorTexture`, the metallic-roughness texture, and the normal texture into the G-buffer. Albedo in the G-buffer becomes the texture's diffuse albedo (base colour times one minus metallic), which is what `BakeMesh::surface` already computes on the CPU. Metallic and roughness go in a new G-buffer channel when a specular step exists. Until then they are stored and the lighting BRDF stays the Lambert term in `lighting_compose.comp` (`LAMBERT`). That matches the GI non-goal: specular and mirrors wait, and roughness and metallic are stored so they can come later.
+The raster samples `baseColorTexture`, the metallic-roughness texture, and the normal texture into the G-buffer. Albedo in the G-buffer becomes the texture's diffuse albedo (base colour times one minus metallic), which is what `BakeMesh::surface` already computes on the CPU. Metallic and roughness go in a new G-buffer channel when a specular step exists. Until that step they are stored and the lighting BRDF stays the Lambert term in `lighting_compose.comp` (`LAMBERT`). [ADR 0019](../../adr/0019-reflections.md) (accepted) is the specular path. Roughness and metallic stay stored for it. The Lambert picture stays until that path draws the lobe.
 
 **Deviation.** glTF PBR is the Khronos metallic-roughness model ([glTF 2.0](https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html)). The picture stays Lambert until a specular commit. The support note for the specular extensions stays `loaded, unsupported` in the asset plan.
 
@@ -133,9 +133,9 @@ Foliage cards that are not in the tracer do not bounce until they have a proxy, 
 
 ### Water
 
-A water surface is a mesh with a material the support matrix already keeps (`KHR_materials_transmission`, `loaded, unsupported`). The first water commit draws it as a transparent pass after the opaque G-buffer, samples the lit colour behind it, and does not write the G-buffer. It therefore does not bounce. A planar proxy card, baked like any mesh, is what the surface cache reads if the water must tint the room. Reflections reuse the screen probes' hit directions. **Deviation.** A screen-space reflection pass of the kind games add on top of GI is not added. The probes are the reflection. A mirror is still a GI non-goal.
+[ADR 0019](../../adr/0019-reflections.md) is accepted. That lifts the limit that the screen probes are the reflection and that a mirror is a GI non-goal. Water is a Gerstner mesh in world space. It writes the G-buffer, and it shades exact dielectric Fresnel, one Snell refraction, and Beer–Lambert absorption. The phases and the caps are in the [reflections design](../reflections-design.md). The old transparent pass that skipped the G-buffer is not the water path.
 
-The surface motion is a small vertex displacement from time. When time is frozen, the scene key is stable and frame reuse holds.
+The displacement is the Gerstner sum on the scene clock. When time is frozen, the surface does not move and the scene key is stable.
 
 ### Sky, atmosphere, weather
 

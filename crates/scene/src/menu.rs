@@ -7,7 +7,10 @@
 //! keys. `--menu` wins for `visible`. `GENOS_MENU` applies only when that
 //! argument was omitted, and then a set variable wins every frame.
 
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 use crate::EngineSettings;
 

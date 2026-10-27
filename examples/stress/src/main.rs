@@ -40,9 +40,9 @@ use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
-    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, FogSettings, Floor,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, Scene, Sky, Vec3,
-    PITCH_LIMIT,
+    look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
 use genos_window::{extent_changed, FocusGate, Window};
@@ -541,7 +541,12 @@ fn options() -> Result<Options, String> {
                     genos_render::check_unfilled_arg(other, Some(&next))?;
                 }
                 Some(false) => genos_render::check_unfilled_arg(other, None)?,
-                None => match genos_scene::lighting_flag_needs_value(other) {
+                None => match genos_scene::reflection_flag_needs_value(other) {
+                    Some(needs) => {
+                        let next = needs.then(|| value()).transpose()?;
+                        genos_scene::check_reflection_arg(other, next.as_deref())?;
+                    }
+                    None => match genos_scene::lighting_flag_needs_value(other) {
                     Some(needs) => {
                         let next = needs.then(|| value()).transpose()?;
                         genos_scene::check_lighting_arg(other, next.as_deref())?;
@@ -565,6 +570,7 @@ fn options() -> Result<Options, String> {
                             Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
                             None => return Err(format!("unknown argument {other}\n{USAGE}")),
                         },
+                    },
                     },
                 },
             },
@@ -1212,6 +1218,7 @@ fn loading_world() -> World {
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
         menu: MenuSettings::default(),

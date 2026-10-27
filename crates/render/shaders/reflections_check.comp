@@ -1,0 +1,124 @@
+#version 450
+// Lavapipe parity fixture for reflections.glsl. build.rs compiles this.
+// The parity test dispatches it and compares every output with genos_math::optics.
+// Push constant `broken` is 0 for the matching run. A non-zero value forgets to
+// invert the below-water index ratio, which is the case that must fail 1e-5.
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Out {
+    float values[];
+} result;
+
+layout(push_constant) uniform Push {
+    uint broken;
+} pc;
+
+#include "reflections.glsl"
+
+const uint STRIDE = 19u;
+
+void write_row(
+    uint row,
+    vec3 normal,
+    vec3 incident,
+    vec3 point,
+    float cos_i,
+    float eta_refract,
+    float n_dot_h,
+    float alpha,
+    float sigma,
+    float distance,
+    float ior,
+    vec3 from_origin,
+    mat3 from_basis,
+    vec3 to_origin,
+    mat3 to_basis,
+    vec3 portal_point,
+    const float chain[8],
+    uint chain_count,
+    uint view_cap
+) {
+    uint base = row * STRIDE;
+    vec3 reflected = reflection_mirror_dir(incident, normal);
+    vec3 mirrored = reflection_mirror_point(point, normal);
+    float above = reflection_fresnel(ior, cos_i);
+    float eta_below = 1.0 / ior;
+    if (pc.broken != 0u) {
+        eta_below = ior;
+    }
+    float below = reflection_fresnel(eta_below, cos_i);
+    vec3 transmitted = vec3(0.0);
+    bool ok = reflection_refract(incident, normal, eta_refract, transmitted);
+    float ndf = reflection_ggx_ndf(n_dot_h, alpha);
+    float beer = reflection_beer(sigma, distance);
+    float flat_water = reflection_flat_water(ior);
+    vec3 portal = reflection_portal_point(portal_point, from_origin, from_basis, to_origin, to_basis);
+    uint views = reflection_mirror_views(chain, chain_count, view_cap, MIRROR_FRESNEL_CUTOFF);
+    result.values[base + 0u] = reflected.x;
+    result.values[base + 1u] = reflected.y;
+    result.values[base + 2u] = reflected.z;
+    result.values[base + 3u] = mirrored.x;
+    result.values[base + 4u] = mirrored.y;
+    result.values[base + 5u] = mirrored.z;
+    result.values[base + 6u] = above;
+    result.values[base + 7u] = below;
+    result.values[base + 8u] = transmitted.x;
+    result.values[base + 9u] = transmitted.y;
+    result.values[base + 10u] = transmitted.z;
+    result.values[base + 11u] = ok ? 1.0 : 0.0;
+    result.values[base + 12u] = ndf;
+    result.values[base + 13u] = beer;
+    result.values[base + 14u] = flat_water;
+    result.values[base + 15u] = portal.x;
+    result.values[base + 16u] = portal.y;
+    result.values[base + 17u] = portal.z;
+    result.values[base + 18u] = float(views);
+}
+
+void main() {
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 diag = normalize(vec3(0.0, 1.0, 1.0));
+    mat3 id = mat3(1.0);
+    mat3 yaw = mat3(vec3(0.0, 0.0, -1.0), vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0));
+    float water_chain[8] = float[8](0.020373188, 0.059690919, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    float bright_chain[8] = float[8](0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0);
+    float one_chain[8] = float[8](0.020373188, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    vec3 origin = vec3(0.0);
+    vec3 portal_to = vec3(10.0, 0.0, 0.0);
+
+    write_row(0u, up, vec3(0.6, -0.8, 0.0), vec3(1.0, 2.0, 3.0), 0.5, 1.0 / 1.333, 1.0, 0.5, 0.5, 1.0, 1.333,
+        origin, id, portal_to, id, vec3(1.0, 2.0, 3.0), water_chain, 2u, 3u);
+    write_row(1u, up, vec3(0.0, -1.0, 0.0), vec3(0.0, 1.0, 0.0), 1.0, 1.0 / 1.333, 0.5, 0.25, 0.5, 2.0, 1.333,
+        origin, id, portal_to, id, vec3(0.0, 0.0, 1.0), water_chain, 2u, 0u);
+    write_row(2u, up, normalize(vec3(0.95, -0.05, 0.0)), vec3(2.0, -1.0, 4.0), 0.0, 1.333, 0.25, 0.7, 1.0, 0.25, 1.5,
+        origin, yaw, portal_to, yaw, vec3(1.0, 2.0, 3.0), bright_chain, 5u, 3u);
+    write_row(3u, diag, normalize(vec3(0.2, -0.4, 0.4)), vec3(-1.0, 0.5, 2.0), 0.25, 1.0 / 1.5, 0.8, 0.4, 0.2, 4.0, 1.5,
+        origin, id, portal_to, id, vec3(4.0, 0.0, -2.0), one_chain, 1u, 1u);
+
+    uint tail = 4u * STRIDE;
+    vec3 plane_origin = vec3(0.0, 0.0, -2.0);
+    vec3 axis_z = vec3(0.0, 0.0, 1.0);
+    result.values[tail + 0u] = reflection_plane_front(vec3(0.0, 0.0, -1.0), plane_origin, axis_z) ? 1.0 : 0.0;
+    result.values[tail + 1u] = reflection_plane_front(vec3(0.0, 0.0, -3.0), plane_origin, axis_z) ? 1.0 : 0.0;
+    vec4 clip_row = reflection_oblique_row(reflection_parity_projection(), vec4(0.0, 0.0, 1.0, 2.0));
+    result.values[tail + 2u] = clip_row.x;
+    result.values[tail + 3u] = clip_row.y;
+    result.values[tail + 4u] = clip_row.z;
+    result.values[tail + 5u] = clip_row.w;
+    vec3 displaced;
+    vec3 wave_normal;
+    reflection_gerstner(vec2(1.0, 0.0), 0.25, 4.0, 1.0, 0.5, vec2(1.0, 0.5), 0.25, displaced, wave_normal);
+    result.values[tail + 6u] = displaced.y;
+    result.values[tail + 7u] = wave_normal.x;
+    result.values[tail + 8u] = wave_normal.y;
+    result.values[tail + 9u] = wave_normal.z;
+    result.values[tail + 10u] = reflection_shoreline(0.4, 0.2, 0.75);
+    vec3 shaded = reflection_water_shade(0.25, vec3(0.8, 0.2, 0.1), vec3(0.1, 0.3, 0.6), 0.5, 1.5);
+    result.values[tail + 11u] = shaded.x;
+    result.values[tail + 12u] = shaded.y;
+    result.values[tail + 13u] = shaded.z;
+    result.values[tail + 14u] = float(reflection_ray_cap(1u));
+    result.values[tail + 15u] = float(reflection_view_cap(1u));
+}

@@ -27,7 +27,8 @@ use genos_mcp::json::Value;
 use genos_render::{DebugView, MaterialStats, Renderer, SceneRead, ScreenRect, ViewMode};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings, Light,
-    LightingPreset, LightingSettings, MenuSettings, OutputMode, Scene, Vec3, PITCH_LIMIT,
+    LightingPreset, LightingSettings, MenuSettings, OutputMode, ReflectionSettings, Scene, Vec3,
+    PITCH_LIMIT,
 };
 
 use crate::image::{Flicker, Image, Region};
@@ -289,6 +290,8 @@ pub struct Tools {
     /// Last sample sequence already appended to `frames.csv`.
     gi_flushed: u64,
     base_lights: usize,
+    /// Last reflection pass: ray count, view count, GPU time, image bytes.
+    reflection_stats: Option<genos_render::ReflectionGrade>,
 }
 
 impl Default for Tools {
@@ -326,6 +329,7 @@ impl Tools {
             gi_dir: PathBuf::from("genos-debug").join("gi"),
             gi_flushed: 0,
             base_lights: 0,
+            reflection_stats: None,
         }
     }
 
@@ -486,6 +490,7 @@ impl Tools {
         timing: FrameTiming,
     ) {
         self.frame += 1;
+        self.reflection_stats = renderer.reflection_grade().ok();
         self.timing.push_back((self.frame, timing));
         while self.timing.len() > 240 {
             self.timing.pop_front();
@@ -1319,6 +1324,14 @@ impl Tools {
             "get_fps_counter" => {
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
             }
+            "get_reflection_settings" => {
+                reply(reflection_value(&ctx.host.scene().reflections.effective()))
+            }
+            "get_reflection_stats" => reply(reflection_stats_value(self.reflection_stats.as_ref())),
+            "set_reflection_settings" => {
+                apply_reflection_update(&mut ctx.host.scene().reflections, args.0)?;
+                reply(reflection_value(&ctx.host.scene().reflections.effective()))
+            }
             "set_fps_counter" => {
                 apply_fps_update(&mut ctx.host.scene().fps_counter, args.0)?;
                 reply(fps_counter_value(&ctx.host.scene().fps_counter.effective()))
@@ -1880,6 +1893,79 @@ fn event_loop_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("an event-loop value is a string or a number".into())
+}
+
+fn reflection_stats_value(grade: Option<&genos_render::ReflectionGrade>) -> Value {
+    let ran = grade.is_some_and(|grade| grade.ran);
+    let rays = grade.map_or(0, |grade| grade.rays);
+    let views = grade.map_or(0, |grade| grade.views);
+    let gpu_ns = grade.map_or(0, |grade| grade.gpu_ns);
+    let vram_bytes = grade.map_or(0, |grade| grade.vram_bytes);
+    obj(vec![
+        ("ran", Value::Bool(ran)),
+        ("rays", num(f64::from(rays))),
+        ("views", num(f64::from(views))),
+        ("gpu_ns", num(gpu_ns as f64)),
+        ("vram_bytes", num(vram_bytes as f64)),
+        ("ms_frac", text("NOT-IMPLEMENTED")),
+        ("vram_frac", text("NOT-IMPLEMENTED")),
+    ])
+}
+
+fn reflection_value(settings: &ReflectionSettings) -> Value {
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("enabled", Value::Bool(settings.enabled)),
+        ("rough_cutoff", num(f64::from(settings.rough_cutoff))),
+        ("mirror_cutoff", num(f64::from(settings.mirror_cutoff))),
+        ("mirror_views", num(f64::from(settings.mirror_views))),
+        ("rays", num(f64::from(settings.rays))),
+        ("shore_cap", num(f64::from(settings.shore_cap))),
+        ("caustics", text(settings.caustics.as_str())),
+        ("tracer", text(settings.tracer.as_str())),
+        ("water", Value::Bool(settings.water)),
+    ])
+}
+
+fn apply_reflection_update(settings: &mut ReflectionSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("reflection settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(|c| c == '\n' || c == ';') {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("reflection line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &reflection_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn reflection_value_text(value: &Value) -> Result<String, String> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.to_string());
+    }
+    if let Some(on) = value.as_bool() {
+        return Ok(if on { "on" } else { "off" }.to_string());
+    }
+    if let Some(number) = value.as_f64() {
+        if number.fract() == 0.0 && number.abs() < 1.0e7 {
+            return Ok(format!("{:.0}", number.round()));
+        }
+        return Ok(format!("{number:?}"));
+    }
+    Err("a reflection value is a string, number, or bool".into())
 }
 
 fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {

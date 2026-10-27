@@ -3,7 +3,7 @@ name = "genos-lighting-ref"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "CPU checker for lighting reference images. No window and no Vulkan."
+description = "Lighting reference checker. Reflection rows that have a frame equivalent read the presented picture."
 
 [lints]
 workspace = true
@@ -12,4 +12,11 @@ workspace = true
 name = "layering-gate"
 path = "src/bin/layering_gate.rs"
 
+[[bin]]
+name = "reflections-check"
+path = "src/bin/reflections-check.rs"
+
 [dependencies]
+genos-math = { path = "../math" }
+genos-render = { path = "../render" }
+genos-window = { path = "../window" }

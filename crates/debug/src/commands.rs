@@ -112,11 +112,29 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+fn reflection_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_reflection_settings",
+            "The reflection settings in force (text form): enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics, tracer, and water. --reflections, --reflection-rays, --mirror-views, --water, --caustics, and --reflection-tracer win over GENOS_REFLECTIONS, GENOS_REFLECTION_RAYS, GENOS_MIRROR_VIEWS, GENOS_WATER, GENOS_CAUSTICS, and GENOS_REFLECTION_TRACER, which win over the scene value.",
+        ),
+        spec(
+            "set_reflection_settings",
+            "Partial reflection update. Keys are enabled, rough_cutoff, mirror_cutoff, mirror_views, rays, shore_cap, caustics (off, image, cache), tracer (off, software, ray_query), and water. A text field overlays key=value lines. Writes the scene. The command-line arguments and GENOS_REFLECTION_* mirrors still overlay the value the picture uses.",
+        ),
+        spec(
+            "get_reflection_stats",
+            "The last reflection pass: ran, rays, views, gpu_ns, and vram_bytes. gpu_ns is the timestamp query around that pass. vram_bytes is the reflection images and grade buffers. ms_frac and vram_frac stay NOT-IMPLEMENTED: lavapipe time is not the 4070 or 1060 cap. Settings stay on get_reflection_settings.",
+        ),
+    ]
 }
 
 fn hdr_specs() -> Vec<CommandSpec> {
