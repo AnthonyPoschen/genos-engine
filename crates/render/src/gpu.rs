@@ -3911,6 +3911,9 @@ impl Gpu {
 
     fn read_color(&self) -> Result<Vec<u8>, String> {
         let bytes = self.extent_w as usize * self.extent_h as usize * 4;
+        if self.hdr_output != crate::hdr_output::HdrSwapchain::Sdr {
+            return self.read_color_of_hdr(bytes);
+        }
         let mut out = vec![0u8; bytes];
         unsafe {
             let mut mapped = std::ptr::null_mut();
@@ -3927,6 +3930,33 @@ impl Gpu {
             )?;
             std::ptr::copy_nonoverlapping(mapped as *const u8, out.as_mut_ptr(), bytes);
             (self.fns.unmap_mem)(self.device, self.host.memory);
+        }
+        Ok(out)
+    }
+
+    /// BGRA8 picture of an HDR frame. The swapchain holds PQ or fp16 words, so
+    /// the display pass also stores the SDR bytes in each encode texel's fourth word.
+    fn read_color_of_hdr(&self, bytes: usize) -> Result<Vec<u8>, String> {
+        let pixels = bytes / 4;
+        let need = pixels.saturating_mul(16);
+        let memory = self.lighting.hdr_encode.memory;
+        let size = self.lighting.hdr_encode.size;
+        if memory.is_null() || usize::try_from(size).unwrap_or(0) < need {
+            return Err("hdr readback: encode buffer missing".to_string());
+        }
+        let mut out = vec![0u8; bytes];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, 0, size, 0, &mut mapped),
+                "map hdr readback",
+            )?;
+            let words = mapped as *const u8;
+            for index in 0..pixels {
+                let src = words.add(index * 16 + 12);
+                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(index * 4), 4);
+            }
+            (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(out)
     }
