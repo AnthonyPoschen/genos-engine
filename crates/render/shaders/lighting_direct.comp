@@ -878,6 +878,17 @@ void main() {
             mean_count = prev_count + 1u;
             e = prev + (e - prev) / float(mean_count);
         }
+        // diag[36] kept a previous mean, diag[37] started over, diag[38] is the
+        // sum of M written this frame. 46, 47, and 55 already belong to the
+        // surface-cache trace. The noise gate prints these on the pan.
+        if (lamp_pick_diag()) {
+            if (prev_count > 0u) {
+                atomicAdd(gstats.diag[36u], 1u);
+            } else {
+                atomicAdd(gstats.diag[37u], 1u);
+            }
+            atomicAdd(gstats.diag[38u], mean_count);
+        }
     }
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
         // The exact sum is the integral, so a quiet pixel holds it instead of

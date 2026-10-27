@@ -176,6 +176,11 @@ pub(crate) struct Lighting {
     /// The traced world as of the last frame the probes ran. Change records compare
     /// it with this frame. It is not rewritten while GI is frozen.
     kept_bytes: Vec<u8>,
+    /// Previous frame's camera (eye, right, up, forward) for ReSTIR. Advances
+    /// every draw, including a frozen one. `kept_bytes` stays the probe scene.
+    lamp_cam: Option<[[f32; 4]; 4]>,
+    /// Vec4 index of that camera in the work buffer. None when GI did not allocate it.
+    lamp_cam_at: Option<u64>,
     kept_key: u64,
     /// Key of the traced world besides the occluders (set with the scene upload).
     pub(crate) trace_key: u64,
@@ -402,7 +407,10 @@ pub struct LightingAtrousStats {
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
 /// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
 /// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
-/// surface-cache trace already uses 53..55).
+/// surface-cache trace already uses 46, 47, and 53..55). `temporal` is
+/// `diag[36]` (the running mean kept a previous sample), `temporal_reset` is
+/// `diag[37]` (it started at M = 1), and `temporal_m` is `diag[38]` (the sum
+/// of M written).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
@@ -413,6 +421,12 @@ pub struct LampPickCounts {
     pub copied: u32,
     pub exact: u32,
     pub restir: u32,
+    /// Pixels whose hold-off mean reused the previous frame.
+    pub temporal: u32,
+    /// Pixels whose hold-off mean started over.
+    pub temporal_reset: u32,
+    /// Sum of M written on the hold-off path.
+    pub temporal_m: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -485,6 +499,8 @@ impl Default for Lighting {
             work_cleared: false,
             compose_valid: false,
             kept_bytes: Vec::new(),
+            lamp_cam: None,
+            lamp_cam_at: None,
             kept_key: 0,
             trace_key: 0,
             probe_samples: [0; 2],
@@ -1077,7 +1093,15 @@ impl Gpu {
         } else {
             0
         };
-        let work_vec4 = work_vec4 + work_tail;
+        // Four vec4s after the gather cells: the previous frame's camera.
+        // lighting_lamp_cam_at() in the shader is this index.
+        let lamp_cam_at = if gi {
+            Some(lighting_lamp_cam_at(probes, rays, kept, pixels, cache_rays))
+        } else {
+            None
+        };
+        self.lighting.lamp_cam_at = lamp_cam_at;
+        let work_vec4 = work_vec4 + work_tail + u64::from(lamp_cam_at.is_some()) * 4;
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
@@ -1406,6 +1430,9 @@ impl Gpu {
                 copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
+                temporal: w[LAMP_TEMPORAL_WORD],
+                temporal_reset: w[LAMP_TEMPORAL_RESET_WORD],
+                temporal_m: w[LAMP_TEMPORAL_M_WORD],
             })
             .unwrap_or_default()
     }
@@ -3132,6 +3159,11 @@ impl Gpu {
             self.lighting.kept_bytes.clone_from(&self.frame_bytes);
             self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
         }
+        // ReSTIR reads last frame's camera, not the frozen probe camera.
+        let restir_cam = self.lighting.lamp_cam.map(restir_camera_basis);
+        if let Some(basis) = scene_camera_basis(&self.frame_bytes) {
+            self.lighting.lamp_cam = Some(basis);
+        }
         let block_at = 16
             * lighting_change_at(
                 probes as u64,
@@ -3165,6 +3197,20 @@ impl Gpu {
                     bytes,
                     block.as_ptr() as *const c_void,
                 );
+                if let Some(cam) = restir_cam {
+                    if let Some(at) = self.lighting.lamp_cam_at {
+                        let offset = at.saturating_mul(16);
+                        if offset.saturating_add(64) <= self.lighting.work.size {
+                            (self.fns.cmd_update_buffer)(
+                                self.cmd,
+                                self.lighting.work.buffer,
+                                offset,
+                                64,
+                                cam.as_ptr().cast::<c_void>(),
+                            );
+                        }
+                    }
+                }
                 if self.lighting.cache_full {
                     // S78X: the a-trous dirty-fraction threshold (millionths). A cache
                     // clear earlier this frame zeroed the word; the levels read it.
@@ -4086,6 +4132,12 @@ const LIGHTING_STATS_WORDS: usize = 144;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
+/// `gstats.diag[36]`, `[37]`, `[38]`: hold-off mean reuse, reset, and sum of M.
+/// 46, 47, and 55 are the surface-cache trace (`lighting_dg`).
+const LAMP_TEMPORAL_WORD: usize = 24 + 36;
+const LAMP_TEMPORAL_RESET_WORD: usize = 24 + 37;
+const LAMP_TEMPORAL_M_WORD: usize = 24 + 38;
+const _: () = assert!(LAMP_TEMPORAL_M_WORD < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
@@ -4182,6 +4234,42 @@ fn lighting_sc_flags_env() -> u32 {
 /// kept hits.
 fn lighting_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
     2 * probes + cache_rays + 7 * probes + 2 * LIGHTING_STRATA as u64 * probes + kept + kept / 4
+}
+
+/// Vec4 index of the ReSTIR previous-frame camera. Matches
+/// `lighting_lamp_cam_at` / `lighting_graw_at(probes, 0)` in the shader.
+fn lighting_lamp_cam_at(probes: u64, rays: u64, kept: u64, pixels: u64, cache_rays: u64) -> u64 {
+    lighting_change_at(probes, cache_rays, kept)
+        + (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64
+        + 4 * probes
+        + 2 * rays * probes
+        + kept
+        + kept / 4
+        + pixels.div_ceil(2)
+        + 2 * probes
+        + rays * probes
+}
+
+/// Eye, right, up, forward from a scene block. Eye's w in the block is 0.
+fn scene_camera_basis(bytes: &[u8]) -> Option<[[f32; 4]; 4]> {
+    if bytes.len() < 144 {
+        return None;
+    }
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, at) in [16usize, 96, 112, 128].into_iter().enumerate() {
+        for c in 0..4 {
+            let start = at + 4 * c;
+            let b = bytes.get(start..start + 4)?;
+            out[i][c] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        }
+    }
+    Some(out)
+}
+
+/// The basis the shader accepts: eye.w is the "a previous frame exists" flag.
+fn restir_camera_basis(mut basis: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    basis[0][3] = 1.0;
+    basis
 }
 
 /// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
@@ -4923,6 +5011,36 @@ mod sun_step {
             LIGHTING_COMPOSE_SPV.len(),
             SUN_COMPOSE_SPV.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod restir_camera {
+    use super::{lighting_lamp_cam_at, restir_camera_basis, scene_camera_basis};
+
+    #[test]
+    fn the_restir_camera_sits_past_the_gather_cells() {
+        // probes 1, rays 1, kept 8, pixels 2, cache rays 10.
+        // change block 45, tail through the gather cells 89, index 134.
+        assert_eq!(lighting_lamp_cam_at(1, 1, 8, 2, 10), 134);
+    }
+
+    #[test]
+    fn the_published_camera_is_the_saved_frame_and_marks_itself_valid() {
+        let mut bytes = vec![0u8; 144];
+        let eye = 1.5f32.to_le_bytes();
+        let forward = (-1.0f32).to_le_bytes();
+        bytes[16..20].copy_from_slice(&eye);
+        bytes[128..132].copy_from_slice(&forward);
+        let saved = scene_camera_basis(&bytes).expect("basis");
+        assert_eq!(saved[0][0], 1.5);
+        assert_eq!(saved[0][3], 0.0);
+        assert_eq!(saved[3][0], -1.0);
+        let published = restir_camera_basis(saved);
+        assert_eq!(published[0][3], 1.0);
+        assert_eq!(published[0][0], 1.5);
+        assert_eq!(published[3][0], -1.0);
+        assert!(scene_camera_basis(&[0u8; 16]).is_none());
     }
 }
 

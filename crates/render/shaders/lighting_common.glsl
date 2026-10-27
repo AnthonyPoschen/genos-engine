@@ -45,6 +45,9 @@
 //               cell has no ray). The gather fills table 0; the spatial filter
 //               passes go 0 -> 1 -> 0 -> SH. Table 1 also holds the gather's
 //               distance sums while it runs.
+//   lamp camera 4 vec4s after the gather raw cells (lighting_lamp_cam_at): the
+//               previous frame's camera for ReSTIR. The change-block camera stays
+//               the last frame the probes ran.
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_control_flow_attributes : require
 
