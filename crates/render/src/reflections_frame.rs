@@ -342,7 +342,14 @@ impl Gpu {
             mirror_view_proj(eye, forward, self.reflection.aspect, origin, normal)
         };
         self.prepare_reflection_target();
-        self.begin_target_pass(self.reflection.clear_pass, self.reflection.fb, true);
+        // The mirror image stays the displayed frame. The guard lives on the scene target.
+        self.begin_target_pass(
+            self.reflection.clear_pass,
+            self.reflection.fb,
+            true,
+            self.extent_w,
+            self.extent_h,
+        );
         unsafe {
             let pipe = if portal {
                 self.reflection.portal_pipe
@@ -393,7 +400,16 @@ impl Gpu {
     fn composite_reflector(&self, matrix: &[f32; 16], index: u32, sample: f32) {
         let slot = usize::try_from(index).unwrap_or(0);
         let plane = self.reflection.planes[slot];
-        self.begin_target_pass(self.reflection.composite_pass, self.framebuffer, false);
+        let (lit_w, lit_h) = self.lit_extent();
+        // The scene target is the lit picture. A display-sized render area would
+        // drop the crop's far edge, and the presented frame would keep the base colour.
+        self.begin_target_pass(
+            self.reflection.composite_pass,
+            self.framebuffer,
+            false,
+            lit_w,
+            lit_h,
+        );
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.reflection.composite_pipe);
             (self.fns.cmd_bind_set)(
@@ -406,7 +422,6 @@ impl Gpu {
                 0,
                 std::ptr::null(),
             );
-            let (lit_w, lit_h) = self.lit_extent();
             self.set_viewport(lit_w, lit_h);
             let scissor = plane.scissor;
             if scissor[2] == 0 || scissor[3] == 0 {
@@ -457,7 +472,14 @@ impl Gpu {
                 continue;
             }
             if !opened {
-                self.begin_target_pass(self.reflection.composite_pass, self.framebuffer, false);
+                let (lit_w, lit_h) = self.lit_extent();
+                self.begin_target_pass(
+                    self.reflection.composite_pass,
+                    self.framebuffer,
+                    false,
+                    lit_w,
+                    lit_h,
+                );
                 unsafe {
                     (self.fns.cmd_bind_pipe)(self.cmd, 0, self.reflection.water_pipe);
                     (self.fns.cmd_bind_set)(
@@ -470,7 +492,6 @@ impl Gpu {
                         0,
                         std::ptr::null(),
                     );
-                    let (lit_w, lit_h) = self.lit_extent();
                     self.set_viewport(lit_w, lit_h);
                     (self.fns.cmd_push)(
                         self.cmd,
@@ -503,7 +524,14 @@ impl Gpu {
 
     fn draw_ggx_swatch(&self) {
         self.upload_ggx_quad();
-        self.begin_target_pass(self.reflection.composite_pass, self.framebuffer, false);
+        let (lit_w, lit_h) = self.lit_extent();
+        self.begin_target_pass(
+            self.reflection.composite_pass,
+            self.framebuffer,
+            false,
+            lit_w,
+            lit_h,
+        );
         let identity = crate::world::identity_pose();
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 0, self.reflection.ggx_pipe);
@@ -1041,7 +1069,7 @@ impl Gpu {
         }
     }
 
-    fn begin_target_pass(&self, pass: Handle, fb: Handle, clear: bool) {
+    fn begin_target_pass(&self, pass: Handle, fb: Handle, clear: bool, width: u32, height: u32) {
         #[repr(C)]
         struct Offset {
             x: i32,
@@ -1077,8 +1105,8 @@ impl Gpu {
             area: Rect {
                 offset: Offset { x: 0, y: 0 },
                 extent: Extent {
-                    w: self.extent_w,
-                    h: self.extent_h,
+                    w: width.max(1),
+                    h: height.max(1),
                 },
             },
             clear_count: if clear { 2 } else { 0 },
