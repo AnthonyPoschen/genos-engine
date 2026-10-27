@@ -153,6 +153,9 @@ Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [
 **Cache level / coarsening**: parents of the 12.5 cm lattice at 25 cm, 50 cm, 1 m, 2 m, and 4 m. An empty cell in budget mode may claim one missing parent under the spawn cap. Cells at 2 m and 4 m also need a coarse slot (High 24 MB). The GPU claims that parent empty. The walk is three constant steps, two bilinear steps on seed-split pixels, then one short tail from 1 m to 4 m. A five-step body faulted lavapipe. The picture reads a finished parent, including a bilinear corner and a 25 cm or 50 cm step, when the reader is within half that cell of the parent's plane and the segment between them stays clear of a wall. A centre inside a solid is rejected. An unfinished parent (sample count at or under 0.5) is not shown from the tail. Seed-split pixels read the bilinear corners before that tail. There is no CPU merge into the parent.
 Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete parents of one lattice) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md) and [§16](../systems/lighting/localized-invalidation-design.md)
 
+**Tail view**: the bounce picture with the 25 cm and 50 cm parents skipped. The pixel reads the 1 m to 4 m tail and falls back to screen probes when that parent has no finished sample. `view tail`.
+Role: TOOL · Literature: — · More detail: `ViewMode::Tail` in [`debug_view.rs`](../../crates/render/src/debug_view.rs); `a_tail_view_skips_an_unfinished_parent`
+
 **Guard band**: extra pixels around the display. Lighting renders that larger picture and the window shows the crop. The eye stays put. Probe picks and lamp-pick history project that displayed camera through the crop. The band is wider toward the turn. High starts at 15% of the display on each edge. A zero edge, or global mode, stays on the display size.
 Role: SCHED · More detail: `lit_target`; `--guard-edge`
 

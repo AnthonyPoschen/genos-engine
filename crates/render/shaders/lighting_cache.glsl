@@ -924,6 +924,13 @@ bool lighting_levels_on() {
     return lighting_world_mode() == 3u && (pc.schedule.x & 8u) != 0u;
 }
 
+// debug_view.rs ViewMode::Tail, compose code 9. Skips the 25 cm and 50 cm
+// parents so the picture reads lighting_sc_level_tail. A second copy of that
+// find overflowed lavapipe, so both walks fall through to the one call.
+bool lighting_tail_view() {
+    return (scene.grid_at.w & 255u) == 9u;
+}
+
 // One new parent this frame, up to pc.frame.z. Word 14 is cleared on the host.
 bool lighting_spawn_permit() {
     uint cap = pc.frame.z;
@@ -1056,26 +1063,31 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
 // copy of this body overflowed lavapipe.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
     // Constant trip count. A runtime bound on this loop faulted lavapipe.
-    [[dont_unroll]] for (uint l = 0u; l < 3u; l++) {
-        if (l == 2u && !lighting_levels_on()) {
-            continue;
-        }
-        size *= 2.0;
-        // The WRC cell (25 cm) is claimed if missing and marked as a seed a
-        // pixel needs (the reveal burst, lighting_compact.comp).
-        bool seed = lighting_world_mode() == 3u && l == 0u && size > 0.2;
-        uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
-        if (s != ~0u && seed) {
-            cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
-        }
-        if (s != ~0u) {
-            vec4 v = cache.v[3u * s + 2u];
-            // A finished finer parent still has to be this surface. The tail's
-            // test does not run once this walk returns.
-            if (v.w > 0.5 && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+    // The tail view starts at 1 m. The loop would return a finer parent first.
+    if (lighting_tail_view()) {
+        size = 1.0;
+    } else {
+        [[dont_unroll]] for (uint l = 0u; l < 3u; l++) {
+            if (l == 2u && !lighting_levels_on()) {
+                continue;
+            }
+            size *= 2.0;
+            // The WRC cell (25 cm) is claimed if missing and marked as a seed a
+            // pixel needs (the reveal burst, lighting_compact.comp).
+            bool seed = lighting_world_mode() == 3u && l == 0u && size > 0.2;
+            uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
+            if (s != ~0u && seed) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-                return vec4(v.rgb, 1.0);
+                cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            }
+            if (s != ~0u) {
+                vec4 v = cache.v[3u * s + 2u];
+                // A finished finer parent still has to be this surface. The tail's
+                // test does not run once this walk returns.
+                if (v.w > 0.5 && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+                    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                    return vec4(v.rgb, 1.0);
+                }
             }
         }
     }
@@ -1190,19 +1202,25 @@ float lighting_seed_sunfrac = 0.0;
 // overflowed lavapipe. The 1 m, 2 m, and 4 m parents are the short tail.
 vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
     float s2 = size * 2.0;
-    if (s2 > 0.2) {
-        uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
-        if (c != ~0u) {
-            cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+    if (lighting_tail_view()) {
+        // Same tail call as below. The 25 cm and 50 cm bilinear is what hid
+        // an unfinished 1 m cell once those corners had a sample.
+        s2 = 1.0;
+    } else {
+        if (s2 > 0.2) {
+            uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
+            if (c != ~0u) {
+                cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
+                cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            }
         }
-    }
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
-        vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
-        if (r.w > -0.5) {
-            return vec4(r.rgb, 1.0);
+        [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
+            vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
+            if (r.w > -0.5) {
+                return vec4(r.rgb, 1.0);
+            }
+            s2 *= 2.0;
         }
-        s2 *= 2.0;
     }
     if (!lighting_levels_on()) {
         return vec4(0.0);

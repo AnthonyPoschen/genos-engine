@@ -118,6 +118,13 @@ fn show_bounce(renderer: &mut Renderer) {
     });
 }
 
+fn show_tail(renderer: &mut Renderer) {
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Tail,
+        ..DebugView::default()
+    });
+}
+
 /// One draw submitted and not read back. Later waits still see its ray slots.
 fn submit(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
     let _ = window.pump();
@@ -1324,6 +1331,53 @@ fn a_still_camera_keeps_probe_history_through_the_crop() {
     assert!(
         kept1 > 100 && kept8 > kept1 * 6,
         "the still camera dropped probe history: kept1 {kept1} kept8 {kept8} probes {probes8}"
+    );
+}
+
+/// The tail view skips the 25 cm and 50 cm bilinear. The first parent is the
+/// 1 m cell claimed on this frame, and that cell has no samples. The ready
+/// check leaves it, so the pixel shows the screen probes. Dropping
+/// `cv.w > LIGHTING_LEVEL_READY` returns the empty cell as black.
+#[test]
+fn a_tail_view_skips_an_unfinished_parent() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = renderer.width();
+    let height = renderer.height();
+    show_tail(&mut renderer);
+    let mut world = scene(
+        vec![Light {
+            position: Vec3::new(-5.0, 4.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        }],
+        vec![Wall {
+            base: 0.0,
+            position: Vec3::new(3.0, 0.0, 0.0),
+            half_x: 0.2,
+            half_z: 2.5,
+            height: 2.6,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }],
+        Vec::new(),
+    );
+    world.scene.lighting.denoiser.enabled = false;
+    world.scene.lighting.ambient.mode = genos_scene::AmbientMode::Off;
+    world.scene.lighting.world_cache.enabled = true;
+    world.scene.lighting.probes.enabled = true;
+    world.scene.lighting.gi.enabled = true;
+    world.scene.lighting.bounce.count = genos_scene::LIGHTING_BOUNCES_UNLIMITED;
+    let mut camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
+    camera.set_pose(Vec3::new(2.2, 1.7, 1.2), std::f32::consts::PI, -0.35);
+    let picture = draw(&mut window, &mut renderer, &world, &camera);
+    let at = [2.8f32, 1.2, 2.2];
+    let lit = brightness(sample(&picture, width, height, &camera, at));
+    eprintln!("tail unfinished parent {lit:.1}");
+    assert!(
+        lit > 30.0,
+        "the tail view showed an unfinished parent: brightness {lit:.1} at {at:?}"
     );
 }
 

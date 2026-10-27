@@ -84,7 +84,7 @@ Page Up and Page Down switch scenes. Keys 1–9 jump checkpoints. Home and 0 res
 
 ## Overlays and debug draws
 
-- Picture modes in `crates/render/src/debug_view.rs`: `full`, `direct`, `bounce`, `albedo`, `normal`, `depth`, `light`, `texels`. The MCP `view` command selects one.
+- Picture modes in `crates/render/src/debug_view.rs`: `full`, `direct`, `bounce`, `albedo`, `normal`, `depth`, `light`, `texels`, `variance`, `tail`. The MCP `view` command selects one. `tail` is bounce with the 25 cm and 50 cm parents skipped.
 - `examples/stress` draws the lighting panel from `genos-debug` knobs, a frame-time graph (`FrameGraph` in `examples/stress/src/main.rs`), and `Tools::overlay` plus `Renderer::set_overlay_lines`.
 - `profile_overlay` and `inspect_region` in `crates/ui/src/profile.rs`. The camera's basic and detailed modes draw the profile graph.
 - Heatmaps from `compare` (`<prefix>-heatmap.png`) and `flicker`.

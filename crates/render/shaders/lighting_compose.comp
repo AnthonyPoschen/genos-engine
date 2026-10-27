@@ -142,7 +142,7 @@ void main() {
         n = -n;
     }
     // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels.
+    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 tail.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
     if (mode == 3u || mode == 4u || mode == 5u) {
@@ -186,7 +186,9 @@ void main() {
     if (mode == 1u || mode == 6u) {
         bounce = vec3(0.0);
     }
-    if (mode == 2u) {
+    if (mode == 2u || mode == 9u) {
+        // Tail is bounce with the 25 cm and 50 cm parents skipped. Direct
+        // would hide an empty parent.
         direct = vec3(0.0);
         glow = vec3(0.0);
     }

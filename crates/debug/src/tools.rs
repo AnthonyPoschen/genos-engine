@@ -66,7 +66,7 @@ pub struct Look {
 
 impl Look {
     /// `full`, `direct`, `bounce`, `nobounce` (the same as `direct`), `albedo`,
-    /// `normal`, `depth`, `light:I`, `texels`.
+    /// `normal`, `depth`, `light:I`, `texels`, `variance`, `tail`.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let (head, arg) = match spec.split_once(':') {
             Some((h, a)) => (h.trim(), Some(a.trim())),
@@ -80,7 +80,7 @@ impl Look {
         } else {
             ViewMode::parse(head).ok_or_else(|| {
                 format!(
-                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels"
+                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels, variance, tail"
                 )
             })?
         };
