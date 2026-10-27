@@ -370,6 +370,17 @@ impl LightGroups {
     }
 }
 
+/// S73: the rect direct and compose light (the display crop plus the screen
+/// filter's reach). The rest of the guard band keeps last frame's values as
+/// history. `lighting_display_rect` in the shaders is the same rect.
+fn shown_rect(w: u32, h: u32, filter_w: u32, filter_h: u32) -> (u32, u32) {
+    if filter_w > 0 && filter_h > 0 {
+        (filter_w.min(w), filter_h.min(h))
+    } else {
+        (w, h)
+    }
+}
+
 /// The group list for this frame. `probe_ray_count` is probes × rays.
 pub(crate) fn light_groups(
     settings: &LightingSettings,
@@ -392,7 +403,8 @@ pub(crate) fn light_groups(
         pixel_only: 0,
         bias: 0,
     };
-    let pixels = w.saturating_mul(h);
+    let (cw, ch) = shown_rect(w, h, filter_w, filter_h);
+    let shown = cw.saturating_mul(ch);
     let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
     // Preset high, this frame, not frozen and not a held frame: the list the
     // pipeline recorded before the settings struct existed.
@@ -402,8 +414,8 @@ pub(crate) fn light_groups(
         && settings.probe_rays() == LIGHTING_RAYS
         && settings.world_mode() == 3;
     if frozen && full {
-        out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        out.push(3, shown.div_ceil(64), 1, B_DIRECT);
+        out.push(7, cw.div_ceil(8).max(1), ch.div_ceil(8).max(1), B_COMPOSE);
     } else if frozen && probe_only(settings) {
         // Still probe-only holds the probes and the cache rays. Pixel direct and
         // compose remain, the same idle a settled surface-cache frame records.
@@ -414,17 +426,17 @@ pub(crate) fn light_groups(
             out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
             out.pixel_only = 1;
         }
-        out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+        out.push(7, cw.div_ceil(8).max(1), ch.div_ceil(8).max(1), B_COMPOSE);
     } else if !round && full && !settings.cache_round_this_frame(frame) {
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
         out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), 1, B_TRACE);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), 1, B_DIRECT);
+        out.push(3, (shown + 2 * kept).div_ceil(64), 1, B_DIRECT);
         out.push(4, probes, 1, B_GATHER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        out.push(7, cw.div_ceil(8).max(1), ch.div_ceil(8).max(1), B_COMPOSE);
     } else if round
         && full
         && settings.cache_rays_this_frame(frame)
@@ -444,7 +456,7 @@ pub(crate) fn light_groups(
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
         out.push(
             3,
-            (pixels + 2 * kept).div_ceil(64),
+            (shown + 2 * kept).div_ceil(64),
             LIGHTING_MODE1,
             B_DIRECT,
         );
@@ -455,7 +467,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
         push_denoise(settings, w, h, slots, filter_w, filter_h, &mut out);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        out.push(7, cw.div_ceil(8).max(1), ch.div_ceil(8).max(1), B_COMPOSE);
     } else {
         gated(
             settings,
@@ -599,6 +611,8 @@ fn gated(
 ) {
     let buckets = settings.gpu_buckets(frame);
     let pixels = w.saturating_mul(h);
+    let (cw, ch) = shown_rect(w, h, filter_w, filter_h);
+    let shown = cw.saturating_mul(ch);
     let k = settings.direct.resolution_scale.max(1);
     let lit = w.div_ceil(k).saturating_mul(h.div_ceil(k));
     let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
@@ -631,7 +645,7 @@ fn gated(
     let combined = buckets.direct && buckets.hit_light && k == 1 && settings.bounce.count > 0;
     if combined {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(3, (pixels + 2 * kept).div_ceil(64), gy, B_DIRECT);
+        out.push(3, (shown + 2 * kept).div_ceil(64), gy, B_DIRECT);
     } else if buckets.direct {
         out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
         out.pixel_only = 1;
@@ -661,7 +675,7 @@ fn gated(
     if buckets.atrous {
         push_denoise(settings, w, h, slots, filter_w, filter_h, out);
     }
-    out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+    out.push(7, cw.div_ceil(8).max(1), ch.div_ceil(8).max(1), B_COMPOSE);
 }
 
 /// Sun height 0..1 from a directional lamp. Rays travel along `direction`;
@@ -882,12 +896,19 @@ mod probe_still_tests {
             assert_eq!(*gx, fw.div_ceil(8));
             assert_eq!(*gy, fh.div_ceil(8));
         }
-        let pixels = lit.lit_w.saturating_mul(lit.lit_h);
+        // Direct shades the filter extent (the display plus the wavelet margin it
+        // reads), not the whole lit band: the band past it keeps its history.
+        let shown = fw.saturating_mul(fh);
         let direct = planned
             .groups
             .iter()
-            .any(|(pass, gx, gy)| *pass == 3 && *gy > 1 && *gx == pixels.div_ceil(64));
-        assert!(direct, "direct stays on the lit band");
+            .any(|(pass, gx, gy)| *pass == 3 && *gy > 1 && *gx == shown.div_ceil(64));
+        assert!(direct, "direct runs on the filter extent, not the lit band");
+        let band = lit.lit_w.saturating_mul(lit.lit_h).div_ceil(64);
+        assert!(
+            !planned.groups.iter().any(|(pass, gx, _)| *pass == 3 && *gx == band),
+            "direct no longer covers the whole lit band"
+        );
         let gather = planned.groups.iter().any(|(pass, gx, _)| *pass == 4 && *gx == 40);
         assert!(gather, "gather stays on the probe grid");
     }
