@@ -331,3 +331,23 @@ Postmortem of the reverted trials:
 3. Fault: the second frame stayed near 40. A global scale of the cache read moved both frames and kept the gap. Zeroing the cache irradiance removed the red.
 4. First seen: 27 Oct 2026, head `976ae57`.
 5. Left reverted: `lighting_cache.comp`, `lighting_cache.glsl`, and `crates/render/tests/gpu_frame.rs` are back at `976ae57`.
+
+Lavapipe per-pass times for the s1 spin, 27 Oct 2026. Both binaries are release, 1920×1080, preset High, stress scene, hall checkpoint, the same movers and the same yaw step as `s1-spin.rhai`. The window is 20 yaw frames after `wait(8)` and a metrics reset, not the full 361-frame script: a steady lavapipe frame is about 5 s of timestamps, so the full script is about half an hour a side, and the pass mix is already flat inside this window. This branch ran with `--lighting-controller off` so the scale stays 1. Master `620d89f` has no controller. Timestamps are lavapipe's, not a 4070.
+
+| Pass | Master p50 | This branch p50 | Ratio | Master p99 | This branch p99 |
+|---|---:|---:|---:|---:|---:|
+| direct_ms | 340.5 | 522.7 | 1.54 | 372.8 | 598.6 |
+| atrous_ms | 1105.9 | 1490.6 | 1.35 | 1195.1 | 1742.1 |
+| trace_ms | 1654.5 | 1714.9 | 1.04 | 1758.6 | 2056.5 |
+| filter_ms | 32.3 | 48.4 | 1.50 | 42.8 | 64.2 |
+| gather_ms | 14.6 | 26.5 | 1.81 | 18.6 | 34.8 |
+| compose_ms | 0.38 | 0.49 | 1.29 | 0.90 | 0.78 |
+| lighting_ms | 4009.0 | 4911.7 | 1.23 | 4113.8 | 5317.6 |
+| rays | 4,994,155 | 5,779,920 | 1.16 |  |  |
+| cache_entries_refreshed | 23,196 | 23,079 | 1.00 |  |  |
+
+`lighting_ms` minus direct, à-trous, trace, filter, gather, and compose is compact + place + cache: 861 ms on master, 1108 ms here (1.29×). Of the 903 ms added to the lighting total, direct and à-trous are 568 ms. Trace added 60 ms.
+
+High's lit frame at 1920×1080 is 2496×1408. The guard is 15% on each edge (30% extra on a side) and the height rounds up to the 16 px tile. Area ratio 3,514,368 / 2,073,600 = 1.695. Direct, gather, filter, and the screen wavelet dispatch that lit size. Master High already runs 5 screen à-trous iterations, so the iteration count is not new. Trace and the cache refresh did not follow the area ratio. Compose stays under 1 ms.
+
+A 4070 s1-spin reported lighting_ms p50/p99 31.6/47.9 against master 21.3/34.7, and direct 18.2 against 9.6 (ratios 1.48 and 1.90). The script's exit 1 is `check_lt` of p99 against the 8 ms cap, and that check runs after `gi_metrics` writes the CSV. Lavapipe's smaller total ratio matches a trace pass that dominates here and did not grow. No dispatch was removed. Shrinking the guard, or running the five wavelet passes on the crop only, would cut the direct and à-trous time and would also drop the finished band the turn is meant to reveal. That stays a design choice.

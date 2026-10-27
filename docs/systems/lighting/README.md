@@ -103,6 +103,8 @@ The shown lattice stays 12.5 cm (S57). In budget mode with world-cache mode 3, a
 
 A frozen scene with grants that cover the picture does not gate, so the full denoise still runs and the picture can settle. The first moving frames can sit over the cap: the scale moves on the sample from the frame before.
 
+Lavapipe, 1920×1080, High, controller off, 20 yaw frames of the s1 spin against master `620d89f`: lighting_ms p50 4912 against 4009 (1.23×). Direct 523 against 340 (1.54×). À-trous 1491 against 1106 (1.35×). Trace 1715 against 1655 (1.04×). The lit frame is 2496×1408, 1.695× the display, and direct, gather, filter, and the screen wavelet dispatch that size. Master High already runs 5 screen iterations. The pass table is in design §16. The guard size is the design, so this note does not cut a dispatch.
+
 A point lamp or an occluder that appears or disappears fills the surface cache and the probe work with zeros before that frame's passes. Cells outside the new bounds would otherwise keep the previous world's finished light. A move that keeps both counts stays a change record. The first uploaded frame does not clear.
 
 Probes: MCP `get_budgets`, `set_budgets`, `get_schedule_stats`, `lighting_lod_snapshot`, and `gi_metrics`. The Perf page rows are `schedule_stats` and `lod_snapshot`. `status.still_frames` and `status.change_records` stay the settle probes. `lighting_lod_snapshot` is the caps, not the live coarse count.
