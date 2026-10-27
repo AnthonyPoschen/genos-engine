@@ -716,6 +716,8 @@ fn run() -> Result<i32, String> {
         }
         if last || tools.quit_code().is_some() {
             let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
+            // The quit harness reads this line to know the run rendered.
+            println!("genos-lighting frames={drawn}");
             return Ok(code);
         }
     }
@@ -762,6 +764,7 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
     let names: Vec<String> = app.entries.iter().map(|e| e.name.clone()).collect();
+    let mut checked_frames = 0u32;
     for name in &names {
         let _ = writeln!(log, "check {name}");
         eprintln!("genos-lighting: check {name}");
@@ -809,6 +812,7 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
             app.advance(STEP);
             let read = frame == 3;
             pixels = renderer.draw(app.world(), &camera, read)?;
+            checked_frames += 1;
         }
         let pixels = pixels.ok_or_else(|| format!("{name}: no picture"))?;
         let (mean, spread) = picture_stats(&pixels);
@@ -833,6 +837,8 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         eprintln!("genos-lighting: {line}");
         let _ = writeln!(log, "{line}");
     }
+    // The quit harness reads this line to know the run rendered.
+    println!("genos-lighting frames={checked_frames}");
     let summary = check_summary(&passed, &skipped, &failed);
     let _ = writeln!(log, "{summary}");
     if failed.is_empty() {
