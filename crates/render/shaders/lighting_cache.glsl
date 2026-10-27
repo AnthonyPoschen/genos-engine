@@ -4037,7 +4037,10 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
     } else {
         c = ivec3(floor(o / gstats.ctrl_shadow_cell));
     }
-    uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
+    // Chained, not an XOR of per-axis products: that key let mirrored cells
+    // ((x, y, z) and (-x, -y, z), ...) share a tag, so a lit cell on one side of
+    // a wall read as lit on the other (S86: the close lamp crossed the wall).
+    uint h = lighting_hash(uint(c.x) ^ lighting_hash(uint(c.y) ^ lighting_hash(uint(c.z) ^ lighting_hash(lighting_axis(n) + 8u * li))));
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
