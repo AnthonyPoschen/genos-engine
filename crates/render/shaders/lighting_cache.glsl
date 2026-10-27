@@ -1025,7 +1025,7 @@ vec4 lighting_sc_level_tail(vec3 pos, vec3 n, float size) {
             && lighting_level_valid(pos, cache.v[3u * coarse].xyz, n, size);
         if (show) {
             cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
-            return vec4(cv.rgb, 1.0);
+            return vec4(cv.rgb, cv.w);
         }
     }
     return vec4(0.0);
@@ -1058,7 +1058,7 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
 }
 
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
-// texel not lit yet); w 0 when there is none. Detail levels read one step
+// texel not lit yet); w is that parent's set count, 0 when there is none. Detail levels read one step
 // further here (1 m). Coarser parents are lighting_sc_level_tail: a fourth
 // copy of this body overflowed lavapipe.
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
@@ -1086,7 +1086,7 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
                 // test does not run once this walk returns.
                 if (v.w > 0.5 && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-                    return vec4(v.rgb, 1.0);
+                    return vec4(v.rgb, v.w);
                 }
             }
         }
@@ -1582,6 +1582,12 @@ const float LIGHTING_SC_POOL_FULL = 24.0;
 // LIGHTING_DN_DARK luminance the target grows as LIGHTING_DN_DARK / L, at most 4x)
 // counts as settled.
 const float LIGHTING_DN_MIN_SETS = 8.0;
+// A parent seeds or hands over to a child only once it holds its own
+// LIGHTING_DN_MIN_SETS sets. A one-set parent is a single noisy sample
+// stretched over 8 children: the blocky patches on PR #70.
+bool lighting_sc_parent_mature(vec4 up) {
+    return up.w >= LIGHTING_DN_MIN_SETS - 0.5;
+}
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -2287,7 +2293,7 @@ vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) 
     }
     float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
     vec4 up = lighting_sc_parent(pos, nrm, cell);
-    if (!(up.w > LIGHTING_LEVEL_READY)) {
+    if (!lighting_sc_parent_mature(up)) {
         return own;
     }
     float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
@@ -2362,7 +2368,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {
             vec4 up = lighting_sc_parent(pos, n, hsize);
-            if (up.w > 0.0) {
+            if (lighting_sc_parent_mature(up)) {
                 lighting_bounce_path = 3u;
                 return up.rgb;
             }
@@ -3095,6 +3101,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 }
             } else {
                 v = lighting_sc_parent(q, n, size);
+                if (!lighting_sc_parent_mature(v)) {
+                    v = vec4(0.0);
+                }
             }
         }
         if (v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
