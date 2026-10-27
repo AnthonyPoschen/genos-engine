@@ -1951,7 +1951,7 @@ fn reflection_value_text(value: &Value) -> Result<String, String> {
     }
     if let Some(number) = value.as_f64() {
         if number.fract() == 0.0 && number.abs() < 1.0e7 {
-            return Ok(format!("{}", number.round() as i64));
+            return Ok(format!("{:.0}", number.round()));
         }
         return Ok(format!("{number:?}"));
     }
