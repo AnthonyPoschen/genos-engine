@@ -7,10 +7,6 @@
     reason = "Vulkan handles and byte sizes are pointer-width"
 )]
 #![expect(
-    clippy::cast_possible_truncation,
-    reason = "Vulkan struct fields are the API's u32"
-)]
-#![expect(
     clippy::cast_precision_loss,
     reason = "mirror view count is a small integer stored as f32"
 )]
@@ -663,7 +659,8 @@ fn dispatch(broken: u32) -> Result<(String, Vec<f32>), String> {
             map_mem(device, memory, 0, alloc_size, 0, &mut mapped),
             "map",
         )?;
-        std::ptr::write_bytes(mapped, 0, alloc_size as usize);
+        let bytes = usize::try_from(alloc_size).unwrap();
+        std::ptr::write_bytes(mapped, 0, bytes);
 
         #[repr(C)]
         struct DescBinding {
