@@ -581,6 +581,8 @@ fn gate_lighting(preset: Option<LightingPreset>) -> LightingSettings {
     settings.ambient.mode = AmbientMode::Off;
     settings.shadows.enabled = true;
     settings.compose_reuse = false;
+    // Lavapipe floors the work-cap controller, and that hold is not this grade.
+    settings.controller = false;
     settings
 }
 
