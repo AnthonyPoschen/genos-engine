@@ -142,6 +142,8 @@ Skipping unchanged work cannot help here. When a lamp turns on in a dark room, e
 | G. Low preset on a 1060-class budget | densities and probe counts | ≤ 16 ms modelled, measured if hardware is found |
 | H. Bonus: change-driven skipping | power and headroom | identical images to the full re-light (bit-exact or within ε) |
 
+Stage A (harness and oracle) is test infrastructure and merges to master. Stages B onwards land on the long-lived `lighting-v3` branch, which reaches master only after Anthony reviews the finished branch.
+
 Each stage is a small PR with an A/B flag. A stage that misses its gate is dropped under the standing drop rule.
 
 ## 6. What can't be measured yet
