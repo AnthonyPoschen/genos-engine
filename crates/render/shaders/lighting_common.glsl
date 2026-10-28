@@ -332,10 +332,7 @@ uint lighting_cell_hash(vec3 pos, vec3 n) {
     // (any camera motion) turned at random, and kept strata traced with one turn
     // landed unevenly in the cells of the other (blotches that crawl with a turn).
     ivec3 cell = ivec3(floor(pos / 0.25 - 0.5 * n));
-    // Salt 6: any salt is a different but equally valid turn pattern. On lavapipe
-    // a_turn_toward_the_lamp and an_open_floor sit at their thresholds and flip
-    // with the pattern (salts 0-5 fail one of them, 6-8 pass both).
-    return hash_cell3(cell, 6u);
+    return hash_cell3(cell, 0u);
 }
 uint lighting_grid() {
     return max(uint(sqrt(float(lighting_rays())) + 0.5), 1u);
