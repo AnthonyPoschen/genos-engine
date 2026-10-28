@@ -1,6 +1,6 @@
 # 0023: Graphics settings come as four presets over one set of knobs
 
-Status: **Proposed** for Anthony's review. Design: [`docs/systems/rendering/settings-presets.md`](../systems/rendering/settings-presets.md).
+Status: **Accepted** (28 Oct 2026). Engine decided with Anthony's delegation on 28 Oct; Anthony will review later. Design: [`docs/systems/rendering/settings-presets.md`](../systems/rendering/settings-presets.md).
 
 ## Context
 
@@ -15,6 +15,8 @@ The renderer has many quality knobs (lighting, shadows, reflections, fog, textur
 5. Direct light is computed every frame on every preset. Low may add one optional knob, **bounce spread**: world-space bounce relight is spread over N frames and then swapped in with a short blend. It is off by default and never applies to direct light or to screen-space terms, so camera turns stay immediate.
 6. Each preset has a frame-time and VRAM gate on its reference hardware, measured with the lighting oracle (`make lighting-oracle`). A knob value that misses its gate moves down a preset.
 7. Startup picks a preset from the device (VRAM, RT support, known device IDs) and the player can change it.
+8. Steam Deck targets 40 fps in the Deck's 40 Hz display mode (25 ms), with a hard floor of 30 fps (33.3 ms) at the worst moment, such as a light switching on. 40 Hz divides evenly, so frame pacing stays smooth, and it is clearly better than 30 fps for the same battery class; 30 fps as the floor keeps the light-switch gate meaningful.
+9. Low upscales with FSR (spatial or temporal). It is vendor-neutral and runs on the GTX 1060, RX 580, Steam Deck and MoltenVK, which covers every Low target. DLSS and XeSS may be added later as optional extras on hardware that supports them.
 
 ## Rejected
 

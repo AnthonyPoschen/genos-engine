@@ -10,7 +10,7 @@ Ship four presets (Low, Medium, High, Ultra) that each hit a frame budget and a 
 
 | Preset | Reference hardware | Resolution | Frame budget |
 |---|---|---|---|
-| Low | GTX 1060 6 GB, RX 580; Steam Deck | 1080p; 800p on Deck | 16.6 ms (60 fps); 33.3 ms on Deck (30 fps floor, 40–60 fps aim) |
+| Low | GTX 1060 6 GB, RX 580; Steam Deck | 1080p; 800p on Deck | 16.6 ms (60 fps); 25 ms on Deck (40 fps in 40 Hz mode; 33.3 ms / 30 fps hard floor) |
 | Medium | RTX 2060 / RX 6600 class | 1440p | 16.6 ms |
 | High | RTX 4070 class | 1440p | 8.3 ms (120 fps) |
 | Ultra | RTX 4070 and above | 1440p–4K | 16.6 ms |
@@ -73,8 +73,12 @@ Each preset, on its reference hardware, through `make lighting-oracle`:
 3. `ref_err_near` and `grid_worst` no worse than the preset above it by more than an agreed margin.
 4. No pops in the light-switch `frames_to_ref` run.
 
+## Decisions (28 Oct 2026)
+
+- Steam Deck: 40 fps target in the 40 Hz mode at 800p, 30 fps hard floor at the worst moment (light switch). 40 Hz paces evenly and looks much better than 30; the floor keeps the worst case gated.
+- Low upscaler: FSR, because it is vendor-neutral and runs on every Low target (GTX 1060, RX 580, Deck, MoltenVK). DLSS and XeSS are optional extras on capable hardware later.
+
 ## Open questions
 
-- Steam Deck: 30 fps floor or 40 fps target at 800p.
-- Upscaler choice for Low (FSR 2 or a built-in temporal upscale).
+
 - Exact Medium/High/Ultra lighting VRAM targets after measuring.
