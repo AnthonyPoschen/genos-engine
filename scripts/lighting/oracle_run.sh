@@ -6,6 +6,7 @@
 # full: adds sun 1x (7200 frames) and a reference on every frame (many hours).
 # Writes OUT/metrics.json (compact, one object) and prints it.
 # GENOS_STRESS_BIN overrides the binary (default target/release/genos-stress).
+# SPEC=1 also runs the specular scenarios (lighting_oracle_spec.rhai, stage S0).
 # LAVAPIPE=0 keeps the session's Vulkan driver and display.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -30,14 +31,18 @@ fi
 export GENOS_GI_METRICS=1
 mkdir -p "$out"
 work=$(mktemp -d)
+scripts=(lighting_oracle)
+[[ "${SPEC:-0}" == 1 ]] && scripts+=(lighting_oracle_spec)
+for name in "${scripts[@]}"; do
 for pass in temporal oracle; do
-  script="$work/lighting_oracle_$pass.rhai"
+  script="$work/${name}_$pass.rhai"
   sed -e "s/^let PASS = .*/let PASS = \"$pass\";/" -e "s/^let PROFILE = .*/let PROFILE = \"$profile\";/" \
-    "$root/examples/stress/scripts/lighting_oracle.rhai" >"$script"
+    "$root/examples/stress/scripts/$name.rhai" >"$script"
   # gi_metrics writes genos-debug/gi/ under the working directory.
   (cd "$work" && "$bin" --proof --no-panel --size 160x90 --report "$out" --script "$script") \
-    >"$out/$pass.log" 2>&1 || { echo "pass $pass failed, see $out/$pass.log and $out/report.md" >&2; exit 1; }
-  cp "$out/report.md" "$out/report-$pass.md"
+    >"$out/$name-$pass.log" 2>&1 || { echo "$name $pass failed, see $out/$name-$pass.log and $out/report.md" >&2; exit 1; }
+  cp "$out/report.md" "$out/report-$name-$pass.md"
+done
 done
 mkdir -p "$out/gi"; cp "$work"/genos-debug/gi/*-frames.csv "$out/gi/" 2>/dev/null || true
 rm -rf "$work"
