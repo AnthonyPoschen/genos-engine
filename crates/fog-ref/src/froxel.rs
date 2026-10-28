@@ -12,7 +12,7 @@ use crate::{hg, Ray, Scene, V3};
 /// A graphics preset from ADR 0023 with its ADR 0026 fog grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
-    /// 64×36×32, 1 shadow ray.
+    /// 64×36×32, 2 shadow rays.
     Low,
     /// 96×54×48, 1 shadow ray.
     Medium,
@@ -30,7 +30,7 @@ impl Preset {
     #[must_use]
     pub const fn grid(self) -> Grid {
         let (w, h, d, rays, taps) = match self {
-            Self::Low => (64, 36, 32, 1, 4),
+            Self::Low => (64, 36, 32, 2, 4),
             Self::Medium => (96, 54, 48, 1, 4),
             Self::High => (160, 90, 64, 2, 4),
             Self::Ultra => (240, 135, 96, 2, 4),
