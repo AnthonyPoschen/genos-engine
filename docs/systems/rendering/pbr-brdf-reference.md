@@ -39,7 +39,7 @@ Inputs are a `Material` (`base_color`, `metallic`, `roughness`, `emissive`, `emi
 ## Stages
 
 1. **Reference and its tests** (this change). `cargo test -p genos-math --test brdf`.
-2. **Shader parity harness.** A headless test feeds a grid of materials and cosines through the GLSL shade (compiled once, run on the GPU) and compares to the reference. Tolerance: relative 1e-3 for `D`, `V`, `F`; 1e-2 on `f` where a shader uses an approximation. Runs on the 4070 in the first PR.
+2. **Shader parity harness.** A headless test feeds a grid of materials and cosines through the GLSL shade (compiled once, run on the GPU) and compares to the reference. Tolerance: relative 1e-3 for `D`, `V`, `F`; 1e-2 on `f` where a shader uses an approximation. Runs on the 4070 in the first PR. The harness is `crates/render/tests/pbr_parity.rs` dispatching `pbr_check.comp`, which includes the shared `crates/render/shaders/pbr_brdf.glsl`. The grid is 5 n·l × 5 n·v × 5 roughness × 3 metallic × 3 albedo. A push constant that drops the dielectric `(1 − F)` weight must fail the `f` gate.
 3. **G-buffer specular lobe** (ADR 0019 path). Gate: parity harness plus a presented-frame change on DamagedHelmet.
 4. **Path tracer material shade.** Gate: parity harness, then the path-traced reference picture of `panel.gltf` against the materials gate in ADR 0014.
 5. **Emissive.** The shade adds emission; the surface light cache does not store it (ADR 0014). Gate: emissive parity row in the harness, plus a cache read that excludes emission.

@@ -1460,3 +1460,8 @@ name = "GENOS_PHYSICS_METRICS_OUT"
 kind = "mirror"
 detail = "--out"
 
+
+[[var]]
+name = "GENOS_PBR_PARITY_DEVICE"
+kind = "test"
+detail = "harness only"
