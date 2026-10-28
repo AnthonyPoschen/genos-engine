@@ -123,6 +123,8 @@ impl Medium {
     /// Closed-form optical depth from `o` along unit `d` for distance `t`.
     #[must_use]
     pub fn optical_depth(&self, o: V3, d: V3, t: f64) -> f64 {
+        // Rounding can hand in -1e-16 at the start of a ray.
+        let t = t.max(0.0);
         match *self {
             Self::Homogeneous { sigma_t, top, .. } => {
                 let inside = if d.y.abs() < 1e-12 {
