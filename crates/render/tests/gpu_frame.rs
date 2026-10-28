@@ -1178,11 +1178,11 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
     // [44.9, 15.2, 2.3] (brightness 62.4). The live frame must reach half of it
     // and half its warmth (red over blue). Live reads ~0.6-0.7 of the trace on
     // lavapipe: the renderer's whole-frame energy gap, not the fire's.
-    const REF_BESIDE: [f32; 3] = [44.9, 15.2, 2.3];
+    let ref_beside: [f32; 3] = [44.9, 15.2, 2.3];
     assert!(
-        brightness(beside) > 0.5 * brightness(REF_BESIDE)
-            && beside[0] - beside[2] > 0.5 * (REF_BESIDE[0] - REF_BESIDE[2]),
-        "the fire did not warm the nearby floor: {beside:?}, reference {REF_BESIDE:?}"
+        brightness(beside) > 0.5 * brightness(ref_beside)
+            && beside[0] - beside[2] > 0.5 * (ref_beside[0] - ref_beside[2]),
+        "the fire did not warm the nearby floor: {beside:?}, reference {ref_beside:?}"
     );
     assert!(
         brightness(hall) < 12.0,
