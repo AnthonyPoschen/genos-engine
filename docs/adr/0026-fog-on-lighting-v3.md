@@ -9,7 +9,7 @@ ADR 0018 chose a budgeted froxel volume, lit by the old direct pass and the worl
 ## Decision
 
 1. **The froxel grid of ADR 0018 stays.** One view-aligned grid holds height fog, local fog volumes and in-scattering. Extinction is analytic and recomputed every frame; the composite stays `background * transmittance + in-scattering`.
-2. **Direct in-scatter uses the ReSTIR light picks.** Each froxel draws its lamp candidates from the same light tree as ReSTIR DI and keeps one reservoir. It casts 1 shadow ray per froxel on Low and Medium and 2 on High and Ultra, through ray queries when present and the software tracer otherwise. Froxel reservoirs reuse spatially only (neighbouring froxels in the same slice). They keep no temporal reservoirs, so a light switching on is in the fog on the same frame and fog cost does not depend on lamp count.
+2. **Direct in-scatter uses the ReSTIR light picks.** Each froxel draws its lamp candidates from the same light tree as ReSTIR DI and keeps one reservoir. It casts 1 shadow ray per froxel on Medium and 2 on Low, High and Ultra (Low raised to 2 in stage F1: with 1 ray its coarse slices miss the window-shaft gate), through ray queries when present and the software tracer otherwise. Froxel reservoirs reuse spatially only (neighbouring froxels in the same slice). They keep no temporal reservoirs, so a light switching on is in the fog on the same frame and fog cost does not depend on lamp count.
 3. **Indirect in-scatter reads the DDGI probes.** Each froxel samples probe irradiance with Chebyshev visibility at its centre. Fog never writes the probes or the card cache.
 4. **Height fog is analytic.** Exponential height density with the closed-form slanted optical depth from `genos_math::media`. With the froxel off (Low option), height fog is applied in compose by closed form only, lit by the sun and one ambient probe sample, so there is no pop when the grid toggles.
 5. **No fog history on any preset.** ADR 0012 and ADR 0022 F1 show only finished values; the grid is re-lit in full every frame. Flicker is held down by a fixed per-froxel blue-noise jitter that is the same every frame for a still camera, and by tricubic upsampling of the grid in compose. A reprojected history stays an open decision for Anthony, as in ADR 0018.
@@ -17,7 +17,7 @@ ADR 0018 chose a budgeted froxel volume, lit by the old direct pass and the worl
 
 | Preset | Grid | Shadow rays/froxel | Fog ms | Fog VRAM |
 | --- | --- | --- | --- | --- |
-| Low (GTX 1060, 1080p) | 64×36×32, or height fog only | 1 | 0.6 on the 1060 | 2 MB |
+| Low (GTX 1060, 1080p) | 64×36×32, or height fog only | 2 | 0.9 on the 1060 | 2 MB |
 | Medium | 96×54×48 | 1 | 0.30 | 5 MB |
 | High | 160×90×64 | 2 | 0.45 | 15 MB |
 | Ultra | 240×135×96 | 2 | 0.80 | 40 MB |
