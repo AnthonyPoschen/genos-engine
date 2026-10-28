@@ -299,10 +299,62 @@ pub struct ShadePlane {
     pub color: [f32; 3],
 }
 
-/// Never 0, so a renderer that has drawn nothing yet is told apart.
-fn next_world_identity() -> u64 {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+/// Which scene a `Scene` is, from its fixed layout: the floor, walls and
+/// ceiling in full, and each solid's shape and size but not its place, turn or
+/// colour (solids move). Lights, sky and settings are left out: the renderer
+/// follows those incrementally. Two builds of the same scene agree, so
+/// rebuilding a world does not drop the surface cache. Never 0, so a renderer
+/// that has drawn nothing yet is told apart.
+fn scene_identity(scene: &Scene) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let f = |values: &[f32], h: &mut std::collections::hash_map::DefaultHasher| {
+        for v in values {
+            v.to_bits().hash(h);
+        }
+    };
+    let fl = &scene.floor;
+    f(
+        &[
+            fl.position.x,
+            fl.position.y,
+            fl.position.z,
+            fl.half_x,
+            fl.half_z,
+        ],
+        &mut h,
+    );
+    f(&fl.color, &mut h);
+    scene.walls.len().hash(&mut h);
+    for w in &scene.walls {
+        f(
+            &[
+                w.position.x,
+                w.position.y,
+                w.position.z,
+                w.half_x,
+                w.half_z,
+                w.height,
+                w.base,
+            ],
+            &mut h,
+        );
+        f(&w.color, &mut h);
+    }
+    scene.solids.len().hash(&mut h);
+    for s in &scene.solids {
+        format!("{:?}", s.shape).hash(&mut h);
+        f(&[s.size, s.height], &mut h);
+    }
+    match &scene.ceiling {
+        Some(c) => {
+            1u8.hash(&mut h);
+            f(&[c.height], &mut h);
+            f(&c.color, &mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
+    h.finish().max(1)
 }
 
 #[derive(Clone, Debug)]
@@ -328,8 +380,8 @@ pub struct World {
     /// More mip chains the frame streams, after the colour and normal atlases.
     /// Each names the object that supplies its distance and derivatives.
     pub stream_textures: Vec<StreamedTexture>,
-    /// Which scene this is, not what it holds. Each `from_scene` takes a new
-    /// value and a clone keeps it. The renderer drops the surface cache when the
+    /// Which scene this is, from its fixed layout (see `scene_identity`). The
+    /// same scene built twice gets the same value. The renderer drops the surface cache when the
     /// value changes. The light key cannot do that: it changes every frame with
     /// the fire and the puffs.
     identity: u64,
@@ -344,6 +396,7 @@ pub struct StreamedTexture {
 
 impl World {
     pub fn from_scene(scene: Scene) -> Self {
+        let identity = scene_identity(&scene);
         let mut parts = vec![FixedPart::Floor];
         if scene.ceiling.is_some() {
             parts.push(FixedPart::Ceiling);
@@ -374,7 +427,7 @@ impl World {
             color_atlas: MaterialAtlas::empty(),
             normal_atlas: MaterialAtlas::empty(),
             stream_textures: Vec::new(),
-            identity: next_world_identity(),
+            identity,
         }
     }
 
@@ -492,7 +545,7 @@ mod tests {
     use super::*;
     use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
 
-    fn red_scene() -> Scene {
+    pub(super) fn red_scene() -> Scene {
         Scene {
             floor: Floor {
                 position: Vec3::new(0.0, 0.0, 0.0),
@@ -587,4 +640,37 @@ pub fn transform_pose(pose: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
         pose[1] * point[0] + pose[5] * point[1] + pose[9] * point[2] + pose[13],
         pose[2] * point[0] + pose[6] * point[1] + pose[10] * point[2] + pose[14],
     ]
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_scene_built_twice_is_one_world() {
+        let a = World::from_scene(super::tests::red_scene());
+        let b = World::from_scene(super::tests::red_scene());
+        assert_eq!(a.identity(), b.identity());
+        assert_ne!(a.identity(), 0);
+    }
+
+    #[test]
+    fn a_moved_lamp_or_solid_keeps_the_world_but_a_new_floor_does_not() {
+        let base = super::tests::red_scene();
+        let mut lamp = base.clone();
+        if let Some(l) = lamp.lights.first_mut() {
+            l.position.x += 1.5;
+        }
+        lamp.lights.clear();
+        let mut solid = base.clone();
+        if let Some(s) = solid.solids.first_mut() {
+            s.position.x += 0.5;
+        }
+        let mut floor = base.clone();
+        floor.floor.half_x += 1.0;
+        let id = World::from_scene(base).identity();
+        assert_eq!(World::from_scene(lamp).identity(), id);
+        assert_eq!(World::from_scene(solid).identity(), id);
+        assert_ne!(World::from_scene(floor).identity(), id);
+    }
 }
