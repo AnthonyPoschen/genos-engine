@@ -33,6 +33,23 @@ pub fn text(t: impl Into<String>) -> Value {
 pub struct Args<'a>(pub &'a Value);
 
 impl Args<'_> {
+    /// Fail on any key not in `known`, so a misspelt field is an error instead of
+    /// a silent no-op.
+    pub fn only(&self, command: &str, known: &[&str]) -> Result<(), String> {
+        let Value::Object(pairs) = self.0 else {
+            return Ok(());
+        };
+        for (key, _) in pairs {
+            if !known.contains(&key.as_str()) {
+                return Err(format!(
+                    "{command} has no field {key}; known: {}",
+                    known.join(", ")
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn f64(&self, key: &str) -> Result<Option<f64>, String> {
         match self.0.get(key) {
             None | Some(Value::Null) => Ok(None),
@@ -124,5 +141,19 @@ impl Args<'_> {
                 Ok(Some(out))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod only_tests {
+    use super::*;
+
+    #[test]
+    fn only_rejects_a_field_the_command_does_not_know() {
+        let known = json::object([("index", json::int(1)), ("roughness", json::float(0.5))]);
+        assert!(Args(&known).only("object", &["index", "roughness"]).is_ok());
+        let typo = json::object([("index", json::int(1)), ("roughnes", json::float(0.5))]);
+        let got = Args(&typo).only("object", &["index", "roughness"]);
+        assert!(matches!(&got, Err(e) if e.contains("roughnes")), "{got:?}");
     }
 }

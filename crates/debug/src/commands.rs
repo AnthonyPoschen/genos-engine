@@ -30,7 +30,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
-        spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), reset."),
+        spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),
         spec("camera", "Set position [x,y,z], yaw, pitch, look_at [x,y,z], or path [[x,y,z,yaw,pitch],..] over frames. Returns the pose."),
         spec("time", "pause (bool), fixed_dt (s; 0 or real_time: true for wall time)."),
         spec("step", "Advance a paused scene by frames (default 1) and reply after them."),

@@ -164,6 +164,11 @@ struct ObjectEdit {
     spun: f32,
     frozen: Option<(Vec3, f32)>,
     path: Option<Path>,
+    /// Material override, 0 to 1. Only the reference tracer reads these today:
+    /// solids have no roughness or metallic in the live renderer until the
+    /// specular pass (ADR 0024) lands, so the picture ignores them.
+    roughness: Option<f32>,
+    metallic: Option<f32>,
 }
 
 /// A picture a job wants this frame.
@@ -898,6 +903,22 @@ impl Tools {
                     .collect(),
             )),
             "object" => {
+                args.only(
+                    "object",
+                    &[
+                        "index",
+                        "reset",
+                        "position",
+                        "path",
+                        "frames",
+                        "loop",
+                        "yaw",
+                        "spin",
+                        "freeze",
+                        "roughness",
+                        "metallic",
+                    ],
+                )?;
                 let index = args.u32("index")?.ok_or("object needs index")? as usize;
                 let solid = ctx
                     .host
@@ -935,14 +956,27 @@ impl Tools {
                     Some(false) => edit.frozen = None,
                     None => {}
                 }
-                reply(obj(vec![
+                if let Some(r) = args.f32("roughness")? {
+                    edit.roughness = Some(unit("roughness", r)?);
+                }
+                if let Some(m) = args.f32("metallic")? {
+                    edit.metallic = Some(unit("metallic", m)?);
+                }
+                let mut fields = vec![
                     ("index", num(index as f64)),
                     (
                         "position",
                         vec3([solid.position.x, solid.position.y, solid.position.z]),
                     ),
                     ("yaw", num(solid.yaw as f64)),
-                ]))
+                ];
+                if let Some(r) = edit.roughness {
+                    fields.push(("roughness", num(r as f64)));
+                }
+                if let Some(m) = edit.metallic {
+                    fields.push(("metallic", num(m as f64)));
+                }
+                reply(obj(fields))
             }
             "camera" => {
                 let cam = &mut *ctx.camera;
@@ -1626,6 +1660,15 @@ fn camera_value(c: &Camera) -> Value {
         ("yaw", num(c.yaw as f64)),
         ("pitch", num(c.pitch as f64)),
     ])
+}
+
+/// A material value must lie in 0..=1.
+fn unit(key: &str, v: f32) -> Result<f32, String> {
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("{key} is 0 to 1, not {v}"))
+    }
 }
 
 fn finish_reference(
