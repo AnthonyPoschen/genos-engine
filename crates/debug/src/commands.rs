@@ -68,7 +68,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
         spec(
             "gi_metrics",
-            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
+            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. spec_ms is the specular pass and reads 0 until that pass exists (ADR 0024). resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
         ),
         spec(
             "get_lighting_settings",

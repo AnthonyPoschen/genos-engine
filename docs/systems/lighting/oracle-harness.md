@@ -71,7 +71,10 @@ the trace pauses time, so it adds no settling.
 `gloss-sweep`, `gloss-edge`, `gloss-offscreen`, `gloss-switch` and `gloss-band`, as set out in
 `specular-v3-design.md`. `oracle_metrics.py` scores them with `spec_err_near` (near error over
 pixels whose reference light is at least 20% specular, per roughness row on `gloss-sweep`),
-`spec_pop`, `frames_to_ref` on `gloss-switch`, and `spec_ms`. The script needs three engine
-hooks before its numbers mean anything: a per-object roughness and metallic override, a
-specular-only reference image (`aov: "specular"`), and a `spec_ms` gi_metrics column. Until
-then the specular metrics report `spec_mask: missing`.
+`spec_pop`, `frames_to_ref` on `gloss-switch`, and `spec_ms`. The engine hooks it uses:
+`object(#{index, roughness, metallic})` (0 to 1; unknown `object` fields are an error), which
+only the reference tracer reads, since the live renderer has no per-solid material yet;
+`reference(#{aov: "specular"})`, which also writes `<prefix>-reference-spec.png`, the GGX lobe
+at the primary hit of the overridden solids, without fog (such traces skip the reference cache
+and gpuref); and the `spec_ms` gi_metrics column, which reads 0 until the live specular pass
+(ADR 0024) exists. Without a spec image the specular metrics report `spec_mask: missing`.
