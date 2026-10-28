@@ -40,7 +40,7 @@ Costs are **modelled estimates, not measurements**: ms of lighting for a complet
 
 ### C1. Object/texture-space lighting at a decoupled rate, screen space for detail only
 
-Shade direct and indirect into a world-space surface cache (cards or texels) at a fixed texel density, about 0.25–0.5 M texels in view instead of 3.7 M pixels at 1440p. A complete re-light of every visible texel happens every frame. Screen space keeps only contact shadows, the specular term and a 1-tap texel fetch. This is the Lumen surface cache made per-frame-complete, and texture-space shading (Hillesland & Yang, HPG 2016; Baker, "Object Space Lighting", GDC 2016).
+Shade direct and indirect into a world-space surface cache (cards or texels) at a fixed texel density, about 0.25–0.5 M texels in view instead of 3.7 M pixels at 1440p. A complete re-light of every visible texel happens every frame. Screen space keeps only contact shadows, the specular term and a 1-tap texel fetch. This is the Lumen surface cache made per-frame-complete, and texture-space shading (Hillesland & Yang, "Texel Shading", Eurographics 2016 short paper; Baker, "Object Space Lighting", GDC 2016).
 - Cost: direct ~2.0, indirect gather into texels ~1.5, screen apply + specular ~1.2: **~4.7 ms at 1440p on the 4070; 1060 ~7 ms at Low** (half texel density).
 - Quality risk: texel-density aliasing at near-camera grazing angles and thin geometry; card coverage gaps (Lumen's known weakness). Shadow edges need screen-space refinement.
 - Reuses: the existing surface cache, cards, MSME blend, mover attachment (GIBS-style), and the reference compare.
@@ -103,11 +103,37 @@ Move lighting from per-pixel to a **decoupled world-space pipeline**:
 
 This keeps ADR 0012's rule that stored light never depends on the camera, and replaces ADR 0021's convergence machinery with complete re-lights. Nothing stale is shown, so the checkerboard and mover patchiness go away by construction rather than by blending.
 
+## 4a. Worst case: a light switches on in a dark room
+
+Skipping unchanged work cannot help here. When a lamp turns on in a dark room, every visible pixel, texel and probe changes in the same frame. This is the frame that sets the real budget, and the design has to meet it without spreading the work over later frames.
+
+**Cost of a full re-light at that moment (modelled, 4070 at 1440p):**
+
+| part | calm frame | light-switch frame | why it is the same |
+|---|---|---|---|
+| direct (C2, ReSTIR DI) | ~2.0–2.5 ms | ~2.0–2.5 ms | fixed 1–2 shadow rays per pixel, whatever the number or state of lamps; the new lamp joins the light tree and gets sampled by importance in its first frame |
+| texel re-light (C1) | ~1.5 ms | ~1.5 ms | every visible texel is already relit every frame at fixed density, so there is no backlog of out-of-date texels |
+| probe trace + update (C3) | ~1.3 ms | ~1.3 ms | every probe is re-traced every frame at a fixed ray count |
+| screen apply + specular | ~1.2 ms | ~1.2 ms | per pixel, no dependence on what changed |
+| **total** | **~4–5 ms** | **~4–5 ms** | the calm frame already pays for a complete re-light |
+
+1060 at 1080p Low: the same reasoning gives ~8–10 ms in both cases. Today's master, by contrast, would mark every cache cell out of date at once; the budget controller then either overruns the frame or spreads the refresh over seconds, which is the checkerboard Anthony saw at 100x sun.
+
+**Why the design meets budget then:** the cost is set by fixed sample counts (rays per pixel, texels in view, probe count × rays), not by how much changed. A full re-light is the normal case, so the worst-case frame costs the same as any other. Reuse lowers the cost of every frame instead of being a shortcut that only works when nothing changes:
+- light adds up, so the new lamp's share is just one more term in the resampled direct estimate, with no recompute of other lamps' results;
+- visibility (what can see what) is separate from lamp intensity, so dimming or switching a lamp reuses the shadow work already cached for it;
+- neighbouring pixels and the previous frame share reservoir samples, so 1–2 rays per pixel are enough.
+
+**What is not free in that frame (quality, not cost):**
+- Temporal reservoirs and probe history describe the dark room. A change record from the switch has to reset their confidence (ADR 0021) so the old darkness does not lag in; the first frame then uses spatial reuse only and is noisier.
+- If texels gather bounce light from last frame's probes, multi-bounce light builds up over a few frames (one bounce per frame). The first frame shows correct direct light and first bounce, and the rest converges within about 3–5 frames, blending only finished values, so no grid.
+- Stage A adds a dark-room light-switch scenario that measures the cost of the switch frame, the frames until error is under the threshold, and grid and flicker scores. Those numbers replace these estimates.
+
 ## 5. Staged migration (each step checked against the reference)
 
 | stage | what | gate |
 |---|---|---|
-| A. Harness and oracle | Per-frame reference path-trace of fixed camera paths (stress hall, yard at 100x sun, spinning box, basic scene); a near-camera-weighted error metric (FLIP or relative MSE weighted by 1/depth); a "recompute of unchanged" counter; the PR #94 grid metric | runs on lavapipe and the 4070; today's master scored as the baseline |
+| A. Harness and oracle | Per-frame reference path-trace of fixed camera paths (sun cycle at 100x/10x/1x over at least one full rotation, spinning object, dark-room light switch, camera turn); a near-camera-weighted error metric (FLIP or relative MSE weighted by 1/depth); a "recompute of unchanged" counter; the PR #94 grid metric | runs on lavapipe and the 4070; today's master scored as the baseline |
 | B. Design ADR | ADR for the decoupled pipeline, accepted by Anthony | review |
 | C. ReSTIR DI behind a flag | replace brute direct | error ≤ master's, grid ≤ 0.15, direct ≤ 3 ms at 1440p on the 4070 |
 | D. Full-coverage card re-light | every visible texel relit each frame at fixed density | spin settle ≤ 1 frame, grid ≤ 0.15 at 100x, no leak test regressions |
@@ -134,7 +160,7 @@ Each stage is a small PR with an A/B flag. A stage that misses its gate is dropp
 - Majercik et al., "Dynamic Diffuse Global Illumination with Ray-Traced Irradiance Fields" (DDGI), JCGT 8(2), 2019: https://jcgt.org/published/0008/02/01/
 - Sannikov, "Radiance Cascades: A Novel Approach to Calculating Global Illumination", 2023: https://github.com/Raikiri/RadianceCascadesPaper
 - Hillesland, Yang, "Texel Shading", Eurographics 2016 short paper: https://diglib.eg.org/handle/10.2312/egsh20161018
-- Baker, "Object Space Lighting" (Oxide), GDC 2016: https://www.gdcvault.com/play/1023511/Object-Space-Lighting-Following-Film
+- Baker, "Object Space Lighting" (Oxide), GDC 2016 session "Object Space Rendering in DirectX 12"; slides: https://www.oxidegames.com/wp-content/uploads/2016/03/Object-Space-Lighting-Rev-21.pdf (session page: https://www.gdcvault.com/play/1023511/Advanced-Graphics-Techniques-Tutorial-Day)
 - Müller et al., "Real-time Neural Radiance Caching for Path Tracing", SIGGRAPH 2021: https://arxiv.org/abs/2106.12372
 - Halén, Hayward et al., "Global Illumination Based on Surfels" (GIBS), SIGGRAPH 2021 Advances: https://advances.realtimerendering.com/s2021/index.html
 - Andersson et al., "FLIP: A Difference Evaluator for Alternating Images", HPG 2020: https://research.nvidia.com/publication/2020-07_flip
