@@ -1,6 +1,6 @@
 # Specular and reflections in lighting-v3
 
-Status: **Proposed** with [ADR 0023](../../adr/0023-lighting-v3-specular.md). Architecture: [ADR 0022](../../adr/0022-lighting-v3-compute-architecture.md). Mirrors, portals, water and preset caps: [ADR 0019](../../adr/0019-reflections.md), [reflections design](../reflections-design.md). Harness: [oracle harness](oracle-harness.md). Terms: [glossary](../../lighting/GLOSSARY.md).
+Status: **Proposed** with [ADR 0024](../../adr/0024-lighting-v3-specular.md). Architecture: [ADR 0022](../../adr/0022-lighting-v3-compute-architecture.md). Mirrors, portals, water and preset caps: [ADR 0019](../../adr/0019-reflections.md), [reflections design](../reflections-design.md). Harness: [oracle harness](oracle-harness.md). Terms: [glossary](../../lighting/GLOSSARY.md).
 
 ## Goals
 
@@ -60,7 +60,7 @@ Goes to master as harness work, then is merged into `lighting-v3`.
 
 **Self-test:** synthetic image pairs check that the mask selects only specular pixels, that a one-frame spike is caught by `spec_pop`, and that a constant offset scales `spec_err_near` linearly.
 
-**Baseline:** S0 records master and `lighting-v3` numbers in `docs/systems/lighting/history.md`. Later stage gates (ADR 0023) are written against those numbers.
+**Baseline:** S0 records master and `lighting-v3` numbers in `docs/systems/lighting/history.md`. Later stage gates (ADR 0024) are written against those numbers.
 
 ## Failure modes and probes
 

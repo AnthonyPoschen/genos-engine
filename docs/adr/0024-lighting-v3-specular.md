@@ -1,4 +1,4 @@
-# 0023: Specular and reflections in lighting-v3
+# 0024: Specular and reflections in lighting-v3
 
 Status: **Proposed** (Engine bot, 28 Oct 2026). Targets the `lighting-v3` branch; Anthony reviews the finished branch before master. Design: [`docs/systems/lighting/specular-v3-design.md`](../systems/lighting/specular-v3-design.md). Builds on [ADR 0022](0022-lighting-v3-compute-architecture.md) (decision 4: screen space for contact detail, specular and compose). Keeps [ADR 0019](0019-reflections.md) for mirrors, portals, water and the per-preset reflection caps, and re-points its glossy fallback at the lighting-v3 stores.
 
