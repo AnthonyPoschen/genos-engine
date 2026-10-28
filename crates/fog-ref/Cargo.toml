@@ -13,3 +13,7 @@ workspace = true
 [[test]]
 name = "fog_reference"
 path = "../debug/tests/fog_reference.rs"
+
+[[test]]
+name = "fog_froxel"
+path = "../debug/tests/fog_froxel.rs"
