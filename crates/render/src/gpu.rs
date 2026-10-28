@@ -2059,23 +2059,12 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let mut transfer_family = queue_family;
-            let mut transfer_dedicated = false;
-            for index in 0..family_count {
-                if index == queue_family || index == compute_family {
-                    continue;
-                }
-                let base = index as usize * 24;
-                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
-                let queues =
-                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
-                // Transfer without graphics. A shared graphics family keeps the graphics queue.
-                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
-                    transfer_family = index;
-                    transfer_dedicated = true;
-                    break;
-                }
-            }
+            // The streaming submit blits mips into the atlas (vkCmdBlitImage) and
+            // can clear it (vkCmdClearColorImage) and hand it to fragment stages. All need a graphics
+            // queue. A transfer-only family (NVIDIA family 1) cannot run them: the
+            // submit faults and its fence never signals, so `wait_fence` blocked
+            // forever. Streaming stays on the graphics family.
+            let transfer_family = queue_family;
             let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
@@ -2113,7 +2102,7 @@ impl Gpu {
                     priorities: priorities.as_ptr().add(2),
                 },
             ];
-            let mut queue_info_count = if separate {
+            let queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -2121,9 +2110,6 @@ impl Gpu {
             } else {
                 1
             };
-            if transfer_dedicated {
-                queue_info_count += 1;
-            }
             let enumerate_device_ext: unsafe extern "system" fn(
                 Handle,
                 *const c_char,
@@ -2226,10 +2212,7 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
-            let mut transfer_queue = queue;
-            if transfer_dedicated {
-                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
-            }
+            let transfer_queue = queue;
             let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
