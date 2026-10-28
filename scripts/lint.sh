@@ -13,6 +13,7 @@ if [[ -d "${HOME}/.local/bin" ]]; then
 fi
 
 python3 scripts/lint-env-mirrors.py --self-test
+python3 scripts/vk-validation-gate.py --self-test
 python3 scripts/lint-semgrep.py
 python3 scripts/lint-shader-constants.py
 python3 scripts/lint-clippy-fixture.py
