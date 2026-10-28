@@ -1047,10 +1047,14 @@ vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
 // LIGHTING_F1_SETS. Under changing light (sun moving, lamp switched) the sets
 // are for an older light, so confidence is halved until the light is quiet.
 const float LIGHTING_F1_SETS = 8.0;
+const uint LIGHTING_SC_F1_FLAG = 8388608u;
+const float LIGHTING_F1_FINE_MAX = 0.2;
+const float LIGHTING_F1_CHANGING = 0.5;
+const float LIGHTING_F1_LIT = 0.5;
 float lighting_sc_f1_confidence(uint slot) {
     float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
     float c = clamp(sets / LIGHTING_F1_SETS, 0.0, 1.0);
-    return lighting_sc_light_quiet() ? c : 0.5 * c;
+    return lighting_sc_light_quiet() ? c : LIGHTING_F1_CHANGING * c;
 }
 vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     lighting_seed_sunfrac = 0.0;
@@ -2920,11 +2924,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // value is shown in proportion to its confidence for the current light;
         // the rest is the coarser finished level (2x, 4x bilinear), so a texel
         // that is not finished never shows alone and blends in once.
-        if (mode == 3u && lighting_sc_display && (lighting_sc_flags() & 8388608u) != 0u && size <= 0.2) {
+        if (mode == 3u && lighting_sc_display && (lighting_sc_flags() & LIGHTING_SC_F1_FLAG) != 0u && size <= LIGHTING_F1_FINE_MAX) {
             float conf = lighting_sc_f1_confidence(slot);
             if (conf < 1.0) {
                 vec4 pr = lighting_sc_parent_bilerp(q, n, size);
-                if (pr.w > 0.5) {
+                if (pr.w > LIGHTING_F1_LIT) {
                     v.rgb = mix(pr.rgb, v.rgb, conf);
                 }
             }
