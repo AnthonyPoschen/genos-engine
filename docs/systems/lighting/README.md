@@ -158,7 +158,7 @@ Departures from [ADR 0013](../../adr/0013-lighting-invalidation-is-local.md) and
 - Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
 - IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
 - A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
-- Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A).
+- Shadow visibility shared per 12.5 cm cell for hits, invalidated per lamp range (S74A). The cell tag is `hash_cell3` (each axis through `lighting_hash`, then the salt). An XOR of per-axis products (Teschner) gives a cell and its sign mirror the same tag, so a lit cell west of a wall was read as lit east of it.
 - 1-in-16 push refresh floor (S78B); kept-hit bounce refreshed with its re-trace (S78D); held strata keep exact directions (S78K).
 - Going fully quiet (DDGI and Lumen always spend a fixed budget).
 - Compose redraws only 8×8 blocks whose inputs changed, and while the camera is held a filtered field stays on screen past S72V10's two-frame stamp (the push idle and a frozen frame do not rewrite it). SVGF and Lumen composite every pixel every frame.
