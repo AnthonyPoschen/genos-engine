@@ -54,6 +54,22 @@ A stage that misses its gate is reworked or dropped, never merged on a promise.
 
 Each scene compares the closed form or CPU froxel model with the path tracer at fixed sample counts and reports `fog_ref_err_near`. Renderer rows report `NOT-IMPLEMENTED` until F2.
 
+## F1 results (CPU froxel model)
+
+`crates/fog-ref/src/froxel.rs` builds the per-preset grid every frame from scratch: closed-form optical depth per froxel, 1–2 stratified shadow rays per froxel at fixed blue-noise jitter with light picks resampled by unshadowed contribution, reuse of the 4 slice neighbours, front-to-back closed-form integration, and a trilinear read in compose. `crates/debug/tests/fog_froxel.rs` grades it against the F0 reference on 5 pixels per scene ray.
+
+| `fog_ref_err_near` | Low | Medium | High | Ultra |
+| --- | --- | --- | --- | --- |
+| 1 homogeneous sun | 0.0027 | 0.0016 | 0.0010 | 0.0004 |
+| 2 height fog low sun | 0.0078 | 0.0036 | 0.0015 | 0.0005 |
+| 3 point lamp | 0.0421 | 0.0108 | 0.0051 | 0.0030 |
+| 4 lamp switch dark room | 0.0051 | 0.0044 | 0.0013 | 0.0004 |
+| 5 window shaft | **0.1471** | 0.0450 | 0.0388 | 0.0228 |
+
+`fog_switch_frames_to_ref` is 1 on every preset (frame 0 exactly black, frame 1 error ≤ 0.0014), and `fog_flicker_max` is 0 on a still camera.
+
+Low misses the gate on the window shaft. With 64 rays per froxel the same grid reaches 0.007, so the miss is visibility noise from one shadow ray in 32 coarse slices, not the grid layout. The test holds it at a 0.16 ceiling as a recorded miss. Options for Anthony: accept height-fog-only on Low, give Low 2 rays, or use a wider reuse kernel on Low (a 3×3 kernel only reached 0.123).
+
 ## No pops, no flicker
 
 - Fixed blue-noise jitter per froxel, constant for a still camera.
