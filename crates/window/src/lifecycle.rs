@@ -14,6 +14,12 @@
 //! its exit handler while the compositor still had the client. New binaries
 //! copied that second path.
 //!
+//! Device uploads use one staging buffer per reused command buffer and
+//! `vkCmdCopyBuffer`. Those buffers are begun again without the one-time
+//! flag. On NVIDIA, a one-time recording and `vkCmdUpdateBuffer` both leave
+//! driver state that only `vkDestroyDevice` frees, so that phase grew with
+//! the frame count. Quit still does not call `vkDeviceWaitIdle`.
+//!
 //! [`Lifecycle`] is the only owner of that sequence. The frame calls [`Lifecycle::quit`]
 //! or drops the lifecycle. Either way the state machine runs on this thread:
 //! stop producers, poll GPU fences, destroy resources, unmap, then exit.

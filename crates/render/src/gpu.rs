@@ -181,6 +181,10 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 mod fog;
 mod media_check;
+mod stage;
+mod traffic;
+
+pub use traffic::VkTraffic;
 
 #[path = "debug_view.rs"]
 mod debug_view;
@@ -703,6 +707,15 @@ impl Renderer {
     #[must_use]
     pub fn device_bytes(&self) -> u64 {
         self.gpu.device_bytes.get()
+    }
+
+    /// Vulkan creates, allocates, and recording calls since the process started.
+    ///
+    /// One device per process. The steady-state delta is [`VkTraffic::is_flat`].
+    #[must_use]
+    pub fn vk_traffic(&self) -> VkTraffic {
+        let _ = self.gpu.device;
+        traffic::snapshot()
     }
 
     /// Bytes of device memory still bound to streamed mip pages.
@@ -1460,8 +1473,8 @@ struct Gpu {
     /// This frame's scene bytes, written into `frame_scene` once its slot is free.
     frame_bytes: Vec<u8>,
     /// S70C: what the resident scene buffer holds (`frame_scene[0]`, device-local;
-    /// `[1]` names the same buffer). A frame records only the 256-byte blocks that
-    /// differ (vkCmdUpdateBuffer, in the frame's command stream).
+    /// `[1]` names the same buffer). A frame copies only the 256-byte blocks that
+    /// differ, from the staging buffer, in the frame's command stream.
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
     /// Device-local atlases the fragment shader loads (bindings 4 and 7).
@@ -1492,7 +1505,7 @@ struct Gpu {
     transfer_wait: bool,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
-    /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
+    /// copies only `mesh_field_dirty` (byte ranges) from the staging buffer, so a
     /// moving instance costs its 128-byte record and no device wait.
     mesh_field: Buffer,
     mesh_field_cap: u64,
@@ -1628,6 +1641,10 @@ struct Gpu {
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
     frame_mark: Option<Instant>,
+    /// Host staging for device uploads. One slot per reused command buffer.
+    /// Reset when that buffer's fence has retired, so the copy memory is not
+    /// allocated again each frame.
+    stage: stage::StageSet,
 }
 
 struct Image {
@@ -1686,6 +1703,7 @@ struct MemProps {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct Fns {
     destroy_instance: FnDestroy,
     destroy_device: FnDestroy,
@@ -2461,7 +2479,7 @@ impl Gpu {
                 aa_pool: std::ptr::null_mut(),
                 aa_sets: [std::ptr::null_mut(); 2],
                 reflection: ReflectionGpu::idle(),
-                fns: load_fns(
+                fns: load_fns_installed(
                     dload,
                     create_wayland_surface,
                     destroy_surface,
@@ -2501,6 +2519,7 @@ impl Gpu {
                 budget_extension,
                 memory_budget_query,
                 frame_mark: None,
+                stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -3217,6 +3236,228 @@ impl Gpu {
         self.vertex = copy_buffer(&self.vertices[slot]);
     }
 
+    /// Record `cmd` again. The caller has waited this buffer's fence and reset
+    /// it. Flags stay 0.
+    ///
+    /// `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` makes the NVIDIA driver
+    /// drop that recording's backing store. The stores are freed in
+    /// `vkDestroyDevice`, so the quit stall grew with the frame count.
+    fn begin_reused(&mut self, cmd: Handle) -> Result<(), String> {
+        self.stage_reset(cmd);
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 0,
+            inherit: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cmd",
+            )
+        }
+    }
+
+    fn stage_slot(&self, cmd: Handle) -> Option<usize> {
+        if cmd.is_null() {
+            return None;
+        }
+        if cmd == self.cmds[0] {
+            return Some(0);
+        }
+        if cmd == self.cmds[1] {
+            return Some(1);
+        }
+        if cmd == self.lighting.world_cmd {
+            return Some(2);
+        }
+        if cmd == self.audio_cmd {
+            return Some(3);
+        }
+        if self.froxel.as_ref().is_some_and(|targets| targets.cmd == cmd) {
+            return Some(4);
+        }
+        if self
+            .media_check
+            .as_ref()
+            .is_some_and(|pipe| pipe.cmd == cmd)
+        {
+            return Some(5);
+        }
+        None
+    }
+
+    fn stage_families(&self, index: usize) -> Vec<u32> {
+        if index == 2 {
+            self.light_families()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn make_stage(&self, size: u64, families: &[u32]) -> Result<stage::Staged, String> {
+        let buffer = self.make_buffer_queues(size, 1, Memory::Upload, families)?;
+        let mut mapped = std::ptr::null_mut();
+        let result = unsafe {
+            (self.fns.map_mem)(
+                self.device,
+                buffer.memory,
+                0,
+                buffer.size,
+                0,
+                &mut mapped,
+            )
+        };
+        if result != VK_SUCCESS {
+            let mut buffer = buffer;
+            self.destroy_buffer(&mut buffer);
+            return Err(format!("map stage {result}"));
+        }
+        Ok(stage::Staged {
+            buffer,
+            mapped: mapped.cast(),
+        })
+    }
+
+    fn drop_staged(&self, staged: &mut stage::Staged) {
+        if !staged.mapped.is_null() && !staged.buffer.memory.is_null() && !self.device.is_null() {
+            unsafe {
+                (self.fns.unmap_mem)(self.device, staged.buffer.memory);
+            }
+        }
+        staged.mapped = std::ptr::null_mut();
+        self.destroy_buffer(&mut staged.buffer);
+    }
+
+    fn drop_stages(&mut self) {
+        for index in 0..self.stage.slots.len() {
+            let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+            for extra in &mut overflow {
+                self.drop_staged(extra);
+            }
+            let mut main = std::mem::replace(
+                &mut self.stage.slots[index].main,
+                stage::Staged::empty(),
+            );
+            self.drop_staged(&mut main);
+        }
+    }
+
+    /// The fence for `cmd` has retired. Drop overflow copies and grow the
+    /// standing buffer when the last recording did not fit.
+    fn stage_reset(&mut self, cmd: Handle) {
+        let Some(index) = self.stage_slot(cmd) else {
+            return;
+        };
+        let families = self.stage_families(index);
+        let filled = self.stage.slots[index].filled;
+        let main_size = self.stage.slots[index].main.buffer.size;
+        let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+        for extra in &mut overflow {
+            self.drop_staged(extra);
+        }
+        if filled > main_size && main_size > 0 {
+            let cap = filled.max(4096).checked_next_power_of_two().unwrap_or(filled);
+            if let Ok(created) = self.make_stage(cap, &families) {
+                let mut old = std::mem::replace(&mut self.stage.slots[index].main, created);
+                self.drop_staged(&mut old);
+            }
+        }
+        self.stage.slots[index].cursor = 0;
+        self.stage.slots[index].filled = 0;
+    }
+
+    fn stage_reserve(&mut self, index: usize, size: u64) -> Result<(Handle, u64, *mut u8), String> {
+        let families = self.stage_families(index);
+        if self.stage.slots[index].main.buffer.buffer.is_null() {
+            self.stage.slots[index].main = self.make_stage(256u64 * 1024, &families)?;
+        }
+        let aligned = {
+            let slot = &self.stage.slots[index];
+            let cursor = slot.cursor.saturating_add(3) & !3;
+            if cursor.saturating_add(size) <= slot.main.buffer.size {
+                Some(cursor)
+            } else {
+                None
+            }
+        };
+        if let Some(aligned) = aligned {
+            let slot = &mut self.stage.slots[index];
+            slot.cursor = aligned.saturating_add(size);
+            slot.filled = slot.filled.max(slot.cursor);
+            let offset = usize::try_from(aligned).unwrap_or(0);
+            let ptr = unsafe { slot.main.mapped.add(offset) };
+            return Ok((slot.main.buffer.buffer, aligned, ptr));
+        }
+        let cap = size.max(4096).checked_next_power_of_two().unwrap_or(size);
+        let extra = self.make_stage(cap, &families)?;
+        let handle = extra.buffer.buffer;
+        let ptr = extra.mapped;
+        self.stage.slots[index].overflow.push(extra);
+        let slot = &mut self.stage.slots[index];
+        slot.filled = slot.filled.saturating_add(size);
+        Ok((handle, 0, ptr))
+    }
+
+    /// Copy `bytes` into the staging slot for `cmd` and record a buffer copy.
+    /// `vkCmdUpdateBuffer` embeds the host bytes in the command buffer. NVIDIA
+    /// frees that copy in `vkDestroyDevice`.
+    fn write_device(
+        &mut self,
+        cmd: Handle,
+        dst: Handle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if dst.is_null() || bytes.is_empty() {
+            return Ok(());
+        }
+        let size = u64::try_from(bytes.len()).unwrap_or(0) & !3;
+        if size == 0 {
+            return Ok(());
+        }
+        if offset & 3 != 0 {
+            return Err("device upload offset is not a multiple of 4".into());
+        }
+        let Some(index) = self.stage_slot(cmd) else {
+            return Err("device upload has no staging slot".into());
+        };
+        let (src, src_offset, ptr) = self.stage_reserve(index, size)?;
+        let count = usize::try_from(size).unwrap_or(0);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, count);
+        }
+        self.barrier_on(cmd, 0x4000, 0x1000, 0x4000, 0x800);
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region {
+            src: src_offset,
+            dst: offset,
+            size,
+        };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                cmd,
+                src,
+                dst,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
+        Ok(())
+    }
+
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
         if self.unfilled.dump_pct.is_some() {
             self.copy_picture = true;
@@ -3258,38 +3499,22 @@ impl Gpu {
             }
             check(acquire, "acquire")?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            self.begin_reused(self.cmd)?;
             if profiled {
                 self.reset_queries(slot);
                 // Top of pipe, before the GPU work. The value is device ticks.
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
-            self.update_resident_scene();
-            self.update_resident_fields();
+            self.update_resident_scene()?;
+            self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
                 if lighting {
-                    self.lighting_begin(slot);
+                    self.lighting_begin(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
                 self.raster_scene(
@@ -3304,10 +3529,10 @@ impl Gpu {
                 self.froxel_wrote = false;
                 self.record_froxel()?;
                 if !self.froxel_wrote {
-                    self.release_froxel_header();
+                    self.release_froxel_header()?;
                 }
                 if lighting {
-                    self.lighting_passes(slot);
+                    self.lighting_passes(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Lighting);
                 self.reflections_after_lighting(matrix)?;
@@ -3933,23 +4158,7 @@ impl Gpu {
                 "reset fence",
             )?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            self.begin_reused(self.cmd)?;
             self.copy_color_to_buffer();
             self.copy_scene_for_readback();
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
@@ -4863,23 +5072,7 @@ impl Gpu {
                 "audio reset fence",
             )?;
             check((self.fns.reset_cmd)(self.audio_cmd, 0), "audio reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.audio_cmd, &begin as *const BeginInfo as *const u8),
-                "audio begin",
-            )?;
+            self.begin_reused(self.audio_cmd)?;
             #[repr(C)]
             struct MemBar {
                 s_type: i32,
@@ -5053,10 +5246,10 @@ impl Gpu {
     }
 
     /// Record the field's marked ranges into this frame (before any pass reads it).
-    fn update_resident_fields(&mut self) {
+    fn update_resident_fields(&mut self) -> Result<(), String> {
         const RUN: usize = 65536;
         if self.mesh_field_dirty.is_empty() || self.mesh_field.buffer.is_null() {
-            return;
+            return Ok(());
         }
         if self.lighting.async_on {
             // The async light cache reads the field too: let its round finish, and
@@ -5078,15 +5271,13 @@ impl Gpu {
                 if end <= at {
                     break;
                 }
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.mesh_field.buffer,
-                        at as u64,
-                        (end - at) as u64,
-                        self.mesh_field_shadow[at..end].as_ptr() as *const c_void,
-                    );
-                }
+                let chunk = self.mesh_field_shadow[at..end].to_vec();
+                let cmd = self.cmd;
+                let dst = self.mesh_field.buffer;
+                let Ok(offset) = u64::try_from(at) else {
+                    break;
+                };
+                self.write_device(cmd, dst, offset, &chunk)?;
                 sent += end - at;
                 at = end;
             }
@@ -5100,6 +5291,7 @@ impl Gpu {
                 self.mesh_field_shadow.len()
             );
         }
+        Ok(())
     }
 
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
@@ -5126,15 +5318,15 @@ impl Gpu {
         self.write_buffer(&self.particle_buf, bytes)
     }
 
-    /// S70C: bring the resident scene up to this frame's bytes, recording only the
-    /// 256-byte blocks that changed (runs up to vkCmdUpdateBuffer's 64 KiB).
-    fn update_resident_scene(&mut self) {
+    /// S70C: bring the resident scene up to this frame's bytes, copying only the
+    /// 256-byte blocks that changed (runs up to 64 KiB).
+    fn update_resident_scene(&mut self) -> Result<(), String> {
         const BLOCK: usize = 256;
         const RUN: usize = 65536;
         let bytes = std::mem::take(&mut self.frame_bytes);
         if bytes.is_empty() || self.frame_scene[0].buffer.is_null() {
             self.frame_bytes = bytes;
-            return;
+            return Ok(());
         }
         let len = bytes.len().min(self.frame_scene[0].size as usize) & !3;
         let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -5155,15 +5347,12 @@ impl Gpu {
             // The last frame's reads are done before the writes (in queue order).
             self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
             for &(start, stop) in &runs {
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.frame_scene[0].buffer,
-                        start as u64,
-                        (stop - start) as u64,
-                        bytes[start..stop].as_ptr() as *const c_void,
-                    );
-                }
+                let cmd = self.cmd;
+                let dst = self.frame_scene[0].buffer;
+                let Ok(offset) = u64::try_from(start) else {
+                    continue;
+                };
+                self.write_device(cmd, dst, offset, &bytes[start..stop])?;
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -5178,6 +5367,7 @@ impl Gpu {
             }
         }
         self.frame_bytes = bytes;
+        Ok(())
     }
 
     fn sync_materials(&mut self, world: &World) -> Result<(), String> {
@@ -6634,23 +6824,7 @@ impl Gpu {
                 "transfer reset fence",
             )?;
             check((self.fns.reset_cmd)(self.transfer_cmd, 0), "transfer reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inheritance: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 0x1,
-                inheritance: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.transfer_cmd, &begin as *const BeginInfo as *const u8),
-                "transfer begin",
-            )?;
+            self.begin_reused(self.transfer_cmd)?;
         }
         self.staging_barrier(0x4000, 0x1000, 0x4000, 0x800);
         let mut copied = 0u64;
@@ -7894,6 +8068,21 @@ fn read_f32s(
         .collect())
 }
 
+fn pod_bytes<T>(value: &T) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(value).cast::<u8>(),
+            std::mem::size_of::<T>(),
+        )
+    }
+}
+
+fn pod_slice<T>(values: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+    }
+}
+
 fn copy_buffer(buffer: &Buffer) -> Buffer {
     Buffer {
         buffer: buffer.buffer,
@@ -8181,6 +8370,7 @@ impl Gpu {
         self.lifecycle_release = true;
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
+        self.drop_stages();
         self.drop_stream_resources();
         unsafe {
             self.destroy_targets();
@@ -8340,6 +8530,8 @@ impl Gpu {
         }
         let device = self.device;
         self.device = std::ptr::null_mut();
+        let traffic = traffic::snapshot();
+        eprintln!("vk_traffic {}", traffic.line());
         unsafe {
             (self.fns.destroy_device)(device, std::ptr::null());
         }
@@ -8600,6 +8792,36 @@ fn load_fns(
             get_query_results: d!("vkGetQueryPoolResults"),
         }
     }
+}
+
+fn load_fns_installed(
+    dload: impl Fn(&[u8]) -> Pfn,
+    create_wayland_surface: FnWayland,
+    destroy_surface: Fn2,
+    surface_support: FnSupport,
+    surface_caps: FnCaps,
+    surface_formats: FnCount,
+    surface_modes: FnCount,
+    destroy_instance: FnDestroy,
+    enumerate_devices: FnEnumDev,
+    queue_families: FnQueues,
+    mem_props: FnMemProps,
+) -> Fns {
+    let mut fns = load_fns(
+        dload,
+        create_wayland_surface,
+        destroy_surface,
+        surface_support,
+        surface_caps,
+        surface_formats,
+        surface_modes,
+        destroy_instance,
+        enumerate_devices,
+        queue_families,
+        mem_props,
+    );
+    traffic::install(&mut fns);
+    fns
 }
 
 fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {

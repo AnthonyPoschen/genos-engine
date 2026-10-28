@@ -48,7 +48,7 @@ pub(super) struct Targets {
     inject: Handle,
     integrate: Handle,
     query: Handle,
-    cmd: Handle,
+    pub(super) cmd: Handle,
     fence: Handle,
     image_ready: bool,
 }
@@ -127,23 +127,17 @@ impl Gpu {
     }
 
     /// Compose reads `pad0`. A frame that did not dispatch leaves it at 0.
-    pub(super) fn release_froxel_header(&self) {
+    pub(super) fn release_froxel_header(&mut self) -> Result<(), String> {
         if self.froxel_wrote || self.frame_scene[0].buffer.is_null() {
-            return;
+            return Ok(());
         }
         let cmd = self.cmd;
+        let dst = self.frame_scene[0].buffer;
         self.barrier_on(cmd, 0x8000 | 0x800, 0x1000, 0x20, 0x1000);
         let zero = 0u32.to_ne_bytes();
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                12,
-                4,
-                zero.as_ptr().cast(),
-            );
-        }
+        self.write_device(cmd, dst, 12, &zero)?;
         self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
+        Ok(())
     }
 
     /// Record inject and integrate on the frame command buffer, then copy the
@@ -185,7 +179,7 @@ impl Gpu {
         );
         self.stamp_froxel(cmd, query, 1, 0x800);
         if columns_fit(job.width, job.height) {
-            self.publish_frame_columns(cmd, columns, job.width, job.height, job.slices);
+            self.publish_frame_columns(cmd, columns, job.width, job.height, job.slices)?;
             self.froxel_wrote = true;
         }
         self.froxel_pending = !query.is_null() && self.timestamp_period > 0.0;
@@ -206,31 +200,20 @@ impl Gpu {
 
     /// Device-side `pad0` plus the column tail. Compose sees fog only after this.
     fn publish_frame_columns(
-        &self,
+        &mut self,
         cmd: Handle,
         columns: Handle,
         width: u32,
         height: u32,
         slices: u32,
-    ) {
+    ) -> Result<(), String> {
         self.barrier_on(cmd, 0x800, 0x1000 | 0x4000, 0x40 | 0x20, 0x800 | 0x1000 | 0x2000);
         let word = tail_word().to_ne_bytes();
         let head = column_header(width, height, slices);
+        let dst = self.frame_scene[0].buffer;
+        self.write_device(cmd, dst, 12, &word)?;
+        self.write_device(cmd, dst, scene_offset(), &head)?;
         unsafe {
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                12,
-                4,
-                word.as_ptr().cast(),
-            );
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                scene_offset(),
-                16,
-                head.as_ptr().cast(),
-            );
             let region = CopyRegion {
                 src: 0,
                 dst: scene_offset().saturating_add(16),
@@ -245,6 +228,7 @@ impl Gpu {
             );
         }
         self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
+        Ok(())
     }
 
     pub(super) fn collect_froxel_time(&mut self) {
@@ -335,23 +319,7 @@ impl Gpu {
                 "froxel reset fence",
             )?;
             check((self.fns.reset_cmd)(cmd, 0), "froxel reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(cmd, std::ptr::from_ref(&begin).cast()),
-                "froxel begin",
-            )?;
+            self.begin_reused(cmd)?;
         }
         self.barrier_on(cmd, 0x4000, 0x800, 0x4000, 0x20);
         self.transition_froxel_image(cmd, image)?;

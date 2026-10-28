@@ -1558,7 +1558,7 @@ impl Gpu {
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
     /// with the buffers this frame's raster writes.
-    fn lighting_begin(&mut self, slot: usize) {
+    fn lighting_begin(&mut self, slot: usize) -> Result<(), String> {
         let header = [self.lighting.dims[0], self.lighting.dims[1], 0, 0];
         let world = self.lighting.async_on;
         if world {
@@ -1672,13 +1672,9 @@ impl Gpu {
                     4,
                     0,
                 );
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    (lighting_compose_at() + 1) * 4,
-                    8,
-                    yz.as_ptr() as *const c_void,
-                );
+                let cmd = self.cmd;
+                let dst = self.lighting.cache_keys.buffer;
+                self.write_device(cmd, dst, (lighting_compose_at() + 1) * 4, pod_bytes(&yz))?;
             }
             // The whole-buffer clears land before the count and header writes.
             self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
@@ -1688,13 +1684,9 @@ impl Gpu {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.gbuf.buffer,
-                0,
-                16,
-                header.as_ptr() as *const c_void,
-            );
+            let cmd = self.cmd;
+            let dst = self.lighting.gbuf.buffer;
+            self.write_device(cmd, dst, 0, pod_bytes(&header))?;
             if self.lighting.lamp_res_clear && !self.lighting.lamp_res.buffer.is_null() {
                 self.lighting.lamp_res_clear = false;
                 (self.fns.cmd_fill_buffer)(
@@ -1713,6 +1705,7 @@ impl Gpu {
             0x20 | 0x40 | 0x1000,
             0x20 | 0x40,
         );
+        Ok(())
     }
 
     /// Count one light cache round's counters toward settling (or not): a round
@@ -1865,13 +1858,6 @@ impl Gpu {
         let cmd = self.lighting.world_cmd;
         let fences = [self.lighting.world_fence];
         #[repr(C)]
-        struct BeginInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            inherit: *const c_void,
-        }
-        #[repr(C)]
         struct Submit {
             s_type: i32,
             next: *const c_void,
@@ -1892,16 +1878,7 @@ impl Gpu {
         ];
         unsafe {
             check((self.fns.reset_cmd)(cmd, 0), "reset lighting world cmd")?;
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
-                "begin lighting world",
-            )?;
+            self.begin_reused(cmd)?;
             let qp = self.lighting.world_qp;
             if !qp.is_null() {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
@@ -1909,13 +1886,9 @@ impl Gpu {
             }
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, LIGHTING_STATS_BYTES, 0);
             self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.lighting.world_stats.buffer,
-                LIGHTING_CTRL_WORD * 4,
-                self.lighting.ctrl_bytes.len() as u64,
-                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
-            );
+            let ctrl = self.lighting.ctrl_bytes;
+            let dst = self.lighting.world_stats.buffer;
+            self.write_device(cmd, dst, LIGHTING_CTRL_WORD * 4, &ctrl)?;
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -2356,14 +2329,14 @@ impl Gpu {
 
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
     /// The intensity word is updated after the chain so the display pass adds it.
-    fn record_gpu_bloom(&mut self, width: u32, height: u32) {
+    fn record_gpu_bloom(&mut self, width: u32, height: u32) -> Result<(), String> {
         if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
-            return;
+            return Ok(());
         }
         let pixels = width.saturating_mul(height);
         let levels = self.lighting.hdr.bloom_levels.min(8);
         if levels == 0 {
-            return;
+            return Ok(());
         }
         let mut mips = Vec::new();
         let mut cursor = pixels;
@@ -2381,29 +2354,29 @@ impl Gpu {
         let end = scratch_b.saturating_add(scratch_px);
         if u64::from(end) > self.lighting.bloom.size / 16 {
             eprintln!("lighting: bloom chain does not fit");
-            return;
+            return Ok(());
         }
         let Some(&(first_w, first_h, first_dst)) = mips.first() else {
-            return;
+            return Ok(());
         };
         self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
         for index in 1..mips.len() {
             let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
-                return;
+                return Ok(());
             };
             let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
-                return;
+                return Ok(());
             };
             self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
         }
         let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
-            return;
+            return Ok(());
         };
         let last = mips.len().saturating_sub(1);
         let mut ping = 0u32;
         for finer in (0..last).rev() {
             let Some(&(finer_w, finer_h, finer_off)) = mips.get(finer) else {
-                return;
+                return Ok(());
             };
             let dst = if ping == 0 { scratch_a } else { scratch_b };
             self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
@@ -2414,17 +2387,12 @@ impl Gpu {
         }
         self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
         let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.hdr_params.buffer,
-                8,
-                4,
-                &word as *const f32 as *const c_void,
-            );
-        }
+        let cmd = self.cmd;
+        let dst = self.lighting.hdr_params.buffer;
+        self.write_device(cmd, dst, 8, &word.to_ne_bytes())?;
         // Display reads the chain and the new intensity. Host reads the full image after the fence.
         self.memory_barrier(0x800 | 0x1000, 0x800 | 0x4000, 0x40 | 0x1000, 0x20 | 0x2000);
+        Ok(())
     }
 
     fn bloom_dispatch(
@@ -2686,7 +2654,7 @@ impl Gpu {
         self.lighting.meter_ping ^= 1;
     }
 
-    fn lighting_passes(&mut self, slot: usize) {
+    fn lighting_passes(&mut self, slot: usize) -> Result<(), String> {
         self.lighting.hdr_query[slot] = u32::MAX;
         self.write_hdr_exposure();
         let [w, h, cols, rows] = self.lighting.dims;
@@ -2877,56 +2845,48 @@ impl Gpu {
             && self.lighting.settings.bounce.count > 0
             && block_at + bytes <= self.lighting.work.size
         {
-            unsafe {
-                // The last frame's passes are done with the block before it is written.
-                self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.work.buffer,
-                    block_at,
-                    bytes,
-                    block.as_ptr() as *const c_void,
-                );
-                if self.lighting.cache_full {
-                    // S78X: the a-trous dirty-fraction threshold (millionths). A cache
-                    // clear earlier this frame zeroed the word; the levels read it.
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        lighting_atrous_ppm_at() * 4,
-                        4,
-                        &atrous_ppm as *const u32 as *const c_void,
-                    );
-                    // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
-                    // Word 13 of the dispatch args. A zero word is sigma 0, which
-                    // tightens the clamp, so this is written every full-cache frame.
-                    let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
-                    let ray_budget = self.lighting.settings.surface_cache.ray_budget;
-                    let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 11) * 4,
-                        4,
-                        &ray_budget as *const u32 as *const c_void,
-                    );
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 12) * 4,
-                        4,
-                        &dormant_rays as *const u32 as *const c_void,
-                    );
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 13) * 4,
-                        4,
-                        &firefly_sigma as *const u32 as *const c_void,
-                    );
-                }
-                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            // The last frame's passes are done with the block before it is written.
+            self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
+            let floats = used.min(block.len());
+            let cmd = self.cmd;
+            let work = self.lighting.work.buffer;
+            self.write_device(cmd, work, block_at, pod_slice(&block[..floats]))?;
+            if self.lighting.cache_full {
+                // S78X: the a-trous dirty-fraction threshold (millionths). A cache
+                // clear earlier this frame zeroed the word; the levels read it.
+                let keys = self.lighting.cache_keys.buffer;
+                self.write_device(
+                    cmd,
+                    keys,
+                    lighting_atrous_ppm_at() * 4,
+                    &atrous_ppm.to_ne_bytes(),
+                )?;
+                // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
+                // Word 13 of the dispatch args. A zero word is sigma 0, which
+                // tightens the clamp, so this is written every full-cache frame.
+                let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                let ray_budget = self.lighting.settings.surface_cache.ray_budget;
+                let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 11) * 4,
+                    &ray_budget.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 12) * 4,
+                    &dormant_rays.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 13) * 4,
+                    &firefly_sigma.to_ne_bytes(),
+                )?;
             }
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
@@ -3172,14 +3132,11 @@ impl Gpu {
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         let mut hdr_pool: Handle = std::ptr::null_mut();
         let mut hdr_base = None;
+        let ctrl = self.lighting.ctrl_bytes;
+        let stats = self.lighting.stats_dev[slot].buffer;
+        let cmd = self.cmd;
+        self.write_device(cmd, stats, LIGHTING_CTRL_WORD * 4, &ctrl)?;
         unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.stats_dev[slot].buffer,
-                LIGHTING_CTRL_WORD * 4,
-                self.lighting.ctrl_bytes.len() as u64,
-                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
-            );
             if self.lighting.cache_full {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
@@ -3208,13 +3165,8 @@ impl Gpu {
                     0,
                 );
             }
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    lighting_sun_at() * 4,
-                    32,
-                    sun_words.as_ptr() as *const c_void,
-                );
+                let keys = self.lighting.cache_keys.buffer;
+                self.write_device(cmd, keys, lighting_sun_at() * 4, pod_bytes(&sun_words))?;
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x1);
             (self.fns.cmd_bind_set)(
@@ -3412,7 +3364,7 @@ impl Gpu {
             self.stamp_hdr_time(slot, true);
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
             if gpu_bloom {
-                self.record_gpu_bloom(w, h);
+                self.record_gpu_bloom(w, h)?;
             }
             unsafe {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.agx_pipe);
@@ -3498,6 +3450,7 @@ impl Gpu {
         }
         self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
         self.lighting_dump_copy();
+        Ok(())
     }
 
     /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
