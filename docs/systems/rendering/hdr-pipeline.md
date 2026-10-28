@@ -1,6 +1,6 @@
 # HDR pipeline: presets, costs, and the headless reference
 
-Status: **accepted** (Engine bot, 29 Oct 2026). ADR: [0026](../../adr/0026-hdr-presets-and-headless-curves.md). The full pipeline design is [`hdr-output-design.md`](../hdr-output-design.md) (ADR 0015). This page maps it onto the ADR 0023 presets and records the CPU reference.
+Status: **accepted** (Engine bot, 29 Oct 2026). ADR: [0027](../../adr/0027-hdr-presets-and-headless-curves.md). The full pipeline design is [`hdr-output-design.md`](../hdr-output-design.md) (ADR 0015). This page maps it onto the ADR 0023 presets and records the CPU reference.
 
 ## 1. Pipeline, in frame order
 

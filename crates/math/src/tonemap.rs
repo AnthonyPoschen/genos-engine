@@ -1,8 +1,8 @@
-//! Exposure and display curves for the HDR pipeline (ADR 0015, ADR 0026).
+//! Exposure and display curves for the HDR pipeline (ADR 0015, ADR 0027).
 //!
 //! These are the closed forms the post passes must match. They are `f64` and
 //! need no GPU, so `cargo test -p genos-math` checks them headless.
-//! `crates/render/src/hdr_output.rs` holds the same formulas today; ADR 0026
+//! `crates/render/src/hdr_output.rs` holds the same formulas today; ADR 0027
 //! moves its scalar curves to call these.
 
 /// Graphics white on both HDR paths, in nits (ITU-R BT.2408).

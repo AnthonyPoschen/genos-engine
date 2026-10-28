@@ -1,4 +1,4 @@
-//! CPU reference for the HDR exposure and display curves (ADR 0026).
+//! CPU reference for the HDR exposure and display curves (ADR 0027).
 //! Each test names the published value it checks, so a wrong constant fails here
 //! before any shader is compared against it.
 

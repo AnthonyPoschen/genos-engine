@@ -1,4 +1,4 @@
-# 0026: HDR follows the four presets, and its curves have a headless reference
+# 0027: HDR follows the four presets, and its curves have a headless reference
 
 Status: **accepted** (Engine bot, 29 Oct 2026). Anthony Poschen delegated design approval to the Engine bot; he reviews later. Design: [`docs/systems/rendering/hdr-pipeline.md`](../systems/rendering/hdr-pipeline.md). Builds on [ADR 0015](0015-hdr-output.md) and [ADR 0023](0023-graphics-settings-presets.md).
 
