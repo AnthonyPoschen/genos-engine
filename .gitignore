@@ -4,3 +4,4 @@
 # Unanchored. `cargo test` runs with the package as its cwd, so a gate
 # under a crate directory is ignored too.
 genos-debug/
+__pycache__/
