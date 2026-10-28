@@ -153,14 +153,10 @@ fn ix(v: u32) -> usize {
     usize::try_from(v).unwrap_or(usize::MAX)
 }
 
-/// Grid cell of a coordinate already clamped to `[0, max]`.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::as_conversions
-)] // Clamped non-negative and below u32::MAX.
+/// Grid cell of a coordinate, clamped to `[0, max]`. Grids are at most a few
+/// hundred cells on a side, so a count beats a lossy float cast.
 fn cell(v: f64, max: u32) -> usize {
-    ix((v.max(0.0) as u32).min(max))
+    (0..max).take_while(|&i| f64::from(i + 1) <= v).count()
 }
 
 /// Fixed per-froxel jitter in [0, 1): the same every frame for a still camera.
