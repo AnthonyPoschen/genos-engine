@@ -388,6 +388,20 @@ Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-
 
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
+### Retired terms
+
+`scripts/check-terms.py` fails a diff that adds one of these outside the glossary, RENAMES.md, an alias shim (a line saying deprecated or alias), or a history note (retired, removed, gone). When a RENAMES.md entry lands, add its old name here.
+
+- `residency_mb`
+- `material-residency-mb`
+- `GENOS_MATERIAL_RESIDENCY_MB`
+- `radiance cascade`
+- `radiance cascades`
+- `radiance field`
+- `v1 world probe`
+- `notice band`
+- `prominence spacing`
+
 ---
 ## How to compare a new technique
 1. Split the technique into parts and give each part one Role.
