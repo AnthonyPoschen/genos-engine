@@ -1,0 +1,15 @@
+[package]
+name = "genos-fog-ref"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CPU fog reference: single-scattering path tracer and closed forms (ADR 0026 stage F0)."
+
+[lints]
+workspace = true
+
+# The plan keeps the comparison test beside the other debug tests; building it
+# from this dependency-free crate lets it run headless with no GPU or Wayland.
+[[test]]
+name = "fog_reference"
+path = "../debug/tests/fog_reference.rs"
