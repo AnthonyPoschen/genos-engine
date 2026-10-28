@@ -1,6 +1,4 @@
 #![cfg_attr(test, expect(clippy::as_conversions, reason = "pixel index from a projected point"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "pixel index from a projected point"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "pixel index from a projected point"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::needless_range_loop, reason = "three channels"))]
 
@@ -43,8 +41,8 @@ fn the_fire_floor_reference() {
     let setup = genos_debug::reference::RefSetup::from_camera(&scene, &camera, width, height, 256);
     let reference = genos_debug::reference::render(&setup);
     let uv = viewport_uv(&camera, 320.0 / 180.0, [0.8, 0.0, 1.8]).expect("point is on screen");
-    let x = (uv[0] * 320.0).round() as u32;
-    let y = (uv[1] * 180.0).round() as u32;
+    let x = nearest_pixel(uv[0] * 320.0, 320);
+    let y = nearest_pixel(uv[1] * 180.0, 180);
     let mut sum = [0.0_f32; 3];
     for py in y - 1..=y + 1 {
         for px in x - 1..=x + 1 {
@@ -60,4 +58,10 @@ fn the_fire_floor_reference() {
         reference.noise
     );
     assert!(reference.noise < 0.1, "reference too noisy: {}", reference.noise);
+}
+
+/// Rounds a screen coordinate to the nearest pixel index without a lossy cast.
+fn nearest_pixel(v: f32, size: u16) -> u32 {
+    let p = (0..size).find(|&p| f32::from(p) + 0.5 > v).unwrap_or(size - 1);
+    u32::from(p)
 }
