@@ -1,6 +1,6 @@
 //! CPU reference for the glTF 2.0 metallic-roughness BRDF (Appendix B).
 //!
-//! This is the oracle GPU shaders are compared against (ADR 0023). It is `f64`,
+//! This is the oracle GPU shaders are compared against (ADR 0025). It is `f64`,
 //! scalar, and has no lookup tables. Directions are given as cosines against
 //! the shading normal, so callers do not need a frame.
 //!

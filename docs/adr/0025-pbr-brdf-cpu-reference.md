@@ -1,4 +1,4 @@
-# 0023: The glTF metallic-roughness BRDF has one CPU reference, and shaders are scored against it
+# 0025: The glTF metallic-roughness BRDF has one CPU reference, and shaders are scored against it
 
 Status: **Proposed**. Design: [`docs/systems/rendering/pbr-brdf-reference.md`](../systems/rendering/pbr-brdf-reference.md). Builds on [ADR 0014](0014-pbr-materials.md) (one material record) and [ADR 0019](0019-reflections.md) (the specular path).
 

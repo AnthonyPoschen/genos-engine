@@ -1,4 +1,4 @@
-//! Oracle checks for the CPU reference BRDF (ADR 0023): analytic values and
+//! Oracle checks for the CPU reference BRDF (ADR 0025): analytic values and
 //! white-furnace energy integrals.
 
 #![allow(
@@ -154,7 +154,7 @@ fn reciprocity() {
 /// White furnace for full materials. Metals never exceed 1. Dielectrics stay
 /// at or under 1 at normal view; off normal the Appendix B `fresnel_mix` gains
 /// up to ~30 %, which is bounded here and pinned below rather than hidden
-/// (ADR 0023).
+/// (ADR 0025).
 #[test]
 fn material_white_furnace_conserves_energy() {
     for roughness in [0.3, 0.6, 1.0] {

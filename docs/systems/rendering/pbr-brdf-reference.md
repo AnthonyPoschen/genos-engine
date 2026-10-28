@@ -1,6 +1,6 @@
 # PBR BRDF reference (glTF metallic-roughness and emissive)
 
-Decision: [ADR 0023](../../adr/0023-pbr-brdf-cpu-reference.md). Material record: [ADR 0014](../../adr/0014-pbr-materials.md), [PBR materials design](../pbr-materials-design.md).
+Decision: [ADR 0025](../../adr/0025-pbr-brdf-cpu-reference.md). Material record: [ADR 0014](../../adr/0014-pbr-materials.md), [PBR materials design](../pbr-materials-design.md).
 
 ## Goal
 
