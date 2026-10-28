@@ -15,6 +15,7 @@ fi
 python3 scripts/lint-env-mirrors.py --self-test
 python3 scripts/lint-semgrep.py
 python3 scripts/lint-shader-constants.py
+python3 scripts/lint-shader-hashes.py
 python3 scripts/lint-clippy-fixture.py
 
 cargo deny check
