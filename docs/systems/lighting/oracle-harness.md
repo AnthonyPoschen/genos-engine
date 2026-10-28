@@ -64,3 +64,14 @@ the trace pauses time, so it adds no settling.
   the same machine.
 
 `python3 scripts/lighting/oracle_metrics.py --self-test` runs in `scripts/lint.sh`.
+
+## Specular scenarios (stage S0)
+
+`SPEC=1 make lighting-oracle` also runs `examples/stress/scripts/lighting_oracle_spec.rhai`:
+`gloss-sweep`, `gloss-edge`, `gloss-offscreen`, `gloss-switch` and `gloss-band`, as set out in
+`specular-v3-design.md`. `oracle_metrics.py` scores them with `spec_err_near` (near error over
+pixels whose reference light is at least 20% specular, per roughness row on `gloss-sweep`),
+`spec_pop`, `frames_to_ref` on `gloss-switch`, and `spec_ms`. The script needs three engine
+hooks before its numbers mean anything: a per-object roughness and metallic override, a
+specular-only reference image (`aov: "specular"`), and a `spec_ms` gi_metrics column. Until
+then the specular metrics report `spec_mask: missing`.
