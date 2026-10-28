@@ -20,3 +20,5 @@ python3 scripts/lint-clippy-fixture.py
 
 cargo deny check
 python3 scripts/lint-clippy.py
+python3 scripts/check-terms.py --self-test
+python3 scripts/check-terms.py
