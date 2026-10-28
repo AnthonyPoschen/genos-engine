@@ -1,7 +1,4 @@
-#![expect(
-    clippy::missing_errors_doc,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
+#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 
 //! Load images, textures, meshes, animations, audio samples, and fonts.
 //!
@@ -12,13 +9,13 @@ mod animation;
 mod bin;
 mod emitters;
 mod error;
+mod mips;
+mod pages;
 mod gltf;
 mod inflate;
 mod jpeg;
 mod material;
 mod mesh;
-mod mips;
-mod pages;
 mod png;
 mod shade;
 mod source;
@@ -33,6 +30,10 @@ pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
+pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
+pub use pages::{
+    miss_colour, mib_f32, HotReload, MaterialWatch,
+};
 pub use error::LoadError;
 pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
@@ -40,8 +41,6 @@ pub use gltf::{
 };
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
-pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
-pub use pages::{mib_f32, miss_colour, HotReload, MaterialWatch};
 pub use png::Image;
 pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
@@ -49,13 +48,13 @@ pub use stream::{
     gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, PendingCopy, Sampled,
     Streamer, TextureView, DEFAULT_DWELL, EVICT_LEVELS, EVICT_PER_FRAME,
 };
-pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
-pub use ttf::{Font, Glyph, OutlinePoint};
 pub use vram::{
     headroom_bytes, is_device_oom, retry_device_alloc, AllocError, Budget as VramBudget, Headroom,
     HeapSlice, DEFAULT_HEADROOM_FLOOR_MB, DEFAULT_HEADROOM_PERCENT, DEVICE_OOM,
     FALLBACK_HEAP_DIVISOR,
 };
+pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
+pub use ttf::{Font, Glyph, OutlinePoint};
 pub use wav::Pcm;
 
 fn read(source: &dyn ByteSource) -> Result<Vec<u8>, LoadError> {
