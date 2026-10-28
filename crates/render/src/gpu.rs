@@ -278,6 +278,8 @@ pub struct Renderer {
     gpu: Gpu,
     /// The world identity drawn last (0 before the first draw).
     world_identity: u64,
+    /// The lamp set drawn last: count and colors, not positions.
+    lamp_set: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -311,6 +313,7 @@ impl Renderer {
             height,
             wire_on: false,
             world_identity: 0,
+            lamp_set: 0,
             memory: FrameMemory::default(),
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
@@ -814,6 +817,27 @@ impl Renderer {
                 self.reset_lighting_cache();
             }
             self.world_identity = world.identity();
+        }
+        // A lamp added, removed or recolored is a lighting scene change too: the
+        // cache never drains bounce from a lamp that is gone (a lamp switched off
+        // left ~29/255 on the corridor floor for good). Moving lamps keep their
+        // cache; the incremental path follows them.
+        let lamp_set = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            world.scene.lights.len().hash(&mut hasher);
+            for light in &world.scene.lights {
+                for c in light.color {
+                    c.to_bits().hash(&mut hasher);
+                }
+            }
+            hasher.finish()
+        };
+        if lamp_set != self.lamp_set {
+            if self.lamp_set != 0 {
+                self.reset_lighting_cache();
+            }
+            self.lamp_set = lamp_set;
         }
         self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
