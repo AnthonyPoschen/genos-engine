@@ -10,11 +10,6 @@ use genos_fog_ref::{rel_err, Aabb, Light, Medium, Ray, Scene, V3};
 
 /// The F1 gate on the model.
 const GATE: f64 = 0.05;
-/// Recorded misses: (scene, preset, ceiling). Low's 32 slices and single
-/// shadow ray cannot resolve the 1 m window shaft; with 64 rays per froxel it
-/// reaches 0.007, so the error is visibility noise, not the grid. Kept as a
-/// regression ceiling, not a pass, until a decision on Low fog is made.
-const KNOWN_MISS: [(&str, Preset, f64); 1] = [("5 window shaft", Preset::Low, 0.16)];
 /// Reference quadrature steps.
 const STEPS: u32 = 4_000;
 /// Screen offsets graded around each scene ray (the near-camera pixels).
@@ -249,17 +244,7 @@ fn froxel_model_matches_path_tracer_per_preset() {
             case.name, errs[0], errs[1], errs[2], errs[3]
         );
         for (p, e) in Preset::ALL.iter().zip(&errs) {
-            let ceiling = KNOWN_MISS
-                .iter()
-                .find(|(n, kp, _)| *n == case.name && kp == p)
-                .map_or(GATE, |m| m.2);
-            if *e > GATE && ceiling > GATE && *e <= ceiling {
-                println!(
-                    "  KNOWN-MISS {} {}: {e:.4} > {GATE} (ceiling {ceiling})",
-                    case.name,
-                    p.name()
-                );
-            } else if *e > ceiling {
+            if *e > GATE {
                 failures.push(format!("{} {}: {e:.4}", case.name, p.name()));
             }
         }
