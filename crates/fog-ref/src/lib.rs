@@ -8,6 +8,8 @@
 //!
 //! See `docs/systems/rendering/fog/plan.md`.
 
+pub mod froxel;
+
 use std::f64::consts::PI;
 use std::ops::{Add, Mul, Sub};
 
