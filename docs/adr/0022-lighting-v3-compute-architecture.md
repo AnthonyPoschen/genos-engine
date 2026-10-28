@@ -17,7 +17,7 @@ Anthony's goals (28 Oct 2026):
 
 1. **Direct light: ReSTIR DI**, 1–2 shadow rays per pixel picked from the light tree, with spatial and temporal reservoir reuse. Cost does not depend on lamp count. A change record (lamp on/off, mover) resets temporal reservoir confidence, so the first frame after a change uses spatial reuse only. Direct light is computed every frame, always.
 2. **Near and mid bounce: full card re-light every frame.** Every visible card texel is relit at a fixed texel density each frame. The cost is set by the texel count, not by how much changed, so a full re-light is the normal frame and the light-switch frame costs the same as any other.
-3. **Far bounce: a DDGI-style probe hierarchy** (irradiance probes with Chebyshev visibility, fully re-traced every frame at a fixed probe count × rays). Radiance cascades are a later experiment inside stage E, not the default.
+3. **Far bounce: a DDGI-style probe hierarchy** (irradiance probes with Chebyshev visibility, fully re-traced every frame at a fixed probe count × rays). Sannikov's 2023 interval-merged probe method (GI v1's retired approach) is not revived; finer probe tiers are a stage E experiment only.
 4. **Screen space only for contact detail, specular and compose.** Half resolution only for the probe apply. No neural cache.
 5. **Display rule (F1): show finished values only.** What a pixel shows is `mix(coarser finished level, own value, confidence)`; a value that is not finished is never shown alone, and a change blends in once.
 6. **Kept possible, not built:** a Low-preset knob that spreads a full world-space bounce re-light over N frames and swaps it in with a short blend. Direct light stays per frame.
