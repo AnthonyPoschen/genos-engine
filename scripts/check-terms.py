@@ -101,7 +101,8 @@ def self_test() -> None:
         for a in (("add", "."), ("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "a")):
             git(*a, cwd=r)
         (r / "a.txt").write_text("old_name here before\nnew_name\n")
-        env = dict(os.environ, CHECK_TERMS_BASE="master")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GITHUB_")}
+        env["CHECK_TERMS_BASE"] = "master"
         assert run(r, env) == 0
         (r / "a.txt").write_text("old_name here before\nold_name again\n")
         assert run(r, env) == 1
