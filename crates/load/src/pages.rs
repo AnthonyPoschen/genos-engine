@@ -116,13 +116,22 @@ impl HotReload {
 }
 
 #[expect(clippy::as_conversions, reason = "a reload waits a handful of frames")]
-#[expect(clippy::cast_precision_loss, reason = "a reload waits a handful of frames")]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a reload waits a handful of frames"
+)]
 fn frames_f32(value: u32) -> f32 {
     value as f32
 }
 
-#[expect(clippy::as_conversions, reason = "a residency total in MiB fits the f32 mantissa")]
-#[expect(clippy::cast_precision_loss, reason = "a residency total in MiB fits the f32 mantissa")]
+#[expect(
+    clippy::as_conversions,
+    reason = "a residency total in MiB fits the f32 mantissa"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a residency total in MiB fits the f32 mantissa"
+)]
 #[must_use]
 pub fn mib_f32(bytes: u64) -> f32 {
     let whole = bytes / (1024 * 1024);

@@ -187,9 +187,18 @@ fn linear_to_srgb(value: f32) -> f32 {
     }
 }
 
-#[expect(clippy::as_conversions, reason = "the rounded texel is clamped to 0..=255")]
-#[expect(clippy::cast_possible_truncation, reason = "the rounded texel is clamped to 0..=255")]
-#[expect(clippy::cast_sign_loss, reason = "the rounded texel is clamped to 0..=255")]
+#[expect(
+    clippy::as_conversions,
+    reason = "the rounded texel is clamped to 0..=255"
+)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the rounded texel is clamped to 0..=255"
+)]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the rounded texel is clamped to 0..=255"
+)]
 fn unit_to_byte(value: f32) -> u8 {
     value.clamp(0.0, 1.0).mul_add(255.0, 0.5).floor() as u8
 }
@@ -203,7 +212,9 @@ mod tests {
         let image = Image {
             width: 2,
             height: 2,
-            pixels: vec![188, 0, 0, 255, 188, 0, 0, 255, 188, 0, 0, 255, 188, 0, 0, 255],
+            pixels: vec![
+                188, 0, 0, 255, 188, 0, 0, 255, 188, 0, 0, 255, 188, 0, 0, 255,
+            ],
         };
         let chain = mip_chain(&image, MipSpace::Srgb);
         assert_eq!(chain.len(), 2);

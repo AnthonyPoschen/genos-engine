@@ -1,16 +1,55 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_pass_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! glTF 2.0: `.gltf` (JSON with external or `data:` buffers and images) and `.glb`.
 //!
@@ -185,6 +224,24 @@ impl PbrMaterial {
     /// Textured hits use [`crate::shade_uv`], which is this product per texel.
     pub fn diffuse_albedo(&self) -> [f32; 3] {
         crate::shade_uv(self, &[], [0.0, 0.0]).diffuse_albedo()
+    }
+}
+
+impl PbrMaterial {
+    /// Factors only, as a [`genos_math::brdf::Material`]: what an untextured
+    /// hit shades with. Textured hits use [`crate::ShadeSample::brdf_material`].
+    #[must_use]
+    pub fn brdf_material(&self) -> genos_math::brdf::Material {
+        crate::shade_uv(self, &[], [0.0, 0.0]).brdf_material()
+    }
+
+    /// The alpha cutoff, or `None` when the mode is not `MASK`.
+    #[must_use]
+    pub fn alpha_cutoff(&self) -> Option<f32> {
+        match self.alpha_mode {
+            AlphaMode::Mask(cutoff) => Some(cutoff),
+            AlphaMode::Opaque | AlphaMode::Blend => None,
+        }
     }
 }
 
@@ -403,7 +460,11 @@ fn level_colour(mip: &Mip) -> [f32; 4] {
 fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
     let mut spaces = vec![MipSpace::Linear; images.len()];
     for material in materials {
-        paint_space(&mut spaces, material.metallic_roughness_texture, MipSpace::Linear);
+        paint_space(
+            &mut spaces,
+            material.metallic_roughness_texture,
+            MipSpace::Linear,
+        );
         paint_space(&mut spaces, material.occlusion_texture, MipSpace::Linear);
         paint_space(&mut spaces, material.base_color_texture, MipSpace::Srgb);
         paint_space(&mut spaces, material.emissive_texture, MipSpace::Srgb);

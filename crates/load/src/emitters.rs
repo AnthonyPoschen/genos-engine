@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Promoted emitters and the closed-room furnace.
 //!
@@ -125,7 +128,12 @@ pub fn furnace_wall(albedo: f32, emission: f32) -> f32 {
 
 /// Relative change of the wall when the strip toggles between promoted and cache-only.
 #[must_use]
-pub fn double_count(albedo: f32, strip_emission: f32, strip_fraction: f32, cache_adds_promoted: bool) -> f32 {
+pub fn double_count(
+    albedo: f32,
+    strip_emission: f32,
+    strip_fraction: f32,
+    cache_adds_promoted: bool,
+) -> f32 {
     let cache_only = settled_wall(Enclosure {
         albedo,
         emission: 0.0,
@@ -367,7 +375,8 @@ impl MaterialSettings {
                     index += 2;
                 }
                 "--material-emissive-promote-flux" => {
-                    self.emissive_promote_flux = parse_f32(required(flag, next)?, "emissive_promote_flux")?;
+                    self.emissive_promote_flux =
+                        parse_f32(required(flag, next)?, "emissive_promote_flux")?;
                     seen |= SAW_FLUX;
                     index += 2;
                 }
@@ -598,7 +607,13 @@ mod tests {
         assert_eq!(watch.as_deref(), Some("from-arg.png"));
         assert!((settings.emissive_promote_flux - 0.5).abs() < 1.0e-6);
         let watch = settings
-            .overlay_args(&[], SettingEnv { promote: Some("off"), ..SettingEnv::default() })
+            .overlay_args(
+                &[],
+                SettingEnv {
+                    promote: Some("off"),
+                    ..SettingEnv::default()
+                },
+            )
             .expect("env");
         assert!(!settings.emissive_promote);
         assert!(watch.is_none());

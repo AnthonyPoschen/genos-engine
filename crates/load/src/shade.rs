@@ -65,6 +65,21 @@ impl ShadeSample {
         ]
     }
 
+    /// This sample as a [`genos_math::brdf::Material`] for the CPU reference.
+    ///
+    /// Emission already carries `emissiveStrength`, so the reference gets a
+    /// strength of 1. Alpha, occlusion and the normal stay with the caller.
+    #[must_use]
+    pub fn brdf_material(self) -> genos_math::brdf::Material {
+        genos_math::brdf::Material {
+            base_color: self.base.map(f64::from),
+            metallic: f64::from(self.metallic),
+            roughness: f64::from(self.roughness),
+            emissive: self.emissive.map(f64::from),
+            emissive_strength: 1.0,
+        }
+    }
+
     /// Outgoing radiance for the Lambert picture.
     ///
     /// `brdf` is the engine weight (paint albedo / π on analytic hits). Direct
@@ -379,9 +394,7 @@ mod tests {
         let images = [Image {
             width: 2,
             height: 2,
-            pixels: vec![
-                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255,
-            ],
+            pixels: vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255],
         }];
         let hit = shade_sets(
             &material,
