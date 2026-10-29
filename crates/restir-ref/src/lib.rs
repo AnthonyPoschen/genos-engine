@@ -9,7 +9,10 @@
 //! `genos_render::lamp_pick::pairwise_merge`. The renderer is unchanged.
 //!
 //! Departures from those papers:
-//! - Proposal is uniform or an exact discrete target CDF, not a light tree.
+//! - Proposal is uniform, an exact discrete target CDF, or a light-tree bound
+//!   (Conty Estevez and Kulla, HPG 2018). The tree draws one leaf per candidate.
+//!   It is not the flat target CDF, and it does not split a node into several
+//!   samples. Departures are in `tree`.
 //! - `p̂` is unshadowed Rec. 709 luminance. One shadow ray multiplies the shade.
 //! - Point lamps and a Lambertian BRDF only. No sun, no BSDF sample.
 //! - Receivers are a grid. Temporal history is the same index, not a motion vector.
@@ -39,9 +42,11 @@ pub mod restir;
 pub mod rng;
 pub mod scene;
 pub mod shade;
+pub mod tree;
 
 pub use dump::{diff_dumps, encode_dump, parse_dump, Diff, Dump};
 pub use harness::{encode_report, evaluate, write_run, EvalSpec, Report};
 pub use metrics::{frames_to_ref, grid_worst, ref_err_near, GateLimits};
 pub use restir::{Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
+pub use tree::{LightTree, TreeFault};
 pub use shade::Scene;

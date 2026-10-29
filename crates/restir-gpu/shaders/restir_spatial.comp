@@ -47,6 +47,8 @@ layout(push_constant) uniform Push {
     uint spatial_neighbors;
     uint spatial_radius;
     uint reverse;
+    uint tree_base;
+    uint tree_count;
 } pc;
 
 const uint LAMP_EMPTY = 0xffffffffu;
@@ -138,6 +140,8 @@ float target_at(uint recv, uint lamp) {
     float blue = load_f(l + 5u) * load_f(r + 8u) * scale;
     return dot3(red, green, blue, LUMA_X, LUMA_Y, LUMA_Z);
 }
+
+#include "restir_tree.glsl"
 
 uint uniform_index(uint n) {
     if (n <= 1u) {
@@ -320,8 +324,11 @@ void merge_pair(
 }
 
 void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, out float target, out float weights[64]) {
-    for (uint i = 0u; i < n; i++) {
-        weights[i] = target_at(recv, i);
+    bool tree = pc.proposal >= PROPOSAL_TREE;
+    if (!tree) {
+        for (uint i = 0u; i < n; i++) {
+            weights[i] = target_at(recv, i);
+        }
     }
     lamp = LAMP_EMPTY;
     w_sum = 0.0;
@@ -330,7 +337,9 @@ void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, o
         bool hit = false;
         uint next_lamp = 0u;
         float pdf = 0.0;
-        if (pc.proposal == PROPOSAL_TARGET) {
+        if (tree) {
+            sample_tree(recv, next_lamp, pdf, hit);
+        } else if (pc.proposal == PROPOSAL_TARGET) {
             sample_cdf(weights, n, next_lamp, pdf, hit);
         } else if (n == 0u) {
             hit = false;
@@ -342,14 +351,14 @@ void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, o
         if (!hit) {
             stream_update(lamp, w_sum, m, LAMP_EMPTY, 0.0);
         } else {
-            float phat = weights[next_lamp];
+            float phat = tree ? target_at(recv, next_lamp) : weights[next_lamp];
             float stream = pdf > 0.0 ? phat / pdf : 0.0;
             stream_update(lamp, w_sum, m, next_lamp, stream);
         }
     }
     target = 0.0;
-    if (lamp != LAMP_EMPTY && lamp < n) {
-        target = weights[lamp];
+    if (lamp != LAMP_EMPTY && (tree ? lamp < pc.lamp_count : lamp < n)) {
+        target = tree ? target_at(recv, lamp) : weights[lamp];
     }
     if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
         store_empty(lamp, w_sum, m, target);
@@ -357,7 +366,8 @@ void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, o
 }
 
 float phat_at(uint recv, uint lamp, uint n) {
-    if (lamp == LAMP_EMPTY || lamp >= n) {
+    uint limit = pc.proposal >= PROPOSAL_TREE ? pc.lamp_count : n;
+    if (lamp == LAMP_EMPTY || lamp >= limit) {
         return 0.0;
     }
     return target_at(recv, lamp);
@@ -531,8 +541,9 @@ void write_reservoir(uint slot, uint lamp, float w_sum, uint m, float target) {
 
 void main() {
     rng_init();
+    bool tree = pc.proposal >= PROPOSAL_TREE;
     uint n = pc.lamp_count;
-    if (n > 64u) {
+    if (!tree && n > 64u) {
         n = 64u;
     }
     uint receivers = pc.receiver_count;
@@ -560,8 +571,10 @@ void main() {
         }
         for (uint recv = 0u; recv < receivers; recv++) {
             float weights[64];
-            for (uint i = 0u; i < n; i++) {
-                weights[i] = target_at(recv, i);
+            if (!tree) {
+                for (uint i = 0u; i < n; i++) {
+                    weights[i] = target_at(recv, i);
+                }
             }
             uint lamp = c_lamp[recv];
             float w_sum = c_w[recv];
@@ -577,12 +590,12 @@ void main() {
                 float hist_w = h_w[recv];
                 cap_history(hist_m, hist_w, m);
                 float tq_c = 0.0;
-                if (lamp != LAMP_EMPTY && lamp < n) {
-                    tq_c = weights[lamp];
+                if (lamp != LAMP_EMPTY && (tree ? lamp < pc.lamp_count : lamp < n)) {
+                    tq_c = tree ? target_at(recv, lamp) : weights[lamp];
                 }
                 float tq_h = 0.0;
-                if (h_lamp[recv] != LAMP_EMPTY && h_lamp[recv] < n) {
-                    tq_h = weights[h_lamp[recv]];
+                if (h_lamp[recv] != LAMP_EMPTY && (tree ? h_lamp[recv] < pc.lamp_count : h_lamp[recv] < n)) {
+                    tq_h = tree ? target_at(recv, h_lamp[recv]) : weights[h_lamp[recv]];
                 }
                 merge_pair(
                     lamp, w_sum, m, target, tq_c,

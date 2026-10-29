@@ -185,4 +185,48 @@ impl Scene {
         });
         scene
     }
+
+    /// 16×16 lamps (256) over a 4×4 receiver grid. Powers span 0.05 to 40 and
+    /// heights sit at 0.4 m or above 2 m, so a flat CDF and a light tree disagree.
+    #[must_use]
+    pub fn many_lights() -> Self {
+        let mut lamps = Vec::with_capacity(256);
+        for row in 0..16 {
+            for col in 0..16 {
+                let index = row * 16 + col;
+                let power = if index % 17 == 0 {
+                    40.0
+                } else if index % 5 == 0 {
+                    0.05
+                } else {
+                    0.4 + 0.15 * as_f32(index % 7)
+                };
+                let height = if index % 3 == 0 {
+                    0.4
+                } else {
+                    2.2 + 0.05 * as_f32(row)
+                };
+                let tint = if index % 2 == 0 {
+                    Vec3::new(1.0, 0.8, 0.5)
+                } else {
+                    Vec3::new(0.4, 0.6, 1.0)
+                };
+                lamps.push(Lamp {
+                    position: Vec3::new(
+                        -6.0 + 0.8 * as_f32(col),
+                        height,
+                        -6.0 + 0.8 * as_f32(row),
+                    ),
+                    intensity: tint * power,
+                });
+            }
+        }
+        Self {
+            lamps,
+            receivers: grid(4, 4, 0.75, Vec3::new(0.7, 0.7, 0.7)),
+            occluders: Vec::new(),
+            width: 4,
+            camera: Vec3::new(0.0, 1.6, -8.0),
+        }
+    }
 }

@@ -12,6 +12,7 @@ use genos_math::Vec3;
 use crate::metrics::{frames_to_ref, grid_worst, ref_err_luma, ref_err_near, GateLimits};
 use crate::reservoir::{reservoir_w, Reservoir, Weighting, LAMP_EMPTY};
 use crate::restir::{Config, History, Proposal};
+use crate::tree::TreeFault;
 use crate::shade::{Aabb, Lamp, Receiver, Scene};
 
 const KIND: &str = "genos-restir-reference";
@@ -320,6 +321,7 @@ fn config_value(config: &Config) -> Value {
         ("temporal", genos_json::bool(config.temporal)),
         ("weighting", string(weight_name(config.weighting))),
         ("proposal", string(proposal_name(config.proposal))),
+        ("tree_fault", string(config.tree_fault.name())),
         ("history", string(history_name(config.history))),
         ("m_clamp", int(i64::from(config.m_clamp))),
     ])
@@ -336,6 +338,7 @@ fn proposal_name(proposal: Proposal) -> &'static str {
     match proposal {
         Proposal::Uniform => "uniform",
         Proposal::Target => "target",
+        Proposal::Tree => "tree",
     }
 }
 
@@ -456,7 +459,12 @@ fn parse_config(value: &Value) -> Result<Config, String> {
     let proposal = match value.get("proposal").and_then(Value::as_str).unwrap_or("") {
         "uniform" => Proposal::Uniform,
         "target" => Proposal::Target,
+        "tree" => Proposal::Tree,
         other => return Err(format!("proposal {other}")),
+    };
+    let tree_fault = match value.get("tree_fault").and_then(Value::as_str) {
+        None => TreeFault::None,
+        Some(name) => TreeFault::parse(name)?,
     };
     let history = match value.get("history").and_then(Value::as_str).unwrap_or("") {
         "temporal" => History::Temporal,
@@ -473,6 +481,7 @@ fn parse_config(value: &Value) -> Result<Config, String> {
             .ok_or("temporal")?,
         weighting,
         proposal,
+        tree_fault,
         history,
         m_clamp: value
             .get("m_clamp")
