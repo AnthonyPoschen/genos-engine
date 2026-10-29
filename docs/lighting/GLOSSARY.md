@@ -68,8 +68,11 @@ Role: OUT · Literature: Academy ACES 2.0 · More detail: [hdr-output design](..
 **Legacy shoulder**: the display curve in the tree today. At or below 0.64 it is the identity. Above that it is a shoulder. The `legacy` display mode.
 Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compose.comp`](../../crates/render/shaders/lighting_compose.comp); `linear_from_display` in [`trace.rs`](../../crates/render/src/trace.rs)
 
-**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
-Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid. The shipped pass adds `bloom_intensity` times that pyramid.
+Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md). [ADR 0028](../adr/0028-bloom.md) proposes an energy-conserving mix and is not the shipped pass.
+
+**Bloom scatter**: the fraction of a pixel the proposed blur replaces. `0` leaves the scene image. `1` replaces it with the blur. The sum of the image stays the sum of the scene when the blur preserves that sum. Not `bloom_intensity`.
+Role: TOOL · Literature: a normalization of Jimenez's additive intensity · More detail: [ADR 0028](../adr/0028-bloom.md)
 
 **HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The sigmoid top maps to 1000 nits when the surface reports no peak. The Linux/Wayland preference.
 Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
