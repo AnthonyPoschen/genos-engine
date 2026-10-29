@@ -9,6 +9,30 @@ const uint NODE_LAMP_EMPTY = 0xffffffffu;
 const float TREE_MIN_DIST = 1.0e-3;
 const float HALF = 0.5;
 
+// The checker reads these from the push constant. The live direct pass
+// defines them as header words before this include.
+#ifndef RESTIR_TREE_BASE
+#define RESTIR_TREE_BASE pc.tree_base
+#define RESTIR_RECV_BASE pc.recv_base
+#define RESTIR_TREE_COUNT pc.tree_count
+#define RESTIR_PROPOSAL pc.proposal
+#endif
+#ifndef RESTIR_WORDS
+#define RESTIR_WORDS words
+#endif
+
+#ifndef RESTIR_LIVE_RECEIVER
+void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
+    uint r = RESTIR_RECV_BASE + recv * 9u;
+    px = load_f(r);
+    py = load_f(r + 1u);
+    pz = load_f(r + 2u);
+    nx = load_f(r + 3u);
+    ny = load_f(r + 4u);
+    nz = load_f(r + 5u);
+}
+#endif
+
 float tree_sqrt(float value) {
     if (!(value > 0.0)) {
         return 0.0;
@@ -31,7 +55,7 @@ float tree_dot(float ax, float ay, float az, float bx, float by, float bz) {
 }
 
 float node_importance(uint node, uint recv, bool ignore_distance) {
-    uint base = pc.tree_base + node * NODE_STRIDE;
+    uint base = RESTIR_TREE_BASE + node * NODE_STRIDE;
     float power = load_f(base + 3u);
     if (power <= 0.0) {
         return 0.0;
@@ -46,10 +70,13 @@ float node_importance(uint node, uint recv, bool ignore_distance) {
     float center_x = HALF * (min_x + max_x);
     float center_y = HALF * (min_y + max_y);
     float center_z = HALF * (min_z + max_z);
-    uint r = pc.recv_base + recv * 9u;
-    float px = load_f(r);
-    float py = load_f(r + 1u);
-    float pz = load_f(r + 2u);
+    float px;
+    float py;
+    float pz;
+    float nx;
+    float ny;
+    float nz;
+    restir_receiver(recv, px, py, pz, nx, ny, nz);
     float dx = center_x - px;
     float dy = center_y - py;
     float dz = center_z - pz;
@@ -84,9 +111,7 @@ float node_importance(uint node, uint recv, bool ignore_distance) {
         return power * geom;
     }
     float inv = 1.0 / dist;
-    float cos_alpha = tree_dot(
-        load_f(r + 3u), load_f(r + 4u), load_f(r + 5u),
-        dx * inv, dy * inv, dz * inv);
+    float cos_alpha = tree_dot(nx, ny, nz, dx * inv, dy * inv, dz * inv);
     float sin_theta = radius * inv;
     if (sin_theta > 1.0) {
         sin_theta = 1.0;
@@ -101,27 +126,27 @@ float node_importance(uint node, uint recv, bool ignore_distance) {
 }
 
 void sample_tree(uint recv, out uint index, out float pdf, out bool hit) {
-    if (pc.tree_count == 0u) {
+    if (RESTIR_TREE_COUNT == 0u) {
         hit = false;
         index = 0u;
         pdf = 0.0;
         return;
     }
-    bool fault = pc.proposal == PROPOSAL_TREE_FAULT;
+    bool fault = RESTIR_PROPOSAL == PROPOSAL_TREE_FAULT;
     uint node = 0u;
     float acc_pdf = 1.0;
     for (uint step = 0u; step < 64u; step++) {
-        uint base = pc.tree_base + node * NODE_STRIDE;
-        uint left = words[base + 8u];
-        uint right = words[base + 9u];
-        uint lamp = words[base + 10u];
+        uint base = RESTIR_TREE_BASE + node * NODE_STRIDE;
+        uint left = RESTIR_WORDS[base + 8u];
+        uint right = RESTIR_WORDS[base + 9u];
+        uint lamp = RESTIR_WORDS[base + 10u];
         if (lamp != NODE_LAMP_EMPTY) {
             index = lamp;
             pdf = acc_pdf;
             hit = true;
             return;
         }
-        if (left >= pc.tree_count || right >= pc.tree_count) {
+        if (left >= RESTIR_TREE_COUNT || right >= RESTIR_TREE_COUNT) {
             next_f32();
             hit = false;
             index = 0u;
