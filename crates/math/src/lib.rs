@@ -9,6 +9,7 @@ mod mat;
 mod media;
 pub mod optics;
 mod quat;
+pub mod ssr;
 pub mod tonemap;
 mod vec;
 
