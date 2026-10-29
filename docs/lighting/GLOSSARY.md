@@ -207,6 +207,9 @@ Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020); motion vectors w
 **Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On is pairwise MIS and does not clamp M. The shade is `light * W`. Off divides by the sum of M, clamps M, and shades with `point_total / phat`. The menu switch is this key.
 Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 2023); the off path is Bitterli et al. 2020 section 3 and Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
 
+**ReSTIR reference**: the CPU checker for ReSTIR direct (`restir-ref`). It resamples point lamps with RIS, reuses a reservoir in time and across a receiver grid, and shades with the balance-heuristic weight. The dump is what a later GPU stage is diffed against. It is not the live lamp-pick shader.
+Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005); ReSTIR DI (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
+
 **Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
 Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
 

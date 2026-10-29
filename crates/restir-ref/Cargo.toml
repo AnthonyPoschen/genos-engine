@@ -1,0 +1,17 @@
+[package]
+name = "genos-restir-ref"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CPU reference for ReSTIR direct lighting. No window and no Vulkan device."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "restir-ref"
+path = "src/bin/restir_ref.rs"
+
+[dependencies]
+genos-json = { path = "../json" }
+genos-math = { path = "../math" }
