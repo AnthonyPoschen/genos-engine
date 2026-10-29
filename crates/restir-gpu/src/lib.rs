@@ -233,6 +233,7 @@ fn c1_config() -> Config {
         weighting: genos_restir_ref::reservoir::Weighting::Balance,
         proposal: Proposal::Target,
         history: History::Temporal,
+        m_clamp: genos_restir_ref::DEFAULT_M_CLAMP,
     }
 }
 
@@ -323,6 +324,7 @@ fn run_temporal(options: &Options) -> Result<Option<String>, String> {
         weighting: genos_restir_ref::reservoir::Weighting::Balance,
         proposal: options.proposal,
         history: History::Temporal,
+        m_clamp: genos_restir_ref::DEFAULT_M_CLAMP,
     };
     config.validate()?;
     let (by_frame, dispatch_ms) = temporal_reservoirs(&scene, &config, options)?;

@@ -162,6 +162,10 @@ fn parse_run(args: &[String]) -> Result<RunOpts, String> {
             "--history" => config.history = history(&next_value(args, &mut index, "--history")?)?,
             "--temporal" => config.temporal = true,
             "--no-temporal" => config.temporal = false,
+            "--m-clamp" => {
+                config.m_clamp =
+                    parse_u32(&next_value(args, &mut index, "--m-clamp")?, "--m-clamp")?;
+            }
             "--frame-ms" => {
                 limits.frame_ms =
                     parse_f32(&next_value(args, &mut index, "--frame-ms")?, "--frame-ms")?;
@@ -409,6 +413,8 @@ Options for run:
   --history NAME        temporal (default) or final
   --temporal            enable temporal reuse (default)
   --no-temporal         fresh candidates each frame
+  --m-clamp N           clamp history M to N times this frame's candidate count
+                        (default 20; 0 leaves M unclamped)
   --ref-err X           ref_err_near ceiling (default 0.05)
   --grid-worst X        grid_worst ceiling (default 0.15)
   --frames-to-ref N     frames_to_ref ceiling (default 8)

@@ -24,7 +24,7 @@ Named in `crates/restir-ref/src/lib.rs` and repeated here.
 - Receivers are a grid. Temporal history is the same index, not a motion vector.
 - Occluders are boxes, not mesh SDFs.
 - One spatial pass. History is the post-temporal reservoir, not the spatial one, so a neighbour's samples are not counted again next frame. `History::Final` stores the shaded reservoir instead.
-- `M` is not clamped.
+- History `M` is clamped to `m_clamp` times the current frame's candidate count before the temporal merge. The default multiple is 20 (Bitterli et al., TOG 2020). `m_clamp = 0` leaves `M` unclamped. The merge output can sit one candidate above the cap, because the clamp runs on the history input. `--m-clamp` sets the multiple. It is not the GPU fault `--m-cap`, which clamps history `M` to an absolute count.
 - An empty canonical sample returns the history record unchanged, matching `pairwise_merge`.
 - The four CPU gates run on an unoccluded grid. `Scene::shadow` adds one box and is the bias check only.
 
@@ -71,6 +71,7 @@ Other locks, same run:
 | Biased weight | `ref_err_near` in `metrics.json`, and `restir-ref diff` |
 | Reuse not reducing variance | `variance_falls_with_temporal_reuse` (ratio above) |
 | Temporal confidence surviving a change | `Session::reset_temporal`, then `history_m` (the test grows `M` past 2, then the next frame is 2) |
+| A moved lamp staying stale because history `M` grew without a cap | `a_moved_lamp_stops_being_stale_inside_the_m_clamp`. Unclamped `M` stays above 40. After the near lamp moves away, the 20× cap is within 0.15 relative error by frame 24, and the unclamped shade is still above 0.5 at that frame |
 | Visibility leak | `a_wall_blocks_one_lamp_and_not_the_other`, and the shadow `ref_err_near` |
 | Tunables | CLI flags, echoed in the dump `config` |
 | Snapshot | `reference.json`. `diff` is the restore check |
@@ -93,7 +94,7 @@ Each stage is a small diff against this reference. Lavapipe is the device until 
 | --- | --- | --- |
 | C0 | This CPU reference | `cargo test -p genos-restir-ref`. `make restir-ref` |
 | C1 | Initial candidates only. Same PCG stream and the documented draw order. `restir-gpu --initial` (off unless the flag or `GENOS_RESTIR_INITIAL` is set) | `restir-ref run --no-temporal --spatial 0 --frames 1`, then `restir-ref diff` on the reservoirs. Lavapipe. A perturbed seed must fail |
-| C2 | Temporal reuse. A change record clears history, as `reset_temporal` does. `--temporal` is off unless the flag or `GENOS_RESTIR_TEMPORAL` is set. `M` stays unclamped; `--m-cap` is the fault. | Diff the reservoirs after N frames against `restir-ref run --spatial 0`. A reset must drop `M` the way the CPU test does. `--m-cap 1` must fail the diff |
+| C2 | Temporal reuse. A change record clears history, as `reset_temporal` does. `--temporal` is off unless the flag or `GENOS_RESTIR_TEMPORAL` is set. History `M` is clamped to `m_clamp` times this frame's candidate count (default 20). `--m-cap` is still the absolute-count fault. | Diff the reservoirs after N frames against `restir-ref run --spatial 0`. A reset must drop `M` the way the CPU test does. `--m-cap 1` must fail the diff. A run where the 20× cap does not fire (8 candidates, 8 frames) stays an exact match |
 | C3 | One spatial pass and the balance weight | `restir-ref run --spatial 4`. Diff reservoirs. Do not treat the CPU multi-seed `grid_worst` of that run as the product gate |
 | C4 | Light-tree proposal | Bias against the brute sum. Not a bit match to the flat target CDF |
 | C5 | A flag replaces brute direct | One 4070 session, below |

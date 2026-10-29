@@ -15,7 +15,10 @@
 //! - Receivers are a grid. Temporal history is the same index, not a motion vector.
 //! - Occluders are boxes, not mesh SDFs.
 //! - One spatial pass. History is the post-temporal reservoir, not the spatial one.
-//! - `M` is not clamped. The shader's 24-bit field is wider than these scenes.
+//! - History `M` is clamped to `m_clamp` times the current frame's candidate
+//!   count before the temporal merge (default 20, Bitterli et al. 2020).
+//!   `m_clamp = 0` leaves `M` unclamped. The output of the merge can be one
+//!   candidate above the cap.
 //! - An empty canonical sample returns the history record unchanged, matching
 //!   `pairwise_merge`. A fresh candidate set is the normal frame.
 //! - The four gates run on an unoccluded grid (`Scene::gate`). `Scene::shadow`
@@ -40,5 +43,5 @@ pub mod shade;
 pub use dump::{diff_dumps, encode_dump, parse_dump, Diff, Dump};
 pub use harness::{encode_report, evaluate, write_run, EvalSpec, Report};
 pub use metrics::{frames_to_ref, grid_worst, ref_err_near, GateLimits};
-pub use restir::{Config, Counters, History, Proposal, Session};
+pub use restir::{Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
 pub use shade::Scene;
