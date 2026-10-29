@@ -567,14 +567,6 @@ fn usize_field(value: &Value, key: &str) -> Result<usize, String> {
     Ok(usize::try_from(raw).unwrap_or(0))
 }
 
-#[expect(
-    clippy::as_conversions,
-    reason = "JSON numbers are f64 and the reservoir stores f32"
-)]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "JSON numbers are f64 and the reservoir stores f32"
-)]
 fn narrow(value: f64) -> f32 {
-    value as f32
+    genos_math::f32_from_f64(value)
 }

@@ -207,16 +207,8 @@ fn variance(values: &[f32]) -> f32 {
         / scale
 }
 
-#[expect(
-    clippy::as_conversions,
-    reason = "Instant reports f64 seconds; the gate stores f32 milliseconds"
-)]
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "Instant reports f64 seconds; the gate stores f32 milliseconds"
-)]
 fn narrow_ms(value: f64) -> f32 {
-    value as f32
+    genos_math::f32_from_f64(value)
 }
 
 /// Text form of a report, one JSON object.

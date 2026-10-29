@@ -17,7 +17,7 @@ pub fn transmittance(optical_depth: f64) -> f64 {
 /// `f32` wrapper of [`transmittance`].
 #[must_use]
 pub fn transmittance_f32(optical_depth: f32) -> f32 {
-    narrow(transmittance(f64::from(optical_depth)))
+    f32_from_f64(transmittance(f64::from(optical_depth)))
 }
 
 /// Height-fog extinction `σ0 * exp(-(y - base_height) / thickness)`.
@@ -34,7 +34,7 @@ pub fn height_fog_density(sigma0: f64, thickness: f64, y: f64, base_height: f64)
 /// `f32` wrapper of [`height_fog_density`].
 #[must_use]
 pub fn height_fog_density_f32(sigma0: f32, thickness: f32, y: f32, base_height: f32) -> f32 {
-    narrow(height_fog_density(
+    f32_from_f64(height_fog_density(
         f64::from(sigma0),
         f64::from(thickness),
         f64::from(y),
@@ -58,7 +58,7 @@ pub fn phase_hg(g: f64, mu: f64) -> f64 {
 /// `f32` wrapper of [`phase_hg`].
 #[must_use]
 pub fn phase_hg_f32(g: f32, mu: f32) -> f32 {
-    narrow(phase_hg(f64::from(g), f64::from(mu)))
+    f32_from_f64(phase_hg(f64::from(g), f64::from(mu)))
 }
 
 /// Homogeneous single-scatter integral `(source / sigma) * (1 - exp(-sigma * distance))`.
@@ -75,7 +75,7 @@ pub fn homogeneous_inscatter(sigma: f64, source: f64, distance: f64) -> f64 {
 /// `f32` wrapper of [`homogeneous_inscatter`].
 #[must_use]
 pub fn homogeneous_inscatter_f32(sigma: f32, source: f32, distance: f32) -> f32 {
-    narrow(homogeneous_inscatter(
+    f32_from_f64(homogeneous_inscatter(
         f64::from(sigma),
         f64::from(source),
         f64::from(distance),
@@ -118,7 +118,7 @@ pub fn height_optical_depth_f32(
     cos_theta: f32,
     distance: f32,
 ) -> f32 {
-    narrow(height_optical_depth(
+    f32_from_f64(height_optical_depth(
         f64::from(sigma0),
         f64::from(thickness),
         f64::from(base_height),
@@ -129,14 +129,16 @@ pub fn height_optical_depth_f32(
     ))
 }
 
+/// Rounds an f64 to the nearest f32. The workspace's one f64 to f32 narrowing.
 #[allow(
     clippy::as_conversions,
-    reason = "f32 fog calls the f64 closed form and stores an f32 result"
+    reason = "the one shared f64 to f32 narrowing; f32 callers of f64 closed forms use it"
 )]
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "f32 fog calls the f64 closed form and stores an f32 result"
+    reason = "the one shared f64 to f32 narrowing; f32 callers of f64 closed forms use it"
 )]
-fn narrow(value: f64) -> f32 {
+#[must_use]
+pub fn f32_from_f64(value: f64) -> f32 {
     value as f32
 }
