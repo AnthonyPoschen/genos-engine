@@ -36,8 +36,11 @@ Role: LIGHTS · Literature: GIBS treats it as a shadow-ray light · More detail:
 **Ambient fill**: a flat light used only when GI is off (constant/hemisphere/day/curve). It is not GI.
 Role: OUT · Literature: — (classic ambient term) · More detail: `AmbientMode`
 
-**Emissive**: a surface that gives off light. GI rays see it like any other lit surface.
-Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+**Emissive**: a surface that gives off light. GI rays see it like any other lit surface. Proposed (ADR 0030): direct light samples an emissive triangle, and the bounce of a triangle in the light tree is the receiver's direct term.
+Role: OUT · Literature: Lumen emissive via surface cache · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md); [../adr/0030-emissive-surfaces.md](../adr/0030-emissive-surfaces.md)
+
+**Emissive triangle** (proposed): one front-facing mesh triangle whose glTF emission is a light in the ReSTIR DI tree. The sample is uniform in area. The shading density is the solid-angle pdf.
+Role: LIGHTS · Literature: ReSTIR DI (Bitterli et al. 2020); PBRT area-light density · More detail: [../adr/0030-emissive-surfaces.md](../adr/0030-emissive-surfaces.md); `genos_math::emissive`
 
 ### Display (accepted, ADR 0015)
 
@@ -358,8 +361,8 @@ Role: OUT · Literature: glTF 2.0 Appendix B diffuse term; Filament diffuse albe
 **Ambient occlusion**: the glTF occlusion texture. It scales indirect irradiance and does not scale direct light.
 Role: VIS · Literature: glTF 2.0 occlusion texture · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
-**Promoted emitter**: an emissive region extracted at import and placed in the light tree.
-Role: LIGHTS · Literature: Lumen emissive cards promoted to lights · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+**Promoted emitter**: an emissive region extracted at import and placed in the light tree. ADR 0030 (proposed) keeps that light-tree role and replaces the region's 64 sample points with the emissive triangle. This name stays until that decision is accepted.
+Role: LIGHTS · Literature: Lumen emissive cards promoted to lights · More detail: [../systems/gi-design.md#emissive-surfaces](../systems/gi-design.md#emissive-surfaces); [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md); [../adr/0030-emissive-surfaces.md](../adr/0030-emissive-surfaces.md)
 
 **Texture page**: one fixed block of one mip of a texture. The word page alone remains the 8×8 surface-cache block.
 Role: STORE · Literature: Mittring virtual-texture page (SIGGRAPH 2008) · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md); [assets/plan.md](../systems/assets/plan.md)
