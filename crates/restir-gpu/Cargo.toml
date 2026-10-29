@@ -1,0 +1,17 @@
+[package]
+name = "genos-restir-gpu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "GPU initial ReSTIR DI candidates. Off unless --initial is passed. No window."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "restir-gpu"
+path = "src/bin/restir_gpu.rs"
+
+[dependencies]
+genos-math = { path = "../math" }
+genos-restir-ref = { path = "../restir-ref" }
