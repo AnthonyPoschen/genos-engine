@@ -4,7 +4,10 @@
 //! the CPU reference stream. The loader is `libvulkan.so.1` (ADR 0007).
 
 #![expect(clippy::as_conversions, reason = "Vulkan create-info pointers")]
-#![expect(clippy::borrow_as_ptr, reason = "Vulkan entry points take raw pointers")]
+#![expect(
+    clippy::borrow_as_ptr,
+    reason = "Vulkan entry points take raw pointers"
+)]
 #![expect(
     clippy::items_after_statements,
     reason = "Vulkan struct layouts sit next to the call that fills them"
@@ -21,6 +24,7 @@ use std::ffi::{c_char, c_void, CStr};
 use genos_math::f32_from_f64;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_initial.spv"));
+const SPV_TEMPORAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_temporal.spv"));
 
 type Handle = *mut c_void;
 type VkResult = i32;
@@ -45,13 +49,59 @@ pub struct GpuRun {
     pub words: Vec<u32>,
 }
 
+/// Temporal-reuse push constants. `reset_after == u32::MAX` clears nothing.
+/// `m_cap == 0` leaves `M` unclamped, matching the CPU reference.
+#[derive(Clone, Copy, Debug)]
+pub struct TemporalPush {
+    pub base: Push,
+    pub frames: u32,
+    pub reset_after: u32,
+    pub m_cap: u32,
+}
+
 /// Runs the initial-candidate shader on lavapipe.
 ///
 /// # Errors
 ///
 /// Returns a string when the loader, the device, or the dispatch fails.
 pub fn dispatch(words: &[u32], push: Push) -> Result<GpuRun, String> {
-    unsafe { dispatch_inner(words, push) }
+    let (seed_lo, seed_hi) = low_high(push.seed)?;
+    let words_push = [
+        seed_lo,
+        seed_hi,
+        push.receivers,
+        push.lamps,
+        push.candidates,
+        push.proposal,
+        push.lamp_base,
+        push.recv_base,
+        push.out_base,
+    ];
+    unsafe { dispatch_inner(words, SPV, &words_push) }
+}
+
+/// Runs the temporal-reuse shader on lavapipe.
+///
+/// # Errors
+///
+/// Returns a string when the loader, the device, or the dispatch fails.
+pub fn dispatch_temporal(words: &[u32], push: TemporalPush) -> Result<GpuRun, String> {
+    let (seed_lo, seed_hi) = low_high(push.base.seed)?;
+    let words_push = [
+        seed_lo,
+        seed_hi,
+        push.base.receivers,
+        push.base.lamps,
+        push.base.candidates,
+        push.base.proposal,
+        push.base.lamp_base,
+        push.base.recv_base,
+        push.base.out_base,
+        push.frames,
+        push.reset_after,
+        push.m_cap,
+    ];
+    unsafe { dispatch_inner(words, SPV_TEMPORAL, &words_push) }
 }
 
 #[repr(C)]
@@ -74,7 +124,10 @@ fn vk_check(result: VkResult, what: &str) -> Result<(), String> {
 }
 
 fn device_name(bytes: &[u8]) -> String {
-    let end = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
@@ -84,7 +137,7 @@ fn low_high(seed: u64) -> Result<(u32, u32), String> {
     Ok((lo, hi))
 }
 
-unsafe fn dispatch_inner(words: &[u32], push: Push) -> Result<GpuRun, String> {
+unsafe fn dispatch_inner(words: &[u32], spv: &[u8], push_words: &[u32]) -> Result<GpuRun, String> {
     let lib = dlopen(c"libvulkan.so.1".as_ptr(), 2);
     if lib.is_null() {
         return Err("libvulkan.so.1 did not open".to_string());
@@ -132,7 +185,11 @@ unsafe fn dispatch_inner(words: &[u32], push: Push) -> Result<GpuRun, String> {
     };
     let mut instance = std::ptr::null_mut();
     vk_check(
-        create_instance(&raw const info as *const u8, std::ptr::null(), &mut instance),
+        create_instance(
+            &raw const info as *const u8,
+            std::ptr::null(),
+            &mut instance,
+        ),
         "vkCreateInstance",
     )?;
     let load = |name: &CStr| get_instance(instance, name.as_ptr());
@@ -258,17 +315,28 @@ unsafe fn dispatch_inner(words: &[u32], push: Push) -> Result<GpuRun, String> {
         "vkCreateDevice",
     )?;
     let dload = |entry: &CStr| get_device(device, entry.as_ptr());
-    let started = std::time::Instant::now();
-    let result = run_shader(dload, device, family, words, push, &raw_props, mem_count);
-    let millis = started.elapsed().as_secs_f64() * 1000.0;
+    let result = run_shader(
+        dload,
+        device,
+        family,
+        words,
+        ShaderBytes { spv, push_words },
+        &raw_props,
+        mem_count,
+    );
     type FnDestroyDev = unsafe extern "system" fn(Handle, *const c_void);
     let destroy_device: FnDestroyDev = std::mem::transmute(dload(c"vkDestroyDevice"));
     destroy_device(device, std::ptr::null());
     destroy_instance(instance, std::ptr::null());
     let mut run = result?;
     run.device = name;
-    run.dispatch_ms = f32_from_f64(millis);
     Ok(run)
+}
+
+#[derive(Clone, Copy)]
+struct ShaderBytes<'a> {
+    spv: &'a [u8],
+    push_words: &'a [u32],
 }
 
 unsafe fn run_shader(
@@ -276,28 +344,47 @@ unsafe fn run_shader(
     device: Handle,
     family: u32,
     words: &[u32],
-    push: Push,
+    shader: ShaderBytes<'_>,
     raw_props: &[u8],
     mem_count: u32,
 ) -> Result<GpuRun, String> {
+    let ShaderBytes { spv, push_words } = shader;
     type FnQueue = unsafe extern "system" fn(Handle, u32, u32, *mut Handle);
-    type FnBuf = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+    type FnBuf =
+        unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
     type FnReq = unsafe extern "system" fn(Handle, Handle, *mut u8);
-    type FnAlloc = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+    type FnAlloc =
+        unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
     type FnBind = unsafe extern "system" fn(Handle, Handle, Handle, u64) -> VkResult;
-    type FnMap = unsafe extern "system" fn(Handle, Handle, u64, u64, u32, *mut *mut c_void) -> VkResult;
+    type FnMap =
+        unsafe extern "system" fn(Handle, Handle, u64, u64, u32, *mut *mut c_void) -> VkResult;
     type FnUnmap = unsafe extern "system" fn(Handle, Handle);
-    type FnLayout = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-    type FnShader = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
-    type FnPool = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+    type FnLayout =
+        unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+    type FnShader =
+        unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
+    type FnPool =
+        unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
     type FnAllocCmd = unsafe extern "system" fn(Handle, *const u8, *mut Handle) -> VkResult;
     type FnBegin = unsafe extern "system" fn(Handle, *const u8) -> VkResult;
     type FnEnd = unsafe extern "system" fn(Handle) -> VkResult;
     type FnBindPipe = unsafe extern "system" fn(Handle, u32, Handle);
-    type FnBindSet = unsafe extern "system" fn(Handle, u32, Handle, u32, u32, *const Handle, u32, *const u32);
+    type FnBindSet =
+        unsafe extern "system" fn(Handle, u32, Handle, u32, u32, *const Handle, u32, *const u32);
     type FnPush = unsafe extern "system" fn(Handle, Handle, u32, u32, u32, *const c_void);
     type FnDispatch = unsafe extern "system" fn(Handle, u32, u32, u32);
-    type FnBarrier = unsafe extern "system" fn(Handle, u32, u32, u32, u32, *const c_void, u32, *const u8, u32, *const c_void);
+    type FnBarrier = unsafe extern "system" fn(
+        Handle,
+        u32,
+        u32,
+        u32,
+        u32,
+        *const c_void,
+        u32,
+        *const u8,
+        u32,
+        *const c_void,
+    );
     type FnSubmit = unsafe extern "system" fn(Handle, u32, *const u8, Handle) -> VkResult;
     type FnIdle = unsafe extern "system" fn(Handle) -> VkResult;
     type FnUpdate = unsafe extern "system" fn(Handle, u32, *const u8, u32, *const u8);
@@ -312,8 +399,14 @@ unsafe fn run_shader(
     let desc_layout: FnLayout = std::mem::transmute(dload(c"vkCreateDescriptorSetLayout"));
     let pipe_layout: FnLayout = std::mem::transmute(dload(c"vkCreatePipelineLayout"));
     let shader_mod: FnShader = std::mem::transmute(dload(c"vkCreateShaderModule"));
-    let create_pipes: unsafe extern "system" fn(Handle, Handle, u32, *const u8, *const c_void, *mut Handle) -> VkResult =
-        std::mem::transmute(dload(c"vkCreateComputePipelines"));
+    let create_pipes: unsafe extern "system" fn(
+        Handle,
+        Handle,
+        u32,
+        *const u8,
+        *const c_void,
+        *mut Handle,
+    ) -> VkResult = std::mem::transmute(dload(c"vkCreateComputePipelines"));
     let desc_pool: FnPool = std::mem::transmute(dload(c"vkCreateDescriptorPool"));
     let alloc_desc: FnAllocCmd = std::mem::transmute(dload(c"vkAllocateDescriptorSets"));
     let update_desc: FnUpdate = std::mem::transmute(dload(c"vkUpdateDescriptorSets"));
@@ -355,7 +448,12 @@ unsafe fn run_shader(
     };
     let mut buffer = std::ptr::null_mut();
     vk_check(
-        create_buffer(device, &raw const buf_info as *const u8, std::ptr::null(), &mut buffer),
+        create_buffer(
+            device,
+            &raw const buf_info as *const u8,
+            std::ptr::null(),
+            &mut buffer,
+        ),
         "buffer",
     )?;
     let mut reqs = [0u8; 24];
@@ -395,12 +493,20 @@ unsafe fn run_shader(
     };
     let mut memory = std::ptr::null_mut();
     vk_check(
-        alloc_mem(device, &raw const alloc_info as *const u8, std::ptr::null(), &mut memory),
+        alloc_mem(
+            device,
+            &raw const alloc_info as *const u8,
+            std::ptr::null(),
+            &mut memory,
+        ),
         "allocate",
     )?;
     vk_check(bind_buf(device, buffer, memory, 0), "bind")?;
     let mut mapped = std::ptr::null_mut();
-    vk_check(map_mem(device, memory, 0, alloc_size, 0, &mut mapped), "map")?;
+    vk_check(
+        map_mem(device, memory, 0, alloc_size, 0, &mut mapped),
+        "map",
+    )?;
     let dst = std::slice::from_raw_parts_mut(mapped.cast::<u32>(), words.len());
     dst.copy_from_slice(words);
 
@@ -436,7 +542,12 @@ unsafe fn run_shader(
     };
     let mut set_layout = std::ptr::null_mut();
     vk_check(
-        desc_layout(device, &raw const layout_info as *const u8, std::ptr::null(), &mut set_layout),
+        desc_layout(
+            device,
+            &raw const layout_info as *const u8,
+            std::ptr::null(),
+            &mut set_layout,
+        ),
         "set layout",
     )?;
     #[repr(C)]
@@ -445,10 +556,11 @@ unsafe fn run_shader(
         offset: u32,
         size: u32,
     }
+    let push_bytes = u32::try_from(push_words.len().saturating_mul(4)).unwrap_or(0);
     let push_range = PushRange {
         stages: 0x20,
         offset: 0,
-        size: 36,
+        size: push_bytes,
     };
     #[repr(C)]
     struct PipeLayoutInfo {
@@ -471,14 +583,22 @@ unsafe fn run_shader(
     };
     let mut layout = std::ptr::null_mut();
     vk_check(
-        pipe_layout(device, &raw const pipe_layout_info as *const u8, std::ptr::null(), &mut layout),
+        pipe_layout(
+            device,
+            &raw const pipe_layout_info as *const u8,
+            std::ptr::null(),
+            &mut layout,
+        ),
         "pipeline layout",
     )?;
-    let (spirv_words, rest) = SPV.as_chunks::<4>();
+    let (spirv_words, rest) = spv.as_chunks::<4>();
     if !rest.is_empty() {
         return Err("SPIR-V length is not a multiple of 4".to_string());
     }
-    let spirv: Vec<u32> = spirv_words.iter().map(|word| u32::from_le_bytes(*word)).collect();
+    let spirv: Vec<u32> = spirv_words
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
     #[repr(C)]
     struct ShaderInfo {
         s_type: i32,
@@ -496,7 +616,12 @@ unsafe fn run_shader(
     };
     let mut module = std::ptr::null_mut();
     vk_check(
-        shader_mod(device, &raw const shader_info as *const u8, std::ptr::null(), &mut module),
+        shader_mod(
+            device,
+            &raw const shader_info as *const u8,
+            std::ptr::null(),
+            &mut module,
+        ),
         "shader",
     )?;
     #[repr(C)]
@@ -539,7 +664,14 @@ unsafe fn run_shader(
     };
     let mut pipeline = std::ptr::null_mut();
     vk_check(
-        create_pipes(device, std::ptr::null_mut(), 1, &raw const pipe_info as *const u8, std::ptr::null(), &mut pipeline),
+        create_pipes(
+            device,
+            std::ptr::null_mut(),
+            1,
+            &raw const pipe_info as *const u8,
+            std::ptr::null(),
+            &mut pipeline,
+        ),
         "pipeline",
     )?;
     #[repr(C)]
@@ -567,7 +699,12 @@ unsafe fn run_shader(
     };
     let mut pool = std::ptr::null_mut();
     vk_check(
-        desc_pool(device, &raw const pool_info as *const u8, std::ptr::null(), &mut pool),
+        desc_pool(
+            device,
+            &raw const pool_info as *const u8,
+            std::ptr::null(),
+            &mut pool,
+        ),
         "descriptor pool",
     )?;
     #[repr(C)]
@@ -586,7 +723,10 @@ unsafe fn run_shader(
         layouts: &set_layout,
     };
     let mut set = std::ptr::null_mut();
-    vk_check(alloc_desc(device, &raw const alloc_sets as *const u8, &mut set), "descriptor set")?;
+    vk_check(
+        alloc_desc(device, &raw const alloc_sets as *const u8, &mut set),
+        "descriptor set",
+    )?;
     #[repr(C)]
     struct BufDesc {
         buffer: Handle,
@@ -623,7 +763,13 @@ unsafe fn run_shader(
         buffer: &buf_desc,
         texel: std::ptr::null(),
     };
-    update_desc(device, 1, &raw const write as *const u8, 0, std::ptr::null());
+    update_desc(
+        device,
+        1,
+        &raw const write as *const u8,
+        0,
+        std::ptr::null(),
+    );
 
     #[repr(C)]
     struct CmdPoolInfo {
@@ -640,7 +786,12 @@ unsafe fn run_shader(
     };
     let mut commands = std::ptr::null_mut();
     vk_check(
-        cmd_pool(device, &raw const cmd_pool_info as *const u8, std::ptr::null(), &mut commands),
+        cmd_pool(
+            device,
+            &raw const cmd_pool_info as *const u8,
+            std::ptr::null(),
+            &mut commands,
+        ),
         "command pool",
     )?;
     #[repr(C)]
@@ -659,7 +810,10 @@ unsafe fn run_shader(
         count: 1,
     };
     let mut cmd = std::ptr::null_mut();
-    vk_check(alloc_cmd(device, &raw const cmd_alloc as *const u8, &mut cmd), "command buffer")?;
+    vk_check(
+        alloc_cmd(device, &raw const cmd_alloc as *const u8, &mut cmd),
+        "command buffer",
+    )?;
     #[repr(C)]
     struct BeginInfo {
         s_type: i32,
@@ -687,34 +841,28 @@ unsafe fn run_shader(
         src: 0x4000,
         dst: 0x20,
     };
-    barrier(cmd, 0x4000, 0x800, 0, 1, &raw const host_to_shader as *const c_void, 0, std::ptr::null(), 0, std::ptr::null());
+    barrier(
+        cmd,
+        0x4000,
+        0x800,
+        0,
+        1,
+        &raw const host_to_shader as *const c_void,
+        0,
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+    );
     bind_pipe(cmd, 1, pipeline);
     bind_set(cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
-    let (seed_lo, seed_hi) = low_high(push.seed)?;
-    #[repr(C)]
-    struct GpuPush {
-        seed_lo: u32,
-        seed_hi: u32,
-        receivers: u32,
-        lamps: u32,
-        candidates: u32,
-        proposal: u32,
-        lamp_base: u32,
-        recv_base: u32,
-        out_base: u32,
-    }
-    let gpu_push = GpuPush {
-        seed_lo,
-        seed_hi,
-        receivers: push.receivers,
-        lamps: push.lamps,
-        candidates: push.candidates,
-        proposal: push.proposal,
-        lamp_base: push.lamp_base,
-        recv_base: push.recv_base,
-        out_base: push.out_base,
-    };
-    push_cmd(cmd, layout, 0x20, 0, 36, &raw const gpu_push as *const c_void);
+    push_cmd(
+        cmd,
+        layout,
+        0x20,
+        0,
+        push_bytes,
+        push_words.as_ptr().cast::<c_void>(),
+    );
     dispatch_cmd(cmd, 1, 1, 1);
     let shader_to_host = MemBarrier {
         s_type: 46,
@@ -722,7 +870,18 @@ unsafe fn run_shader(
         src: 0x40,
         dst: 0x2000,
     };
-    barrier(cmd, 0x800, 0x4000, 0, 1, &raw const shader_to_host as *const c_void, 0, std::ptr::null(), 0, std::ptr::null());
+    barrier(
+        cmd,
+        0x800,
+        0x4000,
+        0,
+        1,
+        &raw const shader_to_host as *const c_void,
+        0,
+        std::ptr::null(),
+        0,
+        std::ptr::null(),
+    );
     vk_check(end_cmd(cmd), "end")?;
     #[repr(C)]
     struct SubmitInfo {
@@ -747,14 +906,24 @@ unsafe fn run_shader(
         signal_count: 0,
         signals: std::ptr::null(),
     };
-    vk_check(submit(queue, 1, &raw const submit_info as *const u8, std::ptr::null_mut()), "submit")?;
+    let started = std::time::Instant::now();
+    vk_check(
+        submit(
+            queue,
+            1,
+            &raw const submit_info as *const u8,
+            std::ptr::null_mut(),
+        ),
+        "submit",
+    )?;
     vk_check(idle(queue), "wait")?;
+    let queued_ms = f32_from_f64(started.elapsed().as_secs_f64() * 1000.0);
     let src = std::slice::from_raw_parts(mapped.cast::<u32>(), words.len());
     let out = src.to_vec();
     unmap_mem(device, memory);
     Ok(GpuRun {
         device: String::new(),
-        dispatch_ms: 0.0,
+        dispatch_ms: queued_ms,
         words: out,
     })
 }

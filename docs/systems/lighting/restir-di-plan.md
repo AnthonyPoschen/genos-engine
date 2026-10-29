@@ -93,7 +93,7 @@ Each stage is a small diff against this reference. Lavapipe is the device until 
 | --- | --- | --- |
 | C0 | This CPU reference | `cargo test -p genos-restir-ref`. `make restir-ref` |
 | C1 | Initial candidates only. Same PCG stream and the documented draw order. `restir-gpu --initial` (off unless the flag or `GENOS_RESTIR_INITIAL` is set) | `restir-ref run --no-temporal --spatial 0 --frames 1`, then `restir-ref diff` on the reservoirs. Lavapipe. A perturbed seed must fail |
-| C2 | Temporal reuse. A change record clears history, as `reset_temporal` does | Diff the reservoirs after N frames. A reset must drop `M` the way the CPU test does |
+| C2 | Temporal reuse. A change record clears history, as `reset_temporal` does. `--temporal` is off unless the flag or `GENOS_RESTIR_TEMPORAL` is set. `M` stays unclamped; `--m-cap` is the fault. | Diff the reservoirs after N frames against `restir-ref run --spatial 0`. A reset must drop `M` the way the CPU test does. `--m-cap 1` must fail the diff |
 | C3 | One spatial pass and the balance weight | `restir-ref run --spatial 4`. Diff reservoirs. Do not treat the CPU multi-seed `grid_worst` of that run as the product gate |
 | C4 | Light-tree proposal | Bias against the brute sum. Not a bit match to the flat target CDF |
 | C5 | A flag replaces brute direct | One 4070 session, below |

@@ -3,7 +3,7 @@ name = "genos-restir-gpu"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "GPU initial ReSTIR DI candidates. Off unless --initial is passed. No window."
+description = "GPU ReSTIR DI candidates. Off unless --initial or --temporal is passed. No window."
 
 [lints]
 workspace = true
