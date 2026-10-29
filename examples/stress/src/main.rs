@@ -169,6 +169,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --restir-di on|off        ReSTIR DI on the direct pass (GENOS_RESTIR_DI). Off by default
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
@@ -272,6 +273,7 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
+    restir_di: Option<String>,
     /// Material flags, in order, including the values. The argument wins over the environment.
     material_args: Vec<String>,
 }
@@ -417,6 +419,7 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
+        restir_di: None,
         material_args: Vec::new(),
     };
     let mut report: Option<PathBuf> = None;
@@ -526,6 +529,7 @@ fn options() -> Result<Options, String> {
             "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
             "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
             "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
+            "--restir-di" => opts.restir_di = Some(value()?),
             "--help" | "-h" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -779,6 +783,11 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             opts.lamp_pick_unbiased.as_deref(),
             "lamp_pick_unbiased",
             "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
+        ),
+        (
+            opts.restir_di.as_deref(),
+            "restir_di",
+            "GENOS_RESTIR_DI",
         ),
     ];
     for (value, key, var) in keys {

@@ -524,6 +524,10 @@ pub struct LightingSettings {
     /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
     /// Potato and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
+    /// ReSTIR DI on screen pixels (ADR 0022 stage C). Off leaves the direct
+    /// pass on the brute or lamp-pick shade. The light tree, the reservoirs,
+    /// and the three passes run only while this is on.
+    pub restir_di: bool,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
@@ -701,6 +705,7 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            restir_di: false,
             time_of_day: 12.0,
         }
     }
@@ -1125,6 +1130,7 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_radius={}", self.lamp_pick.radius);
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
+        let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
@@ -1278,6 +1284,7 @@ impl LightingSettings {
             "lamp_pick_radius" => self.lamp_pick.radius = num_u32(value)?,
             "lamp_pick_history" => self.lamp_pick.history = num_u32(value)?,
             "lamp_pick_unbiased" => self.lamp_pick.unbiased = on(value)?,
+            "restir_di" => self.restir_di = on(value)?,
             "lamp_pick_reuse" => {
                 if on(value)? {
                     self.lamp_pick.mode = LampPickMode::Reuse;
@@ -1398,6 +1405,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_RESTIR_DI", "restir_di"),
         ];
         for (var, key) in keys {
             if let Ok(value) = lighting_env(var) {

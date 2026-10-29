@@ -227,7 +227,43 @@ fn write_shader_glue(
         ));
     }
     append_hdr_compose(&mut glue_text, out);
+    append_restir(&mut glue_text, out);
     std::fs::write(&glue, glue_text).unwrap();
+}
+
+fn append_restir(glue_text: &mut String, out: &std::path::Path) {
+    let live = compile_restir_live(out);
+    let direct = compile_glslc_define(
+        "shaders/lighting_direct.comp",
+        &out.join("lighting_direct_restir.comp.spv"),
+        "GENOS_RESTIR_DI",
+    );
+    glue_text.push_str(&format!(
+        "pub static RESTIR_LIVE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        live.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_DIRECT_RESTIR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        direct.display()
+    ));
+}
+
+fn compile_restir_live(out: &std::path::Path) -> PathBuf {
+    println!("cargo:rerun-if-changed=shaders/restir_live.comp");
+    for piece in [
+        "../restir-gpu/shaders/restir_tree.glsl",
+        "../restir-gpu/shaders/restir_sample.glsl",
+        "../restir-gpu/shaders/restir_merge.glsl",
+        "../restir-gpu/shaders/restir_spatial_ops.glsl",
+    ] {
+        println!("cargo:rerun-if-changed={piece}");
+    }
+    let dest = out.join("restir_live.comp.spv");
+    compile_args(
+        "shaders/restir_live.comp",
+        &dest,
+        &["-I", "../restir-gpu/shaders"],
+    )
 }
 
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {

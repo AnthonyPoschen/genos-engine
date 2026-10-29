@@ -393,6 +393,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "Lamp unbiased",
             lighting.lamp_pick.unbiased,
         ),
+        Knob::switch("lighting_restir_di", "ReSTIR DI", lighting.restir_di),
         Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
         Knob::choice(
             "lighting_shadow_filter",
@@ -625,6 +626,7 @@ pub fn apply_lighting_knob(
         "lighting_lamp_pick_radius" => ("lamp_pick_radius", whole.to_string()),
         "lighting_lamp_pick_history" => ("lamp_pick_history", whole.max(1).to_string()),
         "lighting_lamp_pick_unbiased" => ("lamp_pick_unbiased", on_off(v)),
+        "lighting_restir_di" => ("restir_di", on_off(v)),
         "lighting_shadows" => ("shadows", on_off(v)),
         "lighting_shadow_filter" => (
             "shadow_filter",
