@@ -12,6 +12,7 @@ use std::process::ExitCode;
 use genos_restir_ref::metrics::GateLimits;
 use genos_restir_ref::reservoir::Weighting;
 use genos_restir_ref::restir::{Config, History, Proposal};
+use genos_restir_ref::TreeFault;
 use genos_restir_ref::shade::Scene;
 use genos_restir_ref::{diff_dumps, evaluate, parse_dump, write_run, EvalSpec, Report};
 
@@ -156,6 +157,10 @@ fn parse_run(args: &[String]) -> Result<RunOpts, String> {
             "--proposal" => {
                 config.proposal = proposal(&next_value(args, &mut index, "--proposal")?)?;
             }
+            "--tree-fault" => {
+                config.tree_fault =
+                    TreeFault::parse(&next_value(args, &mut index, "--tree-fault")?)?;
+            }
             "--weighting" => {
                 config.weighting = weighting(&next_value(args, &mut index, "--weighting")?)?;
             }
@@ -193,6 +198,9 @@ fn parse_run(args: &[String]) -> Result<RunOpts, String> {
     }
     if seeds == 0 {
         return Err("--seeds must be positive".to_string());
+    }
+    if config.tree_fault != TreeFault::None && config.proposal != Proposal::Tree {
+        return Err("--tree-fault applies to --proposal tree".to_string());
     }
     Ok(RunOpts {
         scene: scene_by_name(&scene_name)?,
@@ -260,6 +268,7 @@ fn scene_by_name(name: &str) -> Result<Scene, String> {
         "row" => Ok(Scene::open_row()),
         "domain" => Ok(Scene::domain_pair()),
         "variance" => Ok(Scene::variance_point()),
+        "many" => Ok(Scene::many_lights()),
         other => Err(format!("unknown scene {other}")),
     }
 }
@@ -268,6 +277,7 @@ fn proposal(name: &str) -> Result<Proposal, String> {
     match name {
         "uniform" => Ok(Proposal::Uniform),
         "target" => Ok(Proposal::Target),
+        "tree" => Ok(Proposal::Tree),
         other => Err(format!("unknown proposal {other}")),
     }
 }
@@ -402,13 +412,14 @@ The default directory is ./genos-debug/restir. The two run files are replaced.
 Nothing is written under $HOME.
 
 Options for run:
-  --scene NAME          gate (default), shadow, open, row, domain, variance
+  --scene NAME          gate (default), shadow, open, row, domain, variance, many
   --frames N            frames per seed (default 8)
   --seeds N             seeds 1..=N (default 64)
   --candidates N        initial RIS candidates (default 8)
   --spatial N           spatial neighbours (default 0; the open-grid test uses 3)
   --radius N            Chebyshev radius (default 2)
-  --proposal NAME       target (default) or uniform
+  --proposal NAME       target (default), uniform, or tree
+  --tree-fault NAME     none (default) or ignore-distance (tree proposal only)
   --weighting NAME      balance (default) or section3
   --history NAME        temporal (default) or final
   --temporal            enable temporal reuse (default)

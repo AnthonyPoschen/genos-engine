@@ -14,7 +14,8 @@
 //!
 //! Departures are the CPU reference's departures (`crates/restir-ref/src/lib.rs`).
 //! One compute invocation walks the grid in order so the PCG stream stays the
-//! documented draw order. The light tree is a later stage.
+//! documented draw order. `--proposal tree` walks the CPU light tree
+//! (stage C4). That path is off unless the flag is set.
 //!
 //! Replicated state: none. The reservoirs stay in the checker.
 //! Authority: the checker process.
@@ -27,6 +28,8 @@ use std::path::{Path, PathBuf};
 use genos_math::Vec3;
 use genos_restir_ref::reservoir::Reservoir;
 use genos_restir_ref::restir::{Config, History, Proposal};
+use genos_restir_ref::tree::LightTree;
+use genos_restir_ref::TreeFault;
 use genos_restir_ref::shade::{brute, luminance, shade, Scene};
 use genos_restir_ref::{encode_dump, Dump};
 
@@ -54,6 +57,8 @@ pub enum ScenePick {
     Gate,
     /// One receiver, eight coloured lamps.
     OpenRow,
+    /// 256 lamps, mixed power and distance.
+    Many,
 }
 
 /// Parsed invocation. `stage` selects C1 or C2.
@@ -76,6 +81,8 @@ pub struct Options {
     /// Fault: reverse the neighbour list after the draws.
     pub reverse_neighbours: bool,
     pub proposal: Proposal,
+    /// Applied only with [`Proposal::Tree`].
+    pub tree_fault: TreeFault,
     pub scene: ScenePick,
     pub out: PathBuf,
 }
@@ -108,8 +115,9 @@ pub fn parse_args(
     let mut m_cap = 0u32;
     let mut m_clamp = genos_restir_ref::DEFAULT_M_CLAMP;
     let mut candidates = 8u32;
-    let mut uniform = false;
-    let mut open_row = false;
+    let mut proposal = Proposal::Target;
+    let mut tree_fault = TreeFault::None;
+    let mut scene = ScenePick::Gate;
     let mut out = None;
     let mut index = 0;
     while index < args.len() {
@@ -157,16 +165,21 @@ pub fn parse_args(
                 )?;
             }
             "--proposal" => {
-                uniform = match next_value(args, &mut index, "--proposal")?.as_str() {
-                    "target" => false,
-                    "uniform" => true,
+                proposal = match next_value(args, &mut index, "--proposal")?.as_str() {
+                    "target" => Proposal::Target,
+                    "uniform" => Proposal::Uniform,
+                    "tree" => Proposal::Tree,
                     other => return Err(format!("--proposal {other}")),
                 };
             }
+            "--tree-fault" => {
+                tree_fault = TreeFault::parse(&next_value(args, &mut index, "--tree-fault")?)?;
+            }
             "--scene" => {
-                open_row = match next_value(args, &mut index, "--scene")?.as_str() {
-                    "gate" => false,
-                    "open-row" => true,
+                scene = match next_value(args, &mut index, "--scene")?.as_str() {
+                    "gate" => ScenePick::Gate,
+                    "open-row" => ScenePick::OpenRow,
+                    "many" => ScenePick::Many,
                     other => return Err(format!("--scene {other}")),
                 };
             }
@@ -199,6 +212,9 @@ pub fn parse_args(
             );
         }
     };
+    if tree_fault != TreeFault::None && proposal != Proposal::Tree {
+        return Err("--tree-fault applies to --proposal tree".to_string());
+    }
     let out =
         out.unwrap_or_else(|| out_env.map_or_else(|| PathBuf::from(DEFAULT_OUT), PathBuf::from));
     Ok(Options {
@@ -212,16 +228,9 @@ pub fn parse_args(
         spatial_neighbors,
         spatial_radius,
         reverse_neighbours,
-        proposal: if uniform {
-            Proposal::Uniform
-        } else {
-            Proposal::Target
-        },
-        scene: if open_row {
-            ScenePick::OpenRow
-        } else {
-            ScenePick::Gate
-        },
+        proposal,
+        tree_fault,
+        scene,
         out,
     })
 }
@@ -249,10 +258,10 @@ pub fn run(options: &Options) -> Result<Option<String>, String> {
         Stage::Spatial => return run_spatial(options),
         Stage::Initial => {}
     }
-    let scene = Scene::gate();
-    let config = c1_config();
+    let scene = scene_of(options.scene);
+    let config = c1_config(options);
     config.validate()?;
-    let (reservoirs, dispatch_ms) = initial_reservoirs(&scene, config.candidates, options.seed)?;
+    let (reservoirs, dispatch_ms) = initial_reservoirs(&scene, &config, options)?;
     let estimate = shade_all(&scene, &reservoirs);
     let brute_image = scene
         .receivers
@@ -276,29 +285,52 @@ pub fn run(options: &Options) -> Result<Option<String>, String> {
     Ok(Some(options.out.display().to_string()))
 }
 
-fn c1_config() -> Config {
+fn c1_config(options: &Options) -> Config {
     Config {
-        candidates: 8,
+        candidates: options.candidates,
         spatial_neighbors: 0,
         spatial_radius: 2,
         temporal: false,
         weighting: genos_restir_ref::reservoir::Weighting::Balance,
-        proposal: Proposal::Target,
+        proposal: options.proposal,
         history: History::Temporal,
-        m_clamp: genos_restir_ref::DEFAULT_M_CLAMP,
+        m_clamp: options.m_clamp,
+        tree_fault: options.tree_fault,
     }
 }
 
-fn initial_reservoirs(
-    scene: &Scene,
-    candidates: u32,
-    seed: u64,
-) -> Result<(Vec<Reservoir>, f32), String> {
-    let lamp_count = u32::try_from(scene.lamps.len()).map_err(|_| "lamp count")?;
-    let receiver_count = u32::try_from(scene.receivers.len()).map_err(|_| "receiver count")?;
-    if lamp_count > 64 {
-        return Err("C1 shader holds at most 64 lamps".to_string());
+fn scene_of(pick: ScenePick) -> Scene {
+    match pick {
+        ScenePick::OpenRow => Scene::open_row(),
+        ScenePick::Gate => Scene::gate(),
+        ScenePick::Many => Scene::many_lights(),
     }
+}
+
+fn proposal_code(proposal: Proposal, fault: TreeFault) -> u32 {
+    match proposal {
+        Proposal::Uniform => 0,
+        Proposal::Target => 1,
+        Proposal::Tree => match fault {
+            TreeFault::None => 2,
+            TreeFault::IgnoreDistance => 3,
+        },
+    }
+}
+
+struct BufferLayout {
+    words: Vec<u32>,
+    recv_base: u32,
+    out_base: u32,
+    tree_base: u32,
+    tree_count: u32,
+}
+
+fn layout_words(
+    scene: &Scene,
+    out_words: usize,
+    proposal: Proposal,
+) -> Result<BufferLayout, String> {
     let mut words = Vec::new();
     for lamp in &scene.lamps {
         push_vec3(&mut words, lamp.position);
@@ -310,25 +342,57 @@ fn initial_reservoirs(
         push_vec3(&mut words, receiver.normal);
         push_vec3(&mut words, receiver.albedo);
     }
+    let (tree_base, tree_count) = if proposal == Proposal::Tree {
+        let tree = LightTree::build(&scene.lamps);
+        let packed = tree.pack_words();
+        let base = u32::try_from(words.len()).map_err(|_| "tree offset")?;
+        let count = u32::try_from(tree.node_count()).map_err(|_| "tree count")?;
+        words.extend(packed);
+        (base, count)
+    } else {
+        (0, 0)
+    };
     let out_base = u32::try_from(words.len()).map_err(|_| "output offset")?;
+    words.extend(std::iter::repeat_n(0, out_words));
+    Ok(BufferLayout {
+        words,
+        recv_base,
+        out_base,
+        tree_base,
+        tree_count,
+    })
+}
+
+fn initial_reservoirs(
+    scene: &Scene,
+    config: &Config,
+    options: &Options,
+) -> Result<(Vec<Reservoir>, f32), String> {
+    let lamp_count = u32::try_from(scene.lamps.len()).map_err(|_| "lamp count")?;
+    let receiver_count = u32::try_from(scene.receivers.len()).map_err(|_| "receiver count")?;
+    if config.proposal != Proposal::Tree && lamp_count > 64 {
+        return Err("the flat proposal holds at most 64 lamps".to_string());
+    }
     let out_words = usize::try_from(receiver_count)
         .unwrap_or(0)
         .saturating_mul(4);
-    words.extend(std::iter::repeat_n(0, out_words));
+    let layout = layout_words(scene, out_words, config.proposal)?;
     let push = gpu::Push {
-        seed,
+        seed: options.seed,
         receivers: receiver_count,
         lamps: lamp_count,
-        candidates,
-        proposal: 1,
+        candidates: config.candidates,
+        proposal: proposal_code(config.proposal, config.tree_fault),
         lamp_base: 0,
-        recv_base,
-        out_base,
+        recv_base: layout.recv_base,
+        out_base: layout.out_base,
+        tree_base: layout.tree_base,
+        tree_count: layout.tree_count,
     };
-    let ran = gpu::dispatch(&words, push)?;
+    let ran = gpu::dispatch(&layout.words, push)?;
     println!("device {} dispatch_ms {:.3}", ran.device, ran.dispatch_ms);
     let mut reservoirs = Vec::new();
-    let base = usize::try_from(out_base).unwrap_or(0);
+    let base = usize::try_from(layout.out_base).unwrap_or(0);
     for index in 0..usize::try_from(receiver_count).unwrap_or(0) {
         let slot = base.saturating_add(index.saturating_mul(4));
         let lamp = *ran.words.get(slot).ok_or("reservoir lamp")?;
@@ -364,10 +428,7 @@ fn run_temporal(options: &Options) -> Result<Option<String>, String> {
     if options.frames == 0 || options.frames > 64 {
         return Err("frames must be from 1 to 64".to_string());
     }
-    let scene = match options.scene {
-        ScenePick::OpenRow => Scene::open_row(),
-        ScenePick::Gate => Scene::gate(),
-    };
+    let scene = scene_of(options.scene);
     let config = Config {
         candidates: options.candidates,
         spatial_neighbors: 0,
@@ -377,6 +438,7 @@ fn run_temporal(options: &Options) -> Result<Option<String>, String> {
         proposal: options.proposal,
         history: History::Temporal,
         m_clamp: options.m_clamp,
+        tree_fault: options.tree_fault,
     };
     config.validate()?;
     let (by_frame, dispatch_ms) = temporal_reservoirs(&scene, &config, options)?;
@@ -421,47 +483,37 @@ fn temporal_reservoirs(
 ) -> Result<(Vec<Vec<Reservoir>>, f32), String> {
     let lamp_count = u32::try_from(scene.lamps.len()).map_err(|_| "lamp count")?;
     let receiver_count = u32::try_from(scene.receivers.len()).map_err(|_| "receiver count")?;
-    if lamp_count > 64 {
+    if config.proposal != Proposal::Tree && lamp_count > 64 {
         return Err("temporal shader holds at most 64 lamps".to_string());
     }
     if receiver_count > 256 {
         return Err("temporal shader holds at most 256 receivers".to_string());
     }
-    let mut words = Vec::new();
-    for lamp in &scene.lamps {
-        push_vec3(&mut words, lamp.position);
-        push_vec3(&mut words, lamp.intensity);
-    }
-    let recv_base = u32::try_from(words.len()).map_err(|_| "receiver offset")?;
-    for receiver in &scene.receivers {
-        push_vec3(&mut words, receiver.position);
-        push_vec3(&mut words, receiver.normal);
-        push_vec3(&mut words, receiver.albedo);
-    }
-    let out_base = u32::try_from(words.len()).map_err(|_| "output offset")?;
     let receivers = usize::try_from(receiver_count).unwrap_or(0);
     let frames = usize::try_from(options.frames).unwrap_or(0);
     let out_words = receivers.saturating_mul(4).saturating_mul(frames);
-    words.extend(std::iter::repeat_n(0, out_words));
+    let layout = layout_words(scene, out_words, config.proposal)?;
     let push = gpu::TemporalPush {
         base: gpu::Push {
             seed: options.seed,
             receivers: receiver_count,
             lamps: lamp_count,
             candidates: config.candidates,
-            proposal: u32::from(options.proposal == Proposal::Target),
+            proposal: proposal_code(options.proposal, options.tree_fault),
             lamp_base: 0,
-            recv_base,
-            out_base,
+            recv_base: layout.recv_base,
+            out_base: layout.out_base,
+            tree_base: layout.tree_base,
+            tree_count: layout.tree_count,
         },
         frames: options.frames,
         reset_after: options.reset_after.unwrap_or(u32::MAX),
         m_cap: options.m_cap,
         m_clamp: config.m_clamp,
     };
-    let ran = gpu::dispatch_temporal(&words, push)?;
+    let ran = gpu::dispatch_temporal(&layout.words, push)?;
     println!("device {} dispatch_ms {:.3}", ran.device, ran.dispatch_ms);
-    let base = usize::try_from(out_base).unwrap_or(0);
+    let base = usize::try_from(layout.out_base).unwrap_or(0);
     let mut by_frame = Vec::with_capacity(frames);
     for frame in 0..frames {
         let mut reservoirs = Vec::with_capacity(receivers);
@@ -483,10 +535,7 @@ fn run_spatial(options: &Options) -> Result<Option<String>, String> {
     if options.spatial_neighbors == 0 || options.spatial_neighbors > 16 {
         return Err("spatial neighbours must be from 1 to 16".to_string());
     }
-    let scene = match options.scene {
-        ScenePick::OpenRow => Scene::open_row(),
-        ScenePick::Gate => Scene::gate(),
-    };
+    let scene = scene_of(options.scene);
     let config = Config {
         candidates: options.candidates,
         spatial_neighbors: options.spatial_neighbors,
@@ -496,6 +545,7 @@ fn run_spatial(options: &Options) -> Result<Option<String>, String> {
         proposal: options.proposal,
         history: History::Temporal,
         m_clamp: options.m_clamp,
+        tree_fault: options.tree_fault,
     };
     config.validate()?;
     let (by_frame, dispatch_ms) = spatial_reservoirs(&scene, &config, options)?;
@@ -541,28 +591,16 @@ fn spatial_reservoirs(
     let lamp_count = u32::try_from(scene.lamps.len()).map_err(|_| "lamp count")?;
     let receiver_count = u32::try_from(scene.receivers.len()).map_err(|_| "receiver count")?;
     let width = u32::try_from(scene.width).map_err(|_| "width")?;
-    if lamp_count > 64 {
+    if config.proposal != Proposal::Tree && lamp_count > 64 {
         return Err("spatial shader holds at most 64 lamps".to_string());
     }
     if receiver_count > 256 {
         return Err("spatial shader holds at most 256 receivers".to_string());
     }
-    let mut words = Vec::new();
-    for lamp in &scene.lamps {
-        push_vec3(&mut words, lamp.position);
-        push_vec3(&mut words, lamp.intensity);
-    }
-    let recv_base = u32::try_from(words.len()).map_err(|_| "receiver offset")?;
-    for receiver in &scene.receivers {
-        push_vec3(&mut words, receiver.position);
-        push_vec3(&mut words, receiver.normal);
-        push_vec3(&mut words, receiver.albedo);
-    }
-    let out_base = u32::try_from(words.len()).map_err(|_| "output offset")?;
     let receivers = usize::try_from(receiver_count).unwrap_or(0);
     let frames = usize::try_from(options.frames).unwrap_or(0);
     let out_words = receivers.saturating_mul(4).saturating_mul(frames);
-    words.extend(std::iter::repeat_n(0, out_words));
+    let layout = layout_words(scene, out_words, config.proposal)?;
     let push = gpu::SpatialPush {
         temporal: gpu::TemporalPush {
             base: gpu::Push {
@@ -570,10 +608,12 @@ fn spatial_reservoirs(
                 receivers: receiver_count,
                 lamps: lamp_count,
                 candidates: config.candidates,
-                proposal: u32::from(options.proposal == Proposal::Target),
+                proposal: proposal_code(options.proposal, options.tree_fault),
                 lamp_base: 0,
-                recv_base,
-                out_base,
+                recv_base: layout.recv_base,
+                out_base: layout.out_base,
+                tree_base: layout.tree_base,
+                tree_count: layout.tree_count,
             },
             frames: options.frames,
             reset_after: options.reset_after.unwrap_or(u32::MAX),
@@ -585,9 +625,9 @@ fn spatial_reservoirs(
         spatial_radius: config.spatial_radius,
         reverse: u32::from(options.reverse_neighbours),
     };
-    let ran = gpu::dispatch_spatial(&words, push)?;
+    let ran = gpu::dispatch_spatial(&layout.words, push)?;
     println!("device {} dispatch_ms {:.3}", ran.device, ran.dispatch_ms);
-    let base = usize::try_from(out_base).unwrap_or(0);
+    let base = usize::try_from(layout.out_base).unwrap_or(0);
     let mut by_frame = Vec::with_capacity(frames);
     for frame in 0..frames {
         let mut reservoirs = Vec::with_capacity(receivers);
@@ -654,7 +694,7 @@ fn parse_u32(text: &str, flag: &str) -> Result<u32, String> {
 #[must_use]
 pub fn help_text() -> &'static str {
     "\
-restir-gpu — GPU ReSTIR DI candidates (stages C1, C2, and C3)
+restir-gpu — GPU ReSTIR DI candidates (stages C1, C2, C3, and C4)
 
 Each path is off unless a flag is set. A bare run writes nothing.
 The live direct pass does not call this binary.
@@ -680,8 +720,9 @@ Options:
   --m-clamp N           clamp history M to N times this frame's candidate count
                         (default 20, matching restir-ref; 0 leaves that cap off)
   --candidates N        candidates per receiver (default 8)
-  --proposal NAME       target (default) or uniform
-  --scene NAME          gate (default) or open-row
+  --proposal NAME       target (default), uniform, or tree
+  --tree-fault NAME     none (default) or ignore-distance (requires --proposal tree)
+  --scene NAME          gate (default), open-row, or many
   --seed N              PCG seed (default 1, the reference reservoir seed)
   --out DIR             output directory (default ./genos-debug/restir-gpu)
 

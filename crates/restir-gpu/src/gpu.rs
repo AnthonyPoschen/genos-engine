@@ -41,6 +41,8 @@ pub struct Push {
     pub lamp_base: u32,
     pub recv_base: u32,
     pub out_base: u32,
+    pub tree_base: u32,
+    pub tree_count: u32,
 }
 
 /// Device name and the dispatch duration in milliseconds.
@@ -79,6 +81,8 @@ pub fn dispatch(words: &[u32], push: Push) -> Result<GpuRun, String> {
         push.lamp_base,
         push.recv_base,
         push.out_base,
+        push.tree_base,
+        push.tree_count,
     ];
     unsafe { dispatch_inner(words, SPV, &words_push) }
 }
@@ -104,6 +108,8 @@ pub fn dispatch_temporal(words: &[u32], push: TemporalPush) -> Result<GpuRun, St
         push.reset_after,
         push.m_cap,
         push.m_clamp,
+        push.base.tree_base,
+        push.base.tree_count,
     ];
     unsafe { dispatch_inner(words, SPV_TEMPORAL, &words_push) }
 }
@@ -144,6 +150,8 @@ pub fn dispatch_spatial(words: &[u32], push: SpatialPush) -> Result<GpuRun, Stri
         push.spatial_neighbors,
         push.spatial_radius,
         push.reverse,
+        push.temporal.base.tree_base,
+        push.temporal.base.tree_count,
     ];
     unsafe { dispatch_inner(words, SPV_SPATIAL, &words_push) }
 }

@@ -18,7 +18,7 @@ with `area = Σ M_i * W_i * p̂_q(y_i)`. The shade is unshadowed radiance times 
 
 Named in `crates/restir-ref/src/lib.rs` and repeated here.
 
-- Proposal is uniform or an exact discrete target CDF, not a light tree.
+- Proposal is uniform, an exact discrete target CDF, or a light-tree bound (C4). The tree is not the flat target CDF.
 - `p̂` is unshadowed Rec. 709 luminance. One shadow ray multiplies the shade.
 - Point lamps and a Lambertian BRDF only. No sun, no BSDF sample.
 - Receivers are a grid. Temporal history is the same index, not a motion vector.
@@ -96,8 +96,24 @@ Each stage is a small diff against this reference. Lavapipe is the device until 
 | C1 | Initial candidates only. Same PCG stream and the documented draw order. `restir-gpu --initial` (off unless the flag or `GENOS_RESTIR_INITIAL` is set) | `restir-ref run --no-temporal --spatial 0 --frames 1`, then `restir-ref diff` on the reservoirs. Lavapipe. A perturbed seed must fail |
 | C2 | Temporal reuse. A change record clears history, as `reset_temporal` does. `--temporal` is off unless the flag or `GENOS_RESTIR_TEMPORAL` is set. History `M` is clamped to `m_clamp` times this frame's candidate count (default 20). `--m-cap` is still the absolute-count fault. | Diff the reservoirs after N frames against `restir-ref run --spatial 0`. A reset must drop `M` the way the CPU test does. `--m-cap 1` must fail the diff. A run where the 20× cap does not fire (8 candidates, 8 frames) stays an exact match |
 | C3 | One spatial pass and the balance weight. `restir-gpu --spatial N` (off unless the flag or `GENOS_RESTIR_SPATIAL` is set; `N` defaults to 4, radius defaults to 2). History stays post-temporal. `--reverse-neighbours` is the order fault | `restir-ref run --spatial 4`. Diff reservoirs at 1 and 8 frames (lamp mismatches 0, `W` relative error at most 1e-3). Do not treat the CPU multi-seed `grid_worst` of that run as the product gate. `--reverse-neighbours` must fail the diff |
-| C4 | Light-tree proposal | Bias against the brute sum. Not a bit match to the flat target CDF |
+| C4 | Light-tree proposal. `--proposal tree` (off by default). One leaf per candidate from a BVH whose node importance is the Conty and Kulla / Estevez and Kulla bound. `--tree-fault ignore-distance` drops the inverse-square term and must fail the reservoir diff. The live direct pass is unchanged | Bias of the multi-seed mean against the brute sum, ceiling `ref_err_near` 0.05. Not a bit match to the flat target CDF. CPU and GPU reservoirs for the same seed: 0 mismatches |
 | C5 | A flag replaces brute direct | One 4070 session, below |
+
+C4 measured on this crate's tests (debug). Bias is `ref_err_near` of the multi-seed mean, 128 seeds, 8 frames, 8 candidates, temporal on, spatial off. Variance is the frame-1 sample variance at the brightest receiver, 48 seeds, 8 candidates, temporal off. The flat column is the exact target CDF. Brute error is the denominator of `ref_err_near` (zero by construction).
+
+| Scene | Tree bias | Flat bias | Uniform bias | Tree var | Flat var | Uniform var |
+| --- | --- | --- | --- | --- | --- | --- |
+| gate | 0.0114 | 0.0000 | 0.0068 | 0.191 | 0 | 10.84 |
+| shadow | 0.0357 | 0.0286 | 0.0267 | 0.634 | 0.227 | 11.38 |
+| open | 0.0018 | 0.0000 | 0.0058 | 0.028 | 0 | 0.288 |
+| row | 0.0021 | 0.0000 | 0.0109 | 0.0049 | 0 | 0.109 |
+| domain | 0.0000 | 0.0000 | 0.0037 | 0 | 0 | 6601 |
+| variance | 0.0117 | 0.0000 | 0.0075 | 0.0605 | 0 | 0.0487 |
+| many (256 lamps) | 0.0052 | 0.0000 | 0.0764 | 38.17 | 0 | 71475 |
+
+On `variance` (20 lamps at similar range) the tree's one-frame variance sits just above uniform. On `many` it is about 1800× lower. `--tree-fault ignore-distance` on `many` stays inside the 0.05 bias ceiling (0.021 at 96 seeds, 8 frames) and disagrees with the distance-aware reservoirs (14 lamp mismatches, seed 1, one frame). Lavapipe `restir-gpu --initial --proposal tree --scene many`: dispatch 186 ms, reservoir mismatches 0 against the CPU dump. The same fault on the GPU matches the CPU fault and fails the diff against the distance-aware tree.
+
+C5 wires this walk into the live direct pass. That pass still shades the brute or pairwise sum. The flag stays off. C5 uploads this tree with the lamp list, runs the same initial, temporal, and spatial draws, and shades `unshadowed * visibility * W`. The grade is the owner's 4070 session below, not lavapipe.
 
 C5, on the owner's 4070, once:
 

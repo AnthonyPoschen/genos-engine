@@ -27,6 +27,8 @@ layout(push_constant) uniform Push {
     uint lamp_base;
     uint recv_base;
     uint out_base;
+    uint tree_base;
+    uint tree_count;
 } pc;
 
 const uint LAMP_EMPTY = 0xffffffffu;
@@ -110,6 +112,8 @@ float target_at(uint recv, uint lamp) {
     return dot3(red, green, blue, LUMA_X, LUMA_Y, LUMA_Z);
 }
 
+#include "restir_tree.glsl"
+
 uint uniform_index(uint n) {
     if (n <= 1u) {
         return 0u;
@@ -176,14 +180,17 @@ void stream_update(inout uint lamp, inout float w_sum, inout uint m, uint next_l
 
 void main() {
     rng_init();
+    bool tree = pc.proposal >= PROPOSAL_TREE;
     uint n = pc.lamp_count;
-    if (n > 64u) {
+    if (!tree && n > 64u) {
         n = 64u;
     }
     for (uint recv = 0u; recv < pc.receiver_count; recv++) {
         float weights[64];
-        for (uint lamp = 0u; lamp < n; lamp++) {
-            weights[lamp] = target_at(recv, lamp);
+        if (!tree) {
+            for (uint lamp = 0u; lamp < n; lamp++) {
+                weights[lamp] = target_at(recv, lamp);
+            }
         }
         uint chosen = LAMP_EMPTY;
         float w_sum = 0.0;
@@ -192,7 +199,9 @@ void main() {
             bool hit = false;
             uint lamp = 0u;
             float pdf = 0.0;
-            if (pc.proposal == PROPOSAL_TARGET) {
+            if (tree) {
+                sample_tree(recv, lamp, pdf, hit);
+            } else if (pc.proposal == PROPOSAL_TARGET) {
                 sample_cdf(weights, n, lamp, pdf, hit);
             } else if (n == 0u) {
                 hit = false;
@@ -204,14 +213,14 @@ void main() {
             if (!hit) {
                 stream_update(chosen, w_sum, m, LAMP_EMPTY, 0.0);
             } else {
-                float phat = weights[lamp];
+                float phat = tree ? target_at(recv, lamp) : weights[lamp];
                 float stream = pdf > 0.0 ? phat / pdf : 0.0;
                 stream_update(chosen, w_sum, m, lamp, stream);
             }
         }
         float target = 0.0;
-        if (chosen != LAMP_EMPTY && chosen < n) {
-            target = weights[chosen];
+        if (chosen != LAMP_EMPTY && (tree ? chosen < pc.lamp_count : chosen < n)) {
+            target = tree ? target_at(recv, chosen) : weights[chosen];
         }
         uint slot = pc.out_base + recv * 4u;
         if (m == 0u || chosen == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {

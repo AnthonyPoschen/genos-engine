@@ -237,8 +237,8 @@ Role: OUT · Literature: — · More detail: [lamp-layering design](../systems/l
 **Candidates / samples**: candidates are lamps considered without shadows. Samples are the shadow rays actually traced.
 Role: SAMPLE · Literature: ReSTIR M candidates / visible samples
 
-**Light tree** (in the pipeline): lamps grouped in a tree and walked randomly. Planned as `--lamp-pick tree`.
-Role: LIGHTS · Literature: Stochastic Lightcuts (Yuksel 2019), GIBS [§1.16](research/GIBS.md) · More detail: [gi-design.md](../systems/gi-design.md#direct-lighting)
+**Light tree** (in the pipeline): lamps grouped in a tree and walked randomly. The ReSTIR DI checker walks one (`--proposal tree`, off by default) with a conservative cluster bound. The live `--lamp-pick tree` cut is not built.
+Role: LIGHTS · Literature: Conty Estevez and Kulla, HPG 2018; Stochastic Lightcuts (Yuksel 2019) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
 
 **Shadow cell cache** (*shadow filter = cell*): reuses a shadow result across a 12.5 cm world cell for N frames.
 Role: VIS · Literature: — (similar to Lumen cached shadow masks)

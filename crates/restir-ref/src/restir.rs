@@ -2,8 +2,8 @@
 //!
 //! Draw order, for a fixed seed, is the contract a later GPU stage matches:
 //! 1. For each receiver in index order, for each candidate: the proposal draw
-//!    (uniform rejection, or one `f32` on the target CDF), then one `f32` for
-//!    the stream pick.
+//!    (uniform rejection, one `f32` on the target CDF, or one `f32` per internal
+//!    light-tree node), then one `f32` for the stream pick.
 //! 2. For each receiver, when temporal reuse is on: one `f32`, then the merge
 //!    with history. The draw still happens when history is empty.
 //! 3. For each receiver, when `spatial_neighbors > 0`: neighbour-index draws
@@ -25,6 +25,7 @@ use crate::reservoir::{
 };
 use crate::rng::Rng;
 use crate::shade::{target, Receiver, Scene};
+use crate::tree::{LightTree, TreeFault};
 
 /// How the initial candidates are proposed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +34,8 @@ pub enum Proposal {
     Uniform,
     /// Discrete distribution proportional to the unshadowed luminance.
     Target,
+    /// Light-tree bound. One leaf per candidate. Not the flat target CDF.
+    Tree,
 }
 
 /// Which reservoir becomes next frame's history.
@@ -58,6 +61,8 @@ pub struct Config {
     /// count before the temporal merge. `0` leaves history `M` unclamped.
     /// The default, 20, is the usual `ReSTIR` cap (Bitterli et al., TOG 2020).
     pub m_clamp: u32,
+    /// Applied only when `proposal` is [`Proposal::Tree`].
+    pub tree_fault: TreeFault,
 }
 
 /// Default history-`M` multiple. `cap = m_clamp * current_candidate_count`.
@@ -81,6 +86,7 @@ impl Config {
             proposal: Proposal::Target,
             history: History::Temporal,
             m_clamp: DEFAULT_M_CLAMP,
+            tree_fault: TreeFault::None,
         }
     }
 
@@ -134,6 +140,7 @@ pub struct Session {
     scene: Scene,
     config: Config,
     rng: Rng,
+    tree: LightTree,
     history: Vec<Reservoir>,
     shaded: Vec<Reservoir>,
     counters: Counters,
@@ -155,10 +162,12 @@ impl Session {
             return Err("receiver count must divide by width".to_string());
         }
         let count = scene.receivers.len();
+        let tree = LightTree::build(&scene.lamps);
         Ok(Self {
             scene,
             config,
             rng: Rng::new(seed),
+            tree,
             history: vec![Reservoir::empty(); count],
             shaded: vec![Reservoir::empty(); count],
             counters: Counters::zero(),
@@ -203,6 +212,7 @@ impl Session {
         match self.scene.lamps.get_mut(index) {
             Some(lamp) => {
                 lamp.position = position;
+                self.tree = LightTree::build(&self.scene.lamps);
                 true
             }
             None => false,
@@ -268,7 +278,7 @@ impl Session {
         let count = usize::try_from(self.config.candidates).unwrap_or(1);
         for _ in 0..count {
             counters.candidates = counters.candidates.saturating_add(1);
-            let Some((lamp, pdf)) = self.propose(&weights) else {
+            let Some((lamp, pdf)) = self.propose(index, &weights) else {
                 stream_update(&mut reservoir, LAMP_EMPTY, 0.0, &mut self.rng);
                 continue;
             };
@@ -285,7 +295,7 @@ impl Session {
         reservoir
     }
 
-    fn propose(&mut self, weights: &[f32]) -> Option<(usize, f32)> {
+    fn propose(&mut self, index: usize, weights: &[f32]) -> Option<(usize, f32)> {
         match self.config.proposal {
             Proposal::Uniform => {
                 if weights.is_empty() {
@@ -295,6 +305,11 @@ impl Session {
                 Some((index, 1.0 / len_as_f32(weights.len())))
             }
             Proposal::Target => sample_cdf(weights, &mut self.rng),
+            Proposal::Tree => {
+                let receiver = self.scene.receivers.get(index).copied()?;
+                let fault = self.config.tree_fault;
+                self.tree.sample(&receiver, fault, &mut self.rng)
+            }
         }
     }
 
@@ -519,6 +534,7 @@ mod tests {
             proposal,
             history: History::Temporal,
             m_clamp: super::DEFAULT_M_CLAMP,
+            tree_fault: crate::tree::TreeFault::None,
         }
     }
 
@@ -648,6 +664,7 @@ mod tests {
             proposal: Proposal::Uniform,
             history: History::Temporal,
             m_clamp: super::DEFAULT_M_CLAMP,
+            tree_fault: crate::tree::TreeFault::None,
         };
         let mut acc = vec![genos_math::Vec3::ZERO; scene.receivers.len()];
         let seeds = 2000u32;
@@ -758,6 +775,7 @@ mod tests {
             proposal: Proposal::Uniform,
             history: History::Temporal,
             m_clamp,
+            tree_fault: crate::tree::TreeFault::None,
         }
     }
 
