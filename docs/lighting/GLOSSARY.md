@@ -300,8 +300,11 @@ Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More 
 **Fresnel weight**: the fraction of light reflected at a boundary. Dielectrics use the exact equations. From under water the index ratio is inverted, and total internal reflection returns 1. Metals use Schlick with F0 equal to the base colour.
 Role: SAMPLE · Literature: Fresnel equations; Schlick, CGF 1994 (metals) · More detail: [reflections design, optics](../systems/reflections-design.md#optics)
 
-**Screen-space reflection**: a ray marched through the depth buffer along one specular direction.
+**Screen-space reflection**: a ray marched through the depth buffer along one specular direction. The proposed march is the hierarchical-Z march.
 Role: SAMPLE · Literature: McGuire and Mara, JCGT 2014; Stachowiak, SIGGRAPH 2015 · More detail: [reflections design, passes](../systems/reflections-design.md#passes)
+
+**Hierarchical-Z march** (proposed, [ADR 0029](../adr/0029-reflections.md)): a screen-space reflection walked over a min-and-max depth pyramid. A cell whose depth range misses the ray is skipped. The finest cell accepts a hit inside the 25 cm thickness.
+Role: SAMPLE · Literature: Uludag, GPU Pro 5, §4.4.3 (the printed tracer is min-only; we store max as well); McGuire and Mara, JCGT 2014 (thickness, step cap) · More detail: [ADR 0029](../adr/0029-reflections.md)
 
 **Reflection hit**: the first surface a specular ray accepts, stored as geometry, not as radiance.
 Role: VIS · Literature: Lumen screen-trace hit; our kept hit · More detail: [reflections design, data](../systems/reflections-design.md#data)
