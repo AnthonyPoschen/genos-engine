@@ -14,7 +14,15 @@ fn restir_ref(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO"));
     command
         .current_dir(workspace())
-        .args(["run", "-q", "-p", "genos-restir-ref", "--bin", "restir-ref", "--"])
+        .args([
+            "run",
+            "-q",
+            "-p",
+            "genos-restir-ref",
+            "--bin",
+            "restir-ref",
+            "--",
+        ])
         .args(args)
         .env("VK_DRIVER_FILES", "/usr/share/vulkan/icd.d/lvp_icd.json");
     command

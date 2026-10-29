@@ -1470,3 +1470,8 @@ detail = "--out"
 name = "GENOS_RESTIR_INITIAL"
 kind = "mirror"
 detail = "--initial"
+
+[[var]]
+name = "GENOS_RESTIR_TEMPORAL"
+kind = "mirror"
+detail = "--temporal"

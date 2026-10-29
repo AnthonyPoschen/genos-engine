@@ -19,11 +19,15 @@ use std::process::Command;
 
 fn main() {
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let src = "shaders/restir_initial.comp";
+    compile(&out, "shaders/restir_initial.comp", "restir_initial.spv");
+    compile(&out, "shaders/restir_temporal.comp", "restir_temporal.spv");
+}
+
+fn compile(out: &str, src: &str, spv_name: &str) {
     println!("cargo:rerun-if-changed={src}");
     let status = Command::new("glslc")
         .args(["--target-env=vulkan1.0", "-O", src, "-o"])
-        .arg(format!("{out}/restir_initial.spv"))
+        .arg(format!("{out}/{spv_name}"))
         .status()
         .expect("glslc");
     if !status.success() {
