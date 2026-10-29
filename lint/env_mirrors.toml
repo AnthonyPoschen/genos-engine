@@ -1460,3 +1460,8 @@ name = "GENOS_PHYSICS_METRICS_OUT"
 kind = "mirror"
 detail = "--out"
 
+
+[[var]]
+name = "GENOS_RESTIR_OUT"
+kind = "mirror"
+detail = "--out"
