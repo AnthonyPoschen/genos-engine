@@ -210,6 +210,9 @@ Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 
 **ReSTIR reference**: the CPU checker for ReSTIR direct (`restir-ref`). It resamples point lamps with RIS, reuses a reservoir in time and across a receiver grid, and shades with the balance-heuristic weight. The dump is what a later GPU stage is diffed against. It is not the live lamp-pick shader.
 Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005); ReSTIR DI (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
 
+**ReSTIR spatial**: one GPU spatial pass (`restir-gpu --spatial`). It merges the post-temporal reservoir with neighbours from a Chebyshev disk, in the CPU neighbour order, with the balance-heuristic weight. Off unless the flag or `GENOS_RESTIR_SPATIAL` is set. The live direct pass does not run it.
+Role: TOOL · Literature: ReSTIR DI spatial reuse (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: `GENOS_RESTIR_SPATIAL`; [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
+
 **ReSTIR M clamp**: the cap on temporal history `M`, `m_clamp` times this frame's candidate count, applied before the temporal merge. The default multiple is 20. `0` leaves `M` unclamped. `--m-cap` on the GPU is a separate absolute-count fault, not this multiple.
 Role: TEMPORAL · Literature: ReSTIR DI temporal reuse (Bitterli et al., TOG 2020) · More detail: `--m-clamp`; [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
 

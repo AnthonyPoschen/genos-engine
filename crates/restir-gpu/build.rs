@@ -21,6 +21,7 @@ fn main() {
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");
     compile(&out, "shaders/restir_initial.comp", "restir_initial.spv");
     compile(&out, "shaders/restir_temporal.comp", "restir_temporal.spv");
+    compile(&out, "shaders/restir_spatial.comp", "restir_spatial.spv");
 }
 
 fn compile(out: &str, src: &str, spv_name: &str) {
