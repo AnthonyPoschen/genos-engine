@@ -1,0 +1,229 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+
+// Initial ReSTIR DI candidates (Talbot, Cline, and Egbert, EGSR 2005).
+// One invocation walks receivers in index order so the PCG stream matches
+// crates/restir-ref/src/restir.rs: for each receiver, for each candidate,
+// one proposal draw then one stream-pick draw. Temporal and spatial draws
+// are not in this shader.
+//
+// Dot products are `0 + ax*bx + ay*by + az*bz`, the same order as
+// genos_math::Vec3::dot. p̂ is unshadowed Rec. 709 luminance.
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Words {
+    uint words[];
+};
+
+layout(push_constant) uniform Push {
+    uint seed_lo;
+    uint seed_hi;
+    uint receiver_count;
+    uint lamp_count;
+    uint candidates;
+    uint proposal;
+    uint lamp_base;
+    uint recv_base;
+    uint out_base;
+} pc;
+
+const uint LAMP_EMPTY = 0xffffffffu;
+const uint PROPOSAL_TARGET = 1u;
+float pi() {
+    return uintBitsToFloat(0x40490fdbu);
+}
+const float LUMA_X = 0.2126;
+const float LUMA_Y = 0.7152;
+const float LUMA_Z = 0.0722;
+const float DIST2_EPS = 1.0e-8;
+const float UNIT_SCALE = 1.0 / 65536.0;
+
+uint64_t g_state;
+uint64_t g_inc;
+
+uint64_t pcg_step() {
+    uint64_t old = g_state;
+    g_state = old * 6364136223846793005ul + g_inc;
+    return old;
+}
+
+uint rot_r(uint bits, uint rot) {
+    uint r = rot & 31u;
+    if (r == 0u) {
+        return bits;
+    }
+    return (bits >> r) | (bits << (32u - r));
+}
+
+uint next_u32() {
+    uint64_t old = pcg_step();
+    uint64_t mixed = ((old >> 18ul) ^ old) >> 27ul;
+    uint bits = uint(mixed & 0xfffffffful);
+    uint rot = uint(old >> 59ul);
+    return rot_r(bits, rot);
+}
+
+float next_f32() {
+    uint bits = next_u32() >> 8u;
+    return float(bits & 0xffffu) * UNIT_SCALE;
+}
+
+void rng_init() {
+    uint64_t seed = uint64_t(pc.seed_lo) | (uint64_t(pc.seed_hi) << 32ul);
+    g_inc = (seed << 1ul) | 1ul;
+    g_state = 0ul;
+    g_state = pcg_step() + seed;
+    next_u32();
+}
+
+float load_f(uint index) {
+    return uintBitsToFloat(words[index]);
+}
+
+float dot3(float ax, float ay, float az, float bx, float by, float bz) {
+    return 0.0 + ax * bx + ay * by + az * bz;
+}
+
+float target_at(uint recv, uint lamp) {
+    uint r = pc.recv_base + recv * 9u;
+    uint l = pc.lamp_base + lamp * 6u;
+    float dx = load_f(l) - load_f(r);
+    float dy = load_f(l + 1u) - load_f(r + 1u);
+    float dz = load_f(l + 2u) - load_f(r + 2u);
+    float dist2 = dot3(dx, dy, dz, dx, dy, dz);
+    if (dist2 <= DIST2_EPS) {
+        return 0.0;
+    }
+    float dist = sqrt(dist2);
+    float cos_theta = dot3(
+        load_f(r + 3u), load_f(r + 4u), load_f(r + 5u),
+        dx / dist, dy / dist, dz / dist);
+    if (cos_theta <= 0.0) {
+        return 0.0;
+    }
+    float scale = cos_theta / (dist2 * pi());
+    float red = load_f(l + 3u) * load_f(r + 6u) * scale;
+    float green = load_f(l + 4u) * load_f(r + 7u) * scale;
+    float blue = load_f(l + 5u) * load_f(r + 8u) * scale;
+    return dot3(red, green, blue, LUMA_X, LUMA_Y, LUMA_Z);
+}
+
+uint uniform_index(uint n) {
+    if (n <= 1u) {
+        return 0u;
+    }
+    uint limit = 0xffffffffu - (0xffffffffu % n);
+    while (true) {
+        uint draw = next_u32();
+        if (draw < limit) {
+            return draw % n;
+        }
+    }
+}
+
+void sample_cdf(const float weights[64], uint n, out uint index, out float pdf, out bool hit) {
+    float sum = 0.0;
+    for (uint i = 0u; i < n; i++) {
+        sum += weights[i];
+    }
+    if (sum <= 0.0) {
+        next_f32();
+        hit = false;
+        index = 0u;
+        pdf = 0.0;
+        return;
+    }
+    float mark = next_f32() * sum;
+    float acc = 0.0;
+    for (uint i = 0u; i < n; i++) {
+        if (weights[i] <= 0.0) {
+            continue;
+        }
+        acc += weights[i];
+        if (mark < acc) {
+            index = i;
+            pdf = weights[i] / sum;
+            hit = true;
+            return;
+        }
+    }
+    for (uint k = n; k > 0u; k--) {
+        uint i = k - 1u;
+        if (weights[i] > 0.0) {
+            index = i;
+            pdf = weights[i] / sum;
+            hit = true;
+            return;
+        }
+    }
+    hit = false;
+    index = 0u;
+    pdf = 0.0;
+}
+
+void stream_update(inout uint lamp, inout float w_sum, inout uint m, uint next_lamp, float stream) {
+    float unit = next_f32();
+    m += 1u;
+    if (stream > 0.0) {
+        w_sum += stream;
+        if (unit * w_sum < stream) {
+            lamp = next_lamp;
+        }
+    }
+}
+
+void main() {
+    rng_init();
+    uint n = pc.lamp_count;
+    if (n > 64u) {
+        n = 64u;
+    }
+    for (uint recv = 0u; recv < pc.receiver_count; recv++) {
+        float weights[64];
+        for (uint lamp = 0u; lamp < n; lamp++) {
+            weights[lamp] = target_at(recv, lamp);
+        }
+        uint chosen = LAMP_EMPTY;
+        float w_sum = 0.0;
+        uint m = 0u;
+        for (uint c = 0u; c < pc.candidates; c++) {
+            bool hit = false;
+            uint lamp = 0u;
+            float pdf = 0.0;
+            if (pc.proposal == PROPOSAL_TARGET) {
+                sample_cdf(weights, n, lamp, pdf, hit);
+            } else if (n == 0u) {
+                hit = false;
+            } else {
+                lamp = uniform_index(n);
+                pdf = 1.0 / float(n);
+                hit = true;
+            }
+            if (!hit) {
+                stream_update(chosen, w_sum, m, LAMP_EMPTY, 0.0);
+            } else {
+                float phat = weights[lamp];
+                float stream = pdf > 0.0 ? phat / pdf : 0.0;
+                stream_update(chosen, w_sum, m, lamp, stream);
+            }
+        }
+        float target = 0.0;
+        if (chosen != LAMP_EMPTY && chosen < n) {
+            target = weights[chosen];
+        }
+        uint slot = pc.out_base + recv * 4u;
+        if (m == 0u || chosen == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
+            words[slot] = LAMP_EMPTY;
+            words[slot + 1u] = floatBitsToUint(0.0);
+            words[slot + 2u] = 0u;
+            words[slot + 3u] = floatBitsToUint(0.0);
+        } else {
+            words[slot] = chosen;
+            words[slot + 1u] = floatBitsToUint(w_sum);
+            words[slot + 2u] = m;
+            words[slot + 3u] = floatBitsToUint(target);
+        }
+    }
+}

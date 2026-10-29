@@ -1465,3 +1465,8 @@ detail = "--out"
 name = "GENOS_RESTIR_OUT"
 kind = "mirror"
 detail = "--out"
+
+[[var]]
+name = "GENOS_RESTIR_INITIAL"
+kind = "mirror"
+detail = "--initial"

@@ -260,6 +260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-restir-gpu"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
+ "genos-restir-ref",
+]
+
+[[package]]
 name = "genos-restir-ref"
 version = "0.1.0"
 dependencies = [

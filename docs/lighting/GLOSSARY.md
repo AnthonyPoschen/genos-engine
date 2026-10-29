@@ -210,6 +210,9 @@ Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 
 **ReSTIR reference**: the CPU checker for ReSTIR direct (`restir-ref`). It resamples point lamps with RIS, reuses a reservoir in time and across a receiver grid, and shades with the balance-heuristic weight. The dump is what a later GPU stage is diffed against. It is not the live lamp-pick shader.
 Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005); ReSTIR DI (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
 
+**ReSTIR initial**: the GPU initial-candidate pass (`restir-gpu --initial`). One lavapipe dispatch builds frame-1 reservoirs with the reference PCG stream. Temporal and spatial reuse are off. The live direct pass does not run it.
+Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005) · More detail: `GENOS_RESTIR_INITIAL`; [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
+
 **Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
 Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
 
