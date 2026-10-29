@@ -50,12 +50,17 @@ Plan for moving lamps and moving assets (not yet built; measurement first): [dyn
 - Lighting VRAM may grow if it cuts per-frame compute; total should stay fixed rather than scale with the scene (12 Oct).
 - Never skip lighting on an assumption; verify with an extraordinarily cheap check every frame (12 Oct).
 
+## Emissive triangles (proposed)
+
+[ADR 0030](../../adr/0030-emissive-surfaces.md) proposes that glTF emission is a light. Direct lighting samples the triangle by area inside ReSTIR DI ([ADR 0022](https://github.com/AnthonyPoschen/genos-engine/blob/lighting-v3/docs/adr/0022-lighting-v3-compute-architecture.md), on `lighting-v3`). The bounce of a triangle in the tree is the direct term on the surfaces it lights. The CPU reference is `genos_math::emissive`. The renderer does not sample these triangles yet. Low is the GTX 1060.
+
 ## Names
 
 The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
 
 ## Deviations from the papers (summary)
 
+- Proposed ([ADR 0030](../../adr/0030-emissive-surfaces.md)), not in the renderer. Emissive triangles enter ReSTIR DI (Bitterli, Wyman, Shirley, and Lefohn, TOG 2020) as area samples. The source density is the solid-angle pdf `pdf_A * r² / cos θ` from Pharr, Jakob, and Humphreys. This reference does not build the reservoir, so it has no spatiotemporal reuse and no visibility. The GI design's 64 power-stratified points are not the sample.
 - The MSME step follows Barré-Brisebois et al., Ray Tracing Gems ch. 25, `MultiscaleMeanEstimator.hlsl`. The firefly clamp (`0.1 + short mean + sigma * deviation`) is biased. `surface_cache.firefly_sigma` defaults to the listing's 8. Zero keeps the `0.1` floor. Variance is one scalar, not `float3`, weighted with the listing's Rec. 601 `(0.299, 0.587, 0.114)`. The hold path uses Rec. 709 `(0.2126, 0.7152, 0.0722)`, keeps its own clamp of 8, and does not read `surface_cache.firefly_sigma`. A newborn starts at short mean = long mean, inconsistency 1, vbbr 1, and variance `(0.15 * luma)^2`. The first 16 sets blend at most `1 / (n + 1)`. A mover raises the blend to at least 0.5; a lamp delta is capped at 0.9. `surface_cache.blend` forces estimator bit 20 and the hold bit (bit 30).
 - Mover cache entries store an object-local position and normal (`surface_cache.attach_movers`). A cache entry is one hashed surface patch. GIBS attaches every surfel. Static geometry and world probes stay on the world lattice.
 - `surface_cache.ray_budget` 0 keeps the fixed ray lists. A total already under the budget is unchanged. Over the budget, the dispatch lists are scaled down and the floor's leftover entries are given back. A list that had work stays non-empty when the ceiling can hold one 16-ray entry per non-empty list. `surface_cache.dormant_rays` is a whole number of fresh rays per frame, 0 through 16. 0 keeps one sweep in eight. 1 through 16 trace one new 16-ray entry every `ceil(16 / rays)` frames.
