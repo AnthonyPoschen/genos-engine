@@ -21,7 +21,7 @@
 use genos_math::Vec3;
 
 use crate::reservoir::{
-    finalize_initial, merge, stream_update, MergeInput, Reservoir, Weighting, LAMP_EMPTY,
+    finalize_initial, m_as_f32, merge, stream_update, MergeInput, Reservoir, Weighting, LAMP_EMPTY,
 };
 use crate::rng::Rng;
 use crate::shade::{target, Receiver, Scene};
@@ -54,7 +54,14 @@ pub struct Config {
     pub weighting: Weighting,
     pub proposal: Proposal,
     pub history: History,
+    /// History `M` is clamped to this multiple of the current frame's candidate
+    /// count before the temporal merge. `0` leaves history `M` unclamped.
+    /// The default, 20, is the usual `ReSTIR` cap (Bitterli et al., TOG 2020).
+    pub m_clamp: u32,
 }
+
+/// Default history-`M` multiple. `cap = m_clamp * current_candidate_count`.
+pub const DEFAULT_M_CLAMP: u32 = 20;
 
 impl Config {
     /// Target candidates and temporal reuse. Spatial neighbours stay off.
@@ -73,6 +80,7 @@ impl Config {
             weighting: Weighting::Balance,
             proposal: Proposal::Target,
             history: History::Temporal,
+            m_clamp: DEFAULT_M_CLAMP,
         }
     }
 
@@ -90,6 +98,9 @@ impl Config {
         }
         if self.spatial_radius > 32 {
             return Err("spatial radius must be at most 32".to_string());
+        }
+        if self.m_clamp > 4096 {
+            return Err("M clamp must be at most 4096".to_string());
         }
         Ok(())
     }
@@ -184,6 +195,18 @@ impl Session {
     #[must_use]
     pub fn history_m(&self, index: usize) -> Option<u32> {
         self.history.get(index).map(|reservoir| reservoir.m)
+    }
+
+    /// Moves one lamp. The next temporal merge sees the new position.
+    /// History `M` is still clamped, so a moved lamp does not keep a stale weight.
+    pub fn set_lamp_position(&mut self, index: usize, position: Vec3) -> bool {
+        match self.scene.lamps.get_mut(index) {
+            Some(lamp) => {
+                lamp.position = position;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Drops temporal history. The next frame reuses neighbours only.
@@ -286,11 +309,12 @@ impl Session {
             return current;
         }
         let unit = self.rng.next_f32();
-        let previous = self
+        let mut previous = self
             .history
             .get(index)
             .copied()
             .unwrap_or_else(Reservoir::empty);
+        clamp_history(&mut previous, self.config.m_clamp, current.m);
         if previous.is_empty() {
             return current;
         }
@@ -423,6 +447,24 @@ fn sample_cdf(weights: &[f32], rng: &mut Rng) -> Option<(usize, f32)> {
         })
 }
 
+/// Scales history so its `M` is at most `factor * current_m`.
+///
+/// `current_m` is this frame's candidate count. The stored reservoir can
+/// still be one candidate above the cap, because the clamp runs on the
+/// history input and the merge then adds the new sample.
+fn clamp_history(previous: &mut Reservoir, factor: u32, current_m: u32) {
+    if factor == 0 || current_m == 0 || previous.m == 0 {
+        return;
+    }
+    let cap = factor.saturating_mul(current_m);
+    if previous.m <= cap {
+        return;
+    }
+    let scale = m_as_f32(cap) / m_as_f32(previous.m);
+    previous.w_sum *= scale;
+    previous.m = cap;
+}
+
 fn neighbor_indices(
     index: usize,
     width: usize,
@@ -476,6 +518,7 @@ mod tests {
             weighting: Weighting::Balance,
             proposal,
             history: History::Temporal,
+            m_clamp: super::DEFAULT_M_CLAMP,
         }
     }
 
@@ -604,6 +647,7 @@ mod tests {
             weighting,
             proposal: Proposal::Uniform,
             history: History::Temporal,
+            m_clamp: super::DEFAULT_M_CLAMP,
         };
         let mut acc = vec![genos_math::Vec3::ZERO; scene.receivers.len()];
         let seeds = 2000u32;
@@ -639,6 +683,82 @@ mod tests {
         let fresh = session.history_m(0).ok_or("missing history")?;
         assert_eq!(fresh, 2, "reset left M {fresh}");
         Ok(())
+    }
+
+    /// A lamp that moves keeps a huge unclamped `M`, so the shade stays on the
+    /// old integral. The 20× cap lets the new integral win inside a fixed frame
+    /// budget (Bitterli et al. 2020, temporal reuse).
+    #[test]
+    fn a_moved_lamp_stops_being_stale_inside_the_m_clamp() -> Result<(), String> {
+        let scene = Scene {
+            lamps: vec![
+                crate::shade::Lamp {
+                    position: genos_math::Vec3::new(0.0, 1.0, 0.15),
+                    intensity: genos_math::Vec3::new(30.0, 28.0, 24.0),
+                },
+                crate::shade::Lamp {
+                    position: genos_math::Vec3::new(2.4, 1.1, 0.2),
+                    intensity: genos_math::Vec3::new(8.0, 8.0, 8.0),
+                },
+            ],
+            receivers: vec![crate::shade::Receiver {
+                position: genos_math::Vec3::ZERO,
+                normal: genos_math::Vec3::Y,
+                albedo: genos_math::Vec3::new(0.8, 0.8, 0.8),
+            }],
+            occluders: Vec::new(),
+            width: 1,
+            camera: genos_math::Vec3::new(0.0, 1.6, -2.0),
+        };
+        let mut held = Session::new(scene.clone(), mover(0), 9)?;
+        let mut fresh = Session::new(scene.clone(), mover(super::DEFAULT_M_CLAMP), 9)?;
+        for _ in 0..48 {
+            let _ = held.step();
+            let _ = fresh.step();
+        }
+        let grown = held.history_m(0).ok_or("missing history")?;
+        let limited = fresh.history_m(0).ok_or("missing history")?;
+        assert!(grown > 40, "unclamped M {grown}");
+        assert!(
+            limited <= super::DEFAULT_M_CLAMP + 1,
+            "clamped M {limited}"
+        );
+        let far = genos_math::Vec3::new(7.5, 1.0, 0.15);
+        assert!(held.set_lamp_position(0, far));
+        assert!(fresh.set_lamp_position(0, far));
+        let bound = 24u32;
+        let mut settled = None;
+        for frame in 1..=bound {
+            let held_luma = luminance(*held.step().first().ok_or("no receiver")?);
+            let fresh_luma = luminance(*fresh.step().first().ok_or("no receiver")?);
+            let truth = luminance(brute(&fresh.scene().receivers[0], fresh.scene()));
+            let held_err = rel(held_luma, truth);
+            let fresh_err = rel(fresh_luma, truth);
+            if fresh_err < 0.15 {
+                assert!(
+                    held_err > 0.5,
+                    "unclamped path already matched at frame {frame}: error {held_err}"
+                );
+                settled = Some(frame);
+                break;
+            }
+        }
+        let settled = settled.ok_or("clamped path still stale after 24 frames")?;
+        assert!(settled <= bound, "settled at {settled}");
+        Ok(())
+    }
+
+    fn mover(m_clamp: u32) -> Config {
+        Config {
+            candidates: 1,
+            spatial_neighbors: 0,
+            spatial_radius: 1,
+            temporal: true,
+            weighting: Weighting::Balance,
+            proposal: Proposal::Uniform,
+            history: History::Temporal,
+            m_clamp,
+        }
     }
 
     fn variance(values: &[f32]) -> f32 {

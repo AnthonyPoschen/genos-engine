@@ -321,6 +321,7 @@ fn config_value(config: &Config) -> Value {
         ("weighting", string(weight_name(config.weighting))),
         ("proposal", string(proposal_name(config.proposal))),
         ("history", string(history_name(config.history))),
+        ("m_clamp", int(i64::from(config.m_clamp))),
     ])
 }
 
@@ -473,6 +474,11 @@ fn parse_config(value: &Value) -> Result<Config, String> {
         weighting,
         proposal,
         history,
+        m_clamp: value
+            .get("m_clamp")
+            .map_or(Ok(crate::restir::DEFAULT_M_CLAMP), |_| {
+                u32_field(value, "m_clamp")
+            })?,
     })
 }
 

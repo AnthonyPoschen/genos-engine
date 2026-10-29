@@ -25,6 +25,7 @@ use genos_math::f32_from_f64;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_initial.spv"));
 const SPV_TEMPORAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_temporal.spv"));
+const SPV_SPATIAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_spatial.spv"));
 
 type Handle = *mut c_void;
 type VkResult = i32;
@@ -50,13 +51,15 @@ pub struct GpuRun {
 }
 
 /// Temporal-reuse push constants. `reset_after == u32::MAX` clears nothing.
-/// `m_cap == 0` leaves `M` unclamped, matching the CPU reference.
+/// `m_cap == 0` skips the absolute fault. `m_clamp` is the CPU multiple
+/// (`0` leaves that cap off; the reference default is 20).
 #[derive(Clone, Copy, Debug)]
 pub struct TemporalPush {
     pub base: Push,
     pub frames: u32,
     pub reset_after: u32,
     pub m_cap: u32,
+    pub m_clamp: u32,
 }
 
 /// Runs the initial-candidate shader on lavapipe.
@@ -100,8 +103,49 @@ pub fn dispatch_temporal(words: &[u32], push: TemporalPush) -> Result<GpuRun, St
         push.frames,
         push.reset_after,
         push.m_cap,
+        push.m_clamp,
     ];
     unsafe { dispatch_inner(words, SPV_TEMPORAL, &words_push) }
+}
+
+/// Spatial-reuse push constants. Neighbour order matches `neighbor_indices`.
+/// `reverse != 0` swaps that list after the draws.
+#[derive(Clone, Copy, Debug)]
+pub struct SpatialPush {
+    pub temporal: TemporalPush,
+    pub width: u32,
+    pub spatial_neighbors: u32,
+    pub spatial_radius: u32,
+    pub reverse: u32,
+}
+
+/// Runs the spatial-reuse shader on lavapipe.
+///
+/// # Errors
+///
+/// Returns a string when the loader, the device, or the dispatch fails.
+pub fn dispatch_spatial(words: &[u32], push: SpatialPush) -> Result<GpuRun, String> {
+    let (seed_lo, seed_hi) = low_high(push.temporal.base.seed)?;
+    let words_push = [
+        seed_lo,
+        seed_hi,
+        push.temporal.base.receivers,
+        push.temporal.base.lamps,
+        push.temporal.base.candidates,
+        push.temporal.base.proposal,
+        push.temporal.base.lamp_base,
+        push.temporal.base.recv_base,
+        push.temporal.base.out_base,
+        push.temporal.frames,
+        push.temporal.reset_after,
+        push.temporal.m_cap,
+        push.temporal.m_clamp,
+        push.width,
+        push.spatial_neighbors,
+        push.spatial_radius,
+        push.reverse,
+    ];
+    unsafe { dispatch_inner(words, SPV_SPATIAL, &words_push) }
 }
 
 #[repr(C)]
