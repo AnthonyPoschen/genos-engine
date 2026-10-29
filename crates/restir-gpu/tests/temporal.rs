@@ -182,6 +182,50 @@ fn reset_after_drops_m_to_the_candidate_count() {
     );
 }
 
+#[test]
+fn the_history_m_clamp_matches_the_cpu_reference() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("restir-c2-m-clamp");
+    let _ = std::fs::remove_dir_all(&root);
+    let reference = root.join("reference");
+    let candidate = root.join("gpu");
+    let diff_dir = root.join("diff");
+    let (code, text) = output(restir_ref(&[
+        "run",
+        "--spatial",
+        "0",
+        "--seeds",
+        "1",
+        "--frames",
+        "8",
+        "--m-clamp",
+        "1",
+        "--out",
+        reference.to_str().expect("utf8"),
+    ]));
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = output(restir_gpu(&[
+        "--temporal",
+        "--frames",
+        "8",
+        "--m-clamp",
+        "1",
+        "--out",
+        candidate.to_str().expect("utf8"),
+    ]));
+    assert_eq!(code, 0, "{text}");
+    let (code, text) = output(restir_ref(&[
+        "diff",
+        "--reference",
+        reference.join("reference.json").to_str().expect("utf8"),
+        "--candidate",
+        candidate.join("candidate.json").to_str().expect("utf8"),
+        "--out",
+        diff_dir.to_str().expect("utf8"),
+    ]));
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("mismatches 0"), "{text}");
+}
+
 fn history_m(text: &str) -> u32 {
     text.lines()
         .find_map(|line| line.strip_prefix("history_m "))

@@ -2,7 +2,8 @@
 //!
 //! C1 resamples point lamps the way `genos-restir-ref` does on frame 1 with
 //! temporal reuse off. C2 adds temporal reuse: the same PCG stream, the same
-//! draw order, the balance-heuristic weight, and no `M` clamp. `--m-cap`
+//! draw order, the balance-heuristic weight, and the CPU history-`M` clamp
+//! (`m_clamp` times this frame's candidate count, default 20). `--m-cap`
 //! injects the clamped-history fault and must fail `restir-ref diff`.
 //! `--reset-after` clears history the way `Session::reset_temporal` does.
 //! The live lighting pass does not call this crate. Both paths are off unless
@@ -58,8 +59,10 @@ pub struct Options {
     pub frames: u32,
     /// Completed frames before history is cleared. `None` never clears.
     pub reset_after: Option<u32>,
-    /// `0` leaves `M` unclamped. A positive cap is the fault injection.
+    /// `0` leaves the absolute fault off. A positive cap is the fault injection.
     pub m_cap: u32,
+    /// Multiple of this frame's candidate count. Default 20. `0` disables it.
+    pub m_clamp: u32,
     pub candidates: u32,
     pub proposal: Proposal,
     pub scene: ScenePick,
@@ -85,6 +88,7 @@ pub fn parse_args(
     let mut frames = 8u32;
     let mut reset_after = None;
     let mut m_cap = 0u32;
+    let mut m_clamp = genos_restir_ref::DEFAULT_M_CLAMP;
     let mut candidates = 8u32;
     let mut uniform = false;
     let mut open_row = false;
@@ -111,6 +115,9 @@ pub fn parse_args(
             }
             "--m-cap" => {
                 m_cap = parse_u32(&next_value(args, &mut index, "--m-cap")?, "--m-cap")?;
+            }
+            "--m-clamp" => {
+                m_clamp = parse_u32(&next_value(args, &mut index, "--m-clamp")?, "--m-clamp")?;
             }
             "--candidates" => {
                 candidates = parse_u32(
@@ -160,6 +167,7 @@ pub fn parse_args(
         frames,
         reset_after,
         m_cap,
+        m_clamp,
         candidates,
         proposal: if uniform {
             Proposal::Uniform
@@ -324,7 +332,7 @@ fn run_temporal(options: &Options) -> Result<Option<String>, String> {
         weighting: genos_restir_ref::reservoir::Weighting::Balance,
         proposal: options.proposal,
         history: History::Temporal,
-        m_clamp: genos_restir_ref::DEFAULT_M_CLAMP,
+        m_clamp: options.m_clamp,
     };
     config.validate()?;
     let (by_frame, dispatch_ms) = temporal_reservoirs(&scene, &config, options)?;
@@ -405,6 +413,7 @@ fn temporal_reservoirs(
         frames: options.frames,
         reset_after: options.reset_after.unwrap_or(u32::MAX),
         m_cap: options.m_cap,
+        m_clamp: config.m_clamp,
     };
     let ran = gpu::dispatch_temporal(&words, push)?;
     println!("device {} dispatch_ms {:.3}", ran.device, ran.dispatch_ms);
@@ -483,7 +492,9 @@ Options:
   --no-temporal         stay off (wins over GENOS_RESTIR_TEMPORAL)
   --frames N            temporal frames (default 8, at most 64)
   --reset-after N       clear history after N completed frames
-  --m-cap N             fault: clamp history M to N (0 leaves M unclamped)
+  --m-cap N             fault: clamp history M to the absolute count N (0 off)
+  --m-clamp N           clamp history M to N times this frame's candidate count
+                        (default 20, matching restir-ref; 0 leaves that cap off)
   --candidates N        candidates per receiver (default 8)
   --proposal NAME       target (default) or uniform
   --scene NAME          gate (default) or open-row
@@ -491,7 +502,8 @@ Options:
   --out DIR             output directory (default ./genos-debug/restir-gpu)
 
 Writes candidate.json in the restir-ref dump schema.
-M is not clamped. That matches the CPU reference. --m-cap is the fault
+History M is clamped to --m-clamp times this frame's candidate count,
+the same cap as restir-ref (default 20). --m-cap is the absolute fault
 that must fail restir-ref diff. --reset-after drops history the way
 Session::reset_temporal does: the next frame's M is the candidate count.
 GENOS_RESTIR_INITIAL mirrors --initial. GENOS_RESTIR_TEMPORAL mirrors
@@ -510,6 +522,7 @@ mod tests {
         let options = parse_args(&[], None, None, None)?;
         assert_eq!(options.stage, Stage::Off);
         assert_eq!(options.m_cap, 0);
+        assert_eq!(options.m_clamp, genos_restir_ref::DEFAULT_M_CLAMP);
         Ok(())
     }
 

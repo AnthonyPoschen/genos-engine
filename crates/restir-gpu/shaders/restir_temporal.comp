@@ -10,7 +10,9 @@
 //     for each receiver: one f32, then the temporal merge (the draw still
 //       happens when history is empty)
 // History is the post-temporal reservoir. Spatial draws are not in this shader.
-// M is not clamped unless pc.m_cap is non-zero (fault injection).
+// History M is clamped to pc.m_clamp times this frame's candidate count
+// (0 leaves that cap off; the CPU default is 20). pc.m_cap is the absolute
+// fault and runs after that cap.
 // A reset_after frame clears history the way Session::reset_temporal does.
 //
 // Dot products are `0 + ax*bx + ay*by + az*bz`, the same order as
@@ -35,6 +37,7 @@ layout(push_constant) uniform Push {
     uint frames;
     uint reset_after;
     uint m_cap;
+    uint m_clamp;
 } pc;
 
 const uint LAMP_EMPTY = 0xffffffffu;
@@ -209,7 +212,14 @@ void store_empty(out uint lamp, out float w_sum, out uint m, out float target) {
     target = 0.0;
 }
 
-void cap_history(inout uint m, inout float w_sum) {
+void cap_history(inout uint m, inout float w_sum, uint current_m) {
+    if (pc.m_clamp != 0u && current_m != 0u) {
+        uint cap = pc.m_clamp * current_m;
+        if (m > cap) {
+            w_sum *= m_as_f(cap) / m_as_f(m);
+            m = cap;
+        }
+    }
     if (pc.m_cap == 0u || m <= pc.m_cap) {
         return;
     }
@@ -397,7 +407,7 @@ void main() {
             if (h_m[recv] != 0u && h_lamp[recv] != LAMP_EMPTY) {
                 uint hist_m = h_m[recv];
                 float hist_w = h_w[recv];
-                cap_history(hist_m, hist_w);
+                cap_history(hist_m, hist_w, m);
                 float tq_c = 0.0;
                 if (lamp != LAMP_EMPTY && lamp < n) {
                     tq_c = weights[lamp];

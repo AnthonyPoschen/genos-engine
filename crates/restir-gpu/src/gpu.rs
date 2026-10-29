@@ -50,13 +50,15 @@ pub struct GpuRun {
 }
 
 /// Temporal-reuse push constants. `reset_after == u32::MAX` clears nothing.
-/// `m_cap == 0` leaves `M` unclamped, matching the CPU reference.
+/// `m_cap == 0` skips the absolute fault. `m_clamp` is the CPU multiple
+/// (`0` leaves that cap off; the reference default is 20).
 #[derive(Clone, Copy, Debug)]
 pub struct TemporalPush {
     pub base: Push,
     pub frames: u32,
     pub reset_after: u32,
     pub m_cap: u32,
+    pub m_clamp: u32,
 }
 
 /// Runs the initial-candidate shader on lavapipe.
@@ -100,6 +102,7 @@ pub fn dispatch_temporal(words: &[u32], push: TemporalPush) -> Result<GpuRun, St
         push.frames,
         push.reset_after,
         push.m_cap,
+        push.m_clamp,
     ];
     unsafe { dispatch_inner(words, SPV_TEMPORAL, &words_push) }
 }
