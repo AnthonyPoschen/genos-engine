@@ -3,7 +3,7 @@ name = "genos-fog-ref"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "CPU fog reference: single-scattering path tracer and closed forms (ADR 0026 stage F0)."
+description = "CPU fog reference: path tracer, froxel light picks, and volumetric integration (ADR 0026 stages F0–F2)."
 
 [lints]
 workspace = true
@@ -17,3 +17,7 @@ path = "../debug/tests/fog_reference.rs"
 [[test]]
 name = "fog_froxel"
 path = "../debug/tests/fog_froxel.rs"
+
+[[test]]
+name = "fog_integrate"
+path = "../debug/tests/fog_integrate.rs"
