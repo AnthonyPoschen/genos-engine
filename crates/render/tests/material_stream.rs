@@ -38,6 +38,10 @@ use genos_window::Window;
 
 /// A hung GPU wait fails the run instead of blocking it. Override with
 /// `GENOS_TEST_TIMEOUT_SECS`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness watchdog: reads its timeout and sleeps on its own thread"
+)]
 fn watchdog() {
     static ARMED: std::sync::Once = std::sync::Once::new();
     ARMED.call_once(|| {
