@@ -3,10 +3,6 @@
     expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
 )]
 #![allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     clippy::many_single_char_names,
     clippy::chunks_exact_to_as_chunks,
     reason = "error metrics over small fixture images"
@@ -53,8 +49,9 @@ fn temp(name: &str) -> PathBuf {
 
 /// Decode one level to RGBA8 (BC5 gives R, G, 0, 255), cropped to `w`×`h`.
 fn decode_level(format: BlockFormat, blocks: &[u8], w: u32, h: u32) -> Vec<u8> {
-    let (bw, bh) = (w.div_ceil(4) as usize, h.div_ceil(4) as usize);
-    let (w, h) = (w as usize, h as usize);
+    let size = |v: u32| usize::try_from(v).unwrap();
+    let (bw, bh) = (size(w.div_ceil(4)), size(h.div_ceil(4)));
+    let (w, h) = (size(w), size(h));
     let mut out = vec![0u8; w * h * 4];
     for (i, block) in blocks.chunks_exact(16).enumerate() {
         let (bx, by) = (i % bw, i / bw);
@@ -126,7 +123,7 @@ fn check(name: &str, image: &Image, space: MipSpace, k: &Ktx2) -> f64 {
                 let len = (x * x + y * y + z * z).sqrt().max(1e-9);
                 degrees += (dot / len).clamp(-1.0, 1.0).acos().to_degrees();
             }
-            let mean = degrees / (got.len() / 4) as f64;
+            let mean = degrees / f64::from(u32::try_from(got.len() / 4).unwrap());
             assert!(mean <= MAX_MEAN_DEGREES, "{name}: {mean:.2} degrees");
         } else {
             let worst = got
@@ -141,6 +138,17 @@ fn check(name: &str, image: &Image, space: MipSpace, k: &Ktx2) -> f64 {
     first
 }
 
+/// The byte nearest `v`, without a float-to-int cast.
+fn nearest_byte(v: f64) -> u8 {
+    (0..=u8::MAX)
+        .min_by(|a, b| {
+            (f64::from(*a) - v)
+                .abs()
+                .total_cmp(&(f64::from(*b) - v).abs())
+        })
+        .unwrap()
+}
+
 /// A hemisphere of normals, encoded the glTF way.
 fn normal_map(size: u32) -> Image {
     let mut pixels = Vec::new();
@@ -151,7 +159,7 @@ fn normal_map(size: u32) -> Image {
             let z = (1.0 - u * u - v * v).max(0.0).sqrt();
             let l = (u * u + v * v + z * z).sqrt();
             for c in [u / l, v / l, z / l] {
-                pixels.push(((c * 0.5 + 0.5) * 255.0).round() as u8);
+                pixels.push(nearest_byte((c * 0.5 + 0.5) * 255.0));
             }
             pixels.push(255);
         }
@@ -202,7 +210,7 @@ fn gltf_textures_take_the_space_of_their_slot_and_round_trip() {
         assert_eq!(decode_textures(&encode_textures(&cooked)).unwrap(), cooked);
         let spaces = genos_load::image_spaces(scene.images.len(), &scene.materials);
         for (t, space) in cooked.textures.iter().zip(spaces) {
-            let image = &scene.images[t.image as usize];
+            let image = &scene.images[usize::try_from(t.image).unwrap()];
             check(name, image, space, &t.ktx2);
         }
     }
