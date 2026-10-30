@@ -821,12 +821,21 @@ impl Renderer {
         // A lamp added, removed or recolored is a lighting scene change too: the
         // cache never drains bounce from a lamp that is gone (a lamp switched off
         // left ~29/255 on the corridor floor for good). Moving lamps keep their
-        // cache; the incremental path follows them.
+        // cache; the incremental path follows them. Suns (a non-zero direction)
+        // are left out: a sun or sky change is followed incrementally too, so
+        // adding or recoloring one must not drop every probe's rays.
         let lamp_set = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            world.scene.lights.len().hash(&mut hasher);
-            for light in &world.scene.lights {
+            let lamps = || {
+                world
+                    .scene
+                    .lights
+                    .iter()
+                    .filter(|light| light.direction == genos_scene::Vec3::ZERO)
+            };
+            lamps().count().hash(&mut hasher);
+            for light in lamps() {
                 for c in light.color {
                     c.to_bits().hash(&mut hasher);
                 }
