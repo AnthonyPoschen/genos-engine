@@ -10,7 +10,7 @@
 use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::{Fns, Handle, VkResult};
 
@@ -57,7 +57,9 @@ static COUNTS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
 static MEMORY: Mutex<MemoryBook> = Mutex::new(MemoryBook::new());
 
 struct MemoryBook {
-    live: Vec<(usize, u64, u32)>,
+    /// Address, size, memory type, and whether the allocate info had no
+    /// `pNext` chain (only those can be parked and handed out again).
+    live: Vec<(usize, u64, u32, bool)>,
     live_bytes: u64,
     peak_bytes: u64,
     total_bytes: u64,
@@ -82,14 +84,14 @@ impl MemoryBook {
 #[repr(C)]
 struct AllocInfo {
     _s_type: i32,
-    _next: *const c_void,
+    next: *const c_void,
     size: u64,
     index: u32,
 }
 
-fn book_alloc(memory: Handle, size: u64, index: u32) {
+fn book_alloc(memory: Handle, size: u64, index: u32, plain: bool) {
     let mut book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
-    book.live.push((memory.addr(), size, index));
+    book.live.push((memory.addr(), size, index, plain));
     book.live_bytes = book.live_bytes.saturating_add(size);
     book.peak_bytes = book.peak_bytes.max(book.live_bytes);
     book.total_bytes = book.total_bytes.saturating_add(size);
@@ -102,11 +104,101 @@ fn book_alloc(memory: Handle, size: u64, index: u32) {
     }
 }
 
-fn book_free(memory: Handle) {
+/// Size and memory type of a plain allocation, `None` for one with a `pNext`
+/// chain or one the book never saw.
+fn book_free(memory: Handle) -> Option<(u64, u32)> {
     let mut book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(at) = book.live.iter().position(|entry| entry.0 == memory.addr()) {
-        let (_, size, _) = book.live.swap_remove(at);
-        book.live_bytes = book.live_bytes.saturating_sub(size);
+    let at = book
+        .live
+        .iter()
+        .position(|entry| entry.0 == memory.addr())?;
+    let (_, size, index, plain) = book.live.swap_remove(at);
+    book.live_bytes = book.live_bytes.saturating_sub(size);
+    plain.then_some((size, index))
+}
+
+/// Freed device memory kept for the next allocate of the same size and type.
+///
+/// On the 4070 `vkDestroyDevice` took 16 to 25 s with nothing live, and the
+/// time grew with the bytes allocated over the run (1.37 GB to 16 s, 2.56 GB
+/// to 25 s), so the driver pays at teardown for every allocate and free the
+/// run made. Streaming frees and reallocates the same page sizes over and
+/// over. Parking a freed block and handing it back skips the driver for the
+/// repeat. `GENOS_VK_MEM_RECYCLE=0` turns this off for an A/B run.
+static PARKED: Mutex<Parked> = Mutex::new(Parked::new());
+
+/// Most bytes held parked. Older blocks go back to the driver past this.
+const PARK_CAP_BYTES: u64 = 256 << 20;
+
+struct Parked {
+    /// Device, memory, size, memory type. Oldest first.
+    blocks: Vec<(usize, usize, u64, u32)>,
+    bytes: u64,
+    /// Memory currently mapped through the counted `vkMapMemory`.
+    mapped: Vec<usize>,
+    driver_allocs: u64,
+    driver_frees: u64,
+    driver_bytes: u64,
+    reused: u64,
+}
+
+impl Parked {
+    const fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            bytes: 0,
+            mapped: Vec::new(),
+            driver_allocs: 0,
+            driver_frees: 0,
+            driver_bytes: 0,
+            reused: 0,
+        }
+    }
+}
+
+fn recycle_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("GENOS_VK_MEM_RECYCLE").as_deref() != Ok("0"))
+}
+
+fn parked() -> std::sync::MutexGuard<'static, Parked> {
+    PARKED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A parked block of exactly `size` bytes and memory type `index`.
+fn take_parked(device: Handle, size: u64, index: u32) -> Option<Handle> {
+    let mut park = parked();
+    let at = park
+        .blocks
+        .iter()
+        .position(|b| b.0 == device.addr() && b.2 == size && b.3 == index)?;
+    let (_, memory, _, _) = park.blocks.remove(at);
+    park.bytes = park.bytes.saturating_sub(size);
+    park.reused += 1;
+    Some(device.with_addr(memory))
+}
+
+/// Hand every parked block of `device` back to the driver.
+pub(super) fn free_parked(device: Handle) {
+    let freed: Vec<usize> = {
+        let mut park = parked();
+        let mut freed = Vec::new();
+        let mut kept = Vec::new();
+        for block in std::mem::take(&mut park.blocks) {
+            if block.0 == device.addr() {
+                park.bytes = park.bytes.saturating_sub(block.2);
+                freed.push(block.1);
+            } else {
+                kept.push(block);
+            }
+        }
+        park.blocks = kept;
+        park.driver_frees += u64::try_from(freed.len()).unwrap_or(u64::MAX);
+        freed
+    };
+    let free = real().free_mem;
+    for memory in freed {
+        unsafe { free(device, device.with_addr(memory), std::ptr::null()) };
     }
 }
 
@@ -123,6 +215,20 @@ pub(super) fn memory_line() -> String {
         book.live.len(),
         book.largest
     );
+    drop(book);
+    let park = parked();
+    let _ = write!(
+        line,
+        " driver_allocs={} driver_frees={} driver_bytes={} reused_allocs={} parked_bytes={} recycle={}",
+        park.driver_allocs,
+        park.driver_frees,
+        park.driver_bytes,
+        park.reused,
+        park.bytes,
+        recycle_on()
+    );
+    drop(park);
+    let book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
     for (index, bytes) in book.by_type.iter().enumerate() {
         if *bytes > 0 {
             let _ = write!(line, " type{index}_bytes={bytes}");
@@ -428,18 +534,87 @@ unsafe extern "system" fn counted_alloc_mem(
     out: *mut Handle,
 ) -> VkResult {
     bump(ALLOC_MEM);
-    let result = (real().alloc_mem)(device, info, alloc, out);
-    if result == 0 && !info.is_null() && !out.is_null() {
-        let info = std::ptr::read_unaligned(info.cast::<AllocInfo>());
-        book_alloc(*out, info.size, info.index);
+    let request = (!info.is_null()).then(|| std::ptr::read_unaligned(info.cast::<AllocInfo>()));
+    let plain = request.as_ref().is_some_and(|r| r.next.is_null()) && alloc.is_null();
+    if let Some(request) = request
+        .as_ref()
+        .filter(|_| plain && recycle_on() && !out.is_null())
+    {
+        if let Some(memory) = take_parked(device, request.size, request.index) {
+            *out = memory;
+            book_alloc(memory, request.size, request.index, true);
+            return 0;
+        }
+    }
+    let mut result = (real().alloc_mem)(device, info, alloc, out);
+    if result == super::VK_ERROR_OUT_OF_DEVICE_MEMORY && recycle_on() {
+        // Parked blocks hold device memory the app already gave back.
+        free_parked(device);
+        result = (real().alloc_mem)(device, info, alloc, out);
+    }
+    if let Some(request) = request.as_ref().filter(|_| result == 0) {
+        if !out.is_null() {
+            book_alloc(*out, request.size, request.index, plain);
+            let mut park = parked();
+            park.driver_allocs += 1;
+            park.driver_bytes = park.driver_bytes.saturating_add(request.size);
+        }
     }
     result
 }
 
 unsafe extern "system" fn counted_free_mem(device: Handle, memory: Handle, alloc: *const c_void) {
     bump(FREE_MEM);
-    book_free(memory);
+    if memory.is_null() {
+        return;
+    }
+    let known = book_free(memory);
+    if let Some((size, index)) = known.filter(|_| recycle_on() && alloc.is_null()) {
+        if size <= PARK_CAP_BYTES {
+            park(device, memory, size, index);
+            return;
+        }
+    }
+    parked().driver_frees += 1;
     (real().free_mem)(device, memory, alloc);
+}
+
+/// Keep `memory` for a later allocate of the same size and type, and give
+/// the oldest parked blocks back to the driver past [`PARK_CAP_BYTES`].
+unsafe fn park(device: Handle, memory: Handle, size: u64, index: u32) {
+    let (was_mapped, evicted) = {
+        let mut park = parked();
+        let was_mapped = park
+            .mapped
+            .iter()
+            .position(|m| *m == memory.addr())
+            .map(|at| park.mapped.swap_remove(at))
+            .is_some();
+        park.blocks
+            .push((device.addr(), memory.addr(), size, index));
+        park.bytes = park.bytes.saturating_add(size);
+        let mut evicted = Vec::new();
+        while park.bytes > PARK_CAP_BYTES && !park.blocks.is_empty() {
+            let block = park.blocks.remove(0);
+            park.bytes = park.bytes.saturating_sub(block.2);
+            evicted.push(block);
+        }
+        park.driver_frees += u64::try_from(evicted.len()).unwrap_or(u64::MAX);
+        (was_mapped, evicted)
+    };
+    let fns = real();
+    if was_mapped {
+        // vkFreeMemory unmaps implicitly; a parked block must come back
+        // unmapped so the next owner's vkMapMemory succeeds.
+        (fns.unmap_mem)(device, memory);
+    }
+    for (dev, mem, _, _) in evicted {
+        (fns.free_mem)(
+            device.with_addr(dev),
+            device.with_addr(mem),
+            std::ptr::null(),
+        );
+    }
 }
 
 unsafe extern "system" fn counted_create_buffer(
@@ -471,7 +646,11 @@ unsafe extern "system" fn counted_create_image(
     (real().create_image)(device, info, alloc, out)
 }
 
-unsafe extern "system" fn counted_destroy_image(device: Handle, image: Handle, alloc: *const c_void) {
+unsafe extern "system" fn counted_destroy_image(
+    device: Handle,
+    image: Handle,
+    alloc: *const c_void,
+) {
     bump(DESTROY_IMAGE);
     (real().destroy_image)(device, image, alloc);
 }
@@ -501,7 +680,11 @@ unsafe extern "system" fn counted_create_fence(
     (real().create_fence)(device, info, alloc, out)
 }
 
-unsafe extern "system" fn counted_destroy_fence(device: Handle, fence: Handle, alloc: *const c_void) {
+unsafe extern "system" fn counted_destroy_fence(
+    device: Handle,
+    fence: Handle,
+    alloc: *const c_void,
+) {
     bump(DESTROY_FENCE);
     (real().destroy_fence)(device, fence, alloc);
 }
@@ -531,7 +714,11 @@ unsafe extern "system" fn counted_create_query(
     (real().create_query_pool)(device, info, alloc, out)
 }
 
-unsafe extern "system" fn counted_destroy_query(device: Handle, pool: Handle, alloc: *const c_void) {
+unsafe extern "system" fn counted_destroy_query(
+    device: Handle,
+    pool: Handle,
+    alloc: *const c_void,
+) {
     bump(DESTROY_QUERY);
     (real().destroy_query_pool)(device, pool, alloc);
 }
@@ -710,10 +897,20 @@ unsafe extern "system" fn counted_map(
     out: *mut *mut c_void,
 ) -> VkResult {
     bump(MAP_MEM);
-    (real().map_mem)(device, memory, offset, size, flags, out)
+    let result = (real().map_mem)(device, memory, offset, size, flags, out);
+    if result == 0 {
+        parked().mapped.push(memory.addr());
+    }
+    result
 }
 
 unsafe extern "system" fn counted_unmap(device: Handle, memory: Handle) {
     bump(UNMAP_MEM);
+    {
+        let mut park = parked();
+        if let Some(at) = park.mapped.iter().position(|m| *m == memory.addr()) {
+            park.mapped.swap_remove(at);
+        }
+    }
     (real().unmap_mem)(device, memory);
 }

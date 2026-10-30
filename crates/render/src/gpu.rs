@@ -8598,6 +8598,7 @@ impl Gpu {
         teardown_phase("device_wait_idle", || unsafe {
             wait(device);
         });
+        teardown_phase("free_parked_memory", || traffic::free_parked(device));
         let destroy = self.fns.destroy_device;
         teardown_phase("vk_destroy_device", || unsafe {
             destroy(device, std::ptr::null());
