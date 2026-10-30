@@ -13,6 +13,7 @@
 mod format;
 pub mod ktx2;
 mod package;
+mod parallel;
 mod texture;
 
 use std::path::{Path, PathBuf};
@@ -22,10 +23,11 @@ use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshIn
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
 pub use package::{manifest, Manifest};
+pub use parallel::{map_by_cost, Threads};
 pub use texture::{
-    cook_textures, cook_textures_file, decode_textures, encode_image, encode_textures,
-    load_textures, texture_settings_hash, textures_path, CookedTexture, CookedTextures,
-    TEXTURE_MAGIC, TEXTURE_VERSION,
+    cook_textures, cook_textures_file, cook_textures_with, decode_textures, encode_image,
+    encode_textures, load_textures, texture_settings_hash, textures_path, CookedTexture,
+    CookedTextures, TEXTURE_MAGIC, TEXTURE_VERSION,
 };
 
 /// One cooked mesh: the glTF primitives as imported and the bake key.
@@ -101,22 +103,50 @@ pub fn settings_hash(s: &BakeSettings) -> [u8; 32] {
     h.finish()
 }
 
-/// Cook an import. Each mesh goes through `load_or_bake`, so the bake cache is filled or reused.
+/// Cook an import on every core. Each mesh goes through `load_or_bake`, so the
+/// bake cache is filled or reused.
 ///
 /// # Errors
 ///
 /// No scene, or a bake that fails, is an error.
 pub fn cook(doc: &ImportDoc, settings: &BakeSettings) -> Result<Cooked, CookError> {
+    cook_with(doc, settings, Threads::all())
+}
+
+/// [`cook`] with the meshes spread over `threads`, largest first. The record is
+/// the same for any thread count.
+///
+/// # Errors
+///
+/// No scene, or a bake that fails, is an error.
+pub fn cook_with(
+    doc: &ImportDoc,
+    settings: &BakeSettings,
+    threads: Threads,
+) -> Result<Cooked, CookError> {
     let scene = doc.scene.as_ref().ok_or(CookError::NoScene)?;
-    let mut meshes = Vec::with_capacity(scene.meshes.len());
-    for (index, mesh) in scene.meshes.iter().enumerate() {
-        let baked =
-            load_or_bake(&BakeMesh::from_gltf(scene, index), settings).map_err(CookError::Bake)?;
-        meshes.push(CookedMesh {
-            mesh: mesh.clone(),
-            bake_key: baked.key,
-        });
-    }
+    let indices: Vec<usize> = (0..scene.meshes.len()).collect();
+    let meshes = map_by_cost(
+        &indices,
+        threads,
+        |&i| {
+            scene.meshes[i]
+                .primitives
+                .iter()
+                .map(|p| p.indices.len())
+                .sum()
+        },
+        |&i| {
+            let baked =
+                load_or_bake(&BakeMesh::from_gltf(scene, i), settings).map_err(CookError::Bake)?;
+            Ok(CookedMesh {
+                mesh: scene.meshes[i].clone(),
+                bake_key: baked.key,
+            })
+        },
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>, CookError>>()?;
     Ok(Cooked {
         asset_id: doc.asset_id,
         settings: settings_hash(settings),
