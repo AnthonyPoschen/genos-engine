@@ -3511,9 +3511,6 @@ impl Gpu {
                     }
                     if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
                         bucket_ms[B_SHADOWS as usize] += ms;
-                        if times.print {
-                            times.lighting_bucket[B_SHADOWS as usize] += ms;
-                        }
                     }
                 }
                 if times.print {
@@ -3586,7 +3583,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} light_px={:.3} light_hit={:.3} prefill={:.3}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -3605,7 +3602,11 @@ impl Gpu {
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
                 times.world_pass[3] / f64::from(times.world_runs.max(1)),
                 times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
-                times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                // `light=` splits into pixels + kept hits and cache-ray hits. The
+                // shadows bucket only mirrors those two dispatches (it is not a
+                // pass), so it is left out of this line to avoid a double count.
+                times.lighting_bucket[B_DIRECT as usize] / f64::from(times.lighting_frames),
+                times.lighting_bucket[B_HIT as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
                     .map(|stats| format!(" | {}", stats.line()))
@@ -8528,7 +8529,8 @@ struct GpuTimes {
     lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
     lighting: [f64; 9],
-    /// Per-bucket sums, including cache rays, hit light, and shadows.
+    /// Per-bucket sums, including cache rays and hit light. The shadows slot stays
+    /// zero: it would only mirror the direct and hit-light dispatches.
     lighting_bucket: [f64; 12],
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
