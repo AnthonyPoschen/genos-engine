@@ -136,8 +136,11 @@ fn every_binary_answers_pings_while_it_quits() {
         print_phases(spec.label, gap, total, &phases);
         assert_finished(&spec, &run);
         assert_clean(spec.label, gap, total, &phases, &run);
+        // `lifecycle_frames_presented=0` also contains "frames=", so match
+        // the binary's own `<name> frames=N` line.
+        let frames_line = format!("{} frames=", spec.name);
         assert!(
-            !run.stdout.contains("frames=") && !run.stderr.contains("frames="),
+            !run.stdout.contains(&frames_line) && !run.stderr.contains(&frames_line),
             "{} printed a frame line, so close-early ran the frame loop\nstdout {}\nstderr {}",
             spec.label,
             run.stdout,
@@ -176,7 +179,7 @@ fn assert_rendered(spec: &Spec, run: &Finished) {
     );
     if spec.wants_frames_line() {
         assert!(
-            text.contains("frames="),
+            text.contains(&format!("{} frames=", spec.name)),
             "{} printed no frames= line\nstdout {}\nstderr {}",
             spec.label,
             run.stdout,
