@@ -135,8 +135,13 @@ struct Parked {
     /// Device, memory, size, memory type. Oldest first.
     blocks: Vec<(usize, usize, u64, u32)>,
     bytes: u64,
-    /// Memory currently mapped through the counted `vkMapMemory`.
-    mapped: Vec<usize>,
+    /// Memory held mapped by the driver, and its whole-range base pointer.
+    /// The first `vkMapMemory` maps the whole block and keeps it mapped until
+    /// `vkFreeMemory`. Later maps return base plus offset and `vkUnmapMemory`
+    /// never reaches the driver. The 16:40 4070 run had ~3 map/unmap pairs a
+    /// frame as the only driver traffic growing with frames, alongside a
+    /// vkDestroyDevice stall of ~73 ms per frame.
+    mapped: Vec<(usize, usize)>,
     driver_allocs: u64,
     driver_frees: u64,
     driver_bytes: u64,
@@ -183,6 +188,7 @@ pub(super) fn free_parked(device: Handle) {
         for block in std::mem::take(&mut park.blocks) {
             if block.0 == device.addr() {
                 park.bytes = park.bytes.saturating_sub(block.2);
+                forget_mapping(&mut park, block.1);
                 freed.push(block.1);
             } else {
                 kept.push(block);
@@ -239,8 +245,7 @@ const PRESENT: usize = 4;
 const ACQUIRE: usize = 5;
 const RESET_QUERY: usize = 6;
 const REAL_MAP: usize = 7;
-const REAL_UNMAP: usize = 8;
-const EXTRA_N: usize = 9;
+const EXTRA_N: usize = 8;
 const EXTRA_NAMES: [&str; EXTRA_N] = [
     "queue_submit",
     "submit_infos",
@@ -250,7 +255,6 @@ const EXTRA_NAMES: [&str; EXTRA_N] = [
     "acquire",
     "cmd_reset_query",
     "driver_map",
-    "driver_unmap",
 ];
 static EXTRA: [AtomicU64; EXTRA_N] = [const { AtomicU64::new(0) }; EXTRA_N];
 
@@ -789,21 +793,28 @@ unsafe extern "system" fn counted_free_mem(device: Handle, memory: Handle, alloc
             return;
         }
     }
-    parked().driver_frees += 1;
+    {
+        let mut park = parked();
+        park.driver_frees += 1;
+        forget_mapping(&mut park, memory.addr());
+    }
     (real().free_mem)(device, memory, alloc);
+}
+
+/// Drop the kept mapping of `memory`; `vkFreeMemory` unmaps implicitly.
+fn forget_mapping(park: &mut Parked, memory: usize) {
+    if let Some(at) = park.mapped.iter().position(|m| m.0 == memory) {
+        park.mapped.swap_remove(at);
+    }
 }
 
 /// Keep `memory` for a later allocate of the same size and type, and give
 /// the oldest parked blocks back to the driver past [`PARK_CAP_BYTES`].
 unsafe fn park(device: Handle, memory: Handle, size: u64, index: u32) {
-    let (was_mapped, evicted) = {
+    let evicted = {
         let mut park = parked();
-        let was_mapped = park
-            .mapped
-            .iter()
-            .position(|m| *m == memory.addr())
-            .map(|at| park.mapped.swap_remove(at))
-            .is_some();
+        // A parked block stays mapped; the next owner's vkMapMemory gets the
+        // same base back without a driver call.
         park.blocks
             .push((device.addr(), memory.addr(), size, index));
         park.bytes = park.bytes.saturating_add(size);
@@ -814,14 +825,12 @@ unsafe fn park(device: Handle, memory: Handle, size: u64, index: u32) {
             evicted.push(block);
         }
         park.driver_frees += u64::try_from(evicted.len()).unwrap_or(u64::MAX);
-        (was_mapped, evicted)
+        for block in &evicted {
+            forget_mapping(&mut park, block.1);
+        }
+        evicted
     };
     let fns = real();
-    if was_mapped {
-        // vkFreeMemory unmaps implicitly; a parked block must come back
-        // unmapped so the next owner's vkMapMemory succeeds.
-        (fns.unmap_mem)(device, memory);
-    }
     for (dev, mem, _, _) in evicted {
         (fns.free_mem)(
             device.with_addr(dev),
@@ -1133,20 +1142,34 @@ unsafe extern "system" fn counted_map(
     out: *mut *mut c_void,
 ) -> VkResult {
     bump(MAP_MEM);
-    let result = (real().map_mem)(device, memory, offset, size, flags, out);
-    if result == 0 {
-        parked().mapped.push(memory.addr());
+    let Ok(skip) = usize::try_from(offset) else {
+        return (real().map_mem)(device, memory, offset, size, flags, out);
+    };
+    let kept = parked()
+        .mapped
+        .iter()
+        .find(|m| m.0 == memory.addr())
+        .map(|m| m.1);
+    let base = if let Some(base) = kept {
+        base
+    } else {
+        let mut base: *mut c_void = std::ptr::null_mut();
+        // VK_WHOLE_SIZE from offset 0, so any later range is inside it.
+        let result = (real().map_mem)(device, memory, 0, u64::MAX, flags, &mut base);
+        bump_extra(REAL_MAP, 1);
+        if result != 0 {
+            return result;
+        }
+        parked().mapped.push((memory.addr(), base.expose_provenance()));
+        base.expose_provenance()
+    };
+    if !out.is_null() {
+        *out = std::ptr::with_exposed_provenance_mut::<c_void>(base.saturating_add(skip));
     }
-    result
+    0
 }
 
-unsafe extern "system" fn counted_unmap(device: Handle, memory: Handle) {
+/// The mapping stays until `vkFreeMemory`; see [`Parked::mapped`].
+unsafe extern "system" fn counted_unmap(_device: Handle, _memory: Handle) {
     bump(UNMAP_MEM);
-    {
-        let mut park = parked();
-        if let Some(at) = park.mapped.iter().position(|m| *m == memory.addr()) {
-            park.mapped.swap_remove(at);
-        }
-    }
-    (real().unmap_mem)(device, memory);
 }
