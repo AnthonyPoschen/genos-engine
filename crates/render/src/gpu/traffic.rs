@@ -11,6 +11,7 @@ use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use super::{Fns, Handle, VkResult};
 
@@ -226,6 +227,228 @@ pub(super) fn memory_line() -> String {
     }
     line
 }
+
+// Calls the per-type creates above do not cover. The quit stall grows about
+// 73 ms per frame on camera with flat creates, so these are the per-frame
+// driver calls left to rule out.
+const SUBMIT: usize = 0;
+const SUBMIT_INFOS: usize = 1;
+const SUBMIT_CMDS: usize = 2;
+const SUBMIT_SIGNALS: usize = 3;
+const PRESENT: usize = 4;
+const ACQUIRE: usize = 5;
+const RESET_QUERY: usize = 6;
+const REAL_MAP: usize = 7;
+const REAL_UNMAP: usize = 8;
+const EXTRA_N: usize = 9;
+const EXTRA_NAMES: [&str; EXTRA_N] = [
+    "queue_submit",
+    "submit_infos",
+    "submit_cmds",
+    "submit_signals",
+    "present",
+    "acquire",
+    "cmd_reset_query",
+    "driver_map",
+    "driver_unmap",
+];
+static EXTRA: [AtomicU64; EXTRA_N] = [const { AtomicU64::new(0) }; EXTRA_N];
+
+const COUNT_NAMES: [&str; N] = [
+    "alloc_mem",
+    "free_mem",
+    "create_buffer",
+    "destroy_buffer",
+    "create_image",
+    "destroy_image",
+    "create_image_view",
+    "destroy_image_view",
+    "create_fence",
+    "destroy_fence",
+    "create_sem",
+    "destroy_sem",
+    "create_query_pool",
+    "destroy_query_pool",
+    "create_swapchain",
+    "destroy_swapchain",
+    "create_framebuffer",
+    "destroy_framebuffer",
+    "create_shader",
+    "destroy_shader",
+    "create_pipeline",
+    "destroy_pipeline",
+    "create_desc_pool",
+    "destroy_desc_pool",
+    "alloc_desc",
+    "alloc_cmd",
+    "update_desc",
+    "cmd_update_calls",
+    "cmd_update_bytes",
+    "begin_cmd",
+    "one_time_begin",
+    "reset_cmd",
+    "map_mem",
+    "unmap_mem",
+];
+
+/// Nanoseconds spent inside each destroy call, by `COUNTS` index.
+static DESTROY_NS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+
+fn time_destroy(index: usize, start: Instant) {
+    let ns = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    DESTROY_NS[index].fetch_add(ns, Ordering::Relaxed);
+}
+
+fn bump_extra(index: usize, n: u64) {
+    EXTRA[index].fetch_add(n, Ordering::Relaxed);
+}
+
+/// Frames between `vk_traffic_rate` lines.
+const RATE_EVERY: u64 = 100;
+
+/// All counters at the last rate line, `COUNTS` then `EXTRA`.
+static RATE_BASE: Mutex<Option<[u64; N + EXTRA_N]>> = Mutex::new(None);
+
+fn all_counts() -> [u64; N + EXTRA_N] {
+    let mut out = [0u64; N + EXTRA_N];
+    for (slot, c) in out.iter_mut().zip(COUNTS.iter().chain(EXTRA.iter())) {
+        *slot = c.load(Ordering::Relaxed);
+    }
+    out
+}
+
+fn count_name(i: usize) -> &'static str {
+    if i < N {
+        COUNT_NAMES[i]
+    } else {
+        EXTRA_NAMES[i - N]
+    }
+}
+
+/// Hundredths as `whole.frac`, without a float cast.
+fn hundredths(value: u64) -> String {
+    format!("{}.{:02}", value / 100, value % 100)
+}
+
+/// Per-frame rate of every counter that moved over `frames` frames.
+fn rate_text(now: &[u64; N + EXTRA_N], base: &[u64; N + EXTRA_N], frames: u64) -> String {
+    let mut line = String::new();
+    let frames = frames.max(1);
+    for (i, (n, b)) in now.iter().zip(base.iter()).enumerate() {
+        let delta = n.saturating_sub(*b);
+        if delta > 0 {
+            let rate = delta.saturating_mul(100) / frames;
+            let _ = write!(line, " {}={}", count_name(i), hundredths(rate));
+        }
+    }
+    line
+}
+
+/// After every [`RATE_EVERY`] presents, print what each call ran per frame
+/// over that window.
+fn maybe_rate_line(presents: u64) {
+    if !presents.is_multiple_of(RATE_EVERY) {
+        return;
+    }
+    let now = all_counts();
+    let mut guard = RATE_BASE.lock().unwrap_or_else(PoisonError::into_inner);
+    let base = guard.unwrap_or([0; N + EXTRA_N]);
+    eprintln!(
+        "vk_traffic_rate frame={presents} per_frame{}",
+        rate_text(&now, &base, RATE_EVERY)
+    );
+    *guard = Some(now);
+}
+
+/// Per-frame rates over the whole run plus the uncovered call totals, for
+/// the quit line.
+#[must_use]
+pub(super) fn rate_line() -> String {
+    let now = all_counts();
+    let frames = now[N + PRESENT];
+    let mut line = format!("frames={frames}");
+    for (i, name) in EXTRA_NAMES.iter().enumerate() {
+        let _ = write!(line, " {name}={}", now[N + i]);
+    }
+    let _ = write!(
+        line,
+        " per_frame{}",
+        rate_text(&now, &[0; N + EXTRA_N], frames)
+    );
+    line
+}
+
+/// Milliseconds spent destroying each object type over the run, so the
+/// teardown can be split by type before `vkDestroyDevice`.
+#[must_use]
+pub(super) fn destroy_line() -> String {
+    let mut line = String::new();
+    for (i, (ns, count)) in DESTROY_NS.iter().zip(COUNTS.iter()).enumerate() {
+        let n = count.load(Ordering::Relaxed);
+        if COUNT_NAMES[i].starts_with("destroy_") && n > 0 {
+            let centi_ms = ns.load(Ordering::Relaxed) / 10_000;
+            let _ = write!(line, " {}={n}/{}ms", COUNT_NAMES[i], hundredths(centi_ms));
+        }
+    }
+    line
+}
+
+#[repr(C)]
+struct SubmitInfo {
+    _s_type: i32,
+    _next: *const c_void,
+    _wait_count: u32,
+    _waits: *const Handle,
+    _stages: *const u32,
+    cmd_count: u32,
+    _cmds: *const Handle,
+    signal_count: u32,
+    _signals: *const Handle,
+}
+
+unsafe extern "system" fn counted_submit(
+    queue: Handle,
+    count: u32,
+    infos: *const u8,
+    fence: Handle,
+) -> VkResult {
+    bump_extra(SUBMIT, 1);
+    bump_extra(SUBMIT_INFOS, u64::from(count));
+    if !infos.is_null() {
+        let infos = infos.cast::<SubmitInfo>();
+        for i in 0..usize::try_from(count).unwrap_or(0) {
+            let info = infos.add(i).read_unaligned();
+            bump_extra(SUBMIT_CMDS, u64::from(info.cmd_count));
+            bump_extra(SUBMIT_SIGNALS, u64::from(info.signal_count));
+        }
+    }
+    (real().queue_submit)(queue, count, infos, fence)
+}
+
+unsafe extern "system" fn counted_present(queue: Handle, info: *const u8) -> VkResult {
+    let result = (real().present)(queue, info);
+    let presents = EXTRA[PRESENT].fetch_add(1, Ordering::Relaxed) + 1;
+    maybe_rate_line(presents);
+    result
+}
+
+unsafe extern "system" fn counted_acquire(
+    device: Handle,
+    swapchain: Handle,
+    timeout: u64,
+    sem: Handle,
+    fence: Handle,
+    out: *mut u32,
+) -> VkResult {
+    bump_extra(ACQUIRE, 1);
+    (real().acquire)(device, swapchain, timeout, sem, fence, out)
+}
+
+unsafe extern "system" fn counted_reset_query(cmd: Handle, pool: Handle, first: u32, count: u32) {
+    bump_extra(RESET_QUERY, 1);
+    (real().cmd_reset_query)(cmd, pool, first, count);
+}
+
 static REAL: Mutex<Option<Fns>> = Mutex::new(None);
 
 fn bump(index: usize) {
@@ -284,6 +507,10 @@ pub(super) fn install(fns: &mut Fns) {
     fns.reset_cmd = counted_reset;
     fns.map_mem = counted_map;
     fns.unmap_mem = counted_unmap;
+    fns.queue_submit = counted_submit;
+    fns.present = counted_present;
+    fns.acquire = counted_acquire;
+    fns.cmd_reset_query = counted_reset_query;
 }
 
 /// One sample of the process counters.
@@ -620,7 +847,9 @@ unsafe extern "system" fn counted_destroy_buffer(
     alloc: *const c_void,
 ) {
     bump(DESTROY_BUFFER);
+    let start = Instant::now();
     (real().destroy_buffer)(device, buffer, alloc);
+    time_destroy(DESTROY_BUFFER, start);
 }
 
 unsafe extern "system" fn counted_create_image(
@@ -639,7 +868,9 @@ unsafe extern "system" fn counted_destroy_image(
     alloc: *const c_void,
 ) {
     bump(DESTROY_IMAGE);
+    let start = Instant::now();
     (real().destroy_image)(device, image, alloc);
+    time_destroy(DESTROY_IMAGE, start);
 }
 
 unsafe extern "system" fn counted_create_view(
@@ -654,7 +885,9 @@ unsafe extern "system" fn counted_create_view(
 
 unsafe extern "system" fn counted_destroy_view(device: Handle, view: Handle, alloc: *const c_void) {
     bump(DESTROY_IMAGE_VIEW);
+    let start = Instant::now();
     (real().destroy_image_view)(device, view, alloc);
+    time_destroy(DESTROY_IMAGE_VIEW, start);
 }
 
 unsafe extern "system" fn counted_create_fence(
@@ -673,7 +906,9 @@ unsafe extern "system" fn counted_destroy_fence(
     alloc: *const c_void,
 ) {
     bump(DESTROY_FENCE);
+    let start = Instant::now();
     (real().destroy_fence)(device, fence, alloc);
+    time_destroy(DESTROY_FENCE, start);
 }
 
 unsafe extern "system" fn counted_create_sem(
@@ -688,7 +923,9 @@ unsafe extern "system" fn counted_create_sem(
 
 unsafe extern "system" fn counted_destroy_sem(device: Handle, sem: Handle, alloc: *const c_void) {
     bump(DESTROY_SEM);
+    let start = Instant::now();
     (real().destroy_sem)(device, sem, alloc);
+    time_destroy(DESTROY_SEM, start);
 }
 
 unsafe extern "system" fn counted_create_query(
@@ -707,7 +944,9 @@ unsafe extern "system" fn counted_destroy_query(
     alloc: *const c_void,
 ) {
     bump(DESTROY_QUERY);
+    let start = Instant::now();
     (real().destroy_query_pool)(device, pool, alloc);
+    time_destroy(DESTROY_QUERY, start);
 }
 
 unsafe extern "system" fn counted_create_swapchain(
@@ -726,7 +965,9 @@ unsafe extern "system" fn counted_destroy_swapchain(
     alloc: *const c_void,
 ) {
     bump(DESTROY_SWAPCHAIN);
+    let start = Instant::now();
     (real().destroy_swapchain)(device, swapchain, alloc);
+    time_destroy(DESTROY_SWAPCHAIN, start);
 }
 
 unsafe extern "system" fn counted_create_fb(
@@ -741,7 +982,9 @@ unsafe extern "system" fn counted_create_fb(
 
 unsafe extern "system" fn counted_destroy_fb(device: Handle, fb: Handle, alloc: *const c_void) {
     bump(DESTROY_FB);
+    let start = Instant::now();
     (real().destroy_framebuffer)(device, fb, alloc);
+    time_destroy(DESTROY_FB, start);
 }
 
 unsafe extern "system" fn counted_create_shader(
@@ -760,7 +1003,9 @@ unsafe extern "system" fn counted_destroy_shader(
     alloc: *const c_void,
 ) {
     bump(DESTROY_SHADER);
+    let start = Instant::now();
     (real().destroy_shader)(device, shader, alloc);
+    time_destroy(DESTROY_SHADER, start);
 }
 
 unsafe extern "system" fn counted_create_gfx(
@@ -789,7 +1034,9 @@ unsafe extern "system" fn counted_create_compute(
 
 unsafe extern "system" fn counted_destroy_pipe(device: Handle, pipe: Handle, alloc: *const c_void) {
     bump(DESTROY_PIPE);
+    let start = Instant::now();
     (real().destroy_pipeline)(device, pipe, alloc);
+    time_destroy(DESTROY_PIPE, start);
 }
 
 unsafe extern "system" fn counted_create_desc_pool(
@@ -808,7 +1055,9 @@ unsafe extern "system" fn counted_destroy_desc_pool(
     alloc: *const c_void,
 ) {
     bump(DESTROY_DESC_POOL);
+    let start = Instant::now();
     (real().destroy_desc_pool)(device, pool, alloc);
+    time_destroy(DESTROY_DESC_POOL, start);
 }
 
 unsafe extern "system" fn counted_alloc_desc(

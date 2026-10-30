@@ -8587,6 +8587,8 @@ impl Gpu {
         let traffic = traffic::snapshot();
         eprintln!("vk_traffic {}", traffic.line());
         eprintln!("vk_memory {}", traffic::memory_line());
+        eprintln!("vk_traffic_run {}", traffic::rate_line());
+        eprintln!("vk_teardown_by_type{}", traffic::destroy_line());
         let wait = self.fns.device_wait;
         teardown_phase("device_wait_idle", || unsafe {
             wait(device);
