@@ -467,8 +467,8 @@ pub fn bias_guard(base: f32, yaw_delta: f32, pitch_delta: f32) -> GuardEdges {
     GuardEdges {
         left,
         right,
-        bottom,
         top,
+        bottom,
     }
 }
 
