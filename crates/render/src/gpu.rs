@@ -3204,6 +3204,7 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.init_fresh_atlas();
             self.update_resident_scene();
             self.update_resident_fields();
             let swap = self.swap_images[index as usize];
@@ -6617,13 +6618,10 @@ impl Gpu {
         }
         let due = self.uncopied_pages();
         let republish = self.ready_to_show();
-        // A fresh atlas (startup, or a resize) starts UNDEFINED, but the main
-        // pass descriptors name it GENERAL. Submit once to clear it and move it
-        // to GENERAL even with nothing streamed (VUID-vkCmdDraw-None-09600).
-        let atlas_fresh = [true, false]
-            .into_iter()
-            .any(|color| self.sampled_layout[usize::from(!color)] != 1 && !self.sampled_image(color).image.is_null());
-        if due.is_empty() && republish.is_empty() && !atlas_fresh {
+        // A fresh atlas with nothing streamed is cleared on the graphics queue
+        // by init_fresh_atlas: a dedicated transfer family (NVIDIA) cannot run
+        // vkCmdClearColorImage, and doing it here blanked every frame there.
+        if due.is_empty() && republish.is_empty() {
             return Ok(());
         }
         // The previous fill finished with the fence. Put the chain back so this
@@ -6855,6 +6853,25 @@ impl Gpu {
         }
         if !self.sampled_cleared[slot] {
             self.clear_color(self.transfer_cmd, image, 7);
+            self.sampled_cleared[slot] = true;
+        }
+    }
+
+    /// A fresh atlas (startup, or a resize) starts UNDEFINED, but the main pass
+    /// descriptors name it GENERAL (VUID-vkCmdDraw-None-09600). Clear it and move
+    /// it to GENERAL on the frame command buffer: the clear needs a graphics or
+    /// compute queue, which a dedicated transfer family is not.
+    fn init_fresh_atlas(&mut self) {
+        for color in [true, false] {
+            let slot = usize::from(!color);
+            let image = self.sampled_image(color).image;
+            if image.is_null() || self.sampled_layout[slot] != 0 {
+                continue;
+            }
+            self.cmd_image_barrier(self.cmd, image, 0, 7, 0x1, 0x1000, 0, 0x1000);
+            self.clear_color(self.cmd, image, 7);
+            self.cmd_image_barrier(self.cmd, image, 7, 1, 0x1000, 0x80, 0x1000, 0x20);
+            self.sampled_layout[slot] = 1;
             self.sampled_cleared[slot] = true;
         }
     }
