@@ -86,3 +86,10 @@ jobs:
           gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug"
           cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1
           cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
+          # Integration tests in those crates that never open a device: CPU
+          # references, shader-source lints and CPU-side packing checks.
+          cargo test --locked --no-fail-fast \
+            -p genos-debug --test fog_froxel --test fog_integrate --test fog_reference --test fire_reference \
+            -p genos-render --test gpu_budget --test shader_loops --test particle_resident \
+            -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
+            -- --test-threads=1
