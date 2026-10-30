@@ -141,6 +141,7 @@ dependencies = [
 name = "genos-debug"
 version = "0.1.0"
 dependencies = [
+ "genos-fog-ref",
  "genos-gpuref",
  "genos-load",
  "genos-mcp",
@@ -159,6 +160,10 @@ dependencies = [
  "genos-render",
  "genos-window",
 ]
+
+[[package]]
+name = "genos-fog-ref"
+version = "0.1.0"
 
 [[package]]
 name = "genos-fracture"

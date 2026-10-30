@@ -9,6 +9,7 @@ mod mat;
 mod media;
 pub mod optics;
 mod quat;
+pub mod tonemap;
 mod vec;
 
 pub use mat::{Mat3, Mat4};

@@ -89,6 +89,9 @@ fn an_open_floor_under_the_sky_sends_back_its_albedo_of_the_sky() {
         &open_floor(Some(Sky { color: SKY }), Vec::new()),
         &camera,
     );
+    // A different world is a scene switch: the surface cache still holds the sky
+    // light it gathered, and the caller drops it, as the app does.
+    renderer.reset_lighting_cache();
     let dark = draw(
         window,
         renderer,
