@@ -115,6 +115,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.
 uint lighting_hit_kind = 0u;
+// Set by lighting_cache_find_sized when this invocation inserted the key.
+uint lighting_claim_new = 0u;
 bool lighting_gi_on() {
     return (gstats.ctrl_bits & 4u) != 0u;
 }
@@ -815,6 +817,7 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
 // second, unlit copy of that patch.
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
+    lighting_claim_new = 0u;
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     uint free_at = LIGHTING_CACHE_SEARCH;
@@ -836,6 +839,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
         if (prev == 0u) {
+            lighting_claim_new = 1u;
             atomicAdd(gstats.claimed, 1u);
             // Flag 16384 (surface cache): every texel and hit patch is lit from its
             // cell's centre on the claimer's plane, whoever claimed it, and never
@@ -905,28 +909,207 @@ void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
     }
 }
 
-// Surface cache: the lit texel twice the size holding pos (the first fill of a
-// texel not lit yet); w 0 when there is none.
-vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
-        size *= 2.0;
-        // The WRC cell (25 cm) is claimed if missing and marked as a seed a
-        // pixel needs (the reveal burst, lighting_compact.comp).
-        bool seed = lighting_world_mode() == 3u && l == 0u && size > 0.2;
-        uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
-        if (s != ~0u && seed) {
-            cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+// Detail levels (schedule bit 3, world-cache mode 3): 25 cm, 50 cm, 1 m, 2 m, 4 m.
+// The 12.5 cm lattice stays the resident texel. These are its parents.
+// Words 14 and 15 of the dispatch-args header: spawns this frame, live coarse slots.
+const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+const float LIGHTING_COARSE_METRES = 1.99;
+const float LIGHTING_LEVEL_ABOVE_SEED = 0.2;
+const float LIGHTING_SLOT_DEPTH = 1.0e-3;
+const float LIGHTING_SLOT_TAN = 1.0e-6;
+const float LIGHTING_NDC_HALF = 0.5;
+// A parent cell with its own samples. Named so the coarse read adds no magic literal.
+const float LIGHTING_LEVEL_READY = 0.5;
+bool lighting_levels_on() {
+    return lighting_world_mode() == 3u && (pc.schedule.x & 8u) != 0u;
+}
+
+// debug_view.rs ViewMode::Tail, compose code 9. Skips the 25 cm and 50 cm
+// parents so the picture reads lighting_sc_level_tail. A second copy of that
+// find overflowed lavapipe, so both walks fall through to the one call.
+bool lighting_tail_view() {
+    return (scene.grid_at.w & 255u) == 9u;
+}
+
+// One new parent this frame, up to pc.frame.z. Word 14 is cleared on the host.
+bool lighting_spawn_permit() {
+    uint cap = pc.frame.z;
+    if (cap == 0u) {
+        return false;
+    }
+    return atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 14u], 1u) < cap;
+}
+
+// 2 m and 4 m share the coarse-slot cap (pc.frame.w). Word 15 is the live count.
+bool lighting_coarse_permit(float size) {
+    if (size < LIGHTING_COARSE_METRES) {
+        return true;
+    }
+    uint cap = pc.frame.w;
+    if (cap == 0u) {
+        return false;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+    if (prev < cap) {
+        return true;
+    }
+    atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    return false;
+}
+
+void lighting_coarse_undo(float size) {
+    if (size < LIGHTING_COARSE_METRES) {
+        return;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    if (prev == 0u) {
+        atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+    }
+}
+
+// Largest parent. Past this the tail stops. A 25 cm hit walk would otherwise
+// reach 8 m, and lavapipe faulted when that claim sat in lighting_sc_parent.
+const float LIGHTING_LEVEL_MAX = 4.0;
+// A parent is the light of one surface. The reader has to sit on that plane,
+// and the open segment between them has to stay clear of a wall.
+const float LIGHTING_LEVEL_HALF = 0.5;
+// Half a set: the set count is a float, so a mature parent rounds to the minimum.
+const float LIGHTING_SETS_HALF = 0.5;
+
+bool lighting_level_valid(vec3 pos, vec3 at, vec3 n, float size) {
+    float cell = max(size, LIGHTING_LEVEL_HALF);
+    if (abs(dot(at - pos, n)) > cell * LIGHTING_LEVEL_HALF) {
+        return false;
+    }
+    // A centre that sank into a solid is not a surface point. The value belongs
+    // to whatever geometry contains it, not to the reader.
+    if (scene_inside(at)) {
+        return false;
+    }
+    vec3 lift = n * LIGHTING_SLOT_DEPTH;
+    return !scene_segment_blocked(pos + lift, at + lift);
+}
+
+// 1 m, 2 m, and 4 m, starting at `size`. One missing parent is claimed.
+// The find stays in this short loop: a fourth copy of lighting_sc_parent's
+// body, or a bilinear step here, overflowed lavapipe.
+vec4 lighting_sc_level_tail(vec3 pos, vec3 n, float size) {
+    bool spawned = false;
+    [[dont_unroll]] for (uint k = 0u; k < 3u; k++) {
+        if (k != 0u) {
+            size += size;
         }
-        if (s != ~0u) {
-            vec4 v = cache.v[3u * s + 2u];
-            if (v.w > 0.5) {
-                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-                return vec4(v.rgb, 1.0);
+        if (size > LIGHTING_LEVEL_MAX) {
+            continue;
+        }
+        bool claim = !spawned;
+        uint coarse = lighting_cache_find_sized(pos, n, claim, size, pos);
+        if (claim && coarse != ~0u && lighting_claim_new != 0u) {
+            spawned = true;
+            bool room = lighting_spawn_permit();
+            if (room) {
+                room = lighting_coarse_permit(size);
             }
+            if (!room) {
+                ckeys.key[coarse] = 0u;
+                cache.v[3u * coarse + 1u] = vec4(0.0);
+                cache.v[3u * coarse + 2u] = vec4(0.0);
+                continue;
+            }
+            cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
+            cache.v[LIGHTING_WORLD_AT + coarse].z = uintBitsToFloat(lighting_frame());
+        }
+        if (coarse == ~0u) {
+            continue;
+        }
+        vec4 cv = cache.v[3u * coarse + 2u];
+        bool show = cv.w > LIGHTING_LEVEL_READY
+            && lighting_level_valid(pos, cache.v[3u * coarse].xyz, n, size);
+        if (show) {
+            cache.v[3u * coarse].w = uintBitsToFloat(lighting_frame());
+            return vec4(cv.rgb, cv.w);
         }
     }
     return vec4(0.0);
+}
+
+// True when the slot should be dropped. A 2 m or 4 m entry stays while the
+// live coarse count is inside the cap, so a waiting pixel keeps that value.
+bool lighting_sc_may_free(uint slot, uint last, uint shown) {
+    if (!lighting_sc_expired(last, shown)) {
+        return false;
+    }
+    float size = cache.v[3u * slot + 1u].w;
+    if (!(lighting_levels_on() && size >= LIGHTING_COARSE_METRES)) {
+        return true;
+    }
+    uint cap = pc.frame.w;
+    if (cap == 0u) {
+        return false;
+    }
+    uint live = ckeys.key[LIGHTING_ARGS_AT + 15u];
+    if (live <= cap) {
+        return false;
+    }
+    uint prev = atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 0xffffffffu);
+    if (prev == 0u) {
+        atomicAdd(ckeys.key[LIGHTING_ARGS_AT + 15u], 1u);
+        return false;
+    }
+    return true;
+}
+
+// Surface cache: the lit texel twice the size holding pos (the first fill of a
+// texel not lit yet); w is that parent's set count, 0 when there is none. Detail levels read one step
+// further here (1 m). Coarser parents are lighting_sc_level_tail: a fourth
+// copy of this body overflowed lavapipe.
+// A direct-pass ray hit (kept or probe) walks the parent as master does: two
+// levels, no wall test, no coarse tail. The fill at a hit runs once per hit
+// every frame, and on a turn most hits land in new cells, so the third level,
+// each level's scene_inside and wall ray, and the tail's three claims kept the
+// s1 direct pass at 16.6 ms against master's 9.6 after b009a12. The hit light
+// is averaged by the probe gather, so a hit takes master's leak risk.
+bool lighting_sc_parent_full() {
+    return lighting_hit_kind == 0u;
+}
+vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
+    bool full = lighting_sc_parent_full();
+    // Constant trip count. A runtime bound on this loop faulted lavapipe.
+    // The tail view starts at 1 m. The loop would return a finer parent first.
+    if (lighting_tail_view() && full) {
+        size = 1.0;
+    } else {
+        [[dont_unroll]] for (uint l = 0u; l < 3u; l++) {
+            if (l == 2u && !(lighting_levels_on() && full)) {
+                continue;
+            }
+            size *= 2.0;
+            // The WRC cell (25 cm) is claimed if missing and marked as a seed a
+            // pixel needs (the reveal burst, lighting_compact.comp).
+            bool seed = lighting_world_mode() == 3u && l == 0u && size > 0.2;
+            uint s = lighting_cache_find_sized(pos, n, seed, size, pos);
+            if (s != ~0u && seed) {
+                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                cache.v[LIGHTING_WORLD_AT + s].z = uintBitsToFloat(lighting_frame());
+            }
+            if (s != ~0u) {
+                vec4 v = cache.v[3u * s + 2u];
+                // A finished finer parent still has to be this surface. The tail's
+                // test does not run once this walk returns.
+                if (v.w > 0.5 && (!full || lighting_level_valid(pos, cache.v[3u * s].xyz, n, size))) {
+                    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                    return vec4(v.rgb, v.w);
+                }
+            }
+        }
+    }
+    if (!lighting_levels_on() || !full) {
+        return vec4(0.0);
+    }
+    // `size` is 1 m when this walk started at 12.5 cm, and 2 m when it
+    // started at the 25 cm hit patch. The tail claims that cell and the
+    // coarser ones, up to 4 m.
+    return lighting_sc_level_tail(pos, n, size);
 }
 
 // Surface cache estimator (flag 1048576): a converged texel whose recent sets
@@ -990,8 +1173,15 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
         // S72K: a texel with no sets yet that shows its keys' interpolation
         // counts too (it used to drop out, the pixel took the other corners, and
         // it popped in with its first set).
+        // One surface test per corner: each inlined copy of the scene walk adds
+        // seconds to the driver compile of every pipeline that reads the cache.
+        bool keyed = v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on();
+        bool lit = v.w > 0.5 && fract(v.w) < 0.1;
+        if (!(keyed || lit) || !lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+            continue;
+        }
         vec4 shown_s = vec4(0.0);
-        if (v.w < 0.5 && lighting_world_mode() == 3u && lighting_sc_sparse_on()) {
+        if (keyed) {
             shown_s = lighting_sc_shown(s);
             if (shown_s.w > 0.5) {
                 cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
@@ -1001,7 +1191,7 @@ vec4 lighting_sc_bilerp_cover(vec3 pos, vec3 n, float size, float cover) {
             }
             continue;
         }
-        if (v.w > 0.5 && fract(v.w) < 0.1) {
+        {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
             sum += bil * lighting_sc_shown(s).rgb;
             fsum += bil * lighting_sc_sunfrac_now(s);
@@ -1025,23 +1215,34 @@ float lighting_seed_sunfrac = 0.0;
 // S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
 // coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
 // cell holding pos is still claimed as a seed a pixel needs (reveal burst).
+// The bilinear walk stays at two steps (25 cm, then 50 cm). A third bilinear
+// overflowed lavapipe. The 1 m, 2 m, and 4 m parents are the short tail.
 vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
     float s2 = size * 2.0;
-    if (s2 > 0.2) {
-        uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
-        if (c != ~0u) {
-            cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+    if (lighting_tail_view()) {
+        // Same tail call as below. The 25 cm and 50 cm bilinear is what hid
+        // an unfinished 1 m cell once those corners had a sample.
+        s2 = 1.0;
+    } else {
+        if (s2 > 0.2) {
+            uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
+            if (c != ~0u) {
+                cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
+                cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
+            }
+        }
+        [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
+            vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
+            if (r.w > -0.5) {
+                return vec4(r.rgb, 1.0);
+            }
+            s2 *= 2.0;
         }
     }
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
-        vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
-        if (r.w > -0.5) {
-            return vec4(r.rgb, 1.0);
-        }
-        s2 *= 2.0;
+    if (!lighting_levels_on()) {
+        return vec4(0.0);
     }
-    return vec4(0.0);
+    return lighting_sc_level_tail(pos, n, s2);
 }
 vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     lighting_seed_sunfrac = 0.0;
@@ -1270,11 +1471,12 @@ bool lighting_sc_local_change(uint slot, out bool mover) {
     return false;
 }
 // The lamps' change at slot relative to the light it shows (0 when none).
+// A real lamp change (delta above zero) counts while the rest of GI is quiet,
+// so texels inside the reach stay due. A zero delta is the first sight of a
+// lamp and only counts while the light is not quiet. Texels outside the reach
+// keep their finished schedule.
 float lighting_lamp_delta(vec3 p, uint updated);
 float lighting_sc_lamp_change(uint slot) {
-    if (lighting_sc_light_quiet()) {
-        return 0.0;
-    }
     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
     float d = lighting_lamp_delta(lighting_sc_texel_pos(slot), upd);
     if (d <= 0.0) {
@@ -1287,7 +1489,11 @@ float lighting_sc_lamp_change(uint slot) {
 }
 bool lighting_sc_lamp_touched(uint slot) {
     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
-    return !lighting_sc_light_quiet() && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), upd);
+    float d = lighting_lamp_delta(lighting_sc_texel_pos(slot), upd);
+    if (d > 0.0) {
+        return true;
+    }
+    return !lighting_sc_light_quiet() && d >= 0.0;
 }
 bool lighting_sc_asvgf_on();
 float lighting_sc_count(uint slot) {
@@ -1393,6 +1599,12 @@ const float LIGHTING_SC_POOL_FULL = 24.0;
 // LIGHTING_DN_DARK luminance the target grows as LIGHTING_DN_DARK / L, at most 4x)
 // counts as settled.
 const float LIGHTING_DN_MIN_SETS = 8.0;
+// A parent seeds or hands over to a child only once it holds its own
+// LIGHTING_DN_MIN_SETS sets. A one-set parent is a single noisy sample
+// stretched over 8 children: the blocky patches on PR #70.
+bool lighting_sc_parent_mature(vec4 up) {
+    return up.w >= LIGHTING_DN_MIN_SETS - LIGHTING_SETS_HALF;
+}
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -1811,6 +2023,7 @@ const float LIGHTING_SC_SPARSE_OWN = 4.0;
 // S72K handover: interpolation fades out over this many own sets (weight K).
 const float LIGHTING_SC_HANDOVER = 16.0;
 const float LIGHTING_SC_HANDOVER_K = 2.0;
+const float LIGHTING_SC_HANDOVER_EPS = 1.0e-4;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -2082,6 +2295,43 @@ vec4 lighting_sc_own_shown(uint slot) {
     return own.w > 0.5 ? vec4(own.rgb * ls, 1.0) : vec4(0.0);
 }
 
+// S72K handover onto the parent prior (design §6.5). `sets` is the cell's own
+// sample count. Own weight is n / (n + K c f), and f reaches 0 at
+// LIGHTING_SC_HANDOVER, so a finished cell is its own mean. A first write passes
+// n = 1: the new set blends once with the parent held in this frame, and the
+// texel is not replaced outright. No parent, or a cell past the handover,
+// returns `own`. One call to lighting_sc_parent; a second copy of that body
+// overflowed lavapipe.
+// The handover blend onto a parent `up` already looked up.
+vec3 lighting_sc_handover_up(vec3 own, float sets, vec4 up) {
+    float n = max(sets, 0.0);
+    float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    if (fade <= 0.0 || lighting_world_mode() != 3u || !lighting_sc_parent_mature(up)) {
+        return own;
+    }
+    float k = LIGHTING_SC_HANDOVER_K * min(up.w, 1.0) * fade;
+    float a = n > 0.0 ? n / max(n + k, LIGHTING_SC_HANDOVER_EPS) : 0.0;
+    return mix(up.rgb, own, a);
+}
+// The handover is a picture read (compose, pixel). A kept or probe hit in the
+// direct pass skips it: that read runs once per hit every frame, and the parent
+// walk costs up to three hash finds, each with a scene_inside test and a wall
+// ray (lighting_level_valid). On a turning view every cell is young, so PR #70
+// paid those rays on every hit and the direct pass ran 1.8x master's per lamp
+// (s1 17.7 vs 9.7 ms). The hit light is averaged by the probe gather anyway.
+bool lighting_sc_handover_read() {
+    return lighting_hit_kind == 0u;
+}
+vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) {
+    float n = max(sets, 0.0);
+    float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
+    if (fade <= 0.0 || lighting_world_mode() != 3u || !lighting_sc_handover_read()) {
+        return own;
+    }
+    float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
+    return lighting_sc_handover_up(own, sets, lighting_sc_parent(pos, nrm, cell));
+}
+
 // Surface cache read rule at a ray hit t from the ray's origin (SHaRC: a cache
 // cell answers a ray only if it is small against the distance, t > size sqrt 3,
 // and holds enough samples): a near hit reads the finest lit texel with
@@ -2107,7 +2357,8 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
-                    return v.rgb * lighting_sc_sun_gain(s);
+                    vec3 own = lighting_sc_handover(v.rgb, floor(v.w), pos, n, fs);
+                    return own * lighting_sc_sun_gain(s);
                 }
             }
         }
@@ -2144,11 +2395,19 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // new cells is not black until the next round relights it.
     // Flag 32768 (surface cache): every round, not only the round that claimed it.
     bool fill_any = lighting_world_mode() == 3u && (lighting_sc_flags() & 32768u) != 0u;
-    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
+    bool fill = e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u);
+    // One parent lookup serves the fill and the handover (same cell, and the two
+    // never both run). Each call site inlines the whole parent walk with its
+    // wall tests; two sites doubled the compose compile on the 4070.
+    vec4 up = vec4(0.0);
+    bool young = max(floor(e.w), 0.0) < LIGHTING_SC_HANDOVER && lighting_sc_handover_read();
+    if (lighting_world_mode() == 3u && (fill || young)) {
+        up = lighting_sc_parent(pos, n, hsize);
+    }
+    if (fill) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {
-            vec4 up = lighting_sc_parent(pos, n, hsize);
-            if (up.w > 0.0) {
+            if (lighting_sc_parent_mature(up)) {
                 lighting_bounce_path = 3u;
                 return up.rgb;
             }
@@ -2175,7 +2434,10 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        return e.rgb * lighting_sc_sun_gain(slot);
+        // 25 cm hit patch, and any mode-3 cell this read returns. A young mean
+        // still hands over from the parent; a finished count returns itself.
+        vec3 own = lighting_sc_handover_up(e.rgb, floor(e.w), up);
+        return own * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
 }
@@ -2188,7 +2450,6 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
-const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
 // the listing's 0.1 floor and still clamps. The hold path does not read this.
@@ -2775,20 +3036,28 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // surface reads texels keyed in the mover's frame, which move and turn with
     // it and keep their light (relit fast while it moves, as near any change).
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    if (om != ~0u) {
-        lighting_obj_salt = lighting_mover(om, 1u).w;
-        vec4 r = lighting_world_irradiance_in(lighting_mover_to_local(om, pos, false), lighting_mover_to_local(om, n, true), pos, true);
-        lighting_obj_salt = 0.0;
-        return r;
-    }
     // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
     // (an object that moved in the last LIGHTING_MOVER_KEEP frames) takes the screen
     // probes, which trace it as it is now, instead of world texels it sweeps
     // through.
-    if (mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
+    if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    return lighting_world_irradiance_in(pos, n, pos, false);
+    // One call site: the driver inlines the whole cache walk (and its wall
+    // tests) once per call, and a second copy doubled the compose compile.
+    bool obj = om != ~0u;
+    vec3 lpos = pos;
+    vec3 ln = n;
+    if (obj) {
+        lighting_obj_salt = lighting_mover(om, 1u).w;
+        lpos = lighting_mover_to_local(om, pos, false);
+        ln = lighting_mover_to_local(om, n, true);
+    }
+    vec4 r = lighting_world_irradiance_in(lpos, ln, pos, obj);
+    if (obj) {
+        lighting_obj_salt = 0.0;
+    }
+    return r;
 }
 // Debug view "texels" (lighting_compose.comp mode 9): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).
@@ -2879,6 +3148,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 }
             } else {
                 v = lighting_sc_parent(q, n, size);
+                if (!lighting_sc_parent_mature(v)) {
+                    v = vec4(0.0);
+                }
             }
         }
         if (v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
@@ -3577,7 +3849,48 @@ void lighting_svgf_variance(uint slot) {
         }
     }
 }
+// Atrous gate: a slot the scheduler is not refreshing keeps its filtered value.
+// The gate is off when bit 1 is clear, which is every still frame whose denoise
+// grant covers the picture. Both wavelet launches call this, so they filter
+// the same slots.
+bool lighting_slot_in_budget(uint slot) {
+    if ((pc.schedule.x & 2u) == 0u) {
+        return true;
+    }
+    vec3 pos;
+    vec3 nrm;
+    if (!lighting_sc_texel_world(slot, pos, nrm)) {
+        return false;
+    }
+    vec3 v = pos - scene.eye.xyz;
+    float fz = dot(v, scene.view_forward.xyz);
+    if (!(fz > LIGHTING_SLOT_DEPTH)) {
+        return false;
+    }
+    float t = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    if (!(t > LIGHTING_SLOT_TAN)) {
+        return true;
+    }
+    float ndc_x = dot(v, scene.view_right.xyz) / (fz * t * max(aspect, LIGHTING_SLOT_TAN));
+    float ndc_y = dot(v, scene.view_up.xyz) / (fz * t);
+    uint dw = pc.frame.x != 0u ? pc.frame.x : pc.dims.x;
+    uint dh = pc.frame.y != 0u ? pc.frame.y : pc.dims.y;
+    float sx = (ndc_x * LIGHTING_NDC_HALF + LIGHTING_NDC_HALF) * float(dw);
+    float sy = (LIGHTING_NDC_HALF - ndc_y * LIGHTING_NDC_HALF) * float(dh);
+    uint crop = pc.schedule.w;
+    int px = int(floor(sx)) + int(crop & 0xffffu);
+    int py = int(floor(sy)) + int(crop >> 16u);
+    if (px < 0 || py < 0) {
+        return false;
+    }
+    return lighting_tile_kept(uvec2(uint(px), uint(py)));
+}
+
 void lighting_svgf_iter(uint slot, uint it) {
+    if (!lighting_slot_in_budget(slot)) {
+        return;
+    }
 #ifndef LIGHTING_DENOISE_PLAIN
     // Before the dirty early-out. A clean texel still has to publish the last
     // applied level, or the push keeps a stale or empty A. Not in the plain
@@ -3985,8 +4298,8 @@ void lighting_sc_grad_take(uint slot, float l_now) {
 // Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
 // hit's shadow ray to a lamp is kept per 12.5 cm cell, facing axis and lamp, with
 // the lamp's epoch; the epoch moves when the lamp moves or changes, or when a
-// change of the traced world (this frame's change list, old and new bounds, or
-// a whole-world change) falls within its range (suns: anywhere). A moving lamp
+// change of the traced world (this frame's change list) falls within its range
+// (suns: anywhere). The host does not set a whole-world flag. A moving lamp
 // moves its epoch every frame, so it re-shadows as before.
 const bool LIGHTING_SHADOW_CACHE = true;
 const uint LIGHTING_SHADOW_AT = 13u * LIGHTING_CACHE_SLOTS;
@@ -4037,9 +4350,9 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
     } else {
         c = ivec3(floor(o / gstats.ctrl_shadow_cell));
     }
-    // Chained, not an XOR of per-axis products: that key let mirrored cells
-    // ((x, y, z) and (-x, -y, z), ...) share a tag, so a lit cell on one side of
-    // a wall read as lit on the other (S86: the close lamp crossed the wall).
+    // Chained through hash_cell3, not an XOR of per-axis products: that key let
+    // mirrored cells ((x, y, z) and (-x, -y, z), ...) share a tag, so a lit cell
+    // on one side of a wall read as lit on the other (the close lamp crossed the wall).
     uint h = hash_cell3(c, lighting_axis(n) + 8u * li);
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);

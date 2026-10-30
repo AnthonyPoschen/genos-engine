@@ -26,7 +26,7 @@ Counts below are unique source locations from `cargo clippy --workspace --all-ta
 | `cast_sign_loss` | warn | 196 lines | | 2026-10-14 | Same family. |
 | `undocumented_unsafe_blocks` | deny | 125 | 12 | 2026-10-14 | Every `unsafe` block needs a `// SAFETY:` comment. Vulkan and OS FFI are the usual sites. |
 | `pedantic` | warn | 3068 | (100 lint names) | 2026-10-14 | The extra clippy pass. Priority `-1` so the denies above still win. |
-| `disallowed_methods` | deny | 24 | 7 | 2026-10-14 | See `clippy.toml`. |
+| `disallowed_methods` | deny | 26 | 8 | 2026-10-14 | See `clippy.toml`. |
 | `disallowed_types` | deny | 4 | 1 | 2026-10-14 | See `clippy.toml`. |
 
 Bad `unwrap` (the lint fails this):
@@ -58,7 +58,7 @@ Do not refactor these in a drive-by. Delete the `expect` when the sites in that 
 - `unwrap_used` / `expect_used` / `panic`: production sites are the totals above minus the test-only column. Build scripts stay allowed.
 - `wildcard_enum_match_arm`: 37 sites, 17 files.
 - `pedantic`: 3068 sites under per-lint expects. A file that expects `cast_possible_truncation` still fails a different pedantic lint it did not already expect.
-- `disallowed_methods` (`std::env::set_var`): 24 sites in `debug/lighting/src/main.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead.
+- `disallowed_methods` (`std::env::set_var`): 26 sites in `debug/lighting/src/main.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/render/tests/gpu_frame.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead. `gpu_frame.rs` expects the two calls on the empty-probe test only (`GENOS_LIGHTING_FILL`). A new call elsewhere in that file still fails.
 
 One real bug found while turning the lints on: `crates/ui/src/profile.rs` computed `1.0_f32.min(plot_w.max(1.0))`, which is always `1.0`. The mark width is now `1.0_f32.min(plot_w)`.
 
@@ -74,11 +74,11 @@ One real bug found while turning the lints on: `crates/ui/src/profile.rs` comput
 | `std::thread::sleep` | 2026-10-14 | A fixed sleep wastes time when the event is early and flakes when it is late. | `std::thread::sleep(Duration::from_millis(4000))` |
 | `ash::Entry`, `ash::Instance`, `ash::Device` | 2026-10-14 | ADR 0007. The renderer loads `libvulkan` itself. | `fn open() -> ash::Device { unimplemented!() }` |
 
-`lint/fail/` is not a workspace member, so those examples are not compiled with the workspace. `lint/fixture/fail` is its own package. `scripts/lint-clippy-fixture.py` expects clippy to reject `std::env::var`, `std::env::var_os`, and `std::thread::sleep` there, and expects `lint/fixture/pass` to stay clean. The 24 `set_var` sites are still the backlog for that method.
+`lint/fail/` is not a workspace member, so those examples are not compiled with the workspace. `lint/fixture/fail` is its own package. `scripts/lint-clippy-fixture.py` expects clippy to reject `std::env::var`, `std::env::var_os`, and `std::thread::sleep` there, and expects `lint/fixture/pass` to stay clean. The 26 `set_var` sites are still the backlog for that method.
 
 `std::env::var` and `std::env::var_os` are denied in every crate. Existing reads carry a function `#[allow(clippy::disallowed_methods, reason = "...")]`. A new read in a function that does not already have that allow fails. Build scripts are allowed at the file: Cargo passes `OUT_DIR` and the target triple. `GENOS_MCP_PORT` stays allowed on `listen_port` because the discovery directory is the primary path and that variable is the documented override. `HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `WAYLAND_DISPLAY` stay allowed on the one function that reads them.
 
-These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `debug/lighting/src/main.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
+These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `debug/lighting/src/main.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. `crates/render/tests/gpu_frame.rs` expects only the two `GENOS_LIGHTING_FILL` calls. The renderer library is gated per function.
 
 ### TODO: renderer tuning reads
 

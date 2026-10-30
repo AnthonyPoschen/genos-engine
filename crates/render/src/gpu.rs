@@ -169,7 +169,7 @@ use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-use genos_scene::{view_proj, Camera, LightingPreset};
+use genos_scene::{view_proj, view_proj_guard, Camera, GuardFrustum, LightingPreset};
 
 use crate::aa::Antialias;
 use crate::budget::FrameMemory;
@@ -562,6 +562,16 @@ impl Renderer {
         times.samples.make_contiguous()
     }
 
+    /// Controller scale for the next budgeted frame. `1` is the preset cap.
+    pub fn budget_controller_scale(&self) -> f64 {
+        self.gpu.lighting.budget.scale
+    }
+
+    /// Schedule pushed on the last lighting pass. Default until that pass runs.
+    pub fn last_schedule(&self) -> crate::lighting_schedule::SchedulePush {
+        self.gpu.lighting.last_schedule
+    }
+
     /// Drop the recorded window. The next sample starts at sequence 1.
     pub fn gi_metrics_clear(&mut self) {
         if let Some(times) = self.gpu.gpu_times.as_mut() {
@@ -849,8 +859,9 @@ impl Renderer {
             self.lamp_set = lamp_set;
         }
         self.gpu.sync_materials(world)?;
+        self.gpu.prepare_lit_frame(camera, &world.scene)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
-        let matrix = view_proj(camera, aspect);
+        let matrix = view_proj_guard(camera, aspect, self.gpu.lit_guard());
         let eye = [camera.position.x, camera.position.y, camera.position.z];
         self.memory.begin_frame();
         self.shapes.begin_frame();
@@ -1088,6 +1099,11 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Change records, frames since the last one, and spheres waiting on the GPU list.
+    pub fn gi_region_stats(&self) -> crate::lighting_regions::GiRegionStats {
+        self.gpu.gi_region_stats()
+    }
+
     /// Five closed forms from `media_check.comp`. The parity test compares them
     /// with `genos_math::media`. This does not present.
     pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {
@@ -1196,9 +1212,8 @@ impl Renderer {
         self.gpu.antialias
     }
 
-    /// Frames in a row GI has seen the same scene (camera, lights, objects): its
-    /// screen probes average that many frames' rays (up to 32), and any change
-    /// starts the count, and so the average, over at 0.
+    /// Frames since the last change record. A camera move does not reset it.
+    /// Screen probes average that many frames' rays (up to 32).
     pub fn lighting_still_frames(&self) -> u32 {
         self.gpu.lighting_still_frames()
     }
@@ -1395,6 +1410,12 @@ struct Gpu {
     hdr_metadata: bool,
     extent_w: u32,
     extent_h: u32,
+    /// Lit picture. The swapchain and the host readback stay at `extent_*`.
+    /// Equal to the display until a guard band is prepared.
+    lit_w: u32,
+    lit_h: u32,
+    crop_x: u32,
+    crop_y: u32,
     /// Swapchain present mode: 0 immediate, 1 mailbox, 2 FIFO.
     present_mode: i32,
     swap_images: Vec<Handle>,
@@ -2279,6 +2300,10 @@ impl Gpu {
                 hdr_metadata: hdr_meta,
                 extent_w: width.max(1),
                 extent_h: height.max(1),
+                lit_w: width.max(1),
+                lit_h: height.max(1),
+                crop_x: 0,
+                crop_y: 0,
                 present_mode: 2,
                 swap_images: Vec::new(),
                 color: Image::empty(),
@@ -2393,7 +2418,11 @@ impl Gpu {
                     let metrics_env = std::env::var("GENOS_GI_METRICS").ok();
                     let every = gpu_times_every(&refs, env.as_deref())?;
                     let record = gi_metrics_enabled(&refs, metrics_env.as_deref())?;
-                    if every.is_none() && !record {
+                    // Lighting timestamps feed the work-cap controller in normal
+                    // play. `--gpu-times` owns the printed line. `--gi-metrics`
+                    // owns the sample log. A device with no timestamp queries
+                    // drops this below.
+                    if timestamp_period <= 0.0 && every.is_none() && !record {
                         None
                     } else {
                         Some(Box::new(GpuTimes {
@@ -2864,6 +2893,22 @@ impl Gpu {
                 self.extent_w = width.max(1);
                 self.extent_h = height.max(1);
             }
+            self.lit_w = self.extent_w;
+            self.lit_h = self.extent_h;
+            self.crop_x = 0;
+            self.crop_y = 0;
+            self.lighting.lit = crate::lighting_schedule::LitFrame {
+                lit_w: 0,
+                lit_h: 0,
+                crop_x: 0,
+                crop_y: 0,
+                display_w: 0,
+                display_h: 0,
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            };
             let mut format_count = 0u32;
             check(
                 (self.fns.surface_formats)(
@@ -3243,10 +3288,11 @@ impl Gpu {
                     self.lighting_begin(slot);
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
+                let (picture_w, picture_h) = self.picture_size();
                 self.raster_scene(
                     self.framebuffer,
-                    self.extent_w,
-                    self.extent_h,
+                    picture_w,
+                    picture_h,
                     matrix,
                     !filtering && !lighting,
                 );
@@ -3387,10 +3433,15 @@ impl Gpu {
     }
 
     /// A frame timestamp for `GENOS_GPU_TIMES`, at the end of everything recorded so far.
+    ///
+    /// The printed line is opt-in. The lighting pool is separate and always runs.
     fn frame_stamp(&self, slot: usize, stamp: FrameStamp) {
         let Some(times) = self.gpu_times.as_ref() else {
             return;
         };
+        if !times.print || times.pool.is_null() {
+            return;
+        }
         let first = slot as u32 * FRAME_STAMPS;
         unsafe {
             if stamp == FrameStamp::Start {
@@ -3473,23 +3524,25 @@ impl Gpu {
             times.written[slot] = true;
             return;
         }
-        let mut raw = [0u64; FRAME_STAMPS as usize];
-        let got = unsafe {
-            (self.fns.get_query_results)(
-                self.device,
-                times.pool,
-                slot as u32 * FRAME_STAMPS,
-                FRAME_STAMPS,
-                8 * raw.len(),
-                raw.as_mut_ptr() as *mut c_void,
-                8,
-                0x1,
-            )
-        };
-        if got != 0 {
-            return;
-        }
-        if times.print {
+        // Frame-span stamps exist only for the printed line. An unwritten pool
+        // must not abort the lighting read the controller needs.
+        if times.print && !times.pool.is_null() {
+            let mut raw = [0u64; FRAME_STAMPS as usize];
+            let got = unsafe {
+                (self.fns.get_query_results)(
+                    self.device,
+                    times.pool,
+                    slot as u32 * FRAME_STAMPS,
+                    FRAME_STAMPS,
+                    8 * raw.len(),
+                    raw.as_mut_ptr() as *mut c_void,
+                    8,
+                    0x1,
+                )
+            };
+            if got != 0 {
+                return;
+            }
             for (k, w) in raw.windows(2).enumerate() {
                 times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
             }
@@ -3551,17 +3604,39 @@ impl Gpu {
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                // Same total as `gi_sample_from`: every bucket except the shadow
+                // copy of direct and hit. The cap is the schedule pushed for the
+                // retired frame. `lighting_passes` writes the next one after this.
+                // `--gi-metrics` stores the sample. The controller runs either way.
+                let lighting_ms =
+                    bucket_ms.iter().sum::<f64>() - bucket_ms[B_SHADOWS as usize];
+                if self.lighting.settings.schedule == genos_scene::ScheduleMode::Budget
+                    && self.lighting.settings.controller
+                {
+                    self.lighting.budget.observe(
+                        Some(lighting_ms),
+                        self.lighting.last_schedule.lighting_cap_ms,
+                    );
+                } else if !self.lighting.settings.controller {
+                    self.lighting.budget.scale = 1.0;
+                }
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);
                     times.recorded += 1;
-                    let sample = gi_sample_from(
+                    let mut sample = gi_sample_from(
                         times.recorded,
                         &bucket_ms,
                         &stats_words,
                         world_rays,
                         world_relit,
                     );
+                    // The retired frame's schedule, as for the cap above.
+                    let pushed = self.lighting.last_schedule;
+                    sample.controller_scale = pushed.scale;
+                    sample.gates = pushed.words[0] & 7;
+                    sample.lit_w = pushed.lit.lit_w;
+                    sample.lit_h = pushed.lit.lit_h;
                     times.samples.push_back(sample);
                     while times.samples.len() > GI_SAMPLE_CAP {
                         times.samples.pop_front();
@@ -4019,31 +4094,56 @@ impl Gpu {
     }
 
     fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
-        let pixels = self.extent_w as usize * self.extent_h as usize;
-        let bytes = pixels.saturating_mul(16);
-        if bytes == 0
+        let empty = crate::hdr_output::SceneRead {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+            distance_m: Vec::new(),
+        };
+        let lit_w = if self.lit_w == 0 {
+            self.extent_w.max(1)
+        } else {
+            self.lit_w
+        };
+        let lit_h = if self.lit_h == 0 {
+            self.extent_h.max(1)
+        } else {
+            self.lit_h
+        };
+        let src_pixels = (lit_w as usize).saturating_mul(lit_h as usize);
+        let src_bytes = (src_pixels.saturating_mul(16)) as u64;
+        if src_pixels == 0
             || self.lighting.scene_host.memory.is_null()
-            || self.lighting.scene_host.size < bytes as u64
+            || self.lighting.scene_host.size < src_bytes
         {
-            return Ok(crate::hdr_output::SceneRead {
-                width: 0,
-                height: 0,
-                rgb: Vec::new(),
-                distance_m: Vec::new(),
-            });
+            return Ok(empty);
         }
         let values = read_f32s(
             self.fns.map_mem,
             self.fns.unmap_mem,
             self.device,
             self.lighting.scene_host.memory,
-            pixels.saturating_mul(4),
+            src_pixels.saturating_mul(4),
         )?;
-        Ok(crate::hdr_output::scene_read_from_rgba(
-            self.extent_w,
-            self.extent_h,
-            &values,
-        ))
+        let (dw, dh, ox, oy, _) = self.display_sample(lit_w, lit_h);
+        if ox == 0 && oy == 0 && dw == lit_w && dh == lit_h {
+            return Ok(crate::hdr_output::scene_read_from_rgba(dw, dh, &values));
+        }
+        let dst_pixels = (dw as usize).saturating_mul(dh as usize);
+        let mut cropped = vec![0.0f32; dst_pixels.saturating_mul(4)];
+        let stride = lit_w as usize;
+        for row in 0..dh as usize {
+            let src_row = (row + oy as usize).saturating_mul(stride) + ox as usize;
+            let dst_row = row.saturating_mul(dw as usize);
+            for col in 0..dw as usize {
+                let src = src_row.saturating_add(col).saturating_mul(4);
+                let dst = dst_row.saturating_add(col).saturating_mul(4);
+                if src.saturating_add(4) <= values.len() && dst.saturating_add(4) <= cropped.len() {
+                    cropped[dst..dst + 4].copy_from_slice(&values[src..src + 4]);
+                }
+            }
+        }
+        Ok(crate::hdr_output::scene_read_from_rgba(dw, dh, &cropped))
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -5083,6 +5183,7 @@ impl Gpu {
         let bytes = pack::scene_bytes(pack);
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
+        self.lighting.static_light = lighting_static_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
         self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
@@ -6236,7 +6337,16 @@ impl Gpu {
 
     fn make_framebuffer(&self) -> Result<Handle, String> {
         let views = [self.color.view, self.depth.view];
-        self.make_framebuffer_for(self.render_pass, &views, self.extent_w, self.extent_h)
+        let (w, h) = self.picture_size();
+        self.make_framebuffer_for(self.render_pass, &views, w, h)
+    }
+
+    fn picture_size(&self) -> (u32, u32) {
+        if self.lit_w == 0 || self.lit_h == 0 {
+            (self.extent_w.max(1), self.extent_h.max(1))
+        } else {
+            (self.lit_w, self.lit_h)
+        }
     }
 
     fn make_framebuffer_for(
@@ -7695,7 +7805,11 @@ impl Gpu {
         };
         let region = Region {
             src_layers: layers,
-            src_offset: Offset { x: 0, y: 0, z: 0 },
+            src_offset: Offset {
+                x: i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+                y: i32::try_from(self.crop_y).unwrap_or(i32::MAX),
+                z: 0,
+            },
             dst_layers: layers,
             dst_offset: Offset { x: 0, y: 0, z: 0 },
             extent: Extent {
@@ -7756,7 +7870,11 @@ impl Gpu {
                 layer: 0,
                 count: 1,
             },
-            image_offset: Offset { x: 0, y: 0, z: 0 },
+            image_offset: Offset {
+                x: i32::try_from(self.crop_x).unwrap_or(i32::MAX),
+                y: i32::try_from(self.crop_y).unwrap_or(i32::MAX),
+                z: 0,
+            },
             extent: Extent {
                 w: self.extent_w,
                 h: self.extent_h,

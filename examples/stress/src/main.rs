@@ -157,6 +157,16 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             uses screen. The other presets keep hash. This flag and the
                             variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
+  --lighting-schedule budget|global
+                            work caps, or the uncapped frame (GENOS_LIGHTING_SCHEDULE)
+  --lighting-controller on|off
+                            scale the work caps from the retired lighting total.
+                            Off holds the preset caps. Default on
+                            (GENOS_LIGHTING_CONTROLLER applies only when this is omitted)
+  --lighting-budget-scale F multiply every work cap, from 1/64 to 4
+                            (GENOS_LIGHTING_BUDGET_SCALE)
+  --guard-edge F            guard band as a fraction of the display, 0 to 0.35
+                            (GENOS_LIGHTING_GUARD_EDGE)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
   --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)

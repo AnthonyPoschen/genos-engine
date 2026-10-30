@@ -417,6 +417,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::switch("lighting_controller", "Work-cap controller", lighting.controller),
         Knob::switch(
             "lighting_surface_cache_attach_movers",
             "Attach movers",
@@ -633,6 +634,7 @@ pub fn apply_lighting_knob(
         "lighting_gi" => ("gi", on_off(v)),
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
+        "lighting_controller" => ("controller", on_off(v)),
         "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
         "lighting_surface_cache_blend" => (
             "surface_cache.blend",
@@ -851,6 +853,7 @@ mod tests {
         "lighting_gi",
         "lighting_gi_refresh",
         "lighting_budget_shift",
+        "lighting_controller",
         "lighting_surface_cache_attach_movers",
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",

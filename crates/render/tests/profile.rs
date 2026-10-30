@@ -10,6 +10,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{Camera, Floor, Scene, Vec3};
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
@@ -23,7 +29,7 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
 #[test]
 fn a_profiled_draw_reports_device_time_for_the_draw() {
     let (_gpu, mut window, mut renderer) = open();
-    let world = World::from_scene(Scene {
+    let world = present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 8.0,

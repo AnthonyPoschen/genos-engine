@@ -101,6 +101,28 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     return probes;
 }
 
+// S73: the display crop plus the screen filter's reach (SCREEN_FILTER_MARGIN in
+// lighting_screen.comp and lighting_dispatch.rs), clamped to the lit picture.
+// Direct and compose light only this rect; the rest of the guard band keeps
+// last frame's values as history. xy origin, zw size; the whole picture when
+// there is no crop.
+uvec4 lighting_display_rect() {
+    if (pc.frame.x == 0u || pc.frame.y == 0u) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    const uint margin = 32u;
+    uint crop_x = pc.schedule.w & 0xffffu;
+    uint crop_y = pc.schedule.w >> 16u;
+    uint x0 = crop_x > margin ? crop_x - margin : 0u;
+    uint y0 = crop_y > margin ? crop_y - margin : 0u;
+    uint x1 = min(pc.dims.x, crop_x + pc.frame.x + margin);
+    uint y1 = min(pc.dims.y, crop_y + pc.frame.y + margin);
+    if (x1 <= x0 || y1 <= y0) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    return uvec4(x0, y0, x1 - x0, y1 - y0);
+}
+
 void main() {
     lighting_px_unfilled = false;
     uvec2 p;
@@ -108,7 +130,13 @@ void main() {
     // table. The table is a dummy while GI is off.
     bool reuse = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
     if (!reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+        // The full dispatch covers lighting_display_rect.
+        uvec4 r = lighting_display_rect();
         p = gl_GlobalInvocationID.xy;
+        if (p.x >= r.z || p.y >= r.w) {
+            return;
+        }
+        p += r.xy;
     } else {
         uint bw = (pc.dims.x + 7u) / 8u;
         uint block = ckeys.key[LIGHTING_COMPOSE_LIST + gl_WorkGroupID.x];
@@ -160,7 +188,7 @@ void main() {
         n = -n;
     }
     // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels.
+    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 tail.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
     if (mode == 3u || mode == 4u || mode == 5u) {
@@ -204,7 +232,9 @@ void main() {
     if (mode == 1u || mode == 6u) {
         bounce = vec3(0.0);
     }
-    if (mode == 2u) {
+    if (mode == 2u || mode == 9u) {
+        // Tail is bounce with the 25 cm and 50 cm parents skipped. Direct
+        // would hide an empty parent.
         direct = vec3(0.0);
         glow = vec3(0.0);
     }
@@ -230,5 +260,15 @@ void main() {
     if (lighting_px_unfilled && lighting_unfilled_tint()) {
         shown = mix(shown, vec3(1.0, 0.0, 1.0), 0.75);
     }
-    outc.px[index] = pack_rgb(dither8(shown, p));
+    // The guard band shifts this pixel off the swapchain. Dither the swapchain
+    // coordinate so the grain matches a frame with no crop.
+    uvec2 grain = p;
+    if (pc.frame.x != 0u && pc.frame.y != 0u) {
+        uint crop = pc.schedule.w;
+        uvec2 origin = uvec2(crop & 0xffffu, crop >> 16u);
+        if (all(greaterThanEqual(p, origin))) {
+            grain = p - origin;
+        }
+    }
+    outc.px[index] = pack_rgb(dither8(shown, grain));
 }

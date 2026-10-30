@@ -43,9 +43,10 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
-/// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
-/// accepts a 48-byte push.
-const LIGHTING_PC_BYTES: u32 = 48;
+/// `pc.dims` + `pc.params` + `pc.lamp` + schedule words + display size.
+/// Zero schedule words keep the symmetric eye ray and leave every pass on.
+const LIGHTING_PC_WORDS: usize = 20;
+const LIGHTING_PC_BYTES: u32 = 80;
 /// `hdr_meter.comp` header: 4096 bin counts plus moved, total, and two pads.
 const METER_HEADER_BYTES: u64 = 16_400;
 const METER_BIN_CAP: usize = 4096;
@@ -65,15 +66,15 @@ const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
-/// Bounds of moved objects one frame can list (lighting_common.glsl LIGHTING_CHANGES); past
-/// that every kept stratum is dropped.
+    /// Bounds of moved objects one frame can list (lighting_common.glsl LIGHTING_CHANGES).
+    /// Spheres past this wait for a later frame. They are not a full-frame drop.
 const LIGHTING_CHANGES: usize = 64;
 /// Vec4s before the bounds in the changes block (lighting_common.glsl LIGHTING_CHANGE_HEAD).
 const LIGHTING_CHANGE_HEAD: usize = 5;
-/// GI counts as settled once the scene block (camera included) has stayed the
-/// same for this many frames (the screen probes average up to 32 frames' rays,
-/// lighting_gather.comp) and a full sweep of the light cache changed no patch
-/// by more than LIGHTING_SETTLE_CHANGE.
+/// GI counts as settled once this many frames have passed since the last change
+/// record (the screen probes average up to 32 frames' rays, lighting_gather.comp)
+/// and a full sweep of the light cache changed no patch by more than
+/// LIGHTING_SETTLE_CHANGE. A camera move is not a change record.
 const LIGHTING_SETTLE_FRAMES: u32 = 32;
 /// Largest relative change of a relit cache patch, in millionths, that counts as
 /// settled (0.2 %, well under a display code).
@@ -167,13 +168,19 @@ pub(crate) struct Lighting {
     gbuf_clear: bool,
     /// The work buffer is new: zeroed first, so no probe keeps a stratum.
     work_clear: bool,
+    /// This frame's passes see that zero fill. A zero ray slot is not a hit.
+    work_cleared: bool,
     /// The picture in the output buffer was drawn for this size. A new buffer
     /// has no picture yet, so the next compose covers every pixel.
     compose_valid: bool,
-    /// The traced world as of the last frame's passes: the scene block (its
-    /// occluder list is compared, lighting_changes) and the key of what else is traced
-    /// (meshes, floor, roof); a change of the key drops every kept stratum.
+    /// The traced world as of the last frame the probes ran. Change records compare
+    /// it with this frame. It is not rewritten while GI is frozen.
     kept_bytes: Vec<u8>,
+    /// Previous frame's camera (eye, right, up, forward) for ReSTIR. Advances
+    /// every draw, including a frozen one. `kept_bytes` stays the probe scene.
+    lamp_cam: Option<[[f32; 4]; 4]>,
+    /// Vec4 index of that camera in the work buffer. None when GI did not allocate it.
+    lamp_cam_at: Option<u64>,
     kept_key: u64,
     /// Key of the traced world besides the occluders (set with the scene upload).
     pub(crate) trace_key: u64,
@@ -184,8 +191,8 @@ pub(crate) struct Lighting {
     /// Frames the probes ran: which views block is last frame's (its parity).
     probe_runs: u32,
     frame: u32,
-    /// Hash of what GI sees (scene block, traced and drawn meshes), and frames
-    /// it has stayed the same.
+    /// Static light key of the frame the async cache round was built from.
+    /// Movers, point lamps, and the camera are not in it.
     scene_hash: u64,
     still: u32,
     /// Hash of this frame's draw instances (poses, colours, emission).
@@ -241,6 +248,27 @@ pub(crate) struct Lighting {
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
+    /// World-cache cells a frame's change records dirty.
+    regions: crate::lighting_regions::WorldCacheRegions,
+    /// Change spheres that did not fit the GPU list. Retried next frame.
+    /// Never promoted to a full-frame drop.
+    pending_spheres: Vec<[f32; 4]>,
+    /// Mesh bounds from the previous sample.
+    mesh_bounds: Vec<crate::lighting_regions::Aabb>,
+    /// Mesh mover records since `note_field_movers`, consumed by the passes.
+    mesh_records: Vec<crate::lighting_regions::ChangeRecord>,
+    /// Floor, roof, sky, fire, and the sun. Point lamps and occluders are absent,
+    /// so a mover does not clear the quiet schedule of every cell.
+    static_light: u64,
+    /// Eye and camera basis from the previous frame. Compared even while GI is
+    /// frozen, so a camera that stops returns to the dirty-list compose.
+    /// `kept_bytes` stays the scene the probes last shaded.
+    camera_stamp: [u8; 60],
+    camera_stamp_set: bool,
+    /// Last frame's debug view word (scene header, byte 252). A view change
+    /// redraws the picture. It is not a change record.
+    debug_view_word: u32,
+    debug_view_set: bool,
     young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
@@ -331,6 +359,20 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Scales the work caps from the last recorded lighting total. Stays at 1
+    /// until a GI sample is recorded, so a picture test does not feed lavapipe times.
+    budget: crate::lighting_schedule::BudgetController,
+    /// Lit picture from the last prepare. Zero until the guard band is applied.
+    lit: crate::lighting_schedule::LitFrame,
+    /// Probe tile used to size that picture. Zero uses the height rule.
+    sched_tile: u32,
+    cam_yaw: f32,
+    cam_pitch: f32,
+    cam_pose_set: bool,
+    guard_yaw: crate::lighting_schedule::GuardHold,
+    guard_pitch: crate::lighting_schedule::GuardHold,
+    /// Gates and caps pushed with this frame.
+    last_schedule: crate::lighting_schedule::SchedulePush,
     /// Bloom plus the display pass. Zero when timestamps are off.
     hdr_ms: f64,
     /// Query index of that pair. `u32::MAX` means this slot did not stamp it.
@@ -367,7 +409,10 @@ pub struct LightingAtrousStats {
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
 /// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
 /// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
-/// surface-cache trace already uses 53..55).
+/// surface-cache trace already uses 46, 47, and 53..55). `temporal` is
+/// `diag[36]` (the running mean kept a previous sample), `temporal_reset` is
+/// `diag[37]` (it started at M = 1), and `temporal_m` is `diag[38]` (the sum
+/// of M written).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
@@ -378,6 +423,12 @@ pub struct LampPickCounts {
     pub copied: u32,
     pub exact: u32,
     pub restir: u32,
+    /// Pixels whose hold-off mean reused the previous frame.
+    pub temporal: u32,
+    /// Pixels whose hold-off mean started over.
+    pub temporal_reset: u32,
+    /// Sum of M written on the hold-off path.
+    pub temporal_m: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -447,8 +498,11 @@ impl Default for Lighting {
             cache_clear: false,
             gbuf_clear: false,
             work_clear: false,
+            work_cleared: false,
             compose_valid: false,
             kept_bytes: Vec::new(),
+            lamp_cam: None,
+            lamp_cam_at: None,
             kept_key: 0,
             trace_key: 0,
             probe_samples: [0; 2],
@@ -484,6 +538,15 @@ impl Default for Lighting {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
+            regions: crate::lighting_regions::WorldCacheRegions::new(0.25),
+            pending_spheres: Vec::new(),
+            mesh_bounds: Vec::new(),
+            mesh_records: Vec::new(),
+            static_light: 0,
+            camera_stamp: [0; 60],
+            camera_stamp_set: false,
+            debug_view_word: 0,
+            debug_view_set: false,
             young_ok: genos_scene::lighting_env("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
@@ -538,6 +601,26 @@ impl Default for Lighting {
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            budget: crate::lighting_schedule::BudgetController::new(),
+            lit: crate::lighting_schedule::LitFrame {
+                lit_w: 0,
+                lit_h: 0,
+                crop_x: 0,
+                crop_y: 0,
+                display_w: 0,
+                display_h: 0,
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+            sched_tile: 0,
+            cam_yaw: 0.0,
+            cam_pitch: 0.0,
+            cam_pose_set: false,
+            guard_yaw: crate::lighting_schedule::GuardHold::default(),
+            guard_pitch: crate::lighting_schedule::GuardHold::default(),
+            last_schedule: crate::lighting_schedule::SchedulePush::default(),
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
             ctrl_bytes: [0; 64],
@@ -609,6 +692,17 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
+        let now: Vec<crate::lighting_regions::Aabb> = live
+            .iter()
+            .map(|inst| {
+                let (min, max) = inst.world_bounds();
+                crate::lighting_regions::Aabb { min, max }
+            })
+            .collect();
+        self.lighting.mesh_records = crate::lighting_regions::bounds_change_records(
+            &mut self.lighting.mesh_bounds,
+            &now,
+        );
         let g = &mut self.lighting;
         lighting_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
     }
@@ -950,10 +1044,12 @@ impl Gpu {
         self.wait_all_inflight()?;
         self.wait_lighting_world();
         self.poll_lighting_world();
-        let (w, h) = (self.extent_w.max(1), self.extent_h.max(1));
+        let (w, h) = self.picture_size();
         let settings = self.lighting.settings.clone();
-        let tile = if settings.probes.tile == 0 {
-            lighting_tile(h)
+        let tile = if self.lighting.sched_tile != 0 {
+            self.lighting.sched_tile
+        } else if settings.probes.tile == 0 {
+            lighting_tile(self.extent_h.max(1))
         } else {
             settings.probes.tile
         };
@@ -1001,7 +1097,15 @@ impl Gpu {
         } else {
             0
         };
-        let work_vec4 = work_vec4 + work_tail;
+        // Four vec4s after the gather cells: the previous frame's camera.
+        // lighting_lamp_cam_at() in the shader is this index.
+        let lamp_cam_at = if gi {
+            Some(lighting_lamp_cam_at(probes, rays, kept, pixels, cache_rays))
+        } else {
+            None
+        };
+        self.lighting.lamp_cam_at = lamp_cam_at;
+        let work_vec4 = work_vec4 + work_tail + u64::from(lamp_cam_at.is_some()) * 4;
         let mut gbuf = std::mem::replace(&mut self.lighting.gbuf, Buffer::empty());
         let mut work = std::mem::replace(&mut self.lighting.work, Buffer::empty());
         let mut out = std::mem::replace(&mut self.lighting.out, Buffer::empty());
@@ -1146,12 +1250,18 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        let had_grid = self.lighting.dims[0] != 0 && self.lighting.dims[1] != 0;
+        let grid_changed = self.lighting.dims[0] != w || self.lighting.dims[1] != h;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
+        // The first allocation, including the size change before any draw, stays
+        // zeros: a fresh picture builds history from the rect. A later size
+        // change wipes slots that already held NO_RAY. Those zeros must trace.
+        self.lighting.work_cleared = gi && had_grid && grid_changed && self.lighting.frame > 0;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
@@ -1247,8 +1357,8 @@ impl Gpu {
         Ok(())
     }
 
-    /// Settle state for the debug tools, in the tier's terms: one "brick", settled
-    /// once the scene (camera included) has not changed for LIGHTING_SETTLE_FRAMES.
+    /// Settle state for the debug tools. `still_frames` counts frames since the
+    /// last change record. A camera move does not reset it.
     #[allow(
         clippy::disallowed_methods,
         reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
@@ -1292,6 +1402,14 @@ impl Gpu {
         self.lighting.still
     }
 
+    pub(crate) fn gi_region_stats(&self) -> crate::lighting_regions::GiRegionStats {
+        crate::lighting_regions::GiRegionStats {
+            change_records: self.lighting.regions.change_records(),
+            still_frames: self.lighting.still,
+            deferred_spheres: u32::try_from(self.lighting.pending_spheres.len()).unwrap_or(u32::MAX),
+        }
+    }
+
     /// Rays the screen probes held in the last frame drawn, and probes placed
     /// (lighting_gather.comp): waits for that frame.
     pub(crate) fn lighting_probe_samples(&mut self) -> [u32; 2] {
@@ -1316,6 +1434,9 @@ impl Gpu {
                 copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
+                temporal: w[LAMP_TEMPORAL_WORD],
+                temporal_reset: w[LAMP_TEMPORAL_RESET_WORD],
+                temporal_m: w[LAMP_TEMPORAL_M_WORD],
             })
             .unwrap_or_default()
     }
@@ -1545,9 +1666,8 @@ impl Gpu {
 
     /// The lighting runs this frame: built and sized for the picture.
     fn lighting_active(&self) -> bool {
-        self.lighting.ready
-            && self.lighting.dims[0] == self.extent_w
-            && self.lighting.dims[1] == self.extent_h
+        let (w, h) = self.picture_size();
+        self.lighting.ready && self.lighting.dims[0] == w && self.lighting.dims[1] == h
     }
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
@@ -1562,6 +1682,13 @@ impl Gpu {
         // (the async queue's come back with its own submission).
         self.trace_sc(self.lighting.stats[slot].memory, "frame");
         self.lighting_dump_write();
+        // An occluder or a point lamp appeared or disappeared. The cells outside
+        // those bounds still hold the previous world's finished light, and one
+        // draw would show it. A move of the same lists stays a local record.
+        if resident_lists_changed(&self.lighting.kept_bytes, &self.frame_bytes) {
+            self.lighting.cache_clear = true;
+            self.lighting.work_clear = true;
+        }
         // The sun mark is a later read of a copy the frame already made. It does
         // not update light_quiet. That was the debug print that froze a still scene.
         if self.sun_counter_due() {
@@ -1780,7 +1907,14 @@ impl Gpu {
             head.copy_from_slice(&words[..8]);
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
-        if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
+        // The async round's host read is the printed line and the sample log.
+        // The frame controller does not use this pool. Normal play leaves it unread.
+        if self
+            .gpu_times
+            .as_ref()
+            .is_some_and(|times| times.print || times.record)
+            && !self.lighting.world_qp.is_null()
+        {
             let mut raw = [0u64; 6];
             let got = unsafe {
                 (self.fns.get_query_results)(
@@ -1840,7 +1974,7 @@ impl Gpu {
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
     /// and a slow round never queues up work behind it.
-    fn submit_lighting_world(&mut self, pc: [u32; 12]) -> Result<bool, String> {
+    fn submit_lighting_world(&mut self, pc: [u32; LIGHTING_PC_WORDS]) -> Result<bool, String> {
         if self.lighting.world_busy || self.lighting.world_cmd.is_null() {
             return Ok(false);
         }
@@ -2194,6 +2328,117 @@ impl Gpu {
         Some(out)
     }
 
+    /// Frustum margins of the prepared lit picture. Zero is the displayed camera.
+    fn lit_guard(&self) -> GuardFrustum {
+        let lit = self.lighting.lit;
+        GuardFrustum {
+            left: lit.left,
+            right: lit.right,
+            top: lit.top,
+            bottom: lit.bottom,
+        }
+    }
+
+    /// Grow the colour target to the guard band and remember the crop.
+    /// The swapchain and the host buffer stay at the display size.
+    fn prepare_lit_frame(&mut self, camera: &Camera, scene: &genos_scene::Scene) -> Result<(), String> {
+        let mut desired = self
+            .lighting
+            .override_settings
+            .clone()
+            .unwrap_or_else(|| scene.lighting.clone());
+        desired.apply_env();
+        desired.sanitize();
+        let (yaw_delta, pitch_delta) = if self.lighting.cam_pose_set {
+            (
+                camera.yaw - self.lighting.cam_yaw,
+                camera.pitch - self.lighting.cam_pitch,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        self.lighting.cam_yaw = camera.yaw;
+        self.lighting.cam_pitch = camera.pitch;
+        self.lighting.cam_pose_set = true;
+        let yaw_delta = self.lighting.guard_yaw.step(yaw_delta);
+        let pitch_delta = self.lighting.guard_pitch.step(pitch_delta);
+        let tile = if desired.probes.tile == 0 {
+            lighting_tile(self.extent_h.max(1))
+        } else {
+            desired.probes.tile
+        };
+        self.lighting.sched_tile = tile.max(1);
+        let lit = if self.lighting.ready {
+            crate::lighting_schedule::lit_target(
+                &desired,
+                self.extent_w.max(1),
+                self.extent_h.max(1),
+                self.lighting.sched_tile,
+                yaw_delta,
+                pitch_delta,
+            )
+        } else {
+            crate::lighting_schedule::lit_frame(
+                self.extent_w.max(1),
+                self.extent_h.max(1),
+                crate::lighting_schedule::GuardEdges {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                self.lighting.sched_tile,
+            )
+        };
+        self.resize_lit_color(lit.lit_w, lit.lit_h)?;
+        self.crop_x = lit.crop_x;
+        self.crop_y = lit.crop_y;
+        self.lighting.lit = lit;
+        Ok(())
+    }
+
+    fn resize_lit_color(&mut self, lit_w: u32, lit_h: u32) -> Result<(), String> {
+        if lit_w == 0 || lit_h == 0 {
+            return Ok(());
+        }
+        if self.lit_w == lit_w && self.lit_h == lit_h && !self.colors[0].image.is_null() {
+            return Ok(());
+        }
+        if self.render_pass.is_null() {
+            self.lit_w = lit_w;
+            self.lit_h = lit_h;
+            return Ok(());
+        }
+        self.wait_all_inflight()?;
+        for slot in 0..2 {
+            unsafe {
+                if !self.framebuffers[slot].is_null() {
+                    (self.fns.destroy_framebuffer)(self.device, self.framebuffers[slot], std::ptr::null());
+                    self.framebuffers[slot] = std::ptr::null_mut();
+                }
+            }
+            let mut color = std::mem::replace(&mut self.colors[slot], Image::empty());
+            let mut depth = std::mem::replace(&mut self.depths[slot], Image::empty());
+            self.destroy_image(&mut color);
+            self.destroy_image(&mut depth);
+            self.colors[slot] = self.make_image(self.format, 0x10 | 0x4 | 0x1 | 0x2, 1, lit_w, lit_h)?;
+            self.depths[slot] = self.make_image(126, 0x20, 2, lit_w, lit_h)?;
+            self.color = copy_image(&self.colors[slot]);
+            self.depth = copy_image(&self.depths[slot]);
+            self.framebuffers[slot] = self.make_framebuffer_for(
+                self.render_pass,
+                &[self.color.view, self.depth.view],
+                lit_w,
+                lit_h,
+            )?;
+            self.color_layout[slot] = 0;
+        }
+        self.lit_w = lit_w;
+        self.lit_h = lit_h;
+        self.bind_flight();
+        Ok(())
+    }
+
     /// After the raster: the passes, then the result into the colour image.
     /// Copy the scene (or the override), apply env locks, and rebuild buffers
     /// when a size knob changed.
@@ -2214,7 +2459,9 @@ impl Gpu {
         // replaces it once the settings ask for that pair.
         self.refresh_hdr_surface()?;
         let key = lighting_alloc_key(&self.lighting.settings);
-        let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
+        // The lighting images are the guard-band picture, not the swapchain.
+        let (picture_w, picture_h) = self.picture_size();
+        let resized = self.lighting.dims[0] != picture_w || self.lighting.dims[1] != picture_h;
         if (key != self.lighting.alloc_key || resized) && self.lighting.ready {
             self.make_lighting_targets()?;
         }
@@ -2348,9 +2595,30 @@ impl Gpu {
         !hdr.legacy_bytes && hdr.bloom && hdr.bloom_intensity > 0.0 && hdr.bloom_levels > 0
     }
 
+    /// Swapchain rectangle inside the lit image. The origin and stride let a
+    /// post pass read that crop out of a guard-band buffer. A missing lit
+    /// target returns the size passed in, with a zero origin and stride.
+    fn display_sample(&self, lit_w: u32, lit_h: u32) -> (u32, u32, u32, u32, u32) {
+        let dw = self.extent_w;
+        let dh = self.extent_h;
+        let ox = self.crop_x;
+        let oy = self.crop_y;
+        if self.lit_w == 0
+            || dw == 0
+            || dh == 0
+            || ox.saturating_add(dw) > lit_w
+            || oy.saturating_add(dh) > lit_h
+        {
+            return (lit_w, lit_h, 0, 0, 0);
+        }
+        (dw, dh, ox, oy, lit_w)
+    }
+
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
+    /// The pyramid is the swapchain crop, so a CPU pyramid of that crop matches.
     /// The intensity word is updated after the chain so the display pass adds it.
-    fn record_gpu_bloom(&mut self, width: u32, height: u32) {
+    fn record_gpu_bloom(&mut self, lit_w: u32, lit_h: u32) {
+        let (width, height, origin_x, origin_y, stride) = self.display_sample(lit_w, lit_h);
         if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
             return;
         }
@@ -2380,7 +2648,9 @@ impl Gpu {
         let Some(&(first_w, first_h, first_dst)) = mips.first() else {
             return;
         };
-        self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
+        self.bloom_dispatch(
+            first_w, first_h, width, height, 0, first_dst, 0, 0, origin_x, origin_y, stride,
+        );
         for index in 1..mips.len() {
             let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
                 return;
@@ -2388,7 +2658,7 @@ impl Gpu {
             let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
                 return;
             };
-            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
+            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0, 0, 0, 0);
         }
         let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
             return;
@@ -2400,13 +2670,13 @@ impl Gpu {
                 return;
             };
             let dst = if ping == 0 { scratch_a } else { scratch_b };
-            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
+            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off, 0, 0, 0);
             src_w = finer_w;
             src_h = finer_h;
             src = dst;
             ping ^= 1;
         }
-        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
+        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0, 0, 0, 0);
         let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
         unsafe {
             (self.fns.cmd_update_buffer)(
@@ -2431,9 +2701,23 @@ impl Gpu {
         dst: u32,
         mode: u32,
         finer: u32,
+        origin_x: u32,
+        origin_y: u32,
+        scene_stride: u32,
     ) {
         let pc = [
-            dst_w, dst_h, src_w, src_h, src, dst, mode, finer, 0, 0, 0, 0,
+            dst_w,
+            dst_h,
+            src_w,
+            src_h,
+            src,
+            dst,
+            mode,
+            finer,
+            origin_x,
+            origin_y,
+            scene_stride,
+            0,
         ];
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.bloom_pipe);
@@ -2442,7 +2726,7 @@ impl Gpu {
                 self.lighting.layout,
                 0x20,
                 0,
-                LIGHTING_PC_BYTES,
+                u32::try_from(std::mem::size_of_val(&pc)).unwrap_or(0),
                 pc.as_ptr() as *const c_void,
             );
             (self.fns.cmd_dispatch)(
@@ -2601,7 +2885,8 @@ impl Gpu {
 
     /// Histogram of every pixel, and a stride-32 still check. The header is copied
     /// for the next frame. Luma halves stay on the device.
-    fn record_gpu_meter(&mut self, width: u32, height: u32) {
+    fn record_gpu_meter(&mut self, lit_w: u32, lit_h: u32) {
+        let (width, height, origin_x, origin_y, stride) = self.display_sample(lit_w, lit_h);
         if self.lighting.hdr.legacy_bytes
             || self.lighting.meter_pipe.is_null()
             || self.lighting.meter_dev.buffer.is_null()
@@ -2639,9 +2924,9 @@ impl Gpu {
             self.lighting.meter_ping & 1,
             STILL_STRIDE,
             do_hist,
-            0,
-            0,
-            0,
+            origin_x,
+            origin_y,
+            stride,
             0,
         ];
         let groups = u32::try_from(pixels.div_ceil(64)).unwrap_or(u32::MAX).max(1);
@@ -2652,7 +2937,7 @@ impl Gpu {
                 self.lighting.layout,
                 0x20,
                 0,
-                LIGHTING_PC_BYTES,
+                u32::try_from(std::mem::size_of_val(&pc)).unwrap_or(0),
                 pc.as_ptr().cast::<c_void>(),
             );
             (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
@@ -2690,21 +2975,47 @@ impl Gpu {
         let probe_rays = probes * self.lighting.settings.probe_rays();
         let bgra = if self.format == 44 { 1u32 } else { 0 };
         self.lighting.frame = self.lighting.frame.wrapping_add(1);
-        let hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            // Lamps, occluders and camera; the traced meshes; the drawn ones.
-            self.frame_bytes.hash(&mut hasher);
-            self.mesh_field_key.hash(&mut hasher);
-            self.lighting.draw_key.hash(&mut hasher);
-            hasher.finish()
-        };
-        if hash == self.lighting.scene_hash {
-            self.lighting.still = self.lighting.still.saturating_add(1);
+        // Change records dirty the cells a mover or a point lamp touches. The
+        // camera, the draw list, and a whole-scene hash do not. There is no
+        // full-frame drop.
+        let have_prev = !self.lighting.kept_bytes.is_empty();
+        let mut records = if have_prev {
+            crate::lighting_regions::scene_change_records(&self.lighting.kept_bytes, &self.frame_bytes)
         } else {
-            self.lighting.scene_hash = hash;
+            Vec::new()
+        };
+        records.extend(std::mem::take(&mut self.lighting.mesh_records));
+        self.lighting
+            .regions
+            .set_cell(self.lighting.settings.world_cache.cell_metres);
+        self.lighting.regions.apply(&records);
+        let deferred = !self.lighting.pending_spheres.is_empty();
+        // The first frame has no previous scene: stillness stays 0, as a hash
+        // mismatch did. After that, only a change record or a deferred sphere
+        // resets it. The camera does not.
+        if !have_prev || !records.is_empty() || deferred {
             self.lighting.still = 0;
-            self.lighting.quiet = 0;
+        } else {
+            self.lighting.still = self.lighting.still.saturating_add(1);
+        }
+        self.lighting.scene_hash = self.lighting.static_light;
+        let stamp = camera_stamp(&self.frame_bytes);
+        let camera_moved = match stamp {
+            Some(now) => !self.lighting.camera_stamp_set || now != self.lighting.camera_stamp,
+            None => true,
+        };
+        if let Some(now) = stamp {
+            self.lighting.camera_stamp = now;
+            self.lighting.camera_stamp_set = true;
+        }
+        let debug_view = header_word(&self.frame_bytes, 252);
+        let view_changed = match debug_view {
+            Some(word) => !self.lighting.debug_view_set || word != self.lighting.debug_view_word,
+            None => false,
+        };
+        if let Some(word) = debug_view {
+            self.lighting.debug_view_word = word;
+            self.lighting.debug_view_set = true;
         }
         self.lighting.stats_still[slot] = self.lighting.still;
         self.lighting.last_slot = slot;
@@ -2719,19 +3030,29 @@ impl Gpu {
             hasher.finish()
         };
         let frozen = self.lighting_stats().settled;
-        let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
-        let changes = if had {
-            lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
-        } else {
-            None
-        };
+        // The change list drops kept probe rays that cross a sphere. A lamp's
+        // reach would cover the room, and those hits are shaded again anyway.
+        // Lamp records still dirty world-cache cells. The surface cache marks
+        // texels inside the reach through lighting_sc_lamp_touched.
+        let mut geometry = Vec::new();
+        for record in &records {
+            if let crate::lighting_regions::ChangeRecord::Mover { .. } = record {
+                geometry.push(*record);
+            }
+        }
+        let mut spheres = std::mem::take(&mut self.lighting.pending_spheres);
+        spheres.extend(crate::lighting_regions::change_spheres(&geometry));
+        let (spheres, rest) = crate::lighting_regions::split_spheres(spheres, LIGHTING_CHANGES);
+        self.lighting.pending_spheres = rest;
         if lighting_debug_on() {
             if frozen {
                 eprintln!("lighting frozen");
             } else {
                 eprintln!(
-                    "lighting kept had {had} changes {}",
-                    changes.as_ref().map_or(-1, |c| c.len() as i64)
+                    "lighting records {} spheres {} deferred {}",
+                    records.len(),
+                    spheres.len(),
+                    self.lighting.pending_spheres.len()
                 );
             }
         }
@@ -2774,21 +3095,17 @@ impl Gpu {
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
-        let mut used = 0;
-        // Vec4s of the block the GPU gets: head, changes and movers.
-        let mut sent = LIGHTING_CHANGE_HEAD;
-        match &changes {
-            None => block[1] = 1.0,
-            Some(list) => {
-                block[0] = list.len() as f32;
-                for (j, b) in list.iter().enumerate() {
-                    let at = 4 * (LIGHTING_CHANGE_HEAD + j);
-                    block[at..at + 4].copy_from_slice(b);
-                }
-                used = list.len();
-            }
+        // Head y drops kept rays only on the first frame, when there is no
+        // previous scene. A mover never sets it.
+        block[0] = spheres.len() as f32;
+        block[1] = if have_prev { 0.0 } else { 1.0 };
+        for (j, b) in spheres.iter().enumerate() {
+            let at = 4 * (LIGHTING_CHANGE_HEAD + j);
+            block[at..at + 4].copy_from_slice(b);
         }
-        sent += used;
+        let used = spheres.len();
+        // Vec4s of the block the GPU gets: head, changes and movers.
+        let mut sent = LIGHTING_CHANGE_HEAD + used;
         // Movers (surface cache): bounds of every occluder that moved in the
         // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
         // Compared whenever there is a last scene (not only when the trace key held:
@@ -2822,7 +3139,7 @@ impl Gpu {
                 block[3] += 100000.0;
             }
         }
-        if had {
+        if have_prev {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
             let f = |at: usize| {
                 let b = &self.lighting.kept_bytes[at..at + 4];
@@ -2841,7 +3158,13 @@ impl Gpu {
         // The camera up's w (head 3.w) is unread: the flags' high bits.
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
-        let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
+        // The budget controller also halves the cache refresh budget per halving of
+        // its scale, so cache-entry refreshes shrink with trace and a-trous.
+        let budget_shift = crate::lighting_schedule::refresh_budget_shift(
+            self.lighting.settings.gi.budget_shift,
+            self.lighting.settings.controller,
+            self.lighting.budget.scale,
+        );
         block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
@@ -2849,6 +3172,11 @@ impl Gpu {
             self.lighting.kept_key = key;
             self.lighting.kept_bytes.clone_from(&self.frame_bytes);
             self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
+        }
+        // ReSTIR reads last frame's camera, not the frozen probe camera.
+        let restir_cam = self.lighting.lamp_cam.map(restir_camera_basis);
+        if let Some(basis) = scene_camera_basis(&self.frame_bytes) {
+            self.lighting.lamp_cam = Some(basis);
         }
         let block_at = 16
             * lighting_change_at(
@@ -2883,6 +3211,20 @@ impl Gpu {
                     bytes,
                     block.as_ptr() as *const c_void,
                 );
+                if let Some(cam) = restir_cam {
+                    if let Some(at) = self.lighting.lamp_cam_at {
+                        let offset = at.saturating_mul(16);
+                        if offset.saturating_add(64) <= self.lighting.work.size {
+                            (self.fns.cmd_update_buffer)(
+                                self.cmd,
+                                self.lighting.work.buffer,
+                                offset,
+                                64,
+                                cam.as_ptr().cast::<c_void>(),
+                            );
+                        }
+                    }
+                }
                 if self.lighting.cache_full {
                     // S78X: the a-trous dirty-fraction threshold (millionths). A cache
                     // clear earlier this frame zeroed the word; the levels read it.
@@ -2920,35 +3262,32 @@ impl Gpu {
                         4,
                         &firefly_sigma as *const u32 as *const c_void,
                     );
+                    // Spawn permits this frame (detail levels). The coarse live
+                    // count sits in the next word and is not cleared.
+                    (self.fns.cmd_fill_buffer)(
+                        self.cmd,
+                        self.lighting.cache_keys.buffer,
+                        (LIGHTING_ARGS_AT + 14) * 4,
+                        4,
+                        0,
+                    );
                 }
                 self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
             }
         }
-        // The light alone (no camera): while it holds and a full sweep has changed
-        // no mature patch, rounds relight young patches only. Any change goes back
-        // to full sweeps at once. A small sun step stays on the hash from the last
-        // full refresh: the direction is in the scene hash, and taking the new one
-        // would relight the room as a whole-scene light change.
+        // Floor, roof, sky, fire, and a large sun step reset the quiet schedule.
+        // A small sun step stays on the hash from the last full refresh: taking
+        // the new direction would relight the room as a whole-scene light change.
+        // A mover or a point lamp is a change record and does not reset this.
         let sun_amortise = self.note_sun_amortise();
-        let light = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            self.lighting.light_scene.hash(&mut hasher);
-            self.mesh_field_key.hash(&mut hasher);
-            // The drawn list follows the camera (culling), so the surface cache
-            // (mode 3) leaves it out: a turn is not a light change there.
-            if self.lighting.settings.world_mode() != 3 {
-                self.lighting.draw_key.hash(&mut hasher);
-            }
-            hasher.finish()
-        };
+        let light = self.lighting.static_light;
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
         let counters_read = self.lighting.async_on
             || lighting_stats_wanted(self.lighting.settings.world_mode());
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
-        } else if self.lighting.still > 0
+        } else if have_prev
             && lighting_counts_light_on_cpu(
                 self.lighting.settings.world_mode(),
                 probe_only(&self.lighting.settings),
@@ -2998,13 +3337,43 @@ impl Gpu {
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
             lamp[1] |= 1 << 17;
         }
-        let pc = [
+        let sched_tile = if self.lighting.sched_tile != 0 {
+            self.lighting.sched_tile
+        } else {
+            tile
+        };
+        let lit = if self.lighting.lit.lit_w == w && self.lighting.lit.lit_h == h {
+            self.lighting.lit
+        } else {
+            crate::lighting_schedule::lit_frame(
+                w,
+                h,
+                crate::lighting_schedule::GuardEdges {
+                    left: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    bottom: 0.0,
+                },
+                sched_tile.max(1),
+            )
+        };
+        let sched = crate::lighting_schedule::schedule_push(
+            &self.lighting.settings,
+            self.lighting.budget.scale,
+            lit,
+            sched_tile,
+            self.lighting.settings.probe_rays(),
+            u32::try_from(records.len()).unwrap_or(u32::MAX),
+            self.lighting.frame,
+        );
+        self.lighting.last_schedule = sched;
+        let head = [
             w,
             h,
             cols,
             rows,
             self.lighting.settings.probe_rays(),
-            tile,
+            sched_tile,
             z,
             self.lighting.frame,
             lamp[0],
@@ -3012,6 +3381,17 @@ impl Gpu {
             lamp[2],
             lamp[3],
         ];
+        let mut pc = [0u32; LIGHTING_PC_WORDS];
+        pc[..12].copy_from_slice(&head);
+        pc[12..16].copy_from_slice(&sched.words);
+        pc[16..20].copy_from_slice(&sched.tail);
+        // Bit 4: the work buffer was zeroed this frame (a lit-size change, a new
+        // scene). The trace gate keeps a finished hit, and a zero slot looks like
+        // a hit at distance 0. That bit tells the gate to trace it.
+        if self.lighting.work_cleared {
+            pc[12] |= 16;
+            self.lighting.work_cleared = false;
+        }
         let image = self.color.image;
         let blocks = (w.div_ceil(8) as u64) * (h.div_ceil(8) as u64);
         // Full compose when the picture has no history yet, the camera or the
@@ -3019,8 +3399,13 @@ impl Gpu {
         // cover the image. A small sun step, with the camera held, takes one
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
         // forces the full picture.
-        let compose_full = !self.lighting.compose_valid
-            || !(self.lighting.still > 0 || sun_amortise)
+        // Wireframe replaces the shaded triangles. A quiet compose would copy
+        // the previous shaded picture back over those lines.
+        let compose_full = self.wire_on
+            || !self.lighting.compose_valid
+            || camera_moved
+            || view_changed
+            || self.lighting.still == 0 && !sun_amortise
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
@@ -3029,7 +3414,7 @@ impl Gpu {
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
         if compose_full {
-            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true, 0);
+            self.copy_image_buffer(image, 6, self.lighting.out.buffer, w, h, true, 0, 0, 0);
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
@@ -3053,7 +3438,6 @@ impl Gpu {
             && self.lighting.settings.cache_rays_this_frame(self.lighting.frame);
         let round = due && !try_async;
         self.lighting.stats_round[slot] = round;
-        let mut pc = pc;
         if round {
             let n = self.lighting.world_round;
             self.lighting.world_round = n.wrapping_add(1);
@@ -3063,6 +3447,14 @@ impl Gpu {
             pc[6] |= 1 << 8;
         }
         let kept = probe_rays * LIGHTING_STRATA;
+        let (filter_w, filter_h) = screen_filter_extent(
+            lit.lit_w,
+            lit.lit_h,
+            lit.crop_x,
+            lit.crop_y,
+            lit.display_w,
+            lit.display_h,
+        );
         let planned = light_groups(
             &self.lighting.settings,
             self.lighting.frame,
@@ -3073,6 +3465,8 @@ impl Gpu {
             probes,
             probe_rays,
             kept,
+            filter_w,
+            filter_h,
         );
         self.lighting.ctrl_bytes = pack_lighting_ctrl(
             &self.lighting.settings,
@@ -3423,10 +3817,11 @@ impl Gpu {
                     LIGHTING_PC_BYTES,
                     pc.as_ptr() as *const c_void,
                 );
+                let (post_w, post_h, _, _, _) = self.display_sample(w, h);
                 (self.fns.cmd_dispatch)(
                     self.cmd,
-                    w.div_ceil(8).max(1),
-                    h.div_ceil(8).max(1),
+                    post_w.div_ceil(8).max(1),
+                    post_h.div_ceil(8).max(1),
                     1,
                 );
             }
@@ -3446,9 +3841,11 @@ impl Gpu {
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         if self.format == crate::hdr_output::FORMAT_R16F {
             let offset = u64::from(w).saturating_mul(u64::from(h)).saturating_mul(16);
-            self.copy_image_buffer(image, 7, self.lighting.hdr_encode.buffer, w, h, false, offset);
+            self.copy_image_buffer(
+                image, 7, self.lighting.hdr_encode.buffer, w, h, false, 0, 0, offset,
+            );
         } else {
-            self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false, 0);
+            self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false, 0, 0, 0);
         }
         self.image_barrier(image, 7, 6, 0x1000, 0x1000 | 0x800, 0x1000, 0x800 | 0x20);
         // S78W: the frame's stats to the host-visible copy (read a frame later).
@@ -3752,6 +4149,12 @@ const LIGHTING_STATS_WORDS: usize = 144;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
+/// `gstats.diag[36]`, `[37]`, `[38]`: hold-off mean reuse, reset, and sum of M.
+/// 46, 47, and 55 are the surface-cache trace (`lighting_dg`).
+const LAMP_TEMPORAL_WORD: usize = 24 + 36;
+const LAMP_TEMPORAL_RESET_WORD: usize = 24 + 37;
+const LAMP_TEMPORAL_M_WORD: usize = 24 + 38;
+const _: () = assert!(LAMP_TEMPORAL_M_WORD < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
@@ -3850,6 +4253,42 @@ fn lighting_change_at(probes: u64, cache_rays: u64, kept: u64) -> u64 {
     2 * probes + cache_rays + 7 * probes + 2 * LIGHTING_STRATA as u64 * probes + kept + kept / 4
 }
 
+/// Vec4 index of the ReSTIR previous-frame camera. Matches
+/// `lighting_lamp_cam_at` / `lighting_graw_at(probes, 0)` in the shader.
+fn lighting_lamp_cam_at(probes: u64, rays: u64, kept: u64, pixels: u64, cache_rays: u64) -> u64 {
+    lighting_change_at(probes, cache_rays, kept)
+        + (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES) as u64
+        + 4 * probes
+        + 2 * rays * probes
+        + kept
+        + kept / 4
+        + pixels.div_ceil(2)
+        + 2 * probes
+        + rays * probes
+}
+
+/// Eye, right, up, forward from a scene block. Eye's w in the block is 0.
+fn scene_camera_basis(bytes: &[u8]) -> Option<[[f32; 4]; 4]> {
+    if bytes.len() < 144 {
+        return None;
+    }
+    let mut out = [[0.0f32; 4]; 4];
+    for (i, at) in [16usize, 96, 112, 128].into_iter().enumerate() {
+        for c in 0..4 {
+            let start = at + 4 * c;
+            let b = bytes.get(start..start + 4)?;
+            out[i][c] = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        }
+    }
+    Some(out)
+}
+
+/// The basis the shader accepts: eye.w is the "a previous frame exists" flag.
+fn restir_camera_basis(mut basis: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    basis[0][3] = 1.0;
+    basis
+}
+
 /// Occluder records of a scene block (`pack::scene_bytes`), 64 bytes each.
 fn lighting_occs(bytes: &[u8]) -> Vec<&[u8]> {
     let word = |at: usize| {
@@ -3945,46 +4384,6 @@ pub(crate) fn lighting_mesh_movers(
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
 const LIGHTING_MOVER_KEEP: u32 = 240;
 
-/// Spheres (centre, radius) around every occluder that moved, came or went between
-/// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
-/// ray that crosses either sees something else now. None when there are more than
-/// LIGHTING_CHANGES (drop every kept ray instead). Lamps are not compared: kept hits are
-/// shaded again every frame, so light needs no change list.
-pub(crate) fn lighting_changes(old: &[u8], new: &[u8]) -> Option<Vec<[f32; 4]>> {
-    fn occs(bytes: &[u8]) -> Vec<&[u8]> {
-        let word = |at: usize| {
-            bytes
-                .get(at * 4..at * 4 + 4)
-                .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
-        };
-        let start = crate::pack::SCENE_TAIL + word(0) * 32;
-        (0..word(1))
-            .filter_map(|i| bytes.get(start + i * 64..start + i * 64 + 64))
-            .collect()
-    }
-    fn bounds(rec: &[u8]) -> [f32; 4] {
-        let f = |i: usize| f32::from_le_bytes([rec[i * 4], rec[i * 4 + 1], rec[i * 4 + 2], rec[i * 4 + 3]]);
-        // center_shape xyz; extent: x and z half extents, y full height, w radius.
-        let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
-        let (hx, hz) = (hx.max(r), hz.max(r));
-        [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
-    }
-    let (a, b) = (occs(old), occs(new));
-    if a == b {
-        return Some(Vec::new());
-    }
-    let left: std::collections::HashSet<&[u8]> = a.iter().copied().collect();
-    let right: std::collections::HashSet<&[u8]> = b.iter().copied().collect();
-    let mut out = Vec::new();
-    for rec in a.iter().filter(|r| !right.contains(*r)).chain(b.iter().filter(|r| !left.contains(*r))) {
-        if out.len() == LIGHTING_CHANGES {
-            return None;
-        }
-        out.push(bounds(rec));
-    }
-    Some(out)
-}
-
 /// Key of what the probes trace besides the occluders and meshes: the floor and the
 /// roof (their place and colour, which kept hits hold).
 pub(crate) fn lighting_trace_key(pack: &crate::pack::Pack) -> u64 {
@@ -4000,6 +4399,30 @@ pub(crate) fn lighting_trace_key(pack: &crate::pack::Pack) -> u64 {
         f.to_bits().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// True when a point lamp or an occluder was added or removed.
+///
+/// A move of the same lists is a local change record. A different count means
+/// the finished cache describes a different world.
+fn resident_lists_changed(previous: &[u8], current: &[u8]) -> bool {
+    let count = |bytes: &[u8], word: usize| -> Option<u32> {
+        let bytes = bytes.get(word * 4..word * 4 + 4)?;
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    };
+    let Some(prev_lamps) = count(previous, 0) else {
+        return false;
+    };
+    let Some(next_lamps) = count(current, 0) else {
+        return false;
+    };
+    let Some(prev_occs) = count(previous, 1) else {
+        return false;
+    };
+    let Some(next_occs) = count(current, 1) else {
+        return false;
+    };
+    prev_lamps != next_lamps || prev_occs != next_occs
 }
 
 /// Hash of what lights the scene, without the camera: the lamp and occluder lists
@@ -4035,6 +4458,70 @@ pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 
         f.to_bits().hash(&mut hasher);
     }
     hasher.finish()
+}
+
+/// Floor, roof, sky, fire, smoke, and directional lamps (direction and colour).
+/// Point lamps, occluders, and the camera are change records or ignored, so they
+/// do not reset the quiet schedule of every cell.
+pub(crate) fn lighting_static_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let word = |at: usize| {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let tail = crate::pack::SCENE_TAIL;
+    for index in 0..word(0) {
+        let at = tail + index * 32;
+        let Some(rec) = bytes.get(at..at + 32) else {
+            break;
+        };
+        let directional = f32::from_le_bytes([rec[12], rec[13], rec[14], rec[15]]);
+        if directional <= 0.5 {
+            continue;
+        }
+        rec[..12].hash(&mut hasher);
+        rec[16..28].hash(&mut hasher);
+    }
+    let mut floats: Vec<f32> = Vec::new();
+    floats.extend(pack.fire.position);
+    floats.extend(pack.fire.color);
+    floats.push(pack.fire.strength);
+    for puff in &pack.puffs {
+        floats.extend(puff.center);
+        floats.push(puff.radius);
+        floats.push(puff.density);
+    }
+    floats.extend(pack.floor_center);
+    floats.push(pack.floor_half_x);
+    floats.push(pack.floor_half_z);
+    floats.extend(pack.floor_color);
+    floats.extend(pack.ceiling);
+    floats.extend(pack.sky);
+    for value in floats {
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Eye at byte 16 (12 bytes) and the basis at bytes 96..144.
+fn camera_stamp(bytes: &[u8]) -> Option<[u8; 60]> {
+    let eye = bytes.get(16..28)?;
+    let basis = bytes.get(96..144)?;
+    let mut out = [0u8; 60];
+    out[..12].copy_from_slice(eye);
+    out[12..].copy_from_slice(basis);
+    Some(out)
+}
+
+/// One little-endian word of the scene block. Byte 252 is `pack.debug_view`.
+fn header_word(bytes: &[u8], at: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + 4)?;
+    let Ok(arr) = <[u8; 4]>::try_from(slice) else {
+        return None;
+    };
+    Some(u32::from_le_bytes(arr))
 }
 
 /// S78S debug isolate toggles: attribute a change to exactly one component.
@@ -4448,6 +4935,22 @@ mod sun_step {
     }
 
     #[test]
+    fn a_different_lamp_or_occluder_count_is_a_different_world() {
+        let words = |lamps: u32, occs: u32| {
+            let mut bytes = Vec::new();
+            bytes.extend(lamps.to_le_bytes());
+            bytes.extend(occs.to_le_bytes());
+            bytes
+        };
+        let prev = words(1, 2);
+        assert!(!super::resident_lists_changed(&prev, &prev));
+        assert!(super::resident_lists_changed(&prev, &words(2, 2)));
+        assert!(super::resident_lists_changed(&prev, &words(1, 3)));
+        assert!(!super::resident_lists_changed(&[], &prev));
+        assert!(!super::resident_lists_changed(&prev, &prev[..4]));
+    }
+
+    #[test]
     fn the_surface_cache_counts_quiet_light_without_the_counter_read() {
         assert!(super::lighting_counts_light_on_cpu(3, false, false));
         assert!(!super::lighting_counts_light_on_cpu(3, false, true));
@@ -4525,6 +5028,36 @@ mod sun_step {
             LIGHTING_COMPOSE_SPV.len(),
             SUN_COMPOSE_SPV.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod restir_camera {
+    use super::{lighting_lamp_cam_at, restir_camera_basis, scene_camera_basis};
+
+    #[test]
+    fn the_restir_camera_sits_past_the_gather_cells() {
+        // probes 1, rays 1, kept 8, pixels 2, cache rays 10.
+        // change block 45, tail through the gather cells 89, index 134.
+        assert_eq!(lighting_lamp_cam_at(1, 1, 8, 2, 10), 134);
+    }
+
+    #[test]
+    fn the_published_camera_is_the_saved_frame_and_marks_itself_valid() {
+        let mut bytes = vec![0u8; 144];
+        let eye = 1.5f32.to_le_bytes();
+        let forward = (-1.0f32).to_le_bytes();
+        bytes[16..20].copy_from_slice(&eye);
+        bytes[128..132].copy_from_slice(&forward);
+        let saved = scene_camera_basis(&bytes).expect("basis");
+        assert_eq!(saved[0][0], 1.5);
+        assert_eq!(saved[0][3], 0.0);
+        assert_eq!(saved[3][0], -1.0);
+        let published = restir_camera_basis(saved);
+        assert_eq!(published[0][3], 1.0);
+        assert_eq!(published[0][0], 1.5);
+        assert_eq!(published[3][0], -1.0);
+        assert!(scene_camera_basis(&[0u8; 16]).is_none());
     }
 }
 

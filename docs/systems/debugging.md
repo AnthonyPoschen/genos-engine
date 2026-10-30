@@ -65,7 +65,7 @@ that system's features. The agent rubric scores this.
   - `knobs.rs`: named knobs (`Knob`).
   - `script.rs`: the Rhai runner and its report.
 - `crates/render/src/debug_view.rs`: view modes (full, direct, bounce, albedo,
-  normal, depth, light, texels) and `lamp_report`.
+  normal, depth, light, texels, variance, tail) and `lamp_report`.
 - `crates/render/src/trace.rs`: the CPU surfaces and direct light the reference uses.
 - `examples/stress/src/knobs.rs`: the stress knobs (time of day, sun, lights, ...).
 - `examples/stress/scripts/*.rhai`: regression scripts. `reference.rhai` holds noon

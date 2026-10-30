@@ -18,8 +18,8 @@ mod settings;
 mod types;
 
 pub use camera::{
-    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_FAR,
-    CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
+    look_direction, project_guard, transform_point, update, view_proj, view_proj_guard, viewport_uv,
+    Actions, Camera, GuardFrustum, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
@@ -39,7 +39,7 @@ pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
     lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
     DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings, LightingPreset,
-    LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
+    LightingSettings, ProbeSettings, ScheduleMode, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
     LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,
     LIGHTING_BOUNCES_UNLIMITED,

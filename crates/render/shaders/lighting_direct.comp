@@ -100,6 +100,28 @@ bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light
     float bound = LIGHTING_CHECK_K * nz.y * dot(refl, lw) + LIGHTING_CHECK_FLOOR * max(lo, ln);
     return abs(ln - lo) <= bound;
 }
+// S73: the display crop plus the screen filter's reach (SCREEN_FILTER_MARGIN in
+// lighting_screen.comp and lighting_dispatch.rs), clamped to the lit picture.
+// Direct and compose light only this rect; the rest of the guard band keeps
+// last frame's values as history. xy origin, zw size; the whole picture when
+// there is no crop.
+uvec4 lighting_display_rect() {
+    if (pc.frame.x == 0u || pc.frame.y == 0u) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    const uint margin = 32u;
+    uint crop_x = pc.schedule.w & 0xffffu;
+    uint crop_y = pc.schedule.w >> 16u;
+    uint x0 = crop_x > margin ? crop_x - margin : 0u;
+    uint y0 = crop_y > margin ? crop_y - margin : 0u;
+    uint x1 = min(pc.dims.x, crop_x + pc.frame.x + margin);
+    uint y1 = min(pc.dims.y, crop_y + pc.frame.y + margin);
+    if (x1 <= x0 || y1 <= y0) {
+        return uvec4(0u, 0u, pc.dims.x, pc.dims.y);
+    }
+    return uvec4(x0, y0, x1 - x0, y1 - y0);
+}
+
 void main() {
     lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
@@ -132,6 +154,13 @@ void main() {
     } else {
         if (gstats.ctrl_bias != 0u) {
             idx += gstats.ctrl_bias;
+        } else if (mode != 2u) {
+            // Pixels first (the display rect only), then the kept hits.
+            uvec4 r = lighting_display_rect();
+            uint shown = r.z * r.w;
+            idx = idx < shown
+                ? (r.y + idx / r.z) * pc.dims.x + r.x + idx % r.z
+                : idx - shown + pixels;
         }
         if (mode == 2u) {
             idx += pixels + kept;
@@ -260,6 +289,10 @@ void main() {
     uint count = lamp_list_size(list);
     // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
     uint pix_sig = 0u;
+    bool direct_hold = false;
+    if (idx < pixels && (pc.schedule.x & 1u) != 0u) {
+        direct_hold = !lighting_tile_kept(uvec2(idx % pc.dims.x, idx / pc.dims.x));
+    }
     if (lighting_pix_reuse_on() && idx < pixels) {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
         // A one-lamp view must not reuse a held full sum.
@@ -270,7 +303,15 @@ void main() {
         uint c = (idx & 1u) * 2u;
         // A small sun step still traces. Reusing last frame's direct would
         // leave the sun and its shadow a frame behind.
-        if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
+        // Outside the refresh rect, a stored direct value for the same surface
+        // stays up. An empty or other-surface slot falls through and traces.
+        bool quiet_hit = pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet();
+        // Outside the refresh rect the slot holds only for the surface it was
+        // shaded for (1 mm, same normal, same lamp epochs). The slot is per lit
+        // pixel, not per surface: after a turn it holds another surface's light,
+        // and holding it popped the bounce on the first turned frame (turn-pop).
+        bool held_hit = direct_hold && pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig;
+        if ((quiet_hit || held_hit) && !lighting_sun_small()) {
             // Mode 4 holds only an exact sum (kind 2) once the view is still.
             // A trusted copy is not frozen as the truth when the camera stops.
             // The copy goes into this frame's slot only. Writing the other slot
@@ -278,13 +319,14 @@ void main() {
             // The plain variant is the pre-reservoir shade. A matching signature
             // holds, the same test as before reservoirs. The reservoir variant
             // holds only an exact sum, and only while the noise gate allows it.
+            // Outside the refresh rect the stored direct value stays either way.
 #ifdef LIGHTING_DIRECT_PLAIN
             bool hold = true;
 #else
-            bool hold = pc.lamp.x != 4u;
+            bool hold = held_hit || pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
-            if (pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
+            if (!held_hit && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
                 LampReservoir held = lamp_res_load(idx, lamp_res_slot_prev());
                 uvec4 geo = lamp_geo_load(idx, lamp_res_slot_prev());
                 hold = geo.z == LAMP_GEO_EXACT && lamp_res_frames(held) >= LIGHTING_DIRECT_HOLD;
@@ -868,6 +910,17 @@ void main() {
         } else {
             mean_count = prev_count + 1u;
             e = prev + (e - prev) / float(mean_count);
+        }
+        // diag[36] kept a previous mean, diag[37] started over, diag[38] is the
+        // sum of M written this frame. 46, 47, and 55 already belong to the
+        // surface-cache trace. The noise gate prints these on the pan.
+        if (lamp_pick_diag()) {
+            if (prev_count > 0u) {
+                atomicAdd(gstats.diag[36u], 1u);
+            } else {
+                atomicAdd(gstats.diag[37u], 1u);
+            }
+            atomicAdd(gstats.diag[38u], mean_count);
         }
     }
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {

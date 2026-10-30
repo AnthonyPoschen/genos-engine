@@ -53,7 +53,12 @@ void main() {
     if (i >= pixels) {
         return;
     }
-    float y = scene_y(scene_lin.px[i].rgb);
+    // The histogram is the swapchain. `lamp.xy` is the crop, `lamp.z` the lit stride.
+    uint col = i % width;
+    uint row = i / width;
+    uint scene_stride = pc.lamp.z == 0u ? width : pc.lamp.z;
+    uint scene_i = (row + pc.lamp.y) * scene_stride + (col + pc.lamp.x);
+    float y = scene_y(scene_lin.px[scene_i].rgb);
     uint bins = pc.dims.z;
     if (pc.params.w != 0u && y > 0.0 && bins > 0u) {
         if (bins > 4096u) {

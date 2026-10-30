@@ -9,6 +9,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{Floor, Scene, Vec3, Wall};
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn wall(z0: f32, z1: f32, absorption: f32) -> Wall {
     let min_z = z0.min(z1);
     let max_z = z0.max(z1);
@@ -26,7 +32,7 @@ fn wall(z0: f32, z1: f32, absorption: f32) -> Wall {
 }
 
 fn world(walls: Vec<Wall>) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 8.0,

@@ -16,7 +16,9 @@
 
 //! The real Vulkan draw. Pixel checks use the presented readback, not the CPU bake.
 
-use genos_render::{Renderer, World};
+use std::fmt::Write;
+
+use genos_render::{DebugView, Renderer, SchedulePush, ViewMode, World};
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
 
@@ -30,8 +32,14 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     (guard, window, renderer)
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 8.0,
@@ -102,6 +110,105 @@ fn brightness(color: [f32; 3]) -> f32 {
     color[0] + color[1] + color[2]
 }
 
+/// High caps, controller held, scale at the 1/64 floor. 720p then gates direct and trace.
+fn gated(mut world: World) -> World {
+    world.scene.lighting.budget_scale = 1.0 / 64.0;
+    world
+}
+
+fn show_bounce(renderer: &mut Renderer) {
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Bounce,
+        ..DebugView::default()
+    });
+}
+
+fn show_tail(renderer: &mut Renderer) {
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Tail,
+        ..DebugView::default()
+    });
+}
+
+/// One draw submitted and not read back. Later waits still see its ray slots.
+fn submit(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
+    let _ = window.pump();
+    renderer.draw(world, camera, false).expect("draw");
+}
+
+struct FillOff;
+
+impl Drop for FillOff {
+    fn drop(&mut self) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+        )]
+        {
+            std::env::remove_var("GENOS_LIGHTING_FILL");
+        }
+    }
+}
+
+fn look_down(x: f32, z: f32) -> Camera {
+    let mut camera = Camera::new(x, z, 0.0);
+    camera.set_pose(Vec3::new(x, 0.45, z), 0.0, -1.2);
+    camera
+}
+
+fn bounce_span(pixels: &[u8], width: u32, height: u32, push: &SchedulePush) -> (f32, f32, u32, u32) {
+    let tile = 16u32;
+    let plan = push.plan;
+    let mut inside = 0.0f32;
+    let mut outside = 0.0f32;
+    let mut outside_px = 0u32;
+    let mut outside_bright = 0u32;
+    for y in 0..height {
+        for x in 0..width {
+            let tx = x.saturating_add(push.lit.crop_x) / tile;
+            let ty = y.saturating_add(push.lit.crop_y) / tile;
+            let in_rect = plan.tile_w > 0
+                && tx >= plan.tile_x
+                && tx < plan.tile_x.saturating_add(plan.tile_w)
+                && ty >= plan.tile_y
+                && ty < plan.tile_y.saturating_add(plan.tile_h);
+            let in_band = plan.starve_h > 0
+                && ty >= plan.starve_y
+                && ty < plan.starve_y.saturating_add(plan.starve_h);
+            let i = ((y * width + x) * 4) as usize;
+            let b = f32::from(pixels[i + 2]) + f32::from(pixels[i + 1]) + f32::from(pixels[i]);
+            if in_rect || in_band {
+                inside = inside.max(b);
+                continue;
+            }
+            let dx = if tx < plan.tile_x {
+                plan.tile_x - tx
+            } else if tx >= plan.tile_x.saturating_add(plan.tile_w) {
+                tx - plan.tile_x.saturating_add(plan.tile_w)
+            } else {
+                0
+            };
+            let dy = if ty < plan.tile_y {
+                plan.tile_y - ty
+            } else if ty >= plan.tile_y.saturating_add(plan.tile_h) {
+                ty - plan.tile_y.saturating_add(plan.tile_h)
+            } else {
+                0
+            };
+            // Three filter rounds step 2, 4, then 8 probes, so light from the
+            // rect can ride fourteen tiles out. Farther than that is this probe.
+            if dx.max(dy) >= 16 {
+                outside = outside.max(b);
+                outside_px = outside_px.saturating_add(1);
+                if b > 20.0 {
+                    outside_bright = outside_bright.saturating_add(1);
+                }
+            }
+        }
+    }
+    (inside, outside, outside_px, outside_bright)
+}
+
 /// Pixel channels for the direct lamp only, using the same falloff and occlusion as the shader.
 /// Bounce is not included. A white wall and a white lamp make the three channels equal.
 fn direct_wall_pixel(scene: &Scene, surface: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
@@ -130,14 +237,52 @@ fn shipped_scene() -> Scene {
 }
 
 fn shipped_hall() -> World {
-    World::from_scene(shipped_scene())
+    present(shipped_scene())
+}
+
+/// High, no `--gi-metrics`. Two flight slots, so the third draw reads the first.
+#[test]
+fn the_budget_controller_scales_without_gi_metrics() {
+    let (_gpu, mut window, mut renderer) = open();
+    assert!(
+        !renderer.gi_metrics_enabled(),
+        "the sample log is on; this test is normal play"
+    );
+    // The shipped hall (lamp, flame, solids): an empty room retires inside the
+    // 8 ms cap once refreshes are budgeted, and the controller has nothing to do.
+    let mut world = shipped_hall();
+    world.scene.lighting.controller = true;
+    let camera = Camera::opening();
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let early = renderer.budget_controller_scale();
+    assert!(
+        (early - 1.0).abs() < 1e-9,
+        "scale moved before a flight slot was reused: {early}"
+    );
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let scale = renderer.budget_controller_scale();
+    let ms = renderer.lighting_pass_ms();
+    let total: f64 = ms.iter().sum();
+    assert!(
+        renderer.gi_metrics_samples().is_empty(),
+        "normal play recorded a GI sample"
+    );
+    assert!(
+        scale < 1.0,
+        "High stayed at the preset cap without --gi-metrics: scale {scale} sum {total} buckets {ms:?}"
+    );
+    assert!(
+        total > 8.0,
+        "the retired lighting total was inside the 8 ms cap: {total} {ms:?}"
+    );
 }
 
 /// Hall walls and the white lamp. The flame and the colored solids stay out.
 fn hall_lamp() -> World {
     let mut scene = shipped_scene();
     scene.solids.clear();
-    World::from_scene(scene)
+    present(scene)
 }
 
 #[test]
@@ -283,6 +428,12 @@ fn the_gpu_frame_keeps_the_learned_light() {
     let near_shadow = sample(&filled, width, height, &camera, [2.2, 0.0, 0.0]);
     let far_shadow = sample(&filled, width, height, &camera, [1.1, 0.0, 0.0]);
     let behind = sample(&filled, width, height, &camera, [3.8, 0.0, 0.0]);
+    eprintln!(
+        "learned near {} far {} behind {}",
+        brightness(near_shadow),
+        brightness(far_shadow),
+        brightness(behind)
+    );
     assert!(
         brightness(near_shadow) > 4.0,
         "the floor in front of the wall has no bounce: near {near_shadow:?} far {far_shadow:?}"
@@ -1080,12 +1231,249 @@ fn check_hall_wall(
     0.0
 }
 
+/// A cleared ray slot is x = 0, which the trace gate keeps as a finished hit.
+/// Eight missed frames write `LIGHTING_NO_RAY` into every stratum. The next
+/// frame's empty slots, outside the rect, still have to trace. Fills are off,
+/// and the surface cache is off, so that light is the probe trace.
+#[test]
+fn an_empty_probe_outside_the_refresh_still_traces() {
+    let (_gpu, mut window, mut renderer) = open();
+    let _fill = FillOff;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )]
+    {
+        std::env::set_var("GENOS_LIGHTING_FILL", "0");
+    }
+    let width = renderer.width();
+    let height = renderer.height();
+    show_bounce(&mut renderer);
+    let mut world = scene(
+        vec![Light {
+            position: Vec3::new(-5.0, 4.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        }],
+        vec![Wall {
+            base: 0.0,
+            position: Vec3::new(3.0, 0.0, 0.0),
+            half_x: 0.2,
+            half_z: 2.5,
+            height: 2.6,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }],
+        Vec::new(),
+    );
+    world.scene.lighting.denoiser.enabled = false;
+    world.scene.lighting.world_cache.enabled = false;
+    world.scene.lighting.ambient.mode = genos_scene::AmbientMode::Off;
+    world = gated(world);
+    // Straight up, clear of the floor, so every stratum is written `LIGHTING_NO_RAY`
+    // and not a kept hit. The next view's probes outside the rect then have to trace.
+    let mut sky = Camera::new(0.0, 20.0, 0.0);
+    sky.set_pose(Vec3::new(0.0, 20.0, 0.0), 0.0, 1.5);
+    for _ in 0..8 {
+        submit(&mut window, &mut renderer, &world, &sky);
+    }
+    let _ = renderer.lighting_probe_samples();
+    let mut camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
+    camera.set_pose(Vec3::new(2.2, 1.7, 1.2), std::f32::consts::PI, -0.35);
+    let picture = draw(&mut window, &mut renderer, &world, &camera);
+    let sched = renderer.last_schedule();
+    let (inside, outside, outside_px, outside_bright) = bounce_span(&picture, width, height, &sched);
+    let plan = sched.plan;
+    eprintln!(
+        "empty inside {inside} outside {outside} bright {outside_bright} px {outside_px} rect {} {} {} {} crop {} {}",
+        plan.tile_x, plan.tile_y, plan.tile_w, plan.tile_h, sched.lit.crop_x, sched.lit.crop_y
+    );
+    assert!(
+        sched.plan.trace_gate && sched.plan.tile_w > 0,
+        "trace gate off: {:?} scale {}",
+        sched.plan,
+        sched.scale
+    );
+    assert!(
+        outside_px > 100 && outside > 8.0 && inside > 0.0 && outside_bright > 120_000,
+        "empty probes outside the rect stayed dark: outside {outside} inside {inside} bright {outside_bright} px {outside_px} rect {}+{}x{}+{}",
+        sched.plan.tile_x,
+        sched.plan.tile_w,
+        sched.plan.tile_y,
+        sched.plan.tile_h
+    );
+}
+
+/// Eight still frames reuse probe rays through the guard crop. Adding that
+/// crop a second time drops the kept-ray count from eight strata to under six.
+#[test]
+fn a_still_camera_keeps_probe_history_through_the_crop() {
+    let (_gpu, mut window, mut renderer) = open();
+    let world = gated(scene(
+        vec![Light {
+            position: Vec3::new(-5.0, 4.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        }],
+        vec![Wall {
+            base: 0.0,
+            position: Vec3::new(3.0, 0.0, 0.0),
+            half_x: 0.2,
+            half_z: 2.5,
+            height: 2.6,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }],
+        Vec::new(),
+    ));
+    let camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let [kept1, probes1] = renderer.lighting_probe_samples();
+    for _ in 0..6 {
+        submit(&mut window, &mut renderer, &world, &camera);
+    }
+    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let sched = renderer.last_schedule();
+    let [kept8, probes8] = renderer.lighting_probe_samples();
+    eprintln!("history kept1 {kept1} probes1 {probes1} kept8 {kept8} probes8 {probes8}");
+    assert!(
+        sched.plan.trace_gate && sched.lit.crop_x > 0,
+        "history was not gated through a crop: trace {} crop {} scale {}",
+        sched.plan.trace_gate,
+        sched.lit.crop_x,
+        sched.scale
+    );
+    assert!(
+        kept1 > 100 && kept8 > kept1 * 6,
+        "the still camera dropped probe history: kept1 {kept1} kept8 {kept8} probes {probes8}"
+    );
+}
+
+/// The tail view skips the 25 cm and 50 cm bilinear. The first parent is the
+/// 1 m cell claimed on this frame, and that cell has no samples. The ready
+/// check leaves it, so the pixel shows the screen probes. Dropping
+/// `cv.w > LIGHTING_LEVEL_READY` returns the empty cell as black.
+#[test]
+fn a_tail_view_skips_an_unfinished_parent() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = renderer.width();
+    let height = renderer.height();
+    show_tail(&mut renderer);
+    let mut world = scene(
+        vec![Light {
+            position: Vec3::new(-5.0, 4.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        }],
+        vec![Wall {
+            base: 0.0,
+            position: Vec3::new(3.0, 0.0, 0.0),
+            half_x: 0.2,
+            half_z: 2.5,
+            height: 2.6,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }],
+        Vec::new(),
+    );
+    world.scene.lighting.denoiser.enabled = false;
+    world.scene.lighting.ambient.mode = genos_scene::AmbientMode::Off;
+    world.scene.lighting.world_cache.enabled = true;
+    world.scene.lighting.probes.enabled = true;
+    world.scene.lighting.gi.enabled = true;
+    world.scene.lighting.bounce.count = genos_scene::LIGHTING_BOUNCES_UNLIMITED;
+    let mut camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
+    camera.set_pose(Vec3::new(2.2, 1.7, 1.2), std::f32::consts::PI, -0.35);
+    let picture = draw(&mut window, &mut renderer, &world, &camera);
+    let at = [2.8f32, 1.2, 2.2];
+    let lit = brightness(sample(&picture, width, height, &camera, at));
+    eprintln!("tail unfinished parent {lit:.1}");
+    assert!(
+        lit > 30.0,
+        "the tail view showed an unfinished parent: brightness {lit:.1} at {at:?}"
+    );
+}
+
+/// A thin wall splits a 50 cm floor cell. The lit side fills that cell.
+/// Screen probes and ambient are off, so the far side is the cache. The
+/// bilinear read reaches the lit cell; the segment test keeps it off the far
+/// floor. `budget_scale` 1/64 turns the direct gate on for that read.
+#[test]
+fn a_coarse_parent_stays_on_its_own_surface() {
+    let (_gpu, mut window, mut renderer) = open();
+    let width = renderer.width();
+    let height = renderer.height();
+    show_bounce(&mut renderer);
+    let mut world = scene(
+        vec![Light {
+            position: Vec3::new(1.0, 2.4, 0.4),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        }],
+        vec![Wall {
+            base: 0.0,
+            position: Vec3::new(2.45, 0.0, 0.4),
+            half_x: 0.04,
+            half_z: 6.0,
+            height: 3.0,
+            color: [1.0, 1.0, 1.0],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }],
+        Vec::new(),
+    );
+    world.scene.lighting.probes.enabled = false;
+    world.scene.lighting.denoiser.enabled = false;
+    world.scene.lighting.ambient.mode = genos_scene::AmbientMode::Off;
+    let mut lit_line = String::new();
+    let mut lit = 0.0f32;
+    for (i, eye) in [2.0f32, 2.15, 2.25, 2.2, 2.3, 2.2].into_iter().enumerate() {
+        let mut cam = look_down(eye, 0.4);
+        cam.pitch = -1.4;
+        let px = draw(&mut window, &mut renderer, &world, &cam);
+        lit = viewport_uv(&cam, width as f32 / height as f32, [2.2, 0.0, 0.4])
+            .map_or(-1.0, |_| brightness(sample(&px, width, height, &cam, [2.2, 0.0, 0.4])));
+        let _ = write!(lit_line, " f{i}:{lit:.0}");
+    }
+    world = gated(world);
+    let mut far = look_down(2.65, 0.4);
+    far.pitch = -1.4;
+    let far_px = draw(&mut window, &mut renderer, &world, &far);
+    let hidden_at = [2.58f32, 0.0, 0.4];
+    let hidden = brightness(sample(&far_px, width, height, &far, hidden_at));
+    let sched = renderer.last_schedule();
+    eprintln!(
+        "parent lit{lit_line} hidden {hidden:.0} direct {} scale {}",
+        sched.plan.direct_gate, sched.scale
+    );
+    assert!(
+        lit > 400.0,
+        "the lit side of the wall has no cache light: {lit_line}"
+    );
+    assert!(
+        sched.plan.direct_gate && sched.scale < 0.02,
+        "the far read was not gated: direct {} scale {}",
+        sched.plan.direct_gate, sched.scale
+    );
+    assert!(
+        hidden < 130.0,
+        "a parent crossed the wall: hidden {hidden} lit{lit_line}"
+    );
+}
+
 #[test]
 fn the_corridor_carries_bounce_around_the_bend() {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
-    let mut world = World::from_scene(
+    let mut world = present(
         genos_scene::load_path(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/camera/scene.rhai"
@@ -1136,7 +1524,7 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
     let (_gpu, mut window, mut renderer) = open();
     let width = renderer.width();
     let height = renderer.height();
-    let mut world = World::from_scene(
+    let mut world = present(
         genos_scene::load_path(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/camera/scene.rhai"
@@ -1580,7 +1968,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/camera/scene.rhai"
     ));
-    let mut world = World::from_scene(genos_scene::load_path(path).expect("shipped scene"));
+    let mut world = present(genos_scene::load_path(path).expect("shipped scene"));
     let mut top_cam = Camera::new(0.0, 2.6, 0.0);
     top_cam.position.y = 4.2;
     top_cam.pitch = -0.95;
@@ -1600,7 +1988,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
         "the top is not brighter than the unlit face: top {top} face {away}"
     );
 
-    let mut corridor = World::from_scene(genos_scene::load_path(path).expect("shipped scene"));
+    let mut corridor = present(genos_scene::load_path(path).expect("shipped scene"));
     corridor.scene.lights = vec![Light {
         position: Vec3::new(0.0, 3.0, 6.5),
         color: [1.0, 1.0, 1.0],

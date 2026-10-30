@@ -409,14 +409,97 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
 
 /// Column-major view-projection for a Vulkan clip space with Y flipped.
 pub fn view_proj(camera: &Camera, aspect: f32) -> [f32; 16] {
+    view_proj_guard(
+        camera,
+        aspect,
+        GuardFrustum {
+            left: 0.0,
+            right: 0.0,
+            top: 0.0,
+            bottom: 0.0,
+        },
+    )
+}
+
+/// Extra frustum on each side of the displayed frame, as a fraction of that frame.
+/// The eye stays put. A pulled-back camera is not this frustum.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GuardFrustum {
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+/// View-projection for a guard band. `aspect` is the displayed frame, not the lit image.
+pub fn view_proj_guard(camera: &Camera, aspect: f32, guard: GuardFrustum) -> [f32; 16] {
     let view = view_matrix(camera);
-    let proj = perspective(
+    let proj = perspective_guard(
         60.0_f32.to_radians(),
         aspect.max(0.01),
         CAMERA_NEAR,
         CAMERA_FAR,
+        guard,
     );
     (proj * view).cols
+}
+
+/// World direction of one lit-image pixel. `+Y` in camera space is the top of the picture.
+#[must_use]
+pub fn project_guard(
+    camera: &Camera,
+    aspect: f32,
+    guard: GuardFrustum,
+    lit_w: u32,
+    lit_h: u32,
+    px: f32,
+    py: f32,
+) -> Option<[f32; 2]> {
+    let dir = lit_pixel_dir(camera, aspect, guard, lit_w, lit_h, px, py)?;
+    let point = [
+        camera.position.x + dir[0],
+        camera.position.y + dir[1],
+        camera.position.z + dir[2],
+    ];
+    let clip = transform_point(&view_proj_guard(camera, aspect, guard), point);
+    if clip[3] <= 0.0 {
+        return None;
+    }
+    let lit_w = (lit_w as f32).max(1.0);
+    let lit_h = (lit_h as f32).max(1.0);
+    let ndc_x = clip[0] / clip[3];
+    let ndc_y = clip[1] / clip[3];
+    Some([(ndc_x + 1.0) * 0.5 * lit_w, (ndc_y + 1.0) * 0.5 * lit_h])
+}
+
+fn lit_pixel_dir(
+    camera: &Camera,
+    aspect: f32,
+    guard: GuardFrustum,
+    lit_w: u32,
+    lit_h: u32,
+    px: f32,
+    py: f32,
+) -> Option<[f32; 3]> {
+    if lit_w == 0 || lit_h == 0 {
+        return None;
+    }
+    let (ax, bx, ay, by) = guard_axes(60.0_f32.to_radians(), aspect.max(0.01), guard);
+    let nx = (px + 0.5) / (lit_w as f32) * 2.0 - 1.0;
+    let ny = (py + 0.5) / (lit_h as f32) * 2.0 - 1.0;
+    if ax.abs() < 1.0e-8 || ay.abs() < 1.0e-8 {
+        return None;
+    }
+    let x_cam = (nx + bx) / ax;
+    let y_cam = (ny + by) / ay;
+    let forward = look_direction(camera.yaw, camera.pitch);
+    let mut right = forward.cross(Vec3::Y);
+    let scale = right.length().max(1.0e-6);
+    right = right / scale;
+    let up = right.cross(forward);
+    let dir = right * x_cam + up * y_cam + forward;
+    let len = dir.length().max(1.0e-6);
+    Some([dir.x / len, dir.y / len, dir.z / len])
 }
 
 fn view_matrix(camera: &Camera) -> Mat4 {
@@ -450,16 +533,31 @@ fn view_matrix(camera: &Camera) -> Mat4 {
 pub const CAMERA_NEAR: f32 = 0.05;
 pub const CAMERA_FAR: f32 = 200.0;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    let h = 1.0 / (fovy * 0.5).tan();
-    let w = h / aspect;
+fn perspective_guard(fovy: f32, aspect: f32, near: f32, far: f32, guard: GuardFrustum) -> Mat4 {
+    let (ax, bx, ay, by) = guard_axes(fovy, aspect, guard);
     let mut cols = [0.0; 16];
-    cols[0] = w;
-    cols[5] = -h;
+    cols[0] = ax;
+    cols[5] = ay;
+    cols[8] = bx;
+    cols[9] = by;
     cols[10] = far / (near - far);
     cols[11] = -1.0;
     cols[14] = (far * near) / (near - far);
     Mat4::from_cols(cols)
+}
+
+fn guard_axes(fovy: f32, aspect: f32, guard: GuardFrustum) -> (f32, f32, f32, f32) {
+    let tan_y = (fovy * 0.5).tan();
+    let tan_x = tan_y * aspect.max(0.01);
+    let left = -tan_x * (1.0 + 2.0 * guard.left);
+    let right = tan_x * (1.0 + 2.0 * guard.right);
+    let top_y = tan_y * (1.0 + 2.0 * guard.top);
+    let bottom_y = -tan_y * (1.0 + 2.0 * guard.bottom);
+    let ax = 2.0 / (right - left);
+    let bx = (right + left) / (right - left);
+    let ay = 2.0 / (bottom_y - top_y);
+    let by = 1.0 + ay * top_y;
+    (ax, bx, ay, by)
 }
 
 /// Screen position in camera space. Top-left is `(0, 0)`. Bottom-right is `(1, 1)`.
@@ -477,4 +575,94 @@ pub fn viewport_uv(camera: &Camera, aspect: f32, world: [f32; 3]) -> Option<[f32
 pub fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 4] {
     let clip = Mat4::from_cols(*m).transform_homogeneous(Vec3::new(p[0], p[1], p[2]));
     [clip.x, clip.y, clip.z, clip.w]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_guard_matches_the_displayed_projection() {
+        let mut camera = Camera::new(1.0, 3.0, 0.4);
+        camera.pitch = 0.1;
+        let aspect = 16.0 / 9.0;
+        let plain = view_proj(&camera, aspect);
+        let guarded = view_proj_guard(
+            &camera,
+            aspect,
+            GuardFrustum {
+                left: 0.0,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            },
+        );
+        for (a, b) in plain.iter().zip(guarded.iter()) {
+            assert!((a - b).abs() < 1.0e-5);
+        }
+    }
+
+    #[test]
+    fn the_look_direction_stays_on_the_display_center() {
+        let mut camera = Camera::new(0.0, 4.0, 0.2);
+        camera.pitch = -0.05;
+        let aspect = 320.0 / 180.0;
+        let guard = GuardFrustum {
+            left: 0.12,
+            right: 0.18,
+            top: 0.14,
+            bottom: 0.16,
+        };
+        let display_w = 320.0;
+        let display_h = 180.0;
+        let lit_w = display_w * (1.0 + guard.left + guard.right);
+        let lit_h = display_h * (1.0 + guard.top + guard.bottom);
+        let look = look_direction(camera.yaw, camera.pitch);
+        let world = [
+            camera.position.x + look.x * 6.0,
+            camera.position.y + look.y * 6.0,
+            camera.position.z + look.z * 6.0,
+        ];
+        let clip = transform_point(&view_proj_guard(&camera, aspect, guard), world);
+        assert!(clip[3] > 0.0);
+        let u = (clip[0] / clip[3] + 1.0) * 0.5 * lit_w;
+        let v = (clip[1] / clip[3] + 1.0) * 0.5 * lit_h;
+        let center_x = guard.left * display_w + display_w * 0.5;
+        let center_y = guard.top * display_h + display_h * 0.5;
+        assert!((u - center_x).abs() < 0.75);
+        assert!((v - center_y).abs() < 0.75);
+    }
+
+    #[test]
+    fn a_right_margin_pixel_enters_the_display_after_a_right_yaw() {
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let aspect = 16.0 / 9.0;
+        let guard = GuardFrustum {
+            left: 0.05,
+            right: 0.25,
+            top: 0.15,
+            bottom: 0.15,
+        };
+        let display_w = 320.0_f32;
+        let display_h = 180.0_f32;
+        // 320 * 1.3 and 180 * 1.3. Both products are exact.
+        let lit_w = 416u32;
+        let lit_h = 234u32;
+        assert!((display_w * (1.0 + guard.left + guard.right) - 416.0).abs() < 1.0e-3);
+        assert!((display_h * (1.0 + guard.top + guard.bottom) - 234.0).abs() < 1.0e-3);
+        let px = guard.left * display_w + display_w + 4.0;
+        let py = guard.top * display_h + display_h * 0.5;
+        let dir = lit_pixel_dir(&camera, aspect, guard, lit_w, lit_h, px, py).unwrap_or([0.0, 0.0, -1.0]);
+        let world = [
+            camera.position.x + dir[0] * 5.0,
+            camera.position.y + dir[1] * 5.0,
+            camera.position.z + dir[2] * 5.0,
+        ];
+        let before = viewport_uv(&camera, aspect, world).unwrap_or([-1.0, -1.0]);
+        assert!(before[0] > 1.0);
+        camera.yaw += 0.18;
+        let after = viewport_uv(&camera, aspect, world).unwrap_or([-1.0, -1.0]);
+        assert!(after[0] > 0.0 && after[0] < 1.0);
+        assert!(after[1] > 0.0 && after[1] < 1.0);
+    }
 }

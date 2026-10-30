@@ -393,13 +393,10 @@ fn capture_pass(
         if i + 1 == config.settle || (i + 1) % 50 == 0 {
             let c = renderer.lighting_lamp_pick_counts();
             eprintln!(
-                "noise-gate {label} settle {}/{} rays {} exact {} restir {} copied {}",
+                "noise-gate {label} settle {}/{} {}",
                 i + 1,
                 config.settle,
-                c.pixels,
-                c.exact,
-                c.restir,
-                c.copied
+                counts_line(&c)
             );
         }
     }
@@ -412,10 +409,7 @@ fn capture_pass(
         last_still = bgra;
         still.push(y);
     }
-    eprintln!(
-        "noise-gate {label} still rays {} exact {} restir {} copied {}",
-        still_counts.pixels, still_counts.exact, still_counts.restir, still_counts.copied
-    );
+    eprintln!("noise-gate {label} still {}", counts_line(&still_counts));
     let mut pan = Vec::with_capacity(usize::try_from(config.frames).unwrap_or(0));
     let mut last_pan = Vec::new();
     let mut pan_counts = still_counts;
@@ -428,14 +422,16 @@ fn capture_pass(
         };
         camera.set_pose(Vec3::new(0.0, EYE_Y, EYE_Z), yaw, 0.0);
         let (y, bgra, counts) = draw_frame(window, renderer, world, &camera)?;
+        eprintln!(
+            "noise-gate {label} pan {i} yaw {:.5} {}",
+            yaw,
+            counts_line(&counts)
+        );
         pan_counts = counts;
         last_pan = bgra;
         pan.push(y);
     }
-    eprintln!(
-        "noise-gate {label} pan rays {} exact {} restir {} copied {}",
-        pan_counts.pixels, pan_counts.exact, pan_counts.restir, pan_counts.copied
-    );
+    eprintln!("noise-gate {label} pan {}", counts_line(&pan_counts));
     Ok(Pass {
         still,
         pan,
@@ -446,6 +442,26 @@ fn capture_pass(
         last_still,
         last_pan,
     })
+}
+
+fn counts_line(counts: &LampPickCounts) -> String {
+    let samples = counts.temporal.saturating_add(counts.temporal_reset);
+    let mean = if samples == 0 {
+        0.0
+    } else {
+        f64::from(counts.temporal_m) / f64::from(samples)
+    };
+    format!(
+        "rays {} exact {} restir {} copied {} temporal {} reset {} m_sum {} m_mean {:.2}",
+        counts.pixels,
+        counts.exact,
+        counts.restir,
+        counts.copied,
+        counts.temporal,
+        counts.temporal_reset,
+        counts.temporal_m,
+        mean
+    )
 }
 
 fn draw_frame(
@@ -596,6 +612,8 @@ fn gate_lighting(preset: Option<LightingPreset>) -> LightingSettings {
     settings.ambient.mode = AmbientMode::Off;
     settings.shadows.enabled = true;
     settings.compose_reuse = false;
+    // Lavapipe floors the work-cap controller, and that hold is not this grade.
+    settings.controller = false;
     settings
 }
 
