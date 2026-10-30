@@ -8209,8 +8209,8 @@ impl Gpu {
             1 => "destroy_lighting",
             2 => "destroy_swapchain",
             3 => "destroy_objects",
-            4 => "destroy_device",
-            5 => "destroy_surface",
+            4 => "destroy_surface",
+            5 => "destroy_device",
             _ => "destroy_instance",
         }
     }
@@ -8245,12 +8245,17 @@ impl Gpu {
                 false
             }
             4 => {
-                block(|| self.destroy_device_handle());
+                // The surface goes before the device. Its swapchain is already
+                // gone, so this is legal, and it lets the WSI layer release the
+                // compositor's buffers on its own step instead of inside
+                // vkDestroyDevice, where a wait on them looked like a driver
+                // stall of up to 20 s on the 4070.
+                block(|| self.destroy_surface_handle());
                 self.teardown = 5;
                 false
             }
             5 => {
-                block(|| self.destroy_surface_handle());
+                block(|| self.destroy_device_handle());
                 self.teardown = 6;
                 false
             }
@@ -8275,11 +8280,11 @@ impl Gpu {
             self.teardown = 4;
         }
         if self.teardown < 5 {
-            self.destroy_device_handle();
+            self.destroy_surface_handle();
             self.teardown = 5;
         }
         if self.teardown < 6 {
-            self.destroy_surface_handle();
+            self.destroy_device_handle();
             self.teardown = 6;
         }
         self.destroy_instance_handle();
