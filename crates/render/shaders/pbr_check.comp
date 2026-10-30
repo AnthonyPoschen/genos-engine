@@ -35,6 +35,8 @@ void main() {
             vec3 v = vec3(-sqrt(max(0.0, 1.0 - nv * nv)), 0.0, nv);
             vec3 h = normalize(l + v);
             float nh = h.z;
+            // |n x h|^2 for n = +z; see pbr_d_ggx.
+            float nxh2 = h.x * h.x + h.y * h.y;
             float vh = dot(v, h);
             for (uint ir = 0u; ir < 5u; ir++) {
                 for (uint im = 0u; im < 3u; im++) {
@@ -43,13 +45,13 @@ void main() {
                         float metal = METALLIC[im];
                         vec3 base = ALBEDO[ia];
                         float alpha = pbr_alpha(rough);
-                        vec3 f = pbr_eval(base, metal, rough, nl, nv, nh, vh);
+                        vec3 f = pbr_eval(base, metal, rough, nl, nv, nh, nxh2, vh);
                         if (pc.broken != 0u) {
                             float fd = pbr_fresnel_schlick(PBR_DIELECTRIC_F0, vh);
                             f += (1.0 - metal) * fd * (base / PBR_PI);
                         }
                         uint b = row * STRIDE;
-                        result.values[b + 0u] = pbr_d_ggx(nh, alpha);
+                        result.values[b + 0u] = pbr_d_ggx(nh, nxh2, alpha);
                         result.values[b + 1u] = pbr_v_smith_ggx_correlated(nl, nv, alpha);
                         result.values[b + 2u] = pbr_fresnel_schlick(PBR_DIELECTRIC_F0, vh);
                         result.values[b + 3u] = f.r;

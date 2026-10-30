@@ -14,12 +14,16 @@ float pbr_alpha(float roughness) {
     return r * r;
 }
 
-float pbr_d_ggx(float n_dot_h, float alpha) {
+// n_cross_h_sq is |n x h|^2 = 1 - (n.h)^2, passed in from the vectors.
+// The textbook den = (n.h)^2 (a2 - 1) + 1 cancels near n.h = 1: with
+// alpha = 0.01, a2 = 1e-4, and one ulp of n.h (from normalize/rsqrt)
+// shifts den by ~1.2e-7, a 0.27% D error. |n x h|^2 has no cancellation.
+float pbr_d_ggx(float n_dot_h, float n_cross_h_sq, float alpha) {
     if (n_dot_h <= 0.0) {
         return 0.0;
     }
     float a2 = alpha * alpha;
-    float den = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    float den = n_dot_h * n_dot_h * a2 + n_cross_h_sq;
     return a2 / (PBR_PI * den * den);
 }
 
@@ -42,12 +46,13 @@ float pbr_fresnel_schlick(float f0, float v_dot_h) {
 
 // f(l, v) per channel, without the n·l factor.
 vec3 pbr_eval(vec3 base_color, float metallic, float roughness,
-              float n_dot_l, float n_dot_v, float n_dot_h, float v_dot_h) {
+              float n_dot_l, float n_dot_v, float n_dot_h, float n_cross_h_sq,
+              float v_dot_h) {
     if (n_dot_l <= 0.0 || n_dot_v <= 0.0) {
         return vec3(0.0);
     }
     float alpha = pbr_alpha(roughness);
-    float dv = pbr_d_ggx(n_dot_h, alpha) * pbr_v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha);
+    float dv = pbr_d_ggx(n_dot_h, n_cross_h_sq, alpha) * pbr_v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha);
     float m = clamp(metallic, 0.0, 1.0);
     float fd = pbr_fresnel_schlick(PBR_DIELECTRIC_F0, v_dot_h);
     vec3 dielectric = (1.0 - fd) * (base_color / PBR_PI) + fd * dv;
