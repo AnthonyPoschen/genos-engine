@@ -42,7 +42,7 @@ use genos_math::brdf::{self, Cosines, Material, DIELECTRIC_F0};
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pbr_check.comp.spv"));
 // Grid. Same literals as pbr_check.comp.
-const COSINES: [f64; 5] = [0.05, 0.25, 0.5, 0.75, 1.0];
+const COSINES: [f32; 5] = [0.05, 0.25, 0.5, 0.75, 1.0];
 const ROUGHNESS: [f64; 5] = [0.1, 0.3, 0.5, 0.75, 1.0];
 const METALLIC: [f64; 3] = [0.0, 0.5, 1.0];
 const ALBEDO: [[f64; 3]; 3] = [[1.0, 1.0, 1.0], [0.5, 0.25, 0.1], [0.04, 0.8, 0.3]];
@@ -70,8 +70,8 @@ fn cpu_words() -> Vec<f64> {
     let mut out = Vec::with_capacity(WORDS);
     for nl in COSINES {
         for nv in COSINES {
-            let nl = f64::from(nl as f32);
-            let nv = f64::from(nv as f32);
+            let nl = f64::from(nl);
+            let nv = f64::from(nv);
             let l = [(1.0 - nl * nl).max(0.0).sqrt(), 0.0, nl];
             let v = [-(1.0 - nv * nv).max(0.0).sqrt(), 0.0, nv];
             let c = Cosines::from_dirs([0.0, 0.0, 1.0], l, v);
