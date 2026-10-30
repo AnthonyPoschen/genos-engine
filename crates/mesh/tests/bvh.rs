@@ -153,12 +153,12 @@ fn one_sided_triangles_are_missed_from_behind() {
 /// leaves spanning the whole atrium).
 #[test]
 fn far_clusters_split_across_empty_bins() {
-    let tris: Vec<MeshTriangle> = (0..16)
+    let tris: Vec<MeshTriangle> = (0..16u16)
         .map(|i| {
-            let x = if i % 2 == 0 { -10.0 } else { 10.0 } + i as f32 * 0.01;
+            let x = if i % 2 == 0 { -10.0 } else { 10.0 } + f32::from(i) * 0.01;
             MeshTriangle::flat(
                 [[x, 0.0, 0.0], [x + 0.01, 0.0, 0.0], [x, 0.01, 0.0]],
-                i,
+                u32::from(i),
                 true,
             )
         })
@@ -170,24 +170,28 @@ fn far_clusters_split_across_empty_bins() {
 /// visits first, so a better build cannot change a bake.
 #[test]
 fn a_tie_goes_to_the_lower_index() {
-    let flat = |p: [[f32; 3]; 3], i: usize| MeshTriangle::flat(p, i as u32, true);
-    for a in 0..40 {
-        for b in 0..40 {
+    let flat = |p: [[f32; 3]; 3], i: u16| MeshTriangle::flat(p, u32::from(i), true);
+    for a in 0..40u16 {
+        for b in 0..40u16 {
             if a == b {
                 continue;
             }
-            let mut tris: Vec<MeshTriangle> = (0..40)
+            let mut tris: Vec<MeshTriangle> = (0..40u16)
                 .map(|i| {
-                    let x = i as f32 * 0.37 - 7.0;
-                    let z = (i * 7 % 11) as f32 - 5.0;
+                    let x = f32::from(i) * 0.37 - 7.0;
+                    let z = f32::from(i * 7 % 11) - 5.0;
                     flat([[x, z, 5.0], [x + 0.1, z, 5.0], [x, z + 0.1, 5.0]], i)
                 })
                 .collect();
             let shared = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
-            tris[a] = flat(shared, a);
-            tris[b] = flat(shared.map(|p| [p[0] * 2.0, p[1] * 2.0, 0.0]), b);
+            tris[usize::from(a)] = flat(shared, a);
+            tris[usize::from(b)] = flat(shared.map(|p| [p[0] * 2.0, p[1] * 2.0, 0.0]), b);
             let hit = Bvh::build(&tris).intersect(&tris, [0.0, 0.0, 2.0], [0.0, 0.0, -1.0], 10.0);
-            assert_eq!(hit.map(|h| h.triangle as usize), Some(a.min(b)), "{a} {b}");
+            assert_eq!(
+                hit.map(|h| h.triangle),
+                Some(u32::from(a.min(b))),
+                "{a} {b}"
+            );
         }
     }
 }
