@@ -8581,6 +8581,7 @@ impl Gpu {
         self.device = std::ptr::null_mut();
         let traffic = traffic::snapshot();
         eprintln!("vk_traffic {}", traffic.line());
+        eprintln!("vk_memory {}", traffic::memory_line());
         unsafe {
             (self.fns.destroy_device)(device, std::ptr::null());
         }

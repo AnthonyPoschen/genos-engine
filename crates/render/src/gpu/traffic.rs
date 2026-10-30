@@ -8,6 +8,7 @@
 //! own process.
 
 use std::ffi::c_void;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -50,6 +51,85 @@ const UNMAP_MEM: usize = 33;
 const N: usize = 34;
 
 static COUNTS: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
+
+/// Bytes per `VkDeviceMemory` handle, so the quit line can say how much the
+/// driver handed out over the run, not just how many calls it took.
+static MEMORY: Mutex<MemoryBook> = Mutex::new(MemoryBook::new());
+
+struct MemoryBook {
+    live: Vec<(usize, u64, u32)>,
+    live_bytes: u64,
+    peak_bytes: u64,
+    total_bytes: u64,
+    largest: u64,
+    by_type: [u64; 32],
+}
+
+impl MemoryBook {
+    const fn new() -> Self {
+        Self {
+            live: Vec::new(),
+            live_bytes: 0,
+            peak_bytes: 0,
+            total_bytes: 0,
+            largest: 0,
+            by_type: [0; 32],
+        }
+    }
+}
+
+/// Info layout shared by every `VkMemoryAllocateInfo`.
+#[repr(C)]
+struct AllocInfo {
+    _s_type: i32,
+    _next: *const c_void,
+    size: u64,
+    index: u32,
+}
+
+fn book_alloc(memory: Handle, size: u64, index: u32) {
+    let mut book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
+    book.live.push((memory.addr(), size, index));
+    book.live_bytes = book.live_bytes.saturating_add(size);
+    book.peak_bytes = book.peak_bytes.max(book.live_bytes);
+    book.total_bytes = book.total_bytes.saturating_add(size);
+    book.largest = book.largest.max(size);
+    if let Some(slot) = usize::try_from(index)
+        .ok()
+        .and_then(|i| book.by_type.get_mut(i))
+    {
+        *slot = slot.saturating_add(size);
+    }
+}
+
+fn book_free(memory: Handle) {
+    let mut book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(at) = book.live.iter().position(|entry| entry.0 == memory.addr()) {
+        let (_, size, _) = book.live.swap_remove(at);
+        book.live_bytes = book.live_bytes.saturating_sub(size);
+    }
+}
+
+/// `vk_memory` quit line: bytes allocated over the run, the live peak, what
+/// is still live, the largest single allocation, and totals per memory type.
+#[must_use]
+pub(super) fn memory_line() -> String {
+    let book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut line = format!(
+        "total_bytes={} peak_live_bytes={} live_bytes={} live_allocs={} largest_bytes={}",
+        book.total_bytes,
+        book.peak_bytes,
+        book.live_bytes,
+        book.live.len(),
+        book.largest
+    );
+    for (index, bytes) in book.by_type.iter().enumerate() {
+        if *bytes > 0 {
+            let _ = write!(line, " type{index}_bytes={bytes}");
+        }
+    }
+    line
+}
 static REAL: Mutex<Option<Fns>> = Mutex::new(None);
 
 fn bump(index: usize) {
@@ -348,11 +428,17 @@ unsafe extern "system" fn counted_alloc_mem(
     out: *mut Handle,
 ) -> VkResult {
     bump(ALLOC_MEM);
-    (real().alloc_mem)(device, info, alloc, out)
+    let result = (real().alloc_mem)(device, info, alloc, out);
+    if result == 0 && !info.is_null() && !out.is_null() {
+        let info = std::ptr::read_unaligned(info.cast::<AllocInfo>());
+        book_alloc(*out, info.size, info.index);
+    }
+    result
 }
 
 unsafe extern "system" fn counted_free_mem(device: Handle, memory: Handle, alloc: *const c_void) {
     bump(FREE_MEM);
+    book_free(memory);
     (real().free_mem)(device, memory, alloc);
 }
 
