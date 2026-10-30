@@ -1,10 +1,3 @@
-#![cfg_attr(
-    test,
-    expect(
-        clippy::items_after_test_module,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
 #![expect(
     clippy::must_use_candidate,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
