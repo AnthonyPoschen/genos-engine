@@ -34,7 +34,7 @@ jobs:
       - name: lavapipe and a headless Weston
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
       - name: s7 at 96x54
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
@@ -62,7 +62,7 @@ jobs:
       - name: lavapipe and a headless Weston
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
       - name: cargo test (workspace, lavapipe)
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
