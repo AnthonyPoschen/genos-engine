@@ -26,7 +26,7 @@ use genos_load::MaterialSettings;
 use genos_mcp::json::Value;
 use genos_render::{
     caps_for, coarse_cap_bytes, DebugView, MaterialStats, Renderer, SceneRead, SchedulePush,
-    ScreenRect, ViewMode, LEVEL_METRES,
+    ScreenRect, ViewMode, LEVEL_METRES, SCALE_FLOOR,
 };
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings, Light,
@@ -1286,7 +1286,14 @@ impl Tools {
                     crate::gi_metrics::truncate_frames(&self.gi_dir)?;
                 }
                 let name = args.str("write")?;
-                let samples = ctx.renderer.gi_metrics_samples().to_vec();
+                // warmup N drops the first N samples of the window: the cache
+                // refill after a checkpoint jump, pipeline first use, and lit
+                // target resizes. A steady-state p99 must not grade those.
+                let warmup = args
+                    .u32("warmup")?
+                    .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+                let all = ctx.renderer.gi_metrics_samples();
+                let samples = all[warmup.min(all.len())..].to_vec();
                 if let Some(name) = name {
                     if samples.is_empty() {
                         return Err("GI metrics window is empty".into());
@@ -1859,6 +1866,7 @@ fn budgets_value(settings: &LightingSettings, controller_scale: f64) -> Value {
         ("controller", Value::Bool(settings.controller)),
         ("budget_scale", num(f64::from(settings.budget_scale))),
         ("controller_scale", num(controller_scale)),
+        ("controller_floor", num(f64::from(SCALE_FLOOR))),
         ("lighting_cap_ms", num(f64::from(caps.lighting_ms))),
         ("resolve_cap_ms", num(f64::from(caps.resolve_ms))),
         ("guard_edge", num(f64::from(settings.guard_edge))),

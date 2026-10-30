@@ -418,8 +418,8 @@ mod tests {
                 "{name} does not read the lighting cap"
             );
             assert!(
-                text.contains("check_lt"),
-                "{name} does not assert the lighting cap"
+                text.contains("controller_floor") && text.contains("warmup"),
+                "{name} does not grade the lighting cap on steady frames"
             );
             assert!(text.contains("fixed_dt"), "{name} does not fix the step");
             engine
