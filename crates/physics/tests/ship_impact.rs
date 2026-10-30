@@ -8,8 +8,11 @@ use genos_physics::{step, Body, MotionQuality, World};
 const DT: f32 = 1.0 / 60.0;
 const STEPS: u32 = 60;
 const SPEEDS: [f32; 4] = [30.0, 120.0, 600.0, 3_000.0];
-/// Nose to nose at the start. 40 m needs several advances at 3 000 m/s.
-const START_GAP: f32 = 40.0;
+/// Nose to nose at the start. At 3 000 m/s the pair closes 100 m per tick, so
+/// this gap needs 15 radius slices. ADR 0016 reach is 16 advances of the
+/// smaller bounding radius (2.449 m), 39.19 m per tick; see
+/// `a_gap_past_adr_reach_clamps_safely`.
+const START_GAP: f32 = 36.0;
 const HALF_LENGTH: f32 = 2.0;
 const PENETRATION_LIMIT: f32 = 0.05;
 
@@ -36,8 +39,15 @@ fn hull_triangles(nose: f32) -> Vec<[Vec3; 3]> {
     ];
     let mut tris = Vec::new();
     for q in quads {
-        tris.push([p[q[0]], p[q[1]], p[q[2]]]);
-        tris.push([p[q[0]], p[q[2]], p[q[3]]]);
+        // Mirroring x flips the winding; keep the faces outward so the
+        // reducer sees a convex hull, not a concave voxel mesh.
+        if nose > 0.0 {
+            tris.push([p[q[0]], p[q[2]], p[q[1]]]);
+            tris.push([p[q[0]], p[q[3]], p[q[2]]]);
+        } else {
+            tris.push([p[q[0]], p[q[1]], p[q[2]]]);
+            tris.push([p[q[0]], p[q[2]], p[q[3]]]);
+        }
     }
     tris
 }
@@ -119,15 +129,7 @@ fn hull_ships_meet_head_on_without_tunnelling_at_every_lane_speed() {
             "lane {speed}: penetration {}",
             lane.max_penetration
         );
-        // Finding: at 3 000 m/s from 40 m the wedge hulls use all 16 advances and
-        // clamp 0.81 m short (ADR 0016 safe clamp); contact lands the next step.
-        // The box ships in `ccd.rs` converge on the same gap. Other lanes never clamp.
-        let clamp_allowance = u32::from(speed >= 3_000.0);
-        assert!(
-            lane.toi_failed <= clamp_allowance,
-            "lane {speed}: toi_failed {}",
-            lane.toi_failed
-        );
+        assert_eq!(lane.toi_failed, 0, "lane {speed}: toi_failed");
         assert!(lane.impulse_steps >= 1, "lane {speed}: no contact impulse");
         // Equal masses head-on: total momentum stays near zero.
         assert!(
@@ -165,4 +167,43 @@ fn discrete_hull_ships_tunnel_at_ship_speed() {
         world.bodies[0].position.x > world.bodies[1].position.x,
         "control case should tunnel"
     );
+}
+
+#[test]
+fn ships_stop_on_the_step_they_meet() {
+    // At 600 m/s the 36 m gap closes in the second tick. The contact must be
+    // solved in that tick, not deferred to the next one.
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(ship(0.0, 600.0, 1.0));
+    world.insert(ship(START_GAP + 2.0 * HALF_LENGTH, -600.0, -1.0));
+    let mut met = false;
+    for _ in 0..STEPS {
+        let gap = world.bodies[1].position.x - world.bodies[0].position.x - 2.0 * HALF_LENGTH;
+        step(&mut world, DT);
+        if gap <= 1_200.0 * DT {
+            met = true;
+            let closing = world.bodies[0].velocity.x - world.bodies[1].velocity.x;
+            assert!(closing.abs() <= 1.0e-3, "still closing at {closing}");
+            assert!(
+                world.bodies[0].velocity.length() <= 1.0e-3,
+                "sideways drift"
+            );
+            break;
+        }
+    }
+    assert!(met, "ships never met");
+}
+
+#[test]
+fn a_gap_past_adr_reach_clamps_safely() {
+    // 40 m > 16 x 2.449 m: ADR 0016 clamps the tick one advance short, safely,
+    // and contact lands in the next tick. Box ships do the same (`ccd.rs`).
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(ship(0.0, 3_000.0, 1.0));
+    world.insert(ship(40.0 + 2.0 * HALF_LENGTH, -3_000.0, -1.0));
+    step(&mut world, DT);
+    assert_eq!(world.step_stats.toi_failed, 1);
+    step(&mut world, DT);
+    assert_eq!(world.step_stats.toi_failed, 0);
+    assert!(world.bodies[0].position.x < world.bodies[1].position.x);
 }
