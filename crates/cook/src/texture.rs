@@ -263,21 +263,25 @@ pub fn cook_textures_file(source: &Path, out: &Path) -> Result<(Outcome, PathBuf
     })?;
     let dir = source.parent().unwrap_or(Path::new("."));
     let path = textures_path(out, &sha256(&bytes));
-    if let Ok(existing) = std::fs::read(&path) {
-        let fresh = checked_body(&existing)
-            .and_then(|body| header(&mut R { b: body, at: 0 }))
-            .is_ok_and(|(_, settings, inputs)| {
-                settings == texture_settings_hash() && inputs_match(&inputs, &bytes, dir)
-            });
-        if fresh {
-            return Ok((Outcome::UpToDate, path));
-        }
+    if textures_fresh(&path, &bytes, dir) {
+        return Ok((Outcome::UpToDate, path));
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
         genos_load::FileSource::new(dir.join(uri)).read_bytes()
     })?;
     genos_load::write_atomic(&path, &encode_textures(&cook_textures(&doc)?))?;
     Ok((Outcome::Cooked, path))
+}
+
+/// The record at `path` checks and matches every input hash and the encoder.
+pub(crate) fn textures_fresh(path: &Path, source: &[u8], dir: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|existing| {
+        checked_body(&existing)
+            .and_then(|body| header(&mut R { b: body, at: 0 }))
+            .is_ok_and(|(_, settings, inputs)| {
+                settings == texture_settings_hash() && inputs_match(&inputs, source, dir)
+            })
+    })
 }
 
 /// Read and check a `.gtex`.

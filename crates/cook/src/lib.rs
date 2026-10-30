@@ -187,23 +187,88 @@ pub fn cook_file(
     out: &Path,
     settings: &BakeSettings,
 ) -> Result<(Outcome, PathBuf), CookError> {
+    Ok(cook_asset(source, out, settings, false, Threads::all())?.record)
+}
+
+/// What [`cook_asset`] did with each record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetCook {
+    /// The `.gcook`.
+    pub record: (Outcome, PathBuf),
+    /// The `.gtex`, when textures were asked for.
+    pub textures: Option<(Outcome, PathBuf)>,
+}
+
+/// Cook a glTF file's `.gcook` and, with `textures`, its `.gtex`. Each record
+/// follows the up-to-date rule of [`cook_file`] and [`cook_textures_file`].
+/// The source is imported once, and only when a record is stale. With more
+/// than one thread the bake and the texture encode run side by side.
+///
+/// # Errors
+///
+/// A source that does not import, a failed bake, or a failed write.
+pub fn cook_asset(
+    source: &Path,
+    out: &Path,
+    settings: &BakeSettings,
+    textures: bool,
+    threads: Threads,
+) -> Result<AssetCook, CookError> {
     let bytes = std::fs::read(source).map_err(|_| LoadError::NotFound {
         path: source.to_path_buf(),
     })?;
     let dir = source.parent().unwrap_or(Path::new("."));
-    let path = cooked_path(out, &sha256(&bytes));
-    if let Ok(existing) = std::fs::read(&path) {
-        if up_to_date(&existing, &bytes, dir, settings) {
-            return Ok((Outcome::UpToDate, path));
+    let id = sha256(&bytes);
+    let path = cooked_path(out, &id);
+    let tex_path = textures_path(out, &id);
+    let mesh_fresh =
+        std::fs::read(&path).is_ok_and(|existing| up_to_date(&existing, &bytes, dir, settings));
+    let tex_fresh = !textures || texture::textures_fresh(&tex_path, &bytes, dir);
+    let outcome = |fresh: bool| {
+        if fresh {
+            Outcome::UpToDate
+        } else {
+            Outcome::Cooked
         }
+    };
+    let result = AssetCook {
+        record: (outcome(mesh_fresh), path.clone()),
+        textures: textures.then(|| (outcome(tex_fresh), tex_path.clone())),
+    };
+    if mesh_fresh && tex_fresh {
+        return Ok(result);
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
         genos_load::FileSource::new(dir.join(uri)).read_bytes()
     })?;
-    let cooked = cook(&doc, settings)?;
-    genos_load::store_import(out, &doc)?;
-    genos_load::write_atomic(&path, &encode(&cooked))?;
-    Ok((Outcome::Cooked, path))
+    let write_mesh = || -> Result<(), CookError> {
+        if !mesh_fresh {
+            let cooked = cook_with(&doc, settings, threads)?;
+            genos_load::store_import(out, &doc)?;
+            genos_load::write_atomic(&path, &encode(&cooked))?;
+        }
+        Ok(())
+    };
+    let write_tex = || -> Result<(), CookError> {
+        if !tex_fresh {
+            let t = cook_textures_with(&doc, threads)?;
+            genos_load::write_atomic(&tex_path, &encode_textures(&t))?;
+        }
+        Ok(())
+    };
+    if threads.get() > 1 && !mesh_fresh && !tex_fresh {
+        std::thread::scope(|scope| {
+            let tex = scope.spawn(write_tex);
+            let mesh = write_mesh();
+            tex.join()
+                .map_err(|_| CookError::Corrupt("texture encode panicked"))??;
+            mesh
+        })?;
+    } else {
+        write_mesh()?;
+        write_tex()?;
+    }
+    Ok(result)
 }
 
 fn up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSettings) -> bool {

@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use genos_bake::{BakeMesh, BakeMode, BakeSettings};
 use genos_cook::{
-    cook, cook_file, decode, encode, load_cooked, manifest, CookError, Manifest, Outcome,
+    cook, cook_asset, cook_file, cook_textures_file, decode, encode, load_cooked, manifest,
+    CookError, Manifest, Outcome, Threads,
 };
 use genos_load::{import_file, load_gltf_file};
 
@@ -164,4 +165,28 @@ fn package_manifest_is_deterministic_and_checked() {
     std::fs::write(&object, b"tampered").unwrap();
     assert!(second.verify(&out).is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn asset_cook_writes_both_records_once_and_then_skips_them() {
+    let dir = temp("asset");
+    let (s, out) = (settings(&dir), dir.join("out"));
+    let src = fixture("quad.glb");
+    let first = cook_asset(&src, &out, &s, true, Threads::all()).unwrap();
+    assert_eq!(first.record.0, Outcome::Cooked);
+    assert_eq!(first.textures.as_ref().unwrap().0, Outcome::Cooked);
+    let gtex = std::fs::read(&first.textures.as_ref().unwrap().1).unwrap();
+    // The same bytes as the texture-only path, and both now up to date.
+    let alone = dir.join("alone");
+    let (_, path) = cook_textures_file(&src, &alone).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), gtex);
+    let second = cook_asset(&src, &out, &s, true, Threads::ONE).unwrap();
+    assert_eq!(second.record.0, Outcome::UpToDate);
+    assert_eq!(second.textures.unwrap().0, Outcome::UpToDate);
+    // Textures asked for later: only the .gtex is missing.
+    let mesh_only = dir.join("mesh-only");
+    cook_asset(&src, &mesh_only, &s, false, Threads::all()).unwrap();
+    let later = cook_asset(&src, &mesh_only, &s, true, Threads::all()).unwrap();
+    assert_eq!(later.record.0, Outcome::UpToDate);
+    assert_eq!(later.textures.unwrap().0, Outcome::Cooked);
 }
