@@ -21,5 +21,5 @@ let cap = budgets.lighting_cap_ms;
 // 1080p on master, so p99 under the cap is not reachable yet (roadmap item).
 // What this gate grades: when steady p99 is over the cap, the controller must
 // have spent its whole range (scale at the floor), not sat at full budget.
-log(`s6 steady lighting p99 ${p99} ms, cap ${cap} ms, controller_scale ${budgets.controller_scale}`);
-check(p99 < cap + 0.0001 || budgets.controller_scale <= budgets.controller_floor * 1.001, "s6 lighting p99 under the cap, or the controller at its floor");
+log(`s6 steady lighting p99 ${p99} ms, cap ${cap} ms, controller_scale_min ${metrics.summary.controller_scale_min}`);
+check(p99 < cap + 0.0001 || metrics.summary.controller_scale_min <= budgets.controller_floor * 1.001, "s6 lighting p99 under the cap, or the controller reached its floor in the window");

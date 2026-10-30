@@ -30,7 +30,7 @@ use genos_render::GiSample;
 use crate::value::{num, obj, text};
 
 pub const FRAME_HEADER: &str =
-    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded\n";
+    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded,controller_scale,gates,lit_w,lit_h\n";
 
 pub const SUMMARY_HEADER: &str = "name,p50,p99\n";
 
@@ -122,7 +122,7 @@ pub fn frames_csv(samples: &[GiSample]) -> String {
 
 pub fn frame_row(sample: &GiSample) -> String {
     format!(
-        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{}\n",
+        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4},{},{},{}\n",
         sample.seq,
         sample.direct_ms,
         sample.atrous_ms,
@@ -134,7 +134,11 @@ pub fn frame_row(sample: &GiSample) -> String {
         sample.lighting_ms,
         sample.rays,
         sample.cache_entries_refreshed,
-        sample.lamps_shaded
+        sample.lamps_shaded,
+        sample.controller_scale,
+        sample.gates,
+        sample.lit_w,
+        sample.lit_h
     )
 }
 
@@ -239,6 +243,10 @@ pub fn sample_value(sample: &GiSample) -> Value {
             num(f64::from(sample.cache_entries_refreshed)),
         ),
         ("lamps_shaded", num(f64::from(sample.lamps_shaded))),
+        ("controller_scale", num(sample.controller_scale)),
+        ("gates", num(f64::from(sample.gates))),
+        ("lit_w", num(f64::from(sample.lit_w))),
+        ("lit_h", num(f64::from(sample.lit_h))),
     ])
 }
 
@@ -272,6 +280,16 @@ pub fn summary_value(samples: &[GiSample]) -> Value {
             count(|s| s.cache_entries_refreshed),
         ),
         ("lamps_shaded", count(|s| s.lamps_shaded)),
+        // The lowest scale in the window. The scale climbs back to 1 on cheap
+        // frames (1.05 a frame), so the last value says nothing about the heavy
+        // stretch a gate grades.
+        (
+            "controller_scale_min",
+            num(samples
+                .iter()
+                .map(|s| s.controller_scale)
+                .fold(1.0_f64, f64::min)),
+        ),
     ])
 }
 
@@ -323,7 +341,27 @@ mod tests {
             rays,
             cache_entries_refreshed: rays / 2,
             lamps_shaded: 3,
+            controller_scale: 1.0 / f64::from(rays),
+            gates: 1,
+            lit_w: 2000,
+            lit_h: 1080,
         }
+    }
+
+    #[test]
+    fn the_summary_keeps_the_lowest_controller_scale() {
+        // The heavy middle frame scaled to 1/40. The last frame is back near 1.
+        let samples = [sample(1, 1.0, 2), sample(2, 9.0, 40), sample(3, 1.0, 1)];
+        let Value::Object(pairs) = summary_value(&samples) else {
+            panic!("summary is an object");
+        };
+        let low = pairs
+            .iter()
+            .find(|(k, _)| k == "controller_scale_min")
+            .map(|(_, v)| v.clone());
+        assert_eq!(low, Some(num(1.0 / 40.0)));
+        let frames = frames_csv(&samples);
+        assert!(frames.contains(",0.0250,1,2000,1080\n"), "{frames}");
     }
 
     #[test]

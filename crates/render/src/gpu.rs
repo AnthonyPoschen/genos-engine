@@ -3596,13 +3596,19 @@ impl Gpu {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);
                     times.recorded += 1;
-                    let sample = gi_sample_from(
+                    let mut sample = gi_sample_from(
                         times.recorded,
                         &bucket_ms,
                         &stats_words,
                         world_rays,
                         world_relit,
                     );
+                    // The retired frame's schedule, as for the cap above.
+                    let pushed = self.lighting.last_schedule;
+                    sample.controller_scale = pushed.scale;
+                    sample.gates = pushed.words[0] & 7;
+                    sample.lit_w = pushed.lit.lit_w;
+                    sample.lit_h = pushed.lit.lit_h;
                     times.samples.push_back(sample);
                     while times.samples.len() > GI_SAMPLE_CAP {
                         times.samples.pop_front();

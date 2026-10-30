@@ -57,6 +57,14 @@ pub struct GiSample {
     pub rays: u32,
     pub cache_entries_refreshed: u32,
     pub lamps_shaded: u32,
+    /// Work scale this frame was scheduled at (controller times `budget_scale`).
+    /// [`gi_sample_from`] leaves 1. The fence reader fills it in.
+    pub controller_scale: f64,
+    /// Gate bits pushed with this frame: 1 direct, 2 à-trous, 4 trace.
+    pub gates: u32,
+    /// Lit target this frame drew, guard band included.
+    pub lit_w: u32,
+    pub lit_h: u32,
 }
 
 /// Fold bucket milliseconds and the stats words into one [`GiSample`].
@@ -93,6 +101,10 @@ pub fn gi_sample_from(
         rays: word(6).saturating_add(word(16)).saturating_add(world_rays),
         cache_entries_refreshed: word(1).saturating_add(world_relit),
         lamps_shaded: lamps,
+        controller_scale: 1.0,
+        gates: 0,
+        lit_w: 0,
+        lit_h: 0,
     }
 }
 
