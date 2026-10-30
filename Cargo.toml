@@ -19,6 +19,7 @@ members = [
     "crates/lighting-ref",
     "crates/load",
     "crates/load-check",
+    "crates/cook",
     "crates/audio",
     "crates/audio-check",
     "crates/fog-check",

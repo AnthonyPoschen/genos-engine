@@ -1,0 +1,12 @@
+[package]
+name = "genos-cook"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-bake = { path = "../bake" }
+genos-load = { path = "../load" }
