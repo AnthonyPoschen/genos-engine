@@ -579,17 +579,49 @@ fn hull_body(owner: &Body, hull: &Hull, other: &Body) -> Option<(Vec3, f32)> {
     }
 }
 
+/// Separating-axis test on both hulls' face normals. The axis with the least
+/// overlap is the contact normal, pointing from `b` toward `a`. The old
+/// vertex-in-hull exit tested only `b`'s vertices and took the shallowest
+/// face per vertex, which on a face-to-face hit near an edge is a slanted
+/// side face and pushed the bodies sideways.
 fn hull_hull(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<(Vec3, f32)> {
+    if left.vert_count == 0 || right.vert_count == 0 {
+        return None;
+    }
     let mut best: Option<(Vec3, f32)> = None;
-    for vertex in right.verts.iter().take(right.vert_count as usize) {
-        let point = b.position + b.orientation.rotate(*vertex);
-        let local = conjugate(a.orientation).rotate(point - a.position);
-        if let Some((normal, depth)) = sphere_hull(local, 0.0, left) {
-            let world = a.orientation.rotate(normal);
-            best = deeper(best, (world, depth));
+    for (owner, hull) in [(a, left), (b, right)] {
+        for face in hull.faces.iter().take(hull.face_count as usize) {
+            let axis = owner.orientation.rotate(face.normal);
+            let (min_a, max_a) = hull_extent(a, left, axis);
+            let (min_b, max_b) = hull_extent(b, right, axis);
+            let ahead = max_a - min_b;
+            let behind = max_b - min_a;
+            let (normal, depth) = if ahead <= behind {
+                (-axis, ahead)
+            } else {
+                (axis, behind)
+            };
+            if depth < -1.0e-5 {
+                return None;
+            }
+            best = match best {
+                Some((_, kept)) if kept <= depth => best,
+                _ => Some((normal, depth.max(0.0))),
+            };
         }
     }
     best
+}
+
+fn hull_extent(body: &Body, hull: &Hull, axis: Vec3) -> (f32, f32) {
+    let mut low = f32::INFINITY;
+    let mut high = f32::NEG_INFINITY;
+    for vertex in hull.verts.iter().take(hull.vert_count as usize) {
+        let along = axis.dot(body.position + body.orientation.rotate(*vertex));
+        low = low.min(along);
+        high = high.max(along);
+    }
+    (low, high)
 }
 
 fn sphere_hull(center: Vec3, radius: f32, hull: &Hull) -> Option<(Vec3, f32)> {
