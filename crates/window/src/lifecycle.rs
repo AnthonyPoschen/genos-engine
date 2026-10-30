@@ -374,6 +374,15 @@ impl<D: ShutdownDevice> Lifecycle<D> {
         // The seat stays installed. Destroy calls dispatch it from a side
         // thread so a driver round-trip can finish. It is cleared when the
         // window is unmapped.
+        // The quit gap is the longest stretch without a seat dispatch, from
+        // either this thread or the side thread that `block()` starts during
+        // driver calls. Both mark the window's meter. Restart its clock here
+        // so only shutdown counts.
+        let meter = self.window_alive.then(|| self.window.stall_meter());
+        if let Some(meter) = &meter {
+            meter.mark();
+            meter.pull_published(0.0);
+        }
         self.device.prepare_shutdown();
         phase_end("prepare", prepared.elapsed());
         let device = &mut *self.device;
@@ -396,9 +405,15 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 }
             }
         });
-        self.longest = stop.gap;
+        // `stop.gap` only sees this thread's dispatches, so a driver call
+        // under the side-thread pump would count as one long gap. That is the
+        // phase time, not ping latency. Use the meter when there is a window.
+        let gap = meter.map_or(stop.gap, |meter| {
+            Duration::from_secs_f64(meter.longest_ms() / 1000.0)
+        });
+        self.longest = gap;
         self.drain_forced = stop.forced;
-        report_gap(stop.gap, stop.forced);
+        report_gap(gap, stop.forced);
         self.released = true;
     }
 
