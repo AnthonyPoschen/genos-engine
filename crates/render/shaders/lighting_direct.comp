@@ -303,10 +303,14 @@ void main() {
         uint c = (idx & 1u) * 2u;
         // A small sun step still traces. Reusing last frame's direct would
         // leave the sun and its shadow a frame behind.
-        // Outside the refresh rect, a stored direct value stays up. An empty
-        // slot falls through and traces, so the first sight of a pixel is not a hole.
+        // Outside the refresh rect, a stored direct value for the same surface
+        // stays up. An empty or other-surface slot falls through and traces.
         bool quiet_hit = pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet();
-        bool held_hit = direct_hold && floatBitsToUint(pv[c]) != 0u;
+        // Outside the refresh rect the slot holds only for the surface it was
+        // shaded for (1 mm, same normal, same lamp epochs). The slot is per lit
+        // pixel, not per surface: after a turn it holds another surface's light,
+        // and holding it popped the bounce on the first turned frame (turn-pop).
+        bool held_hit = direct_hold && pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig;
         if ((quiet_hit || held_hit) && !lighting_sun_small()) {
             // Mode 4 holds only an exact sum (kind 2) once the view is still.
             // A trusted copy is not frozen as the truth when the camera stops.
