@@ -8419,8 +8419,9 @@ impl Gpu {
         self.lifecycle_release = true;
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
-        self.drop_stages();
-        self.drop_stream_resources();
+        teardown_phase("drop_stages", || self.drop_stages());
+        teardown_phase("drop_stream_resources", || self.drop_stream_resources());
+        let rest = Instant::now();
         unsafe {
             self.destroy_targets();
             self.vertex = Buffer::empty();
@@ -8571,6 +8572,10 @@ impl Gpu {
             }
             self.destroy_reflection();
         }
+        eprintln!(
+            "vk_teardown phase=buffers_images_pipelines_pools ms={:.2}",
+            rest.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     fn destroy_device_handle(&mut self) {
@@ -8582,9 +8587,21 @@ impl Gpu {
         let traffic = traffic::snapshot();
         eprintln!("vk_traffic {}", traffic.line());
         eprintln!("vk_memory {}", traffic::memory_line());
-        unsafe {
-            (self.fns.destroy_device)(device, std::ptr::null());
-        }
+        // NVIDIA's threaded optimisations make vkDestroyDevice join driver
+        // worker threads, a known source of multi-second teardown stalls.
+        let threaded = std::env::var("__GL_THREADED_OPTIMIZATIONS");
+        eprintln!(
+            "vk_teardown_env gl_threaded_optimizations={}",
+            threaded.as_deref().unwrap_or("unset")
+        );
+        let wait = self.fns.device_wait;
+        teardown_phase("device_wait_idle", || unsafe {
+            wait(device);
+        });
+        let destroy = self.fns.destroy_device;
+        teardown_phase("vk_destroy_device", || unsafe {
+            destroy(device, std::ptr::null());
+        });
     }
 
     fn destroy_surface_handle(&mut self) {
@@ -9196,6 +9213,17 @@ impl Default for GpuTimes {
             light_spans: Vec::new(),
         }
     }
+}
+
+/// Run one teardown call and print how long it took, so a slow quit names
+/// the driver call that owns the time.
+fn teardown_phase(name: &str, f: impl FnOnce()) {
+    let start = Instant::now();
+    f();
+    eprintln!(
+        "vk_teardown phase={name} ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 #[cfg(test)]
