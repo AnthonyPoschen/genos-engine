@@ -345,10 +345,11 @@ pub(crate) struct Lighting {
     restir_slot: u32,
     restir_prev: crate::restir_live::RestirCam,
     restir_have_prev: bool,
-    restir_lamp_seen: Option<u64>,
     /// Absolute query index of the four ReSTIR stamps. `u32::MAX` when that slot did not run them.
     restir_query: [u32; 2],
     restir_lamps: Vec<crate::pack::GpuLamp>,
+    /// The lamps of the last uploaded prefix: per-lamp change flags.
+    restir_prev_lamps: Vec<crate::pack::GpuLamp>,
     restir_view: crate::restir_live::RestirCam,
     restir_w: u32,
     restir_h: u32,
@@ -563,9 +564,9 @@ impl Default for Lighting {
             restir_slot: 0,
             restir_prev: crate::restir_live::RestirCam::default(),
             restir_have_prev: false,
-            restir_lamp_seen: None,
             restir_query: [u32::MAX; 2],
             restir_lamps: Vec::new(),
+            restir_prev_lamps: Vec::new(),
             restir_view: crate::restir_live::RestirCam::default(),
             restir_w: 0,
             restir_h: 0,
@@ -2794,30 +2795,34 @@ impl Gpu {
                 return false;
             }
         }
-        let geom_reset = match changes {
-            None => true,
-            Some(list) => !list.is_empty(),
-        };
-        let lamp_reset = self.lighting.restir_lamp_seen != self.lighting.lamp_key;
-        self.lighting.restir_lamp_seen = self.lighting.lamp_key;
-        let reset = geom_reset || lamp_reset || !self.lighting.restir_have_prev;
+        // A moved or recoloured lamp no longer resets every pixel: its history
+        // samples are flagged per lamp in the prefix, re-scored at the current
+        // point, and down-weighted in the temporal pass. A scene with no change
+        // list (a rebuild) or a new lamp layout still resets.
+        let geom_reset = changes.is_none();
         let previous = if self.lighting.restir_have_prev {
             self.lighting.restir_prev
         } else {
             crate::restir_live::RestirCam::default()
         };
-        let Some(prefix) = crate::restir_live::prefix(
+        let Some(mut prefix) = crate::restir_live::prefix(
             &self.lighting.restir_lamps,
+            &self.lighting.restir_prev_lamps,
             &previous,
             width,
             height,
             self.lighting.frame,
-            reset,
+            false,
             self.lighting.restir_slot,
         ) else {
             eprintln!("lighting: restir prefix does not fit");
             return false;
         };
+        let reset = geom_reset || prefix.layout_changed || !self.lighting.restir_have_prev;
+        if let Some(word) = prefix.words.get_mut(15) {
+            *word = u32::from(reset);
+        }
+        self.lighting.restir_prev_lamps.clone_from(&self.lighting.restir_lamps);
         if self.lighting.restir_clear {
             self.lighting.restir_clear = false;
             unsafe {

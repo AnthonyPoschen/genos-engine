@@ -171,6 +171,15 @@ void restir_rng(uint pixel, uint pass_id) {
     next_u32();
 }
 
+// Prefix bit per point lamp: its position, colour, or range changed since
+// the frame that stored the history (header word 38 is the bitset base).
+bool restir_lamp_changed(uint lamp) {
+    if (lamp >= restir_hdr(0u)) {
+        return true;
+    }
+    return ((restir_words[restir_hdr(38u) + lamp / 32u] >> (lamp % 32u)) & 1u) != 0u;
+}
+
 void restir_store4(uint at, uint lamp, float w_sum, uint m, float target) {
     if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
         restir_words[at] = LAMP_EMPTY;
@@ -305,6 +314,17 @@ void restir_temporal(uint pixel) {
         uint hist_m = h_m;
         float hist_w = h_w;
         cap_history(hist_m, hist_w, m);
+        // Validation: the history sample is re-scored at this frame's point
+        // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
+        // out of reach, or switched off drops out (tq_h = 0). A lamp that
+        // changed this frame also keeps at most the current sample's
+        // confidence: its W was built against the old target, so it gets an
+        // equal vote instead of up to 20 frames' worth. Scaling w_sum with M
+        // keeps the reservoir's W, so the estimate stays unbiased.
+        if (m != 0u && hist_m > m && restir_lamp_changed(h_lamp)) {
+            hist_w *= m_as_f(m) / m_as_f(hist_m);
+            hist_m = m;
+        }
         float tq_c = 0.0;
         if (lamp != LAMP_EMPTY && (tree ? lamp < restir_hdr(0u) : lamp < n)) {
             tq_c = restir_phat(pixel, lamp);

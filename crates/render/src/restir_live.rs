@@ -20,8 +20,14 @@ pub const CANDIDATES: u32 = 8;
 pub const PROPOSAL_TREE: u32 = 2;
 pub const SPATIAL_NEIGHBORS: u32 = 4;
 pub const SPATIAL_RADIUS: u32 = 2;
-/// Worst prefix: header, 4096 lamps, and a full binary tree (two nodes per lamp).
-pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12;
+/// Absolute history M cap: 20 frames of `CANDIDATES` initial samples. The
+/// per-frame clamp (20x the current M) still applies first.
+pub const M_CAP: u32 = 20 * CANDIDATES;
+/// Header word: base of the changed-lamp bitset (one bit per point lamp).
+pub const CHANGED_AT_WORD: usize = 38;
+/// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
+/// and the changed-lamp bitset.
+pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 / 32;
 
 /// Previous camera, in the same basis the scene block stores.
 #[derive(Clone, Copy, Debug, Default)]
@@ -39,6 +45,20 @@ pub struct RestirCam {
 pub struct RestirPrefix {
     pub words: Vec<u32>,
     pub total_words: u64,
+    /// The point-lamp list no longer maps index for index onto last frame's
+    /// (a lamp added, removed, or reordered). History lamp indices would name
+    /// the wrong lamp, so the caller resets temporal reuse.
+    pub layout_changed: bool,
+}
+
+fn point_lamps(lamps: &[GpuLamp]) -> impl Iterator<Item = (usize, &GpuLamp)> {
+    lamps.iter().enumerate().filter(|(_, lamp)| !lamp.directional)
+}
+
+/// Same position, colour, and range: the history p-hat of this lamp is still
+/// the p-hat it was stored with.
+fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
+    a.pos == b.pos && a.color == b.color && a.range.to_bits() == b.range.to_bits()
 }
 
 /// Device bytes for `pixels`, including the prefix cap. Reservoirs are not
@@ -62,6 +82,7 @@ fn word_u32(value: usize) -> u32 {
 #[must_use]
 pub fn prefix(
     lamps: &[GpuLamp],
+    prev_lamps: &[GpuLamp],
     previous: &RestirCam,
     width: u32,
     height: u32,
@@ -105,6 +126,24 @@ pub fn prefix(
         return None;
     }
     words.extend(nodes);
+    let changed_base = words.len();
+    let prev_points: Vec<(usize, &GpuLamp)> = point_lamps(prev_lamps).collect();
+    let now_points: Vec<(usize, &GpuLamp)> = point_lamps(lamps).collect();
+    let layout_changed = prev_points.len() != now_points.len()
+        || prev_points
+            .iter()
+            .zip(&now_points)
+            .any(|(old, new)| old.0 != new.0);
+    words.resize(changed_base + refs.len().div_ceil(32), 0);
+    if !layout_changed {
+        for (slot, (old, new)) in prev_points.iter().zip(&now_points).enumerate() {
+            if !same_lamp(old.1, new.1) {
+                if let Some(word) = words.get_mut(changed_base + slot / 32) {
+                    *word |= 1 << (slot % 32);
+                }
+            }
+        }
+    }
     if words.len() > usize::try_from(PREFIX_CAP_WORDS).unwrap_or(usize::MAX) {
         return None;
     }
@@ -130,7 +169,7 @@ pub fn prefix(
     words[9] = CANDIDATES;
     words[10] = PROPOSAL_TREE;
     words[11] = DEFAULT_M_CLAMP;
-    words[12] = 0;
+    words[12] = M_CAP;
     words[13] = SPATIAL_NEIGHBORS;
     words[14] = SPATIAL_RADIUS;
     words[15] = u32::from(reset);
@@ -141,9 +180,11 @@ pub fn prefix(
     words[20] = prev_slot & 1;
     words[21] = u32::from(previous.valid);
     push_cam(&mut words, previous);
+    words[CHANGED_AT_WORD] = word_u32(changed_base);
     Some(RestirPrefix {
         words,
         total_words: total,
+        layout_changed,
     })
 }
 
@@ -202,7 +243,7 @@ mod tests {
                 range: 8.0,
             },
         ];
-        let packed = prefix(&lamps, &RestirCam::default(), 32, 16, 3, true, 0)
+        let packed = prefix(&lamps, &lamps, &RestirCam::default(), 32, 16, 3, true, 0)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(u64::try_from(packed.words.len()).unwrap_or(u64::MAX) <= PREFIX_CAP_WORDS);
         assert_eq!(at(&packed.words, 0), 1, "the sun is not a leaf");
@@ -218,5 +259,30 @@ mod tests {
         );
         assert!(at(&packed.words, 2) >= 1, "a lamp is a leaf");
         assert!(packed.total_words > u64::try_from(packed.words.len()).unwrap_or(0));
+        assert_eq!(at(&packed.words, 12), 160, "history M cap");
+        assert!(!packed.layout_changed);
+        let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
+        assert_eq!(packed.words.get(changed).copied(), Some(0), "nothing moved");
+    }
+
+    #[test]
+    fn a_moved_lamp_is_flagged_and_a_removed_lamp_resets() {
+        let lamp = |x: f32| GpuLamp {
+            pos: [x, 2.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            directional: false,
+            range: 8.0,
+        };
+        let before = [lamp(0.0), lamp(1.0), lamp(2.0)];
+        let moved = [lamp(0.0), lamp(1.5), lamp(2.0)];
+        let packed = prefix(&moved, &before, &RestirCam::default(), 8, 8, 1, false, 0)
+            .unwrap_or_else(|| panic!("prefix"));
+        assert!(!packed.layout_changed, "same lamps, one moved");
+        let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
+        assert_eq!(packed.words.get(changed).copied(), Some(0b010), "only lamp 1 moved");
+        let fewer = [lamp(0.0), lamp(2.0)];
+        let packed = prefix(&fewer, &before, &RestirCam::default(), 8, 8, 1, false, 0)
+            .unwrap_or_else(|| panic!("prefix"));
+        assert!(packed.layout_changed, "indices no longer match");
     }
 }
