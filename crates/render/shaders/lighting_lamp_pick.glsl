@@ -29,6 +29,12 @@ const uint LAMP_GEO_EXACT = 2u;
 const uint LAMP_GEO_RESTIR_MEAN = 3u;
 // Frames in that mean. A still pixel's step is then about noise / 32.
 const uint RESTIR_MEAN_CAP = 32u;
+// History kept when the picked lamp moved or changed since last frame.
+const uint RESTIR_MEAN_MOVED = 4u;
+// A sample further than this many standard deviations (plus a relative
+// margin) from the mean drops the history.
+const float RESTIR_MEAN_SIGMAS = 4.0;
+const float RESTIR_MEAN_REL = 0.25;
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;
