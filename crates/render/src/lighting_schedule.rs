@@ -563,7 +563,11 @@ pub fn screen_plan(input: ScreenBudget) -> ScreenPlan {
     let tiles_y = input.tiles_y.max(1);
     let tiles = tiles_x.saturating_mul(tiles_y);
     let direct = budget_mode_gates(input.shadow_grant, input.shadow_demand, true, input.scaled);
-    let atrous = input.changes > 0 && input.denoise_grant < input.denoise_demand;
+    // A still frame gates too once the controller has scaled. The settle after
+    // a jump is a still frame with full-screen à-trous (s6: about 7 ms of 11-15),
+    // and without this the controller had no lever on it. Outside the rect the
+    // shader keeps the filtered value (`lighting_slot_in_budget`).
+    let atrous = budget_mode_gates(input.denoise_grant, input.denoise_demand, input.changes > 0, input.scaled);
     let trace = budget_mode_gates(input.trace_grant, input.trace_demand, input.changes > 0, input.scaled);
     let cache_ray_grant = if input.scaled && input.cache_rays > 0 {
         input.cache_rays
@@ -1328,6 +1332,35 @@ mod tests {
         let center_x = plan.tile_x + plan.tile_w / 2;
         assert!((i64::from(center_x) - 10).abs() <= 1);
         assert!(plan.tile_w * plan.tile_h < 20 * 12);
+    }
+
+    #[test]
+    fn a_scaled_still_frame_gates_denoise() {
+        let input = |scaled: bool| ScreenBudget {
+            tiles_x: 20,
+            tiles_y: 12,
+            shadow_grant: 2_000_000,
+            shadow_demand: 57_600,
+            denoise_grant: 16_000,
+            denoise_demand: 57_600,
+            trace_grant: 522_000,
+            trace_demand: 15_360,
+            changes: 0,
+            scaled,
+            frame: 3,
+            cache_rays: 256_000,
+            display_x: 0,
+            display_y: 0,
+            display_tiles_w: 0,
+            display_tiles_h: 0,
+            turn_x: 0,
+            turn_y: 0,
+        };
+        // The settle after a jump: still, full-screen à-trous over the cap.
+        assert!(screen_plan(input(true)).atrous_gate);
+        let plan = screen_plan(input(false));
+        assert!(!plan.atrous_gate);
+        assert!(plan.gates_off());
     }
 
     #[test]
