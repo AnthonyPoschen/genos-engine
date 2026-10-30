@@ -242,7 +242,7 @@ pub fn transform_point(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
 const IDENTITY: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
-const SUPPORTED_EXTENSIONS: &[&str] = &["KHR_materials_emissive_strength"];
+pub(crate) const SUPPORTED_EXTENSIONS: &[&str] = &["KHR_materials_emissive_strength"];
 const GLB_MAGIC: u32 = 0x4654_6C67;
 const CHUNK_JSON: u32 = 0x4E4F_534A;
 const CHUNK_BIN: u32 = 0x004E_4942;
@@ -443,7 +443,7 @@ fn paint_space(spaces: &mut [MipSpace], slot: Option<TextureSlot>, space: MipSpa
     }
 }
 
-fn split_glb(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), LoadError> {
+pub(crate) fn split_glb(bytes: &[u8]) -> Result<(&[u8], Option<&[u8]>), LoadError> {
     if bytes.len() < 4 || u32_le(bytes, 0)? != GLB_MAGIC {
         return Ok((bytes, None));
     }

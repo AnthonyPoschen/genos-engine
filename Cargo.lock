@@ -136,6 +136,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-cook"
+version = "0.1.0"
+dependencies = [
+ "genos-bake",
+ "genos-load",
+]
+
+[[package]]
 name = "genos-debug"
 version = "0.1.0"
 dependencies = [

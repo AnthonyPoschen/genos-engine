@@ -7,16 +7,19 @@
 
 mod animation;
 mod bin;
+mod cache;
 mod emitters;
 mod error;
 mod mips;
 mod pages;
 mod gltf;
+mod import;
 mod inflate;
 mod jpeg;
 mod material;
 mod mesh;
 mod png;
+mod sha256;
 mod shade;
 mod source;
 mod stream;
@@ -26,6 +29,7 @@ mod vram;
 mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
+pub use cache::{object_path, store_import, store_object, write_atomic};
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
@@ -39,9 +43,11 @@ pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
     TextureSlot,
 };
+pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
+pub use sha256::{hex, sha256, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
