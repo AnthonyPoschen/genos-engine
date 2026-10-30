@@ -25,6 +25,10 @@ const uint LAMP_PICK_EXACT_LIT = 8u;
 const uint LAMP_GEO_RESTIR = 0u;
 const uint LAMP_GEO_COPY = 1u;
 const uint LAMP_GEO_EXACT = 2u;
+// A ReSTIR pixel's running mean of its shaded colour (lighting_direct.comp).
+const uint LAMP_GEO_RESTIR_MEAN = 3u;
+// Frames in that mean. A still pixel's step is then about noise / 32.
+const uint RESTIR_MEAN_CAP = 32u;
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;

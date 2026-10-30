@@ -928,6 +928,40 @@ void main() {
             e = prev + (e - prev) / float(mean_count);
         }
     }
+#ifdef GENOS_RESTIR_DI
+    // ReSTIR shows one fresh RIS sample a frame (light * W * visibility). The
+    // reservoirs carry the lamp choice across frames, not the shaded colour,
+    // so a still pixel changed every frame by the sample noise and the grid
+    // score never settled. Keep a capped running mean of the shaded colour per
+    // pixel, reprojected like the reservoir and dropped on a disocclusion or a
+    // lamp-list change (header word 15).
+    if (restir_pix && lamp_pix) {
+        uint mean_px = 0u;
+        float mean_z = 0.0;
+        uint mean_prev = 0u;
+        vec3 mean_e = e;
+        if (restir_words[15u] == 0u && lamp_pick_reproject(pos, n, mean_px, mean_z)) {
+            uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
+            if (hg.z == LAMP_GEO_RESTIR_MEAN) {
+                LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
+                mean_prev = pr.m;
+                mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
+            }
+        }
+        uint mean_n = min(mean_prev + 1u, RESTIR_MEAN_CAP);
+        if (mean_prev > 0u) {
+            e = mean_e + (e - mean_e) / float(mean_n);
+        }
+        LampReservoir mr;
+        mr.lamp = 0u;
+        mr.m = mean_n;
+        mr.w_sum = e.r;
+        mr.target = e.g;
+        uint mslot = lamp_res_slot_now();
+        lamp_res_store(idx, mslot, mr);
+        lamp_geo_store(idx, mslot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR_MEAN, floatBitsToUint(e.b)));
+    }
+#endif
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
         // The exact sum is the integral, so a quiet pixel holds it instead of
         // a 32-frame mean (that mean was the frozen grain). A ReSTIR sample
