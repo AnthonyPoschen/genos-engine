@@ -7,9 +7,10 @@ use std::path::Path;
 
 use genos_load::{hex, object_path, sha256};
 
-use crate::{cooked_path, encode, CookError, Cooked};
+use crate::{cooked_path, encode, textures_path, CookError, Cooked};
 
-/// Line `genos-package 1`, then `<asset> cook=<record sha256> inputs=<sha256>,...`.
+/// Line `genos-package 1`, then `<asset> cook=<record sha256> inputs=<sha256>,...`,
+/// and ` gtex=<sha256>` when the asset has a cooked texture record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub lines: Vec<String>,
@@ -17,19 +18,32 @@ pub struct Manifest {
 
 const HEADER: &str = "genos-package 1";
 
-/// Build the manifest for a set of cooked records.
+/// Build the manifest for a set of cooked records with no textures.
 #[must_use]
 pub fn manifest(cooked: &[Cooked]) -> Manifest {
-    let mut lines: Vec<String> = cooked
+    let entries: Vec<(&Cooked, Option<[u8; 32]>)> = cooked.iter().map(|c| (c, None)).collect();
+    package(&entries)
+}
+
+/// Build the manifest for cooked records, each with the SHA-256 of its `.gtex`
+/// file when it has one.
+#[must_use]
+pub fn package(entries: &[(&Cooked, Option<[u8; 32]>)]) -> Manifest {
+    let mut lines: Vec<String> = entries
         .iter()
-        .map(|c| {
+        .map(|(c, gtex)| {
             let inputs: Vec<String> = c.inputs.iter().map(|i| hex(&i.hash)).collect();
-            format!(
+            let mut line = format!(
                 "{} cook={} inputs={}",
                 hex(&c.asset_id),
                 hex(&sha256(&encode(c))),
                 inputs.join(",")
-            )
+            );
+            if let Some(g) = gtex {
+                line.push_str(" gtex=");
+                line.push_str(&hex(g));
+            }
+            line
         })
         .collect();
     lines.sort();
@@ -65,8 +79,8 @@ impl Manifest {
         })
     }
 
-    /// The load-time check: every record and every source object under `out`
-    /// is present and hashes to the value the manifest names.
+    /// The load-time check: every record, texture record and source object
+    /// under `out` is present and hashes to the value the manifest names.
     ///
     /// # Errors
     ///
@@ -86,6 +100,14 @@ impl Manifest {
             let id = unhex(asset)?;
             if hex(&sha256(&std::fs::read(cooked_path(out, &id))?)) != cook {
                 return Err(CookError::Corrupt("record hash differs from the manifest"));
+            }
+            if let Some(gtex) = parts.next() {
+                let gtex = gtex
+                    .strip_prefix("gtex=")
+                    .ok_or(CookError::Corrupt("manifest line"))?;
+                if hex(&sha256(&std::fs::read(textures_path(out, &id))?)) != gtex {
+                    return Err(CookError::Corrupt("texture hash differs from the manifest"));
+                }
             }
             for input in inputs.split(',') {
                 let bytes = std::fs::read(object_path(out, &unhex(input)?))?;

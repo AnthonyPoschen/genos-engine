@@ -22,7 +22,7 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
-pub use package::{manifest, Manifest};
+pub use package::{manifest, package, Manifest};
 pub use parallel::{map_by_cost, Threads};
 pub use texture::{
     cook_textures, cook_textures_file, cook_textures_with, decode_textures, encode_image,
