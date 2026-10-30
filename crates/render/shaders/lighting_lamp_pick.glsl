@@ -35,6 +35,8 @@ const uint RESTIR_MEAN_MOVED = 4u;
 // margin) from the mean drops the history.
 const float RESTIR_MEAN_SIGMAS = 4.0;
 const float RESTIR_MEAN_REL = 0.25;
+// History frames kept, clipped, when a sample breaks that bound.
+const uint RESTIR_MEAN_SEED = 3u;
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;
