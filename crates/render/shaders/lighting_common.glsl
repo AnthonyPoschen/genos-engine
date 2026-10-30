@@ -277,6 +277,13 @@ uint lighting_hash(uint v) {
     return v;
 }
 
+// The one key for an integer cell (S86): each coordinate goes through the hash
+// in turn, then the salt. Never XOR per-axis products (x * p1 ^ y * p2 ^ ...):
+// sign-mirrored cells share that key exactly (scripts/lint-shader-hashes.py).
+uint hash_cell3(ivec3 c, uint salt) {
+    return lighting_hash(uint(c.x) ^ lighting_hash(uint(c.y) ^ lighting_hash(uint(c.z) ^ lighting_hash(salt))));
+}
+
 float lighting_unit(uint v) {
     return float(lighting_hash(v) >> 8u) * (1.0 / 16777216.0);
 }
@@ -325,7 +332,7 @@ uint lighting_cell_hash(vec3 pos, vec3 n) {
     // (any camera motion) turned at random, and kept strata traced with one turn
     // landed unevenly in the cells of the other (blotches that crawl with a turn).
     ivec3 cell = ivec3(floor(pos / 0.25 - 0.5 * n));
-    return lighting_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+    return hash_cell3(cell, 0u);
 }
 uint lighting_grid() {
     return max(uint(sqrt(float(lighting_rays())) + 0.5), 1u);
@@ -389,7 +396,7 @@ bool lighting_stratum_held(uint probe) {
     return LIGHTING_HOLD_STRATA && work.v[lighting_stratum_at(probe, lighting_stratum())].w > 1.5;
 }
 uint lighting_hold_check_k(uint probe) {
-    return lighting_hash(probe * 0x9e3779b9u ^ pc.params.w * 0x85ebca6bu) % lighting_rays();
+    return lighting_hash(probe ^ lighting_hash(pc.params.w)) % lighting_rays();
 }
 float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
     vec3 ab = b - a;
