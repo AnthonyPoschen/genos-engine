@@ -36,8 +36,30 @@ use genos_render::{
 use genos_scene::{Camera, Floor, Scene, Vec3};
 use genos_window::Window;
 
+/// A hung GPU wait fails the run instead of blocking it. Override with
+/// `GENOS_TEST_TIMEOUT_SECS`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test harness watchdog: reads its timeout and sleeps on its own thread"
+)]
+fn watchdog() {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    ARMED.call_once(|| {
+        let secs = std::env::var("GENOS_TEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(300);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            eprintln!("material_stream: timed out after {secs}s (GPU wait hung)");
+            std::process::exit(124);
+        });
+    });
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    watchdog();
     let guard = GPU
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

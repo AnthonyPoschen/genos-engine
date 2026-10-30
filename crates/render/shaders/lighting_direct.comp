@@ -528,12 +528,12 @@ void main() {
                     uint win_k = ~0u;
                     float win_phat = 0.0;
                     [[dont_unroll]] for (uint c = 0u; c < cand; c++) {
-                        float uc = lighting_unit(lighting_hash(idx ^ (mixf * 0x9e3779b9u) ^ (c * 0x85ebca6bu + 1u)));
+                        float uc = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c))));
                         float sample_phat = 0.0;
                         uint sample_k = lamp_pick_one(list, count, origin, n, two_sided, point_total, point_lit, uc, sample_phat);
                         float ris = point_total;
                         w_ris += ris;
-                        float u_chao = lighting_unit(lighting_hash(idx ^ (mixf * 0x27d4eb2fu) ^ (c * 0x85ebca6bu + 9u)));
+                        float u_chao = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c + 1u))));
                         if (sample_k != ~0u && w_ris > 0.0 && u_chao < ris / w_ris) {
                             win_k = sample_k;
                             win_phat = sample_phat;
