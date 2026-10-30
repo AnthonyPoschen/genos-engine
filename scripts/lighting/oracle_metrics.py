@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Score a lighting harness run (scripts/lighting/oracle_run.sh) as compact JSON.
 
-Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn):
+Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn, and lamps-spin,
+lamps-switch from the lamps profile):
 
 * ref_err_near: near-camera-weighted error against the path-traced reference,
   sum(w |live - ref|) / sum(w ref) in linear luminance over 2x2 blocks, with
@@ -16,7 +17,7 @@ Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn):
   `refreshes_unchanged` the part of it that landed on unchanged tiles, assuming
   refreshes spread evenly over the screen (a screen-space proxy, not a
   per-texel count).
-* switch only: frames_to_ref, the first frame after the switch whose ref_err_near
+* switch and lamps-switch only: frames_to_ref, the first frame after the switch whose ref_err_near
   is within 1.1x of the settled frame's.
 
 `--self-test` checks the error, weight and counter on synthetic pictures.
@@ -127,7 +128,7 @@ def score(out):
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
                      ref_err_mean=round(float(np.mean([p[2] for p in per])), 4))
-            if n == "switch":
+            if n == "switch" or n == "lamps-switch":
                 settled = per[-1][1]
                 s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
                 s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}

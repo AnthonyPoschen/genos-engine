@@ -9,6 +9,7 @@ lighting stage one fixed set of scenes and numbers to compare against master.
 make lighting-oracle                 # quick profile, out in genos-debug/oracle
 make lighting-oracle PROFILE=full    # every frame traced, adds sun x1
 scripts/lighting/oracle_run.sh quick /tmp/oracle   # same, explicit
+make lighting-oracle PROFILE=lamps   # many-lamp spin and switch only
 ```
 
 The runner starts a headless Weston on lavapipe (the same setup as the
@@ -23,6 +24,15 @@ JSON, one object per scenario) plus the pictures it scored.
 | `spin` | The box nearest the hall spinning at 2 rad/s, lamps on, at night | 240 |
 | `switch` | Dark room at midnight (lamps off for 10 s first), every lamp turns on in one frame | 8 dark + 120 |
 | `turn` | Camera turns 90 degrees in one second, then holds | 90 |
+| `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
+| `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
+
+The main scene has 5 point lamps. Every pixel then has at most 5 lit lamps and
+shades the exact sum (`LAMP_PICK_EXACT_LIT` is 8), so `spin` and `switch` never
+grade the random lamp path. The `lamps` profile exists to grade that path. Its
+script logs `LAMP_COVER`, the number of lamps whose reach holds the subject.
+That number is an upper bound on `point_lit`. The script fails if it is 8 or
+less.
 
 The `sun_speed` knob tops out at x64, so the script freezes the sun and steps
 `time_of_day` itself, one step per frame. Camera paths and the fixed 1/60 s
