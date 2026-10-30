@@ -63,6 +63,20 @@ the trace pauses time, so it adds no settling.
 * `ref_err`: the same without the weight.
 * `grid_worst`, `grid_longest_run`: the PR #94 checkerboard metric
   (`scripts/lighting/grid_metric.py`, copied unchanged).
+* `grid_excess_worst`, `grid_excess_frame`, `grid_excess_longest_run`: for each
+  frame step that has a reference at both ends, the live grid score minus the
+  reference's grid score for the same step, clamped at 0. Real shadow motion
+  scores about the same in both and cancels, so what's left is the checkerboard
+  the live cache adds. Needs per-frame references:
+  `ORACLE_REF_EVERY_FRAME="sun-x100" ORACLE_ONLY="sun-x100" scripts/lighting/oracle_run.sh quick OUT`
+  (sun-x100 is 73 traces, about 40 min on lavapipe).
+
+**Gate note (31 Oct 2026, pending Anthony):** at 160x90 and x100 sun the
+reference path tracer itself scores `grid_worst` 0.45, because one shadow edge
+crossing an 8x8 tile decides the score (PR #98 diagnosis). The ADR 0022 F1 gate
+(sun-x100 `grid_worst` < 0.567, target <= 0.15) is proposed to move to
+`grid_excess_worst`, recalibrated from base. Until Anthony decides, the gate
+number is unchanged and `grid_worst` stays reported.
 * `unchanged`: recomputed-but-unchanged work. `px_share` is the share of 8x8
   tiles whose picture did not change while being recomputed; `refreshes` is
   the mean `cache_entries_refreshed` per frame and `refreshes_unchanged` the
