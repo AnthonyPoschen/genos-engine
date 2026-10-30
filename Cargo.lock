@@ -254,6 +254,7 @@ dependencies = [
  "genos-load",
  "genos-math",
  "genos-mesh",
+ "genos-restir-ref",
  "genos-scene",
  "genos-ui",
  "genos-window",

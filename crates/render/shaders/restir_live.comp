@@ -1,0 +1,439 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+// Live ReSTIR DI for screen pixels (ADR 0022 stage C5).
+// The initial, temporal, and spatial math is the checker includes
+// (restir_sample.glsl, restir_merge.glsl, restir_spatial_ops.glsl, restir_tree.glsl).
+// This file only supplies the gbuffer receiver, lamp_light p̂, the previous
+// camera, and depth/normal rejection. One thread is one pixel. The push
+// constant is the lighting layout: pc.lamp.w is the chunk base, bits 22-23
+// of pc.lamp.y select the pass (0 initial, 1 temporal, 2 spatial).
+//
+// Departure from the checker: each pixel has its own PCG stream, mixed by
+// pixel, frame, and pass. The checker keeps one stream in receiver order.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#include "lighting_common.glsl"
+
+layout(std430, set = 0, binding = 19) buffer RestirWords {
+    uint restir_words[];
+};
+
+const uint LAMP_EMPTY = 0xffffffffu;
+const uint PROPOSAL_TARGET = 1u;
+const float M_HI = 65536.0;
+const float RESTIR_DEPTH_REL = 0.02;
+const float RESTIR_DEPTH_ABS = 0.05;
+const float RESTIR_NORMAL_MIN = 0.9;
+const float RESTIR_ORIGIN_LIFT = 0.02;
+const vec3 RESTIR_LUMA = vec3(0.2126, 0.7152, 0.0722);
+const float RESTIR_FWD_MIN = 0.5;
+const float RESTIR_Z_MIN = 1.0e-3;
+const float RESTIR_NDC_HALF = 0.5;
+
+uint64_t g_state;
+uint64_t g_inc;
+
+uint64_t pcg_step() {
+    uint64_t old = g_state;
+    g_state = old * 6364136223846793005ul + g_inc;
+    return old;
+}
+
+uint rot_r(uint bits, uint rot) {
+    uint r = rot & 31u;
+    if (r == 0u) {
+        return bits;
+    }
+    return (bits >> r) | (bits << (32u - r));
+}
+
+uint next_u32() {
+    uint64_t old = pcg_step();
+    uint64_t mixed = ((old >> 18ul) ^ old) >> 27ul;
+    uint bits = uint(mixed & 0xfffffffful);
+    uint rot = uint(old >> 59ul);
+    return rot_r(bits, rot);
+}
+
+float next_f32() {
+    uint bits = next_u32() >> 8u;
+    return float(bits & 0xffffu) * (1.0 / M_HI);
+}
+
+uint restir_hdr(uint i) {
+    return restir_words[i];
+}
+
+float load_f(uint index) {
+    return uintBitsToFloat(restir_words[index]);
+}
+
+#define RESTIR_WORDS restir_words
+#define RESTIR_TREE_BASE restir_hdr(3u)
+#define RESTIR_RECV_BASE 0u
+#define RESTIR_TREE_COUNT restir_hdr(2u)
+#define RESTIR_PROPOSAL restir_hdr(10u)
+#define RESTIR_CANDIDATES restir_hdr(9u)
+#define RESTIR_LAMP_COUNT restir_hdr(0u)
+#define RESTIR_M_CLAMP restir_hdr(11u)
+#define RESTIR_M_CAP restir_hdr(12u)
+#define RESTIR_WIDTH restir_hdr(7u)
+#define RESTIR_SPATIAL_NEIGHBORS restir_hdr(13u)
+#define RESTIR_SPATIAL_RADIUS restir_hdr(14u)
+#define RESTIR_REVERSE 0u
+#define RESTIR_LIVE_RECEIVER
+#define RESTIR_LIVE_PHAT
+
+// One surface per invocation. The tree walk asks for the receiver at every
+// node it scores and p̂ asks again per candidate; both are this pixel, so the
+// G-buffer is decoded once (same values, so the estimator is unchanged).
+uint g_surf_recv;
+bool g_surf_ok;
+vec3 g_surf_pos;
+vec3 g_surf_n;
+bool g_surf_two;
+
+bool restir_surface_of(uint recv, out vec3 pos, out vec3 n, out bool two_sided) {
+    if (recv != g_surf_recv) {
+        g_surf_recv = recv;
+        g_surf_ok = false;
+        g_surf_pos = vec3(0.0);
+        g_surf_n = vec3(0.0, 1.0, 0.0);
+        g_surf_two = false;
+        uint width = restir_hdr(7u);
+        uint height = restir_hdr(8u);
+        if (width != 0u && recv < width * height) {
+            vec3 albedo;
+            g_surf_ok = lighting_surface(uvec2(recv % width, recv / width), g_surf_pos, g_surf_n, albedo, g_surf_two);
+        }
+    }
+    pos = g_surf_pos;
+    n = g_surf_n;
+    two_sided = g_surf_two;
+    return g_surf_ok;
+}
+
+void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
+    px = 0.0;
+    py = 0.0;
+    pz = 0.0;
+    nx = 0.0;
+    ny = 1.0;
+    nz = 0.0;
+    vec3 pos;
+    vec3 n;
+    bool two_sided;
+    if (!restir_surface_of(recv, pos, n, two_sided)) {
+        return;
+    }
+    px = pos.x;
+    py = pos.y;
+    pz = pos.z;
+    nx = n.x;
+    ny = n.y;
+    nz = n.z;
+}
+
+float restir_phat(uint recv, uint lamp) {
+    if (lamp >= restir_hdr(0u)) {
+        return 0.0;
+    }
+    vec3 pos;
+    vec3 n;
+    bool two_sided;
+    if (!restir_surface_of(recv, pos, n, two_sided)) {
+        return 0.0;
+    }
+    uint at = restir_hdr(1u) + lamp * 8u;
+    Lamp src;
+    src.pos = vec4(load_f(at), load_f(at + 1u), load_f(at + 2u), 0.0);
+    src.color = vec4(load_f(at + 4u), load_f(at + 5u), load_f(at + 6u), load_f(at + 3u));
+    vec3 origin = pos + n * RESTIR_ORIGIN_LIFT;
+    vec3 target;
+    vec3 light = lamp_light(src, origin, n, two_sided, target);
+    return dot(light, RESTIR_LUMA);
+}
+
+#include "restir_tree.glsl"
+#include "restir_sample.glsl"
+#include "restir_merge.glsl"
+#include "restir_spatial_ops.glsl"
+
+void restir_rng(uint pixel, uint pass_id) {
+    uint64_t seed = uint64_t(restir_hdr(17u)) | (uint64_t(restir_hdr(18u)) << 32ul);
+    seed ^= uint64_t(pixel) * 0x9E3779B97F4A7C15ul;
+    seed ^= uint64_t(restir_hdr(16u)) << 17ul;
+    seed ^= uint64_t(pass_id) * 0xBF58476D1CE4E5B9ul;
+    g_inc = (seed << 1ul) | 1ul;
+    g_state = 0ul;
+    g_state = pcg_step() + seed;
+    next_u32();
+}
+
+// Prefix bit per point lamp: its position, colour, or range changed since
+// the frame that stored the history (header word 38 is the bitset base).
+bool restir_lamp_changed(uint lamp) {
+    if (lamp >= restir_hdr(0u)) {
+        return true;
+    }
+    return ((restir_words[restir_hdr(38u) + lamp / 32u] >> (lamp % 32u)) & 1u) != 0u;
+}
+
+void restir_store4(uint at, uint lamp, float w_sum, uint m, float target) {
+    if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
+        restir_words[at] = LAMP_EMPTY;
+        restir_words[at + 1u] = floatBitsToUint(0.0);
+        restir_words[at + 2u] = 0u;
+        restir_words[at + 3u] = floatBitsToUint(0.0);
+    } else {
+        restir_words[at] = lamp;
+        restir_words[at + 1u] = floatBitsToUint(w_sum);
+        restir_words[at + 2u] = m;
+        restir_words[at + 3u] = floatBitsToUint(target);
+    }
+}
+
+void restir_load4(uint at, out uint lamp, out float w_sum, out uint m, out float target) {
+    lamp = restir_words[at];
+    w_sum = uintBitsToFloat(restir_words[at + 1u]);
+    m = restir_words[at + 2u];
+    target = uintBitsToFloat(restir_words[at + 3u]);
+    if (is_empty(lamp, m) || target <= 0.0 || w_sum <= 0.0) {
+        store_empty(lamp, w_sum, m, target);
+    }
+}
+
+bool restir_pixel_surface(uint pixel, out vec3 pos, out vec3 nrm) {
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    pos = vec3(0.0);
+    nrm = vec3(0.0, 1.0, 0.0);
+    if (width == 0u || pixel >= width * height) {
+        return false;
+    }
+    uvec2 p = uvec2(pixel % width, pixel / width);
+    vec3 albedo;
+    bool two_sided;
+    return lighting_surface(p, pos, nrm, albedo, two_sided);
+}
+
+bool restir_depth_normal(float z_ref, float z_other, vec3 n_ref, vec3 n_other) {
+    if (!(z_ref > 0.0) || !(z_other > 0.0)) {
+        return false;
+    }
+    float gap = abs(z_ref - z_other);
+    if (gap / z_ref > RESTIR_DEPTH_REL && gap > RESTIR_DEPTH_ABS) {
+        return false;
+    }
+    return dot(n_ref, n_other) >= RESTIR_NORMAL_MIN;
+}
+
+bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel) {
+    hist_pixel = 0u;
+    if (restir_hdr(21u) == 0u) {
+        return false;
+    }
+    vec3 eye = vec3(load_f(22u), load_f(23u), load_f(24u));
+    vec3 right = vec3(load_f(25u), load_f(26u), load_f(27u));
+    float t = load_f(28u);
+    vec3 up = vec3(load_f(29u), load_f(30u), load_f(31u));
+    vec3 fwd = vec3(load_f(33u), load_f(34u), load_f(35u));
+    float aspect = load_f(36u);
+    if (dot(fwd, fwd) < RESTIR_FWD_MIN || t == 0.0) {
+        return false;
+    }
+    vec3 rel = pos - eye;
+    float z = dot(rel, fwd);
+    if (z <= RESTIR_Z_MIN) {
+        return false;
+    }
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
+    vec2 px = vec2((ndc.x + 1.0) * RESTIR_NDC_HALF * float(width), (1.0 - ndc.y) * RESTIR_NDC_HALF * float(height));
+    if (px.x < 0.0 || px.y < 0.0 || px.x >= float(width) || px.y >= float(height)) {
+        return false;
+    }
+    hist_pixel = uint(floor(px.y)) * width + uint(floor(px.x));
+    uint stride = restir_hdr(19u);
+    uint prev = restir_hdr(20u) == 0u ? restir_hdr(4u) : restir_hdr(5u);
+    uint geo = prev + hist_pixel * stride;
+    float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
+    vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
+    return restir_depth_normal(z, z_prev, nrm, n_prev);
+}
+
+void restir_initial(uint pixel) {
+    uint n = restir_hdr(0u);
+    if (restir_hdr(10u) < 2u && n > 64u) {
+        n = 64u;
+    }
+    float weights[64];
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    initial_at(pixel, n, lamp, w_sum, m, target, weights);
+    restir_store4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
+}
+
+void restir_temporal(uint pixel) {
+    uint n = restir_hdr(0u);
+    bool tree = restir_hdr(10u) >= 2u;
+    if (!tree && n > 64u) {
+        n = 64u;
+    }
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
+    vec3 pos;
+    vec3 nrm;
+    bool surfaced = restir_pixel_surface(pixel, pos, nrm);
+    uint hist_pixel = 0u;
+    bool reuse = restir_hdr(15u) == 0u && surfaced && restir_reproject(pos, nrm, hist_pixel);
+    uint stride = restir_hdr(19u);
+    uint prev = restir_hdr(20u) == 0u ? restir_hdr(4u) : restir_hdr(5u);
+    uint h_lamp;
+    float h_w;
+    uint h_m;
+    float h_target;
+    if (reuse) {
+        restir_load4(prev + hist_pixel * stride, h_lamp, h_w, h_m, h_target);
+    } else {
+        store_empty(h_lamp, h_w, h_m, h_target);
+    }
+    float unit = next_f32();
+    uint out_lamp = lamp;
+    float out_w = w_sum;
+    uint out_m = m;
+    float out_target = target;
+    if (h_m != 0u && h_lamp != LAMP_EMPTY) {
+        uint hist_m = h_m;
+        float hist_w = h_w;
+        cap_history(hist_m, hist_w, m);
+        // Validation: the history sample is re-scored at this frame's point
+        // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
+        // out of reach, or switched off drops out (tq_h = 0). A lamp that
+        // changed this frame also keeps at most the current sample's
+        // confidence: its W was built against the old target, so it gets an
+        // equal vote instead of up to 20 frames' worth. Scaling w_sum with M
+        // keeps the reservoir's W, so the estimate stays unbiased.
+        if (m != 0u && hist_m > m && restir_lamp_changed(h_lamp)) {
+            hist_w *= m_as_f(m) / m_as_f(hist_m);
+            hist_m = m;
+        }
+        float tq_c = 0.0;
+        if (lamp != LAMP_EMPTY && (tree ? lamp < restir_hdr(0u) : lamp < n)) {
+            tq_c = restir_phat(pixel, lamp);
+        }
+        float tq_h = 0.0;
+        if (h_lamp != LAMP_EMPTY && (tree ? h_lamp < restir_hdr(0u) : h_lamp < n)) {
+            tq_h = restir_phat(pixel, h_lamp);
+        }
+        merge_pair(
+            lamp, w_sum, m, target, tq_c,
+            h_lamp, hist_w, hist_m, h_target, tq_h,
+            tq_c, tq_h,
+            unit,
+            out_lamp, out_w, out_m, out_target);
+    }
+    uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
+    uint at = next + pixel * stride;
+    restir_store4(at, out_lamp, out_w, out_m, out_target);
+    float depth = 0.0;
+    uint packed = lighting_pack_normal(vec3(0.0, 1.0, 0.0));
+    if (surfaced) {
+        depth = dot(pos - scene.eye.xyz, scene.view_forward.xyz);
+        packed = lighting_pack_normal(nrm);
+    }
+    restir_words[at + 4u] = floatBitsToUint(depth);
+    restir_words[at + 5u] = packed;
+}
+
+void restir_spatial(uint pixel) {
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    uint receivers = width * height;
+    uint n = restir_hdr(0u);
+    uint stride = restir_hdr(19u);
+    uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(next + pixel * stride, lamp, w_sum, m, target);
+    uint out_lamp = lamp;
+    float out_w = w_sum;
+    uint out_m = m;
+    float out_target = target;
+    vec3 pos;
+    vec3 nrm;
+    bool surfaced = restir_pixel_surface(pixel, pos, nrm);
+    float z_here = surfaced ? dot(pos - scene.eye.xyz, scene.view_forward.xyz) : 0.0;
+    if (restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
+        uint picked[16];
+        uint nbor = neighbor_count(pixel, receivers, picked);
+        float unit = next_f32();
+        if (nbor != 0u) {
+            uint src_recv[17];
+            uint in_lamp[17];
+            float in_w[17];
+            uint in_m[17];
+            float in_target[17];
+            float in_tq[17];
+            uint nslots = 1u;
+            src_recv[0] = pixel;
+            in_lamp[0] = lamp;
+            in_w[0] = w_sum;
+            in_m[0] = m;
+            in_target[0] = target;
+            in_tq[0] = phat_at(pixel, lamp, n);
+            for (uint s = 0u; s < nbor; s++) {
+                uint source = picked[s];
+                vec3 npos;
+                vec3 nn;
+                bool ok = surfaced && restir_pixel_surface(source, npos, nn);
+                if (ok) {
+                    float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
+                    ok = restir_depth_normal(z_here, z_n, nrm, nn);
+                }
+                if (!ok) {
+                    continue;
+                }
+                src_recv[nslots] = source;
+                restir_load4(next + source * stride, in_lamp[nslots], in_w[nslots], in_m[nslots], in_target[nslots]);
+                in_tq[nslots] = phat_at(pixel, in_lamp[nslots], n);
+                nslots += 1u;
+            }
+            if (nslots > 1u) {
+                balance_list(
+                    nslots, src_recv, in_lamp, in_w, in_m, in_target, in_tq,
+                    unit, n,
+                    out_lamp, out_w, out_m, out_target);
+            }
+        }
+    }
+    restir_store4(restir_hdr(6u) + pixel * 4u, out_lamp, out_w, out_m, out_target);
+}
+
+void main() {
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    uint pixel = pc.lamp.w + gl_GlobalInvocationID.x;
+    if (width == 0u || pixel >= width * height) {
+        return;
+    }
+    uint pass_id = (pc.lamp.y >> 22u) & 3u;
+    g_surf_recv = 0xffffffffu;
+    restir_rng(pixel, pass_id);
+    if (pass_id == 0u) {
+        restir_initial(pixel);
+    } else if (pass_id == 1u) {
+        restir_temporal(pixel);
+    } else {
+        restir_spatial(pixel);
+    }
+}

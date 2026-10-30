@@ -32,7 +32,7 @@ Every gate is a `make lighting-oracle` metric (`docs/systems/lighting/oracle-har
 | --- | --- | --- |
 | B | This ADR | Accepted |
 | F1 | Show finished values only (confidence blend with the coarser finished level) | `sun-x100` `grid_worst` below master's (lavapipe 0.567), target ≤ 0.15; `ref_err_near` not worse than master |
-| C | ReSTIR DI behind a flag, replacing brute direct | `ref_err_near` ≤ master; `grid_worst` ≤ 0.15; direct ≤ 3 ms at 1440p on the 4070 |
+| C | ReSTIR DI behind `restir_di` (`--restir-di`, `GENOS_RESTIR_DI`), off by default | `ref_err_near` ≤ master; `grid_worst` ≤ 0.15; direct ≤ 3 ms at 1440p on the 4070 |
 | D | Full-coverage card re-light every frame | `spin` settles in ≤ 1 frame; `sun-x100` and `sun-x10` `grid_worst` ≤ 0.15; `switch` `frames_to_ref` ≤ 5; no wall-leak test regressions |
 | E | DDGI probe hierarchy for far bounce | wall-leak tests pass; indirect ≤ 3 ms at 1440p on the 4070; `ref_err_near` ≤ stage D |
 | F | Remove resolve / à-trous stages no longer needed, one at a time | `ref_err_near` unchanged within noise; lighting ≤ 8 ms p50 stress hall, basic scene ≥ 500 fps at 1440p on the 4070 |

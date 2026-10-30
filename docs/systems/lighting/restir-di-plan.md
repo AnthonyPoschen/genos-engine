@@ -1,6 +1,6 @@
 # ReSTIR DI — stage C
 
-[ADR 0022](../../adr/0022-lighting-v3-compute-architecture.md) stage C replaces brute direct with ReSTIR DI. This note is the CPU reference and the GPU stages that follow it. No shader is in this change. The renderer is unchanged.
+[ADR 0022](../../adr/0022-lighting-v3-compute-architecture.md) stage C replaces brute direct with ReSTIR DI. This note is the CPU reference and the GPU stages that follow it. C5 is the live flag. It stays off.
 
 ## Reference
 
@@ -76,7 +76,7 @@ Other locks, same run:
 | Tunables | CLI flags, echoed in the dump `config` |
 | Snapshot | `reference.json`. `diff` is the restore check |
 
-No MCP entry. The checker is offline, the same way `reflections-check` is. `debug/lighting` is unchanged because the renderer is unchanged.
+No MCP entry on the checker. The checker is offline, the same way `reflections-check` is. The live flag is a lighting setting (`restir_di`), so `set_key` and the debug-menu switch reach it. It stays off.
 
 ## Networking
 
@@ -113,16 +113,18 @@ C4 measured on this crate's tests (debug). Bias is `ref_err_near` of the multi-s
 
 On `variance` (20 lamps at similar range) the tree's one-frame variance sits just above uniform. On `many` it is about 1800× lower. `--tree-fault ignore-distance` on `many` stays inside the 0.05 bias ceiling (0.021 at 96 seeds, 8 frames) and disagrees with the distance-aware reservoirs (14 lamp mismatches, seed 1, one frame). Lavapipe `restir-gpu --initial --proposal tree --scene many`: dispatch 186 ms, reservoir mismatches 0 against the CPU dump. The same fault on the GPU matches the CPU fault and fails the diff against the distance-aware tree.
 
-C5 wires this walk into the live direct pass. That pass still shades the brute or pairwise sum. The flag stays off. C5 uploads this tree with the lamp list, runs the same initial, temporal, and spatial draws, and shades `unshadowed * visibility * W`. The grade is the owner's 4070 session below, not lavapipe.
+C5 wires this walk into the live direct pass behind `restir_di` (`--restir-di` on `genos-stress`, mirror `GENOS_RESTIR_DI`). The flag stays off, so a default frame still shades the brute or pairwise sum. When it is on, the pass uploads this tree with the lamp list, runs the same initial, temporal, and spatial shader includes, and shades `unshadowed * visibility * W`. A lamp-list change or a geometry change record clears history the way `Session::reset_temporal` does. A camera turn reprojects; a depth or normal break drops the neighbour. Spatial reuse stays on. Screen pixels only: hits stay on the existing shade. Lavapipe checks the flag-on direct pass against brute direct on `Scene::gate` and `Scene::shadow` (`ref_err_near` 0.05). The grade is still the owner's 4070 session below. The stress package is `genos-stress`. Reservoirs are about 64 bytes per pixel plus the prefix, about 236 MB at 1440p, and they are allocated only while the flag is on.
 
 C5, on the owner's 4070, once:
 
 ```sh
 make lighting-oracle PROFILE=full
-cargo run --release -p genos-lighting -- --scene stress --size 2560x1440 --gi-metrics on --gpu-times 30 --frames 120 --out genos-debug/restir-c5
+GENOS_RESTIR_DI=on make lighting-oracle PROFILE=full OUT=genos-debug/oracle-restir
+cargo run --release -p genos-stress -- --scene stress --size 2560x1440 --gi-metrics on --gpu-times 30 --frames 120 --out genos-debug/restir-c5
+cargo run --release -p genos-stress -- --scene stress --size 2560x1440 --gi-metrics on --gpu-times 30 --frames 120 --restir-di on --out genos-debug/restir-c5-on
 ```
 
-`ref_err_near` is no worse than master. `grid_worst` ≤ 0.15. The direct pass is ≤ 3 ms at 1440p. Those are the ADR 0022 stage C gates. A miss drops or reworks the stage. It does not land on a promise.
+`ref_err_near` is no worse than master. `grid_worst` ≤ 0.15. The direct pass is ≤ 3 ms at 1440p. Those are the ADR 0022 stage C gates. A miss drops or reworks the stage. It does not land on a promise. `ref_err_near` and `grid_worst` are fields in `metrics.json` under the oracle directory (`genos-debug/oracle` with the flag off, `genos-debug/oracle-restir` with `GENOS_RESTIR_DI=on`). The direct-pass milliseconds are `light=` on the stderr `LIGHTING_MS` line of the stress run. With the flag on, that line also prints `restir_initial`, `restir_temporal`, and `restir_spatial`, and `light=` includes their sum.
 
 ## References
 

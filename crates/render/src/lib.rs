@@ -16,6 +16,7 @@ mod pack;
 mod particles;
 mod pool;
 mod reflections;
+mod restir_live;
 mod reflections_grade;
 mod scene_mesh;
 mod trace;

@@ -12,6 +12,11 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "lighting_lamp_pick.glsl"
+#ifdef GENOS_RESTIR_DI
+layout(std430, set = 0, binding = 19) buffer RestirWords {
+    uint restir_words[];
+};
+#endif
 
 const bool LIGHTING_KEPT_SHOULD = true;
 // S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
@@ -370,6 +375,12 @@ void main() {
     bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
     bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
     bool lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
+#ifdef GENOS_RESTIR_DI
+    bool restir_pix = ((pc.lamp.y >> 21u) & 1u) != 0u && idx < pixels;
+    if (restir_pix) {
+        lamp_new = false;
+    }
+#endif
     if (lamp_new) {
         pick = false;
     }
@@ -675,6 +686,23 @@ void main() {
     const bool copied = false;
     const vec3 copied_rgb = vec3(0.0);
 #endif
+#ifdef GENOS_RESTIR_DI
+    uint restir_scene = 0xffffffffu;
+    uint restir_lamp = 0xffffffffu;
+    float restir_w = 0.0;
+    if (restir_pix) {
+        uint at = restir_words[6u] + idx * 4u;
+        restir_lamp = restir_words[at];
+        float restir_sum = uintBitsToFloat(restir_words[at + 1u]);
+        uint restir_m = restir_words[at + 2u];
+        float restir_target = uintBitsToFloat(restir_words[at + 3u]);
+        float restir_mf = float(restir_m >> 16u) * float(65536u) + float(restir_m & 0xffffu);
+        if (restir_m != 0u && restir_lamp != 0xffffffffu && restir_target > 0.0 && restir_sum > 0.0 && restir_mf > 0.0) {
+            restir_w = restir_sum / (restir_mf * restir_target);
+            restir_scene = restir_words[restir_words[1u] + restir_lamp * 8u + 7u];
+        }
+    }
+#endif
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
@@ -695,6 +723,13 @@ void main() {
         }
         // A pixel reservoir already chose its point lamps. Skip the rest so the
         // shade walks the sample count, not the lamp list. The exact sum does not.
+#ifdef GENOS_RESTIR_DI
+        // ReSTIR replaces the point-lamp sum: this loop keeps only the suns
+        // and the flame. The reservoir sample is shaded after the loop.
+        if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
+            continue;
+        }
+#endif
         if (lamp_new && !shade_exact && !sun_lamp && chosen_n > 0u) {
             bool chosen = false;
             [[dont_unroll]] for (uint s = 0u; s < chosen_n; s++) {
@@ -792,6 +827,7 @@ void main() {
             }
         }
         if (shadow_lit) {
+            // The exact sum adds each lamp once.
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
             if (k < list.suns.y) {
@@ -799,6 +835,28 @@ void main() {
             }
         }
     }
+#ifdef GENOS_RESTIR_DI
+    // C5: the point lamps of a ReSTIR pixel are one sample, the final
+    // reservoir's lamp y, shaded as p(y) * V(y) * W with
+    // W = w_sum / (M * p_hat(y)) (unbiased RIS). The lamp comes from the
+    // reservoir prefix, so a lamp outside this pixel's cell list still
+    // counts. One shadow ray, for y only.
+    if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+        && restir_lamp < restir_words[0u]) {
+        uint la = restir_words[1u] + restir_lamp * 8u;
+        Lamp rl;
+        rl.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
+        rl.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
+        vec3 rt;
+        vec3 rlight = lamp_light(rl, origin, n, two_sided, rt);
+        if (rlight.r + rlight.g + rlight.b > 0.0) {
+            bool rvis = (gstats.ctrl_bits & 2u) == 0u || !trace_occluded(origin, rt);
+            if (rvis) {
+                e += rlight * restir_w;
+            }
+        }
+    }
+#endif
     n = n_hit;
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);

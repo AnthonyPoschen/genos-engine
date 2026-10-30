@@ -9,7 +9,8 @@
 //! C3 adds one spatial pass: the same neighbour list and order, then the
 //! balance weight over that list. History stays the post-temporal reservoir.
 //! `--reverse-neighbours` is the order fault and must fail `restir-ref diff`.
-//! The live lighting pass does not call this crate. Each path is off unless
+//! The live lighting pass includes these shaders. It does not call this crate.
+//! The live flag is `restir_di` on the renderer and stays off. Each checker path is off unless
 //! the flag or its mirror is set, so a bare invocation writes nothing.
 //!
 //! Departures are the CPU reference's departures (`crates/restir-ref/src/lib.rs`).
@@ -697,7 +698,7 @@ pub fn help_text() -> &'static str {
 restir-gpu — GPU ReSTIR DI candidates (stages C1, C2, C3, and C4)
 
 Each path is off unless a flag is set. A bare run writes nothing.
-The live direct pass does not call this binary.
+The live direct pass does not call this binary. It includes these shaders when restir_di is on.
 
 Usage:
   restir-gpu --initial [options]

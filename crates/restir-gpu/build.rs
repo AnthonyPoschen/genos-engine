@@ -27,6 +27,9 @@ fn main() {
 fn compile(out: &str, src: &str, spv_name: &str) {
     println!("cargo:rerun-if-changed={src}");
     println!("cargo:rerun-if-changed=shaders/restir_tree.glsl");
+    println!("cargo:rerun-if-changed=shaders/restir_sample.glsl");
+    println!("cargo:rerun-if-changed=shaders/restir_merge.glsl");
+    println!("cargo:rerun-if-changed=shaders/restir_spatial_ops.glsl");
     let status = Command::new("glslc")
         .args(["--target-env=vulkan1.0", "-I", "shaders", "-O", src, "-o"])
         .arg(format!("{out}/{spv_name}"))

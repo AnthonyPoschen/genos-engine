@@ -3516,6 +3516,36 @@ impl Gpu {
                         }
                     }
                 }
+                let restir_at = self.lighting.restir_query[slot];
+                if restir_at != u32::MAX {
+                    let mut raw = [0u64; 4];
+                    let restir_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            restir_at,
+                            4,
+                            32,
+                            raw.as_mut_ptr() as *mut c_void,
+                            8,
+                            0x1,
+                        )
+                    };
+                    if restir_got == 0 {
+                        let part = |a, b| ms_from_ticks(tick_delta(a, b, bits), period);
+                        let parts = [part(raw[0], raw[1]), part(raw[1], raw[2]), part(raw[2], raw[3])];
+                        let sum = parts[0] + parts[1] + parts[2];
+                        bucket_ms[B_DIRECT as usize] += sum;
+                        if times.print {
+                            times.lighting[3] += sum;
+                            times.lighting_bucket[B_DIRECT as usize] += sum;
+                            times.restir[0] += parts[0];
+                            times.restir[1] += parts[1];
+                            times.restir[2] += parts[2];
+                            times.restir_frames += 1;
+                        }
+                    }
+                }
                 if times.print {
                     times.lighting_frames += 1;
                     if prefill {
@@ -3586,7 +3616,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -3610,7 +3640,18 @@ impl Gpu {
                 self.last_unfilled
                     .map(|stats| format!(" | {}", stats.line()))
                     .unwrap_or_default(),
-                lamp_pick_line
+                lamp_pick_line,
+                if times.restir_frames > 0 {
+                    let n = f64::from(times.restir_frames);
+                    format!(
+                        " restir_initial={:.3} restir_temporal={:.3} restir_spatial={:.3}",
+                        times.restir[0] / n,
+                        times.restir[1] / n,
+                        times.restir[2] / n
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
         if !times.light_spans.is_empty() {
@@ -8287,6 +8328,13 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
     end.wrapping_sub(start) & mask
 }
 
+/// Timestamp delta to milliseconds. `period` is nanoseconds per tick.
+fn ms_from_ticks(delta: u64, period: f64) -> f64 {
+    let hi = u32::try_from(delta >> 32).unwrap_or(u32::MAX);
+    let lo = u32::try_from(delta & 0xffff_ffff).unwrap_or(0);
+    (f64::from(hi) * 4_294_967_296.0 + f64::from(lo)) * period / 1.0e6
+}
+
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
@@ -8542,11 +8590,18 @@ struct GpuTimes {
     /// line, to show how much of that work ran while a frame was on the GPU.
     frame_spans: Vec<(u64, u64)>,
     light_spans: Vec<(u64, u64)>,
+    /// ReSTIR DI pass sums (initial, temporal, spatial) over `restir_frames`.
+    restir: [f64; 3],
+    restir_frames: u32,
 }
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
 /// One before the passes, one after each dispatch, then the HDR pair when it fits.
-const LIGHTING_STAMPS: u32 = 28;
+/// The body stays 28 so the HDR pair does not move. ReSTIR DI uses four queries
+/// at [`RESTIR_STAMP_AT`] (before initial, after initial, after temporal, after spatial).
+const LIGHTING_STAMP_BODY: u32 = 28;
+const RESTIR_STAMP_AT: u32 = 32;
+const LIGHTING_STAMPS: u32 = 36;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
@@ -8599,6 +8654,8 @@ impl Default for GpuTimes {
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
+            restir: [0.0; 3],
+            restir_frames: 0,
         }
     }
 }
