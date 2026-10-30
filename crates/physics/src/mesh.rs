@@ -71,7 +71,7 @@ fn hull_from_points(points: &[Vec3]) -> Hull {
     fill_faces(&mut hull);
     let (edges, edge_count) = crate::contact::edge_directions(&hull);
     hull.edges = edges;
-    hull.edge_count = edge_count as u8;
+    hull.edge_count = u8::try_from(edge_count).unwrap_or(u8::MAX);
     hull
 }
 
