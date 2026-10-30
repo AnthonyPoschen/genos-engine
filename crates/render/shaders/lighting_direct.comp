@@ -688,10 +688,11 @@ void main() {
 #endif
 #ifdef GENOS_RESTIR_DI
     uint restir_scene = 0xffffffffu;
+    uint restir_lamp = 0xffffffffu;
     float restir_w = 0.0;
     if (restir_pix) {
         uint at = restir_words[6u] + idx * 4u;
-        uint restir_lamp = restir_words[at];
+        restir_lamp = restir_words[at];
         float restir_sum = uintBitsToFloat(restir_words[at + 1u]);
         uint restir_m = restir_words[at + 2u];
         float restir_target = uintBitsToFloat(restir_words[at + 3u]);
@@ -723,10 +724,10 @@ void main() {
         // A pixel reservoir already chose its point lamps. Skip the rest so the
         // shade walks the sample count, not the lamp list. The exact sum does not.
 #ifdef GENOS_RESTIR_DI
+        // ReSTIR replaces the point-lamp sum: this loop keeps only the suns
+        // and the flame. The reservoir sample is shaded after the loop.
         if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
-            if (!(restir_w > 0.0) || lamp_list_index(list, k) != restir_scene) {
-                continue;
-            }
+            continue;
         }
 #endif
         if (lamp_new && !shade_exact && !sun_lamp && chosen_n > 0u) {
@@ -782,13 +783,6 @@ void main() {
             take = times > 0.0;
             scale = times * step / w;
         }
-#ifdef GENOS_RESTIR_DI
-        if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
-            take = true;
-            times = 1.0;
-            scale = restir_w;
-        }
-#endif
         // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
         // Shadows off skips the trace and the cell. Hard traces every time.
         bool shadow_lit = false;
@@ -833,21 +827,36 @@ void main() {
             }
         }
         if (shadow_lit) {
-            // The exact sum adds each lamp once. A reservoir sample is
-            // unshadowed * W (the balance weight). Visibility already
-            // selected this lamp.
+            // The exact sum adds each lamp once.
             vec3 add = (!lamp_new && exact) ? light : light * scale;
-#ifdef GENOS_RESTIR_DI
-            if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
-                add = light * scale;
-            }
-#endif
             e += add;
             if (k < list.suns.y) {
                 e_sun += add;
             }
         }
     }
+#ifdef GENOS_RESTIR_DI
+    // C5: the point lamps of a ReSTIR pixel are one sample, the final
+    // reservoir's lamp y, shaded as p(y) * V(y) * W with
+    // W = w_sum / (M * p_hat(y)) (unbiased RIS). The lamp comes from the
+    // reservoir prefix, so a lamp outside this pixel's cell list still
+    // counts. One shadow ray, for y only.
+    if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+        && restir_lamp < restir_words[0u]) {
+        uint la = restir_words[1u] + restir_lamp * 8u;
+        Lamp rl;
+        rl.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
+        rl.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
+        vec3 rt;
+        vec3 rlight = lamp_light(rl, origin, n, two_sided, rt);
+        if (rlight.r + rlight.g + rlight.b > 0.0) {
+            bool rvis = (gstats.ctrl_bits & 2u) == 0u || !trace_occluded(origin, rt);
+            if (rvis) {
+                e += rlight * restir_w;
+            }
+        }
+    }
+#endif
     n = n_hit;
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
