@@ -8587,13 +8587,6 @@ impl Gpu {
         let traffic = traffic::snapshot();
         eprintln!("vk_traffic {}", traffic.line());
         eprintln!("vk_memory {}", traffic::memory_line());
-        // NVIDIA's threaded optimisations make vkDestroyDevice join driver
-        // worker threads, a known source of multi-second teardown stalls.
-        let threaded = std::env::var("__GL_THREADED_OPTIMIZATIONS");
-        eprintln!(
-            "vk_teardown_env gl_threaded_optimizations={}",
-            threaded.as_deref().unwrap_or("unset")
-        );
         let wait = self.fns.device_wait;
         teardown_phase("device_wait_idle", || unsafe {
             wait(device);
