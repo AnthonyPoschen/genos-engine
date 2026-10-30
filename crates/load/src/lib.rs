@@ -12,6 +12,7 @@ mod error;
 mod mips;
 mod pages;
 mod gltf;
+mod import;
 mod inflate;
 mod jpeg;
 mod material;
@@ -40,6 +41,7 @@ pub use gltf::{
     transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
     TextureSlot,
 };
+pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
