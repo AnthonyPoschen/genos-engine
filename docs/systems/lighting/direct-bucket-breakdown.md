@@ -146,8 +146,117 @@ unchanged-pixel share falls from 0.97 (flag off) to 0.42 (flag on). That points
 to reuse picking a different lamp each frame rather than holding one, which
 also explains the grid error.
 
+## Update, 30 Oct 18:00 run: the kept hits' shadow rays are not the cost
+
+4070, 30 Oct 18:00 AEDT, 2560x1440 stress, `GENOS_LIGHTING_LAMP_PICK_DIAG=1`.
+
+| Measure | Value |
+|---|---|
+| light_px, GI on | 14.2-14.7 ms |
+| light_px, GI off | ~4.3 ms |
+| lamp_px (shadow rays at pixels, one frame) | 17.66 M (~4.8 per pixel) |
+| lamp_kept (shadow rays at kept hits, one frame) | ~0.7 M |
+| Probe picks on (`LIGHTING_PROBE_PICKS` + `GENOS_LIGHTING_CACHE_PICKS=1`) | saves ~1.5 ms |
+
+This disproves the "1.8 M kept hits x full lamp loop of shadow rays" story
+above, and cut 1's 6-9 ms estimate with it. Kept hits trace ~25x fewer lamp
+rays than pixels, and picking at them saves only ~1.5 ms. The earlier
+sections are kept as written so the history is visible. They were wrong
+twice: first blaming GI hits, then blaming kept-hit shadow rays.
+
+### What the code makes certain
+
+- **The counter is honest.** `lighting_direct.comp` increments
+  `gstats.diag[48]` (stats word `LAMP_PICK_DIAG_WORD` = 72) once per real
+  `trace_occluded` with `idx < pixels`. That covers the sun and every point
+  lamp. A shadow-cell hit does not count. Pixels never use the cell
+  (`li = LAMP_ALL` for pixels), so every pixel lamp is traced. Slot 49 is kept
+  hits, 50 fills and 51 cache rays. The words are one frame's snapshot.
+- **No double taps.** The combined dispatch runs once per frame over
+  `pixels + 2 * kept` threads (`lighting_dispatch.rs`). A pixel thread shades
+  once. 4.8 rays per pixel is about 4-5 lamps in range plus the sun.
+- **The pixel path is the same with GI on or off.** The only GI-dependent
+  pixel code is S78J pixel reuse (`lighting_pix_reuse_on` needs GI on), which
+  only removes work. With movers it is off anyway (`lighting_pix_quiet`).
+  The second is reservoir reprojection, which matters only in lamp-pick modes.
+  Nothing in the pixel path adds rays when GI is on.
+- **`light_px` means different things in the two runs.** With GI on and
+  bounce > 0 it times the combined dispatch: pixels plus every kept and fill
+  slot. That is 3.7 M + 2 x 7.4 M = ~18.4 M threads. With GI off it is a
+  pixel-only dispatch (`ctrl_pixel_only`). The GI-on/GI-off difference is
+  therefore the hit half of the dispatch, not the pixels.
+- **The "direct off" row already isolates the hits.** With direct off, the
+  same kept/fill threads run alone (bias = pixels) under `light_hit`:
+  **9.84 ms**. So, to the precision of cross-run subtraction under load:
+
+| Part of GI-on light_px | ms |
+|---|---|
+| Pixels (17.66 M shadow rays) | ~4.4 (14.3 - 9.8, matches GI off 4.27) |
+| Kept + fill slots | ~9.8 |
+
+### Likely cause (code reading, needs a GPU check)
+
+The ~10 ms is the **per-slot work of the kept/fill half of the dispatch,
+apart from shadow rays**. It scales with lamps: no lamps gives 2.94 ms total,
+sun only 3.76 ms. It is barely touched by picks. Candidates, in order of
+likelihood:
+
+1. **The kept-relight gate itself.** All 7.4 M kept slots launch. Each loads
+   its hit record and rebuilds its stratum ray (`lighting_stratum_ray`) before
+   the S69C stratum test. The ~1.8 M in this frame's two strata then run the
+   held-probe checks and `lighting_wrc_lamp_changed` -> `lighting_lamp_delta`.
+   That walks the `LIGHTING_WRC_RING` of lamps moved recently, with two
+   `length()` calls and a range test each. With moving lamps the ring is full,
+   and with no lamps it is empty. That matches the no-lamps and sun-only rows,
+   and picks cannot help it. Since only 0.7 M kept rays are traced, most of
+   the 1.8 M must leave here or hit shadow cells.
+2. **Per-hit lamp bookkeeping that picks keep.** `lamps_at` per hit, and with
+   world mode 3 the S75 TDL path (`lighting_cache_find_sized`, a second
+   `lamps_at` at the texel, `lighting_tdl_sig`). Then the shade loop's
+   `lamp_light` per lamp plus a `lighting_shadow_get` (scattered `cache.v`
+   read) for every lamp, and `lighting_shadow_put` writes after traces. The
+   pick path still walks every lamp for its weights (the `if (pick)` loop).
+3. **Fill hits.** Fills are not under the S69C relight skip. Their traced
+   rays are in slot 50, which the 18:00 report did not list.
+4. `lighting_cache_irradiance_at` at hits is GI-only but does not scale with
+   lamps, so it is bounded by the 2.94 ms no-lamps row. It is unlikely to be
+   the 10 ms.
+
+Confidence: high that pixels are ~4.4 ms and do not grow with GI on. High that
+the GI-on extra is the kept/fill half. Medium-low on which per-slot work
+inside it dominates (1 vs 2 vs 3). Code reading has already been wrong twice
+on this pass.
+
+### 4070 A/Bs to confirm (1440p stress, 30-frame windows, same build)
+
+| # | Run | Expect if the hypothesis holds |
+|---|---|---|
+| A | GI off + `GENOS_LIGHTING_LAMP_PICK_DIAG=1` | lamp_px ~17.7 M, so pixel rays are the same with GI on or off |
+| B | Base + DIAG: print all of words 72-75 (px, kept, fills, cache) | fills small; if fills are many M, candidate 3 moves up |
+| C | Direct off, repeated at base / sun only / no lamps | light_hit ~9.8 / small / small: the kept-slot cost is lamp-dependent |
+| D | Local flip: `lighting_lamp_delta` returns -1 at once (gate always skips), or lamps stopped in the scene | big drop in kept-slot ms = candidate 1 (quality off, timing only) |
+| E | Local flip: `LIGHTING_TDL = false` | drop = TDL lookups (candidate 2) |
+| F | Local flip: `LIGHTING_SHADOW_CACHE = false` | slot 49 up; ms down would mean the cell reads cost more than the rays they save |
+| G | `GENOS_LIGHTING_TOGGLES=direct_only` | bounds the `irradiance_at` share at hits (candidate 4) |
+| H | Local diag: `lighting_dg` counters at each early `return` in the kept path (stratum skip, sun hold, relight gate) | how many of the 7.4 M slots get past each gate |
+
+### What changes in the ranked cuts
+
+- **Cut 1 (pick lamps at kept hits):** measured at ~1.5 ms, not 6-9. Keep it
+  only as a cheap add-on.
+- **Cut 2 (kept hits read the surface cache):** still the right shape,
+  because it removes the lamp loop, the cell reads and the TDL lookups at hits.
+  The saving is unproven until E/F show where the ms goes.
+- **New cut 0:** don't launch threads for kept slots outside this frame's two
+  strata. Compact the 1.8 M due hits into an indirect list, or index only
+  those strata, and make the relight gate cheap, e.g. one moved-lamp bound per
+  probe instead of a ring walk per hit. Size it after D and H.
+- **Pixels (~4.4 ms for 17.7 M rays):** the next target after the hits, and
+  the place where screen lamp sampling (C5) could pay off. 4.8 rays per pixel
+  down to ~2 would be worth ~2 ms if rays dominate the pixel cost.
+
 ## Open decision for Anthony
 
-Order of work: cut 1 first (smallest change, biggest measured target), then
-cut 2 if the 4070 A/B leaves the kept hits above ~2 ms. Cut 3 only if both fall
-short.
+Superseded by the 18:00 update. Run A/Bs A-H first (no rendering change).
+Then pick between cut 0 (launch and gate cost) and cut 2 (surface cache at
+hits) using whichever of D/E/F moves the kept-slot ms.
