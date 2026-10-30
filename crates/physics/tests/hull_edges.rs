@@ -1,6 +1,7 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
 
 //! Hull-vs-hull edge-to-edge contact. Two unit cubes, one turned 45 degrees
 //! about z and one about y, meet along x with crossed edges. Only the
@@ -44,10 +45,16 @@ fn crossed_cubes(gap: f32, mass_a: f32) -> World {
     let quarter = std::f32::consts::FRAC_PI_4;
     let mut a = Body::mesh(Vec3::ZERO, mass_a, &outward_box(HALF));
     a.orientation = Quat::from_axis_angle(Vec3::Z, quarter);
-    let mut b = Body::mesh(Vec3::new(2.0 * reach + gap, 0.0, 0.0), 1.0, &outward_box(HALF));
+    let mut b = Body::mesh(
+        Vec3::new(2.0 * reach + gap, 0.0, 0.0),
+        1.0,
+        &outward_box(HALF),
+    );
     b.orientation = Quat::from_axis_angle(Vec3::Y, quarter);
     for body in [&a, &b] {
-        let Shape::Mesh(mesh) = body.shape else { panic!("mesh") };
+        let Shape::Mesh(mesh) = body.shape else {
+            panic!("mesh")
+        };
         assert!(
             matches!(mesh.pieces[0], Piece::Hull(_)) && mesh.count == 1,
             "cube must reduce to one hull"
@@ -81,9 +88,15 @@ fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
     let moved_a = world.bodies[0].position - before[0];
     let moved_b = world.bodies[1].position - before[1];
     // Pushed apart along x only.
-    assert!(moved_a.x < 0.0 && moved_b.x > 0.0, "a {moved_a:?} b {moved_b:?}");
+    assert!(
+        moved_a.x < 0.0 && moved_b.x > 0.0,
+        "a {moved_a:?} b {moved_b:?}"
+    );
     for moved in [moved_a, moved_b] {
-        assert!(moved.y.abs() <= 1.0e-6 && moved.z.abs() <= 1.0e-6, "sideways {moved:?}");
+        assert!(
+            moved.y.abs() <= 1.0e-6 && moved.z.abs() <= 1.0e-6,
+            "sideways {moved:?}"
+        );
     }
     // Correction is bounded by the true edge depth, not a face overlap.
     let pushed = moved_b.x - moved_a.x;
@@ -98,7 +111,11 @@ fn an_edge_rests_on_a_crossed_static_edge() {
     let quarter = std::f32::consts::FRAC_PI_4;
     let mut a = Body::mesh(Vec3::ZERO, 0.0, &outward_box(HALF));
     a.orientation = Quat::from_axis_angle(Vec3::Z, quarter);
-    let mut b = Body::mesh(Vec3::new(0.0, 2.0 * reach + 0.2, 0.0), 1.0, &outward_box(HALF));
+    let mut b = Body::mesh(
+        Vec3::new(0.0, 2.0 * reach + 0.2, 0.0),
+        1.0,
+        &outward_box(HALF),
+    );
     b.orientation = Quat::from_axis_angle(Vec3::X, quarter);
     let mut world = World::new(Vec3::new(0.0, -9.81, 0.0));
     world.insert(a);
@@ -109,8 +126,16 @@ fn an_edge_rests_on_a_crossed_static_edge() {
     let body = world.bodies[1];
     let gap = body.position.y - 2.0 * reach;
     assert!(gap.abs() <= 0.02, "edge rest gap {gap}");
-    assert!(body.position.x.abs() <= 1.0e-4 && body.position.z.abs() <= 1.0e-4, "drift {:?}", body.position);
-    assert!(body.velocity.length() <= 0.05, "still moving {:?}", body.velocity);
+    assert!(
+        body.position.x.abs() <= 1.0e-4 && body.position.z.abs() <= 1.0e-4,
+        "drift {:?}",
+        body.position
+    );
+    assert!(
+        body.velocity.length() <= 0.05,
+        "still moving {:?}",
+        body.velocity
+    );
 }
 
 #[test]

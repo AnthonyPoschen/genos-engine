@@ -42,7 +42,7 @@
 
 use genos_math::{Quat, Vec3};
 
-use crate::{Body, Hull, Mesh, Piece, Shape};
+use crate::{Body, Hull, Mesh, Piece, Shape, MAX_HULL_EDGES};
 
 const SLOP: f32 = 0.001;
 const PERCENT: f32 = 0.8;
@@ -579,28 +579,46 @@ fn hull_body(owner: &Body, hull: &Hull, other: &Body) -> Option<(Vec3, f32)> {
     }
 }
 
-/// Separating-axis test on both hulls' face normals. The axis with the least
-/// overlap is the contact normal, pointing from `b` toward `a`. The old
-/// vertex-in-hull exit tested only `b`'s vertices and took the shallowest
-/// face per vertex, which on a face-to-face hit near an edge is a slanted
-/// side face and pushed the bodies sideways.
+/// Separating-axis test on both hulls' face normals and on the cross product
+/// of every pair of feature-edge directions. The axis with the least overlap
+/// is the contact normal, pointing from `b` toward `a`. Face-only SAT misses
+/// the edge-edge axis, so crossed edges read as touching when apart and as
+/// deep face overlap when they barely cross.
 fn hull_hull(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<(Vec3, f32)> {
+    hull_hull_contact(a, left, b, right).map(|hit| (hit.normal, hit.depth))
+}
+
+/// One hull-hull hit: normal from `b` toward `a`, depth, and a world point
+/// midway between the two surfaces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HullHit {
+    pub normal: Vec3,
+    pub depth: f32,
+    pub point: Vec3,
+}
+
+/// Edge axes win only when clearly shallower than the best face axis, so a
+/// face-to-face rest does not flicker onto a near-tied edge axis.
+const EDGE_AXIS_BIAS: f32 = 1.0e-3;
+/// `|ea x eb|` below this (unit edges) is treated as parallel and skipped.
+const PARALLEL_SINE: f32 = 1.0e-3;
+
+pub(crate) fn hull_hull_contact(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<HullHit> {
     if left.vert_count == 0 || right.vert_count == 0 {
         return None;
     }
+    // World-space vertices once per pair; every axis below projects them.
+    let world_a = world_verts(a, left);
+    let world_b = world_verts(b, right);
+    let (verts_a, verts_b) = (
+        &world_a[..usize::from(left.vert_count)],
+        &world_b[..usize::from(right.vert_count)],
+    );
     let mut best: Option<(Vec3, f32)> = None;
     for (owner, hull) in [(a, left), (b, right)] {
         for face in hull.faces.iter().take(hull.face_count as usize) {
             let axis = owner.orientation.rotate(face.normal);
-            let (min_a, max_a) = hull_extent(a, left, axis);
-            let (min_b, max_b) = hull_extent(b, right, axis);
-            let ahead = max_a - min_b;
-            let behind = max_b - min_a;
-            let (normal, depth) = if ahead <= behind {
-                (-axis, ahead)
-            } else {
-                (axis, behind)
-            };
+            let (normal, depth) = axis_overlap(verts_a, verts_b, axis);
             if depth < -1.0e-5 {
                 return None;
             }
@@ -610,18 +628,205 @@ fn hull_hull(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<(Vec3, f32
             };
         }
     }
-    best
+    let (face_normal, face_depth) = best?;
+    let (left_dirs, left_count) = (&left.edges, usize::from(left.edge_count));
+    let (right_dirs, right_count) = (&right.edges, usize::from(right.edge_count));
+    let mut edge: Option<(Vec3, f32, usize, usize)> = None;
+    for (i, local_a) in left_dirs.iter().take(left_count).enumerate() {
+        let ea = a.orientation.rotate(*local_a);
+        for (j, local_b) in right_dirs.iter().take(right_count).enumerate() {
+            let eb = b.orientation.rotate(*local_b);
+            let cross = ea.cross(eb);
+            let sine = cross.length();
+            if sine < PARALLEL_SINE || !sine.is_finite() {
+                continue;
+            }
+            let axis = cross / sine;
+            let (normal, depth) = axis_overlap(verts_a, verts_b, axis);
+            if depth < -1.0e-5 {
+                return None;
+            }
+            edge = match edge {
+                Some((_, kept, _, _)) if kept <= depth => edge,
+                _ => Some((normal, depth.max(0.0), i, j)),
+            };
+        }
+    }
+    if let Some((normal, depth, i, j)) = edge {
+        if depth + EDGE_AXIS_BIAS < face_depth {
+            let ea = a.orientation.rotate(left_dirs[i]);
+            let eb = b.orientation.rotate(right_dirs[j]);
+            // a's edge facing b (support along -normal), b's along +normal.
+            let (a0, a1) = support_edge(a, left, -normal, ea);
+            let (b0, b1) = support_edge(b, right, normal, eb);
+            let (on_a, on_b) = closest_between_segments(a0, a1, b0, b1);
+            return Some(HullHit {
+                normal,
+                depth,
+                point: (on_a + on_b) * 0.5,
+            });
+        }
+    }
+    let deepest_b = support_world(verts_b, face_normal);
+    Some(HullHit {
+        normal: face_normal,
+        depth: face_depth,
+        point: deepest_b - face_normal * (face_depth * 0.5),
+    })
 }
 
-fn hull_extent(body: &Body, hull: &Hull, axis: Vec3) -> (f32, f32) {
+/// Overlap of the two hulls on `axis`, and the normal (from `b` toward `a`)
+/// that resolves it. Negative depth means `axis` separates them.
+fn axis_overlap(verts_a: &[Vec3], verts_b: &[Vec3], axis: Vec3) -> (Vec3, f32) {
+    let (min_a, max_a) = extent(verts_a, axis);
+    let (min_b, max_b) = extent(verts_b, axis);
+    let ahead = max_a - min_b;
+    let behind = max_b - min_a;
+    if ahead <= behind {
+        (-axis, ahead)
+    } else {
+        (axis, behind)
+    }
+}
+
+/// Unit directions of the hull's feature edges in local space, one per
+/// parallel family. Triangle diagonals inside a flat face are skipped.
+/// Runs when the hull is built, not in the step.
+pub(crate) fn edge_directions(hull: &Hull) -> ([Vec3; MAX_HULL_EDGES], usize) {
+    let mut dirs = [Vec3::ZERO; MAX_HULL_EDGES];
+    let mut count = 0;
+    let faces = &hull.faces[..hull.face_count as usize];
+    for (f, face) in faces.iter().enumerate() {
+        for k in 0..3 {
+            let i0 = face.index[k];
+            let i1 = face.index[(k + 1) % 3];
+            let neighbour = faces.iter().enumerate().find(|(g, other)| {
+                *g != f && (0..3).any(|m| other.index[m] == i1 && other.index[(m + 1) % 3] == i0)
+            });
+            if let Some((_, other)) = neighbour {
+                if other.normal.dot(face.normal) > 1.0 - 1.0e-4 {
+                    continue;
+                }
+            }
+            let edge = hull.verts[usize::from(i1)] - hull.verts[usize::from(i0)];
+            let length = edge.length();
+            if length < 1.0e-6 {
+                continue;
+            }
+            let dir = edge / length;
+            let known = dirs[..count]
+                .iter()
+                .any(|kept: &Vec3| kept.cross(dir).length() < PARALLEL_SINE);
+            if !known && count < MAX_HULL_EDGES {
+                dirs[count] = dir;
+                count += 1;
+            }
+        }
+    }
+    (dirs, count)
+}
+
+fn world_verts(body: &Body, hull: &Hull) -> [Vec3; crate::MAX_HULL_VERTS] {
+    let mut out = [body.position; crate::MAX_HULL_VERTS];
+    for (slot, vertex) in out
+        .iter_mut()
+        .zip(hull.verts.iter().take(usize::from(hull.vert_count)))
+    {
+        *slot = body.position + body.orientation.rotate(*vertex);
+    }
+    out
+}
+
+fn extent(verts: &[Vec3], axis: Vec3) -> (f32, f32) {
     let mut low = f32::INFINITY;
     let mut high = f32::NEG_INFINITY;
-    for vertex in hull.verts.iter().take(hull.vert_count as usize) {
-        let along = axis.dot(body.position + body.orientation.rotate(*vertex));
+    for vertex in verts {
+        let along = axis.dot(*vertex);
         low = low.min(along);
         high = high.max(along);
     }
     (low, high)
+}
+
+fn support_world(verts: &[Vec3], direction: Vec3) -> Vec3 {
+    let mut best = Vec3::ZERO;
+    let mut best_dot = f32::NEG_INFINITY;
+    for world in verts.iter().copied() {
+        let along = direction.dot(world);
+        if along > best_dot {
+            best_dot = along;
+            best = world;
+        }
+    }
+    best
+}
+
+/// The world-space hull edge parallel to `dir` that reaches furthest along
+/// `direction`.
+fn support_edge(body: &Body, hull: &Hull, direction: Vec3, dir: Vec3) -> (Vec3, Vec3) {
+    let mut best = (body.position, body.position);
+    let mut best_dot = f32::NEG_INFINITY;
+    for face in hull.faces.iter().take(hull.face_count as usize) {
+        for k in 0..3 {
+            let p0 = body.position
+                + body
+                    .orientation
+                    .rotate(hull.verts[usize::from(face.index[k])]);
+            let p1 = body.position
+                + body
+                    .orientation
+                    .rotate(hull.verts[usize::from(face.index[(k + 1) % 3])]);
+            let edge = p1 - p0;
+            let length = edge.length();
+            if length < 1.0e-6 || (edge / length).cross(dir).length() >= PARALLEL_SINE {
+                continue;
+            }
+            let along = direction.dot(p0 + p1);
+            if along > best_dot {
+                best_dot = along;
+                best = (p0, p1);
+            }
+        }
+    }
+    best
+}
+
+/// Closest points between segments `p0-p1` and `q0-q1`.
+fn closest_between_segments(p0: Vec3, p1: Vec3, q0: Vec3, q1: Vec3) -> (Vec3, Vec3) {
+    let d1 = p1 - p0;
+    let d2 = q1 - q0;
+    let offset = p0 - q0;
+    let len_p = d1.dot(d1);
+    let len_q = d2.dot(d2);
+    let q_off = d2.dot(offset);
+    if len_p <= 1.0e-12 && len_q <= 1.0e-12 {
+        return (p0, q0);
+    }
+    let (sp, tq) = if len_p <= 1.0e-12 {
+        (0.0, (q_off / len_q).clamp(0.0, 1.0))
+    } else {
+        let p_off = d1.dot(offset);
+        if len_q <= 1.0e-12 {
+            ((-p_off / len_p).clamp(0.0, 1.0), 0.0)
+        } else {
+            let mix = d1.dot(d2);
+            let denom = len_p * len_q - mix * mix;
+            let sp = if denom > 1.0e-12 {
+                ((mix * q_off - p_off * len_q) / denom).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let tq = (mix * sp + q_off) / len_q;
+            if tq < 0.0 {
+                ((-p_off / len_p).clamp(0.0, 1.0), 0.0)
+            } else if tq > 1.0 {
+                (((mix - p_off) / len_p).clamp(0.0, 1.0), 1.0)
+            } else {
+                (sp, tq)
+            }
+        }
+    };
+    (p0 + d1 * sp, q0 + d2 * tq)
 }
 
 fn sphere_hull(center: Vec3, radius: f32, hull: &Hull) -> Option<(Vec3, f32)> {
@@ -1054,4 +1259,95 @@ pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetratio
         b.position -= correction * b.inverse_mass;
     }
     dynamic_hit
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use genos_math::{Quat, Vec3};
+
+    use super::hull_hull_contact;
+    use crate::{Body, Piece, Shape};
+
+    fn cube(position: Vec3, axis: Vec3) -> Body {
+        let h = 0.5;
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x * h, y * h, z * h);
+        let (nnn, pnn, ppn, npn) = (
+            v(-1., -1., -1.),
+            v(1., -1., -1.),
+            v(1., 1., -1.),
+            v(-1., 1., -1.),
+        );
+        let (nnp, pnp, ppp, npp) = (
+            v(-1., -1., 1.),
+            v(1., -1., 1.),
+            v(1., 1., 1.),
+            v(-1., 1., 1.),
+        );
+        let triangles = [
+            [pnn, ppn, ppp],
+            [pnn, ppp, pnp],
+            [nnn, nnp, npp],
+            [nnn, npp, npn],
+            [npn, npp, ppp],
+            [npn, ppp, ppn],
+            [nnn, pnn, pnp],
+            [nnn, pnp, nnp],
+            [nnp, pnp, ppp],
+            [nnp, ppp, npp],
+            [nnn, npn, ppn],
+            [nnn, ppn, pnn],
+        ];
+        let mut body = Body::mesh(position, 1.0, &triangles);
+        body.orientation = Quat::from_axis_angle(axis, std::f32::consts::FRAC_PI_4);
+        body
+    }
+
+    fn hull(body: &Body) -> crate::Hull {
+        let Shape::Mesh(mesh) = body.shape else {
+            unreachable!()
+        };
+        let Piece::Hull(hull) = mesh.pieces[0] else {
+            unreachable!()
+        };
+        hull
+    }
+
+    #[test]
+    fn crossed_edges_give_the_edge_axis_depth_and_point() {
+        let reach = 0.5 * std::f32::consts::SQRT_2;
+        let a = cube(Vec3::ZERO, Vec3::Z);
+        let b = cube(Vec3::new(2.0 * reach - 0.05, 0.0, 0.0), Vec3::Y);
+        let hit = hull_hull_contact(&a, &hull(&a), &b, &hull(&b)).unwrap_or_else(|| unreachable!());
+        assert!(
+            (hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1.0e-4,
+            "{hit:?}"
+        );
+        assert!((hit.depth - 0.05).abs() < 1.0e-4, "{hit:?}");
+        assert!(
+            (hit.point - Vec3::new(reach - 0.025, 0.0, 0.0)).length() < 1.0e-4,
+            "{hit:?}"
+        );
+    }
+
+    #[test]
+    fn crossed_edges_apart_have_no_hit() {
+        let reach = 0.5 * std::f32::consts::SQRT_2;
+        let a = cube(Vec3::ZERO, Vec3::Z);
+        let b = cube(Vec3::new(2.0 * reach + 0.01, 0.0, 0.0), Vec3::Y);
+        assert!(hull_hull_contact(&a, &hull(&a), &b, &hull(&b)).is_none());
+    }
+
+    #[test]
+    fn aligned_cubes_keep_the_face_axis() {
+        let mut a = cube(Vec3::ZERO, Vec3::Z);
+        let mut b = cube(Vec3::new(0.95, 0.0, 0.0), Vec3::Z);
+        a.orientation = Quat::IDENTITY;
+        b.orientation = Quat::IDENTITY;
+        let hit = hull_hull_contact(&a, &hull(&a), &b, &hull(&b)).unwrap_or_else(|| unreachable!());
+        assert!(
+            (hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1.0e-6,
+            "{hit:?}"
+        );
+        assert!((hit.depth - 0.05).abs() < 1.0e-5, "{hit:?}");
+    }
 }
