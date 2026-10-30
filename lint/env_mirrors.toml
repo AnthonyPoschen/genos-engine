@@ -1462,6 +1462,11 @@ detail = "--out"
 
 
 [[var]]
+name = "GENOS_PBR_PARITY_DEVICE"
+kind = "test"
+detail = "harness only"
+
+[[var]]
 name = "GENOS_TEST_TIMEOUT_SECS"
 kind = "test"
 detail = "material_stream watchdog seconds"
