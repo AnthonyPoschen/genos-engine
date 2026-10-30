@@ -1063,14 +1063,24 @@ bool lighting_sc_may_free(uint slot, uint last, uint shown) {
 // texel not lit yet); w is that parent's set count, 0 when there is none. Detail levels read one step
 // further here (1 m). Coarser parents are lighting_sc_level_tail: a fourth
 // copy of this body overflowed lavapipe.
+// A direct-pass ray hit (kept or probe) walks the parent as master does: two
+// levels, no wall test, no coarse tail. The fill at a hit runs once per hit
+// every frame, and on a turn most hits land in new cells, so the third level,
+// each level's scene_inside and wall ray, and the tail's three claims kept the
+// s1 direct pass at 16.6 ms against master's 9.6 after b009a12. The hit light
+// is averaged by the probe gather, so a hit takes master's leak risk.
+bool lighting_sc_parent_full() {
+    return lighting_hit_kind == 0u;
+}
 vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
+    bool full = lighting_sc_parent_full();
     // Constant trip count. A runtime bound on this loop faulted lavapipe.
     // The tail view starts at 1 m. The loop would return a finer parent first.
-    if (lighting_tail_view()) {
+    if (lighting_tail_view() && full) {
         size = 1.0;
     } else {
         [[dont_unroll]] for (uint l = 0u; l < 3u; l++) {
-            if (l == 2u && !lighting_levels_on()) {
+            if (l == 2u && !(lighting_levels_on() && full)) {
                 continue;
             }
             size *= 2.0;
@@ -1086,14 +1096,14 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
                 vec4 v = cache.v[3u * s + 2u];
                 // A finished finer parent still has to be this surface. The tail's
                 // test does not run once this walk returns.
-                if (v.w > 0.5 && lighting_level_valid(pos, cache.v[3u * s].xyz, n, size)) {
+                if (v.w > 0.5 && (!full || lighting_level_valid(pos, cache.v[3u * s].xyz, n, size))) {
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     return vec4(v.rgb, v.w);
                 }
             }
         }
     }
-    if (!lighting_levels_on()) {
+    if (!lighting_levels_on() || !full) {
         return vec4(0.0);
     }
     // `size` is 1 m when this walk started at 12.5 cm, and 2 m when it
