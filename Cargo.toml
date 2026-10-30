@@ -27,6 +27,7 @@ members = [
     "examples/stress",
     "debug/scene-lib",
     "debug/lighting",
+    "debug/physics",
 ]
 
 [workspace.lints.rust]
