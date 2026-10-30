@@ -13,6 +13,7 @@
 mod format;
 pub mod ktx2;
 mod package;
+mod texture;
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,11 @@ use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshIn
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
 pub use package::{manifest, Manifest};
+pub use texture::{
+    cook_textures, cook_textures_file, decode_textures, encode_image, encode_textures,
+    load_textures, texture_settings_hash, textures_path, CookedTexture, CookedTextures,
+    TEXTURE_MAGIC, TEXTURE_VERSION,
+};
 
 /// One cooked mesh: the glTF primitives as imported and the bake key.
 #[derive(Clone, Debug, PartialEq)]
@@ -111,18 +117,10 @@ pub fn cook(doc: &ImportDoc, settings: &BakeSettings) -> Result<Cooked, CookErro
             bake_key: baked.key,
         });
     }
-    let mut inputs = vec![Input {
-        uri: String::new(),
-        hash: doc.asset_id,
-    }];
-    inputs.extend(doc.externals.iter().map(|(uri, bytes)| Input {
-        uri: uri.clone(),
-        hash: sha256(bytes),
-    }));
     Ok(Cooked {
         asset_id: doc.asset_id,
         settings: settings_hash(settings),
-        inputs,
+        inputs: inputs_of(doc),
         meshes,
         instances: scene.instances.clone(),
         unsupported: doc
@@ -182,15 +180,32 @@ fn up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSetting
     let Ok(header) = format::decode_header(existing) else {
         return false;
     };
-    header.settings == settings_hash(settings)
-        && header.inputs.iter().all(|input| {
-            let bytes = if input.uri.is_empty() {
-                Some(source.to_vec())
-            } else {
-                std::fs::read(dir.join(&input.uri)).ok()
-            };
-            bytes.is_some_and(|b| sha256(&b) == input.hash)
-        })
+    header.settings == settings_hash(settings) && inputs_match(&header.inputs, source, dir)
+}
+
+/// The source and every external it read, with their hashes.
+pub(crate) fn inputs_of(doc: &ImportDoc) -> Vec<Input> {
+    let mut inputs = vec![Input {
+        uri: String::new(),
+        hash: doc.asset_id,
+    }];
+    inputs.extend(doc.externals.iter().map(|(uri, bytes)| Input {
+        uri: uri.clone(),
+        hash: sha256(bytes),
+    }));
+    inputs
+}
+
+/// Every recorded input still hashes the same. Reads files; decodes nothing.
+pub(crate) fn inputs_match(inputs: &[Input], source: &[u8], dir: &Path) -> bool {
+    inputs.iter().all(|input| {
+        let bytes = if input.uri.is_empty() {
+            Some(source.to_vec())
+        } else {
+            std::fs::read(dir.join(&input.uri)).ok()
+        };
+        bytes.is_some_and(|b| sha256(&b) == input.hash)
+    })
 }
 
 /// Read and check a `.gcook`: magic, version and the SHA-256 trailer.

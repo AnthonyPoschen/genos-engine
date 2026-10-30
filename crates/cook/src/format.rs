@@ -155,7 +155,7 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header, CookError> {
     header(&mut R { b: body, at: 0 }).map(|(_, h)| h)
 }
 
-fn checked_body(bytes: &[u8]) -> Result<&[u8], CookError> {
+pub(crate) fn checked_body(bytes: &[u8]) -> Result<&[u8], CookError> {
     let split = bytes
         .len()
         .checked_sub(32)
@@ -187,17 +187,17 @@ fn header(r: &mut R) -> Result<([u8; 32], Header), CookError> {
     Ok((asset_id, Header { settings, inputs }))
 }
 
-struct W(Vec<u8>);
+pub(crate) struct W(pub(crate) Vec<u8>);
 
 impl W {
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.0.extend_from_slice(&v.to_le_bytes());
     }
-    fn len(&mut self, n: usize) {
+    pub(crate) fn len(&mut self, n: usize) {
         self.0
             .extend_from_slice(&u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes());
     }
-    fn str(&mut self, s: &str) {
+    pub(crate) fn str(&mut self, s: &str) {
         self.len(s.len());
         self.0.extend_from_slice(s.as_bytes());
     }
@@ -213,13 +213,13 @@ impl W {
     }
 }
 
-struct R<'a> {
-    b: &'a [u8],
-    at: usize,
+pub(crate) struct R<'a> {
+    pub(crate) b: &'a [u8],
+    pub(crate) at: usize,
 }
 
 impl R<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], CookError> {
+    pub(crate) fn take(&mut self, n: usize) -> Result<&[u8], CookError> {
         let end = self.at.checked_add(n).ok_or(CookError::Corrupt("length"))?;
         let s = self
             .b
@@ -228,15 +228,15 @@ impl R<'_> {
         self.at = end;
         Ok(s)
     }
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], CookError> {
+    pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], CookError> {
         self.take(N)?
             .try_into()
             .map_err(|_| CookError::Corrupt("truncated"))
     }
-    fn u32(&mut self) -> Result<u32, CookError> {
+    pub(crate) fn u32(&mut self) -> Result<u32, CookError> {
         Ok(u32::from_le_bytes(self.array()?))
     }
-    fn len(&mut self) -> Result<usize, CookError> {
+    pub(crate) fn len(&mut self) -> Result<usize, CookError> {
         let n = u64::from_le_bytes(self.array()?);
         let n = usize::try_from(n).map_err(|_| CookError::Corrupt("length"))?;
         if n > self.b.len() {
@@ -244,7 +244,7 @@ impl R<'_> {
         }
         Ok(n)
     }
-    fn str(&mut self) -> Result<String, CookError> {
+    pub(crate) fn str(&mut self) -> Result<String, CookError> {
         let n = self.len()?;
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| CookError::Corrupt("utf-8"))
     }
