@@ -84,9 +84,9 @@ These bind every step.
 | Composite glyphs, kerning, hinting | missing | `ttf.rs` returns an error for a composite glyph. |
 | Content-addressed cache for source files | done | `crates/load/src/cache.rs` `store_object`, `store_import`: SHA-256 (`sha256.rs`) at `<dir>/objects/<hex>`, temp file then rename. The bake cache stays FNV-1a. |
 | Import document | done | `crates/load/src/import.rs` `ImportDoc`, `import_file`. Unused glTF arrays are kept as JSON with a `Note`. `examples/import_report.rs`. |
-| Offline cook to `.gcook` | partial | `crates/cook` (`genos-cook`). Geometry, instances and the bake key, with input hashes and a SHA-256 trailer. Materials, images, meshlets and LOD are not cooked yet. The renderer does not read `.gcook`. |
+| Offline cook to `.gcook` | partial | `crates/cook` (`genos-cook`). Geometry, instances and the bake key, with input hashes and a SHA-256 trailer. Images cook to a separate `.gtex` (next row). Materials, meshlets and LOD are not cooked yet. The renderer does not read `.gcook`. |
 | Meshopt, meshlets, LOD | missing | GI design names up to 4 LODs. None are built. |
-| BC7, ASTC, KTX2, Basis | missing | |
+| BC7, ASTC, KTX2, Basis | partial | `crates/cook/src/ktx2.rs` writes and reads KTX2 (BC7 unorm / sRGB, BC5, ASTC 4×4 formats named). `crates/cook/src/texture.rs` cooks every glTF image with `genos_load::mip_chain` in the space from `image_spaces`: colour BC7 sRGB, data BC7 unorm, normals BC5. Encoder `intel_tex_2` (ISPC), a cook-only dependency in place of the step 12 Basis vendor. Record `<asset>.gtex`, same input hashes, settings hash and SHA-256 trailer as `.gcook`; `genos-cook --textures`. No ASTC encode yet. The runtime does not read `.gtex`. |
 | Virtual textures, mesh streaming, GPU-driven scene draws | missing | Lighting uses `vkCmdDispatchIndirect` (`lighting_gpu.rs`). Scene draws use `vkCmdDraw`. |
 | Hot reload of a cooked file | missing | Shaders are compiled by `crates/render/build.rs` at build time. |
 | Package manifest | done | `crates/cook/src/package.rs`. One line per asset; `genos-cook --verify DIR` checks every hash. |

@@ -10,3 +10,7 @@ workspace = true
 [dependencies]
 genos-bake = { path = "../bake" }
 genos-load = { path = "../load" }
+intel_tex_2 = "0.5"
+
+[dev-dependencies]
+bcdec_rs = "0.2"

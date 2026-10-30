@@ -419,7 +419,18 @@ fn level_colour(mip: &Mip) -> [f32; 4] {
 }
 
 fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
-    let mut spaces = vec![MipSpace::Linear; images.len()];
+    images
+        .iter()
+        .zip(image_spaces(images.len(), materials))
+        .map(|(image, space)| mip_chain(image, space))
+        .collect()
+}
+
+/// How each image is filtered, from the material slots that name it. An image
+/// no material names is `Linear`. A later slot wins: normal over colour over data.
+#[must_use]
+pub fn image_spaces(images: usize, materials: &[PbrMaterial]) -> Vec<MipSpace> {
+    let mut spaces = vec![MipSpace::Linear; images];
     for material in materials {
         paint_space(&mut spaces, material.metallic_roughness_texture, MipSpace::Linear);
         paint_space(&mut spaces, material.occlusion_texture, MipSpace::Linear);
@@ -427,11 +438,7 @@ fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
         paint_space(&mut spaces, material.emissive_texture, MipSpace::Srgb);
         paint_space(&mut spaces, material.normal_texture, MipSpace::Normal);
     }
-    images
-        .iter()
-        .zip(spaces)
-        .map(|(image, space)| mip_chain(image, space))
-        .collect()
+    spaces
 }
 
 fn paint_space(spaces: &mut [MipSpace], slot: Option<TextureSlot>, space: MipSpace) {

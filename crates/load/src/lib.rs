@@ -40,8 +40,8 @@ pub use pages::{
 };
 pub use error::LoadError;
 pub use gltf::{
-    transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial, Primitive, Sampler,
-    TextureSlot,
+    image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial,
+    Primitive, Sampler, TextureSlot,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;
