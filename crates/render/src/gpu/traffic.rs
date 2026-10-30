@@ -10,7 +10,7 @@
 use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, PoisonError};
 
 use super::{Fns, Handle, VkResult};
 
@@ -124,7 +124,7 @@ fn book_free(memory: Handle) -> Option<(u64, u32)> {
 /// to 25 s), so the driver pays at teardown for every allocate and free the
 /// run made. Streaming frees and reallocates the same page sizes over and
 /// over. Parking a freed block and handing it back skips the driver for the
-/// repeat. `GENOS_VK_MEM_RECYCLE=0` turns this off for an A/B run.
+/// repeat. Compare against the commit before this one for an A/B run.
 static PARKED: Mutex<Parked> = Mutex::new(Parked::new());
 
 /// Most bytes held parked. Older blocks go back to the driver past this.
@@ -154,11 +154,6 @@ impl Parked {
             reused: 0,
         }
     }
-}
-
-fn recycle_on() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("GENOS_VK_MEM_RECYCLE").as_deref() != Ok("0"))
 }
 
 fn parked() -> std::sync::MutexGuard<'static, Parked> {
@@ -219,13 +214,8 @@ pub(super) fn memory_line() -> String {
     let park = parked();
     let _ = write!(
         line,
-        " driver_allocs={} driver_frees={} driver_bytes={} reused_allocs={} parked_bytes={} recycle={}",
-        park.driver_allocs,
-        park.driver_frees,
-        park.driver_bytes,
-        park.reused,
-        park.bytes,
-        recycle_on()
+        " driver_allocs={} driver_frees={} driver_bytes={} reused_allocs={} parked_bytes={}",
+        park.driver_allocs, park.driver_frees, park.driver_bytes, park.reused, park.bytes
     );
     drop(park);
     let book = MEMORY.lock().unwrap_or_else(PoisonError::into_inner);
@@ -536,10 +526,7 @@ unsafe extern "system" fn counted_alloc_mem(
     bump(ALLOC_MEM);
     let request = (!info.is_null()).then(|| std::ptr::read_unaligned(info.cast::<AllocInfo>()));
     let plain = request.as_ref().is_some_and(|r| r.next.is_null()) && alloc.is_null();
-    if let Some(request) = request
-        .as_ref()
-        .filter(|_| plain && recycle_on() && !out.is_null())
-    {
+    if let Some(request) = request.as_ref().filter(|_| plain && !out.is_null()) {
         if let Some(memory) = take_parked(device, request.size, request.index) {
             *out = memory;
             book_alloc(memory, request.size, request.index, true);
@@ -547,7 +534,7 @@ unsafe extern "system" fn counted_alloc_mem(
         }
     }
     let mut result = (real().alloc_mem)(device, info, alloc, out);
-    if result == super::VK_ERROR_OUT_OF_DEVICE_MEMORY && recycle_on() {
+    if result == super::VK_ERROR_OUT_OF_DEVICE_MEMORY {
         // Parked blocks hold device memory the app already gave back.
         free_parked(device);
         result = (real().alloc_mem)(device, info, alloc, out);
@@ -569,7 +556,7 @@ unsafe extern "system" fn counted_free_mem(device: Handle, memory: Handle, alloc
         return;
     }
     let known = book_free(memory);
-    if let Some((size, index)) = known.filter(|_| recycle_on() && alloc.is_null()) {
+    if let Some((size, index)) = known.filter(|_| alloc.is_null()) {
         if size <= PARK_CAP_BYTES {
             park(device, memory, size, index);
             return;
