@@ -2959,7 +2959,7 @@ mod tests {
             lamp_names,
             ["off", "hits", "pixels", "both", "reuse"]
         );
-        assert_eq!(lamp.value, 1.0, "high samples hits");
+        assert_eq!(lamp.value, 4.0, "high uses the lamp reservoir (reuse)");
         let sliders: Vec<&str> = rows
             .iter()
             .filter(|row| row.slider.is_some())
