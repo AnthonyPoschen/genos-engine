@@ -85,24 +85,46 @@ float load_f(uint index) {
 #define RESTIR_LIVE_RECEIVER
 #define RESTIR_LIVE_PHAT
 
+// One surface per invocation. The tree walk asks for the receiver at every
+// node it scores and p̂ asks again per candidate; both are this pixel, so the
+// G-buffer is decoded once (same values, so the estimator is unchanged).
+uint g_surf_recv;
+bool g_surf_ok;
+vec3 g_surf_pos;
+vec3 g_surf_n;
+bool g_surf_two;
+
+bool restir_surface_of(uint recv, out vec3 pos, out vec3 n, out bool two_sided) {
+    if (recv != g_surf_recv) {
+        g_surf_recv = recv;
+        g_surf_ok = false;
+        g_surf_pos = vec3(0.0);
+        g_surf_n = vec3(0.0, 1.0, 0.0);
+        g_surf_two = false;
+        uint width = restir_hdr(7u);
+        uint height = restir_hdr(8u);
+        if (width != 0u && recv < width * height) {
+            vec3 albedo;
+            g_surf_ok = lighting_surface(uvec2(recv % width, recv / width), g_surf_pos, g_surf_n, albedo, g_surf_two);
+        }
+    }
+    pos = g_surf_pos;
+    n = g_surf_n;
+    two_sided = g_surf_two;
+    return g_surf_ok;
+}
+
 void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
-    uint width = restir_hdr(7u);
-    uint height = restir_hdr(8u);
     px = 0.0;
     py = 0.0;
     pz = 0.0;
     nx = 0.0;
     ny = 1.0;
     nz = 0.0;
-    if (width == 0u || recv >= width * height) {
-        return;
-    }
-    uvec2 p = uvec2(recv % width, recv / width);
     vec3 pos;
     vec3 n;
-    vec3 albedo;
     bool two_sided;
-    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+    if (!restir_surface_of(recv, pos, n, two_sided)) {
         return;
     }
     px = pos.x;
@@ -114,17 +136,13 @@ void restir_receiver(uint recv, out float px, out float py, out float pz, out fl
 }
 
 float restir_phat(uint recv, uint lamp) {
-    uint width = restir_hdr(7u);
-    uint height = restir_hdr(8u);
-    if (width == 0u || recv >= width * height || lamp >= restir_hdr(0u)) {
+    if (lamp >= restir_hdr(0u)) {
         return 0.0;
     }
-    uvec2 p = uvec2(recv % width, recv / width);
     vec3 pos;
     vec3 n;
-    vec3 albedo;
     bool two_sided;
-    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+    if (!restir_surface_of(recv, pos, n, two_sided)) {
         return 0.0;
     }
     uint at = restir_hdr(1u) + lamp * 8u;
@@ -389,6 +407,7 @@ void main() {
         return;
     }
     uint pass_id = (pc.lamp.y >> 22u) & 3u;
+    g_surf_recv = 0xffffffffu;
     restir_rng(pixel, pass_id);
     if (pass_id == 0u) {
         restir_initial(pixel);
