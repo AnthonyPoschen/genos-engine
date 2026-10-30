@@ -444,23 +444,67 @@ const GUARD_TURN_FULL_RAD: f32 = std::f32::consts::PI;
 /// Extra fraction of the display added on the leading edge at that rate.
 const GUARD_TURN_EXTRA: f32 = 0.10;
 
-/// `base` is the symmetric extra on each axis (High 0.08), split across the
-/// two edges. A turn adds up to [`GUARD_TURN_EXTRA`] on the leading edge.
-/// The share is `yaw / π`, so 0.05 rad does not saturate. `yaw_delta` > 0
-/// turns toward +X (screen right). `pitch_delta` > 0 looks up.
+/// Per-frame turn on one axis below which that axis gets no guard band.
+/// 0.002 rad is about 7 degrees a second at 60 Hz. A still camera, a strafe,
+/// or the slow pitch drift in S5 reveals almost nothing at the screen edge,
+/// so the band there was pure extra work (S6 settle paid about 1.17x area).
+pub const GUARD_STILL_RAD: f32 = 0.002;
+/// Frames an axis keeps its band after its turn drops below
+/// [`GUARD_STILL_RAD`]. A one-frame pause (a path joint) would otherwise
+/// shrink and regrow the lit target, and each size change waits for the GPU.
+pub const GUARD_HOLD_FRAMES: u32 = 30;
+
+/// `base` is the guard on a turning axis (High 0.08). Half of it goes on the
+/// leading edge, plus up to [`GUARD_TURN_EXTRA`] at `delta / π`. The trailing
+/// edge gets nothing: those pixels leave the view, so their history is never
+/// read. An axis turning slower than [`GUARD_STILL_RAD`] gets no band.
+/// `yaw_delta` > 0 turns toward +X (screen right). `pitch_delta` > 0 looks up.
 #[must_use]
 pub fn bias_guard(base: f32, yaw_delta: f32, pitch_delta: f32) -> GuardEdges {
     let base = if base.is_finite() { base.clamp(0.0, 0.5) } else { 0.0 };
-    let half = base * 0.5;
-    let yaw = if yaw_delta.is_finite() { yaw_delta } else { 0.0 };
-    let pitch = if pitch_delta.is_finite() { pitch_delta } else { 0.0 };
-    let turn_x = (yaw / GUARD_TURN_FULL_RAD).clamp(-1.0, 1.0) * GUARD_TURN_EXTRA;
-    let turn_y = (pitch / GUARD_TURN_FULL_RAD).clamp(-1.0, 1.0) * GUARD_TURN_EXTRA;
+    let (left, right) = axis_guard(base, yaw_delta);
+    let (bottom, top) = axis_guard(base, pitch_delta);
     GuardEdges {
-        left: half + (-turn_x).max(0.0),
-        right: half + turn_x.max(0.0),
-        bottom: half + (-turn_y).max(0.0),
-        top: half + turn_y.max(0.0),
+        left,
+        right,
+        bottom,
+        top,
+    }
+}
+
+/// `(negative edge, positive edge)` for one axis.
+fn axis_guard(base: f32, delta: f32) -> (f32, f32) {
+    if !delta.is_finite() || delta.abs() < GUARD_STILL_RAD {
+        return (0.0, 0.0);
+    }
+    let lead = base * 0.5 + (delta.abs() / GUARD_TURN_FULL_RAD).min(1.0) * GUARD_TURN_EXTRA;
+    if delta > 0.0 {
+        (0.0, lead)
+    } else {
+        (lead, 0.0)
+    }
+}
+
+/// Holds one axis's last real turn for [`GUARD_HOLD_FRAMES`] frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GuardHold {
+    last: f32,
+    left: u32,
+}
+
+impl GuardHold {
+    /// The delta [`bias_guard`] should see this frame.
+    pub fn step(&mut self, delta: f32) -> f32 {
+        if delta.is_finite() && delta.abs() >= GUARD_STILL_RAD {
+            self.last = delta;
+            self.left = GUARD_HOLD_FRAMES;
+            delta
+        } else if self.left > 0 {
+            self.left -= 1;
+            self.last
+        } else {
+            0.0
+        }
     }
 }
 
@@ -1149,40 +1193,52 @@ mod tests {
     }
 
     #[test]
-    fn guard_bias_splits_the_axis_and_leads_the_turn() {
+    fn guard_bias_leads_the_turn_and_drops_the_trailing_edge() {
         let full = bias_guard(0.15, std::f32::consts::PI, 0.0);
-        assert!((full.left - 0.075).abs() < 1.0e-4);
+        assert!(full.left.abs() < 1.0e-6);
         assert!((full.right - 0.175).abs() < 1.0e-4);
-        let slow = bias_guard(0.15, 0.05, 0.0);
-        assert!(slow.right > slow.left);
-        assert!(slow.left + slow.right < 0.17, "0.05 rad no longer takes the whole extra");
+        assert!(full.top.abs() < 1.0e-6 && full.bottom.abs() < 1.0e-6);
+        let slow = bias_guard(0.15, -0.05, 0.0);
+        assert!(slow.left > 0.075 && slow.left < 0.08, "{}", slow.left);
+        assert!(slow.right.abs() < 1.0e-6);
+        let up = bias_guard(0.15, 0.0, 0.01);
+        assert!(up.top > 0.0 && up.bottom.abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_still_or_drifting_axis_gets_no_band() {
         let still = bias_guard(0.15, 0.0, 0.0);
-        assert!((still.left - still.right).abs() < 1.0e-4);
-        assert!((still.top + still.bottom - 0.15).abs() < 1.0e-4);
+        assert!((still.left + still.right + still.top + still.bottom).abs() < 1.0e-9);
+        // S5 pitch drift: 0.2 rad over 240 frames.
+        let drift = bias_guard(0.08, 0.0, 0.2 / 240.0);
+        assert!((drift.top + drift.bottom).abs() < 1.0e-9);
+        let lit = lit_frame(1920, 1080, still, 16);
+        assert_eq!((lit.lit_w, lit.lit_h), (1920, 1080));
     }
 
     #[test]
-    fn a_full_turn_grows_only_the_leading_edge() {
-        let tile = 16;
-        let still = lit_frame(320, 180, bias_guard(0.15, 0.0, 0.0), tile);
-        let turning = lit_frame(320, 180, bias_guard(0.15, std::f32::consts::PI, 0.0), tile);
-        assert!(turning.lit_w > still.lit_w);
-        assert_eq!(still.lit_h, turning.lit_h);
-        assert_eq!(still.crop_x % tile, 0);
-        assert_eq!(turning.crop_x % tile, 0);
+    fn guard_hold_rides_out_a_short_pause() {
+        let mut hold = GuardHold::default();
+        assert!(hold.step(0.0).abs() < 1.0e-9);
+        assert!((hold.step(0.01) - 0.01).abs() < 1.0e-6);
+        for _ in 0..GUARD_HOLD_FRAMES {
+            assert!((hold.step(0.0) - 0.01).abs() < 1.0e-6);
+        }
+        assert!(hold.step(0.0).abs() < 1.0e-9);
     }
 
     #[test]
-    fn high_guard_stays_inside_the_area_band() {
+    fn s5_turn_costs_far_less_than_the_old_symmetric_band() {
         let tile = 16;
-        let still = lit_frame(1920, 1080, bias_guard(0.15, 0.0, 0.0), tile);
+        // S5: yaw 2.2 rad and pitch 0.2 rad over 240 frames.
+        let s5 = lit_frame(1920, 1080, bias_guard(0.08, -2.2006 / 240.0, -0.2 / 240.0), tile);
+        let area = f64::from(s5.lit_w) * f64::from(s5.lit_h) / (1920.0 * 1080.0);
+        assert!(area < 1.06, "{area}");
+        assert_eq!(s5.lit_h, 1088);
         let turning = lit_frame(1920, 1080, bias_guard(0.15, std::f32::consts::PI, 0.0), tile);
-        let display = 1920.0_f64 * 1080.0;
-        let still_area = f64::from(still.lit_w) * f64::from(still.lit_h) / display;
-        let turn_area = f64::from(turning.lit_w) * f64::from(turning.lit_h) / display;
-        assert!(still_area > 1.25 && still_area < 1.40, "{still_area}");
-        assert!(turn_area > still_area && turn_area < 1.50, "{turn_area}");
-        assert_eq!(turning.lit_h, still.lit_h);
+        let turn_area = f64::from(turning.lit_w) * f64::from(turning.lit_h) / (1920.0 * 1080.0);
+        assert!(turn_area > 1.15 && turn_area < 1.25, "{turn_area}");
+        assert_eq!(turning.crop_x % tile, 0);
     }
 
     #[test]

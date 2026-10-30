@@ -369,6 +369,8 @@ pub(crate) struct Lighting {
     cam_yaw: f32,
     cam_pitch: f32,
     cam_pose_set: bool,
+    guard_yaw: crate::lighting_schedule::GuardHold,
+    guard_pitch: crate::lighting_schedule::GuardHold,
     /// Gates and caps pushed with this frame.
     last_schedule: crate::lighting_schedule::SchedulePush,
     /// Bloom plus the display pass. Zero when timestamps are off.
@@ -616,6 +618,8 @@ impl Default for Lighting {
             cam_yaw: 0.0,
             cam_pitch: 0.0,
             cam_pose_set: false,
+            guard_yaw: crate::lighting_schedule::GuardHold::default(),
+            guard_pitch: crate::lighting_schedule::GuardHold::default(),
             last_schedule: crate::lighting_schedule::SchedulePush::default(),
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
@@ -2356,6 +2360,8 @@ impl Gpu {
         self.lighting.cam_yaw = camera.yaw;
         self.lighting.cam_pitch = camera.pitch;
         self.lighting.cam_pose_set = true;
+        let yaw_delta = self.lighting.guard_yaw.step(yaw_delta);
+        let pitch_delta = self.lighting.guard_pitch.step(pitch_delta);
         let tile = if desired.probes.tile == 0 {
             lighting_tile(self.extent_h.max(1))
         } else {

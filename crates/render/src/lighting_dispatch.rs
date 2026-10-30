@@ -862,7 +862,7 @@ mod probe_still_tests {
         let lit = crate::lighting_schedule::lit_frame(
             1920,
             1080,
-            crate::lighting_schedule::bias_guard(0.15, 0.0, 0.0),
+            crate::lighting_schedule::bias_guard(0.15, 0.1, 0.1),
             16,
         );
         let (fw, fh) = screen_filter_extent(
