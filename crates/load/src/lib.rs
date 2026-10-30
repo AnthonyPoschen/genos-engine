@@ -7,6 +7,7 @@
 
 mod animation;
 mod bin;
+mod cache;
 mod emitters;
 mod error;
 mod mips;
@@ -28,6 +29,7 @@ mod vram;
 mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
+pub use cache::{object_path, store_import, store_object, write_atomic};
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,

@@ -87,3 +87,31 @@ fn external_files_feed_the_inputs_hash() {
     changed.externals[0].1[0] ^= 1;
     assert_ne!(doc.inputs_hash(), changed.inputs_hash());
 }
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("genos-import-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn cache_stores_by_content_and_never_rewrites() {
+    let dir = temp_dir("cache");
+    let doc = import_file(fixture("tri.gltf")).unwrap();
+    let path = genos_load::store_import(&dir, &doc).unwrap();
+    assert_eq!(path, genos_load::object_path(&dir, &doc.asset_id));
+    assert_eq!(std::fs::read(&path).unwrap(), doc.source);
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    genos_load::store_import(&dir, &doc).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        before
+    );
+    let objects = || std::fs::read_dir(dir.join("objects")).unwrap().count();
+    assert_eq!(objects(), 3);
+    let mut changed = doc.source.clone();
+    changed.push(b' ');
+    genos_load::store_object(&dir, &changed).unwrap();
+    assert_eq!(objects(), 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
