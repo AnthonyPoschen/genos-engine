@@ -58,7 +58,10 @@ fn point_lamps(lamps: &[GpuLamp]) -> impl Iterator<Item = (usize, &GpuLamp)> {
 /// Same position, colour, and range: the history p-hat of this lamp is still
 /// the p-hat it was stored with.
 fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
-    a.pos == b.pos && a.color == b.color && a.range.to_bits() == b.range.to_bits()
+    let bits = |v: &[f32; 3]| v.map(f32::to_bits);
+    bits(&a.pos) == bits(&b.pos)
+        && bits(&a.color) == bits(&b.color)
+        && a.range.to_bits() == b.range.to_bits()
 }
 
 /// Device bytes for `pixels`, including the prefix cap. Reservoirs are not
@@ -87,7 +90,6 @@ pub fn prefix(
     width: u32,
     height: u32,
     frame: u32,
-    reset: bool,
     prev_slot: u32,
 ) -> Option<RestirPrefix> {
     let mut refs = Vec::new();
@@ -172,7 +174,7 @@ pub fn prefix(
     words[12] = M_CAP;
     words[13] = SPATIAL_NEIGHBORS;
     words[14] = SPATIAL_RADIUS;
-    words[15] = u32::from(reset);
+    words[15] = u32::from(layout_changed);
     words[16] = frame;
     words[17] = 0xC5A1_7E11 ^ frame;
     words[18] = 0x0051_5EED;
@@ -243,13 +245,13 @@ mod tests {
                 range: 8.0,
             },
         ];
-        let packed = prefix(&lamps, &lamps, &RestirCam::default(), 32, 16, 3, true, 0)
+        let packed = prefix(&lamps, &lamps, &RestirCam::default(), 32, 16, 3, 0)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(u64::try_from(packed.words.len()).unwrap_or(u64::MAX) <= PREFIX_CAP_WORDS);
         assert_eq!(at(&packed.words, 0), 1, "the sun is not a leaf");
         assert_eq!(at(&packed.words, 10), 2, "proposal is the light tree");
         assert_eq!(at(&packed.words, 11), 20, "history M clamp");
-        assert_eq!(at(&packed.words, 15), 1, "reset");
+        assert_eq!(at(&packed.words, 15), 0, "same layout, no reset");
         let lamp_base = usize::try_from(at(&packed.words, 1)).unwrap_or(0);
         assert!(lamp_base >= HEADER_WORDS);
         assert_eq!(
@@ -275,13 +277,13 @@ mod tests {
         };
         let before = [lamp(0.0), lamp(1.0), lamp(2.0)];
         let moved = [lamp(0.0), lamp(1.5), lamp(2.0)];
-        let packed = prefix(&moved, &before, &RestirCam::default(), 8, 8, 1, false, 0)
+        let packed = prefix(&moved, &before, &RestirCam::default(), 8, 8, 1, 0)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(!packed.layout_changed, "same lamps, one moved");
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
         assert_eq!(packed.words.get(changed).copied(), Some(0b010), "only lamp 1 moved");
         let fewer = [lamp(0.0), lamp(2.0)];
-        let packed = prefix(&fewer, &before, &RestirCam::default(), 8, 8, 1, false, 0)
+        let packed = prefix(&fewer, &before, &RestirCam::default(), 8, 8, 1, 0)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(packed.layout_changed, "indices no longer match");
     }

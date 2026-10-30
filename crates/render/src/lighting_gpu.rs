@@ -2812,7 +2812,6 @@ impl Gpu {
             width,
             height,
             self.lighting.frame,
-            false,
             self.lighting.restir_slot,
         ) else {
             eprintln!("lighting: restir prefix does not fit");
