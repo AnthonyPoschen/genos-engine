@@ -56,6 +56,7 @@ jobs:
 
   unit-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -80,4 +81,8 @@ jobs:
           export WAYLAND_DISPLAY=genos-test
           export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
           export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
-          cargo test --locked --workspace --no-fail-fast -- --test-threads=1
+          # GPU picture/reference integration tests in render, stress and debug
+          # take far too long on lavapipe; run only their unit tests here.
+          gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug"
+          cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1
+          cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
