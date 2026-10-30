@@ -11,6 +11,7 @@
 //! cooked path is opt-in and does not change a draw.
 
 mod format;
+pub mod ktx2;
 mod package;
 
 use std::path::{Path, PathBuf};
