@@ -188,6 +188,24 @@ impl PbrMaterial {
     }
 }
 
+impl PbrMaterial {
+    /// Factors only, as a [`genos_math::brdf::Material`]: what an untextured
+    /// hit shades with. Textured hits use [`crate::ShadeSample::brdf_material`].
+    #[must_use]
+    pub fn brdf_material(&self) -> genos_math::brdf::Material {
+        crate::shade_uv(self, &[], [0.0, 0.0]).brdf_material()
+    }
+
+    /// The alpha cutoff, or `None` when the mode is not `MASK`.
+    #[must_use]
+    pub fn alpha_cutoff(&self) -> Option<f32> {
+        match self.alpha_mode {
+            AlphaMode::Mask(cutoff) => Some(cutoff),
+            AlphaMode::Opaque | AlphaMode::Blend => None,
+        }
+    }
+}
+
 impl GltfScene {
     /// Every triangle of every instance in world space, with its material.
     pub fn world_triangles(&self) -> Vec<([[f32; 3]; 3], Option<usize>)> {
