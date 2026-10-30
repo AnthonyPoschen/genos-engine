@@ -940,41 +940,20 @@ void main() {
         float mean_z = 0.0;
         uint mean_prev = 0u;
         vec3 mean_e = e;
-        float mean_m2 = 0.0;
         if (restir_words[15u] == 0u && lamp_pick_reproject(pos, n, mean_px, mean_z)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
                 LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
                 mean_prev = pr.m;
                 mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
-                mean_m2 = uintBitsToFloat(pr.lamp);
-            }
-        }
-        // A long mean lags a moving lamp. When the picked lamp moved or changed
-        // colour this frame, keep only a short history.
-        if (mean_prev > RESTIR_MEAN_MOVED && restir_lamp < restir_words[0u]
-            && ((restir_words[restir_words[38u] + restir_lamp / 32u] >> (restir_lamp % 32u)) & 1u) != 0u) {
-            mean_prev = RESTIR_MEAN_MOVED;
-        }
-        // Variance bound, like a TAA clamp: a sample far outside the pixel's
-        // own spread means the lighting changed, so the history goes.
-        float lum_s = dot(e, vec3(0.2126, 0.7152, 0.0722));
-        if (mean_prev > 1u) {
-            float lum_h = dot(mean_e, vec3(0.2126, 0.7152, 0.0722));
-            float sigma = sqrt(max(mean_m2 - lum_h * lum_h, 0.0));
-            if (abs(lum_s - lum_h) > RESTIR_MEAN_SIGMAS * sigma + RESTIR_MEAN_REL * lum_h + 1e-4) {
-                mean_prev = 0u;
             }
         }
         uint mean_n = min(mean_prev + 1u, RESTIR_MEAN_CAP);
         if (mean_prev > 0u) {
             e = mean_e + (e - mean_e) / float(mean_n);
-            mean_m2 = mean_m2 + (lum_s * lum_s - mean_m2) / float(mean_n);
-        } else {
-            mean_m2 = lum_s * lum_s;
         }
         LampReservoir mr;
-        mr.lamp = floatBitsToUint(mean_m2);
+        mr.lamp = 0u;
         mr.m = mean_n;
         mr.w_sum = e.r;
         mr.target = e.g;
