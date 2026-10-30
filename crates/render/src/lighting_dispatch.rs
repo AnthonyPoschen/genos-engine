@@ -641,7 +641,7 @@ mod probe_still_tests {
 
     #[test]
     fn gi_without_a_cache_does_not_ask_the_shader_to_read_one() {
-        let mut settings = LightingSettings::preset(LightingPreset::Potato);
+        let mut settings = LightingSettings::preset(LightingPreset::Fallback);
         settings.gi.enabled = true;
         settings.bounce.count = u32::MAX;
         let bytes = pack_lighting_ctrl(&settings, 0, 1.0, 0, 0);

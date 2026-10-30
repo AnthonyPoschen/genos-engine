@@ -2504,7 +2504,7 @@ impl Gpu {
         let force_sdr = self.lighting.hdr.legacy_bytes
             || matches!(
                 self.lighting.settings.preset,
-                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+                genos_scene::LightingPreset::Fallback | genos_scene::LightingPreset::Low
             );
         if force_sdr {
             return 0.0;
@@ -2545,7 +2545,7 @@ impl Gpu {
         };
         // Bloom intensity stays 0 until the pyramid has run. The display pass
         // reads the updated word. Compose therefore does not add a stale buffer.
-        // `w` is the encode: 0 SDR, 1 HDR10 PQ, 2 scRGB. Potato, Low, and
+        // `w` is the encode: 0 SDR, 1 HDR10 PQ, 2 scRGB. Fallback, Low, and
         // `legacy_bytes` stay 0. An unlisted mode still encodes into the side
         // buffer; the swapchain image stays the SDR pair.
         let output = self.hdr_output_word();

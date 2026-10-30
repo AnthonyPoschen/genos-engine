@@ -817,7 +817,7 @@ fn loading_world() -> World {
         sky: Some(Sky {
             color: [0.02, 0.02, 0.025],
         }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),

@@ -86,7 +86,7 @@ fn the_presented_frame_shows_the_mirror_the_portal_and_the_ray_cap() {
     );
 
     for (preset, rays, views) in [
-        (ReflectionPreset::Potato, 0, 0),
+        (ReflectionPreset::Fallback, 0, 0),
         (ReflectionPreset::Low, 0, 1),
         (ReflectionPreset::High, 128_000, 3),
     ] {

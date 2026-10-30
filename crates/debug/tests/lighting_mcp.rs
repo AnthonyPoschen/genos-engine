@@ -71,7 +71,7 @@ fn lighting_settings_round_trip_over_mcp() {
     let started = Instant::now();
     let worker = std::thread::spawn(|| {
         let listed = call("list_presets", json::object([]));
-        let applied = call("apply_preset", json::object([("name", json::string("potato"))]));
+        let applied = call("apply_preset", json::object([("name", json::string("fallback"))]));
         let day = call("apply_preset", json::object([("name", json::string("day-cycle"))]));
         let bounce = call("apply_preset", json::object([("name", json::string("gi-1bounce"))]));
         let updated = call(
@@ -103,9 +103,9 @@ fn lighting_settings_round_trip_over_mcp() {
         .collect();
     assert_eq!(
         names,
-        ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
+        ["fallback", "day-cycle", "gi-1bounce", "low", "medium", "high"]
     );
-    assert!(text_of(&applied).contains("preset=potato"), "{}", text_of(&applied));
+    assert!(text_of(&applied).contains("preset=fallback"), "{}", text_of(&applied));
     assert!(text_of(&applied).contains("gi=0"), "{}", text_of(&applied));
     let day_text = text_of(&day);
     assert!(day_text.contains("preset=day-cycle"), "{day_text}");

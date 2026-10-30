@@ -6,7 +6,7 @@
 //! one L0 cell, or brighter than the flux threshold, is promoted: the light
 //! tree owns that flux, and the cache's direct term skips it. An indirect hit
 //! reads the leftover. A camera on the wall reads the wall's full outgoing.
-//! Potato promotes nothing.
+//! Fallback promotes nothing.
 //!
 //! The GPU cache does not skip promoted flux yet. That skip needs
 //! `crates/render/src/lighting_gpu.rs`, which the lighting branch owns.
@@ -22,10 +22,10 @@ pub const CELL_EDGE_M: f32 = 0.25;
 
 const STEPS: u32 = 48;
 
-/// Which preset caps promotion. Potato promotes none.
+/// Which preset caps promotion. Fallback promotes none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromotePreset {
-    Potato,
+    Fallback,
     Low,
     Medium,
     High,
@@ -45,7 +45,7 @@ impl PromoteBudget {
     #[must_use]
     pub fn preset(preset: PromotePreset, brightest_lamp: f32, flux_fraction: f32) -> Self {
         let (enabled, max_regions) = match preset {
-            PromotePreset::Potato => (false, 0),
+            PromotePreset::Fallback => (false, 0),
             PromotePreset::Low => (true, 4),
             PromotePreset::Medium => (true, 8),
             PromotePreset::High => (true, 16),
@@ -239,7 +239,7 @@ impl MaterialSettings {
     #[must_use]
     pub fn preset(preset: PromotePreset) -> Self {
         let (mip_bias, anisotropy, occlusion, emissive_promote) = match preset {
-            PromotePreset::Potato => (2.0, 1, false, false),
+            PromotePreset::Fallback => (2.0, 1, false, false),
             PromotePreset::Low => (1.0, 2, true, true),
             PromotePreset::Medium => (0.0, 4, true, true),
             PromotePreset::High => (0.0, 8, true, true),
@@ -549,14 +549,14 @@ mod tests {
     }
 
     #[test]
-    fn a_small_strip_is_promoted_and_potato_promotes_none() {
+    fn a_small_strip_is_promoted_and_fallback_promotes_none() {
         let low = PromoteBudget::preset(PromotePreset::Low, 100.0, 0.01);
         assert!(should_promote(0.01, 0.0, low, 0));
         assert!(!should_promote(2.0, 0.0, low, 0));
         assert!(should_promote(2.0, 2.0, low, 0));
         assert!(!should_promote(0.01, 0.0, low, 4));
-        let potato = PromoteBudget::preset(PromotePreset::Potato, 100.0, 0.01);
-        assert!(!should_promote(0.01, 10.0, potato, 0));
+        let fallback = PromoteBudget::preset(PromotePreset::Fallback, 100.0, 0.01);
+        assert!(!should_promote(0.01, 10.0, fallback, 0));
         let high = PromoteBudget::preset(PromotePreset::High, 1.0, 0.01);
         assert_eq!(high.max_regions, 16);
     }
@@ -605,11 +605,11 @@ mod tests {
         let text = settings.to_text();
         let parsed = MaterialSettings::parse(&text).expect("round trip");
         assert_eq!(parsed, settings);
-        let potato = MaterialSettings::preset(PromotePreset::Potato);
-        assert_eq!(potato.texture_quality, TextureQuality::Ultra);
-        assert!((potato.mip_bias - 2.0).abs() < 1.0e-6);
-        assert!(!potato.occlusion);
-        assert!(!potato.emissive_promote);
+        let fallback = MaterialSettings::preset(PromotePreset::Fallback);
+        assert_eq!(fallback.texture_quality, TextureQuality::Ultra);
+        assert!((fallback.mip_bias - 2.0).abs() < 1.0e-6);
+        assert!(!fallback.occlusion);
+        assert!(!fallback.emissive_promote);
         assert!(material_flag_needs_value("--material-dwell-frames").unwrap_or(false));
         assert!(material_flag_needs_value("--preset").is_none());
     }

@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn long_names_wrap_onto_a_second_row_and_the_current_step_stays() {
-        let steps: Vec<SliderStep> = ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
+        let steps: Vec<SliderStep> = ["fallback", "day-cycle", "gi-1bounce", "low", "medium", "high"]
             .into_iter()
             .enumerate()
             .map(|(i, name)| SliderStep {
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn a_narrow_track_keeps_only_the_selected_name() {
         let steps: Vec<SliderStep> = [
-            "potato",
+            "fallback",
             "day-cycle",
             "gi-1bounce",
             "low",

@@ -17,10 +17,10 @@ pub const SHORE_CAP: f32 = 0.75;
 /// Index of refraction used for a water surface.
 pub const WATER_IOR: f32 = 1.333;
 
-/// Potato, Low, Medium, or High. The ray and view caps are the preset table.
+/// Fallback, Low, Medium, or High. The ray and view caps are the preset table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionPreset {
-    Potato = 0,
+    Fallback = 0,
     Low = 1,
     Medium = 2,
     High = 3,
@@ -153,11 +153,11 @@ pub fn mirror_views(fresnel: &[f32], cap: u32, cutoff: f32) -> u32 {
     emitted
 }
 
-/// Reflection rays the preset schedules. Potato and Low stay at zero.
+/// Reflection rays the preset schedules. Fallback and Low stay at zero.
 #[must_use]
 pub fn reflection_ray_cap(preset: ReflectionPreset) -> u32 {
     match preset {
-        ReflectionPreset::Potato | ReflectionPreset::Low => 0,
+        ReflectionPreset::Fallback | ReflectionPreset::Low => 0,
         ReflectionPreset::Medium => 32_000,
         ReflectionPreset::High => 128_000,
     }
@@ -167,7 +167,7 @@ pub fn reflection_ray_cap(preset: ReflectionPreset) -> u32 {
 #[must_use]
 pub fn reflection_view_cap(preset: ReflectionPreset) -> u32 {
     match preset {
-        ReflectionPreset::Potato => 0,
+        ReflectionPreset::Fallback => 0,
         ReflectionPreset::Low => 1,
         ReflectionPreset::Medium => 2,
         ReflectionPreset::High => 3,
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn low_schedules_no_reflection_rays_and_one_view() {
         assert_eq!(reflection_ray_cap(ReflectionPreset::Low), 0);
-        assert_eq!(reflection_ray_cap(ReflectionPreset::Potato), 0);
+        assert_eq!(reflection_ray_cap(ReflectionPreset::Fallback), 0);
         assert_eq!(reflection_ray_cap(ReflectionPreset::Medium), 32_000);
         assert_eq!(reflection_view_cap(ReflectionPreset::Low), 1);
         assert_eq!(reflection_view_cap(ReflectionPreset::High), 3);

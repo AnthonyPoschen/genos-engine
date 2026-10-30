@@ -70,7 +70,7 @@ Frame reuse, as the extras plan describes it, skips the pyramid when the scene k
 
 The lighting work caps are unchanged. Post has its own ceilings in §7. A slow bloom does not borrow rays from the cache, and a lighting frame does not skip the display pass to pay for GI.
 
-Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Potato and Low force SDR output. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Potato, so the grade is the same buffer on every preset. Potato does not run the pyramid or the histogram. Its exposure is fixed.
+Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Fallback and Low force SDR output. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Fallback, so the grade is the same buffer on every preset. Fallback does not run the pyramid or the histogram. Its exposure is fixed.
 
 Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom is half resolution and coarser down the pyramid on every preset. That is the Jimenez pyramid, not a camera-dependent kernel. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
 
@@ -130,7 +130,7 @@ Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×=
 
 The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_colorspace` extension. HDR10 is "HDR10 (BT.2020), encoded according to SMPTE ST 2084". Extended sRGB linear is "extended sRGB color space, encoded using a linear transfer function". The nonlinear extended-sRGB enum (1000104014) is the scRGB specification's other encoding. We do not pick it. Windows literature for the linear one is `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`. We do not call DXGI.
 
-**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
+**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Fallback and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
 
 **Departure:** `create_targets` records that pick (`resolve_swapchain` through `surface_choice`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The SDR search is still 44, then 37, and it does not read the color space. When the resolved pair is listed, the image is that pair: `A2B10G10R10` or `A2R10G10B10` with `HDR10_ST2084`, or `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR`. `VK_EXT_swapchain_colorspace` is enabled when the instance lists it. `VK_EXT_hdr_metadata` is enabled when the device lists it, and `vkSetHdrMetadataEXT` runs only for a created HDR10 image (BT.2020 primaries, peak 1000 nits). An unlisted mode stays on the SDR image. The display pass still writes the 8-bit `AgX` code for that fallback, and it also writes the PQ or scRGB values into a side buffer so a readback can grade them. A listed 10-bit image is packed in that pass. A listed fp16 image is copied from the half-float tail of the same buffer.
 
@@ -197,10 +197,10 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `adapt_down` | seconds, exposure falling (scene got brighter) | 0.40 |
 | `adapt_up` | seconds, exposure rising (scene got darker) | 0.80 |
 | `display` | `agx`, `aces`, `legacy` | `agx`. `aces` presents the legacy shoulder until `aces2_rec709` is the Academy CTL |
-| `bloom` | `off`, `on` | `on` from phase 4; `off` on Potato |
-| `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Potato) |
-| `bloom_levels` | 0..6 | 6 on High, 5 Medium, 4 Low, 0 Potato |
-| `output` | `auto`, `sdr`, `hdr10`, `scrgb` | `auto` on Medium and High; forced `sdr` on Potato and Low |
+| `bloom` | `off`, `on` | `on` from phase 4; `off` on Fallback |
+| `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Fallback) |
+| `bloom_levels` | 0..6 | 6 on High, 5 Medium, 4 Low, 0 Fallback |
+| `output` | `auto`, `sdr`, `hdr10`, `scrgb` | `auto` on Medium and High; forced `sdr` on Fallback and Low |
 
 GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 
@@ -232,11 +232,11 @@ e += (target − e) × (1 − exp(−dt / τ))
 
 The one-frame latency of the histogram is a departure from a textbook meter that finishes inside the frame. It is how the draw stays free of a fence wait, which [renderer.md](renderer.md) already requires.
 
-`hdr_meter.comp` counts every pixel whose luma is above 0, and it compares stride-32 luma for `still_pop`. The CPU does not map the scene image for either check. It reads the bin counts after the fence and clips them with `histogram_ev100_from_counts`. Potato keeps a fixed exposure, so that pass skips the histogram atomics. `legacy_bytes` does not dispatch the pass.
+`hdr_meter.comp` counts every pixel whose luma is above 0, and it compares stride-32 luma for `still_pop`. The CPU does not map the scene image for either check. It reads the bin counts after the fence and clips them with `histogram_ev100_from_counts`. Fallback keeps a fixed exposure, so that pass skips the histogram atomics. `legacy_bytes` does not dispatch the pass.
 
 ## 6. Presets
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Who | a floor card, no GI | GTX 1060 6 GB, RX 580 | mid | RTX 4070 |
 | Exposure | `fixed`, EV100 0, compensation 0 | `auto`, 64 bins | `auto`, 128 bins | `auto`, 256 bins |
@@ -264,7 +264,7 @@ Bloom pyramid:
 | 5 | 80×45 | 0.027 |
 | 6 | 40×22 | 0.007 |
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Scene image | 28.125 | 28.125 | 28.125 | 28.125 |
 | Bloom | 0 | 9.338 | 9.366 | 9.373 |
@@ -285,7 +285,7 @@ The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB i
 
 - 4 GB is the minimum. High with scRGB is 79.685 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
 
-A steady basic scene on Potato or on a held High frame dispatches the display pass only. The pyramid and the histogram reduction are off or reused. That is the path that has to leave room for 500 fps.
+A steady basic scene on Fallback or on a held High frame dispatches the display pass only. The pyramid and the histogram reduction are off or reused. That is the path that has to leave room for 500 fps.
 
 ## 8. Success metrics
 
@@ -300,7 +300,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | Metric | Threshold | What it grades | Live, this tree |
 |---|---|---|---|
 | `legacy_inverse` | ≤ 1e−4 | `linear_from_display(tone(x))` against `x` for 0, 0.25, 0.64, 1, 4, 16. `tone` is `mesh::tone`. Relative, denominator `max(x, 1)` | PASS |
-| `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Potato, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the shared `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
+| `legacy_shader` | = 0 codes | lavapipe readback of the shipped hall, Fallback, `legacy_bytes`, ambient raised to 8 so the shoulder is in frame, against the stored plain-compose picture. The shoulder in that shader is the shared `tone_channel`. Two settled frames must match | PASS. Moving a colour byte by 8, or changing `tone_channel`, fails |
 | `gpu_legacy` | ≤ 1 code | the same hall through `hdr_agx.comp` mode 0 (`display=legacy`, not `legacy_bytes`), against `tone` of exposure times the scene image. Dither may move one code. A pixel above the shoulder start must be in frame | PASS. Changing the shared shoulder fails |
 | `exposure_ev` | ≤ 1e−9 | `ev100_from_luminance` and `exposure_from_ev100` on 0.01, 0.18, 1, and 12.5. EV100 is `log2(L × 100 / 12.5)`. Exposure is `1 / (1.2 × 2^EV100)` | PASS |
 | `exposure_histogram` | ≤ 0.10 stops | `histogram_ev100` on a grey field with a one-pixel sun, and on a field whose top 9% is that sun, against `log2(0.18 × 100 / 12.5)`. The 9% sits inside the dropped tail | PASS. Removing the 10% drop fails the heavy tail |
@@ -316,7 +316,7 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `gpu_bloom` | ≤ 1e−3 | GPU bloom buffer, and the bloom the display pass added, against that same tap pyramid. The added value is the encode buffer on SDR. The graded frame changes the lamp, so the previous frame's pyramid does not match | PASS. A pyramid that doubles energy fails. A display add that scales the pyramid by 4 fails |
 | `hdr_encode` | ≤ 0.02 | lavapipe readback of the encode buffer on the shipped hall, Medium with GI off, fixed EV100 2, bloom off, `output=hdr10`, against `hdr10_pq(agx_display_linear(exposure × scene))`. Paper white is 203 nits. The surface is the SDR pair or a listed HDR10 pair | PASS. An 80-nit paper white fails |
 | `hdr_scrgb` | ≤ 0.02 | the same frame with `output=scrgb`, against `scrgb_from_display` of that display-linear colour. Code 1.0 stays 80 nits. The surface is the SDR pair or a listed scRGB pair | PASS. An 80-nit paper white fails |
-| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR. An asked HDR pair that is not listed is SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. Forcing HDR10 when it is not listed fails |
+| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Fallback and Low force SDR. An asked HDR pair that is not listed is SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. Forcing HDR10 when it is not listed fails |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
@@ -428,7 +428,7 @@ Collected so a phase cannot drift in silence. Lighting departures also belong in
 | Jimenez, SIGGRAPH 2014 | 13-tap, 9-tap, thresholdless pyramid, weights sum to 1 | Not every frame. No knee. Rec.709 Karis luma |
 | Karis, same course | `1 / (1 + Y)` on the first downsample | Runs before exposure, so it does not commute with that scale |
 | SMPTE ST 2084, BT.2100, BT.2408 | PQ, BT.2020, graphics white at 203 nits on HDR10 and on scRGB | scRGB code of that white is 2.5375, written 2.54. Code 1.0 stays 80 nits |
-| Vulkan `VK_EXT_swapchain_colorspace` | The two enums and the SDR color space | Potato and Low force SDR even when HDR is listed |
+| Vulkan `VK_EXT_swapchain_colorspace` | The two enums and the SDR color space | Fallback and Low force SDR even when HDR is listed |
 | ADR 0012 | Stored light ignores the camera | Exposure and bloom are downstream of compose |
 | ADR 0013 | Budgets are ceilings. A cheap check decides a skip | The check is the histogram max bin. Post ceilings are not the lighting caps |
 | extras plan, step 7 | `tone(exposure × (linear + bloom))`, byte match at exposure 1 and bloom 0 | The grade reads the scene image before that product. AgX replaces the curve only in phase 5 |

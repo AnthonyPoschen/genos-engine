@@ -122,7 +122,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --unfilled-session-cap N  saves in one process (default 32)
                             (GENOS_UNFILLED_SESSION_CAP)
   --trace                   capture the picture after every script command that changes it
-  --preset NAME             potato, day-cycle, gi-1bounce, low, medium, high
+  --preset NAME             fallback, day-cycle, gi-1bounce, low, medium, high
                             (GENOS_LIGHTING_PRESET is the mirror)
   --surface-cache-attach-movers on|off
                             store mover cache entries in the object's frame
@@ -1214,7 +1214,7 @@ fn loading_world() -> World {
         sky: Some(Sky {
             color: [0.02, 0.02, 0.025],
         }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),

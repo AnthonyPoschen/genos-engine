@@ -44,7 +44,7 @@ fn room() -> World {
         }],
         ceiling: None,
         sky: None,
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
+        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Fallback),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),

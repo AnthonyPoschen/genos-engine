@@ -5,7 +5,7 @@
 //! Lavapipe check that the frame-rate plate is in the picture.
 //!
 //! The plate is built on the CPU at the update rate, then drawn with the same
-//! overlay path `genos-lighting` uses. Potato lighting keeps the frame on the
+//! overlay path `genos-lighting` uses. Fallback lighting keeps the frame on the
 //! direct pass. Times below are the draw, not a GPU timestamp (lavapipe does
 //! not time the GPU).
 
@@ -37,7 +37,7 @@ fn room() -> World {
         }],
         ceiling: None,
         sky: None,
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
+        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Fallback),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: FpsCounterSettings {
             enabled: true,

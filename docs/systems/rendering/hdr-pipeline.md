@@ -74,7 +74,7 @@ Run: `cargo test -p genos-math`.
 ## 5. Follow-ups
 
 1. Point `hdr_output.rs` at `genos-math::tonemap` and delete its copies of these curves.
-2. Rename the `HdrSettings` preset table from Potato..High to the ADR 0023 names.
+2. Rename the `HdrSettings` preset table from Fallback..High to the ADR 0023 names.
 3. Measure the §3 ceilings on the 4070 with `post_ms_device` and `post_vram_device`.
 
 ## References

@@ -1808,6 +1808,6 @@ mod tests {
         assert_eq!((high.width, high.height, high.slices), (160, 90, 48));
         let one = grid_for_samples(LightingPreset::High, 1);
         assert!(one.width * one.height * one.slices <= 4, "{one:?}");
-        assert_eq!(grid_for_samples(LightingPreset::Potato, 4).slices, 0);
+        assert_eq!(grid_for_samples(LightingPreset::Fallback, 4).slices, 0);
     }
 }

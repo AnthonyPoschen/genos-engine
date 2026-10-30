@@ -523,7 +523,7 @@ impl Renderer {
         self.gpu.lighting.work_clear = true;
     }
 
-    /// Replace the override with a named preset (`potato`, `low`, `medium`, `high`).
+    /// Replace the override with a named preset (`fallback`, `low`, `medium`, `high`).
     pub fn apply_lighting_preset(&mut self, name: &str) -> Result<(), String> {
         let preset = genos_scene::LightingPreset::parse(name)
             .ok_or_else(|| format!("unknown lighting preset {name}"))?;
@@ -2730,7 +2730,7 @@ impl Gpu {
         let force_sdr = self.lighting.hdr.legacy_bytes
             || matches!(
                 self.lighting.settings.preset,
-                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+                genos_scene::LightingPreset::Fallback | genos_scene::LightingPreset::Low
             );
         crate::hdr_output::surface_choice(
             sdr_format,
