@@ -276,6 +276,10 @@ impl MaterialStats {
 
 pub struct Renderer {
     gpu: Gpu,
+    /// The world identity drawn last (0 before the first draw).
+    world_identity: u64,
+    /// The lamp set drawn last: count and colors, not positions.
+    lamp_set: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -308,6 +312,8 @@ impl Renderer {
             width,
             height,
             wire_on: false,
+            world_identity: 0,
+            lamp_set: 0,
             memory: FrameMemory::default(),
             shapes: crate::pool::MeshPool::default(),
             overlay_rects: Vec::new(),
@@ -814,6 +820,44 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        // A different world is a scene switch: the cached texels belong to the
+        // old one (docs/systems/lighting/surface-cache-wall-leak.md).
+        if world.identity() != self.world_identity {
+            if self.world_identity != 0 {
+                self.reset_lighting_cache();
+            }
+            self.world_identity = world.identity();
+        }
+        // A lamp added, removed or recolored is a lighting scene change too: the
+        // cache never drains bounce from a lamp that is gone (a lamp switched off
+        // left ~29/255 on the corridor floor for good). Moving lamps keep their
+        // cache; the incremental path follows them. Suns (a non-zero direction)
+        // are left out: a sun or sky change is followed incrementally too, so
+        // adding or recoloring one must not drop every probe's rays.
+        let lamp_set = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let lamps = || {
+                world
+                    .scene
+                    .lights
+                    .iter()
+                    .filter(|light| light.direction == genos_scene::Vec3::ZERO)
+            };
+            lamps().count().hash(&mut hasher);
+            for light in lamps() {
+                for c in light.color {
+                    c.to_bits().hash(&mut hasher);
+                }
+            }
+            hasher.finish()
+        };
+        if lamp_set != self.lamp_set {
+            if self.lamp_set != 0 {
+                self.reset_lighting_cache();
+            }
+            self.lamp_set = lamp_set;
+        }
         self.gpu.sync_materials(world)?;
         self.gpu.prepare_lit_frame(camera, &world.scene)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
@@ -2080,23 +2124,12 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let mut transfer_family = queue_family;
-            let mut transfer_dedicated = false;
-            for index in 0..family_count {
-                if index == queue_family || index == compute_family {
-                    continue;
-                }
-                let base = index as usize * 24;
-                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
-                let queues =
-                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
-                // Transfer without graphics. A shared graphics family keeps the graphics queue.
-                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
-                    transfer_family = index;
-                    transfer_dedicated = true;
-                    break;
-                }
-            }
+            // The streaming submit blits mips into the atlas (vkCmdBlitImage) and
+            // can clear it (vkCmdClearColorImage) and hand it to fragment stages. All need a graphics
+            // queue. A transfer-only family (NVIDIA family 1) cannot run them: the
+            // submit faults and its fence never signals, so `wait_fence` blocked
+            // forever. Streaming stays on the graphics family.
+            let transfer_family = queue_family;
             let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
@@ -2134,7 +2167,7 @@ impl Gpu {
                     priorities: priorities.as_ptr().add(2),
                 },
             ];
-            let mut queue_info_count = if separate {
+            let queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -2142,9 +2175,6 @@ impl Gpu {
             } else {
                 1
             };
-            if transfer_dedicated {
-                queue_info_count += 1;
-            }
             let enumerate_device_ext: unsafe extern "system" fn(
                 Handle,
                 *const c_char,
@@ -2247,10 +2277,7 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
-            let mut transfer_queue = queue;
-            if transfer_dedicated {
-                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
-            }
+            let transfer_queue = queue;
             let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
@@ -3249,6 +3276,7 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.init_fresh_atlas();
             self.update_resident_scene();
             self.update_resident_fields();
             let swap = self.swap_images[index as usize];
@@ -5515,10 +5543,15 @@ impl Gpu {
         let depth_load = if keep { 2 } else { 1 };
         // Final layout cannot be undefined. The overlay pass discards depth.
         let depth_final = 3;
-        let in_stage = if keep { 0x1000 } else { 0x400 };
-        // The filter leaves the color image visible to a transfer read.
-        let in_access = if keep { 0x800 } else { 0 };
-        let in_dst = if keep { 0x180 } else { 0x100 };
+        // Both variants share one external dependency so the keep and clear
+        // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
+        // VUID-vkCmdDraw-renderPass-02684): framebuffers and pipelines are made
+        // against one variant and used with the other. The filter leaves the
+        // color image visible to a transfer read; the clear pass waits on the
+        // previous frame's color output.
+        let in_stage = 0x1000 | 0x400;
+        let in_access = 0x800 | 0x100;
+        let in_dst = 0x180;
         let atts = [
             Att {
                 flags: 0,
@@ -6681,6 +6714,9 @@ impl Gpu {
         }
         let due = self.uncopied_pages();
         let republish = self.ready_to_show();
+        // A fresh atlas with nothing streamed is cleared on the graphics queue
+        // by init_fresh_atlas: a dedicated transfer family (NVIDIA) cannot run
+        // vkCmdClearColorImage, and doing it here blanked every frame there.
         if due.is_empty() && republish.is_empty() {
             return Ok(());
         }
@@ -6917,6 +6953,25 @@ impl Gpu {
         }
     }
 
+    /// A fresh atlas (startup, or a resize) starts UNDEFINED, but the main pass
+    /// descriptors name it GENERAL (VUID-vkCmdDraw-None-09600). Clear it and move
+    /// it to GENERAL on the frame command buffer: the clear needs a graphics or
+    /// compute queue, which a dedicated transfer family is not.
+    fn init_fresh_atlas(&mut self) {
+        for color in [true, false] {
+            let slot = usize::from(!color);
+            let image = self.sampled_image(color).image;
+            if image.is_null() || self.sampled_layout[slot] != 0 {
+                continue;
+            }
+            self.cmd_image_barrier(self.cmd, image, 0, 7, 0x1, 0x1000, 0, 0x1000);
+            self.clear_color(self.cmd, image, 7);
+            self.cmd_image_barrier(self.cmd, image, 7, 1, 0x1000, 0x80, 0x1000, 0x20);
+            self.sampled_layout[slot] = 1;
+            self.sampled_cleared[slot] = true;
+        }
+    }
+
     /// Leave the atlas in general layout so the fragment shader can load it.
     /// The colour atlas also copies texel (0, 0) into the readback buffer.
     fn finish_atlas_draw(&mut self, color: bool, readback: bool) {
@@ -6936,7 +6991,10 @@ impl Gpu {
             0x1000,
             0x1000,
             0x1000,
-            0x800 | 0x20,
+            // Transfer read for the texel readback. The fragment read waits on
+            // this submit; a shader read is not a transfer-stage access
+            // (VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820).
+            0x800,
         );
         self.sampled_layout[slot] = 1;
         if readback {

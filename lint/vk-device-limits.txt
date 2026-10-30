@@ -1,0 +1,12 @@
+# Vulkan validation IDs the lavapipe CI gate tolerates, one per line.
+# Only device-limit VUIDs belong here: lavapipe's limits sit below the
+# engine's minimum spec (GTX 1060), so the error cannot fire on supported
+# hardware. Anything about API misuse (layouts, barriers, render pass
+# compatibility) never goes here: fix it instead.
+#
+# lavapipe maxStorageBufferRange is 128 MiB; the surface light cache is one
+# 368 MiB binding (1M entries x 368 B). GTX 1060 and up allow 4 GiB.
+VUID-VkWriteDescriptorSet-descriptorType-00333
+# lavapipe maxComputeWorkGroupCount[0] is 65535; the 1D direct pass launches
+# 72000 groups at 1280x720 with kept hits. NVIDIA allows 2^31-1.
+VUID-vkCmdDispatch-groupCountX-00386

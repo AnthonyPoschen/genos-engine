@@ -13,6 +13,8 @@ if [[ -d "${HOME}/.local/bin" ]]; then
 fi
 
 python3 scripts/lint-env-mirrors.py --self-test
+python3 scripts/vk-validation-gate.py --self-test
+if python3 -c "import numpy, PIL" 2>/dev/null; then python3 scripts/lighting/oracle_metrics.py --self-test; else echo "oracle_metrics self-test skipped (needs numpy and pillow)"; fi
 python3 scripts/lint-semgrep.py
 python3 scripts/lint-shader-constants.py
 python3 scripts/lint-shader-hashes.py
@@ -20,3 +22,5 @@ python3 scripts/lint-clippy-fixture.py
 
 cargo deny check
 python3 scripts/lint-clippy.py
+python3 scripts/check-terms.py --self-test
+python3 scripts/check-terms.py

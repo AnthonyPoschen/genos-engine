@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lint-docs lint
+.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -34,6 +34,12 @@ reference:
 # OUT=<dir> overrides the report directory.
 lighting-ref-check:
 	cargo run --release -p genos-stress -- lighting-ref check --mode $(if $(MODE),$(MODE),owner) $(if $(BASE),--base $(BASE),) $(if $(OUT),--out $(OUT),)
+
+# Lighting harness and oracle (docs/systems/lighting/oracle-harness.md).
+# PROFILE=quick (default) or full. OUT=<dir> overrides ./genos-debug/oracle.
+lighting-oracle:
+	cargo build --release -p genos-stress
+	scripts/lighting/oracle_run.sh $(if $(PROFILE),$(PROFILE),quick) $(if $(OUT),$(OUT),genos-debug/oracle)
 
 # docs/systems/*/plan.md: a References section, and local links that resolve.
 # docs/systems/core-networking/plan.md is allowlisted until that plan lands.
