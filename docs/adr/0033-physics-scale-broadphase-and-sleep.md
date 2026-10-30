@@ -1,4 +1,4 @@
-# 0031: Physics scale is a layered AABB tree plus island sleep
+# 0033: Physics scale is a layered AABB tree plus island sleep
 
 Status: **Proposed** (2026-10-31). Needs Anthony's review before code. Source: [physics plan](../systems/physics/plan.md) steps P4, P5, P6 and P12. [ADR 0016](0016-physics-ccd-destruction.md) accepted only the CCD and destruction slice; the plan itself is unreviewed, so this ADR asks for the scale slice to be accepted.
 
