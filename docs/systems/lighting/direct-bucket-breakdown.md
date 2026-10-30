@@ -1,71 +1,153 @@
-# What the "direct" lighting bucket spends, and how to cut it
+# Direct lighting bucket: measured breakdown and ranked cuts
 
-Status: findings and proposal, for review. No renderer change rides on this note.
+Status: for Anthony's review. Replaces the code-reading estimates in the first
+version of this note, which the 4070 run disproved.
 
-## Why this matters
+## What was measured
 
-The goal is a 2 ms frame for the basic scene at 1440p on an RTX 4070 (about 500 fps), about 100 fps for the stress scene, photoreal against the path-traced reference, no flicker, about 200 MB of lighting VRAM, and a Low preset that runs on a GTX 1060. What counts is the cost of a full relight, not tricks that skip unchanged frames.
+4070, 30 Oct 16:40 AEDT, lighting-v3 `34cc80cb`, 2560x1440 stress scene,
+`GENOS_GPU_DISPATCH=1`, last 30-frame window. The PC was in use, so absolute
+times are under load; the differences between rows are what matter.
 
-On 30 Oct the 4070 measured the direct bucket (`light=` in `LIGHTING_MS`) at **16.0 ms** with the ReSTIR flag off, at 2560×1440 while the PC was in use. On its own, that is eight times the whole frame budget. The point-lamp shading people usually picture as "direct light" is only about 0.3 ms of it.
+| Run | light_px ms | light_hit ms | lighting total ms |
+|---|---|---|---|
+| Base | 14.32 | 0.83 (2.9 first window) | 37.3 |
+| GI off | 4.27 | 0 | 4.7 |
+| Sun only (no lamps, no sky, noon) | 3.76 | 1.02 | 27.1 |
+| Sun only, shadows off | 3.23 | 1.03 | 26.5 |
+| No lamps, sun or sky | 2.94 | 0.90 | 23.1 |
+| Emissive (flame) off | 14.29 | 0.76 | 37.3 |
+| Direct off, GI on | 0 | 9.84 | 32.1 |
 
-## What the bucket actually is
+`light_px` is one dispatch that shades the screen pixels **and the screen
+probes' kept hits**. `light_hit` is the light cache's ray hits and probe fills.
 
-The bucket times one compute pass, `lighting_direct.comp`, which runs in up to three dispatches each frame:
+## Corrected breakdown
 
-| Dispatch | Points shaded | What each point does |
-|---|---|---|
-| Pixels + kept probe hits | every 1440p pixel (3.69 M) plus 2 × the kept screen-probe hits | Every sun: an exact shadow ray (pixels always trace; hits may reuse a cached shadow cell). Point lamps and the flame: a weighted pick sharing one shadow ray. Hits also add the light cache's bounce and write the light sent back along the probe ray. |
-| Cache-ray hits (`B_HIT`, async rounds) | the light cache's own rays | The same lamp, sun and flame evaluation, for bounce 2 and up |
-| Kept hits only | when direct is off but GI is on | The same work on hits only |
+| Part | Earlier estimate | Measured | From |
+|---|---|---|---|
+| Point lamps at probe kept hits | (not counted) | ~10 ms | base 14.3 - sun only 3.8, and the lamps cost almost nothing with GI off |
+| Point lamps and sun at pixels | 0.3 (lamps) | ~1.3 | GI off 4.27 - nothing lit 2.94 |
+| Sun shadow ray | 4-6 | ~0.5 | sun only 3.76 - shadows off 3.23 |
+| GI hit lighting (light cache, fills) | 6-8 | 0.8-2.9 | light_hit |
+| Fixed per-point overhead | 1.5-2.5 | ~2.9 | nothing-lit row |
+| Flame | 0.5-1 | ~0 | emissive off |
 
-So the "direct" bucket is really **all lights evaluated at every surface the lighting system touches**: the picture itself and every GI ray hit. Most of that cost is sun visibility and GI hit lighting, not lamps.
+The lamps are the bucket, and they cost only where GI is on.
 
-### Timing double-count
+## Where the ~10 ms comes from (code)
 
-`gpu.rs` also added each of these dispatches to a `shadows` bucket. That bucket is not a separate pass, so the 30 Oct reading "shadows 15.7 + initial 8.1 + …" counted the same work twice. PR #123 drops `shadows=` from `LIGHTING_MS` and prints `light_px=` and `light_hit=` instead, so the bucket can be split honestly.
+All in `lighting_direct.comp` on lighting-v3:
 
-## Estimated shares of the 16.0 ms
+- **Invocations.** The light_px dispatch covers `pixels + kept hits`. Kept hits
+  are `probes x rays x LIGHTING_STRATA` = 160 x 90 probes (16 px tile) x 64 rays
+  x 8 strata = 7.4 M slots at 1440p. Each frame relights two strata
+  (`LIGHTING_KEPT_RELIGHT`: the stratum traced this frame and the one halfway
+  round), so about **1.8 M kept-hit points a frame**, half the 3.7 M pixels. The
+  halfway relight is skipped only when no moved lamp reaches the hit
+  (`lighting_wrc_lamp_changed`), and the stress scene's lamps move, so it
+  mostly runs.
+- **Lamps per invocation.** Kept hits do not pick. `LIGHTING_PROBE_PICKS` is
+  `false` ("S60A: no gain measured"), so `pick` is false, `exact` is true and the
+  shade loop walks **every lamp in the hit's lamp list**. Light-cache rays do
+  pick, with at most `LIGHTING_CACHE_PICKS` = 2.
+- **Shadow rays per lamp.** One `trace_occluded` per lit lamp, unless the S74A
+  shadow cell has a stored answer. The cell is used only for a static lamp
+  with world mode 3, so moving lamps always trace.
+- **Why pixels are cheap and hits are not.** Pixels are coherent, have the S78J
+  signature hold (a quiet pixel reuses last frame's sum), and on #120 the
+  ReSTIR reservoir. Kept hits land on scattered surfaces in random directions,
+  so their lamp lists and shadow rays diverge, and none of those savings apply.
+  ReSTIR on #120 (`lamp_pix`) only covers `idx < pixels`. The kept-hit path in
+  flag mode 0 is untouched.
+- The S69C comment in the shader already records this pass at about 10 ms of
+  kept-hit relighting at 1080p, before the two-strata relight cut it down.
 
-These are estimates from the code and the existing 4070 numbers. None of them has been measured on its own yet.
+## Why the earlier estimates were wrong
 
-| Part | Estimate | Reasoning |
-|---|---|---|
-| Sun shadow ray per pixel | 4–6 ms | One incoherent ray query per pixel, 3.69 M rays, in a compute shader without hardware ray reordering |
-| Lighting GI hits (kept probe hits + cache rays): sun ray, lamp pick, cache read | 6–8 ms | 2 × kept hits plus cache rays, each a scattered memory read and usually a trace. Matches #70, where direct scaled with hit count (1.7–1.9×). |
-| Flame (picked as a lamp, plus its signature and hash work) | 0.5–1 ms | Joins the pick sum at every point |
-| Point lamps (pick loop over the list) | ~0.3 ms | Measured with ReSTIR on and off |
-| Per-point overhead (G-buffer and history reads, packing, change counters) | 1.5–2.5 ms | Wide, branchy shader with low occupancy |
-| Load inflation | ~2.7 ms | The clean run on 30 Oct 08:00 read 13.3 ms against 16.0 ms under load |
+- **Point lamps 0.3 ms.** That was the pixel cost with GI off. The kept hits sit
+  in the same dispatch and timestamp, so their lamp loop was booked to
+  "pixels" and then wrongly put under GI hits.
+- **GI hits 6-8 ms.** It assumed the light cache's hits carry the full lamp
+  loop. They pick two lamps at most, and `light_hit` measures 0.8-2.9 ms. The
+  9.84 ms in "direct off" is the kept hits moving into that bucket, not a real
+  hit cost.
+- **Sun shadow 4-6 ms.** It priced one incoherent ray per pixel. Sun rays from
+  the G-buffer are coherent, and hits outside the sun slice keep the committed
+  sun, so it costs ~0.5 ms.
 
-## Ways to cut it, ranked
+## Ranked cuts
 
-| # | Change | What industry does | Est. saving (4070, 1440p) | Quality risk |
-|---|---|---|---|---|
-| 1 | **Light GI hits from the surface/radiance cache, not from lights.** A probe or cache hit reads the cached lit surface, and the cache is relit in a small budgeted pass. | Lumen: final-gather hits sample the lit surface-cache cards and never trace a lamp. Also DDGI and SHaRC. | 5–7 ms | Medium: lag after a light changes, which is already handled by cache invalidation. Leaks if the cache is coarse. Check against the oracle grid score. |
-| 2 | **Sun visibility from shadow maps**: cascaded shadow maps now, virtual shadow maps later, with ray-traced contact or penumbra only near edges. | UE5 virtual shadow maps; most shipped games use cascades | 3–5 ms (cascades ~1 ms for 4 × 2048²) | Low to medium: blocky or soft edges, peter-panning. VRAM is 16–64 MB. Also suits the GTX 1060 Low preset. |
-| 2b | Alternative to 2: **half-resolution or checkerboard sun rays plus a denoiser** | MegaLights, the RTX shadow denoiser (SIGMA) | 2–3 ms | Medium: temporal blur or flicker on thin casters, and the flicker gate is strict |
-| 3 | **Fold the flame into the lamp list** (one reservoir candidate), with no separate per-point path | MegaLights / ReSTIR treat every emitter the same | 0.5–1 ms | Low |
-| 4 | **Slim the per-point shader**: split pixels from hits so the pixel dispatch stays coherent, move change counters behind a debug flag, cut history reads | Standard occupancy work | 1–2 ms | Low |
-| 5 | **Budget GI hit counts** (kept hits ×2, cache rays per round) against a fixed ms target | Lumen's fixed probe and ray budgets | 1–3 ms | Medium: noisier GI, so it depends on the denoiser |
+Targets are against ~10 ms of kept-hit lamp work. Quality is judged against the
+path-traced reference: photoreal, no look hacks, near-camera error first, no
+flicker.
 
-Even if every saving lands, the bucket still ends up at about 2–4 ms. So a 2 ms whole frame needs #1 and #2 together, plus the GI and compose cuts already planned. Direct light can't reach that target alone.
+### 1. Sample lamps at kept hits instead of summing them (save est. 6-9 ms)
 
-## Recommendation
+Give kept hits the same stochastic, light-proportional pick the light cache
+already uses: one or two chosen lamps and one shadow ray each, weighted to
+stay unbiased. The unshadowed per-lamp weight is cheap. The shadow rays and
+divergence are the cost.
 
-1. Merge #123, then take one clean 4070 run that prints `light_px` and `light_hit` separately. Every estimate above depends on that split.
-2. Do #1 first (cache-lit GI hits). It is the biggest saving, it is what Lumen does, and it also stops each extra light making GI cost more.
-3. Then do #2 with cascaded shadow maps as the default sun path, keep ray-traced sun shadows as a High-preset option, and use cascades only on Low and the GTX 1060.
-4. Keep ReSTIR DI (#120) only for point lamps. It is not where the time goes.
+- Estimate: shadow rays per kept hit go from the lamp count (several) to <= 2.
+  The ~2.9 ms fixed overhead and the unshadowed walk remain.
+- Why S60A saw "no gain": it was measured before the kept-hit relight budget
+  and two-strata relight, and probably when the loop was not the limiter. It
+  needs re-measuring on today's scene.
+- Quality risk: low to medium. Kept hits feed the probe gather, which averages
+  64 rays x 8 strata, so per-hit noise mostly averages out. The pick offset
+  hangs on the hit's 25 cm cell, so a still hit gives the same answer and does
+  not crawl. Watch for blotches in indirect light near a bright lamp.
+- 4070 A/B: probe picks off/on. light_px, shadow-ray counter slot 49
+  (`GENOS_LIGHTING_LAMP_PICK_DIAG`), oracle near/grid on sun-x100, turn, spin
+  and switch, and the still-scene unchanged-pixel share.
 
-## What 4070 measurement confirms each estimate
+### 2. Light kept hits from the world-space surface cache (save est. 8-10 ms)
 
-All runs at 2560×1440 with `--proof`, during a clean-GPU window, with `GENOS_GPU_DISPATCH=1`.
+Kept hits read direct light from the surface cache texel under them (the S75
+path, as Lumen's final gather reads lit cards) instead of tracing. The cache
+already relights texels when a lamp in range changes.
 
-| Estimate | Run that confirms it |
-|---|---|
-| Pixels vs GI hits split | `light_px` vs `light_hit`, plus the per-dispatch `LIGHTING_DISPATCH` line |
-| Sun ray cost | Run with sun shadows off (`GENOS_LIGHTING_SHADOWS=0`, sun only) and compare `light_px`; sun-x100 scene |
-| GI hit lighting | Run with `direct=0` and GI on (the kept-hits-only dispatch), and run with GI off |
-| Flame | Fire on vs off in the stress building |
-| Overhead | The basic scene with no lamps and no sun: what remains is per-point overhead |
-| Load inflation | Repeat the 30 Oct numbers in a clean window, and compare with 13.3 ms |
+- Estimate: removes the loop and the shadow rays at kept hits, leaving a cache
+  lookup. The cache's own relight cost goes up somewhat. That is the light_hit
+  bucket to watch.
+- Quality risk: medium. Cache texels are coarser than a hit point, and a moving
+  lamp's light lags by the cache's relight delay. Indirect light near the camera
+  is from close surfaces, where texel size shows most. Needs a check that it
+  adds no flicker when lamps move.
+- 4070 A/B: kept-hit lighting from the cache vs traced. light_px and light_hit,
+  oracle near error (gate: no worse than master), turn and switch.
+
+### 3. Budget kept-hit relights (save est. 2-5 ms)
+
+Relight fewer kept hits per frame, for example only the traced stratum plus
+hits a moved lamp really reaches (a tighter `lighting_lamp_delta` threshold), or
+a fixed hit budget per frame spent nearest the camera first.
+
+- Estimate: the halfway relight is about half the kept-hit points, so up to
+  ~5 ms if it is mostly skipped, and less in scenes with many moving lamps.
+- Quality risk: medium. Older kept light lags moving lamps by up to 8 frames,
+  which shows as indirect-light ghosting. It must stay near-camera first.
+- 4070 A/B: relight budget off/on, light_px, oracle on turn and switch, and
+  the lamp-motion lag on spin.
+
+### 4. Reuse the screen reservoirs at hits (save est. <1 ms, low priority)
+
+Most kept hits are off-screen or not at a pixel's surface, so a screen
+reservoir rarely applies. Worth trying only after 1 or 2.
+
+## What this means for C5 (ReSTIR, #120)
+
+With the flag off, pixel lamp work is ~1.3 ms with the sun, so screen ReSTIR
+cannot pay back its ~10 ms (initial 4.9 + temporal 0.8 + spatial 4.2). Its
+value is in scenes with many lamps, and the kept-hit sampler in cut 1 is the
+same idea applied where the cost really is. On spin, the still-scene
+unchanged-pixel share falls from 0.97 (flag off) to 0.42 (flag on). That points
+to reuse picking a different lamp each frame rather than holding one, which
+also explains the grid error.
+
+## Open decision for Anthony
+
+Order of work: cut 1 first (smallest change, biggest measured target), then
+cut 2 if the 4070 A/B leaves the kept hits above ~2 ms. Cut 3 only if both fall
+short.
