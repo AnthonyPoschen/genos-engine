@@ -1,10 +1,31 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_range_loop,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! A binned-SAH bounding volume hierarchy over triangles.
 //!
@@ -334,14 +355,19 @@ fn build_node(
         let mut right_n = [0usize; BINS];
         let (mut acc, mut n) = (Aabb::EMPTY, 0);
         for b in (1..BINS).rev() {
-            acc = acc.union(&bin_box[b]);
+            // An empty bin's box is EMPTY, and `union` with EMPTY spans everything.
+            if bin_n[b] > 0 {
+                acc = acc.union(&bin_box[b]);
+            }
             n += bin_n[b];
             right_area[b] = acc.half_area();
             right_n[b] = n;
         }
         let (mut acc, mut n) = (Aabb::EMPTY, 0);
         for b in 0..BINS - 1 {
-            acc = acc.union(&bin_box[b]);
+            if bin_n[b] > 0 {
+                acc = acc.union(&bin_box[b]);
+            }
             n += bin_n[b];
             if n == 0 || right_n[b + 1] == 0 {
                 continue;

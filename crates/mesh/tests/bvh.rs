@@ -1,8 +1,35 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The BVH must agree with brute force on every query.
 
@@ -119,4 +146,22 @@ fn one_sided_triangles_are_missed_from_behind() {
     assert!(Bvh::build(&[])
         .intersect(&[], [0.0; 3], [1.0, 0.0, 0.0], 1.0)
         .is_none());
+}
+
+/// Two far clusters leave empty SAH bins between them. An empty bin must not
+/// make every split look infinitely costly (Sponza's `leaf` had 16-triangle
+/// leaves spanning the whole atrium).
+#[test]
+fn far_clusters_split_across_empty_bins() {
+    let tris: Vec<MeshTriangle> = (0..16)
+        .map(|i| {
+            let x = if i % 2 == 0 { -10.0 } else { 10.0 } + i as f32 * 0.01;
+            MeshTriangle::flat(
+                [[x, 0.0, 0.0], [x + 0.01, 0.0, 0.0], [x, 0.01, 0.0]],
+                i,
+                true,
+            )
+        })
+        .collect();
+    assert!(Bvh::build(&tris).node_count() > 1);
 }
