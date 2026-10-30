@@ -6,11 +6,15 @@
 //! An input whose record already matches every input hash and the settings is
 //! reported `up to date` and not rebuilt.
 //!
+//! `--threads N` caps the threads (default every core). Assets, meshes and
+//! images are spread over them; the output bytes are the same for any count.
+//!
 //! `--textures` also cooks every image into `DIR/cooked/<asset>.gtex` (BC7, BC5
 //! for normals, full mips), with the same up-to-date rule. Off by default.
 //!
-//! `genos-cook --verify DIR` is the load-time check: it hashes every record and
-//! object the manifest names, decodes each record, and prints the timings.
+//! `genos-cook --verify DIR` is the load-time check: it hashes every record,
+//! texture record and object the manifest names, decodes each record, and
+//! prints the timings.
 //!
 //! `genos-cook --compare FILE` cooks one file in memory and compares the loaded
 //! record with a direct `load_gltf_file`, printing both times. Exit 1 on a difference.
@@ -20,8 +24,8 @@ use std::time::Instant;
 
 use genos_bake::{BakeMode, BakeSettings};
 use genos_cook::{
-    cook, cook_file, cook_textures_file, cooked_path, decode, encode, load_cooked, load_textures,
-    manifest, Manifest, Outcome,
+    cook, cook_asset, cooked_path, decode, encode, load_cooked, load_textures, map_by_cost,
+    package, textures_path, AssetCook, Manifest, Outcome, Threads,
 };
 
 fn main() {
@@ -46,6 +50,7 @@ fn run() -> Result<(), String> {
     let mut mode = Mode::Cook;
     let mut files = Vec::new();
     let mut textures = false;
+    let mut threads = Threads::all();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -56,8 +61,14 @@ fn run() -> Result<(), String> {
             "--verify" => mode = Mode::Verify(value("--verify")?.into()),
             "--compare" => mode = Mode::Compare,
             "--textures" => textures = true,
+            "--threads" => {
+                threads = Threads(
+                    std::num::NonZeroUsize::new(parse(&value("--threads")?)?)
+                        .ok_or("--threads needs at least 1")?,
+                );
+            }
             "-h" | "--help" => {
-                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
+                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] [--threads N] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
                 return Ok(());
             }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
@@ -67,7 +78,7 @@ fn run() -> Result<(), String> {
     match mode {
         Mode::Verify(dir) => verify(&dir),
         Mode::Compare => compare(&files, &settings),
-        Mode::Cook => cook_all(&files, &out, &settings, textures),
+        Mode::Cook => cook_all(&files, &out, &settings, textures, threads),
     }
 }
 
@@ -87,58 +98,75 @@ fn cook_all(
     out: &Path,
     settings: &BakeSettings,
     textures: bool,
+    threads: Threads,
 ) -> Result<(), String> {
     if files.is_empty() {
         return Err("no input files (try --help)".into());
     }
+    let mut files = files.to_vec();
+    files.sort();
+    files.dedup();
     let total = Instant::now();
+    let cooked = map_by_cost(
+        &files,
+        threads,
+        |f| std::fs::metadata(f).map_or(0, |m| usize::try_from(m.len()).unwrap_or(usize::MAX)),
+        |file| {
+            let start = Instant::now();
+            cook_asset(file, out, settings, textures, threads)
+                .map(|c| (c, ms(start)))
+                .map_err(|e| format!("{}: {e}", file.display()))
+        },
+    );
     let mut records = Vec::new();
-    for file in files {
-        let start = Instant::now();
-        let (outcome, path) =
-            cook_file(file, out, settings).map_err(|e| format!("{}: {e}", file.display()))?;
+    for (file, result) in files.iter().zip(cooked) {
+        let (AssetCook { record, textures }, cook_ms) = result?;
+        let (outcome, path) = record;
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         println!(
-            "{}: {} {} ({size} bytes) {:.2} ms",
+            "{}: {} {} ({size} bytes) {cook_ms:.2} ms",
             file.display(),
             what(outcome),
             path.display(),
-            ms(start)
         );
-        records.push(load_cooked(&path).map_err(|e| e.to_string())?);
-        if textures {
-            cook_textures(file, out)?;
-        }
+        let gtex = textures
+            .map(|(outcome, path)| report_textures(file, outcome, &path))
+            .transpose()?;
+        records.push((load_cooked(&path).map_err(|e| e.to_string())?, gtex));
     }
-    let text = manifest(&records).text();
+    let entries: Vec<_> = records.iter().map(|(c, g)| (c, *g)).collect();
+    let text = package(&entries).text();
     genos_load::write_atomic(&out.join("package.manifest"), text.as_bytes())
         .map_err(|e| e.to_string())?;
-    println!("package: {} assets, {:.2} ms", records.len(), ms(total));
+    println!(
+        "package: {} assets, {} threads, {:.2} ms",
+        records.len(),
+        threads.get(),
+        ms(total)
+    );
     Ok(())
 }
 
-fn cook_textures(file: &Path, out: &Path) -> Result<(), String> {
+/// Print a texture record's size and checked-load time; return its file hash.
+fn report_textures(file: &Path, outcome: Outcome, path: &Path) -> Result<[u8; 32], String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let start = Instant::now();
-    let (outcome, path) =
-        cook_textures_file(file, out).map_err(|e| format!("{}: {e}", file.display()))?;
-    let cook_ms = ms(start);
-    let start = Instant::now();
-    let t = load_textures(&path).map_err(|e| e.to_string())?;
+    let t = genos_cook::decode_textures(&bytes).map_err(|e| e.to_string())?;
     let load_ms = ms(start);
-    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
     let texels: u64 = t
         .textures
         .iter()
         .map(|t| u64::from(t.ktx2.width) * u64::from(t.ktx2.height))
         .sum();
     println!(
-        "{}: textures {} {} ({} images, {texels} base texels, {size} bytes) {cook_ms:.2} ms, checked load {load_ms:.2} ms",
+        "{}: textures {} {} ({} images, {texels} base texels, {} bytes), checked load {load_ms:.2} ms",
         file.display(),
         what(outcome),
         path.display(),
-        t.textures.len()
+        t.textures.len(),
+        bytes.len()
     );
-    Ok(())
+    Ok(genos_load::sha256(&bytes))
 }
 
 fn verify(dir: &Path) -> Result<(), String> {
@@ -149,10 +177,18 @@ fn verify(dir: &Path) -> Result<(), String> {
     let checked = ms(start);
     let load = Instant::now();
     let mut triangles = 0;
+    let mut images = 0;
     for line in &m.lines {
         let id = line.split(' ').next().unwrap_or_default();
         let path = cooked_path(dir, &unhex(id)?);
         let c = load_cooked(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if line.contains(" gtex=") {
+            let tex = textures_path(dir, &unhex(id)?);
+            images += load_textures(&tex)
+                .map_err(|e| format!("{}: {e}", tex.display()))?
+                .textures
+                .len();
+        }
         triangles += c
             .meshes
             .iter()
@@ -161,7 +197,7 @@ fn verify(dir: &Path) -> Result<(), String> {
             .sum::<usize>();
     }
     println!(
-        "verify: {n} assets ok, {triangles} triangles, hash check {checked:.2} ms, decode {:.2} ms",
+        "verify: {n} assets ok, {triangles} triangles, {images} cooked images, hash check {checked:.2} ms, decode {:.2} ms",
         ms(load)
     );
     Ok(())

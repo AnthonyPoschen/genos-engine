@@ -23,7 +23,7 @@ use intel_tex_2::{bc5, bc7, RgSurface, RgbaSurface};
 
 use crate::format::{checked_body, R, W};
 use crate::ktx2::{self, BlockFormat, Ktx2};
-use crate::{inputs_match, inputs_of, CookError, Input, Outcome};
+use crate::{inputs_match, inputs_of, map_by_cost, CookError, Input, Outcome, Threads};
 
 pub const TEXTURE_MAGIC: &[u8; 4] = b"GTX1";
 pub const TEXTURE_VERSION: u32 = 1;
@@ -125,24 +125,40 @@ pub fn encode_image(image: &Image, space: MipSpace) -> Ktx2 {
     }
 }
 
-/// Cook every image of an import.
+/// Cook every image of an import on every core.
 ///
 /// # Errors
 ///
 /// An import with no scene.
 pub fn cook_textures(doc: &ImportDoc) -> Result<CookedTextures, CookError> {
+    cook_textures_with(doc, Threads::all())
+}
+
+/// [`cook_textures`] with the images spread over `threads`, largest first. The
+/// record is the same for any thread count.
+///
+/// # Errors
+///
+/// An import with no scene.
+pub fn cook_textures_with(doc: &ImportDoc, threads: Threads) -> Result<CookedTextures, CookError> {
     let scene = doc.scene.as_ref().ok_or(CookError::NoScene)?;
     let spaces = image_spaces(scene.images.len(), &scene.materials);
-    let textures = scene
+    let jobs: Vec<(usize, &Image, MipSpace)> = scene
         .images
         .iter()
         .zip(spaces)
         .enumerate()
-        .map(|(i, (image, space))| CookedTexture {
+        .map(|(i, (image, space))| (i, image, space))
+        .collect();
+    let textures = map_by_cost(
+        &jobs,
+        threads,
+        |job| job.1.pixels.len(),
+        |&(i, image, space)| CookedTexture {
             image: u32::try_from(i).unwrap_or(u32::MAX),
             ktx2: encode_image(image, space),
-        })
-        .collect();
+        },
+    );
     Ok(CookedTextures {
         asset_id: doc.asset_id,
         settings: texture_settings_hash(),
@@ -247,21 +263,25 @@ pub fn cook_textures_file(source: &Path, out: &Path) -> Result<(Outcome, PathBuf
     })?;
     let dir = source.parent().unwrap_or(Path::new("."));
     let path = textures_path(out, &sha256(&bytes));
-    if let Ok(existing) = std::fs::read(&path) {
-        let fresh = checked_body(&existing)
-            .and_then(|body| header(&mut R { b: body, at: 0 }))
-            .is_ok_and(|(_, settings, inputs)| {
-                settings == texture_settings_hash() && inputs_match(&inputs, &bytes, dir)
-            });
-        if fresh {
-            return Ok((Outcome::UpToDate, path));
-        }
+    if textures_fresh(&path, &bytes, dir) {
+        return Ok((Outcome::UpToDate, path));
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
         genos_load::FileSource::new(dir.join(uri)).read_bytes()
     })?;
     genos_load::write_atomic(&path, &encode_textures(&cook_textures(&doc)?))?;
     Ok((Outcome::Cooked, path))
+}
+
+/// The record at `path` checks and matches every input hash and the encoder.
+pub(crate) fn textures_fresh(path: &Path, source: &[u8], dir: &Path) -> bool {
+    std::fs::read(path).is_ok_and(|existing| {
+        checked_body(&existing)
+            .and_then(|body| header(&mut R { b: body, at: 0 }))
+            .is_ok_and(|(_, settings, inputs)| {
+                settings == texture_settings_hash() && inputs_match(&inputs, source, dir)
+            })
+    })
 }
 
 /// Read and check a `.gtex`.

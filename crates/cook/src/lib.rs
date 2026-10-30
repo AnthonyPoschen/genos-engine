@@ -13,6 +13,7 @@
 mod format;
 pub mod ktx2;
 mod package;
+mod parallel;
 mod texture;
 
 use std::path::{Path, PathBuf};
@@ -21,11 +22,12 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
-pub use package::{manifest, Manifest};
+pub use package::{manifest, package, Manifest};
+pub use parallel::{map_by_cost, Threads};
 pub use texture::{
-    cook_textures, cook_textures_file, decode_textures, encode_image, encode_textures,
-    load_textures, texture_settings_hash, textures_path, CookedTexture, CookedTextures,
-    TEXTURE_MAGIC, TEXTURE_VERSION,
+    cook_textures, cook_textures_file, cook_textures_with, decode_textures, encode_image,
+    encode_textures, load_textures, texture_settings_hash, textures_path, CookedTexture,
+    CookedTextures, TEXTURE_MAGIC, TEXTURE_VERSION,
 };
 
 /// One cooked mesh: the glTF primitives as imported and the bake key.
@@ -101,22 +103,50 @@ pub fn settings_hash(s: &BakeSettings) -> [u8; 32] {
     h.finish()
 }
 
-/// Cook an import. Each mesh goes through `load_or_bake`, so the bake cache is filled or reused.
+/// Cook an import on every core. Each mesh goes through `load_or_bake`, so the
+/// bake cache is filled or reused.
 ///
 /// # Errors
 ///
 /// No scene, or a bake that fails, is an error.
 pub fn cook(doc: &ImportDoc, settings: &BakeSettings) -> Result<Cooked, CookError> {
+    cook_with(doc, settings, Threads::all())
+}
+
+/// [`cook`] with the meshes spread over `threads`, largest first. The record is
+/// the same for any thread count.
+///
+/// # Errors
+///
+/// No scene, or a bake that fails, is an error.
+pub fn cook_with(
+    doc: &ImportDoc,
+    settings: &BakeSettings,
+    threads: Threads,
+) -> Result<Cooked, CookError> {
     let scene = doc.scene.as_ref().ok_or(CookError::NoScene)?;
-    let mut meshes = Vec::with_capacity(scene.meshes.len());
-    for (index, mesh) in scene.meshes.iter().enumerate() {
-        let baked =
-            load_or_bake(&BakeMesh::from_gltf(scene, index), settings).map_err(CookError::Bake)?;
-        meshes.push(CookedMesh {
-            mesh: mesh.clone(),
-            bake_key: baked.key,
-        });
-    }
+    let indices: Vec<usize> = (0..scene.meshes.len()).collect();
+    let meshes = map_by_cost(
+        &indices,
+        threads,
+        |&i| {
+            scene.meshes[i]
+                .primitives
+                .iter()
+                .map(|p| p.indices.len())
+                .sum()
+        },
+        |&i| {
+            let baked =
+                load_or_bake(&BakeMesh::from_gltf(scene, i), settings).map_err(CookError::Bake)?;
+            Ok(CookedMesh {
+                mesh: scene.meshes[i].clone(),
+                bake_key: baked.key,
+            })
+        },
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>, CookError>>()?;
     Ok(Cooked {
         asset_id: doc.asset_id,
         settings: settings_hash(settings),
@@ -157,23 +187,88 @@ pub fn cook_file(
     out: &Path,
     settings: &BakeSettings,
 ) -> Result<(Outcome, PathBuf), CookError> {
+    Ok(cook_asset(source, out, settings, false, Threads::all())?.record)
+}
+
+/// What [`cook_asset`] did with each record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetCook {
+    /// The `.gcook`.
+    pub record: (Outcome, PathBuf),
+    /// The `.gtex`, when textures were asked for.
+    pub textures: Option<(Outcome, PathBuf)>,
+}
+
+/// Cook a glTF file's `.gcook` and, with `textures`, its `.gtex`. Each record
+/// follows the up-to-date rule of [`cook_file`] and [`cook_textures_file`].
+/// The source is imported once, and only when a record is stale. With more
+/// than one thread the bake and the texture encode run side by side.
+///
+/// # Errors
+///
+/// A source that does not import, a failed bake, or a failed write.
+pub fn cook_asset(
+    source: &Path,
+    out: &Path,
+    settings: &BakeSettings,
+    textures: bool,
+    threads: Threads,
+) -> Result<AssetCook, CookError> {
     let bytes = std::fs::read(source).map_err(|_| LoadError::NotFound {
         path: source.to_path_buf(),
     })?;
     let dir = source.parent().unwrap_or(Path::new("."));
-    let path = cooked_path(out, &sha256(&bytes));
-    if let Ok(existing) = std::fs::read(&path) {
-        if up_to_date(&existing, &bytes, dir, settings) {
-            return Ok((Outcome::UpToDate, path));
+    let id = sha256(&bytes);
+    let path = cooked_path(out, &id);
+    let tex_path = textures_path(out, &id);
+    let mesh_fresh =
+        std::fs::read(&path).is_ok_and(|existing| up_to_date(&existing, &bytes, dir, settings));
+    let tex_fresh = !textures || texture::textures_fresh(&tex_path, &bytes, dir);
+    let outcome = |fresh: bool| {
+        if fresh {
+            Outcome::UpToDate
+        } else {
+            Outcome::Cooked
         }
+    };
+    let result = AssetCook {
+        record: (outcome(mesh_fresh), path.clone()),
+        textures: textures.then(|| (outcome(tex_fresh), tex_path.clone())),
+    };
+    if mesh_fresh && tex_fresh {
+        return Ok(result);
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
         genos_load::FileSource::new(dir.join(uri)).read_bytes()
     })?;
-    let cooked = cook(&doc, settings)?;
-    genos_load::store_import(out, &doc)?;
-    genos_load::write_atomic(&path, &encode(&cooked))?;
-    Ok((Outcome::Cooked, path))
+    let write_mesh = || -> Result<(), CookError> {
+        if !mesh_fresh {
+            let cooked = cook_with(&doc, settings, threads)?;
+            genos_load::store_import(out, &doc)?;
+            genos_load::write_atomic(&path, &encode(&cooked))?;
+        }
+        Ok(())
+    };
+    let write_tex = || -> Result<(), CookError> {
+        if !tex_fresh {
+            let t = cook_textures_with(&doc, threads)?;
+            genos_load::write_atomic(&tex_path, &encode_textures(&t))?;
+        }
+        Ok(())
+    };
+    if threads.get() > 1 && !mesh_fresh && !tex_fresh {
+        std::thread::scope(|scope| {
+            let tex = scope.spawn(write_tex);
+            let mesh = write_mesh();
+            tex.join()
+                .map_err(|_| CookError::Corrupt("texture encode panicked"))??;
+            mesh
+        })?;
+    } else {
+        write_mesh()?;
+        write_tex()?;
+    }
+    Ok(result)
 }
 
 fn up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSettings) -> bool {
