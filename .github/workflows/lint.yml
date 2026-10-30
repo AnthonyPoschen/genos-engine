@@ -26,6 +26,20 @@ jobs:
       - name: lint
         run: ./scripts/lint.sh
 
+  quit-gap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Wayland, Weston, and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config mesa-vulkan-drivers weston
+      - name: build the windowed binaries
+        run: cargo build -p genos-camera -p genos-stress -p genos-lighting
+      - name: quit gap under headless Weston
+        run: cargo test -p genos-window --test lifecycle_quit -- --test-threads=1 --nocapture
+
   noise-gate:
     runs-on: ubuntu-latest
     steps:

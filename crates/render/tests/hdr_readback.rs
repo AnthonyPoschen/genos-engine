@@ -57,10 +57,14 @@ fn picture(window: &mut Window, renderer: &mut Renderer, world: &World) -> Vec<u
 fn an_hdr_readback_matches_the_sdr_picture() {
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    let sdr = picture(&mut window, &mut renderer, &hall(OutputMode::Sdr));
-    let hdr = picture(&mut window, &mut renderer, &hall(OutputMode::Auto));
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let sdr = picture(window, renderer, &hall(OutputMode::Sdr));
+    let hdr = picture(window, renderer, &hall(OutputMode::Auto));
     let (format, space) = renderer.hdr_surface();
     assert_eq!(sdr.len(), hdr.len());
     let mut sum = 0u64;

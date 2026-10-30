@@ -49,6 +49,8 @@ pub struct CheckOptions {
     pub plan: FramePlan,
     /// Wayland display name for the proof window. `None` is the session compositor.
     pub display: Option<String>,
+    /// Stall once during the live capture's shutdown.
+    pub block_ms: Option<std::time::Duration>,
 }
 
 struct Wanted {
@@ -376,6 +378,7 @@ fn capture_live(
         params: *params,
         jobs,
         display: opts.display.clone(),
+        block_ms: opts.block_ms,
     }) {
         Ok(outcome) => {
             for (scene, checkpoint, reason) in outcome.skipped {

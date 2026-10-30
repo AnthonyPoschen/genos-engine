@@ -580,8 +580,11 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
     let _guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = World::from_scene(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),

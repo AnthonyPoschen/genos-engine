@@ -55,7 +55,7 @@ pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
     LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
-    MaterialStats, Renderer,
+    MaterialStats, Renderer, VkTraffic,
     ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use hdr_output::{

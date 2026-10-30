@@ -20,14 +20,14 @@ use genos_render::{DebugView, LampPickCounts, LightingAtrousStats, Renderer, Vie
 use genos_scene::{AmbientMode, Camera, LampPickMode, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn shipped_hall() -> World {
@@ -53,7 +53,8 @@ fn pipeline_limit() -> Duration {
 
 #[test]
 fn lighting_pipelines_build_quickly() {
-    let (_gpu, _window, renderer) = open();
+    let (_gpu, owner) = open();
+    let renderer = &*owner.device;
     let times = renderer.pipeline_times();
     let lighting: Vec<_> = times
         .iter()
@@ -95,7 +96,9 @@ fn lighting_pipelines_build_quickly() {
 
 #[test]
 fn agx_display_draws_a_frame() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut world = shipped_hall();
     world.scene.hdr = genos_scene::HdrSettings::for_preset(LightingPreset::High);
     let camera = Camera::opening();
@@ -117,17 +120,19 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Ca
 
 #[test]
 fn the_bounce_adds_light_to_the_direct_view() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = shipped_hall();
     let camera = Camera::opening();
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         ..DebugView::default()
     });
-    let direct = draw(&mut window, &mut renderer, &world, &camera);
+    let direct = draw(window, renderer, &world, &camera);
     // The full picture has light the direct view does not: the probes' bounce.
     renderer.set_debug_view(DebugView::default());
-    let full = draw(&mut window, &mut renderer, &world, &camera);
+    let full = draw(window, renderer, &world, &camera);
     let lit = |p: &[u8]| p.iter().map(|&c| u64::from(c)).sum::<u64>();
     assert!(lit(&full) > lit(&direct), "the bounce adds light");
 }
@@ -136,7 +141,9 @@ fn the_bounce_adds_light_to_the_direct_view() {
 /// and rays that hit it carry that light onto the floor in front of it.
 #[test]
 fn lighting_draws_emitted_light_and_bounces_it() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let gltf = genos_load::load_gltf_file(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../load/fixtures/cube.gltf"
@@ -190,7 +197,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
     let mut shot = |world: &World| {
         let mut last = Vec::new();
         for _ in 0..60 {
-            last = draw(&mut window, &mut renderer, world, &camera);
+            last = draw(window, renderer, world, &camera);
         }
         last
     };
@@ -266,7 +273,9 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
 /// probe keeps all its kept rays, the far ones and the ones the lamp lights alike.
 #[test]
 fn lighting_probes_keep_their_rays_when_the_light_changes() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let base: Scene = shipped_hall().scene;
     assert!(!base.lights.is_empty());
     let camera = Camera::opening();
@@ -297,14 +306,14 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
         ("the sun and sky changing", sun),
     ];
     for (what, scene) in changes {
-        let before = fill_strata(&mut window, &mut renderer, &still_world, &camera);
+        let before = fill_strata(window, renderer, &still_world, &camera);
         let after = draw(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &World::from_scene(scene),
             &camera,
         );
-        let held = samples_per_probe(&mut renderer);
+        let held = samples_per_probe(renderer);
         assert!(
             held > 0.95 * 512.0,
             "{what}: every probe keeps its rays, near the change or far from it ({held})"
@@ -326,26 +335,28 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
 /// The change shows at once.
 #[test]
 fn lighting_moving_object_retraces_the_rays_it_crosses() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let base: Scene = shipped_hall().scene;
     assert!(!base.solids.is_empty());
     let camera = Camera::opening();
     let mut moved = base.clone();
     moved.solids[0].position.x += 0.5;
     let before = fill_strata(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &World::from_scene(base),
         &camera,
     );
-    let full = samples_per_probe(&mut renderer);
+    let full = samples_per_probe(renderer);
     let after = draw(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &World::from_scene(moved),
         &camera,
     );
-    let held = samples_per_probe(&mut renderer);
+    let held = samples_per_probe(renderer);
     assert!(
         held > full - 14.0,
         "the rays that cross the moved object are traced again, not dropped ({full} -> {held})"
@@ -362,7 +373,9 @@ fn lighting_moving_object_retraces_the_rays_it_crosses() {
 /// almost all rays; turning round to surfaces last frame never saw keeps few.
 #[test]
 fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = shipped_hall();
     let camera = Camera::opening();
     let p = camera.position;
@@ -370,16 +383,16 @@ fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
     turned.set_pose(p, camera.yaw + 0.002, camera.pitch);
     let mut jumped = Camera::opening();
     jumped.set_pose(p, camera.yaw + std::f32::consts::PI, camera.pitch);
-    fill_strata(&mut window, &mut renderer, &world, &camera);
-    let _ = draw(&mut window, &mut renderer, &world, &turned);
-    let held = samples_per_probe(&mut renderer);
+    fill_strata(window, renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &turned);
+    let held = samples_per_probe(renderer);
     assert!(
         held > 0.9 * 512.0,
         "a slight turn keeps almost all kept rays ({held})"
     );
-    fill_strata(&mut window, &mut renderer, &world, &camera);
-    let _ = draw(&mut window, &mut renderer, &world, &jumped);
-    let held = samples_per_probe(&mut renderer);
+    fill_strata(window, renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &jumped);
+    let held = samples_per_probe(renderer);
     assert!(held < 0.25 * 512.0, "turning round keeps few ({held})");
 }
 
@@ -388,23 +401,25 @@ fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
 /// refills one stratum a frame.
 #[test]
 fn lighting_floor_change_drops_all_kept_rays() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let base: Scene = shipped_hall().scene;
     let camera = Camera::opening();
     let mut floor = base.clone();
     floor.floor.color = [0.2, 0.6, 0.3];
     fill_strata(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &World::from_scene(base),
         &camera,
     );
     let changed = World::from_scene(floor);
-    let _ = draw(&mut window, &mut renderer, &changed, &camera);
-    let held = samples_per_probe(&mut renderer);
+    let _ = draw(window, renderer, &changed, &camera);
+    let held = samples_per_probe(renderer);
     assert!(held <= 64.5, "only this frame's rays are left ({held})");
-    let _ = draw(&mut window, &mut renderer, &changed, &camera);
-    let held = samples_per_probe(&mut renderer);
+    let _ = draw(window, renderer, &changed, &camera);
+    let held = samples_per_probe(renderer);
     assert!(
         held > 64.5 && held <= 128.5,
         "the next frame keeps the first and adds its own ({held})"
@@ -428,7 +443,9 @@ fn mean_byte(p: &[u8]) -> f64 {
 /// cells: 1.05, 1.22 and 1.31 here.
 #[test]
 fn lighting_moving_camera_keeps_its_brightness() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Bounce,
         ..DebugView::default()
@@ -447,7 +464,7 @@ fn lighting_moving_camera_keeps_its_brightness() {
     for clip in ["wiggle", "slide", "turn"] {
         let mut settled = Vec::new();
         for _ in 0..30 {
-            settled = draw(&mut window, &mut renderer, &world, &camera);
+            settled = draw(window, renderer, &world, &camera);
         }
         let mut last = Vec::new();
         for i in 0..12 {
@@ -458,7 +475,7 @@ fn lighting_moving_camera_keeps_its_brightness() {
                 "turn" => at(0.0, -0.03 * k),
                 _ => at(0.0, 0.0),
             };
-            last = draw(&mut window, &mut renderer, &world, &c);
+            last = draw(window, renderer, &world, &c);
         }
         let ratio = mean_byte(&last) / mean_byte(&settled).max(1.0e-6);
         eprintln!("{clip}: moving / settled {ratio:.4}");
@@ -487,7 +504,9 @@ fn mean_abs(a: &[u8], b: &[u8]) -> f64 {
 /// stats report the fraction, the mode and the threshold.
 #[test]
 fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = shipped_hall();
     let camera = Camera::opening();
     // The screen wavelet reports mode 3. This check is the hash-slot lists.
@@ -499,7 +518,7 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     let mut listed = Vec::new();
     for _ in 0..6 {
         previous = listed;
-        listed = draw(&mut window, &mut renderer, &world, &camera);
+        listed = draw(window, renderer, &world, &camera);
     }
     let list_stats = renderer.lighting_atrous_stats();
     let temporal = mean_abs(&previous, &listed);
@@ -529,7 +548,7 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     );
 
     renderer.set_lighting_atrous_dirty(0.0);
-    let dense = draw(&mut window, &mut renderer, &world, &camera);
+    let dense = draw(window, renderer, &world, &camera);
     let dense_stats = renderer.lighting_atrous_stats();
     let cross = mean_abs(&listed, &dense);
     eprintln!(
@@ -560,7 +579,7 @@ fn lighting_atrous_switches_to_dense_above_the_dirty_fraction() {
     );
 
     renderer.set_lighting_atrous_dirty(1.0);
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let back = renderer.lighting_atrous_stats();
     assert_eq!(
         back.mode, 1,
@@ -741,33 +760,35 @@ fn assert_bounce_close(
 /// iteration so the skip is actually taken on a young scene.
 #[test]
 fn adaptive_atrous_matches_the_full_reference() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = shipped_hall();
     let camera = Camera::opening();
     renderer.set_lighting_settings(denoise_settings());
-    view_at(&mut renderer, ViewMode::Bounce);
+    view_at(renderer, ViewMode::Bounce);
     let mut full_frames = Vec::new();
     for _ in 0..6 {
-        full_frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        full_frames.push(draw(window, renderer, &world, &camera));
     }
     let reference = full_frames.last().expect("reference").clone();
     let full_flicker = flicker_variance(&full_frames[4..]);
-    view_at(&mut renderer, ViewMode::Depth);
-    let depth = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Normal);
-    let normal = draw(&mut window, &mut renderer, &world, &camera);
-    view_at(&mut renderer, ViewMode::Direct);
-    let direct_full = draw(&mut window, &mut renderer, &world, &camera);
+    view_at(renderer, ViewMode::Depth);
+    let depth = draw(window, renderer, &world, &camera);
+    view_at(renderer, ViewMode::Normal);
+    let normal = draw(window, renderer, &world, &camera);
+    view_at(renderer, ViewMode::Direct);
+    let direct_full = draw(window, renderer, &world, &camera);
 
     for (name, settings) in [
         ("adaptive 0.02", adaptive_settings("0.02")),
         ("adaptive 0.10", adaptive_settings("0.1")),
     ] {
         renderer.set_lighting_settings(settings);
-        view_at(&mut renderer, ViewMode::Bounce);
+        view_at(renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
         for _ in 0..4 {
-            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+            frames.push(draw(window, renderer, &world, &camera));
         }
         assert_bounce_close(
             name,
@@ -778,8 +799,8 @@ fn adaptive_atrous_matches_the_full_reference() {
             &frames,
             full_flicker,
         );
-        view_at(&mut renderer, ViewMode::Direct);
-        let direct = draw(&mut window, &mut renderer, &world, &camera);
+        view_at(renderer, ViewMode::Direct);
+        let direct = draw(window, renderer, &world, &camera);
         let gap = mean_abs(&direct_full, &direct);
         eprintln!("{name} direct {gap:.3}");
         assert!(gap < 1.0, "{name} direct moved: {gap:.3}");
@@ -801,27 +822,31 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     let world = shipped_hall();
     let camera = Camera::opening();
     let adaptive = {
-        let (_gpu, mut window, mut renderer) = open();
+        let (_gpu, mut owner) = open();
+        let window = &mut *owner.window;
+        let renderer = &mut *owner.device;
         renderer.set_lighting_settings(adaptive_settings("0.1"));
-        view_at(&mut renderer, ViewMode::Bounce);
+        view_at(renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
         for _ in 0..4 {
-            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+            frames.push(draw(window, renderer, &world, &camera));
         }
         frames.pop().expect("adaptive frame")
     };
     let one = {
-        let (_gpu, mut window, mut renderer) = open();
+        let (_gpu, mut owner) = open();
+        let window = &mut *owner.window;
+        let renderer = &mut *owner.device;
         let mut settings = LightingSettings::preset(LightingPreset::High);
         settings.denoiser.screen = false;
         settings
             .set_key("denoise_iters", "1")
             .expect("denoise_iters");
         renderer.set_lighting_settings(settings);
-        view_at(&mut renderer, ViewMode::Bounce);
+        view_at(renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
         for _ in 0..4 {
-            frames.push(draw(&mut window, &mut renderer, &world, &camera));
+            frames.push(draw(window, renderer, &world, &camera));
         }
         frames.pop().expect("one-iter frame")
     };
@@ -857,11 +882,13 @@ fn high_bounce(
     frames: usize,
     shift: f32,
 ) -> (Vec<Vec<u8>>, LightingAtrousStats) {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
     renderer.set_lighting_settings(settings);
-    view_at(&mut renderer, ViewMode::Bounce);
+    view_at(renderer, ViewMode::Bounce);
     let mut world = shipped_hall();
     let camera = Camera::opening();
     let x0 = world.scene.solids[0].position.x;
@@ -870,7 +897,7 @@ fn high_bounce(
         if shift != 0.0 {
             world.scene.solids[0].position.x = x0 + shift * (i as f32 + 1.0);
         }
-        out.push(draw(&mut window, &mut renderer, &world, &camera));
+        out.push(draw(window, renderer, &world, &camera));
     }
     let stats = renderer.lighting_atrous_stats();
     (out, stats)
@@ -1089,11 +1116,13 @@ struct FloorCam {
 }
 
 fn floor_shadow_shot(screen: bool) -> FloorShadow {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
     renderer.set_lighting_settings(settings);
-    view_at(&mut renderer, ViewMode::Bounce);
+    view_at(renderer, ViewMode::Bounce);
     let world = shadow_floor_world();
     let still = FloorCam {
         x: 0.0,
@@ -1124,13 +1153,13 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
     ];
     for _ in 0..10 {
         let camera = floor_camera(&shots[0]);
-        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        let _ = draw(window, renderer, &world, &camera);
     }
     let mut frames = Vec::new();
     for cam in &shots {
         frames.push(draw(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &world,
             &floor_camera(cam),
         ));
@@ -1383,22 +1412,24 @@ fn banner_camera(cam: (f32, f32, f32)) -> Camera {
 /// frames. The far side is measured in the same cache: a shared 12.5 cm cell
 /// still holds the lamp.
 fn banner_cut(screen: bool) -> (BannerView, BannerView) {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
     renderer.set_lighting_settings(settings);
-    view_at(&mut renderer, ViewMode::Bounce);
+    view_at(renderer, ViewMode::Bounce);
     // Beside the cloth, on the +Z side, so neither camera's view of the scored
     // region passes through the emitter.
     let world = banner_world(2.2, 0.45);
     let lamp_side = (0.0f32, 0.0f32, 3.2f32);
     for _ in 0..20 {
         let camera = banner_camera(lamp_side);
-        let _ = draw(&mut window, &mut renderer, &world, &camera);
+        let _ = draw(window, renderer, &world, &camera);
     }
     let lamp_frame = draw(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &world,
         &banner_camera(lamp_side),
     );
@@ -1419,8 +1450,8 @@ fn banner_cut(screen: bool) -> (BannerView, BannerView) {
     let mut frames = Vec::new();
     for cam in far_shots {
         frames.push(draw(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &world,
             &banner_camera(cam),
         ));
@@ -1793,11 +1824,13 @@ fn sponza_gltf_is_real() -> bool {
 }
 
 fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
     renderer.set_lighting_settings(settings);
-    view_at(&mut renderer, ViewMode::Bounce);
+    view_at(renderer, ViewMode::Bounce);
     let path = std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../assets/built/sponza/sponza.gltf"
@@ -1851,7 +1884,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
             std::f32::consts::PI,
             0.0,
         );
-        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        frames.push(draw(window, renderer, &world, &camera));
     }
     let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
     (edge, roi_flicker(&frames, 320))
@@ -1946,7 +1979,9 @@ fn traced_rays(counts: LampPickCounts) -> u32 {
 /// One sample per pixel reconstructs that sum and does not flicker.
 #[test]
 fn lamp_pick_pixels_match_the_full_sum() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = white_lamps(3);
     let camera = lamp_camera();
     renderer.set_debug_view(DebugView {
@@ -1954,29 +1989,29 @@ fn lamp_pick_pixels_match_the_full_sum() {
         ..DebugView::default()
     });
     renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
-    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let off = draw(window, renderer, &world, &camera);
     assert!(
         mean_byte(&off) > 1.0,
         "the full sum is black ({})",
         mean_byte(&off)
     );
     renderer.set_lighting_settings(direct_pick(LampPickMode::Hits, 1));
-    let hits = draw(&mut window, &mut renderer, &world, &camera);
+    let hits = draw(window, renderer, &world, &camera);
     assert!(
         max_channel(&off, &hits) <= 1,
         "hits on bounce 0 changed a pixel by {}",
         max_channel(&off, &hits)
     );
     renderer.set_lighting_settings(direct_pick(LampPickMode::Pixels, 4));
-    let covered = draw(&mut window, &mut renderer, &world, &camera);
+    let covered = draw(window, renderer, &world, &camera);
     assert!(
         max_channel(&off, &covered) <= 1,
         "rays that cover the lamps differ by {}",
         max_channel(&off, &covered)
     );
     renderer.set_lighting_settings(direct_pick(LampPickMode::Pixels, 1));
-    let once = draw(&mut window, &mut renderer, &world, &camera);
-    let again = draw(&mut window, &mut renderer, &world, &camera);
+    let once = draw(window, renderer, &world, &camera);
+    let again = draw(window, renderer, &world, &camera);
     eprintln!(
         "lamp pick rays=1 mean_abs {:.4} stable {:.4}",
         mean_abs(&off, &once),
@@ -1995,7 +2030,9 @@ fn lamp_pick_pixels_match_the_full_sum() {
 /// Off traces a ray per lamp. One sample per pixel does not.
 #[test]
 fn lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let camera = lamp_camera();
@@ -2013,16 +2050,16 @@ fn lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count() {
         let _ = draw(window, renderer, &world, &camera);
         traced_rays(renderer.lighting_lamp_pick_counts())
     };
-    let off3 = count_of(&mut renderer, &mut window, 3, LampPickMode::Off, 1);
-    let off9 = count_of(&mut renderer, &mut window, 9, LampPickMode::Off, 1);
+    let off3 = count_of(renderer, window, 3, LampPickMode::Off, 1);
+    let off9 = count_of(renderer, window, 9, LampPickMode::Off, 1);
     eprintln!("lamp pick off rays 3={off3} 9={off9}");
     assert!(off3 > 0, "off traced nothing");
     assert!(
         off9 > off3 * 2,
         "off did not grow with the lamps ({off3} -> {off9})"
     );
-    let one3 = count_of(&mut renderer, &mut window, 3, LampPickMode::Pixels, 1);
-    let one9 = count_of(&mut renderer, &mut window, 9, LampPickMode::Pixels, 1);
+    let one3 = count_of(renderer, window, 3, LampPickMode::Pixels, 1);
+    let one9 = count_of(renderer, window, 9, LampPickMode::Pixels, 1);
     eprintln!("lamp pick pixels rays 3={one3} 9={one9}");
     assert!(one3 > 0 && one9 > 0, "pixels traced nothing");
     assert!(
@@ -2044,7 +2081,9 @@ fn lamp_pick_shadow_rays_do_not_grow_with_the_lamp_count() {
 /// becomes true and the hold cannot run.
 #[test]
 fn lamp_pick_reuse_follows_a_moved_lamp() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let mut world = white_lamps(12);
@@ -2075,19 +2114,19 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     let pose = genos_scene::Vec3::new(0.0, 1.7, 4.0);
     // The first frame has no previous camera. The turn keeps the view from
     // being held, so twelve lamps stay on ReSTIR instead of the exact sum.
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     camera.set_pose(pose, 0.05, 0.0);
     world.scene.lights[0].position.x += 3.0;
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let spatial = renderer.lighting_lamp_pick_counts().spatial;
     assert_eq!(spatial, 0, "radius 0 merged a neighbour");
     settings.lamp_pick.radius = 8;
     renderer.set_lighting_settings(settings.clone());
     camera.set_pose(pose, 0.10, 0.0);
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     camera.set_pose(pose, 0.15, 0.0);
     world.scene.lights[1].position.x += 3.0;
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let moving = renderer.lighting_lamp_pick_counts();
     assert!(
         moving.spatial > 0,
@@ -2098,13 +2137,13 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     let mut settled = Vec::new();
     let mut last_counts = moving;
     for _ in 0..6 {
-        settled = draw(&mut window, &mut renderer, &world, &camera);
+        settled = draw(window, renderer, &world, &camera);
         last_counts = renderer.lighting_lamp_pick_counts();
     }
     settings.lamp_pick.mode = LampPickMode::Off;
     renderer.set_lighting_settings(settings);
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
-    let full = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
+    let full = draw(window, renderer, &world, &camera);
     let err = mean_abs(&settled, &full);
     eprintln!(
         "lamp pick reuse settled mean_abs {err:.4} mean {} vs {} rays {} exact {} restir {}",
@@ -2176,7 +2215,9 @@ fn history_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
 /// frame stays on one visibility ray; that ray drop is `preset_direct_scales_with_samples_not_lamps`.
 #[test]
 fn lamp_pick_each_mode_against_off() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let world = shadowed_lamps();
@@ -2186,8 +2227,8 @@ fn lamp_pick_each_mode_against_off() {
         ..DebugView::default()
     });
     renderer.set_lighting_settings(history_pick(LampPickMode::Off, 1));
-    let open = draw(&mut window, &mut renderer, &white_lamps(3), &camera);
-    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let open = draw(window, renderer, &white_lamps(3), &camera);
+    let off = draw(window, renderer, &world, &camera);
     let boxed = mean_abs(&open, &off);
     let off_rays = renderer.lighting_lamp_pick_counts().pixels;
     assert!(
@@ -2204,15 +2245,15 @@ fn lamp_pick_each_mode_against_off() {
         let picture = draw(window, renderer, &world, &camera);
         max_channel(&off, &picture)
     };
-    let hits = matches(&mut renderer, &mut window, LampPickMode::Hits, 1);
-    let pixels = matches(&mut renderer, &mut window, LampPickMode::Pixels, 4);
-    let both = matches(&mut renderer, &mut window, LampPickMode::Both, 4);
+    let hits = matches(renderer, window, LampPickMode::Hits, 1);
+    let pixels = matches(renderer, window, LampPickMode::Pixels, 4);
+    let both = matches(renderer, window, LampPickMode::Both, 4);
     assert!(hits <= 1, "hits changed a pixel by {hits}");
     assert!(pixels <= 1, "covering pixel samples differ by {pixels}");
     assert!(both <= 1, "covering both samples differ by {both}");
     renderer.set_lighting_settings(history_pick(LampPickMode::Reuse, 1));
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
-    let reused = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
+    let reused = draw(window, renderer, &world, &camera);
     let counts = renderer.lighting_lamp_pick_counts();
     let err = mean_abs(&off, &reused);
     eprintln!(
@@ -2234,7 +2275,9 @@ fn lamp_pick_each_mode_against_off() {
 /// `light:I` shades that scene lamp and not the others.
 #[test]
 fn light_view_shades_only_that_lamp() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut world = white_lamps(2);
     world.scene.lights[0].color = [4.0, 0.2, 0.2];
     world.scene.lights[1].color = [0.2, 0.2, 4.0];
@@ -2244,12 +2287,12 @@ fn light_view_shades_only_that_lamp() {
         mode: ViewMode::Light,
         lamp: 0,
     });
-    let red = draw(&mut window, &mut renderer, &world, &camera);
+    let red = draw(window, renderer, &world, &camera);
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Light,
         lamp: 1,
     });
-    let blue = draw(&mut window, &mut renderer, &world, &camera);
+    let blue = draw(window, renderer, &world, &camera);
     let split = mean_abs(&red, &blue);
     eprintln!("light view split {split:.3}");
     assert!(split > 2.0, "light:0 and light:1 matched ({split:.3})");
@@ -2260,7 +2303,7 @@ fn light_view_shades_only_that_lamp() {
         mode: ViewMode::Direct,
         lamp: 0,
     });
-    let solo = draw(&mut window, &mut renderer, &only, &camera);
+    let solo = draw(window, renderer, &only, &camera);
     let err = mean_abs(&red, &solo);
     assert!(
         err < 1.0,
@@ -2273,7 +2316,9 @@ fn light_view_shades_only_that_lamp() {
 /// Off grows with the lamp count. High does not. `lamps_shaded` is those rays.
 #[test]
 fn preset_direct_scales_with_samples_not_lamps() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let camera = lamp_camera();
@@ -2306,21 +2351,21 @@ fn preset_direct_scales_with_samples_not_lamps() {
         let _ = draw(window, renderer, &world, camera);
         traced_rays(renderer.lighting_lamp_pick_counts())
     };
-    let off3 = count_of(&mut renderer, &mut window, 3, LightingPreset::Potato, &camera);
-    let off12 = count_of(&mut renderer, &mut window, 12, LightingPreset::Potato, &camera);
+    let off3 = count_of(renderer, window, 3, LightingPreset::Potato, &camera);
+    let off12 = count_of(renderer, window, 12, LightingPreset::Potato, &camera);
     eprintln!("preset potato rays 3={off3} 12={off12}");
     assert!(off3 > 0, "potato traced nothing");
     assert!(
         off12 > off3.saturating_mul(2),
         "potato did not grow with the lamps ({off3} -> {off12})"
     );
-    let high3 = count_of(&mut renderer, &mut window, 3, LightingPreset::High, &camera);
+    let high3 = count_of(renderer, window, 3, LightingPreset::High, &camera);
     // A yaw keeps this frame off the quiet held path, which would shade every lamp once.
     let mut moving = camera.clone();
     moving.set_pose(genos_scene::Vec3::new(0.4, 1.7, 4.0), 0.2, 0.0);
     let high12 = count_of(
-        &mut renderer,
-        &mut window,
+        renderer,
+        window,
         12,
         LightingPreset::High,
         &moving,
@@ -2343,7 +2388,9 @@ fn preset_direct_scales_with_samples_not_lamps() {
 /// bit set keeps `lighting_pix_quiet` false, so the mean would never run.
 #[test]
 fn preset_direct_converges_without_flicker() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = shadowed_lamps();
     let camera = lamp_camera();
     renderer.set_debug_view(DebugView {
@@ -2360,12 +2407,12 @@ fn preset_direct_converges_without_flicker() {
     settings.probes.rays = 4;
     settings.probes.tile = 64;
     renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
-    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let off = draw(window, renderer, &world, &camera);
     assert!(mean_byte(&off) > 1.0, "the full sum is black");
     renderer.set_lighting_settings(settings);
     let mut frames = Vec::new();
     for _ in 0..12 {
-        frames.push(draw(&mut window, &mut renderer, &world, &camera));
+        frames.push(draw(window, renderer, &world, &camera));
     }
     let first = mean_abs(&off, &frames[0]);
     let last = mean_abs(&off, frames.last().expect("frames"));

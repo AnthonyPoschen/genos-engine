@@ -15,12 +15,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{Camera, EngineSettings, Floor, Light, MenuSettings, Scene, Vec3};
 use genos_window::Window;
 
-fn open() -> (Window, Renderer) {
+fn open() -> genos_window::Lifecycle<Renderer> {
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (window, renderer)
+    genos_window::Lifecycle::new(window, renderer, permit)
 }
 
 fn room() -> World {
@@ -78,7 +78,9 @@ fn menu_settings_round_trip_through_config_and_mcp() {
     assert_eq!(settings.tab, "GI");
     assert_eq!(settings.collapsed, vec!["world".to_string()]);
 
-    let (mut window, mut renderer) = open();
+    let mut owner = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut world = room();
     let mut camera = Camera::opening();
     let mut tools = Tools::new();
@@ -110,7 +112,7 @@ fn menu_settings_round_trip_through_config_and_mcp() {
             "menu mcp round trip timed out"
         );
         tools.before_draw(&mut Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut world.scene,
         });
