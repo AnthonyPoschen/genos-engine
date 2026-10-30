@@ -17,6 +17,7 @@ mod jpeg;
 mod material;
 mod mesh;
 mod png;
+mod sha256;
 mod shade;
 mod source;
 mod stream;
@@ -42,6 +43,7 @@ pub use gltf::{
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
 pub use png::Image;
+pub use sha256::{hex, sha256, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
