@@ -12,10 +12,6 @@
     reason = "Vulkan handles and byte sizes are pointer-width"
 )]
 #![expect(
-    clippy::cast_possible_truncation,
-    reason = "the f64 reference is compared at the shader's f32"
-)]
-#![expect(
     clippy::borrow_as_ptr,
     reason = "Vulkan entry points take raw pointers"
 )]
