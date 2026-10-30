@@ -2,6 +2,8 @@
 
 Status: Proposed (31 Oct 2026). No renderer code changes until Anthony accepts it.
 
+> **Strongest reason for this ADR: Low today allocates the full 1M-slot table (~368 MiB plus keys).** `allocates_cache()` is true at Low (GI and probes on, 1 bounce), even though Low has no world cache. That alone breaks the ~200 MB lighting VRAM soft budget and the 4 GB / GTX 1060 minimum-spec floor (ADR 0023) that Low is meant to fit.
+
 ## Context
 
 - The GI world/surface light cache has a fixed size of `LIGHTING_CACHE_SLOTS = 1048576` slots. The value is set in `crates/render/src/lighting_gpu.rs` and repeated in `shaders/lighting_cache_slots.glsl`.
@@ -65,7 +67,7 @@ Findings:
 
    Why High is 512K and not 1M: the 407K peak is the first ~6 readbacks of a cold start. It sits above the 316K seen once warm, and no other scene comes near it. At 512K it is 78% load, which is acceptable for a few frames *if* overflow is graceful (point 5). Missed claims during the fill fall back to the screen probes, which is the same path a cold start already uses. If the overflow test (test plan step 2) shows visible artefacts at 512K during the fill, High stays at 1M and only Low, Medium and the 4 GB cap shrink.
 
-3. **Resolution scaling.** On-screen surface patches grow with pixel count. The base count is scaled by `pixels / (1920*1080)`, rounded to the next power of two, and clamped to between ½× and 2× of base. At 1440p (1.78×) that rounds to 2×. Medium at 1440p therefore becomes 512K. Whether occupancy really scales with pixels is to be checked in test step 1. If it does not, the scaling is dropped and the count follows preset only.
+3. **Resolution scaling.** On-screen surface patches grow with pixel count. The base count is scaled by `pixels / (1920*1080)`, rounded to the next power of two, and clamped to between ½× and 2× of base. At 1440p (1.78×) that rounds to 2×. Medium (512K at 1080p) at 1440p therefore becomes 1M; Low becomes 512K; High becomes 1M (capped at Ultra's 1M). Whether occupancy really scales with pixels is to be checked in test step 1. If it does not, the scaling is dropped and the count follows preset only.
 
 4. **The 4 GB floor.** On a device with ≤ 4 GB of device-local heap, slots are capped at the Low value. Even under a Medium or High preset, cache memory then stays ≤ ~54 MB (estimate). This keeps ADR 0023's minimum spec (4 GB, Low runs) inside budget. The budget helper (`budget.rs`) reports the chosen count and bytes.
 
