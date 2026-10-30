@@ -2303,10 +2303,19 @@ vec3 lighting_sc_handover_up(vec3 own, float sets, vec4 up) {
     float a = n > 0.0 ? n / max(n + k, LIGHTING_SC_HANDOVER_EPS) : 0.0;
     return mix(up.rgb, own, a);
 }
+// The handover is a picture read (compose, pixel). A kept or probe hit in the
+// direct pass skips it: that read runs once per hit every frame, and the parent
+// walk costs up to three hash finds, each with a scene_inside test and a wall
+// ray (lighting_level_valid). On a turning view every cell is young, so PR #70
+// paid those rays on every hit and the direct pass ran 1.8x master's per lamp
+// (s1 17.7 vs 9.7 ms). The hit light is averaged by the probe gather anyway.
+bool lighting_sc_handover_read() {
+    return lighting_hit_kind == 0u;
+}
 vec3 lighting_sc_handover(vec3 own, float sets, vec3 pos, vec3 nrm, float size) {
     float n = max(sets, 0.0);
     float fade = clamp(1.0 - n / LIGHTING_SC_HANDOVER, 0.0, 1.0);
-    if (fade <= 0.0 || lighting_world_mode() != 3u) {
+    if (fade <= 0.0 || lighting_world_mode() != 3u || !lighting_sc_handover_read()) {
         return own;
     }
     float cell = size > 0.0 ? size : LIGHTING_SC_TEXEL;
@@ -2381,7 +2390,8 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // never both run). Each call site inlines the whole parent walk with its
     // wall tests; two sites doubled the compose compile on the 4070.
     vec4 up = vec4(0.0);
-    if (lighting_world_mode() == 3u && (fill || max(floor(e.w), 0.0) < LIGHTING_SC_HANDOVER)) {
+    bool young = max(floor(e.w), 0.0) < LIGHTING_SC_HANDOVER && lighting_sc_handover_read();
+    if (lighting_world_mode() == 3u && (fill || young)) {
         up = lighting_sc_parent(pos, n, hsize);
     }
     if (fill) {
