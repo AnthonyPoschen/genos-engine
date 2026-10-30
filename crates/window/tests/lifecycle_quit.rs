@@ -537,19 +537,9 @@ fn assert_clean(label: &str, gap: f64, total: f64, phases: &[PhaseSample], run: 
         gap_within_budget(gap),
         "{label} quit gap {gap:.1} ms is outside the 100 ms ping budget"
     );
-    // vkDestroyInstance runs after the device, surface and every engine object
-    // are gone, so its time is the driver's own. On lavapipe (this harness
-    // always forces it through ICD) it is a flat ~86 ms on every CI run
-    // regardless of engine changes (85.6 ms at 0410ef2, 86.5 ms at 6e1b5e2,
-    // while destroy_device moved 42.8 -> 78.7 ms). It is still printed, must
-    // be present and must stay inside the 100 ms per-phase budget, but it is
-    // left out of the total so the total budget measures engine teardown.
-    let instance = phase_ms(phases, "destroy_instance");
-    let engine_total = total - instance;
     assert!(
-        phases_within_budget(phases, engine_total),
-        "{label} phase or total is outside the 100 ms budget, total {total:.1} \
-         (without lavapipe destroy_instance {instance:.1}: {engine_total:.1}) phases {phases:?}"
+        phases_within_budget(phases, total),
+        "{label} phase or total is outside the 100 ms budget, total {total:.1} phases {phases:?}"
     );
     for name in FULL_PHASES {
         assert!(
