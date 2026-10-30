@@ -8,7 +8,9 @@
 use std::path::{Path, PathBuf};
 
 use genos_bake::{BakeMesh, BakeMode, BakeSettings};
-use genos_cook::{cook, cook_file, decode, encode, load_cooked, CookError, Outcome};
+use genos_cook::{
+    cook, cook_file, decode, encode, load_cooked, manifest, CookError, Manifest, Outcome,
+};
 use genos_load::{import_file, load_gltf_file};
 
 fn fixture(name: &str) -> PathBuf {
@@ -120,5 +122,46 @@ fn load_refuses_a_damaged_record() {
             .0,
         Outcome::Cooked
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn package_manifest_is_deterministic_and_checked() {
+    let dir = temp("package");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    for name in ["tri.gltf", "tri.bin", "quad.png", "cube.gltf"] {
+        std::fs::copy(fixture(name), src.join(name)).unwrap();
+    }
+    let out = dir.join("out");
+    let s = settings(&dir);
+    let cook_all = || -> Manifest {
+        let records: Vec<_> = ["cube.gltf", "tri.gltf"]
+            .iter()
+            .map(|n| load_cooked(&cook_file(&src.join(n), &out, &s).unwrap().1).unwrap())
+            .collect();
+        manifest(&records)
+    };
+    let first = cook_all();
+    assert_eq!(first, cook_all());
+    assert_eq!(Manifest::parse(&first.text()).unwrap(), first);
+    assert_eq!(first.verify(&out).unwrap(), 2);
+
+    let mut png = std::fs::read(src.join("quad.png")).unwrap();
+    png.push(0);
+    std::fs::write(src.join("quad.png"), &png).unwrap();
+    let second = cook_all();
+    let changed = first
+        .lines
+        .iter()
+        .zip(&second.lines)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(changed, 1);
+    assert_eq!(second.verify(&out).unwrap(), 2);
+
+    let object = genos_load::object_path(&out, &genos_load::sha256(&png));
+    std::fs::write(&object, b"tampered").unwrap();
+    assert!(second.verify(&out).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }

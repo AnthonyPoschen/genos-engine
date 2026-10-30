@@ -11,6 +11,7 @@
 //! cooked path is opt-in and does not change a draw.
 
 mod format;
+mod package;
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,7 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
+pub use package::{manifest, Manifest};
 
 /// One cooked mesh: the glTF primitives as imported and the bake key.
 #[derive(Clone, Debug, PartialEq)]
