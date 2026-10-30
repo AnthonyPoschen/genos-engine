@@ -165,3 +165,29 @@ fn far_clusters_split_across_empty_bins() {
         .collect();
     assert!(Bvh::build(&tris).node_count() > 1);
 }
+
+/// Coincident triangles tie on `t`. The lower index wins whatever the tree
+/// visits first, so a better build cannot change a bake.
+#[test]
+fn a_tie_goes_to_the_lower_index() {
+    let flat = |p: [[f32; 3]; 3], i: usize| MeshTriangle::flat(p, i as u32, true);
+    for a in 0..40 {
+        for b in 0..40 {
+            if a == b {
+                continue;
+            }
+            let mut tris: Vec<MeshTriangle> = (0..40)
+                .map(|i| {
+                    let x = i as f32 * 0.37 - 7.0;
+                    let z = (i * 7 % 11) as f32 - 5.0;
+                    flat([[x, z, 5.0], [x + 0.1, z, 5.0], [x, z + 0.1, 5.0]], i)
+                })
+                .collect();
+            let shared = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
+            tris[a] = flat(shared, a);
+            tris[b] = flat(shared.map(|p| [p[0] * 2.0, p[1] * 2.0, 0.0]), b);
+            let hit = Bvh::build(&tris).intersect(&tris, [0.0, 0.0, 2.0], [0.0, 0.0, -1.0], 10.0);
+            assert_eq!(hit.map(|h| h.triangle as usize), Some(a.min(b)), "{a} {b}");
+        }
+    }
+}
