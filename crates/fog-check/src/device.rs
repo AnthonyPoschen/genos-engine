@@ -20,7 +20,7 @@ thread_local! {
     static GPU: RefCell<Option<Session>> = const { RefCell::new(None) };
 }
 
-/// Timestamp of the grid the frame dispatches. Potato is 0 without a window.
+/// Timestamp of the grid the frame dispatches. Fallback is 0 without a window.
 /// A positive grid is `None` when lavapipe is missing. Not an RTX 4070 time.
 pub(crate) fn dispatched_ms(preset: LightingPreset) -> Option<f64> {
     let size = grid_size(preset);

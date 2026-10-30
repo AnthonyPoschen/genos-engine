@@ -52,7 +52,7 @@ Nothing is replaced. The cache gains a level index (L0 = 25 cm … L4 = 4 m) in 
 
 Every expensive pass takes a **work-unit cap** per preset: rays, entry relights, pixel reshades, denoise items. Work units are the mechanism. Per-preset millisecond targets are calibrated from phase 0, and a later runtime controller scales the units so the frame holds that millisecond cap. Work that doesn't fit goes back into the priority queue (§5) and is never run late in a burst. The ms column is the cap on a 4070 at 1080p. Phase 0 records the pass times that calibrate it. The controller is not in phase 0.
 
-| budget (per frame) | Potato | Low | Medium | High |
+| budget (per frame) | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | screen-probe rays (probe tile × rays) | 0 | 16 px tile × 16 = 33 k | 16 × 32 = 261 k | 16 × 64 = 522 k |
 | cache entry relights | 0 | 16 k | 32 k | 64 k |
@@ -205,7 +205,7 @@ The same command with `s2-strafe.rhai` through `s6-settle.rhai`. `--out DIR` mov
 | S78N | Guess-and-verify reuse mismatched | Change records are explicit, not guessed. |
 | S78G | Stop-at-cap trickle starved converging texels (+40–50% pop) | Reserved 10% starvation slice; young entries also have `w_new`. |
 | S73A/S73B | Off-screen pre-fill took ray budget and darkened the picture | Off-screen work only from leftover budget, below on-screen bins. Coarse seeding costs no rays. |
-| S72S | Must scale to GTX 1060; no minimum ray count | Budgets are caps; Low and Potato work at small caps. |
+| S72S | Must scale to GTX 1060; no minimum ray count | Budgets are caps; Low and Fallback work at small caps. |
 | WAKE / PR #31 | Ring launches didn't shrink the frame | Rings only add priority, never extra launches. Judged on per-dispatch ms. |
 
 ## 11. Debug views and MCP

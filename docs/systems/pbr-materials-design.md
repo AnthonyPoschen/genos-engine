@@ -28,7 +28,7 @@ A glTF 2.0 material looks the same to the G-buffer, the surface light cache, and
 | `surface_mean` | `gltf_draw.rs` | Area-weighted base colour and emission. Metallic does not darken it. That mean is the untextured draw colour and the SDF field's albedo. |
 | Path tracer | `crates/debug/src/reference.rs`, `crates/gpuref` | Flat albedo. The reference file says textures are not traced. |
 | `.gbake` | `crates/bake` | SDF and six cards. `content_key` is FNV-1a. Cards are not the runtime cache. |
-| Surface light cache | ADR 0012, ADR 0013 | World-space irradiance, budgeted refresh, presets Potato, Low, Medium, High. Stored light does not depend on the camera. |
+| Surface light cache | ADR 0012, ADR 0013 | World-space irradiance, budgeted refresh, presets Fallback, Low, Medium, High. Stored light does not depend on the camera. |
 | Asset plan | `docs/systems/assets/plan.md` | Import document, SHA-256 object cache, cook crate, BC7 and ASTC packages, page table, hot reload, `debug/assets`. Not built. |
 
 `load_mesh` stays the strict OBJ triangle reader. `load_gltf` stays the strict projection: a required extension it does not apply is `LoadError`.
@@ -48,7 +48,7 @@ Occlusion is 1 for direct light. Emissive is `emissiveTexture × emissiveFactor 
 
 Because albedo and emission are applied at the shade, a factor edit or a finished texture swap changes the pixel on the next G-buffer. The stored irradiance stays valid until the bounce of that change is due. The change is a change record (ADR 0013): magnitude from the albedo delta or the emission delta, times the bounce reach. Near-camera error keeps the highest weight. Work beyond the cap waits. There is no full-frame flush and no screen-tile fallback.
 
-Potato has no GI. The pixel still adds emission. The room does not bounce it. Low, Medium, and High bounce it through the cache and, for a promoted emitter, through the light tree.
+Fallback has no GI. The pixel still adds emission. The room does not bounce it. Low, Medium, and High bounce it through the cache and, for a promoted emitter, through the light tree.
 
 A steady scene does not upload textures and does not rebuild an atlas. The upload cap is a ceiling. A still resident set dispatches nothing. The basic scene stays above 500 fps on the RTX 4070 at 1440p (frame under 2 ms). The stress scene stays near 100 fps. Material work has to fit inside the G-buffer ceilings below. It does not get a new multi-millisecond pass.
 
@@ -150,7 +150,7 @@ Mip maps for sRGB images (base colour, emissive) are boxed in linear light and e
 ADR 0012 and the GI design's emissive section still hold, with the departure in ADR 0014: emission is a shade, not a value baked into the cache.
 
 - Every emissive texel lights indirect through the cache, because a hit adds emission to the irradiance it reads.
-- A connected region is promoted when its area is under one L0 cache cell (0.25 m × 0.25 m) or its flux exceeds `emissive_promote_flux`. The default flux is 1% of the brightest lamp, which is the GI design's rule and is not a measured constant. At most 4 regions per mesh on Low, 8 on Medium, 16 on High. Potato promotes none.
+- A connected region is promoted when its area is under one L0 cache cell (0.25 m × 0.25 m) or its flux exceeds `emissive_promote_flux`. The default flux is 1% of the brightest lamp, which is the GI design's rule and is not a measured constant. At most 4 regions per mesh on Low, 8 on Medium, 16 on High. Fallback promotes none.
 - A dim wall stays cache-only. The cache cell is large enough for that and too coarse for a thin strip. The strip is the promoted emitter.
 - Double counting: the light tree owns the promoted flux. A cache ray's direct term skips it. An indirect hit on that region reads the leftover emission. A camera ray reads the full emission. That skip is in `lighting_gpu.rs`, which the lighting branch owns. `double_count` stays `NOT-IMPLEMENTED` until that write exists. The note is `model only; waits on lighting_gpu.rs`.
 - Turning a promoted emitter on or off is a light change, a multiply on its layer once layers exist, and a change record until then. It does not rebuild the SDF, the BVH, or the page table.
@@ -172,10 +172,10 @@ Settings, when the feature exists, follow `docs/engine/settings-principles.md`. 
 | Argument | Environment mirror | Default |
 |---|---|---|
 | `--material-texture-quality ultra\|high\|medium\|low` | `GENOS_MATERIAL_TEXTURE_QUALITY` | `ultra` on every preset |
-| `--material-mip-bias` | `GENOS_MATERIAL_MIP_BIAS` | Potato +2, Low +1, Medium 0, High 0 |
-| `--material-anisotropy` | `GENOS_MATERIAL_ANISOTROPY` | Potato 1, Low 2, Medium 4, High 8 |
-| `--material-occlusion on\|off` | `GENOS_MATERIAL_OCCLUSION` | Potato off, others on |
-| `--material-emissive-promote on\|off` | `GENOS_MATERIAL_EMISSIVE_PROMOTE` | Potato off, others on |
+| `--material-mip-bias` | `GENOS_MATERIAL_MIP_BIAS` | Fallback +2, Low +1, Medium 0, High 0 |
+| `--material-anisotropy` | `GENOS_MATERIAL_ANISOTROPY` | Fallback 1, Low 2, Medium 4, High 8 |
+| `--material-occlusion on\|off` | `GENOS_MATERIAL_OCCLUSION` | Fallback off, others on |
+| `--material-emissive-promote on\|off` | `GENOS_MATERIAL_EMISSIVE_PROMOTE` | Fallback off, others on |
 | `--material-emissive-promote-flux` | `GENOS_MATERIAL_EMISSIVE_PROMOTE_FLUX` | 0.01 of the brightest lamp |
 | `--material-headroom-percent` | `GENOS_MATERIAL_HEADROOM_PERCENT` | 5 |
 | `--material-headroom-floor-mb` | `GENOS_MATERIAL_HEADROOM_FLOOR_MB` | 256 |
@@ -198,7 +198,7 @@ This design adds no second mapping. After the copy, those records go through the
 
 Ceilings, not measurements. Lighting VRAM is ADR 0013's and is unchanged. Material residency sits outside that lighting budget and inside a 4 GB card. The G-buffer milliseconds are the depth prepass plus the shaded raster on top of today's cost. The phase that adds the maps measures them. `gbuffer_ms` in the gate is the High, RTX 4070, 1440p, basic-scene ceiling. The 1060 numbers wait for a 1060. gi-design already records that the lab does not have one.
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Target | any discrete GPU, GI off | GTX 1060 6 GB, RX 580, 1080p | RTX 2060 class, 1080p | RTX 4070, 1440p |
 | Max edge | 512 | 1024 | 2048 | 4096 |

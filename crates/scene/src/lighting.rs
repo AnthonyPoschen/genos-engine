@@ -79,7 +79,7 @@ pub const LIGHTING_BOUNCES_UNLIMITED: u32 = u32::MAX;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightingPreset {
     /// Direct light, traced shadows, and a flat ambient. No GI buffers.
-    Potato,
+    Fallback,
     /// Direct light, shadows, and the time-of-day ambient curve. No GI.
     DayCycle,
     /// One bounce of screen-probe GI. No surface cache, denoiser, or prefill.
@@ -96,7 +96,7 @@ pub enum LightingPreset {
 impl LightingPreset {
     pub fn name(self) -> &'static str {
         match self {
-            Self::Potato => "potato",
+            Self::Fallback => "fallback",
             Self::DayCycle => "day-cycle",
             Self::Gi1Bounce => "gi-1bounce",
             Self::Low => "low",
@@ -107,7 +107,11 @@ impl LightingPreset {
 
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
-            "potato" => Some(Self::Potato),
+            "fallback" => Some(Self::Fallback),
+            "potato" => {
+                eprintln!("warning: preset potato is deprecated; use fallback");
+                Some(Self::Fallback)
+            }
             "day-cycle" | "day_cycle" => Some(Self::DayCycle),
             "gi-1bounce" | "gi_1bounce" => Some(Self::Gi1Bounce),
             "low" => Some(Self::Low),
@@ -119,7 +123,7 @@ impl LightingPreset {
 
     pub fn all() -> &'static [LightingPreset] {
         &[
-            Self::Potato,
+            Self::Fallback,
             Self::DayCycle,
             Self::Gi1Bounce,
             Self::Low,
@@ -210,12 +214,12 @@ pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
 ///
 /// The sun is never a sample. It is traced on its own. `low`, `medium`, and
 /// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
-/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
+/// samples bounce hits and leaves pixels on the full sum. Fallback and day-cycle
 /// stay [`Off`](Self::Off).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Every lamp. Potato and day-cycle.
+    /// Every lamp. Fallback and day-cycle.
     Off = 0,
     /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
     Hits = 1,
@@ -522,7 +526,7 @@ pub struct LightingSettings {
     pub ambient: AmbientSettings,
     /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
     /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
-    /// Potato and day-cycle trace every lamp.
+    /// Fallback and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
@@ -574,7 +578,7 @@ impl LightingSettings {
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
-            LightingPreset::Potato => {
+            LightingPreset::Fallback => {
                 s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
@@ -2080,7 +2084,7 @@ mod launch_tests {
         hours_near(settings.time_of_day, 9.5);
 
         let mut env = empty();
-        env.preset = Some("potato");
+        env.preset = Some("fallback");
         env.bounces = Some("0");
         env.ambient = Some("curve");
         env.time_of_day = Some("18:24");
@@ -2127,7 +2131,7 @@ mod launch_tests {
 
         let unlimited = resolve_lighting_launch(&["--bounces", "unlimited"], &env).unwrap();
         assert_eq!(unlimited.bounces, Some(LIGHTING_BOUNCES_UNLIMITED));
-        assert_eq!(unlimited.preset, Some(LightingPreset::Potato));
+        assert_eq!(unlimited.preset, Some(LightingPreset::Fallback));
 
         let mut ignored = empty();
         ignored.bounces = Some("4");
@@ -2307,6 +2311,13 @@ mod launch_tests {
     }
 
     #[test]
+    fn potato_is_a_deprecated_alias_for_fallback() {
+        assert_eq!(LightingPreset::parse("potato"), Some(LightingPreset::Fallback));
+        assert_eq!(LightingPreset::parse("fallback"), Some(LightingPreset::Fallback));
+        assert_eq!(LightingPreset::Fallback.name(), "fallback");
+    }
+
+    #[test]
     #[allow(
         clippy::disallowed_methods,
         reason = "this test is the alias contract for process env mirrors"
@@ -2314,15 +2325,15 @@ mod launch_tests {
     fn cli_flag_beats_deprecated_genos_gi2_env_alias() {
         std::env::remove_var("GENOS_LIGHTING_PRESET");
         std::env::remove_var("GENOS_GI2_PRESET");
-        std::env::set_var("GENOS_GI2_PRESET", "potato");
+        std::env::set_var("GENOS_GI2_PRESET", "fallback");
 
         let alias = lighting_env("GENOS_LIGHTING_PRESET").unwrap();
-        assert_eq!(alias, "potato");
+        assert_eq!(alias, "fallback");
         let mut env = empty();
         env.preset = Some(alias.as_str());
 
         let from_alias = resolve_lighting_launch(&[], &env).unwrap();
-        assert_eq!(from_alias.preset, Some(LightingPreset::Potato));
+        assert_eq!(from_alias.preset, Some(LightingPreset::Fallback));
 
         let from_cli = resolve_lighting_launch(&["--preset", "high"], &env).unwrap();
         assert_eq!(from_cli.preset, Some(LightingPreset::High));

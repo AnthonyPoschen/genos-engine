@@ -60,7 +60,7 @@ Lavapipe times are not a result. The report is <out>/metrics.json.
   --size WxH       picture size (default 96x54)
   --settle N       still frames before the capture (default 4200)
   --frames N       still frames, and pan frames (default 64, at least 9)
-  --preset NAME    potato, day-cycle, gi-1bounce, low, medium, high
+  --preset NAME    fallback, day-cycle, gi-1bounce, low, medium, high
   --lamps N        lamps on a grid (default 16, at least 9). Intensity is 3/N
   --broken         uniform pick, shade weight 1, no pairwise weight
   --out DIR        report directory (default ./genos-debug/noise)
@@ -564,7 +564,7 @@ fn overlap_world(n: u32) -> World {
         lights,
         ceiling: None,
         sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),

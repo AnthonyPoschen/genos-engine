@@ -149,8 +149,8 @@ fn presets_and_feature_off_skip_their_passes() {
     let mut timed = false;
     let cases = [
         (
-            LightingPreset::Potato.name(),
-            LightingSettings::preset(LightingPreset::Potato),
+            LightingPreset::Fallback.name(),
+            LightingSettings::preset(LightingPreset::Fallback),
             picture.as_slice(),
             gi.as_slice(),
         ),

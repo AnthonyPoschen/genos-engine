@@ -2,7 +2,7 @@
 //!
 //! The frame shades water with `reflection_water_shade` and rasters mirror and
 //! portal views when the world has those surfaces. Glossy screen marches, the
-//! world cache, and `ray_query` wait on the lighting schedule. Potato and Low
+//! world cache, and `ray_query` wait on the lighting schedule. Fallback and Low
 //! schedule zero reflection rays. A refraction miss keeps the opaque sample,
 //! darkened by Beer–Lambert.
 //!
@@ -457,11 +457,11 @@ fn add(color: [f32; 3], extra: f32) -> [f32; 3] {
     [color[0] + extra, color[1] + extra, color[2] + extra]
 }
 
-/// Reflection rays a frame may cast. Potato (`0`) and Low (`1`) stay at zero.
+/// Reflection rays a frame may cast. Fallback (`0`) and Low (`1`) stay at zero.
 #[must_use]
 pub fn frame_ray_count(preset: u32) -> u32 {
     let preset = match preset {
-        0 => ReflectionPreset::Potato,
+        0 => ReflectionPreset::Fallback,
         1 => ReflectionPreset::Low,
         2 => ReflectionPreset::Medium,
         _ => ReflectionPreset::High,
@@ -755,11 +755,11 @@ pub fn water_vertices(reflectors: &[crate::world::Reflector]) -> Vec<GpuVertex> 
     out
 }
 
-/// Lighting preset index the frame pushes. Potato is 0, Low is 1, Medium is 2.
+/// Lighting preset index the frame pushes. Fallback is 0, Low is 1, Medium is 2.
 #[must_use]
 pub fn lighting_reflection_preset(preset: genos_scene::LightingPreset) -> u32 {
     match preset {
-        genos_scene::LightingPreset::Potato => 0,
+        genos_scene::LightingPreset::Fallback => 0,
         genos_scene::LightingPreset::Low => 1,
         genos_scene::LightingPreset::Medium => 2,
         genos_scene::LightingPreset::DayCycle
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn potato_and_low_cast_no_rays_and_an_empty_scene_skips_the_frame() {
+    fn fallback_and_low_cast_no_rays_and_an_empty_scene_skips_the_frame() {
         assert_eq!(frame_ray_count(0), 0);
         assert_eq!(frame_ray_count(1), 0);
         assert!(frame_ray_count(2) > 0);

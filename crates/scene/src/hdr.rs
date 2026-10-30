@@ -26,7 +26,7 @@ pub enum DisplayTransform {
     Legacy,
 }
 
-/// Swapchain choice. Potato and Low force [`OutputMode::Sdr`].
+/// Swapchain choice. Fallback and Low force [`OutputMode::Sdr`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
     Auto,
@@ -46,7 +46,7 @@ pub struct HdrSettings {
     pub shutter: f64,
     pub adapt_down: f64,
     pub adapt_up: f64,
-    /// Histogram bins. High 256, Medium 128, Low 64, Potato unused.
+    /// Histogram bins. High 256, Medium 128, Low 64, Fallback unused.
     pub histogram_bins: u32,
     pub display: DisplayTransform,
     pub bloom: bool,
@@ -123,20 +123,20 @@ impl HdrSettings {
     }
 
     /// Design defaults for a lighting preset. `AgX` is the display transform.
-    /// Bloom is on at intensity 0.05 except Potato. `legacy_bytes` stays on the
+    /// Bloom is on at intensity 0.05 except Fallback. `legacy_bytes` stays on the
     /// shoulder with bloom off, so an old picture does not move.
     pub fn for_preset(preset: LightingPreset) -> Self {
         let mut settings = Self::legacy_bytes();
         settings.legacy_bytes = false;
         settings.display = DisplayTransform::Agx;
-        settings.bloom = preset != LightingPreset::Potato;
-        settings.bloom_intensity = if preset == LightingPreset::Potato {
+        settings.bloom = preset != LightingPreset::Fallback;
+        settings.bloom_intensity = if preset == LightingPreset::Fallback {
             0.0
         } else {
             0.05
         };
         match preset {
-            LightingPreset::Potato => {
+            LightingPreset::Fallback => {
                 settings.exposure_mode = ExposureMode::Fixed;
                 settings.output = OutputMode::Sdr;
                 settings.bloom_levels = 0;
@@ -550,7 +550,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn high_meters_and_potato_stays_sdr() {
+    fn high_meters_and_fallback_stays_sdr() {
         let high = HdrSettings::for_preset(LightingPreset::High);
         assert!(matches!(high.exposure_mode, ExposureMode::Auto));
         assert!(!high.legacy_bytes);
@@ -563,13 +563,13 @@ mod tests {
         assert!(low.bloom);
         assert_eq!(low.bloom_intensity.to_bits(), 0.05_f64.to_bits());
         assert!(matches!(low.output, OutputMode::Sdr));
-        let potato = HdrSettings::for_preset(LightingPreset::Potato);
-        assert!(matches!(potato.exposure_mode, ExposureMode::Fixed));
-        assert!(matches!(potato.display, DisplayTransform::Agx));
-        assert!(matches!(potato.output, OutputMode::Sdr));
-        assert!(!potato.bloom);
-        assert_eq!(potato.bloom_intensity.to_bits(), 0.0_f64.to_bits());
-        assert_eq!(potato.bloom_levels, 0);
+        let fallback = HdrSettings::for_preset(LightingPreset::Fallback);
+        assert!(matches!(fallback.exposure_mode, ExposureMode::Fixed));
+        assert!(matches!(fallback.display, DisplayTransform::Agx));
+        assert!(matches!(fallback.output, OutputMode::Sdr));
+        assert!(!fallback.bloom);
+        assert_eq!(fallback.bloom_intensity.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(fallback.bloom_levels, 0);
     }
 
     #[test]

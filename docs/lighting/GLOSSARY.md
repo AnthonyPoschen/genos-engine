@@ -198,7 +198,7 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (potato, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). At 8 positive lamps or fewer, and on a quiet held view, `reuse` shades the sum. `reuse (experimental)` is a deprecated value and logs a warning.
+**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (fallback, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). At 8 positive lamps or fewer, and on a quiet held view, `reuse` shades the sum. `reuse (experimental)` is a deprecated value and logs a warning.
 Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI (Bitterli et al. 2020) with pairwise MIS (Bitterli et al. 2022); GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
 **Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and merges it again next frame (`lamp_pick_reuse`). Low is temporal only. Medium and High also merge one neighbour. History is the previous frame's pixel under the motion vector, rejected on depth and normal. A quiet held pixel stores the exact sum and then holds. Off fills a new reservoir each frame. The menu switch is this key.
@@ -282,7 +282,7 @@ Role: LIGHTS · Literature: Hillaire 2015; Engelhardt and Dachsbacher, I3D 2010 
 Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../adr/0012-gi.md) stores no radiance history · More detail: [fog design §7](../systems/fog-and-volumetric-lighting-design.md)
 
 ### Quality and tooling
-**Preset**: a named full set of settings: potato, day-cycle, gi-1bounce, low, medium, high. **Potato** is direct light plus flat ambient, with no GI. Role: TOOL
+**Preset**: a named full set of settings: fallback, day-cycle, gi-1bounce, low, medium, high. **Fallback** is direct light plus flat ambient, with no GI. Role: TOOL
 **Full effort**: one-shot action that pushes every effort knob to max for comparison. Role: TOOL
 **Ray budget / budget shift**: the per-round ray budget divided by 2^shift. Role: SCHED · Literature: GIBS global ray budget (§1.12)
 **Refresh frames**: "do this every Nth frame". Role: SCHED

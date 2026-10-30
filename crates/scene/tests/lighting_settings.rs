@@ -162,7 +162,7 @@ fn gi_presets_sample_pixels_from_a_reservoir() {
             .mode,
         LampPickMode::Hits
     );
-    for preset in [LightingPreset::Potato, LightingPreset::DayCycle] {
+    for preset in [LightingPreset::Fallback, LightingPreset::DayCycle] {
         let settings = LightingSettings::preset(preset);
         assert_eq!(
             settings.lamp_pick.mode,
@@ -171,9 +171,9 @@ fn gi_presets_sample_pixels_from_a_reservoir() {
             preset.name()
         );
     }
-    let potato = LightingSettings::preset(LightingPreset::Potato);
-    assert_eq!(potato.direct.max_lights, 8);
-    assert!(!potato.gi.enabled);
+    let fallback = LightingSettings::preset(LightingPreset::Fallback);
+    assert_eq!(fallback.direct.max_lights, 8);
+    assert!(!fallback.gi.enabled);
 }
 
 #[test]
@@ -186,21 +186,21 @@ fn the_text_form_round_trips_every_preset() {
 }
 
 #[test]
-fn potato_is_direct_shadows_and_flat_ambient() {
-    let potato = LightingSettings::preset(LightingPreset::Potato);
-    assert!(potato.direct.enabled);
-    assert!(potato.shadows.enabled);
-    assert!(!potato.gi.enabled);
-    assert_eq!(potato.bounce.count, 0);
-    assert!(!potato.probes.enabled);
-    assert!(!potato.world_cache.enabled);
-    assert!(!potato.denoiser.enabled);
-    assert!(!potato.allocates_cache());
-    assert_eq!(potato.ambient.mode, AmbientMode::Constant);
-    assert!(!potato.gpu_buckets(1).compact);
-    assert!(!potato.gpu_buckets(1).cache_rays);
-    assert!(potato.gpu_buckets(1).direct);
-    assert!(potato.gpu_buckets(1).shadows);
+fn fallback_is_direct_shadows_and_flat_ambient() {
+    let fallback = LightingSettings::preset(LightingPreset::Fallback);
+    assert!(fallback.direct.enabled);
+    assert!(fallback.shadows.enabled);
+    assert!(!fallback.gi.enabled);
+    assert_eq!(fallback.bounce.count, 0);
+    assert!(!fallback.probes.enabled);
+    assert!(!fallback.world_cache.enabled);
+    assert!(!fallback.denoiser.enabled);
+    assert!(!fallback.allocates_cache());
+    assert_eq!(fallback.ambient.mode, AmbientMode::Constant);
+    assert!(!fallback.gpu_buckets(1).compact);
+    assert!(!fallback.gpu_buckets(1).cache_rays);
+    assert!(fallback.gpu_buckets(1).direct);
+    assert!(fallback.gpu_buckets(1).shadows);
 }
 
 #[test]
@@ -269,14 +269,14 @@ fn full_effort_spends_the_maximum_and_rewrites_every_pixel() {
 }
 
 #[test]
-fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
+fn day_cycle_and_one_bounce_sit_between_fallback_and_low() {
     let names: Vec<_> = LightingPreset::all()
         .iter()
         .map(|preset| preset.name())
         .collect();
     assert_eq!(
         names,
-        ["potato", "day-cycle", "gi-1bounce", "low", "medium", "high"]
+        ["fallback", "day-cycle", "gi-1bounce", "low", "medium", "high"]
     );
     let day = LightingSettings::preset(LightingPreset::DayCycle);
     assert!(!day.gi.enabled);
@@ -364,11 +364,11 @@ fn a_partial_line_overlays_a_preset() {
 #[test]
 fn a_scene_file_overrides_the_lighting_defaults() {
     let source = format!(
-        "{}\nlighting_preset(\"potato\");\nlighting(\"direct_lights=3; ambient_intensity=0.4\");\n",
+        "{}\nlighting_preset(\"fallback\");\nlighting(\"direct_lights=3; ambient_intensity=0.4\");\n",
         room()
     );
     let scene = load_str(&source).expect("scene");
-    assert_eq!(scene.lighting.preset, LightingPreset::Potato);
+    assert_eq!(scene.lighting.preset, LightingPreset::Fallback);
     assert!(!scene.lighting.gi.enabled);
     assert!(!scene.lighting.allocates_cache());
     assert_eq!(scene.lighting.direct.max_lights, 3);

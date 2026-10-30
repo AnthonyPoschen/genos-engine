@@ -72,7 +72,7 @@ const GPU_TAU: f64 = 0.001;
 const GPU_BLOOM_K: f64 = 1.0;
 const GPU_BLOOM_LEVELS: u32 = 3;
 const GPU_FRAMES: u32 = 2;
-/// Plain compose of the shipped hall, Potato, ambient 8, `legacy_bytes`, 160×90.
+/// Plain compose of the shipped hall, Fallback, ambient 8, `legacy_bytes`, 160×90.
 const LEGACY_SHOULDER: &[u8] = include_bytes!("data/legacy_shoulder_160x90.bgra");
 
 /// Scene-linear Rec.709, then the `AgX_LUT_Gen` sRGB power-2.4 code.
@@ -831,7 +831,7 @@ fn force_sdr_misses(
     wrong
 }
 
-/// Mutation: Potato and Low keep the host HDR pair.
+/// Mutation: Fallback and Low keep the host HDR pair.
 fn pick_ignores_force(
     host: PresentHost,
     list: &[ListedFormat],
@@ -1121,7 +1121,7 @@ fn capture_gpu() -> Grab {
         Err(err) => return fail_grab(&err),
     };
     let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
     world.scene.hdr = gpu_settings();
     let opened = open_grade_renderer();
     let (mut window, mut renderer) = match opened {
@@ -1282,8 +1282,8 @@ fn capture_legacy() -> LegacyGrab {
         }
     };
     let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
-    // Potato's ambient sits under 0.64, so the shoulder never runs. Raised
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
+    // Fallback's ambient sits under 0.64, so the shoulder never runs. Raised
     // ambient puts the plain compose onto the curve this row grades.
     world.scene.lighting.ambient.intensity = 8.0;
     world.scene.hdr = HdrSettings::legacy_bytes();
@@ -1408,9 +1408,9 @@ fn capture_legacy_mode() -> LegacyModeGrab {
         }
     };
     let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
     world.scene.lighting.ambient.intensity = 8.0;
-    let mut hdr = HdrSettings::for_preset(LightingPreset::Potato);
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Fallback);
     hdr.display = genos_scene::DisplayTransform::Legacy;
     hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
     hdr.ev100 = 0.0;

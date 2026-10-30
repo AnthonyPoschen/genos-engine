@@ -4,7 +4,7 @@
 //! history slot. History is not blended. The frame dispatches
 //! [`dispatched_grid`]: zero axes keep the preset, and a positive `samples`
 //! limits cells. [`fit_pass`] is the CPU helper for that limit. The frame
-//! does not call it. Potato does not dispatch.
+//! does not call it. Fallback does not dispatch.
 
 use genos_scene::{FogSettings, LightingPreset};
 
@@ -23,7 +23,7 @@ pub struct PassCost {
     pub milliseconds: f64,
 }
 
-/// Decimal MB of the preset grid. Potato, day-cycle, and one-bounce allocate 0.
+/// Decimal MB of the preset grid. Fallback, day-cycle, and one-bounce allocate 0.
 #[must_use]
 pub fn allocation_mb(preset: LightingPreset) -> f64 {
     megabytes(grid_size(preset))
@@ -39,7 +39,7 @@ pub fn allocation_mb_doubled() -> f64 {
 #[must_use]
 pub fn sample_cap(preset: LightingPreset) -> u32 {
     match preset {
-        LightingPreset::Potato | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => 0,
+        LightingPreset::Fallback | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => 0,
         LightingPreset::Low => 4_000,
         LightingPreset::Medium => 12_000,
         LightingPreset::High => 32_000,
@@ -51,7 +51,7 @@ pub fn sample_cap(preset: LightingPreset) -> u32 {
 #[must_use]
 pub fn millisecond_ceiling(preset: LightingPreset) -> f64 {
     match preset {
-        LightingPreset::Potato | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => 0.05,
+        LightingPreset::Fallback | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => 0.05,
         LightingPreset::Low => 0.40,
         LightingPreset::Medium => 0.80,
         LightingPreset::High => 1.20,
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn preset_bytes_match_the_design_table() {
-        assert_eq!(allocation_mb(LightingPreset::Potato), 0.0);
+        assert_eq!(allocation_mb(LightingPreset::Fallback), 0.0);
         assert!((allocation_mb(LightingPreset::Low) - 0.903_168).abs() < 1.0e-9);
         assert!((allocation_mb(LightingPreset::Medium) - 2.695_680).abs() < 1.0e-9);
         assert!((allocation_mb(LightingPreset::High) - 11.174_400).abs() < 1.0e-9);
@@ -214,9 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn potato_does_not_dispatch() {
+    fn fallback_does_not_dispatch() {
         let mut dispatched = false;
-        let fitted = fit_pass(LightingPreset::Potato, |_| {
+        let fitted = fit_pass(LightingPreset::Fallback, |_| {
             dispatched = true;
             0.0
         });

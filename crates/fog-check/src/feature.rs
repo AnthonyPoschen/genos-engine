@@ -28,11 +28,11 @@ const GI_INSCATTER_BLUR_REL: f64 = 0.12;
 const MEDIA_PATH_BLUR_REL: f64 = 0.12;
 const NEAR_FOG_BLUR_REL: f64 = 0.08;
 const FOG_STILL_FLICKER: f64 = 0.02;
-const FROXEL_VRAM_POTATO_MB: f64 = 0.05;
+const FROXEL_VRAM_FALLBACK_MB: f64 = 0.05;
 const FROXEL_VRAM_LOW_MB: f64 = 1.5;
 const FROXEL_VRAM_MEDIUM_MB: f64 = 4.0;
 const FROXEL_VRAM_HIGH_MB: f64 = 12.0;
-const FROXEL_MS_POTATO: f64 = 0.05;
+const FROXEL_MS_FALLBACK: f64 = 0.05;
 const FROXEL_MS_LOW: f64 = 0.40;
 const FROXEL_MS_MEDIUM: f64 = 0.80;
 const FROXEL_MS_HIGH: f64 = 1.20;
@@ -125,11 +125,11 @@ fn good_feature() -> Vec<Metric> {
             FRAME_PICTURE_UNCHANGED,
             FRAME_PICTURE_NOTE,
         ),
-        vram_row("froxel_vram_potato_mb", good.vram[0], FROXEL_VRAM_POTATO_MB),
+        vram_row("froxel_vram_fallback_mb", good.vram[0], FROXEL_VRAM_FALLBACK_MB),
         vram_row("froxel_vram_low_mb", good.vram[1], FROXEL_VRAM_LOW_MB),
         vram_row("froxel_vram_medium_mb", good.vram[2], FROXEL_VRAM_MEDIUM_MB),
         vram_row("froxel_vram_high_mb", good.vram[3], FROXEL_VRAM_HIGH_MB),
-        ms_row("froxel_ms_potato", good.ms[0], FROXEL_MS_POTATO),
+        ms_row("froxel_ms_fallback", good.ms[0], FROXEL_MS_FALLBACK),
         ms_row("froxel_ms_low", good.ms[1], FROXEL_MS_LOW),
         ms_row("froxel_ms_medium", good.ms[2], FROXEL_MS_MEDIUM),
         ms_row("froxel_ms_high", good.ms[3], FROXEL_MS_HIGH),
@@ -138,19 +138,19 @@ fn good_feature() -> Vec<Metric> {
 
 fn broken_feature() -> Vec<Metric> {
     let presets = [
-        LightingPreset::Potato,
+        LightingPreset::Fallback,
         LightingPreset::Low,
         LightingPreset::Medium,
         LightingPreset::High,
     ];
     let byte_ceilings = [
-        FROXEL_VRAM_POTATO_MB,
+        FROXEL_VRAM_FALLBACK_MB,
         FROXEL_VRAM_LOW_MB,
         FROXEL_VRAM_MEDIUM_MB,
         FROXEL_VRAM_HIGH_MB,
     ];
     let time_ceilings = [
-        FROXEL_MS_POTATO,
+        FROXEL_MS_FALLBACK,
         FROXEL_MS_LOW,
         FROXEL_MS_MEDIUM,
         FROXEL_MS_HIGH,
@@ -199,8 +199,8 @@ fn broken_feature() -> Vec<Metric> {
 
 const fn vram_name(preset: LightingPreset) -> &'static str {
     match preset {
-        LightingPreset::Potato | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => {
-            "froxel_vram_potato_mb"
+        LightingPreset::Fallback | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => {
+            "froxel_vram_fallback_mb"
         }
         LightingPreset::Low => "froxel_vram_low_mb",
         LightingPreset::Medium => "froxel_vram_medium_mb",
@@ -210,8 +210,8 @@ const fn vram_name(preset: LightingPreset) -> &'static str {
 
 const fn ms_name(preset: LightingPreset) -> &'static str {
     match preset {
-        LightingPreset::Potato | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => {
-            "froxel_ms_potato"
+        LightingPreset::Fallback | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => {
+            "froxel_ms_fallback"
         }
         LightingPreset::Low => "froxel_ms_low",
         LightingPreset::Medium => "froxel_ms_medium",
@@ -234,7 +234,7 @@ fn measure_good() -> Good {
     let frame = frame_scores();
     let yaw = yaw_frames();
     let presets = [
-        LightingPreset::Potato,
+        LightingPreset::Fallback,
         LightingPreset::Low,
         LightingPreset::Medium,
         LightingPreset::High,

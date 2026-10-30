@@ -14,7 +14,7 @@ pub struct Shot {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
-    /// Potato, Low, Medium, High.
+    /// Fallback, Low, Medium, High.
     pub rays: [u32; 4],
     pub views: [u32; 4],
     /// Max mean-channel change between still Medium frames.
@@ -62,7 +62,7 @@ fn capture() -> Result<Shot, String> {
     let mut rays = [0; 4];
     let mut views = [0; 4];
     let presets = [
-        ReflectionPreset::Potato,
+        ReflectionPreset::Fallback,
         ReflectionPreset::Low,
         ReflectionPreset::Medium,
         ReflectionPreset::High,

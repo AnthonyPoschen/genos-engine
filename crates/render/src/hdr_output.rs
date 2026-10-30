@@ -1102,7 +1102,7 @@ pub fn surface_choice(
     (sdr_format, COLOR_SPACE_SRGB, HdrSwapchain::Sdr)
 }
 
-/// Host preference, then the output mode. `force_sdr` is Potato, Low, and `legacy_bytes`.
+/// Host preference, then the output mode. `force_sdr` is Fallback, Low, and `legacy_bytes`.
 /// `Auto` calls [`pick_hdr_output`].
 #[must_use]
 pub fn resolve_swapchain(
