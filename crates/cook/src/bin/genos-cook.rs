@@ -6,6 +6,9 @@
 //! An input whose record already matches every input hash and the settings is
 //! reported `up to date` and not rebuilt.
 //!
+//! `--textures` also cooks every image into `DIR/cooked/<asset>.gtex` (BC7, BC5
+//! for normals, full mips), with the same up-to-date rule. Off by default.
+//!
 //! `genos-cook --verify DIR` is the load-time check: it hashes every record and
 //! object the manifest names, decodes each record, and prints the timings.
 //!
@@ -17,7 +20,8 @@ use std::time::Instant;
 
 use genos_bake::{BakeMode, BakeSettings};
 use genos_cook::{
-    cook, cook_file, cooked_path, decode, encode, load_cooked, manifest, Manifest, Outcome,
+    cook, cook_file, cook_textures_file, cooked_path, decode, encode, load_cooked, load_textures,
+    manifest, Manifest, Outcome,
 };
 
 fn main() {
@@ -41,6 +45,7 @@ fn run() -> Result<(), String> {
     let mut out = PathBuf::from("target/cook");
     let mut mode = Mode::Cook;
     let mut files = Vec::new();
+    let mut textures = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or(format!("{name} needs a value"));
@@ -50,8 +55,9 @@ fn run() -> Result<(), String> {
             "--voxels-per-side" => settings.voxels_per_side = parse(&value("--voxels-per-side")?)?,
             "--verify" => mode = Mode::Verify(value("--verify")?.into()),
             "--compare" => mode = Mode::Compare,
+            "--textures" => textures = true,
             "-h" | "--help" => {
-                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
+                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
                 return Ok(());
             }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
@@ -61,7 +67,7 @@ fn run() -> Result<(), String> {
     match mode {
         Mode::Verify(dir) => verify(&dir),
         Mode::Compare => compare(&files, &settings),
-        Mode::Cook => cook_all(&files, &out, &settings),
+        Mode::Cook => cook_all(&files, &out, &settings, textures),
     }
 }
 
@@ -69,7 +75,19 @@ fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1e3
 }
 
-fn cook_all(files: &[PathBuf], out: &Path, settings: &BakeSettings) -> Result<(), String> {
+fn what(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Cooked => "cooked",
+        Outcome::UpToDate => "up to date",
+    }
+}
+
+fn cook_all(
+    files: &[PathBuf],
+    out: &Path,
+    settings: &BakeSettings,
+    textures: bool,
+) -> Result<(), String> {
     if files.is_empty() {
         return Err("no input files (try --help)".into());
     }
@@ -79,23 +97,47 @@ fn cook_all(files: &[PathBuf], out: &Path, settings: &BakeSettings) -> Result<()
         let start = Instant::now();
         let (outcome, path) =
             cook_file(file, out, settings).map_err(|e| format!("{}: {e}", file.display()))?;
-        let what = match outcome {
-            Outcome::Cooked => "cooked",
-            Outcome::UpToDate => "up to date",
-        };
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         println!(
-            "{}: {what} {} ({size} bytes) {:.2} ms",
+            "{}: {} {} ({size} bytes) {:.2} ms",
             file.display(),
+            what(outcome),
             path.display(),
             ms(start)
         );
         records.push(load_cooked(&path).map_err(|e| e.to_string())?);
+        if textures {
+            cook_textures(file, out)?;
+        }
     }
     let text = manifest(&records).text();
     genos_load::write_atomic(&out.join("package.manifest"), text.as_bytes())
         .map_err(|e| e.to_string())?;
     println!("package: {} assets, {:.2} ms", records.len(), ms(total));
+    Ok(())
+}
+
+fn cook_textures(file: &Path, out: &Path) -> Result<(), String> {
+    let start = Instant::now();
+    let (outcome, path) =
+        cook_textures_file(file, out).map_err(|e| format!("{}: {e}", file.display()))?;
+    let cook_ms = ms(start);
+    let start = Instant::now();
+    let t = load_textures(&path).map_err(|e| e.to_string())?;
+    let load_ms = ms(start);
+    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+    let texels: u64 = t
+        .textures
+        .iter()
+        .map(|t| u64::from(t.ktx2.width) * u64::from(t.ktx2.height))
+        .sum();
+    println!(
+        "{}: textures {} {} ({} images, {texels} base texels, {size} bytes) {cook_ms:.2} ms, checked load {load_ms:.2} ms",
+        file.display(),
+        what(outcome),
+        path.display(),
+        t.textures.len()
+    );
     Ok(())
 }
 
