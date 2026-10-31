@@ -1096,6 +1096,8 @@ pub fn schedule_push(
     // #70 R3: direct runs on the full crop. A held direct value outside the
     // rect showed as blotches on a turn.
     plan.direct_gate = false;
+    // Trace too, same reason.
+    plan.trace_gate = false;
     let mut words = plan.words(lit.crop_x, lit.crop_y);
     // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
     words[0] |= 1 << 3;
@@ -1524,11 +1526,11 @@ mod tests {
     }
 
     #[test]
-    fn high_1080p_with_a_change_gates_trace_only() {
+    fn high_1080p_with_a_change_gates_nothing() {
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
         let push = schedule_push(&settings, 1.0, display(1920, 1080), 16, 64, 1, 1);
         assert!(!push.plan.direct_gate);
-        assert!(push.plan.trace_gate);
+        assert!(!push.plan.trace_gate);
         assert!(!push.plan.atrous_gate);
     }
 
