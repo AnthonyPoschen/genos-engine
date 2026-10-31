@@ -215,6 +215,45 @@ fn exact(p: &Pixel, lamps: &[LiveLamp]) -> Vec3 {
     lamps.iter().fold(Vec3::ZERO, |acc, l| acc + lamp_light(l, origin(p), p.n, p.two_sided))
 }
 
+/// A sphere occluder for the shadows-on case.
+#[derive(Clone, Copy)]
+struct Ball {
+    center: Vec3,
+    radius: f32,
+}
+
+/// `trace_occluded(origin, lamp)`: the segment from the lifted origin to the lamp.
+fn occluded(balls: &[Ball], from: Vec3, to: Vec3) -> bool {
+    let d = to - from;
+    let len2 = d.dot(d);
+    balls.iter().any(|b| {
+        let t = ((b.center - from).dot(d) / len2).clamp(0.0, 1.0);
+        let q = from + d * t - b.center;
+        q.dot(q) < b.radius * b.radius
+    })
+}
+
+/// Shadows on: the target stays unshadowed (`restir_phat`), the shade step
+/// multiplies by visibility from the same lifted origin. The mean must equal
+/// the exact shadowed sum.
+fn mean_estimate_shadowed(p: &Pixel, lamps: &[LiveLamp], tree: &LightTree, balls: &[Ball], seed: u64, frames: u32) -> Vec3 {
+    let mut rng = Rng::new(seed);
+    let mut hist = Res::default();
+    let mut sum = Vec3::ZERO;
+    for _ in 0..frames {
+        let c = initial(p, lamps, tree, &mut rng);
+        let unit = rng.next_f32();
+        let r = temporal(p, lamps, c, hist, unit);
+        hist = r;
+        if let Some(l) = r.lamp {
+            if !occluded(balls, origin(p), lamps[l].pos) {
+                sum += lamp_light(&lamps[l], origin(p), p.n, p.two_sided) * w_of(r);
+            }
+        }
+    }
+    sum * (1.0 / frames as f32)
+}
+
 fn mean_estimate(p: &Pixel, lamps: &[LiveLamp], tree: &LightTree, seed: u64, frames: u32) -> Vec3 {
     let mut rng = Rng::new(seed);
     let mut hist = Res::default();
@@ -261,4 +300,39 @@ fn live_estimator_mean_matches_the_exact_unshadowed_lamp_sum() {
 #[test]
 fn live_estimator_two_sided_matches_the_exact_sum() {
     check(&two_sided_pixels());
+}
+
+#[test]
+fn live_estimator_shadowed_mean_matches_the_exact_shadowed_sum() {
+    let lamps = scene();
+    let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
+    let tree = LightTree::build(&refs);
+    // One ball hides the bright warm lamp from the floor beside it; one sits
+    // just above the floor so the 0.02 lift decides grazing visibility.
+    let balls = [
+        Ball { center: v(-0.6, 0.35, 0.8), radius: 0.3 },
+        Ball { center: v(1.0, 0.03, 3.9), radius: 0.025 },
+    ];
+    let mut failures = Vec::new();
+    for (name, p) in pixels() {
+        let want = lamps.iter().fold(Vec3::ZERO, |acc, l| {
+            if occluded(&balls, origin(&p), l.pos) {
+                acc
+            } else {
+                acc + lamp_light(l, origin(&p), p.n, p.two_sided)
+            }
+        });
+        let mut got = Vec3::ZERO;
+        let seeds = [11u64, 23, 37, 41, 53, 67, 71, 89, 97, 101, 103, 107, 109, 113, 127, 131];
+        for seed in seeds {
+            got += mean_estimate_shadowed(&p, &lamps, &tree, &balls, seed, 20000);
+        }
+        got = got * (1.0 / seeds.len() as f32);
+        let rel = (luma(got) - luma(want)) / luma(want).max(1.0e-6);
+        eprintln!("{name:>24}: shadowed exact {:.4} mean {:.4} rel {:+.4}", luma(want), luma(got), rel);
+        if rel.abs() > TOL {
+            failures.push(format!("{name}: rel {rel:+.4}"));
+        }
+    }
+    assert!(failures.is_empty(), "biased pixels: {failures:?}");
 }
