@@ -163,8 +163,18 @@ def self_test():
     x = 180 / 255 - 0.64
     tone_ok = abs(la - 128 / 255) < 1e-3 and abs(lb - (0.64 + 1.1 * x / (0.14 - x))) < 1e-2
     print(json.dumps({"lin_luma_128": round(la, 4), "lin_luma_180": round(lb, 4)}))
+    # Pixels at the shoulder ceiling (0.78 = 198.9/255, +-dither) carry no
+    # recoverable radiance: they must be counted, not decoded to ~1100.
+    sat = np.full((4, 4, 3), 0.3, np.float32); sat[0, 0] = 198 / 255; sat[1, 1] = (199 / 255, 0.2, 0.2)
+    sat[2, 2] = 190 / 255  # bright but below the ceiling: still decoded
+    oc = over_ceiling(sat)
+    flat = np.full((4, 4), 0.3, np.float32)
+    hot = flat.copy(); hot[0, 0] = 1100.0
+    masked, _ = ref_error(hot, flat, None, mask=np.zeros((4, 4), bool) | (np.arange(16).reshape(4, 4) == 0))
+    ceil_ok = int(oc.sum()) == 2 and oc[0, 0] and oc[1, 1] and not oc[2, 2] and masked < 1e-6
+    print(json.dumps({"over_ceiling_px": int(oc.sum()), "masked_err": round(masked, 6)}))
     ok = (same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
-          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok)
+          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok and ceil_ok)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)]}))
     print("self-test", "ok" if ok else "FAIL")
