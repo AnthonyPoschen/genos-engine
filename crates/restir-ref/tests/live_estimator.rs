@@ -336,3 +336,58 @@ fn live_estimator_shadowed_mean_matches_the_exact_shadowed_sum() {
     }
     assert!(failures.is_empty(), "biased pixels: {failures:?}");
 }
+
+/// Temporal reuse while the bright lamp orbits (lamps-spin): the history
+/// sample is re-scored at this frame's lamp position (`tq_h`), and a lamp
+/// flagged changed keeps at most the current M (`restir_lamp_changed`). The
+/// tree is rebuilt each frame like the live prefix. Over many frames the
+/// mean estimate must equal the mean of the per-frame exact sums. A near
+/// lamp is heavy-tailed, so a pixel fails only when its bias is both over
+/// `TOL` and over 3 standard errors of the 16 per-seed estimates.
+#[test]
+fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
+    let base = scene();
+    let spin = base.len() - 3;
+    let mut failures = Vec::new();
+    for (name, p) in pixels() {
+        let mut got = 0.0f64;
+        let mut want = 0.0f64;
+        let frames = 10000u32;
+        let mut per = Vec::new();
+        for seed in [11u64, 23, 37, 41, 53, 67, 71, 89, 97, 101, 103, 107, 109, 113, 127, 131] {
+            let (g0, w0) = (got, want);
+            let mut rng = Rng::new(seed);
+            let mut hist = Res::default();
+            for f in 0..frames {
+                let a = f as f32 * 0.07;
+                let mut lamps = base.clone();
+                lamps[spin].pos = v(0.3 + 0.8 * a.cos(), 0.6, 0.2 + 0.8 * a.sin());
+                let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
+                let tree = LightTree::build(&refs);
+                let c = initial(&p, &lamps, &tree, &mut rng);
+                let m_now = if c.lamp.is_none() { CANDIDATES } else { c.m };
+                if hist.lamp == Some(spin) && hist.m > m_now {
+                    hist.w_sum *= m_now as f32 / hist.m as f32;
+                    hist.m = m_now;
+                }
+                let unit = rng.next_f32();
+                let r = temporal(&p, &lamps, c, hist, unit);
+                hist = r;
+                if let Some(l) = r.lamp {
+                    got += f64::from(luma(lamp_light(&lamps[l], origin(&p), p.n, p.two_sided) * w_of(r)));
+                }
+                want += f64::from(luma(exact(&p, &lamps)));
+            }
+            per.push((got - g0) / (want - w0).max(1.0e-9) - 1.0);
+        }
+        let k = per.len() as f64;
+        let mu = per.iter().sum::<f64>() / k;
+        let se = (per.iter().map(|x| (x - mu) * (x - mu)).sum::<f64>() / (k - 1.0)).sqrt() / k.sqrt();
+        let rel = ((got - want) / want.max(1.0e-6)) as f32;
+        eprintln!("{name:>24}: moving exact {want:.1} mean {got:.1} rel {rel:+.4} (seeds {mu:+.4} se {se:.4})");
+        if want > 0.0 && rel.abs() > TOL && f64::from(rel.abs()) > 3.0 * se {
+            failures.push(format!("{name}: rel {rel:+.4}"));
+        }
+    }
+    assert!(failures.is_empty(), "biased pixels: {failures:?}");
+}
