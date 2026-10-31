@@ -122,3 +122,23 @@ All values are bounce / reference indirect. Direct / ref is 0.997 in every run.
 - Probe ray count and termination.
 - Albedo per hop: the next toggle is to scale the hit albedo and see whether the gap scales like a geometric series.
 - Sky and ambient: at 22:00 the sky is near 0, so they are unlikely to matter here.
+
+### Per-bounce series (lighting-v3 34cc80c, 31 Oct 2026)
+
+Stress hall, lamps lit, 160x90, live settled 900 frames, tone-inverse decode. Each value is a fraction of that row's 64-bounce reference indirect. `k` scales the albedo of every secondary hit, both live (`reflectance` in `lighting_direct.comp`) and in the reference (`path_from`). These were local debug hooks and were not committed.
+
+| k | ref b1 | ref b2 | ref b4 | ref b8 | ref b64 (abs) | live 1-bounce | live WRC off | live WRC on |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 | 0.335 | 0.504 | 0.741 | — | 0.4986 | 0.333 | 0.881 | 0.773 |
+| 0.9 | 0.416 | 0.604 | 0.834 | 0.969 | 0.3615 | — | 0.928 | 0.816 |
+| 0.5 | 0.707 | 0.884 | — | — | 0.1183 | — | 0.988 | 0.901 |
+
+**Findings:**
+
+- **First bounce is exact.** Live one-bounce is 0.333 and reference b1 is 0.335. The whole shared gap is in hops 2 and later.
+- **The hall has high loop gain.** The reference fits I(k) = c·k/(1 − g·k) with c = 0.156 and g = 0.68, which predicts 0.486 at k = 1 against the measured 0.499. Raising k from 0.9 to 1.0 grows the indirect by 38 %, so a small per-hop loss is amplified.
+- **A constant per-hop loss fits the data.** WRC off fits the same form with g·f = 0.645, which gives f ≈ 0.95, a loss of about 5 % per later hop. That predicts 0.335 at k = 0.9 (measured 0.335) and 0.115 at k = 0.5 (measured 0.117).
+- **A hard truncation also fits.** Truncating at about 6–7 hops would match k = 1 and 0.9 as well. The data cannot separate the two models, but no hard depth limit is needed. The 1.2 % that is still missing at k = 0.5 leans slightly towards the per-hop loss, because truncation at 6 hops would predict about 0.998.
+- **WRC on costs a further 9–12 % at every k**, including 3.6 % at one bounce. It is not mainly hop-dependent, which matches the history lag noted above.
+- **Ruled out by reading the code:** rgb9e5 packing (it rounds to nearest, so it is unbiased), and the hit reflectance chain (tint·0.8/π is stored as ×π in unorm8, then read as /π, which matches the reference's LAMBERT).
+- **Still not measured:** the source of the ≈5 % per hop, with cache cell normal or position interpolation as the lead suspect, and a corner-free open-plane comparison.
