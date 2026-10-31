@@ -206,7 +206,7 @@ fn pixels() -> Vec<(&'static str, Pixel)> {
 
 /// A two-sided face above the bright lamp: `lamp_light` lights it from below
 /// (|n.l|), but the tree's cosine bound is one-sided, so the lamp under it is
-/// never proposed. Known support loss (darkening), a follow-up.
+/// never proposed: support loss (darkening).
 fn two_sided_pixels() -> Vec<(&'static str, Pixel)> {
     vec![("two-sided leaf", Pixel { pos: v(0.3, 1.2, 0.2), n: v(0.0, 1.0, 0.0), two_sided: true })]
 }
@@ -259,7 +259,6 @@ fn live_estimator_mean_matches_the_exact_unshadowed_lamp_sum() {
 }
 
 #[test]
-#[ignore = "two-sided faces: the tree cosine bound drops lamps behind the normal (follow-up)"]
 fn live_estimator_two_sided_matches_the_exact_sum() {
     check(&two_sided_pixels());
 }
