@@ -61,7 +61,10 @@ pub fn millisecond_ceiling(preset: LightingPreset) -> f64 {
 /// Full sample cap, timed and not reduced. The ceiling test uses this as the
 /// broken pass.
 #[must_use]
-pub fn unfitted_milliseconds(preset: LightingPreset, mut time_groups: impl FnMut(u32) -> f64) -> f64 {
+pub fn unfitted_milliseconds(
+    preset: LightingPreset,
+    mut time_groups: impl FnMut(u32) -> f64,
+) -> f64 {
     let samples = sample_cap(preset);
     if samples == 0 {
         0.0

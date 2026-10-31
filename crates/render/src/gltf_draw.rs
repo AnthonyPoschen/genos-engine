@@ -1,19 +1,67 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::items_after_statements, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::type_complexity, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::items_after_statements,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::type_complexity,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Place a glTF scene in the world as mesh draws.
 //!
@@ -35,9 +83,7 @@ use std::collections::HashMap;
 
 use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive};
 
-use crate::world::{
-    transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World,
-};
+use crate::world::{transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World};
 
 impl World {
     /// Add every mesh instance of `scene`, placed by `place` (column-major, applied
@@ -144,7 +190,8 @@ impl World {
                 let surface = primitive.material.and_then(|index| {
                     *ready.entry(index).or_insert_with(|| {
                         let m = scene.materials.get(index)?;
-                        let built = build_surface(m, &scene.images, &mut color_shelf, &mut normal_shelf);
+                        let built =
+                            build_surface(m, &scene.images, &mut color_shelf, &mut normal_shelf);
                         if built.color[2] > 0 {
                             color_changed = true;
                         }
@@ -391,7 +438,9 @@ fn fit_shelf(w: u32, h: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
 fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
     let slot = m.base_color_texture?;
     let img = images.get(slot.image)?;
-    let pixels = (img.width as usize).saturating_mul(img.height as usize).saturating_mul(4);
+    let pixels = (img.width as usize)
+        .saturating_mul(img.height as usize)
+        .saturating_mul(4);
     if img.width == 0 || img.height == 0 || img.pixels.len() < pixels {
         return None;
     }
@@ -417,7 +466,9 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)
 fn copy_normal(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
     let slot = m.normal_texture?;
     let img = images.get(slot.image)?;
-    let pixels = (img.width as usize).saturating_mul(img.height as usize).saturating_mul(4);
+    let pixels = (img.width as usize)
+        .saturating_mul(img.height as usize)
+        .saturating_mul(4);
     if img.width == 0 || img.height == 0 || img.pixels.len() < pixels {
         return None;
     }
@@ -794,7 +845,10 @@ mod tests {
         };
         assert_eq!(texcoords.len(), 3);
         assert_eq!(normals.len(), 3);
-        assert!((color[0] - 0.5).abs() < 1e-6, "instance colour is the factor");
+        assert!(
+            (color[0] - 0.5).abs() < 1e-6,
+            "instance colour is the factor"
+        );
         let surface = world.surfaces[surface.unwrap()];
         assert!(surface.two_sided);
         assert!((surface.cutoff - 0.5).abs() < 1e-6);

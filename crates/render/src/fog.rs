@@ -1,9 +1,6 @@
 #![cfg_attr(
     test,
-    expect(
-        clippy::expect_used,
-        reason = "a test aborts when a fixture fails"
-    )
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
 )]
 
 //! Froxel grid for height fog and local volumes.
@@ -404,16 +401,16 @@ pub fn world_cache_inscatter(_gi: bool) -> [f32; 3] {
 /// `T_next = T * exp(-σ Δs)` and, when `σ > 0`,
 /// `L += T * (S / σ) * (1 - exp(-σ Δs))`. The tail is height fog only.
 #[must_use]
-pub fn integrate_samples(samples: &[SliceSample], tail_tau: f32, tail_ratio: [f32; 3]) -> FogColumn {
+pub fn integrate_samples(
+    samples: &[SliceSample],
+    tail_tau: f32,
+    tail_ratio: [f32; 3],
+) -> FogColumn {
     let mut transmittance = 1.0_f32;
     let mut inscatter = [0.0_f32; 3];
     for sample in samples {
-        let (added, next) = step_scatter(
-            transmittance,
-            sample.sigma,
-            sample.source,
-            sample.distance,
-        );
+        let (added, next) =
+            step_scatter(transmittance, sample.sigma, sample.source, sample.distance);
         for channel in 0..3 {
             inscatter[channel] += added[channel];
         }
@@ -760,8 +757,12 @@ fn delta_track_transmittance(
 }
 
 fn extinction_point(settings: &FogSettings, point: [f32; 3]) -> f32 {
-    let mut sigma =
-        height_fog_density_f32(settings.density, settings.thickness, point[1], settings.height);
+    let mut sigma = height_fog_density_f32(
+        settings.density,
+        settings.thickness,
+        point[1],
+        settings.height,
+    );
     for volume in &settings.volumes {
         sigma += volume.density.max(0.0) * falloff(volume, point);
     }
@@ -926,9 +927,8 @@ fn scatter_at(query: &ScatterQuery<'_>) -> (f32, [f32; 3]) {
         optical / query.distance
     };
     let mut sigma = sigma_height;
-    let mut scatter = sigma_height
-        * settings.albedo.clamp(0.0, 1.0)
-        * phase_hg_f32(settings.phase_g, query.mu);
+    let mut scatter =
+        sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, query.mu);
     let p1 = add(query.p0, query.delta);
     for volume in &settings.volumes {
         let local = volume.density.max(0.0) * falloff(volume, query.centre);
@@ -1080,7 +1080,14 @@ fn leak_scene() -> (FroxelGrid, FogVolume, FogView) {
     (grid, volume, view)
 }
 
-fn cell_extinction(settings: &FogSettings, view: &FogView, size: GridSize, x: u32, y: u32, z: u32) -> f32 {
+fn cell_extinction(
+    settings: &FogSettings,
+    view: &FogView,
+    size: GridSize,
+    x: u32,
+    y: u32,
+    z: u32,
+) -> f32 {
     let z0 = slice_edge(z, size.slices);
     let z1 = slice_edge(z + 1, size.slices);
     let p0 = point_at(view, size, x, y, z0);
@@ -1118,7 +1125,11 @@ fn local_density(volumes: &[FogVolume], point: [f32; 3]) -> f32 {
 /// position. A thick slice's ray segment shears farther than a small volume,
 /// which walks the in-scatter centroid off the projected centre during a yaw.
 /// Extinction stays on the view ray.
-pub(crate) fn aligned_volume_point(view: &FogView, volume: &FogVolume, point: [f32; 3]) -> [f32; 3] {
+pub(crate) fn aligned_volume_point(
+    view: &FogView,
+    volume: &FogVolume,
+    point: [f32; 3],
+) -> [f32; 3] {
     let depth = dot(sub(volume.position, view.origin), view.forward);
     let along = dot(sub(point, view.origin), view.forward);
     if depth <= 0.05 || along <= 0.05 {
@@ -1177,7 +1188,9 @@ fn volume_contains(volume: &FogVolume, point: [f32; 3]) -> bool {
             let dz = (point[2] - volume.position[2]).abs();
             dx <= volume.extents[0] && dy <= volume.extents[1] && dz <= volume.extents[2]
         }
-        FogShape::Sphere => length_sq(sub(point, volume.position)) <= volume.extents[0] * volume.extents[0],
+        FogShape::Sphere => {
+            length_sq(sub(point, volume.position)) <= volume.extents[0] * volume.extents[0]
+        }
     }
 }
 
@@ -1190,10 +1203,7 @@ pub fn point_at(view: &FogView, size: GridSize, x: u32, y: u32, view_z: f32) -> 
     add(
         view.origin,
         scale(
-            add(
-                add(view.forward, scale(view.right, nx)),
-                scale(view.up, ny),
-            ),
+            add(add(view.forward, scale(view.right, nx)), scale(view.up, ny)),
             view_z,
         ),
     )
@@ -1452,13 +1462,7 @@ mod tests {
         };
         let sized = dispatched_grid(&set, LightingPreset::Low);
         assert_eq!((sized.width, sized.height, sized.slices), (8, 4, 2));
-        let limited = dispatched_grid(
-            &FogSettings {
-                samples: 10,
-                ..set
-            },
-            LightingPreset::Low,
-        );
+        let limited = dispatched_grid(&FogSettings { samples: 10, ..set }, LightingPreset::Low);
         assert!(limited.cells() <= 10);
         assert!(limited.cells() >= 1);
         assert_eq!(limited.width, 8);

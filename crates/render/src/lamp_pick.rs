@@ -1,6 +1,15 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! CPU replica of the point-lamp estimator in `lighting_direct.comp`.
 //!
@@ -346,7 +355,11 @@ fn u32_as_f32(n: u32) -> f32 {
 
 /// Greatest integer `<= coord` that is inside `0..limit`.
 fn pixel_of(coord: f32, limit: u32) -> Option<u32> {
-    if coord.partial_cmp(&0.0).is_none_or(std::cmp::Ordering::is_lt) || limit == 0 {
+    if coord
+        .partial_cmp(&0.0)
+        .is_none_or(std::cmp::Ordering::is_lt)
+        || limit == 0
+    {
         return None;
     }
     if coord >= u32_as_f32(limit) {
@@ -512,11 +525,7 @@ mod tests {
     fn the_cumulative_mean_converges_to_the_visibility_sum() {
         let weights = [1.0, 3.0, 6.0];
         let visible = [1.0, 0.0, 1.0];
-        let reference: f32 = weights
-            .iter()
-            .zip(visible)
-            .map(|(w, v)| w * v)
-            .sum();
+        let reference: f32 = weights.iter().zip(visible).map(|(w, v)| w * v).sum();
         assert!((reference - 7.0).abs() < 1.0e-4);
         let mut samples = Vec::new();
         let mut u = 0.0;

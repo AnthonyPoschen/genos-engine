@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Equal elapsed time keeps the same motion. A bad interval does not advance.
 

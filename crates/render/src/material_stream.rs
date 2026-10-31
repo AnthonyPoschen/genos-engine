@@ -132,24 +132,12 @@ pub fn frame_views(
     let mut views = Vec::new();
     if let Some(index) = texture_index(color, normal, true) {
         views.push(atlas_view(
-            world,
-            camera,
-            width,
-            height,
-            view_proj,
-            index,
-            true,
+            world, camera, width, height, view_proj, index, true,
         ));
     }
     if let Some(index) = texture_index(color, normal, false) {
         views.push(atlas_view(
-            world,
-            camera,
-            width,
-            height,
-            view_proj,
-            index,
-            false,
+            world, camera, width, height, view_proj, index, false,
         ));
     }
     let mut index = views.len();
@@ -308,13 +296,9 @@ fn object_hit(object: &Object, ctx: &ViewCtx<'_>) -> Option<Hit> {
     else {
         return None;
     };
-    let rect = surface.and_then(|slot| ctx.surfaces.get(slot)).map(|item| {
-        if ctx.color {
-            item.color
-        } else {
-            item.normal
-        }
-    })?;
+    let rect = surface
+        .and_then(|slot| ctx.surfaces.get(slot))
+        .map(|item| if ctx.color { item.color } else { item.normal })?;
     if rect[2] == 0 || rect[3] == 0 {
         return None;
     }
@@ -353,9 +337,24 @@ fn triangle_derivatives(
     }
     let mut index = 0;
     while index + 2 < vertices.len() {
-        let p0 = project(view_proj, transform_pose(pose, vertices[index]), width, height);
-        let p1 = project(view_proj, transform_pose(pose, vertices[index + 1]), width, height);
-        let p2 = project(view_proj, transform_pose(pose, vertices[index + 2]), width, height);
+        let p0 = project(
+            view_proj,
+            transform_pose(pose, vertices[index]),
+            width,
+            height,
+        );
+        let p1 = project(
+            view_proj,
+            transform_pose(pose, vertices[index + 1]),
+            width,
+            height,
+        );
+        let p2 = project(
+            view_proj,
+            transform_pose(pose, vertices[index + 2]),
+            width,
+            height,
+        );
         if let (Some(s0), Some(s1), Some(s2)) = (p0, p1, p2) {
             if let Some(deriv) = screen_derivatives(
                 s0,
@@ -401,7 +400,13 @@ fn screen_derivatives(
     })
 }
 
-fn scale_to_atlas(deriv: Derivatives, rect_w: u32, rect_h: u32, atlas_w: u32, atlas_h: u32) -> Derivatives {
+fn scale_to_atlas(
+    deriv: Derivatives,
+    rect_w: u32,
+    rect_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+) -> Derivatives {
     let across = u32_to_f32(rect_w) / u32_to_f32(atlas_w.max(1));
     let down = u32_to_f32(rect_h) / u32_to_f32(atlas_h.max(1));
     Derivatives {

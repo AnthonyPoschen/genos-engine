@@ -822,7 +822,8 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
-        let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
+        let views =
+            crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
         self.gpu.tick_materials(self.memory.accounted(), &views)?;
         self.fund_stream_pages()?;
         self.gpu.submit_transfer()?;
@@ -1061,7 +1062,10 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn run_fog(&mut self, job: &crate::fog_pass::FogDispatch) -> Result<crate::fog_pass::FogGpu, String> {
+    pub fn run_fog(
+        &mut self,
+        job: &crate::fog_pass::FogDispatch,
+    ) -> Result<crate::fog_pass::FogGpu, String> {
         self.gpu.run_fog(job)
     }
 
@@ -1070,7 +1074,11 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device has no timestamp queries or the dispatch fails.
-    pub fn froxel_sample_ms(&mut self, preset: LightingPreset, samples: u32) -> Result<f64, String> {
+    pub fn froxel_sample_ms(
+        &mut self,
+        preset: LightingPreset,
+        samples: u32,
+    ) -> Result<f64, String> {
         self.gpu.froxel_sample_ms(preset, samples)
     }
 
@@ -1089,14 +1097,22 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the image or buffer allocation fails.
-    pub fn froxel_allocation(&mut self, preset: LightingPreset, doubled: bool) -> Result<u64, String> {
+    pub fn froxel_allocation(
+        &mut self,
+        preset: LightingPreset,
+        doubled: bool,
+    ) -> Result<u64, String> {
         self.gpu.froxel_allocation(preset, doubled)
     }
 
     /// Probe for the debug page. `pass_ms` is the last frame's froxel timestamp.
     /// History stays off, so accepts and rejects stay 0.
     #[must_use]
-    pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
+    pub fn fog_frame_probe(
+        &self,
+        fog: &genos_scene::FogSettings,
+        preset: LightingPreset,
+    ) -> crate::fog_budget::FogProbe {
         let mut probe = crate::fog_budget::fog_probe(fog, preset);
         if probe.dispatches == 0 || !self.gpu.froxel_wrote {
             probe.dispatches = 0;
@@ -2067,8 +2083,7 @@ impl Gpu {
                 }
                 let base = index as usize * 24;
                 let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
-                let queues =
-                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
+                let queues = u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
                 // Transfer without graphics. A shared graphics family keeps the graphics queue.
                 if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
                     transfer_family = index;
@@ -2698,7 +2713,10 @@ impl Gpu {
             }
             let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
             let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
-            listed.push(crate::hdr_output::ListedFormat { format, color_space });
+            listed.push(crate::hdr_output::ListedFormat {
+                format,
+                color_space,
+            });
         }
         let force_sdr = self.lighting.hdr.legacy_bytes
             || matches!(
@@ -3533,7 +3551,11 @@ impl Gpu {
                     };
                     if restir_got == 0 {
                         let part = |a, b| ms_from_ticks(tick_delta(a, b, bits), period);
-                        let parts = [part(raw[0], raw[1]), part(raw[1], raw[2]), part(raw[2], raw[3])];
+                        let parts = [
+                            part(raw[0], raw[1]),
+                            part(raw[1], raw[2]),
+                            part(raw[2], raw[3]),
+                        ];
                         let sum = parts[0] + parts[1] + parts[2];
                         bucket_ms[B_DIRECT as usize] += sum;
                         if times.print {
@@ -4010,7 +4032,11 @@ impl Gpu {
         if src.is_null() || dst.is_null() {
             return;
         }
-        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        let size = self
+            .lighting
+            .scene_lin
+            .size
+            .min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -4020,7 +4046,11 @@ impl Gpu {
             dst: u64,
             size: u64,
         }
-        let region = Region { src: 0, dst: 0, size };
+        let region = Region {
+            src: 0,
+            dst: 0,
+            size,
+        };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
@@ -5221,8 +5251,7 @@ impl Gpu {
         let bytes = chain.level_bytes();
         let total = chain.total_bytes();
         let index = self.streamer.texture_count();
-        self.streamer
-            .add_texture(chain.width, chain.height, &bytes);
+        self.streamer.add_texture(chain.width, chain.height, &bytes);
         let elapsed = started.elapsed().as_millis().max(1);
         let ms = u32::try_from(elapsed).unwrap_or(u32::MAX);
         self.streamer.observe_disk(total, ms);
@@ -6577,7 +6606,8 @@ impl Gpu {
         raw[8..16].copy_from_slice(&next.to_ne_bytes());
         unsafe { query(self.physical, raw.as_mut_ptr()) };
         let props = parse_mem_props(&raw[16..]);
-        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let heap_count =
+            u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
         let mut heap_budget = 0u64;
         let mut heap_usage = 0u64;
         for index in 0..heap_count {
@@ -6798,7 +6828,11 @@ impl Gpu {
     }
 
     fn record_mip_copy(&self, index: usize, level: u32) -> u64 {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return 0;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -6911,7 +6945,11 @@ impl Gpu {
     }
 
     fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -6920,8 +6958,7 @@ impl Gpu {
         let Some(mip) = source.chain.levels.get(slot) else {
             return;
         };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
-        else {
+        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
             return;
         };
         self.publish_resident(&page, source.color);
@@ -6929,7 +6966,13 @@ impl Gpu {
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
     /// handle and not a staging buffer.
-    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+    fn copied_page(
+        &self,
+        index: usize,
+        level: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ResidentPage> {
         let page = self.stream_pages.iter().find(|page| {
             page.index == index && page.level == level && page.copied && !page.image.is_null()
         })?;
@@ -6997,7 +7040,9 @@ impl Gpu {
             if buffer.is_null() || size < 4 {
                 continue;
             }
-            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+            self.transfer_buffer_barrier(
+                buffer, size, src_stage, dst_stage, src_access, dst_access,
+            );
         }
     }
 
@@ -7595,14 +7640,7 @@ impl Gpu {
         dst_access: u32,
     ) {
         self.cmd_image_barrier(
-            self.cmd,
-            image,
-            old,
-            new,
-            src_stage,
-            dst_stage,
-            src_access,
-            dst_access,
+            self.cmd, image, old, new, src_stage, dst_stage, src_access, dst_access,
         );
     }
 
@@ -8128,7 +8166,8 @@ fn device_extension_present(
             unsafe extern "system" fn(Handle, *const c_void, *mut u32, *mut u8) -> VkResult;
         let enumerate: Enumerate = transmute(raw);
         let mut count = 0u32;
-        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0 || count == 0
+        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0
+            || count == 0
         {
             return false;
         }

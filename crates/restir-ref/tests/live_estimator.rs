@@ -338,8 +338,8 @@ fn live_estimator_shadowed_mean_matches_the_exact_shadowed_sum() {
 }
 
 /// Temporal reuse while the bright lamp orbits (lamps-spin): the history
-/// sample is re-scored at this frame's lamp position (`tq_h`), and a lamp
-/// flagged changed keeps at most the current M (`restir_lamp_changed`). The
+/// sample is re-scored at this frame's lamp position (`tq_h`), and when any
+/// lamp changed the history keeps at most the current M (header word 39). The
 /// tree is rebuilt each frame like the live prefix. Over many frames the
 /// mean estimate must equal the mean of the per-frame exact sums. A near
 /// lamp is heavy-tailed, so a pixel fails only when its bias is both over
@@ -366,7 +366,9 @@ fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
                 let tree = LightTree::build(&refs);
                 let c = initial(&p, &lamps, &tree, &mut rng);
                 let m_now = if c.lamp.is_none() { CANDIDATES } else { c.m };
-                if hist.lamp == Some(spin) && hist.m > m_now {
+                // Any lamp changed this frame (the orbiting one always has):
+                // every history sample gets the same clamp, whatever it holds.
+                if hist.m > m_now {
                     hist.w_sum *= m_now as f32 / hist.m as f32;
                     hist.m = m_now;
                 }

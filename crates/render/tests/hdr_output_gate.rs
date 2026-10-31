@@ -15,16 +15,14 @@
 
 use genos_render::{
     aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,
-    bloom_pyramid, bloom_upsample,
-    ev100_from_luminance, exposure_adapt_outside, exposure_from_camera, exposure_from_ev100,
-    exposure_overshoot, exposure_still_change, exposure_with_compensation, graphics_white_linear,
-    hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
-    pack_f32,
-    pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
-    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, HdrSwapchain,
-    HDR_PEAK_NITS,
-    Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
-    COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
+    bloom_pyramid, bloom_upsample, ev100_from_luminance, exposure_adapt_outside,
+    exposure_from_camera, exposure_from_ev100, exposure_overshoot, exposure_still_change,
+    exposure_with_compensation, graphics_white_linear, hdr10_pq, histogram_ev100,
+    karis_downsample_rgb, karis_firefly_response, linear_from_display, pack_f32, pick_hdr_output,
+    pq_st2084, rec2020_from_rec709, resolve_swapchain, scene_luma, scrgb_code, scrgb_from_display,
+    step_exposure, swapchain_nits, tone, HdrSwapchain, Image, ListedFormat, PresentHost, Renderer,
+    World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10,
+    FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8, HDR_PEAK_NITS,
 };
 
 use genos_scene::{Camera, HdrSettings, LightingPreset, LightingSettings, OutputMode};
@@ -269,7 +267,11 @@ fn live_metrics() -> Vec<Metric> {
             CAMERA_MAX,
         ),
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
-        at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
+        at_most(
+            "bloom_firefly",
+            karis_firefly_response(1_000.0),
+            FIREFLY_MAX,
+        ),
         at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
         at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
@@ -315,7 +317,11 @@ fn proof_good() -> Vec<Metric> {
             CAMERA_MAX,
         ),
         at_most("bloom_energy", bloom_error(), BLOOM_MAX),
-        at_most("bloom_firefly", karis_firefly_response(1_000.0), FIREFLY_MAX),
+        at_most(
+            "bloom_firefly",
+            karis_firefly_response(1_000.0),
+            FIREFLY_MAX,
+        ),
         at_most("bloom_commute", bloom_commute_error(), COMMUTE_MAX),
         at_most("gpu_agx", gpu_agx_error(false), GPU_AGX_MAX),
         at_most("gpu_exposure", gpu_exposure_error(false), GPU_EXPOSURE_MAX),
@@ -523,9 +529,7 @@ fn histogram_error(meter: fn(&[f64]) -> f64) -> f64 {
     let mut heavy = vec![0.18; 910];
     heavy.extend(std::iter::repeat_n(10_000.0, 90));
     let grey = spec_ev(0.18);
-    (meter(&one) - grey)
-        .abs()
-        .max((meter(&heavy) - grey).abs())
+    (meter(&one) - grey).abs().max((meter(&heavy) - grey).abs())
 }
 
 fn mean_ev(samples: &[f64]) -> f64 {
@@ -578,8 +582,12 @@ fn bloom_field() -> (Vec<f32>, Vec<f64>) {
     for index in 0..side.saturating_mul(side) {
         let base = index.saturating_mul(4);
         rgb.push(f64::from(rgba.get(base).copied().unwrap_or(0.0)));
-        rgb.push(f64::from(rgba.get(base.saturating_add(1)).copied().unwrap_or(0.0)));
-        rgb.push(f64::from(rgba.get(base.saturating_add(2)).copied().unwrap_or(0.0)));
+        rgb.push(f64::from(
+            rgba.get(base.saturating_add(1)).copied().unwrap_or(0.0),
+        ));
+        rgb.push(f64::from(
+            rgba.get(base.saturating_add(2)).copied().unwrap_or(0.0),
+        ));
     }
     (rgba, rgb)
 }
@@ -654,11 +662,7 @@ fn exposure_still_stepped() -> f64 {
 
 /// Highlight clipped to 1 before `agx_rec709`, so linear 16 never reaches the shoulder.
 fn agx_hard_clip(scene: [f64; 3]) -> [f64; 3] {
-    agx_rec709([
-        scene[0].min(1.0),
-        scene[1].min(1.0),
-        scene[2].min(1.0),
-    ])
+    agx_rec709([scene[0].min(1.0), scene[1].min(1.0), scene[2].min(1.0)])
 }
 
 fn pq_error(encode: fn(f64) -> f64) -> f64 {
@@ -773,15 +777,30 @@ fn force_sdr_misses(
     ];
     let mut wrong = 0.0;
     let cases = [
-        (PresentHost::Linux, OutputMode::Auto, true, HdrSwapchain::Sdr),
-        (PresentHost::Linux, OutputMode::Auto, false, HdrSwapchain::Hdr10),
+        (
+            PresentHost::Linux,
+            OutputMode::Auto,
+            true,
+            HdrSwapchain::Sdr,
+        ),
+        (
+            PresentHost::Linux,
+            OutputMode::Auto,
+            false,
+            HdrSwapchain::Hdr10,
+        ),
         (
             PresentHost::Windows,
             OutputMode::Auto,
             false,
             HdrSwapchain::Scrgb,
         ),
-        (PresentHost::Linux, OutputMode::Sdr, false, HdrSwapchain::Sdr),
+        (
+            PresentHost::Linux,
+            OutputMode::Sdr,
+            false,
+            HdrSwapchain::Sdr,
+        ),
         (
             PresentHost::Windows,
             OutputMode::Hdr10,
@@ -1674,7 +1693,13 @@ fn hdr_encode_error(broken: bool) -> f64 {
     if !grab.ok || !grab.hdr10_surface {
         return 1.0;
     }
-    encode_delta(&grab.scene_hdr10, &grab.encode_hdr10, grab.exposure, broken, false)
+    encode_delta(
+        &grab.scene_hdr10,
+        &grab.encode_hdr10,
+        grab.exposure,
+        broken,
+        false,
+    )
 }
 
 fn hdr_scrgb_error(broken: bool) -> f64 {
@@ -1682,7 +1707,13 @@ fn hdr_scrgb_error(broken: bool) -> f64 {
     if !grab.ok || !grab.scrgb_surface {
         return 1.0;
     }
-    encode_delta(&grab.scene_scrgb, &grab.encode_scrgb, grab.exposure, broken, true)
+    encode_delta(
+        &grab.scene_scrgb,
+        &grab.encode_scrgb,
+        grab.exposure,
+        broken,
+        true,
+    )
 }
 
 fn encode_delta(scene: &[f64], encoded: &[f32], exposure: f64, broken: bool, scrgb: bool) -> f64 {
@@ -1726,7 +1757,12 @@ fn encode_delta(scene: &[f64], encoded: &[f32], exposure: f64, broken: bool, scr
         };
         let base = index.saturating_mul(4);
         for channel in 0..3 {
-            let got = f64::from(encoded.get(base.saturating_add(channel)).copied().unwrap_or(0.0));
+            let got = f64::from(
+                encoded
+                    .get(base.saturating_add(channel))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
             sum += (got - want[channel]).abs();
             gap += (live[channel] - paper[channel]).abs();
             seen += 1.0;
@@ -1780,7 +1816,8 @@ fn picture_error(grab: &Grab, linear: bool) -> f64 {
     if pixels == 0 || grab.scene.len() < pixels.saturating_mul(3) {
         return 1.0;
     }
-    if grab.bloom_ref.len() < pixels.saturating_mul(3) || grab.pixels.len() < pixels.saturating_mul(4)
+    if grab.bloom_ref.len() < pixels.saturating_mul(3)
+        || grab.pixels.len() < pixels.saturating_mul(4)
     {
         return 1.0;
     }
@@ -1865,7 +1902,12 @@ fn bloom_delta(buffer: &[f32], reference: &[f64], scale: f64) -> f64 {
         let want = rgb3(reference, index);
         let base = index.saturating_mul(4);
         for (channel, want_c) in want.iter().enumerate() {
-            let got = f64::from(buffer.get(base.saturating_add(channel)).copied().unwrap_or(0.0)) * scale;
+            let got = f64::from(
+                buffer
+                    .get(base.saturating_add(channel))
+                    .copied()
+                    .unwrap_or(0.0),
+            ) * scale;
             sum += (got - want_c).abs();
             energy += want_c.abs();
         }

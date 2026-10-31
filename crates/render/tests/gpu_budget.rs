@@ -1,5 +1,14 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Shape blocks and particle images share one byte budget.
 

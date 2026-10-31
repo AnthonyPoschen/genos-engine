@@ -1,15 +1,84 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::doc_markdown,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::manual_midpoint,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::many_single_char_names,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! GI frame path (lighting_gpu.rs): its pipelines build quickly, and its direct light
 //! matches the current frame's direct light.
@@ -60,7 +129,9 @@ fn lighting_pipelines_build_quickly() {
         .filter(|(name, _)| name.starts_with("lighting"))
         .collect();
     assert!(
-        lighting.iter().all(|(name, _)| *name != "lighting sun compose"),
+        lighting
+            .iter()
+            .all(|(name, _)| *name != "lighting sun compose"),
         "the sun compose is built on the first small step, not at startup: {times:?}"
     );
     // Nine compute names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
@@ -852,11 +923,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     );
 }
 
-fn high_bounce(
-    screen: bool,
-    frames: usize,
-    shift: f32,
-) -> (Vec<Vec<u8>>, LightingAtrousStats) {
+fn high_bounce(screen: bool, frames: usize, shift: f32) -> (Vec<Vec<u8>>, LightingAtrousStats) {
     let (_gpu, mut window, mut renderer) = open();
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.denoiser.screen = screen;
@@ -968,12 +1035,14 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     assert!(
         hash_far.p95 <= hash_lit.p95 * 0.45,
         "hash shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
-        hash_far.p95, hash_lit.p95
+        hash_far.p95,
+        hash_lit.p95
     );
     assert!(
         screen_far.p95 <= screen_lit.p95 * 0.45,
         "screen shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
-        screen_far.p95, screen_lit.p95
+        screen_far.p95,
+        screen_lit.p95
     );
     assert!(
         hash_far.peaks < 8.0,
@@ -994,7 +1063,8 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     assert!(
         screen_far.flicker <= hash_far.flicker * 0.85 + 0.35,
         "screen flicker {:.3} did not beat hash {:.3}",
-        screen_far.flicker, hash_far.flicker
+        screen_far.flicker,
+        hash_far.flicker
     );
     if sponza_gltf_is_real() {
         let (hash_edge, hash_flicker) = sponza_curtain_scores(false);
@@ -1041,7 +1111,8 @@ fn shadowed_floor_bounce_stays_smooth_on_high() {
     assert!(
         screen.peaks_max <= hash.peaks_max + 8.0,
         "screen cell excess {:.1} is above the hash {:.1}",
-        screen.peaks_max, hash.peaks_max
+        screen.peaks_max,
+        hash.peaks_max
     );
     assert!(
         err_mean <= 1.5,
@@ -1054,7 +1125,8 @@ fn shadowed_floor_bounce_stays_smooth_on_high() {
     assert!(
         screen.flicker <= hash.flicker + 0.2,
         "screen flicker {:.3} is above hash {:.3}",
-        screen.flicker, hash.flicker
+        screen.flicker,
+        hash.flicker
     );
     assert!(
         screen.flicker <= 1.5,
@@ -1128,12 +1200,7 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
     }
     let mut frames = Vec::new();
     for cam in &shots {
-        frames.push(draw(
-            &mut window,
-            &mut renderer,
-            &world,
-            &floor_camera(cam),
-        ));
+        frames.push(draw(&mut window, &mut renderer, &world, &floor_camera(cam)));
     }
     let still_lumas = floor_lumas(&frames[0], &shots[0]);
     let covered = still_lumas.len();
@@ -1328,7 +1395,11 @@ fn floor_flicker(frames: &[Vec<u8>], cams: &[FloorCam]) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn floor_project(cam: &FloorCam, world: [f32; 3]) -> Option<(usize, usize)> {
@@ -1341,11 +1412,7 @@ fn floor_project(cam: &FloorCam, world: [f32; 3]) -> Option<(usize, usize)> {
         right[2] * forward[0] - right[0] * forward[2],
         right[0] * forward[1] - right[1] * forward[0],
     ];
-    let rel = [
-        world[0] - cam.x,
-        world[1] - cam.y,
-        world[2] - cam.z,
-    ];
+    let rel = [world[0] - cam.x, world[1] - cam.y, world[2] - cam.z];
     let zv = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
     if zv < 1.0e-3 {
         return None;
@@ -1545,7 +1612,8 @@ fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i + 3 <= bytes.len() {
-        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        let n =
+            (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
         out.push(T[((n >> 6) & 63) as usize] as char);
@@ -1614,8 +1682,16 @@ fn cell_edge_excess(frame: &[u8], width: usize, stride: usize) -> f64 {
                     interior_n += 1.0;
                 }
             }
-            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
-            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            let b = if boundary_n > 0.0 {
+                boundary / boundary_n
+            } else {
+                0.0
+            };
+            let i = if interior_n > 0.0 {
+                interior / interior_n
+            } else {
+                0.0
+            };
             best = best.max(b - i);
         }
     }
@@ -1647,8 +1723,16 @@ fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
                     interior_n += 1.0;
                 }
             }
-            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
-            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            let b = if boundary_n > 0.0 {
+                boundary / boundary_n
+            } else {
+                0.0
+            };
+            let i = if interior_n > 0.0 {
+                interior / interior_n
+            } else {
+                0.0
+            };
             best = best.max(b / (i + 0.05));
         }
     }
@@ -1739,7 +1823,11 @@ fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32, f32)]) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn banner_project(cam: (f32, f32, f32), world: [f32; 3]) -> Option<(usize, usize)> {
@@ -1778,7 +1866,11 @@ fn roi_flicker(frames: &[Vec<u8>], width: usize) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn sponza_gltf_is_real() -> bool {
@@ -1853,7 +1945,11 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         );
         frames.push(draw(&mut window, &mut renderer, &world, &camera));
     }
-    let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    let edge = frames
+        .iter()
+        .map(|f| cell_edge_ratio(f, 320, 6))
+        .sum::<f64>()
+        / frames.len() as f64;
     (edge, roi_flicker(&frames, 320))
 }
 
@@ -2190,10 +2286,7 @@ fn lamp_pick_each_mode_against_off() {
     let off = draw(&mut window, &mut renderer, &world, &camera);
     let boxed = mean_abs(&open, &off);
     let off_rays = renderer.lighting_lamp_pick_counts().pixels;
-    assert!(
-        boxed > 2.0,
-        "the centre lamp is not shadowed ({boxed:.4})"
-    );
+    assert!(boxed > 2.0, "the centre lamp is not shadowed ({boxed:.4})");
     assert!(
         mean_byte(&off) > 1.0,
         "the shadowed full sum is black ({})",
@@ -2225,10 +2318,7 @@ fn lamp_pick_each_mode_against_off() {
         "settled reuse traced more than the full sum ({} vs {off_rays})",
         counts.pixels
     );
-    assert!(
-        err < 1.0,
-        "settled reuse left the full sum ({err:.4})"
-    );
+    assert!(err < 1.0, "settled reuse left the full sum ({err:.4})");
 }
 
 /// `light:I` shades that scene lamp and not the others.
@@ -2306,8 +2396,20 @@ fn preset_direct_scales_with_samples_not_lamps() {
         let _ = draw(window, renderer, &world, camera);
         traced_rays(renderer.lighting_lamp_pick_counts())
     };
-    let off3 = count_of(&mut renderer, &mut window, 3, LightingPreset::Potato, &camera);
-    let off12 = count_of(&mut renderer, &mut window, 12, LightingPreset::Potato, &camera);
+    let off3 = count_of(
+        &mut renderer,
+        &mut window,
+        3,
+        LightingPreset::Potato,
+        &camera,
+    );
+    let off12 = count_of(
+        &mut renderer,
+        &mut window,
+        12,
+        LightingPreset::Potato,
+        &camera,
+    );
     eprintln!("preset potato rays 3={off3} 12={off12}");
     assert!(off3 > 0, "potato traced nothing");
     assert!(

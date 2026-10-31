@@ -25,6 +25,8 @@ pub const SPATIAL_RADIUS: u32 = 2;
 pub const M_CAP: u32 = 20 * CANDIDATES;
 /// Header word: base of the changed-lamp bitset (one bit per point lamp).
 pub const CHANGED_AT_WORD: usize = 38;
+/// 1 when any point lamp changed since the history frame (bitset non-zero).
+pub const ANY_CHANGED_WORD: usize = 39;
 /// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
 /// and the changed-lamp bitset.
 pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 / 32;
@@ -52,7 +54,10 @@ pub struct RestirPrefix {
 }
 
 fn point_lamps(lamps: &[GpuLamp]) -> impl Iterator<Item = (usize, &GpuLamp)> {
-    lamps.iter().enumerate().filter(|(_, lamp)| !lamp.directional)
+    lamps
+        .iter()
+        .enumerate()
+        .filter(|(_, lamp)| !lamp.directional)
 }
 
 /// Same position, colour, and range: the history p-hat of this lamp is still
@@ -69,7 +74,9 @@ fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
 #[must_use]
 pub fn buffer_bytes(pixels: u64) -> u64 {
     let reservoirs = pixels.saturating_mul(u64::from(HIST_STRIDE) * 2 + 4) * 4;
-    PREFIX_CAP_WORDS.saturating_mul(4).saturating_add(reservoirs)
+    PREFIX_CAP_WORDS
+        .saturating_mul(4)
+        .saturating_add(reservoirs)
 }
 
 fn push_f(words: &mut Vec<u32>, value: f32) {
@@ -78,6 +85,16 @@ fn push_f(words: &mut Vec<u32>, value: f32) {
 
 fn word_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Records where the changed-lamp bitset starts and whether any bit is set,
+/// so the temporal clamp can apply to every history sample alike.
+fn mark_changed(words: &mut [u32], changed_base: usize) {
+    words[CHANGED_AT_WORD] = word_u32(changed_base);
+    let any = words
+        .get(changed_base..)
+        .is_some_and(|bits| bits.iter().any(|w| *w != 0));
+    words[ANY_CHANGED_WORD] = u32::from(any);
 }
 
 /// Point lamps in scene order, then the light tree. `scene_index` is the
@@ -188,7 +205,7 @@ pub fn prefix(
     words[20] = prev_slot & 1;
     words[21] = u32::from(previous.valid);
     push_cam(&mut words, previous);
-    words[CHANGED_AT_WORD] = word_u32(changed_base);
+    mark_changed(&mut words, changed_base);
     Some(RestirPrefix {
         words,
         total_words: total,
@@ -246,7 +263,10 @@ mod tests {
     use crate::pack::GpuLamp;
 
     fn at(words: &[u32], index: u32) -> u32 {
-        words.get(usize::try_from(index).unwrap_or(0)).copied().unwrap_or(0)
+        words
+            .get(usize::try_from(index).unwrap_or(0))
+            .copied()
+            .unwrap_or(0)
     }
 
     #[test]
@@ -301,7 +321,11 @@ mod tests {
             .unwrap_or_else(|| panic!("prefix"));
         assert!(!packed.layout_changed, "same lamps, one moved");
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
-        assert_eq!(packed.words.get(changed).copied(), Some(0b010), "only lamp 1 moved");
+        assert_eq!(
+            packed.words.get(changed).copied(),
+            Some(0b010),
+            "only lamp 1 moved"
+        );
         let fewer = [lamp(0.0), lamp(2.0)];
         let packed = prefix(&fewer, &before, &RestirCam::default(), 8, 8, 1, 0)
             .unwrap_or_else(|| panic!("prefix"));

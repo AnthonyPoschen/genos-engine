@@ -333,7 +333,11 @@ void restir_temporal(uint pixel) {
         // confidence: its W was built against the old target, so it gets an
         // equal vote instead of up to 20 frames' worth. Scaling w_sum with M
         // keeps the reservoir's W, so the estimate stays unbiased.
-        if (m_now != 0u && hist_m > m_now && restir_lamp_changed(h_lamp)) {
+        // The clamp must not depend on which lamp the history holds: a
+        // weight keyed to the sample (only a changed lamp loses M) breaks
+        // the M-weight partition of unity and darkened a wall by a moving
+        // lamp ~20 %. Header word 39 is "any lamp changed this frame".
+        if (m_now != 0u && hist_m > m_now && restir_hdr(39u) != 0u) {
             hist_w *= m_as_f(m_now) / m_as_f(hist_m);
             hist_m = m_now;
         }
