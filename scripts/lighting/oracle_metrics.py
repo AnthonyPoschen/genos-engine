@@ -28,6 +28,16 @@ lamps-switch from the lamps profile):
 * switch and lamps-switch only: frames_to_ref, the first frame after the switch whose ref_err_near
   is within 1.1x of the settled frame's.
 
+* gloss-* scenarios (specular stage S0, docs/systems/lighting/specular-v3-design.md):
+  spec_err_near is ref_err_near over pixels whose reference specular share
+  (f*-reference-spec.png / f*-reference.png) is >= 0.2, worst and mean, and per
+  roughness row where the scenario names rows (gloss-sweep). spec_pop is the
+  worst frame-to-frame luminance step in the masked pixels of the live sequence
+  minus the same step in the reference sequence. gloss-switch adds
+  frames_to_ref as for switch. spec_ms is the median spec_ms column of the
+  gi_metrics CSV (lavapipe numbers only compare run against run). Without the
+  specular AOV the mask is reported as missing and the spec metrics are left out.
+
 `--self-test` checks the error, weight and counter on synthetic pictures.
 """
 import csv, glob, json, os, re, sys
@@ -123,6 +133,93 @@ def gi_refreshes(path):
         float(np.median([float(r["lighting_ms"]) for r in rows]))
 
 
+SPEC_SHARE = 0.2
+# gloss-sweep rows: five spheres at these roughness values, left to right,
+# metal row on top and dielectric row below (lighting_oracle_spec.rhai).
+SWEEP_ROUGHNESS = [0.05, 0.2, 0.4, 0.6, 0.9]
+
+
+def spec_mask(spec_ref, total_ref, share=SPEC_SHARE):
+    """Pixels where the reference light is at least `share` specular."""
+    return (total_ref > 1e-4) & (spec_ref >= share * np.maximum(total_ref, 1e-6))
+
+
+def masked_error(live, ref, mask, dist=None):
+    """ref_error's near-weighted share, over masked pixels only."""
+    d = np.abs(live - ref) * mask
+    r = ref * mask
+    w = np.ones_like(ref) if dist is None else 1.0 / np.maximum(dist, 0.5)
+    return float((w * d).sum() / ((w * r).sum() + 1e-6))
+
+
+def worst_step(frames, mask):
+    """Worst mean |delta luminance| between consecutive frames over the mask."""
+    if len(frames) < 2 or not mask.any():
+        return 0.0
+    return max(float(np.abs(b - a)[mask].mean()) for a, b in zip(frames, frames[1:]))
+
+
+def spec_pop(live, ref, mask):
+    return worst_step(live, mask) - worst_step(ref, mask)
+
+
+def sweep_rows(mask, cols=len(SWEEP_ROUGHNESS)):
+    """Masks for each roughness column (both metal and dielectric rows)."""
+    h, w = mask.shape
+    out = {}
+    for i, r in enumerate(SWEEP_ROUGHNESS[:cols]):
+        m = np.zeros_like(mask)
+        m[:, i * w // cols:(i + 1) * w // cols] = True
+        out[str(r)] = m & mask
+    return out
+
+
+def spec_ms(path):
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        rows = [r for r in csv.DictReader(f) if r.get("spec_ms") not in (None, "")]
+    return float(np.median([float(r["spec_ms"]) for r in rows])) if rows else None
+
+
+def score_spec(out, n, s):
+    per, lives, refs, mask_all = [], [], [], None
+    for lv in sorted(glob.glob(os.path.join(out, "oracle", n, "f*-live.png"))):
+        stem = lv[:-len("-live.png")]
+        ref, sp = stem + "-reference.png", stem + "-reference-spec.png"
+        if not (os.path.exists(ref) and os.path.exists(sp)):
+            continue
+        l, r = lin_luma(lv), lin_luma(ref)
+        if l.shape != r.shape:
+            continue
+        m = spec_mask(lin_luma(sp), r)
+        dp = stem + "-depth.png"
+        dist = distance(dp) if os.path.exists(dp) else None
+        f = int(re.search(r"f(\d+)$", stem).group(1))
+        per.append((f, masked_error(l, r, m, dist), m, l, r, dist))
+        lives.append(l); refs.append(r)
+        mask_all = m if mask_all is None else (mask_all | m)
+    if not per:
+        s["spec_mask"] = "missing"
+        return
+    errs = [p[1] for p in per]
+    worst = max(per, key=lambda p: p[1])
+    s.update(spec_frames=len(per), spec_err_near_worst=round(worst[1], 4),
+             spec_err_near_worst_frame=worst[0], spec_err_near_mean=round(float(np.mean(errs)), 4),
+             spec_mask_share=round(float(np.mean([p[2].mean() for p in per])), 4),
+             spec_pop=round(spec_pop(lives, refs, mask_all), 4))
+    if n == "gloss-sweep":
+        rows = {}
+        for k in SWEEP_ROUGHNESS:
+            rows[str(k)] = round(float(np.mean([masked_error(p[3], p[4], sweep_rows(p[2])[str(k)], p[5])
+                                                for p in per])), 4)
+        s["spec_err_near_by_roughness"] = rows
+    if n == "gloss-switch":
+        settled = per[-1][1]
+        s["frames_to_ref"] = next((f for f, e, *_ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
+        s["spec_err_near_by_frame"] = {str(p[0]): round(p[1], 4) for p in per}
+
+
 def score(out):
     res = {}
     names = sorted({os.path.basename(p) for p in glob.glob(os.path.join(out, "temporal", "*"))}
@@ -169,8 +266,39 @@ def score(out):
                 settled = per[-1][1]
                 s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
                 s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}
+        if n.startswith("gloss-"):
+            score_spec(out, n, s)
+            ms = spec_ms(os.path.join(out, "gi", f"{n}-frames.csv"))
+            if ms is not None:
+                s["spec_ms_p50_lavapipe"] = round(ms, 2)
         res[n] = s
     return res
+
+
+def spec_self_test():
+    rng = np.random.default_rng(7)
+    diffuse = rng.uniform(0.2, 0.4, (32, 32)).astype(np.float32)
+    spec = np.zeros_like(diffuse)
+    spec[8:24, 8:24] = 0.6  # a glossy patch
+    total = diffuse + spec
+    m = spec_mask(spec, total)
+    mask_ok = bool(m[8:24, 8:24].all()) and not m[:8].any() and not m[24:].any()
+    e1 = masked_error(total + 0.05 * m, total, m)
+    e2 = masked_error(total + 0.10 * m, total, m)
+    e_off = masked_error(total + 0.10 * (~m), total, m)  # error outside the mask is ignored
+    linear = abs(e2 - 2 * e1) < 1e-4 and e1 > 0 and e_off < 1e-6
+    still = [total] * 5
+    spike = list(still); spike[2] = total + 0.3 * m
+    pop_caught = spec_pop(spike, still, m) > 0.25 and abs(spec_pop(still, still, m)) < 1e-6
+    lit = [total * 0.1, total, total]  # reference changes too: that step is not a pop
+    pop_ref = abs(spec_pop(lit, lit, m)) < 1e-6
+    rows = sweep_rows(np.ones((10, 50), bool))
+    rows_ok = len(rows) == 5 and all(v.sum() == 100 for v in rows.values())
+    ok = mask_ok and linear and pop_caught and pop_ref and rows_ok
+    print(json.dumps({"spec_mask": mask_ok, "spec_err_linear": [round(e1, 4), round(e2, 4)],
+                      "spec_pop_spike": pop_caught, "spec_pop_ref": pop_ref, "rows": rows_ok}))
+    print("spec self-test", "ok" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 def self_test():
@@ -201,7 +329,7 @@ def self_test():
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)]}))
     print("self-test", "ok" if ok else "FAIL")
-    return 0 if ok and grid_metric.self_test() == 0 else 1
+    return 0 if ok and grid_metric.self_test() == 0 and spec_self_test() == 0 else 1
 
 
 def main():
