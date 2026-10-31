@@ -121,7 +121,6 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3246` | `--lighting-sun-bands` |
 | `GENOS_LIGHTING_TILE` | `crates/render/src/lighting_gpu.rs:35` | none |
 | `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3176` | none |
-| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3177` | none |
 | `GENOS_LIGHTING_UNFILLED` | `crates/render/src/unfilled.rs:193` | `--unfilled` |
 | `GENOS_LIGHTING_UNFILLED_DUMP` | `crates/render/src/unfilled.rs:195` | `--unfilled-dump` |
 | `GENOS_LIGHTING_UNFILLED_TINT` | `crates/render/src/unfilled.rs:194` | `--unfilled-tint` |

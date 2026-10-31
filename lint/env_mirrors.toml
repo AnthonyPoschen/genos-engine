@@ -643,11 +643,6 @@ kind = "todo"
 detail = "no CLI argument yet"
 
 [[var]]
-name = "GENOS_LIGHTING_TOGGLES_FILE"
-kind = "todo"
-detail = "no CLI argument yet"
-
-[[var]]
 name = "GENOS_LIGHTING_URGENT"
 kind = "todo"
 detail = "no CLI argument yet"
@@ -1143,11 +1138,6 @@ detail = "deprecated alias of GENOS_LIGHTING_TIME; one-release warning"
 name = "GENOS_GI2_TOGGLES"
 kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_TOGGLES; one-release warning"
-
-[[var]]
-name = "GENOS_GI2_TOGGLES_FILE"
-kind = "override"
-detail = "deprecated alias of GENOS_LIGHTING_TOGGLES_FILE; one-release warning"
 
 [[var]]
 name = "GENOS_GI2_UNFILLED"

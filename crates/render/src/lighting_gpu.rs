@@ -4038,8 +4038,7 @@ pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 
 }
 
 /// S78S debug isolate toggles: attribute a change to exactly one component.
-/// GENOS_LIGHTING_TOGGLES (start) or the file named by GENOS_LIGHTING_TOGGLES_FILE
-/// (re-read every frame, so `echo direct_only > file` switches live), words:
+/// GENOS_LIGHTING_TOGGLES, words:
 /// freeze_cache (no surface-cache / world-cache value writes), direct_only (no
 /// cache light at ray hits), bounce_only (no direct light at pixels or hits),
 /// freeze_probes (kept-hit lights not rewritten).
@@ -4052,12 +4051,7 @@ const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
     reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
 )]
 fn lighting_toggles() -> u32 {
-    let mut text = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
-    if let Ok(path) = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES_FILE") {
-        if let Ok(t) = std::fs::read_to_string(path) {
-            text = t;
-        }
-    }
+    let text = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
     let mut bits = 0;
     for w in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
         bits |= match w {
