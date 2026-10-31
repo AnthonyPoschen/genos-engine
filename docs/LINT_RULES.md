@@ -270,7 +270,7 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 | Kind | Count | Meaning |
 |---|---|---|
 | `mirror` | 30 | A CLI argument exists and wins when both are set. `detail` is the flag. |
-| `todo` | 94 | Read today, and still has no argument. |
+| `todo` | 82 | Read today, and still has no argument. |
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
@@ -286,7 +286,7 @@ let _ = std::env::var("GENOS_NOT_A_MIRROR");
 
 ### TODO: env switches without an argument
 
-The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`. Young-only, cache picks, cache Hz, surface cache settle and world cap are now `LightingSettings.experiments` keys. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
+The 82 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`. Young-only, cache picks, cache Hz, surface cache settle and world cap are now `LightingSettings.experiments` keys. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
 
 ## Semgrep
 
