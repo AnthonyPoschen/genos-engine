@@ -32,8 +32,12 @@ LUM = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 DEPTH_RANGE = 50.0  # lighting_compose.comp: depth view = 1 - distance / 50
 
 
-def srgb_to_linear(c):
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+def linear_from_display(c):
+    """Undo the shoulder tone the engine and reference PNGs store (mesh::tone,
+    hdr_shoulder.glsl, trace.rs linear_from_display): linear to 0.64, then
+    0.64 + 0.14 e / (e + 1.1). Not sRGB."""
+    k = np.clip((c - 0.64) / 0.14, 0.0, 0.999)
+    return np.where(c <= 0.64, np.maximum(c, 0.0), 0.64 + 1.1 * k / (1.0 - k))
 
 
 def load_rgb(path):
@@ -42,7 +46,7 @@ def load_rgb(path):
 
 
 def lin_luma(path):
-    return srgb_to_linear(load_rgb(path)) @ LUM
+    return linear_from_display(load_rgb(path)) @ LUM
 
 
 def distance(path):
