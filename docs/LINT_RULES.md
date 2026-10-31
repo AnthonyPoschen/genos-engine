@@ -100,34 +100,33 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_GPU_DISPATCH` | `crates/render/src/gpu.rs:2315` | none |
 | `GENOS_GPU_TIMES` | `crates/render/src/gpu.rs:1448` | `--gpu-times` |
 | `GENOS_GI_METRICS` | `crates/render/src/gpu.rs:1550` | `--gi-metrics` |
-| `GENOS_LIGHTING_ASYNC` | `crates/render/src/lighting_gpu.rs:373` | none |
-| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2947` | none |
+| `GENOS_LIGHTING_ASYNC` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-async` |
+| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/scene/src/lighting.rs:1529` | `--lighting-denoise-dirty` |
 | `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2246` | none |
-| `GENOS_LIGHTING_CACHE_HZ` | `crates/render/src/lighting_gpu.rs:398` | none |
-| `GENOS_LIGHTING_CACHE_PICKS` | `crates/render/src/lighting_gpu.rs:2237` | none |
+| `GENOS_LIGHTING_CACHE_HZ` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-hz` |
+| `GENOS_LIGHTING_CACHE_PICKS` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-picks` |
 | `GENOS_LIGHTING_CATCH_UP` | `crates/render/src/lighting_gpu.rs:3250` | none |
 | `GENOS_LIGHTING_COMPOSE_ALL` | `crates/render/src/lighting_gpu.rs:2286` | `--full-effort` |
 | `GENOS_LIGHTING_DEBUG` | `crates/render/src/lighting_gpu.rs:3254` | `--lighting-debug` |
 | `GENOS_LIGHTING_DUMP` | `crates/render/src/lighting_gpu.rs:2669` | none |
 | `GENOS_LIGHTING_DUMP_DIR` | `crates/render/src/lighting_gpu.rs:2723` | none |
-| `GENOS_LIGHTING_FILL` | `crates/render/src/lighting_gpu.rs:2238` | none |
+| `GENOS_LIGHTING_FILL` | `crates/scene/src/lighting.rs:1529` | `--lighting-fill` |
 | `GENOS_LIGHTING_FULL_EFFORT` | `crates/render/src/lighting_gpu.rs:3243` | `--lighting-full-effort` |
 | `GENOS_LIGHTING_LAMP_PICK_DIAG` | `crates/render/src/lighting_dispatch.rs:91`, `crates/render/src/gpu.rs:2205` | none |
 | `GENOS_LIGHTING_MOVED_DROP` | `crates/render/src/lighting_gpu.rs:2244` | none |
-| `GENOS_LIGHTING_SC_FLAGS` | `crates/render/src/lighting_gpu.rs:2963` | none |
-| `GENOS_LIGHTING_SC_SETTLE` | `crates/render/src/lighting_gpu.rs:1101` | none |
+| `GENOS_LIGHTING_SC_FLAGS` | `crates/scene/src/lighting.rs:1529` | `--lighting-sc-flags` |
+| `GENOS_LIGHTING_SC_SETTLE` | `crates/scene/src/lighting.rs:1529` | `--lighting-sc-settle` |
 | `GENOS_LIGHTING_SC_TRACE` | `crates/render/src/lighting_gpu.rs:1725`, `crates/render/src/lighting_gpu.rs:2934` | none |
 | `GENOS_LIGHTING_SUN` | `crates/render/src/lighting_gpu.rs:3240` | `--lighting-sun` |
 | `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3246` | `--lighting-sun-bands` |
-| `GENOS_LIGHTING_TILE` | `crates/render/src/lighting_gpu.rs:35` | none |
-| `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3176` | none |
-| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3177` | none |
+| `GENOS_LIGHTING_TILE` | `crates/scene/src/lighting.rs:1529` | `--lighting-probe-tile` |
+| `GENOS_LIGHTING_TOGGLES` | `crates/scene/src/lighting.rs:1529` | `--lighting-toggles` |
 | `GENOS_LIGHTING_UNFILLED` | `crates/render/src/unfilled.rs:193` | `--unfilled` |
 | `GENOS_LIGHTING_UNFILLED_DUMP` | `crates/render/src/unfilled.rs:195` | `--unfilled-dump` |
 | `GENOS_LIGHTING_UNFILLED_TINT` | `crates/render/src/unfilled.rs:194` | `--unfilled-tint` |
 | `GENOS_LIGHTING_URGENT` | `crates/render/src/lighting_gpu.rs:2245` | none |
-| `GENOS_LIGHTING_WORLD_CAP` | `crates/render/src/lighting_gpu.rs:1097`, `crates/render/src/lighting_gpu.rs:2010` | none |
-| `GENOS_LIGHTING_YOUNG_ONLY` | `crates/render/src/lighting_gpu.rs:392` | none |
+| `GENOS_LIGHTING_WORLD_CAP` | `crates/scene/src/lighting.rs:1529` | `--lighting-world-cap` |
+| `GENOS_LIGHTING_YOUNG_ONLY` | `crates/scene/src/lighting.rs:1529` | `--lighting-young-only` |
 | `GENOS_SCENE_DELTA` | `crates/render/src/lib.rs:56` | none |
 | `GENOS_UNFILLED_MAX_AGE_SECS` | `crates/render/src/unfilled.rs:198` | `--unfilled-max-age-secs` |
 | `GENOS_UNFILLED_MAX_BYTES` | `crates/render/src/unfilled.rs:197` | `--unfilled-max-bytes` |
@@ -270,8 +269,8 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 
 | Kind | Count | Meaning |
 |---|---|---|
-| `mirror` | 74 | A CLI argument exists and wins when both are set. `detail` is the flag. |
-| `todo` | 94 | Read today, and still has no argument. |
+| `mirror` | 93 | A CLI argument exists and wins when both are set. `detail` is the flag. |
+| `todo` | 82 | Read today, and still has no argument. |
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
@@ -287,7 +286,7 @@ let _ = std::env::var("GENOS_NOT_A_MIRROR");
 
 ### TODO: env switches without an argument
 
-The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
+The 82 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`. Young-only, cache picks, cache Hz, surface cache settle and world cap are now `LightingSettings.experiments` keys. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
 
 ## Semgrep
 

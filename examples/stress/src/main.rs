@@ -173,6 +173,18 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
+  --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)
+  --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
+  --lighting-fill on|off    unlit probes read lit neighbours (GENOS_LIGHTING_FILL)
+  --lighting-young-only on|off  quiet rounds relight young patches only (GENOS_LIGHTING_YOUNG_ONLY)
+  --lighting-world-cap N    world cell / texel average frames, 0 mode default (GENOS_LIGHTING_WORLD_CAP)
+  --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
+  --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
+  --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
+                            freeze_probes, none (GENOS_LIGHTING_TOGGLES)
+  --lighting-probe-tile N   screen probe tile pixels, 4..64, 0 auto (GENOS_LIGHTING_TILE)
+  --lighting-denoise-dirty F  a-trous work-list fraction, 0..1 (GENOS_LIGHTING_ATROUS_DIRTY)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
@@ -280,6 +292,8 @@ struct Options {
     block_ms: Option<Duration>,
     /// `--lifecycle-close-early`. The mirror applies when this stays false.
     close_early: bool,
+    /// `LIGHTING_EXPERIMENT_FLAGS` passed, index and value, in order.
+    lighting_experiments: Vec<(usize, String)>,
     /// Material flags, in order, including the values. The argument wins over the environment.
     material_args: Vec<String>,
 }
@@ -427,6 +441,7 @@ fn options() -> Result<Options, String> {
         lamp_pick_unbiased: None,
         block_ms: None,
         close_early: false,
+        lighting_experiments: Vec::new(),
         material_args: Vec::new(),
     };
     let mut report: Option<PathBuf> = None;
@@ -536,6 +551,11 @@ fn options() -> Result<Options, String> {
             "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
             "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
             "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
+            flag if lighting_experiment_flag(flag).is_some() => {
+                if let Some(i) = lighting_experiment_flag(flag) {
+                    opts.lighting_experiments.push((i, value()?));
+                }
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 genos_window::exit(0);
@@ -734,6 +754,25 @@ fn settings_text(stage: &Stage) -> String {
     )
 }
 
+/// Flag, `LightingSettings` key, and the environment variable it mirrors.
+const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 11] = [
+    ("--lighting-cache-async", "cache_async", "GENOS_LIGHTING_ASYNC"),
+    ("--lighting-cache-hz", "cache_hz", "GENOS_LIGHTING_CACHE_HZ"),
+    ("--lighting-cache-picks", "cache_picks", "GENOS_LIGHTING_CACHE_PICKS"),
+    ("--lighting-fill", "fill", "GENOS_LIGHTING_FILL"),
+    ("--lighting-young-only", "young_only", "GENOS_LIGHTING_YOUNG_ONLY"),
+    ("--lighting-world-cap", "world_cap", "GENOS_LIGHTING_WORLD_CAP"),
+    ("--lighting-sc-settle", "sc_settle", "GENOS_LIGHTING_SC_SETTLE"),
+    ("--lighting-sc-flags", "sc_flags", "GENOS_LIGHTING_SC_FLAGS"),
+    ("--lighting-toggles", "toggles", "GENOS_LIGHTING_TOGGLES"),
+    ("--lighting-probe-tile", "probe_tile", "GENOS_LIGHTING_TILE"),
+    ("--lighting-denoise-dirty", "denoise_dirty", "GENOS_LIGHTING_ATROUS_DIRTY"),
+];
+
+fn lighting_experiment_flag(flag: &str) -> Option<usize> {
+    LIGHTING_EXPERIMENT_FLAGS.iter().position(|(name, _, _)| *name == flag)
+}
+
 /// A passed flag wins over the matching environment variable. An omitted flag
 /// leaves that variable alone, so it still applies.
 fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
@@ -816,6 +855,11 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             check.set_key(key, value)?;
             std::env::set_var(var, value);
         }
+    }
+    for (i, value) in &opts.lighting_experiments {
+        let (flag, key, var) = LIGHTING_EXPERIMENT_FLAGS[*i];
+        check.set_key(key, value).map_err(|e| format!("{flag}: {e}"))?;
+        std::env::set_var(var, value);
     }
     if let Some(every) = &opts.gpu_times {
         parse::<u32>("--gpu-times", every)?;

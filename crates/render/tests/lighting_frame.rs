@@ -268,9 +268,12 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 2).count()
 }
 
-/// GI keeps visibility (ray hits), never light: a lamp that moves, dims or turns
-/// off, and a sun or sky that changes, show in full on the next frame while every
-/// probe keeps all its kept rays, the far ones and the ones the lamp lights alike.
+/// GI keeps visibility (ray hits), never light: a lamp that moves, and a sun or
+/// sky that changes, show in full on the next frame while every probe keeps all
+/// its kept rays, the far ones and the ones the lamp lights alike. A lamp that
+/// dims or turns off changes the lamp set, which resets the cache so no bounce
+/// from the old lamp lingers: those may refill from this frame's rays, but the
+/// change still shows at once.
 #[test]
 fn lighting_probes_keep_their_rays_when_the_light_changes() {
     let (_gpu, mut owner) = open();
@@ -299,13 +302,14 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
         color: [0.4, 0.5, 0.7],
     });
     let still_world = World::from_scene(base.clone());
-    let changes: [(&str, Scene); 4] = [
-        ("a lamp moving", moved_lamp),
-        ("a lamp dimming", dimmed),
-        ("a lamp going off", off),
-        ("the sun and sky changing", sun),
+    // (what, scene, whether the probes must keep their rays)
+    let changes: [(&str, Scene, bool); 4] = [
+        ("a lamp moving", moved_lamp, true),
+        ("a lamp dimming", dimmed, false),
+        ("a lamp going off", off, false),
+        ("the sun and sky changing", sun, true),
     ];
-    for (what, scene) in changes {
+    for (what, scene, keeps) in changes {
         let before = fill_strata(window, renderer, &still_world, &camera);
         let after = draw(
             window,
@@ -314,10 +318,17 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
             &camera,
         );
         let held = samples_per_probe(renderer);
-        assert!(
-            held > 0.95 * 512.0,
-            "{what}: every probe keeps its rays, near the change or far from it ({held})"
-        );
+        if keeps {
+            assert!(
+                held > 0.95 * 512.0,
+                "{what}: every probe keeps its rays, near the change or far from it ({held})"
+            );
+        } else {
+            assert!(
+                held >= 0.95 * 64.0,
+                "{what}: a lamp-set reset still traces this frame's rays ({held})"
+            );
+        }
         assert!(
             changed_pixels(&before, &after) > 0,
             "{what}: the first frame after the change shows it"

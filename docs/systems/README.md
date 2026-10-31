@@ -6,7 +6,7 @@ Read the record before you write a game feature that uses the system. Read it be
 
 Every new system is designed with networking in mind. Its plan states the five lines in the [agent rubric](../agent-rubric.md): replicated state, authority, prediction or rollback, determinism, and headless server. The commit that first implements the system copies those lines into the system record. The session, the socket, and the snapshot codec belong to the [core-networking plan](core-networking/plan.md). When a name in that file differs from another plan, that file wins.
 
-Engine-feature settings follow [the settings principles](../engine/settings-principles.md). Lighting is the reference example.
+Engine-feature settings follow [the settings principles](../engine/settings-principles.md). Lighting is the reference example. Quality tiers are in [quality settings](../engine/quality-settings.md).
 
 Each record uses these headings:
 

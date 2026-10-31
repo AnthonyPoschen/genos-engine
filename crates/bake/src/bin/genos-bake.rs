@@ -1,5 +1,11 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Build the GI import data (mesh SDFs and cards) for glTF files ahead of time.
 //!
@@ -11,7 +17,7 @@
 
 use std::time::Instant;
 
-use genos_bake::{cache_path, read, rebake, BakeMesh, BakeMode, BakeSettings};
+use genos_bake::{key_path, read, rebake_keyed, BakeMesh, BakeMode, BakeSettings};
 
 fn main() {
     if let Err(err) = run() {
@@ -50,13 +56,14 @@ fn run() -> Result<(), String> {
         let scene = genos_load::load_gltf_file(&file).map_err(|e| format!("{file}: {e}"))?;
         for index in 0..scene.meshes.len() {
             let mesh = BakeMesh::from_gltf(&scene, index);
-            let path = cache_path(&mesh, &settings);
+            let key = mesh.content_key(&settings);
+            let path = key_path(&settings, key);
             if !force && read(&path).is_some() {
                 println!("{file} {}: up to date ({})", mesh.name, path.display());
                 continue;
             }
             let start = Instant::now();
-            let (baked, path) = rebake(&mesh, &settings).map_err(|e| e.to_string())?;
+            let (baked, path) = rebake_keyed(&mesh, &settings, key).map_err(|e| e.to_string())?;
             let sdf = &baked.sdf;
             println!(
                 "{file} {}: {} triangles, voxel {:.3} m, {} bricks{} ({:.1} MB), {} cards ({} texels), {:.2} s -> {}",

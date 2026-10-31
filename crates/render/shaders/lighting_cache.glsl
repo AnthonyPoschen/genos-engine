@@ -780,8 +780,8 @@ uint lighting_cache_key_sized(vec3 pos, vec3 n, float size) {
     // boundary falls in one cell, not either by rounding.
     vec3 inset = lighting_world_mode() != 0u ? 0.5 * lighting_axis_vec(lighting_axis(n)) : vec3(0.0);
     ivec3 c = ivec3(floor(pos / size - inset));
-    uint h = lighting_hash(uint(c.x) * 73856093u ^ lighting_hash(uint(c.y) * 19349663u ^ lighting_hash(uint(c.z) * 83492791u)));
-    h = lighting_hash(h ^ (lighting_axis(n) * 0x27d4eb2du) ^ (floatBitsToUint(size) * 0x165667b1u));
+    uint h = hash_cell3(c, 0u);
+    h = lighting_hash(h ^ lighting_hash(lighting_axis(n) ^ lighting_hash(floatBitsToUint(size))));
     if (lighting_obj_salt > 0.5) {
         h = lighting_hash(h ^ (uint(lighting_obj_salt) * 0x85ebca6bu));
     }
@@ -2241,7 +2241,7 @@ ivec4 lighting_sc_cell(uint slot) {
 }
 uint lighting_sc_page_at(uint slot, ivec4 c, ivec2 page) {
     float size = max(cache.v[3u * slot + 1u].w, 1.0e-3);
-    uint h = lighting_hash(uint(page.x) * 73856093u ^ uint(page.y) * 19349663u ^ uint(c.z) * 83492791u ^ (uint(c.w) * 2654435761u) ^ floatBitsToUint(size) ^ floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].x));
+    uint h = hash_cell3(ivec3(page, c.z), lighting_hash(uint(c.w) ^ lighting_hash(floatBitsToUint(size) ^ lighting_hash(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].x)))));
     return h % LIGHTING_SC_PAGES;
 }
 uint lighting_sc_page(uint slot) {
@@ -2636,7 +2636,7 @@ uint lighting_sc_entries(uint slot, bool full) {
 // ~50 degrees of where the camera is heading (forward, plus its motion and turn
 // since the last frame the probes ran).
 void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
-    uint h = lighting_hash(s * 0x9e3779b9u ^ lighting_round() * 0x85ebca6bu);
+    uint h = lighting_hash(s ^ lighting_hash(lighting_round()));
     float u1 = lighting_unit(h);
     float u2 = lighting_unit(h ^ 0x68e31da4u);
     vec4 head_at = vec4(0.0);
@@ -3867,7 +3867,7 @@ bool lighting_sc_grad_rep(uint slot) {
     vec2 c = lighting_sc_true_cell(slot);
     ivec2 b = ivec2(floor(c / 3.0));
     ivec2 m = ivec2(c) - 3 * b;
-    uint h = lighting_hash(uint(b.x) * 0x8da6b343u ^ uint(b.y) * 0xd8163841u ^ lighting_round() * 0x9e3779b9u);
+    uint h = hash_cell3(ivec3(b, 0), lighting_round());
     return uint(m.y * 3 + m.x) == h % 9u;
 }
 void lighting_sc_grad_put(uint s, float lam) {
@@ -4037,7 +4037,10 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
     } else {
         c = ivec3(floor(o / gstats.ctrl_shadow_cell));
     }
-    uint h = lighting_hash(uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u ^ lighting_axis(n) * 0x27d4eb2fu ^ (li + 1u) * 0x9e3779b9u);
+    // Chained, not an XOR of per-axis products: that key let mirrored cells
+    // ((x, y, z) and (-x, -y, z), ...) share a tag, so a lit cell on one side of
+    // a wall read as lit on the other (S86: the close lamp crossed the wall).
+    uint h = hash_cell3(c, lighting_axis(n) + 8u * li);
     tag = h | 1u;
     return LIGHTING_SHADOW_AT + (lighting_hash(h ^ 0x5bd1e995u) % LIGHTING_CACHE_SLOTS);
 }
@@ -4168,7 +4171,7 @@ bool lighting_pix_quiet() {
 }
 uint lighting_pix_sig(vec3 pos, vec3 n, bool two_sided, LampList list) {
     ivec3 q = ivec3(floor(pos * 1000.0));
-    uint h = lighting_hash(uint(q.x) * 0x8da6b343u ^ uint(q.y) * 0xd8163841u ^ uint(q.z) * 0xcb1ab31fu ^ lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
+    uint h = hash_cell3(q, lighting_pack_normal(n) ^ (two_sided ? 0x5bd1e995u : 0u));
     return lighting_lamps_sig(h, list);
 }
 

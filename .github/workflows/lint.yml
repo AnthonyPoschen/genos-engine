@@ -48,7 +48,7 @@ jobs:
       - name: lavapipe and a headless Weston
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
       - name: s7 at 96x54
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
@@ -67,3 +67,43 @@ jobs:
           export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
           export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
           cargo test --locked -p genos-stress --test noise_gate -- --test-threads=1
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
+      - name: cargo test (workspace, lavapipe)
+        run: |
+          runtime="${RUNNER_TEMP}/genos-runtime"
+          mkdir -p "$runtime"
+          chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR="$runtime"
+          weston --backend=headless --socket=genos-test >/tmp/weston.log 2>&1 &
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -S "$runtime/genos-test" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+          test -S "$runtime/genos-test"
+          export WAYLAND_DISPLAY=genos-test
+          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+          # GPU picture/reference integration tests in render, stress and debug
+          # take far too long on lavapipe; run only their unit tests here.
+          gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug"
+          cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1
+          cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
+          # Integration tests in those crates that never open a device: CPU
+          # references, shader-source lints and CPU-side packing checks.
+          cargo test --locked --no-fail-fast \
+            -p genos-debug --test fog_froxel --test fog_integrate --test fog_reference --test fire_reference \
+            -p genos-render --test gpu_budget --test shader_loops --test particle_resident \
+            -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
+            -- --test-threads=1
