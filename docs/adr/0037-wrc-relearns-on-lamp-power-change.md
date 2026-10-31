@@ -172,6 +172,8 @@ Build: lighting-v3 34cc80c plus `/home/box/shared/adr0037-hooks.patch` (regenera
 
 ### Correction to round 8
 
+(Round 10: the replacement words 56–63 were also in use. See the round 10 counter fix. The round-9 hall share columns are invalid too.)
+
 The round-8 convergence counters wrote to `chg[12..17]`. Those slots already hold `CHG_G_HELD`, `G_DIRTY`, `G_MOVED`, `G_PICKS`, `TEX_WRITE` and `TEX_D0`, so **the round-8 convergence table is invalid** (shares above 1 were seen). Round 9 counts in the unused `diag[56..63]` words, and only while `GENOS_LIGHTING_SC_TRACE` is set.
 
 ### Results
@@ -200,6 +202,64 @@ Box drift (offline): within 2 % at frame 36 in every variant, and within 1 % onl
 
 1. Neither test is a usable freeze trigger yet. A per-cell noise test needs a real σ (uncapped, or estimated from the ray count), and it needs a minimum sample count before it can pass. Round-mean drift over relit cells is too noisy, because each round relights a different subset.
 2. The linger failure is not explained by the cell count alone. The next step is to check whether the hall bounce view reads the texel cache (`LIGHTING_CACHE_MATURE`), which neither hook resets.
+
+## Round 10: texel reset, counter fix, real noise, trend term (31 Oct 2026)
+
+Build: 34cc80c plus the regenerated `/home/box/shared/adr0037-hooks.patch`. New hooks, all off by default, and all packed with mean mode 3 (head bits 18–20 k, 21 TEXOFF, 22 SIGCAP):
+
+- `GENOS_DBG_TEXOFF=1`: a surface-cache texel inside a switched-on or switched-off lamp's range sphere restarts its mean from the current set. It applies before every texel estimator path.
+- `GENOS_DBG_SIGCAP=1`: the stored WRC noise cap goes from 0.2 to 1 (d is ≤ 1 already). It is used by `lighting_wrc_check_take`, by the mode-3 reset and by the counters.
+- `GENOS_DBG_CONV=3`: the mode-1 noise test, plus at least `GENOS_DBG_CONV_MIN` rounds (default 64), plus a summed signed mean step of relit cells under 0.5 % over the last 16 rounds.
+
+"r10" below means CONV=3 + NO_YOUNG + MEAN=3, K=3 + LAMPOFF + TEXOFF + SIGCAP.
+
+### Counter double-count (fixed)
+
+Round 9's `diag[56..63]` words are not free:
+
+- `lighting_direct.comp` adds to 57–59 under `lamp_pick_diag()`. Its restir count in 59 is the "3σ share above 1" double count.
+- `lighting_screen.comp` adds to 61–63, and `screen_publish` *reads* 61 and 62 for the screen à-trous change fraction. So round 9's trace-on runs also nudged the à-trous fraction, both default and k3. The default numbers still matched round 8 (box 0.563, hall 0.765).
+
+Round 10 counts only in words that nothing writes outside `lighting_dg` (which is off): 0 1 5 6 8 13 14 18 21–27 32 34 38 39 60. With the fix the hall share > 3σ/√n is 0.57–0.62, never above 1.
+
+### Per-sample noise (WRC cells with 8+ sets, |sample − mean| / max)
+
+| scene | < 0.05 | 0.05–0.1 | 0.1–0.2 | 0.2–0.4 | 0.4–0.8 | ≥ 0.8 | rms | share above the 0.2 cap |
+|---|---|---|---|---|---|---|---|---|
+| box, default | 50.7 % | 31.4 % | 12.5 % | 4.5 % | 0.8 % | 0.1 % | ≈ 0.11 | 5 % |
+| box, r10 | 67.8 % | 22.4 % | 8.2 % | 1.7 % | 0 | 0 | ≈ 0.07 | 2 % |
+| hall, r10 | 30.2 % | 16.2 % | 20.0 % | 24.1 % | 9.6 % | 0 | ≈ 0.25 | 34 % |
+
+In the hall the cap was binding for a third of the samples. The box sits under it.
+
+### Results
+
+| | default | r10 with CONV=1 | r10 (CONV=3) |
+|---|---|---|---|
+| box live/ref, 900 frames | 0.562 (f 0.764) | 0.566 (f 0.767) | **0.661** (f 0.845) |
+| box test passes | – | round 18, frame 22 | round 599, frame 603 |
+| hall indirect/ref, 1140 frames | 0.765 (round 9) | – | 0.821 |
+| hall test passes | – | – | never (1381 rounds) |
+| hall still ms p50 / p90 (840–1140) | 0.09 / 0.12 | – | 270 / 326 (never froze) |
+| hall still flicker, per-pixel luma std | 0 | – | 0.00000 |
+| linger off 30 / 120 / 300 (gate ≤ 5 % at 120) | 65 / 56 / 46 % (round 9) | – | 92 / **72** / 38 % |
+| lag on 60 / 120 / 300 / 600 (gate ≥ 90 % at 300) | 16 / 23 / **31** / 33 % (fresh) | – | 24 / 44 / **74** / 79 % |
+
+**Why the box passes at frame 22.** A cell's stored step from one update is about σ/n, but the threshold is 3σ/√n, and σ/n < 3σ/√n for any n ≥ 1. A single update can exceed the threshold only if its sample sits more than 3σ√n from the mean. So a mean that is still rising, with every sample inside the noise band, passes at once. This is structural, so removing the cap cannot fix it: with SIGCAP the box still passes at frame 22. The trend term fixes the box: it passes at frame 603 and the box reaches 0.661, against 0.566 when it freezes at frame 22.
+
+**Why the hall never passes, even uncapped.** 57–62 % of relit cells exceed 3σ/√n, and 86–90 % move more than 1 % on every relight, in every round. This is inconsistent with converged cells at count n. Steps that large mean the hall cells' counts stay small. The likely causes are the two-sided reset, which drops a cell to 4 when its sample is outside max(10 %, 3σ), and cell reuse. This is not measured yet (next: a count histogram). So the cache never freezes and the idle cost stays at the no-freeze level, about 270 ms on lavapipe.
+
+**The texel reset has no effect, because the hall has no surface-cache texels.** A diagnostic counter (d[34], texels relit, outside the WRC) is 0 over the whole linger run. The WRC lamp-off reset fires (d[39], 1.4 M cell resets) but d[38] (texel resets) is 0. So `LIGHTING_CACHE_MATURE` texels are not the source of the linger. The 72 % left at 120 frames sits downstream of the WRC: the probes, or the screen and compose history. That is where to look next.
+
+The lag gate is still missed: 74 % at 300 frames, against 31 % for the shipped default.
+
+Note: the "dark" baselines differ (default 0.121, r10 0.026). The shipped cache keeps a large part of the lamp light in the dark state, so the default percentages are of a smaller range.
+
+### Changes to the proposed design
+
+1. The convergence test needs a trend or minimum-sample term. The noise-only test cannot detect a rising mean. CONV=3 is the first rule that does not freeze the box early.
+2. Before any freeze rule can pass in the hall, find out why hall cells keep moving by more than 1 % per relight: measure their count distribution and how often the mode-3 reset fires.
+3. Linger: instrument the probe and screen-history layers. The cache-side resets (WRC and texel) are now in place and do not move the gate.
 
 ## Open questions for Anthony
 
