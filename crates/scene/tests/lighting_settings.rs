@@ -91,6 +91,22 @@ fn surface_cache_blend_and_firefly_sigma_round_trip() {
 }
 
 #[test]
+fn controller_off_stays_on_the_named_preset() {
+    let mut settings = LightingSettings::preset(LightingPreset::Medium);
+    assert!(settings.controller);
+    settings.set_key("controller", "off").unwrap();
+    assert!(!settings.controller);
+    assert_eq!(settings.preset_label(), "medium");
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.controller);
+    assert_eq!(parsed, settings);
+    assert_eq!(parsed.preset_label(), "medium");
+    let held = LightingSettings::picture();
+    assert!(!held.controller);
+    assert_eq!(held.preset_label(), "high");
+}
+
+#[test]
 fn the_engine_settings_trait_reads_and_writes_lighting() {
     let settings = LightingSettings::preset(LightingPreset::Low);
     let text = EngineSettings::to_text(&settings);

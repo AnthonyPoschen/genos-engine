@@ -124,6 +124,18 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          uses screen. The other presets keep hash. This flag and the
                          variable override the preset
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
+  --lighting-schedule budget|global
+                         work caps, or the uncapped frame. GENOS_LIGHTING_SCHEDULE
+                         applies only when this argument is omitted
+  --lighting-controller on|off
+                         scale the work caps from the retired lighting total.
+                         Off holds the preset caps. Default on.
+                         GENOS_LIGHTING_CONTROLLER applies only when this is omitted
+  --lighting-budget-scale F
+                         multiply every work cap, from 1/64 to 4.
+                         GENOS_LIGHTING_BUDGET_SCALE applies only when this is omitted
+  --guard-edge F         guard band as a fraction of the display, 0 to 0.35.
+                         GENOS_LIGHTING_GUARD_EDGE applies only when this is omitted
   --headless             proof window, no panel
   --display NAME         Wayland display name. Omit it to use the session compositor.
   --lifecycle-block-ms N stall shutdown once, for the quit-gap test.
@@ -192,7 +204,8 @@ or --fps-counter turns it on. GENOS_DEBUG_KEYS replaces those keys.
 
 Screenshots go to <out>/shots, the log to <out>/logs, lighting dumps to <out>/dumps.
 GI metrics go to <out>/gi. frames.csv is the live window. gi_metrics write NAME
-saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv.
+saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv, or
+NAME-2.csv and NAME-2-frames.csv when that name is already there.
 The binary does not write under $HOME.
 ";
 
@@ -271,8 +284,8 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_surface_cache_blend",
     "fog_view",
 ];
-const VIEWS: [&str; 8] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
+const VIEWS: [&str; 9] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "tail",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -699,6 +712,7 @@ fn run() -> Result<i32, String> {
             },
         );
         note_gi(&mut app, renderer);
+        note_schedule(&mut app, renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts
@@ -889,6 +903,10 @@ struct App {
     gi_passes: String,
     /// Last GI work counters. Numbers only.
     gi_work: String,
+    /// Last schedule push: scale, cap, gates.
+    schedule_stats: String,
+    /// Last detail-level caps.
+    lod_snapshot: String,
     /// Launch fog arguments. Reapplied over each loaded scene.
     fog_cli: FogCli,
     /// Mirrors for the fog arguments this launch left empty.
@@ -914,6 +932,8 @@ impl App {
             load: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
+            schedule_stats: "scale 1.000 cap 8.0 direct off atrous off trace off".into(),
+            lod_snapshot: "lod off spawn 0 coarse 0".into(),
             fog_cli: FogCli::default(),
             fog_env: FogEnv::default(),
         })
@@ -1468,6 +1488,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
         ViewMode::Variance => "variance",
+        ViewMode::Tail => "tail",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -1816,6 +1837,20 @@ fn setting_piece(
         })),
         "gi_work" => Some(Piece::Row(PanelRow {
             label: app.gi_work.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "schedule_stats" => Some(Piece::Row(PanelRow {
+            label: app.schedule_stats.clone(),
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
+        "lod_snapshot" => Some(Piece::Row(PanelRow {
+            label: app.lod_snapshot.clone(),
             buttons: Vec::new(),
             slider: None,
             dropdown: None,
@@ -2190,6 +2225,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_direct_refresh" => "Direct refresh frames",
         "lighting_gi_refresh" => "GI refresh frames",
         "lighting_budget_shift" => "Ray budget shift",
+        "lighting_controller" => "Work-cap controller",
         "lighting_lamp_pick" => "Lamp pick",
         "lighting_lamp_pick_samples" => "Samples",
         "lighting_lamp_pick_candidates" => "Candidates",
@@ -2489,6 +2525,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
         "variance" => ViewMode::Variance,
+        "tail" => ViewMode::Tail,
         _ => ViewMode::Full,
     }
 }
@@ -2529,6 +2566,30 @@ fn note_gi(app: &mut App, renderer: &mut Renderer) {
     app.gi_work = format!(
         "rays {} refreshed {} lamps {}",
         sample.rays, sample.cache_entries_refreshed, sample.lamps_shaded
+    );
+}
+
+fn gate_word(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
+}
+
+/// Perf labels for the last schedule push. Numbers only.
+fn note_schedule(app: &mut App, renderer: &Renderer) {
+    let push = renderer.last_schedule();
+    app.schedule_stats = format!(
+        "scale {:.3} cap {:.1} direct {} atrous {} trace {}",
+        renderer.budget_controller_scale(),
+        push.lighting_cap_ms,
+        gate_word(push.plan.direct_gate),
+        gate_word(push.plan.atrous_gate),
+        gate_word(push.plan.trace_gate),
+    );
+    let levels = (push.words[0] & 8) != 0 && renderer.lighting_settings().world_mode() == 3;
+    app.lod_snapshot = format!(
+        "lod {} spawn {} coarse {}",
+        gate_word(levels),
+        push.tail[2],
+        push.tail[3],
     );
 }
 
@@ -3318,6 +3379,14 @@ mod tests {
         assert!(super::USAGE.contains("--gi-metrics"));
         assert!(super::USAGE.contains("--script"));
         assert!(super::USAGE.contains("GENOS_GI_METRICS"));
+        assert!(super::USAGE.contains("--lighting-schedule"));
+        assert!(super::USAGE.contains("--lighting-controller"));
+        assert!(super::USAGE.contains("--lighting-budget-scale"));
+        assert!(super::USAGE.contains("--guard-edge"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_SCHEDULE"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_CONTROLLER"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_BUDGET_SCALE"));
+        assert!(super::USAGE.contains("GENOS_LIGHTING_GUARD_EDGE"));
         assert!(super::USAGE.contains("--exposure-mode"));
         assert!(super::USAGE.contains("--hdr-display"));
         assert!(super::USAGE.contains("--ev100"));

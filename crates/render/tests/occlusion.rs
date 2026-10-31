@@ -17,6 +17,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Ceiling, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
@@ -126,7 +132,7 @@ fn check(
     let height = renderer.height();
     let mut dark = scene.clone();
     dark.lights = vec![hidden];
-    let dark_px = draw(window, renderer, &World::from_scene(dark), camera);
+    let dark_px = draw(window, renderer, &present(dark), camera);
     if let Ok(dir) = std::env::var("OCC_DUMP") {
         let mut rgb = Vec::new();
         for px in dark_px.chunks(4) {
@@ -145,7 +151,7 @@ fn check(
     }
     let mut lit = scene;
     lit.lights = vec![control];
-    let lit_px = draw(window, renderer, &World::from_scene(lit), camera);
+    let lit_px = draw(window, renderer, &present(lit), camera);
     let value = sample(&lit_px, width, height, camera, points[0]);
     assert!(
         value > 60.0,
@@ -348,7 +354,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
-    let mut world = World::from_scene(scene);
+    let mut world = present(scene);
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
     camera.pitch = -0.15;
     let eye = [0.0f32, -4.0];

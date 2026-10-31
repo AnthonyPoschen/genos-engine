@@ -20,13 +20,19 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Render
     (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn hall() -> World {
     let scene: Scene = genos_scene::load_path(std::path::Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../examples/camera/scene.rhai"
     )))
     .expect("shipped scene");
-    World::from_scene(scene)
+    present(scene)
 }
 
 fn sun_at(yaw: f32) -> Light {
@@ -169,7 +175,7 @@ fn a_corner_lamp_that_stops_catches_up_for_four_frames() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    let mut world = World::from_scene(
+    let mut world = present(
         genos_scene::load_path(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/stress/scenes/bounce_corner.rhai"

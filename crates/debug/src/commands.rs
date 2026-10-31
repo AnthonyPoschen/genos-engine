@@ -22,7 +22,7 @@ fn spec(name: &str, description: &str) -> CommandSpec {
 /// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and scripts.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled)."),
+        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled, change_records, deferred_spheres)."),
         spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(
@@ -41,7 +41,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "view",
-            "What the picture shows: mode full, direct, bounce, nobounce (direct), albedo, normal, depth, light:I, texels.",
+            "What the picture shows: mode full, direct, bounce, nobounce (direct), albedo, normal, depth, light:I, texels, variance, tail.",
         ),
         spec(
             "capture",
@@ -68,7 +68,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
         spec(
             "gi_metrics",
-            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
+            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. Each frame also records controller_scale (the scale it was scheduled at), gates (1 direct, 2 a-trous, 4 trace) and lit_w, lit_h. summary.controller_scale_min is the lowest scale in the window. resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. warmup N leaves the first N frames of the window out of the reply and the files (the refill after a jump, first pipeline use). write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv, or NAME-2.csv and NAME-2-frames.csv when that name is already there. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
         ),
         spec(
             "get_lighting_settings",
@@ -112,12 +112,34 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(schedule_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+fn schedule_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_budgets",
+            "Preset work caps, the live controller scale, and the schedule knobs in force (schedule, controller, budget_scale, guard_edge, floor_level, floor_converged, near_radius, cache_loosen). lighting_cap_ms is the millisecond ceiling for this preset. controller is the on/off for that scale.",
+        ),
+        spec(
+            "set_budgets",
+            "Partial schedule update. Keys: schedule (budget or global), controller (on or off), budget_scale, guard_edge, cache_loosen, floor_level, floor_converged, near_radius. Writes the scene and clears a renderer override. Applies on the next draw.",
+        ),
+        spec(
+            "get_schedule_stats",
+            "The last lighting schedule push: controller scale, lighting cap, direct/atrous/trace gates, tile rect, starvation band, lit size, crop, spawn cap, coarse slots, and whether detail levels are on.",
+        ),
+        spec(
+            "lighting_lod_snapshot",
+            "Detail levels for the last schedule push. enabled is budget mode with world-cache mode 3. levels_m is 0.25, 0.5, 1, 2, 4. base_m is the 0.125 lattice. spawn_cap and coarse_slots are the frame's caps.",
+        ),
+    ]
 }
 
 fn reflection_specs() -> Vec<CommandSpec> {

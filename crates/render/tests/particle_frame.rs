@@ -21,6 +21,12 @@ use genos_scene::{load_path, viewport_uv, Camera};
 use genos_window::Window;
 use std::path::PathBuf;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: genos_scene::Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 const NEAR_FLOOR: [f32; 3] = [0.8, 0.0, 1.8];
 const FAR_FLOOR: [f32; 3] = [-4.2, 0.0, 3.3];
 const FLAME: [f32; 3] = [0.0, 1.8, 0.0];
@@ -30,7 +36,7 @@ const MISS: [f32; 3] = [2.2, 2.4, -1.6];
 fn cold() -> (World, Simulation) {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/camera/scene.rhai");
     let scene = load_path(&path).expect("camera scene");
-    let mut world = World::from_scene(scene);
+    let mut world = present(scene);
     let mut sim = Simulation::from_scene(&world.scene);
     for _ in 0..PROOF_STEPS {
         sim.advance(&mut world, STEP_DT);

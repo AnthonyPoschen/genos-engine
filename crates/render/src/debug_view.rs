@@ -33,11 +33,15 @@ pub enum ViewMode {
     /// Short-term relative standard deviation of the cache entry under each
     /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
+    /// Bounce, with the 25 cm and 50 cm parents skipped. The pixel reads the
+    /// 1 m to 4 m tail and falls back to screen probes when that parent has
+    /// no finished sample. Compose code 9 (`scene.grid_at.w` bits 0–7).
+    Tail,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 9] = [
+    pub const ALL: [ViewMode; 10] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -47,6 +51,7 @@ impl ViewMode {
         Self::Light,
         Self::Texels,
         Self::Variance,
+        Self::Tail,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +65,7 @@ impl ViewMode {
             Self::Light => "light",
             Self::Texels => "texels",
             Self::Variance => "variance",
+            Self::Tail => "tail",
         }
     }
 

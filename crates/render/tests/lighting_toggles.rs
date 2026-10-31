@@ -37,8 +37,14 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Render
     (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn room(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 8.0,
@@ -47,11 +53,21 @@ fn room(settings: LightingSettings) -> World {
         },
         walls: Vec::new(),
         solids: Vec::new(),
-        lights: vec![Light {
-            position: Vec3::new(0.0, 3.0, 0.0),
-            color: [1.0, 0.95, 0.85],
-            direction: Vec3::new(0.2, -1.0, 0.1),
-        }],
+        lights: vec![
+            Light {
+                position: Vec3::new(0.0, 3.0, 0.0),
+                color: [1.0, 0.95, 0.85],
+                direction: Vec3::new(0.2, -1.0, 0.1),
+            },
+            // A point lamp. The dispatch test moves it. A camera move is not
+            // a change record, so without this the probe-only presets settle
+            // and stop placing probes.
+            Light {
+                position: Vec3::new(0.0, 2.5, 1.0),
+                color: [0.4, 0.4, 0.35],
+                direction: Vec3::ZERO,
+            },
+        ],
         ceiling: None,
         sky: None,
         lighting: settings,
@@ -72,11 +88,21 @@ fn index(name: &str) -> usize {
         .unwrap_or_else(|| panic!("unknown bucket {name}"))
 }
 
-fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &mut Camera) {
-    // A moving camera keeps the frame from settling, so a cache round stays due.
+fn draw(window: &mut Window, renderer: &mut Renderer, world: &mut World, camera: &mut Camera) {
+    // A camera move is not a change record. The point lamp is. While it
+    // moves, stillness stays 0 and a probe-only preset keeps placing probes.
     camera.position.x += 0.05;
     if camera.position.x > 1.5 {
         camera.position.x = -1.5;
+    }
+    if let Some(lamp) = world.scene.lights.iter_mut().find(|lamp| {
+        let d = lamp.direction;
+        d.x * d.x + d.y * d.y + d.z * d.z < 1.0e-8
+    }) {
+        lamp.position.x += 0.05;
+        if lamp.position.x > 1.0 {
+            lamp.position.x = -1.0;
+        }
     }
     let _ = window.pump();
     renderer.draw(world, camera, false).expect("draw");
@@ -87,7 +113,7 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &mu
 fn run_case(
     window: &mut Window,
     renderer: &mut Renderer,
-    world: &World,
+    world: &mut World,
     camera: &mut Camera,
     name: &str,
     run: &[&str],
@@ -221,11 +247,11 @@ fn presets_and_feature_off_skip_their_passes() {
         ),
     ];
     for (name, settings, run, zero) in cases {
-        let world = room(settings);
+        let mut world = room(settings);
         timed |= run_case(
             window,
             renderer,
-            &world,
+            &mut world,
             &mut camera,
             name,
             run,
@@ -235,11 +261,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.direct.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "direct off",
         &["compose", "place", "hit_light"],
@@ -248,11 +274,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.shadows.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "shadows off",
         &["direct", "compose"],
@@ -261,11 +287,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.gi.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "gi off",
         picture.as_slice(),
@@ -274,11 +300,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.bounce.count = 0;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "bounces 0",
         picture.as_slice(),
@@ -287,11 +313,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut one = LightingSettings::preset(LightingPreset::High);
     one.bounce.count = 1;
-    let world = room(one);
+    let mut world = room(one);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "bounces 1",
         &["direct", "shadows", "compose", "place", "trace", "gather", "filter"],
@@ -300,11 +326,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut two = LightingSettings::preset(LightingPreset::High);
     two.bounce.count = 2;
-    let world = room(two);
+    let mut world = room(two);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "bounces 2",
         &[
@@ -326,11 +352,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.probes.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "probes off",
         &["direct", "compose", "cache"],
@@ -339,11 +365,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.world_cache.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "world cache off",
         &["direct", "compose", "place", "cache_rays"],
@@ -352,11 +378,11 @@ fn presets_and_feature_off_skip_their_passes() {
 
     let mut off = LightingSettings::preset(LightingPreset::High);
     off.denoiser.enabled = false;
-    let world = room(off);
+    let mut world = room(off);
     timed |= run_case(
         window,
         renderer,
-        &world,
+        &mut world,
         &mut camera,
         "denoise off",
         &["direct", "compose", "cache"],
@@ -380,11 +406,11 @@ fn presets_and_feature_off_skip_their_passes() {
     ] {
         let mut settings = LightingSettings::preset(LightingPreset::High);
         edit(&mut settings);
-        let world = room(settings.clone());
+        let mut world = room(settings.clone());
         timed |= run_case(
             window,
             renderer,
-            &world,
+            &mut world,
             &mut camera,
             name,
             &["direct", "compose", "cache"],
@@ -445,7 +471,7 @@ fn box_at(x: f32, z: f32, color: [f32; 3]) -> Solid {
 /// Closed hangar so the mean is the interior, not the sky. Red and green boxes
 /// sit in front of the camera.
 fn interior(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 4.0,
@@ -767,7 +793,7 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
 }
 
 fn shadow_corner(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
+    present(Scene {
         floor: Floor {
             position: Vec3::ZERO,
             half_x: 4.0,

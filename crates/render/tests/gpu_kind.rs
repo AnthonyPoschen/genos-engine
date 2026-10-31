@@ -11,8 +11,10 @@ use genos_window::Window;
 fn the_renderer_names_its_device_kind() {
     let mut window = Window::open_proof(64, 64).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
+    let owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let renderer = &*owner.device;
     let lavapipe = std::env::var("VK_ICD_FILENAMES").is_ok_and(|v| v.contains("lvp"));
     if lavapipe {
         assert_eq!(renderer.gpu_kind(), GpuKind::Software);

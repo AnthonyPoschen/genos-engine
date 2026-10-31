@@ -24,7 +24,10 @@ use std::path::PathBuf;
 
 use genos_load::MaterialSettings;
 use genos_mcp::json::Value;
-use genos_render::{DebugView, MaterialStats, Renderer, SceneRead, ScreenRect, ViewMode};
+use genos_render::{
+    caps_for, coarse_cap_bytes, DebugView, MaterialStats, Renderer, SceneRead, SchedulePush,
+    ScreenRect, ViewMode, LEVEL_METRES, SCALE_FLOOR,
+};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings, Light,
     LightingPreset, LightingSettings, MenuSettings, OutputMode, ReflectionSettings, Scene, Vec3,
@@ -65,7 +68,7 @@ pub struct Look {
 
 impl Look {
     /// `full`, `direct`, `bounce`, `nobounce` (the same as `direct`), `albedo`,
-    /// `normal`, `depth`, `light:I`, `texels`.
+    /// `normal`, `depth`, `light:I`, `texels`, `variance`, `tail`.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let (head, arg) = match spec.split_once(':') {
             Some((h, a)) => (h.trim(), Some(a.trim())),
@@ -79,7 +82,7 @@ impl Look {
         } else {
             ViewMode::parse(head).ok_or_else(|| {
                 format!(
-                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels"
+                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels, variance, tail"
                 )
             })?
         };
@@ -790,6 +793,7 @@ impl Tools {
         match name {
             "status" => {
                 let stats = ctx.renderer.settle_stats();
+                let regions = ctx.renderer.gi_region_stats();
                 reply(obj(vec![
                     ("frame", num(self.frame as f64)),
                     ("paused", Value::Bool(self.paused)),
@@ -808,6 +812,8 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                     ("stable", Value::Bool(stats.settled)),
                     ("still_frames", num(stats.still_frames as f64)),
+                    ("change_records", num(regions.change_records as f64)),
+                    ("deferred_spheres", num(regions.deferred_spheres as f64)),
                     (
                         "picture_settled",
                         Value::Bool(ctx.renderer.picture_settled()),
@@ -1241,6 +1247,35 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "get_budgets" => reply(budgets_value(
+                &ctx.renderer.lighting_settings(),
+                ctx.renderer.budget_controller_scale(),
+            )),
+            "set_budgets" => {
+                let Value::Object(pairs) = args.0 else {
+                    return Err("set_budgets takes an object".into());
+                };
+                for (key, _) in pairs {
+                    if !budget_key(key) {
+                        return Err(format!("set_budgets does not set {key}"));
+                    }
+                }
+                let scene = ctx.host.scene();
+                apply_lighting_update(&mut scene.lighting, args.0)?;
+                scene.lighting.sanitize();
+                ctx.renderer.clear_lighting_override();
+                reply(budgets_value(
+                    &scene.lighting,
+                    ctx.renderer.budget_controller_scale(),
+                ))
+            }
+            "get_schedule_stats" => {
+                reply(schedule_stats(&ctx.renderer.last_schedule()))
+            }
+            "lighting_lod_snapshot" => reply(lod_snapshot(
+                &ctx.renderer.lighting_settings(),
+                &ctx.renderer.last_schedule(),
+            )),
             "gi_metrics" => {
                 if !ctx.renderer.gi_metrics_enabled() {
                     return Err(crate::gi_metrics::disabled_error());
@@ -1251,7 +1286,14 @@ impl Tools {
                     crate::gi_metrics::truncate_frames(&self.gi_dir)?;
                 }
                 let name = args.str("write")?;
-                let samples = ctx.renderer.gi_metrics_samples().to_vec();
+                // warmup N drops the first N samples of the window: the cache
+                // refill after a checkpoint jump, pipeline first use, and lit
+                // target resizes. A steady-state p99 must not grade those.
+                let warmup = args
+                    .u32("warmup")?
+                    .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+                let all = ctx.renderer.gi_metrics_samples();
+                let samples = all[warmup.min(all.len())..].to_vec();
                 if let Some(name) = name {
                     if samples.is_empty() {
                         return Err("GI metrics window is empty".into());
@@ -1799,6 +1841,111 @@ fn diff_value(
             out.map_or(Value::Null, |p| text(p.display().to_string())),
         ),
     ]))
+}
+
+fn budget_key(key: &str) -> bool {
+    matches!(
+        key,
+        "schedule"
+            | "controller"
+            | "budget_scale"
+            | "guard_edge"
+            | "cache_loosen"
+            | "floor_level"
+            | "floor_converged"
+            | "near_radius"
+    )
+}
+
+fn budgets_value(settings: &LightingSettings, controller_scale: f64) -> Value {
+    let preset = settings.preset_label();
+    let caps = caps_for(preset);
+    obj(vec![
+        ("preset", text(preset)),
+        ("schedule", text(settings.schedule.name())),
+        ("controller", Value::Bool(settings.controller)),
+        ("budget_scale", num(f64::from(settings.budget_scale))),
+        ("controller_scale", num(controller_scale)),
+        ("controller_floor", num(f64::from(SCALE_FLOOR))),
+        ("lighting_cap_ms", num(f64::from(caps.lighting_ms))),
+        ("resolve_cap_ms", num(f64::from(caps.resolve_ms))),
+        ("guard_edge", num(f64::from(settings.guard_edge))),
+        ("floor_level", num(f64::from(settings.floor_level))),
+        (
+            "floor_converged",
+            num(f64::from(settings.floor_converged)),
+        ),
+        ("near_radius", num(f64::from(settings.near_radius))),
+        ("cache_loosen", num(f64::from(settings.cache_loosen))),
+        (
+            "screen_probe_rays",
+            num(f64::from(caps.screen_probe_rays)),
+        ),
+        ("cache_rays", num(f64::from(caps.cache_rays))),
+        ("cache_relights", num(f64::from(caps.cache_relights))),
+        ("spawns", num(f64::from(caps.spawns))),
+        ("coarsen_ops", num(f64::from(caps.coarsen_ops))),
+        (
+            "fresh_shadow_rays",
+            num(f64::from(caps.fresh_shadow_rays)),
+        ),
+        ("denoise_items", num(f64::from(caps.denoise_items))),
+        ("denoise_iters", num(f64::from(caps.denoise_iters))),
+        (
+            "coarse_cap_bytes",
+            num(coarse_cap_bytes(preset) as f64),
+        ),
+    ])
+}
+
+fn schedule_stats(push: &SchedulePush) -> Value {
+    obj(vec![
+        ("scale", num(push.scale)),
+        ("lighting_cap_ms", num(f64::from(push.lighting_cap_ms))),
+        ("direct_gate", Value::Bool(push.plan.direct_gate)),
+        ("atrous_gate", Value::Bool(push.plan.atrous_gate)),
+        ("trace_gate", Value::Bool(push.plan.trace_gate)),
+        ("levels", Value::Bool((push.words[0] & 8) != 0)),
+        ("tile_x", num(f64::from(push.plan.tile_x))),
+        ("tile_y", num(f64::from(push.plan.tile_y))),
+        ("tile_w", num(f64::from(push.plan.tile_w))),
+        ("tile_h", num(f64::from(push.plan.tile_h))),
+        ("starve_y", num(f64::from(push.plan.starve_y))),
+        ("starve_h", num(f64::from(push.plan.starve_h))),
+        (
+            "cache_ray_grant",
+            num(f64::from(push.plan.cache_ray_grant)),
+        ),
+        ("lit_w", num(f64::from(push.lit.lit_w))),
+        ("lit_h", num(f64::from(push.lit.lit_h))),
+        ("crop_x", num(f64::from(push.lit.crop_x))),
+        ("crop_y", num(f64::from(push.lit.crop_y))),
+        ("display_w", num(f64::from(push.lit.display_w))),
+        ("display_h", num(f64::from(push.lit.display_h))),
+        ("spawn_cap", num(f64::from(push.tail[2]))),
+        ("coarse_slots", num(f64::from(push.tail[3]))),
+    ])
+}
+
+fn lod_snapshot(settings: &LightingSettings, push: &SchedulePush) -> Value {
+    let levels = (push.words[0] & 8) != 0;
+    obj(vec![
+        (
+            "enabled",
+            Value::Bool(levels && settings.world_mode() == 3),
+        ),
+        ("base_m", num(0.125)),
+        (
+            "levels_m",
+            list(LEVEL_METRES.iter().copied().map(|m| num(f64::from(m))).collect()),
+        ),
+        ("spawn_cap", num(f64::from(push.tail[2]))),
+        ("coarse_slots", num(f64::from(push.tail[3]))),
+        (
+            "coarse_cap_bytes",
+            num(coarse_cap_bytes(settings.preset_label()) as f64),
+        ),
+    ])
 }
 
 fn lighting_report(body: &str, renderer: &Renderer) -> Value {
@@ -2356,6 +2503,38 @@ mod tests {
         let stepped = tools.scene_dt(1.0);
         assert!((stepped - DEFAULT_STEP).abs() < 1.0e-6);
         assert_eq!(tools.scene_dt(1.0), 0.0);
+    }
+
+    #[test]
+    fn budgets_name_the_high_cap_and_the_level_sizes() {
+        let settings = LightingSettings::preset(LightingPreset::High);
+        let value = budgets_value(&settings, 1.0);
+        assert_eq!(
+            value.get("lighting_cap_ms").and_then(Value::as_f64),
+            Some(8.0)
+        );
+        assert_eq!(
+            value.get("schedule").and_then(Value::as_str),
+            Some("budget")
+        );
+        assert!(budget_key("budget_scale"));
+        assert!(budget_key("controller"));
+        assert_eq!(
+            value.get("controller").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!budget_key("direct"));
+        let mut push = SchedulePush::default();
+        push.words[0] = 8;
+        push.tail[2] = 8_000;
+        let stats = schedule_stats(&push);
+        assert_eq!(stats.get("levels").and_then(Value::as_bool), Some(true));
+        assert_eq!(stats.get("spawn_cap").and_then(Value::as_f64), Some(8000.0));
+        let lod = lod_snapshot(&settings, &push);
+        assert_eq!(lod.get("enabled").and_then(Value::as_bool), Some(true));
+        assert_eq!(lod.get("base_m").and_then(Value::as_f64), Some(0.125));
+        let off = lod_snapshot(&settings, &SchedulePush::default());
+        assert_eq!(off.get("enabled").and_then(Value::as_bool), Some(false));
     }
 
     #[test]

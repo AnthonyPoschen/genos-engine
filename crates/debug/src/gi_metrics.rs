@@ -30,7 +30,7 @@ use genos_render::GiSample;
 use crate::value::{num, obj, text};
 
 pub const FRAME_HEADER: &str =
-    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded\n";
+    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded,controller_scale,gates,lit_w,lit_h\n";
 
 pub const SUMMARY_HEADER: &str = "name,p50,p99\n";
 
@@ -122,7 +122,7 @@ pub fn frames_csv(samples: &[GiSample]) -> String {
 
 pub fn frame_row(sample: &GiSample) -> String {
     format!(
-        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{}\n",
+        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4},{},{},{}\n",
         sample.seq,
         sample.direct_ms,
         sample.atrous_ms,
@@ -134,7 +134,11 @@ pub fn frame_row(sample: &GiSample) -> String {
         sample.lighting_ms,
         sample.rays,
         sample.cache_entries_refreshed,
-        sample.lamps_shaded
+        sample.lamps_shaded,
+        sample.controller_scale,
+        sample.gates,
+        sample.lit_w,
+        sample.lit_h
     )
 }
 
@@ -151,6 +155,25 @@ pub fn scenario_name(name: &str) -> Result<&str, String> {
     Ok(name)
 }
 
+/// `NAME.csv`, or `NAME-2.csv`, `NAME-3.csv`, … when that file is already there.
+pub fn unique_summary_path(dir: &Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let name = scenario_name(name)?;
+    let first = dir.join(format!("{name}.csv"));
+    if !first.exists() {
+        return Ok(first);
+    }
+    for n in 2..10_000 {
+        let path = dir.join(format!("{name}-{n}.csv"));
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "{}: too many {name} summaries",
+        dir.display()
+    ))
+}
+
 pub fn write_summary(
     dir: &Path,
     name: &str,
@@ -158,10 +181,13 @@ pub fn write_summary(
 ) -> Result<std::path::PathBuf, String> {
     let name = scenario_name(name)?;
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
-    let path = dir.join(format!("{name}.csv"));
+    let path = unique_summary_path(dir, name)?;
+    let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| {
+        format!("{}: bad summary name", path.display())
+    })?;
     std::fs::write(&path, summary_csv(samples))
         .map_err(|err| format!("{}: {err}", path.display()))?;
-    let frames = dir.join(format!("{name}-frames.csv"));
+    let frames = dir.join(format!("{stem}-frames.csv"));
     std::fs::write(&frames, frames_csv(samples))
         .map_err(|err| format!("{}: {err}", frames.display()))?;
     Ok(path)
@@ -217,6 +243,10 @@ pub fn sample_value(sample: &GiSample) -> Value {
             num(f64::from(sample.cache_entries_refreshed)),
         ),
         ("lamps_shaded", num(f64::from(sample.lamps_shaded))),
+        ("controller_scale", num(sample.controller_scale)),
+        ("gates", num(f64::from(sample.gates))),
+        ("lit_w", num(f64::from(sample.lit_w))),
+        ("lit_h", num(f64::from(sample.lit_h))),
     ])
 }
 
@@ -250,6 +280,16 @@ pub fn summary_value(samples: &[GiSample]) -> Value {
             count(|s| s.cache_entries_refreshed),
         ),
         ("lamps_shaded", count(|s| s.lamps_shaded)),
+        // The lowest scale in the window. The scale climbs back to 1 on cheap
+        // frames (1.05 a frame), so the last value says nothing about the heavy
+        // stretch a gate grades.
+        (
+            "controller_scale_min",
+            num(samples
+                .iter()
+                .map(|s| s.controller_scale)
+                .fold(1.0_f64, f64::min)),
+        ),
     ])
 }
 
@@ -301,7 +341,27 @@ mod tests {
             rays,
             cache_entries_refreshed: rays / 2,
             lamps_shaded: 3,
+            controller_scale: 1.0 / f64::from(rays),
+            gates: 1,
+            lit_w: 2000,
+            lit_h: 1080,
         }
+    }
+
+    #[test]
+    fn the_summary_keeps_the_lowest_controller_scale() {
+        // The heavy middle frame scaled to 1/40. The last frame is back near 1.
+        let samples = [sample(1, 1.0, 2), sample(2, 9.0, 40), sample(3, 1.0, 1)];
+        let Value::Object(pairs) = summary_value(&samples) else {
+            panic!("summary is an object");
+        };
+        let low = pairs
+            .iter()
+            .find(|(k, _)| k == "controller_scale_min")
+            .map(|(_, v)| v.clone());
+        assert_eq!(low, Some(num(1.0 / 40.0)));
+        let frames = frames_csv(&samples);
+        assert!(frames.contains(",0.0250,1,2000,1080\n"), "{frames}");
     }
 
     #[test]
@@ -353,6 +413,10 @@ mod tests {
         assert!(text.contains("direct_ms,1.5000,1.5000"));
         let frames = std::fs::read_to_string(dir.join("s6-settle-frames.csv")).unwrap();
         assert!(frames.contains("1,1.5000,"));
+        let again = write_summary(&dir, "s6-settle", &samples).unwrap();
+        assert_eq!(again, dir.join("s6-settle-2.csv"));
+        assert!(dir.join("s6-settle-2-frames.csv").is_file());
+        assert!(std::fs::read_to_string(&path).unwrap().contains("direct_ms,1.5000,1.5000"));
         append_frames(&dir, &samples).unwrap();
         append_frames(&dir, &samples).unwrap();
         let live = std::fs::read_to_string(dir.join("frames.csv")).unwrap();
@@ -386,6 +450,14 @@ mod tests {
             assert!(
                 text.contains("gi_metrics"),
                 "{name} does not record GI metrics"
+            );
+            assert!(
+                text.contains("get_budgets"),
+                "{name} does not read the lighting cap"
+            );
+            assert!(
+                text.contains("controller_floor") && text.contains("warmup"),
+                "{name} does not grade the lighting cap on steady frames"
             );
             assert!(text.contains("fixed_dt"), "{name} does not fix the step");
             engine

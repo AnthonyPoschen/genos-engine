@@ -165,6 +165,15 @@ float lamp_pick_depth(vec3 pos) {
     return dot(pos - scene.eye.xyz, scene.view_forward.xyz);
 }
 
+// Previous frame's camera. Four vec4s past the gather cells: eye (w 1 when
+// the frame exists), right (w tan of half the fov), up, forward (w aspect).
+// The change block keeps the camera from the last frame the probes ran.
+// A frozen frame does not refresh that, so a pan after settle would reproject
+// through the still pose and the running mean would reset every frame.
+uint lighting_lamp_cam_at() {
+    return lighting_graw_at(lighting_probes(), 0u);
+}
+
 // Motion vector into the previous frame. The returned pixel is in bounds.
 // Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
 // A mover bound does not reject on its own. GI off has no last camera.
@@ -174,15 +183,16 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
     if (!lighting_gi_on()) {
         return false;
     }
-    vec4 eye = work.v[lighting_change_at() + 1u];
+    uint cam = lighting_lamp_cam_at();
+    vec4 eye = work.v[cam];
     if (eye.w < 0.5) {
         return false;
     }
-    vec3 right = work.v[lighting_change_at() + 2u].xyz;
-    float t = work.v[lighting_change_at() + 2u].w;
-    vec3 up = work.v[lighting_change_at() + 3u].xyz;
-    vec3 fwd = work.v[lighting_change_at() + 4u].xyz;
-    float aspect = work.v[lighting_change_at() + 4u].w;
+    vec3 right = work.v[cam + 1u].xyz;
+    float t = work.v[cam + 1u].w;
+    vec3 up = work.v[cam + 2u].xyz;
+    vec3 fwd = work.v[cam + 3u].xyz;
+    float aspect = work.v[cam + 3u].w;
     if (dot(fwd, fwd) < 0.5 || t == 0.0) {
         return false;
     }
@@ -193,7 +203,20 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
-    vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+    // Same crop as lighting_eye_dir. A guard band would otherwise shift the
+    // history pixel off the lit image by the crop.
+    float dw = float(pc.dims.x);
+    float dh = float(pc.dims.y);
+    float ox = 0.0;
+    float oy = 0.0;
+    if (pc.frame.x != 0u && pc.frame.y != 0u) {
+        uint crop = pc.schedule.w;
+        dw = float(pc.frame.x);
+        dh = float(pc.frame.y);
+        ox = float(crop & 0xffffu);
+        oy = float(crop >> 16u);
+    }
+    vec2 px = vec2((ndc.x + 1.0) * 0.5 * dw + ox, (1.0 - ndc.y) * 0.5 * dh + oy);
     if (px.x < 0.0 || px.y < 0.0 || px.x >= float(pc.dims.x) || px.y >= float(pc.dims.y)) {
         return false;
     }

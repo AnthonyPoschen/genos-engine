@@ -502,6 +502,32 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
 }
 
+/// `budget` scales work to the millisecond cap. `global` keeps today's full dispatches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScheduleMode {
+    Budget,
+    Global,
+}
+
+impl ScheduleMode {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+            Self::Global => "global",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "budget" => Some(Self::Budget),
+            "global" => Some(Self::Global),
+            _ => None,
+        }
+    }
+}
+
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
 /// (`lighting_cache.glsl` lighting_sc_flags).
 pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6_007_050;
@@ -625,6 +651,23 @@ pub struct LightingSettings {
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
+    /// `budget` holds the work caps. `global` is the uncapped A/B.
+    pub schedule: ScheduleMode,
+    /// When on, the retired lighting total scales the work caps. Off holds the preset caps.
+    pub controller: bool,
+    /// Multiplies every work cap. `1` is the preset. Test knob.
+    pub budget_scale: f32,
+    /// Guard on a turning axis: half goes on the leading edge, before the turn adds
+    /// up to 10%. A still axis gets none. High is 0.08 (0.15 cost s5 1.7x direct).
+    pub guard_edge: f32,
+    /// How many times looser removal is than the 1.5× add threshold.
+    pub cache_loosen: f32,
+    /// Coarsest cache level that still meets the quality floor. L0 is 0.
+    pub floor_level: u32,
+    /// Convergence the quality floor requires, 0..1.
+    pub floor_converged: f32,
+    /// Metres around the camera where out-of-view regions catch up to the floor.
+    pub near_radius: f32,
 }
 
 impl Default for LightingSettings {
@@ -634,6 +677,18 @@ impl Default for LightingSettings {
 }
 
 impl LightingSettings {
+    /// High preset with the work-cap controller held off.
+    ///
+    /// Picture checks use this so a slow device keeps the preset caps.
+    /// Play uses [`Self::default`], which leaves the controller on.
+    #[must_use]
+    pub fn picture() -> Self {
+        Self {
+            controller: false,
+            ..Self::default()
+        }
+    }
+
     pub fn preset(preset: LightingPreset) -> Self {
         let mut s = Self::high_defaults();
         s.preset = preset;
@@ -722,8 +777,40 @@ impl LightingSettings {
                 );
             }
         }
+        s.apply_schedule_defaults();
         s.sanitize();
         s
+    }
+
+    fn apply_schedule_defaults(&mut self) {
+        let name = self.preset.name();
+        self.schedule = ScheduleMode::Budget;
+        self.controller = true;
+        self.budget_scale = 1.0;
+        self.guard_edge = match name {
+            "medium" => 0.06,
+            "high" => 0.08,
+            _ => 0.05,
+        };
+        self.cache_loosen = match name {
+            "medium" => 3.0,
+            "low" | "gi-1bounce" => 2.5,
+            "potato" | "day-cycle" => 2.0,
+            _ => 4.0,
+        };
+        self.floor_level = match name {
+            "medium" => 2,
+            "low" | "gi-1bounce" => 3,
+            "potato" | "day-cycle" => 4,
+            _ => 1,
+        };
+        self.floor_converged = 0.35;
+        self.near_radius = match name {
+            "medium" => 8.0,
+            "low" | "gi-1bounce" => 6.0,
+            "potato" | "day-cycle" => 4.0,
+            _ => 12.0,
+        };
     }
 
     fn high_defaults() -> Self {
@@ -801,6 +888,14 @@ impl LightingSettings {
             lamp_pick: LampPickSettings::default(),
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
+            schedule: ScheduleMode::Budget,
+            controller: true,
+            budget_scale: 1.0,
+            guard_edge: 0.08,
+            cache_loosen: 4.0,
+            floor_level: 1,
+            floor_converged: 0.35,
+            near_radius: 12.0,
         }
     }
 
@@ -864,6 +959,32 @@ impl LightingSettings {
         };
         self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
+        self.budget_scale = if self.budget_scale.is_finite() {
+            self.budget_scale.clamp(1.0 / 64.0, 4.0)
+        } else {
+            1.0
+        };
+        self.guard_edge = if self.guard_edge.is_finite() {
+            self.guard_edge.clamp(0.0, 0.35)
+        } else {
+            0.08
+        };
+        self.cache_loosen = if self.cache_loosen.is_finite() {
+            self.cache_loosen.clamp(1.0, 8.0)
+        } else {
+            4.0
+        };
+        self.floor_level = self.floor_level.min(4);
+        self.floor_converged = if self.floor_converged.is_finite() {
+            self.floor_converged.clamp(0.0, 1.0)
+        } else {
+            0.35
+        };
+        self.near_radius = if self.near_radius.is_finite() {
+            self.near_radius.clamp(0.0, 64.0)
+        } else {
+            12.0
+        };
     }
 
     /// World mode the shaders see. A forced mode wins once cache-to-cache is
@@ -1090,6 +1211,9 @@ impl LightingSettings {
         // The clock is not a preset knob. A moving time of day stays on the named preset.
         a.time_of_day = 0.0;
         b.time_of_day = 0.0;
+        // Holding the work-cap controller is not a quality preset.
+        a.controller = true;
+        b.controller = true;
         a == b
     }
 
@@ -1121,6 +1245,14 @@ impl LightingSettings {
         let _ = writeln!(out, "gi={}", bit(self.gi.enabled));
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
+        let _ = writeln!(out, "schedule={}", self.schedule.name());
+        let _ = writeln!(out, "controller={}", bit(self.controller));
+        let _ = writeln!(out, "budget_scale={}", num_text(self.budget_scale));
+        let _ = writeln!(out, "guard_edge={}", num_text(self.guard_edge));
+        let _ = writeln!(out, "cache_loosen={}", num_text(self.cache_loosen));
+        let _ = writeln!(out, "floor_level={}", self.floor_level);
+        let _ = writeln!(out, "floor_converged={}", num_text(self.floor_converged));
+        let _ = writeln!(out, "near_radius={}", num_text(self.near_radius));
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1309,6 +1441,17 @@ impl LightingSettings {
             "gi" => self.gi.enabled = on(value)?,
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
+            "schedule" => {
+                self.schedule = ScheduleMode::parse(value)
+                    .ok_or_else(|| format!("schedule is budget or global, got {value}"))?
+            }
+            "controller" => self.controller = on(value)?,
+            "budget_scale" => self.budget_scale = num_f32(value)?,
+            "guard_edge" => self.guard_edge = num_f32(value)?,
+            "cache_loosen" => self.cache_loosen = num_f32(value)?,
+            "floor_level" => self.floor_level = num_u32(value)?,
+            "floor_converged" => self.floor_converged = num_f32(value)?,
+            "near_radius" => self.near_radius = num_f32(value)?,
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.blend" => {
                 self.surface_cache.blend = SurfaceCacheBlend::parse(value)
@@ -1451,6 +1594,10 @@ impl LightingSettings {
         let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
+        let schedule = lighting_env("GENOS_LIGHTING_SCHEDULE").ok();
+        let controller = lighting_env("GENOS_LIGHTING_CONTROLLER").ok();
+        let budget_scale = lighting_env("GENOS_LIGHTING_BUDGET_SCALE").ok();
+        let guard_edge = lighting_env("GENOS_LIGHTING_GUARD_EDGE").ok();
         let Ok(launch) = resolve_lighting_launch(
             &refs,
             &LightingMirrors {
@@ -1464,6 +1611,10 @@ impl LightingSettings {
                 firefly_sigma: firefly.as_deref(),
                 ray_budget: ray_budget.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
+                schedule: schedule.as_deref(),
+                controller: controller.as_deref(),
+                budget_scale: budget_scale.as_deref(),
+                guard_edge: guard_edge.as_deref(),
             },
         ) else {
             return;
@@ -1576,6 +1727,18 @@ impl LightingSettings {
         if let Some(rays) = launch.dormant_rays {
             self.surface_cache.dormant_rays = rays;
         }
+        if let Some(mode) = launch.schedule {
+            self.schedule = mode;
+        }
+        if let Some(on) = launch.controller {
+            self.controller = on;
+        }
+        if let Some(scale) = launch.budget_scale {
+            self.budget_scale = scale;
+        }
+        if let Some(edge) = launch.guard_edge {
+            self.guard_edge = edge;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1645,6 +1808,10 @@ struct LightingLaunch {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    schedule: Option<ScheduleMode>,
+    controller: Option<bool>,
+    budget_scale: Option<f32>,
+    guard_edge: Option<f32>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1660,6 +1827,10 @@ struct LightingMirrors<'a> {
     firefly_sigma: Option<&'a str>,
     ray_budget: Option<&'a str>,
     dormant_rays: Option<&'a str>,
+    schedule: Option<&'a str>,
+    controller: Option<&'a str>,
+    budget_scale: Option<&'a str>,
+    guard_edge: Option<&'a str>,
 }
 
 enum LightingKind {
@@ -1672,6 +1843,10 @@ enum LightingKind {
     FireflySigma,
     RayBudget,
     DormantRays,
+    Schedule,
+    Controller,
+    BudgetScale,
+    GuardEdge,
 }
 
 enum LightingFlag {
@@ -1684,6 +1859,10 @@ enum LightingFlag {
     FireflySigma(f32),
     RayBudget(u32),
     DormantRays(u32),
+    Schedule(ScheduleMode),
+    Controller(bool),
+    BudgetScale(f32),
+    GuardEdge(f32),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1759,6 +1938,18 @@ fn resolve_lighting_launch(
         dormant_rays: chosen
             .dormant_rays
             .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
+        schedule: chosen
+            .schedule
+            .or_else(|| env.schedule.and_then(ScheduleMode::parse)),
+        controller: chosen
+            .controller
+            .or_else(|| env.controller.and_then(|value| on(value).ok())),
+        budget_scale: chosen
+            .budget_scale
+            .or_else(|| env.budget_scale.and_then(|value| num_f32(value).ok())),
+        guard_edge: chosen
+            .guard_edge
+            .or_else(|| env.guard_edge.and_then(|value| num_f32(value).ok())),
     })
 }
 
@@ -1773,6 +1964,10 @@ struct ChosenLighting {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    schedule: Option<ScheduleMode>,
+    controller: Option<bool>,
+    budget_scale: Option<f32>,
+    guard_edge: Option<f32>,
 }
 
 impl ChosenLighting {
@@ -1787,6 +1982,10 @@ impl ChosenLighting {
             LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
             LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
             LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
+            LightingFlag::Schedule(mode) => self.schedule = Some(mode),
+            LightingFlag::Controller(on) => self.controller = Some(on),
+            LightingFlag::BudgetScale(scale) => self.budget_scale = Some(scale),
+            LightingFlag::GuardEdge(edge) => self.guard_edge = Some(edge),
         }
     }
 }
@@ -1813,6 +2012,10 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
         "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
         "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
+        "lighting-schedule" => Some(LightingKind::Schedule),
+        "lighting-controller" => Some(LightingKind::Controller),
+        "lighting-budget-scale" => Some(LightingKind::BudgetScale),
+        "guard-edge" => Some(LightingKind::GuardEdge),
         _ => None,
     }
 }
@@ -1865,6 +2068,19 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         ),
         LightingKind::DormantRays => LightingFlag::DormantRays(
             num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::Schedule => LightingFlag::Schedule(
+            ScheduleMode::parse(value)
+                .ok_or_else(|| format!("{flag} {value} is not budget or global"))?,
+        ),
+        LightingKind::Controller => LightingFlag::Controller(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
+        ),
+        LightingKind::BudgetScale => LightingFlag::BudgetScale(
+            num_f32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::GuardEdge => LightingFlag::GuardEdge(
+            num_f32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
         ),
     };
     Ok(Some(parsed))
@@ -2196,6 +2412,33 @@ mod launch_tests {
 
     fn empty() -> LightingMirrors<'static> {
         LightingMirrors::default()
+    }
+
+    #[test]
+    fn schedule_arguments_win_over_the_env_mirrors() {
+        let mut env = empty();
+        env.schedule = Some("budget");
+        env.controller = Some("off");
+        env.budget_scale = Some("1");
+        env.guard_edge = Some("0.2");
+        let launch = resolve_lighting_launch(
+            &[
+                "--lighting-schedule",
+                "global",
+                "--lighting-controller",
+                "on",
+                "--lighting-budget-scale",
+                "2",
+                "--guard-edge",
+                "0.1",
+            ],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(launch.schedule, Some(ScheduleMode::Global));
+        assert_eq!(launch.controller, Some(true));
+        assert_eq!(launch.budget_scale, Some(2.0));
+        assert_eq!(launch.guard_edge, Some(0.1));
     }
 
     fn hours_near(value: f32, hours: f32) {

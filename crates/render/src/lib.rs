@@ -9,6 +9,8 @@ mod hdr_output;
 mod material_stream;
 #[cfg(test)]
 mod lamp_pick;
+mod lighting_regions;
+mod lighting_schedule;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
@@ -58,6 +60,15 @@ pub use gpu::{
     LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
     MaterialStats, Renderer, VkTraffic,
     ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
+};
+pub use lighting_regions::{
+    Aabb, ChangeRecord, FinishedLight, GiRegionStats, WorldCacheRegion, WorldCacheRegions,
+};
+pub use lighting_schedule::{
+    bias_guard, caps_for, coarse_cap_bytes, floor_for, grant_u32, guard_edge_for, lit_frame,
+    lit_target, loosen_for, near_radius_for, scale_u32, schedule_push, screen_plan, select_refresh,
+    zone_of, BudgetController, GuardEdges, ItemZone, LitFrame, QualityFloor, SchedulePush,
+    ScreenBudget, ScreenPlan, WorkCaps, WorkItem, LEVEL_METRES, SCALE_FLOOR,
 };
 pub use hdr_output::{
     aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,

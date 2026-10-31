@@ -13,6 +13,12 @@ use genos_render::{identity_pose, Antialias, Bounds, DrawKind, Object, Renderer,
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Vec3};
 use genos_window::Window;
 
+/// Picture checks hold the work-cap controller off. Play leaves it on.
+fn present(mut scene: Scene) -> World {
+    scene.lighting.controller = false;
+    World::from_scene(scene)
+}
+
 fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
@@ -24,7 +30,7 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Render
 }
 
 fn silhouette_world() -> World {
-    let mut world = World::from_scene(Scene {
+    let mut world = present(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 8.0,

@@ -179,20 +179,26 @@ Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF
 **Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
 
-**Change record** (proposed, ADR 0013): one frame's description of what moved: a mover's old and new bounds, a lamp's old and new position and reach, or the sun. It raises the priority of what it can affect.
+**Change record** (ADR 0013): one frame's description of what moved. A mover contributes the bounds swept between frames. A point lamp contributes each place it occupied, at that place's reach. The record dirties the world-cache cells those volumes overlap. Cells outside them keep their finished values when the lamp count and the occluder count stay the same. A different count drops the surface cache, because those cells would still describe the previous world. A directional sun is not a record. The screen gate sees the record count. A screen tile's change magnitude is its turn exposure: 1 on a turn-side tile outside the display, the fraction toward the leading edge inside the display, and 0 when the camera is still or the tile is off the turn. That magnitude is not an irradiance delta.
 Role: SCHED · Literature: UE5 VSM caster-bounds invalidation · More detail: [localized-invalidation-design.md](../systems/lighting/localized-invalidation-design.md)
 
-**Schedule mode** (proposed): `budget` (work caps + priority) or `global` (today's single stillness hash). `--lighting-schedule`.
-Role: TOOL · More detail: [ADR 0013](../adr/0013-lighting-invalidation-is-local.md)
+**Schedule mode**: `budget` or `global`. Budget pushes the work caps, the guard band, and detail levels. Global pushes zeros and stays on the display size. `--lighting-schedule`. Presets use budget.
+Role: TOOL · More detail: [ADR 0013](../adr/0013-lighting-invalidation-is-local.md); `LightingSettings.schedule`
 
-**Work cap** (proposed, ADR 0013): the static per-preset limit on one expensive pass per frame (rays, relights, spawns, coarsen ops, fresh shadow rays, denoise items). Work beyond it is deferred by priority.
-Role: SCHED · Literature: GIBS global ray budget (§1.12); Lumen update budget · More detail: [design §3](../systems/lighting/localized-invalidation-design.md)
+**Work cap** (ADR 0013): the per-preset ceiling on one pass. High is 8 ms, 2e6 fresh shadow rays, 16k denoise items, and 522k screen-probe rays. Potato lighting is 1.5 ms and its GI caps are 0. With `controller` on, a controller scales the caps by [1/64, 1] from the retired lighting total on every budgeted frame: over the cap it becomes cap/ms, under 75% it grows by 1.05, and it never passes 1. Off holds the preset caps. `--gi-metrics` records that total. It does not gate the controller. `--lighting-controller`.
+Role: SCHED · Literature: GIBS global ray budget (§1.12); Lumen update budget · More detail: [design §3](../systems/lighting/localized-invalidation-design.md); `get_budgets`
 
-**Priority** (proposed): the per-item score that picks which entries, probes and pixel groups get fresh work within the caps. It replaces the global stillness hash.
-Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [design §5](../systems/lighting/localized-invalidation-design.md)
+**Priority**: the display up to the quality floor, then the guard band toward the turn, then leftover budget by visible error (change magnitude times closeness). Screen tiles write the turn exposure above as that magnitude, so a leading edge outranks a quiet tile in the same pass. A fast change stays inside its pass. The GPU gate is one tile rect centered on the display, grown toward the turn when that guard is picked, plus a 10% band for the oldest rows. The design's histogram is not built.
+Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [design §5](../systems/lighting/localized-invalidation-design.md) and [§16](../systems/lighting/localized-invalidation-design.md); `select_refresh`
 
-**Cache level / coarsening** (proposed): the cache key carries a level (L0 25 cm … L4 4 m). Coarsening merges a fine entry's MSME state into its parent before retiring it; the parent seeds fine entries on return.
-Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete levels) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md)
+**Cache level / coarsening**: parents of the 12.5 cm lattice at 25 cm, 50 cm, 1 m, 2 m, and 4 m. An empty cell in budget mode may claim one missing parent under the spawn cap. Cells at 2 m and 4 m also need a coarse slot (High 24 MB). The GPU claims that parent empty. The walk is three constant steps, two bilinear steps on seed-split pixels, then one short tail from 1 m to 4 m. A five-step body faulted lavapipe. The picture reads a finished parent, including a bilinear corner and a 25 cm or 50 cm step, when the reader is within half that cell of the parent's plane and the segment between them stays clear of a wall. A centre inside a solid is rejected. An unfinished parent (sample count at or under 0.5) is not shown from the tail. Seed-split pixels read the bilinear corners before that tail. There is no CPU merge into the parent.
+Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete parents of one lattice) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md) and [§16](../systems/lighting/localized-invalidation-design.md)
+
+**Tail view**: the bounce picture with the 25 cm and 50 cm parents skipped. The pixel reads the 1 m to 4 m tail and falls back to screen probes when that parent has no finished sample. `view tail`.
+Role: TOOL · Literature: — · More detail: `ViewMode::Tail` in [`debug_view.rs`](../../crates/render/src/debug_view.rs); `a_tail_view_skips_an_unfinished_parent`
+
+**Guard band**: extra pixels around the display. Lighting renders that larger picture and the window shows the crop. The eye stays put. Probe picks and lamp-pick history project that displayed camera through the crop. High adds 15% of the display across each axis, split on the two edges, and up to 10% more on the turning side. A half-turn in one frame takes that whole extra. A slower yaw takes a smaller share. Direct and gather run on that band. The five screen wavelet passes run on the displayed crop plus a 32 px margin. A zero edge, or global mode, stays on the display size.
+Role: SCHED · More detail: `lit_target`; `--guard-edge`
 
 ### Lamps and shadows
 **Lamp**: a point light. The sun is not a lamp.

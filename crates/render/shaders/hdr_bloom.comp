@@ -36,11 +36,16 @@ float rec709(vec3 c) {
     return dot(c, vec3(REC709_R, REC709_G, REC709_B));
 }
 
+// `lamp.xy` is the display crop. `lamp.z` is the lit stride. Zero keeps a
+// packed scene the size of the source, which is the whole target with no guard.
 vec3 at_scene(uint w, uint h, uint x, uint y) {
     if (x >= w || y >= h) {
         return vec3(0.0);
     }
-    return scene_lin.px[y * w + x].rgb;
+    uint stride = pc.lamp.z == 0u ? w : pc.lamp.z;
+    uint sx = x + pc.lamp.x;
+    uint sy = y + pc.lamp.y;
+    return scene_lin.px[sy * stride + sx].rgb;
 }
 
 vec3 box2_scene(uint w, uint h, uint x, uint y) {

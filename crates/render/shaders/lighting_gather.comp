@@ -208,7 +208,20 @@ void main() {
             float z = dot(rel, fwd.xyz);
             if (z > 1.0e-3) {
                 vec2 ndc = vec2(dot(rel, right.xyz) / (z * right.w * fwd.w), dot(rel, up) / (z * right.w));
-                vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+                // The basis is the displayed camera. The lit image is that frame
+                // plus the crop, so last frame's tile is not dims * ndc.
+                float dw = float(pc.dims.x);
+                float dh = float(pc.dims.y);
+                float ox = 0.0;
+                float oy = 0.0;
+                if (pc.frame.x != 0u && pc.frame.y != 0u) {
+                    uint crop = pc.schedule.w;
+                    dw = float(pc.frame.x);
+                    dh = float(pc.frame.y);
+                    ox = float(crop & 0xffffu);
+                    oy = float(crop >> 16u);
+                }
+                vec2 px = vec2((ndc.x + 1.0) * 0.5 * dw + ox, (1.0 - ndc.y) * 0.5 * dh + oy);
                 t = ivec2(floor(px / float(pc.params.y)));
             }
         }
@@ -222,7 +235,8 @@ void main() {
         // A probe's spacing on its surface at its distance (the tile across the
         // view, stretched where the surface is seen at a slant).
         float facing = max(abs(dot(n, normalize(scene.eye.xyz - pp.xyz))), 0.2);
-        float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / float(pc.dims.y) / facing;
+        float view_h = pc.frame.y != 0u ? float(pc.frame.y) : float(pc.dims.y);
+        float spacing = float(pc.params.y) * 2.0 * scene.view_right.w * dist / view_h / facing;
         float reach = LIGHTING_REACH * spacing + 0.02;
         // The changes this frame (params.z bit 3): a kept stratum traced from inside
         // the bounds of an object that moved, came or went (a probe on a moving box,

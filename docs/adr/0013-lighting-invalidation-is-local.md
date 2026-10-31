@@ -1,6 +1,6 @@
 # 0013: Lighting cost is budgeted and reuses a world-space cache
 
-Status: **accepted** (Anthony Poschen, 2026-10-26). Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md).
+Status: **accepted** (Anthony, 26 Oct 2026). The first code slice is local change tracking. Design: [`docs/systems/lighting/localized-invalidation-design.md`](../systems/lighting/localized-invalidation-design.md). Departures are in the lighting system record, section Local change tracking.
 
 ## Context
 
@@ -29,3 +29,11 @@ Finished values only, blended once. Stored light never depends on the camera (AD
 ## Consequences
 
 `--lighting-schedule global` stays as the A/B reference until P6. Each phase lands with its own A/B and gameplay gates (spin, strafe, approach, many movers, A→B→A, settle). A phase that misses its gate is dropped under the standing drop rule.
+
+## Code (26 Oct 2026)
+
+Local change tracking is in the engine. Movers and point lamps emit change records. Those records dirty world-cache cells (swept bounds, lamp reach). The global full-frame drop is deleted. There is no full recompute fallback. A different lamp count or occluder count still clears the surface cache once. That is a different resident set, not the deleted per-mover drop. A move that keeps both counts stays a change record.
+
+The budgeted frame is in the engine as well. Presets use `--lighting-schedule budget`. Work caps, a controller on the retired lighting total (`--lighting-controller`, default on; off holds the preset caps), a guard-band crop, and shader gates for direct, à-trous, and trace are pushed each frame. Empty cells can read or claim a parent from 25 cm through 4 m. The walk is split so lavapipe can run it: three constant steps in `lighting_sc_parent`, two bilinear steps, then one short tail for 1 m through 4 m. The picture reads a 1 m, 2 m, or 4 m parent only when the reader is on that parent's plane and the segment between them stays clear of a wall. `global` pushes zeros.
+
+The GPU does not build the §5.2 histogram, does not merge a retiring fine entry into its parent, and does not evict coarse cells farthest-first. The hash table stays about 368 MB, over the ~200 MB budget. The departures are in the lighting record under Budgeted refresh and in design §16.
