@@ -400,12 +400,61 @@ r10 + FX is the best single config. It passes no gate except flicker:
 3. Convergence: the drift term needs a tolerance relative to hall noise, because the noise test alone already passes at RUN=1.
 4. Box gate: measure with at least 3 runs per config.
 
-## Round 13 (in progress)
+## Round 13
 
-Hooks R10 + FX with RUN=1, dark7 / onramp7, lavapipe 160x90.
+Hooks R10 + FX with RUN=1, dark7 / onramp7 / hall9 / box, lavapipe 160x90, lighting-v3 34cc80c. New debug hooks (all 0 = shipped):
 
-- Perfect-invalidation oracle (`GENOS_DBG_FOOT=7`, every cell counts as changed): aborted. It ran at about 0.4 fps on lavapipe and the script's wait timed out at frame 221. Replaced by a cold-start lit run as the switch-on oracle.
-- (a) Bounce-footprint clear (`GENOS_DBG_FOOT=3`, change sphere = lamp range + 3 m) plus no held filter in the change window: linger 47.0 / 49.2 / 27.6 % at 30 / 120 / 300 frames, against 43.8 / 50.6 / 27.8 % for round 12 FX. No change.
+- `GENOS_DBG_FOOT=n` (debug word 2, bits 5-7): grows each recorded lamp-change sphere by n metres (lamp range + n, the bounce footprint). Any non-zero value also turns off the held probe filter while the light is not quiet (`lighting_direct.comp`). 7 marks every cell as changed (perfect-invalidation oracle).
+- `GENOS_DBG_LAYER=n` (scene word bits 26-28): picks which bounce layer compose shows. 1 is probes only, 2 world only, 3 skips the pushed a-trous field (WRC as of now), 4 the texel's own mean, 5 probes only with no held gather or filter, 6 the full picture with no held gather or filter.
+- `GENOS_DBG_CONV=4`: the convergence test. It needs mode 1's noise test (under 1 % of relit cells more than 3σ/√n off), at least `GENOS_DBG_CONV_MIN` rounds (default 64) and 16, and a summed signed step over the last 16 rounds under max(0.5 %, 8 × the std of those steps). It is noise-relative drift rather than a fixed ε.
+
+### Linger (dark7; gate ≤ 5 % at 120)
+
+| config | off 30 | off 120 | off 300 |
+|---|---|---|---|
+| r12 FX | 43.8 % | 50.6 % | 27.8 % |
+| FX + FOOT=3 (footprint clear, no held filter in window) | 47.0 % | 49.2 % | 27.6 % |
+| FX, LAYER=1 (probes only) | 25.8 % | 11.8 % | 11.8 % |
+| FOOT=7 oracle | aborted: about 0.4 fps, wait timed out at frame 221 | | |
+
+### Lag (onramp7; gate ≥ 90 % at 300; reference h13c4)
+
+| config | on 60 | on 120 | on 300 | on 600 |
+|---|---|---|---|---|
+| r10 + FX (current best) | 95.2 % | 56.8 % | 78.6 % | 82.4 % |
+| cold start lit (perfect-invalidation proxy) | 114.3 % | 84.9 % | **94.8 %** | 96.0 % |
+
+The FOOT=3 lag run (o13A) has no result and was not re-run.
+
+### Hall (hall9, 1140 frames, CONV=4, RUN=1)
+
+| | value |
+|---|---|
+| freezes | round 500, frame 545 |
+| still-camera lighting p50 / p90 (frames 840-1140) | 0.11 / 0.17 ms |
+| indirect / ref | 0.801 |
+| direct / ref | 0.997 |
+| flicker (per-pixel luma std) | 0.00001 |
+
+### Box (900 frames, live/ref, 3 runs each; must stay ≥ 0.66)
+
+| config | run 1 | run 2 | run 3 | mean |
+|---|---|---|---|---|
+| B | 0.631 | 0.621 | 0.658 | 0.637 |
+| A | 0.645 | 0.630 | 0.639 | 0.638 |
+
+Run-to-run spread is about ±0.02, so round 10's 0.66 box result was within noise of the 0.64 seen here. Neither config meets 0.66.
+
+### Verdict
+
+The current architecture can't meet the linger and lag gates with local tuning.
+
+- Settling is solved: CONV=4 freezes the hall at frame 545 at 0.11 ms with no flicker.
+- Lag is reachable only when all history is gone: cold start reaches 94.8 % at 300 frames, and the best tuned build reaches 78.6 %.
+- Linger doesn't move when the WRC change sphere grows (FOOT=3: 49 %), so the stale light is not in the cells the sphere covers. Probes alone still hold 12 %, over the 5 % gate.
+- The stale light sits in several chained histories (WRC cells, texel means, the display field, probe gather and filter, compose history). Each relearns only through the others, so resetting one layer is refilled from the next.
+
+**Design change needed:** event-driven invalidation. A lamp power or on/off event must invalidate every history inside the lamp's influence footprint in the same frame: WRC cells, per-texel means and the display field, probe irradiance and its gather/filter hold, and screen-space or compose history. Each history then restarts from a cold count. The relight runs under a bounded per-frame budget (a capped number of cells or probes per frame, most important near the camera first), so a mass switch defers work rather than spiking the frame. CONV=4 then decides when to freeze again. FOOT=7 shows that relighting everything at once is far too expensive, so the budget is required.
 
 ## Open questions for Anthony
 
