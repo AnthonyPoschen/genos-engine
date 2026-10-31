@@ -261,6 +261,59 @@ Note: the "dark" baselines differ (default 0.121, r10 0.026). The shipped cache 
 2. Before any freeze rule can pass in the hall, find out why hall cells keep moving by more than 1 % per relight: measure their count distribution and how often the mode-3 reset fires.
 3. Linger: instrument the probe and screen-history layers. The cache-side resets (WRC and texel) are now in place and do not move the gate.
 
+## Round 11: which layer holds the old light, and hall sample counts (1 Nov 2026)
+
+Build: 34cc80c plus the regenerated `/home/box/shared/adr0037-hooks.patch` (7 files, +216/−8). New hooks, all 0 by default, in the debug word (`scene.grid_at.w`, bits 26–31, unused by shipped code):
+
+- `GENOS_DBG_LAYER` (bits 26–28): compose shows one layer. 1 probes only, 2 WRC (world) only, 3 surface-cache texels skip the pushed à-trous display field and read the WRC as of now, 5 probes only with the probe gather and filter holds off.
+- `GENOS_DBG_HIST` (bit 29): the noise bins count relit WRC cells by their count before any reset; d[32] counts mode-3 resets, d[34] new cells.
+- `GENOS_DBG_RESET` (bits 30–31): mode-3 reset variant. 0 drops the count to 4 (r10), 1 halves it (floor 4), 2 halves it and widens the band floor to 20 %.
+
+The counters use only the free words listed in round 10. All runs used the r10 config, 160×90, on lavapipe.
+
+### Linger by layer (dark7, lamps off after 300 lit frames; share of lit-minus-never left)
+
+| layer shown | off 30 | off 120 (gate ≤ 5 %) | off 300 |
+|---|---|---|---|
+| full picture, r10 (round 10) | 92 % | 72 % | 38 % |
+| 2: WRC (world) only | 88 % | 69 % | 39 % |
+| 1: probes only | 100 % | 99 % | 99 % |
+| 5: probes only, no gather/filter hold | 101 % | 100 % | 100 % |
+| 3: texels skip the pushed à-trous field | 45 % | **14 %** | 13 % |
+
+Findings:
+
+- **The pushed à-trous display field is the main holder.** When texels read the WRC directly, the share left at 120 frames drops from 72 % to 14 %. The WRC-only view lingers as much as the full picture because that view still goes through the pushed field. The à-trous log shows `dirty 0.0000` after switch-off, so the field is never marked dirty and never repainted.
+- **The probes never let go.** With the probes alone, 99–100 % of the lamp light is still there after 300 frames, with or without the gather and filter holds. A switch-off therefore does not reach the probes at all. My unverified guess is that the probe radiance is read from cached hit shading that a lamp switch does not invalidate. The remaining 13–14 % with layer 3 is consistent with the probes' share of the mix.
+- No fix was tested this round. Layer 3 is a diagnostic, not a fix, and still misses the gate (14 %). The lag gate was not rerun.
+- `GENOS_LIGHTING_COMPOSE_ALL=1` with layer 5 hung: the frame stopped serving script commands, the run hit its 1500 s timeout, and it produced no frames. Without COMPOSE_ALL, layer 5 ran normally.
+
+### Hall WRC counts before reset (relit cells, frames 600–1140)
+
+| | ≤ 8 | 9–16 | 17–32 | 33–64 | > 64 | resets / relight | new cells | > 3σ/√n |
+|---|---|---|---|---|---|---|---|---|
+| default | – (frozen; frames 100–400: 0.5 %) | 0.3 % | 1.0 % | 4.1 % | 94.1 % | 0 | 0 | 0.05 |
+| r10 (reset to 4) | 39.9 % | 24.2 % | 15.0 % | 10.1 % | 10.7 % | 0.40 | 0 | 0.59 |
+| r10, RESET=1 (halve) | 14.8 % | 33.3 % | 23.2 % | 12.2 % | 16.5 % | 0.43 | 0 | 0.59 |
+
+The default froze, so it relit no cells after frame 600; its row is frames 100–400. **The two-sided reset is what keeps hall counts low.** 40 % of relights fire it, and no cells are new, so cell reuse is not the cause. Halving instead of dropping to 4 moves counts up, but the reset still fires on 43 % of relights. The hall's per-sample noise (round 10, rms ≈ 0.25) puts a large share of single samples outside max(10 %, 3σ), so a reset on one sample cannot work in the hall.
+
+### Hall results (hall9, 1140 frames)
+
+| | default | r10 | r10, RESET=1 |
+|---|---|---|---|
+| indirect/ref | 0.767 | 0.823 | 0.813 |
+| CONV=3 test passes | – | never | never |
+| still ms p50 / p90 (840–1140) | 0.09 / 0.11 | 345 / 402 | 163 / 220 |
+| flicker, per-pixel luma std | 0 | 0.00000 | 0.00001 |
+
+Box live/ref was not rerun. No box-side code changed after round 10's 0.661.
+
+### Changes to the proposed design
+
+1. Linger: a lamp switch must mark the à-trous display field dirty (or repaint the texels inside the lamp's sphere), and it must reach the probes. Both are needed: fixing the field alone leaves about 14 %.
+2. Reset: one out-of-band sample must not trigger it. Next to test: a reset after several out-of-band samples in a row, or a reset driven only by the lamp-change record (LAMPOFF) with no sample band.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
