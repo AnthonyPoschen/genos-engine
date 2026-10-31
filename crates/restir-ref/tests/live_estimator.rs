@@ -393,3 +393,99 @@ fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
     }
     assert!(failures.is_empty(), "biased pixels: {failures:?}");
 }
+
+/// `balance_list` (restir_spatial_ops.glsl) over the current pixel and one
+/// neighbour: empty slots carry no M and drop out of the MIS denominator.
+fn spatial(ps: &[Pixel], lamps: &[LiveLamp], slots: &[Res], unit: f32) -> Res {
+    let empty = |r: &Res| r.lamp.is_none() || r.m == 0;
+    if slots.len() == 2 && empty(&slots[0]) {
+        return if empty(&slots[1]) { Res::default() } else { slots[1] };
+    }
+    let here = &ps[0];
+    let tq: Vec<f32> = slots.iter().map(|r| r.lamp.map_or(0.0, |l| phat(here, &lamps[l]))).collect();
+    let mass: Vec<f32> = slots
+        .iter()
+        .zip(&tq)
+        .map(|(r, &t)| if !empty(r) && t > 0.0 { r.m as f32 * w_of(*r) * t } else { 0.0 })
+        .collect();
+    let area: f32 = mass.iter().sum();
+    if area <= 0.0 {
+        return Res::default();
+    }
+    let mark = unit * area;
+    let mut acc = 0.0;
+    let mut sel = None;
+    for (i, &m) in mass.iter().enumerate() {
+        if m <= 0.0 {
+            continue;
+        }
+        sel = Some(i);
+        acc += m;
+        if mark < acc {
+            break;
+        }
+    }
+    let Some(sel) = sel else { return Res::default() };
+    let lamp = slots[sel].lamp.unwrap_or(0);
+    let t_src = phat(&ps[sel], &lamps[lamp]);
+    if tq[sel] <= 0.0 || t_src <= 0.0 {
+        return Res::default();
+    }
+    let mut denom = 0.0;
+    let mut count = 0;
+    for (r, p) in slots.iter().zip(ps) {
+        if empty(r) {
+            continue;
+        }
+        count += r.m;
+        denom += r.m as f32 * phat(p, &lamps[lamp]);
+    }
+    if denom <= 0.0 || count == 0 {
+        return Res::default();
+    }
+    let w_new = area * t_src / (tq[sel] * denom);
+    Res { lamp: Some(lamp), w_sum: w_new * count as f32 * tq[sel], m: count, target: tq[sel] }
+}
+
+/// Spatial reuse alone (no history): a miss-heavy pixel and its neighbour on
+/// the same face. The mean at the first pixel must equal its exact sum.
+#[test]
+fn live_estimator_spatial_matches_the_exact_sum() {
+    let lamps = scene();
+    let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
+    let tree = LightTree::build(&refs);
+    let pairs = [
+        ("outward wall past ring", v(17.0, 1.0, 0.0), v(17.0, 1.0, 0.3), v(1.0, 0.0, 0.0)),
+        ("open floor", v(1.7, 0.0, 3.9), v(1.9, 0.0, 3.9), v(0.0, 1.0, 0.0)),
+        ("wall facing bright lamp", v(1.3, 0.5, 0.2), v(1.3, 0.5, 0.4), v(-1.0, 0.0, 0.0)),
+    ];
+    let mut failures = Vec::new();
+    for (name, a, b, n) in pairs {
+        let ps = [Pixel { pos: a, n, two_sided: false }, Pixel { pos: b, n, two_sided: false }];
+        let want = luma(exact(&ps[0], &lamps));
+        let mut per_seed = Vec::new();
+        for seed in 1u64..=16 {
+            let mut rng = Rng::new(seed);
+            let mut sum = Vec3::ZERO;
+            let frames = 150_000;
+            for _ in 0..frames {
+                let slots = [initial(&ps[0], &lamps, &tree, &mut rng), initial(&ps[1], &lamps, &tree, &mut rng)];
+                let r = spatial(&ps, &lamps, &slots, rng.next_f32());
+                if let Some(l) = r.lamp {
+                    sum += lamp_light(&lamps[l], origin(&ps[0]), n, false) * w_of(r);
+                }
+            }
+            per_seed.push(luma(sum) / frames as f32);
+        }
+        let k = per_seed.len() as f32;
+        let mean = per_seed.iter().sum::<f32>() / k;
+        let var = per_seed.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / (k - 1.0);
+        let rel = (mean - want) / want.max(1.0e-6);
+        let se = (var / k).sqrt() / want.max(1.0e-6);
+        eprintln!("{name:>24}: exact {want:.4} mean {mean:.4} rel {rel:+.4} se {se:.4}");
+        if rel.abs() > TOL && rel.abs() > 3.0 * se {
+            failures.push(format!("{name}: rel {rel:+.4} se {se:.4}"));
+        }
+    }
+    assert!(failures.is_empty(), "biased pixels: {failures:?}");
+}
