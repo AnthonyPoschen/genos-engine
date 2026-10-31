@@ -253,6 +253,34 @@ pub(crate) fn decode_gltf(
     bytes: &[u8],
     resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
 ) -> Result<GltfScene, LoadError> {
+    decode_gltf_phased(bytes, resolve, &mut LoadPhases::default())
+}
+
+/// Wall time of each glTF load phase, for the cook tools' timing output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoadPhases {
+    /// Reading the file, the JSON, buffers and image bytes.
+    pub import: std::time::Duration,
+    /// PNG and JPEG decode.
+    pub decode: std::time::Duration,
+    /// Accessors, primitives, materials and the node tree.
+    pub meshes: std::time::Duration,
+    /// The mip chains.
+    pub mips: std::time::Duration,
+}
+
+/// [`decode_gltf`] that adds each phase's wall time to `phases`.
+pub(crate) fn decode_gltf_phased(
+    bytes: &[u8],
+    resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
+    phases: &mut LoadPhases,
+) -> Result<GltfScene, LoadError> {
+    let mut clock = std::time::Instant::now();
+    let mut lap = |slot: &mut std::time::Duration| {
+        let now = std::time::Instant::now();
+        *slot += now - clock;
+        clock = now;
+    };
     let (json, bin) = split_glb(bytes)?;
     let text = std::str::from_utf8(json).map_err(|_| LoadError::Unrecognized)?;
     let doc = genos_json::parse(text).map_err(|_| LoadError::Unrecognized)?;
@@ -290,6 +318,7 @@ pub(crate) fn decode_gltf(
         buffers: &buffers,
     };
 
+    lap(&mut phases.import);
     let mut images = Vec::new();
     for image in list(&doc, "images") {
         let data = match (
@@ -300,7 +329,9 @@ pub(crate) fn decode_gltf(
             (None, Some(view)) => reader.view(index(view)?)?.to_vec(),
             _ => return Err(LoadError::Unrecognized),
         };
+        lap(&mut phases.import);
         images.push(crate::decode_image(&data)?);
+        lap(&mut phases.decode);
     }
     let materials = list(&doc, "materials")
         .iter()
@@ -377,8 +408,10 @@ pub(crate) fn decode_gltf(
             stack.push((index(c)?, world, depth + 1));
         }
     }
+    lap(&mut phases.meshes);
     let mips = cook_mips(&images, &materials);
     let (resident_bytes, mip_fallback) = fit_mips(&mips);
+    lap(&mut phases.mips);
     Ok(GltfScene {
         meshes,
         materials,

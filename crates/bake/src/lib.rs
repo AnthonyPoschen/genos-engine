@@ -125,11 +125,39 @@ pub fn bake(mesh: &BakeMesh, settings: &BakeSettings) -> Baked {
 /// [`bake`] with `key` already computed. The key hashes every texel the
 /// scene holds, so it is worth computing once.
 fn bake_keyed(mesh: &BakeMesh, settings: &BakeSettings, key: u64) -> Baked {
-    Baked {
-        key,
-        sdf: sdf::build(mesh, settings),
-        cards: cards::build(mesh, settings),
+    bake_phased(mesh, settings, key, &mut BakePhases::default())
+}
+
+/// Wall time of each bake phase, for the cook tools' timing output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BakePhases {
+    pub bvh: std::time::Duration,
+    pub sdf: std::time::Duration,
+    pub cards: std::time::Duration,
+    pub write: std::time::Duration,
+}
+
+impl BakePhases {
+    pub fn add(&mut self, other: &BakePhases) {
+        self.bvh += other.bvh;
+        self.sdf += other.sdf;
+        self.cards += other.cards;
+        self.write += other.write;
     }
+}
+
+/// [`bake_keyed`] with one BVH shared by the SDF and the cards, timing each phase.
+fn bake_phased(mesh: &BakeMesh, settings: &BakeSettings, key: u64, phases: &mut BakePhases) -> Baked {
+    let start = std::time::Instant::now();
+    let bvh = genos_mesh::Bvh::build(&mesh.triangles);
+    let built = std::time::Instant::now();
+    let sdf = sdf::build_with(mesh, settings, &bvh);
+    let sdf_done = std::time::Instant::now();
+    let cards = cards::build_with(mesh, settings, &bvh);
+    phases.bvh += built - start;
+    phases.sdf += sdf_done - built;
+    phases.cards += sdf_done.elapsed();
+    Baked { key, sdf, cards }
 }
 
 /// The cache file for a mesh under these settings.
@@ -170,9 +198,21 @@ pub fn rebake_keyed(
     settings: &BakeSettings,
     key: u64,
 ) -> Result<(Baked, PathBuf), BakeError> {
+    rebake_phased(mesh, settings, key, &mut BakePhases::default())
+}
+
+/// [`rebake_keyed`] that adds each phase's wall time to `phases`.
+pub fn rebake_phased(
+    mesh: &BakeMesh,
+    settings: &BakeSettings,
+    key: u64,
+    phases: &mut BakePhases,
+) -> Result<(Baked, PathBuf), BakeError> {
     let path = key_path(settings, key);
-    let baked = bake_keyed(mesh, settings, key);
+    let baked = bake_phased(mesh, settings, key, phases);
+    let start = std::time::Instant::now();
     write(&path, &baked)?;
+    phases.write += start.elapsed();
     Ok((baked, path))
 }
 

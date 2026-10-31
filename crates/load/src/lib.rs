@@ -40,7 +40,8 @@ pub use pages::{
 };
 pub use error::LoadError;
 pub use gltf::{
-    image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, MeshInstance, PbrMaterial,
+    image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
+    PbrMaterial,
     Primitive, Sampler, TextureSlot,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
@@ -91,6 +92,22 @@ pub fn load_gltf_file(path: impl AsRef<std::path::Path>) -> Result<GltfScene, Lo
 /// Decode a PNG or a JPEG into an RGBA8 image. The format comes from the bytes.
 pub fn load_image(source: &dyn ByteSource) -> Result<Image, LoadError> {
     decode_image(&read(source)?)
+}
+
+/// [`load_gltf_file`] that adds each load phase's wall time to `phases`.
+pub fn load_gltf_file_phased(
+    path: impl AsRef<std::path::Path>,
+    phases: &mut LoadPhases,
+) -> Result<GltfScene, LoadError> {
+    let path = path.as_ref();
+    let dir = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let start = std::time::Instant::now();
+    let bytes = read(&FileSource::new(path))?;
+    phases.import += start.elapsed();
+    gltf::decode_gltf_phased(&bytes, &|uri| FileSource::new(dir.join(uri)).read_bytes(), phases)
 }
 
 /// Decode PNG or JPEG bytes into an RGBA8 image.
