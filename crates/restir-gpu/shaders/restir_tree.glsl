@@ -8,6 +8,9 @@ const uint NODE_STRIDE = 12u;
 const uint NODE_LAMP_EMPTY = 0xffffffffu;
 // lamp_light's LAMP_RADIUS clamp; tree.rs MIN_DIST.
 const float TREE_MIN_DIST = 0.1;
+
+// Round a split share to the nearest step (tree.rs split_steps).
+const float TREE_ROUND = 0.5;
 // restir_phat measures range from the lifted origin (tree.rs RANGE_SLACK).
 const float TREE_RANGE_SLACK = 0.02;
 const float HALF = 0.5;
@@ -34,11 +37,12 @@ float tree_split_steps(float left_i, float right_i, float sum) {
         return 0.0;
     }
     // A side with importance keeps at least one step, so no lamp loses support.
-    return clamp(floor(left_i / sum * TREE_STEPS + 0.5), 1.0, TREE_STEPS - 1.0);
+    return clamp(floor(left_i / sum * TREE_STEPS + TREE_ROUND), 1.0, TREE_STEPS - 1.0);
 }
 
 // Power-only share weight in each split's defensive mixture (tree.rs DEFENSIVE).
 const float TREE_DEFENSIVE = 0.1;
+
 
 // tree.rs split_steps_mixed: (1 - a) * bound share + a * power share.
 float tree_split_steps_mixed(float left_i, float right_i, float left_p, float right_p) {
@@ -51,7 +55,7 @@ float tree_split_steps_mixed(float left_i, float right_i, float left_p, float ri
     float bound = left_i / (left_i + right_i);
     float power = left_p / (left_p + right_p);
     float share = (1.0 - TREE_DEFENSIVE) * bound + TREE_DEFENSIVE * power;
-    return clamp(floor(share * TREE_STEPS + 0.5), 1.0, TREE_STEPS - 1.0);
+    return clamp(floor(share * TREE_STEPS + TREE_ROUND), 1.0, TREE_STEPS - 1.0);
 }
 
 #ifndef RESTIR_LIVE_RECEIVER
