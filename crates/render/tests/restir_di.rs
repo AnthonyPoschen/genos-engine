@@ -20,14 +20,14 @@ const WARMUP: u32 = 8;
 const GATE_AVG: u32 = 8;
 const SHADOW_AVG: u32 = 64;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn direct_settings(restir: bool) -> LightingSettings {
@@ -284,14 +284,16 @@ fn assert_turn(window: &mut Window, renderer: &mut Renderer, world: &World, came
 
 #[test]
 fn restir_di_matches_brute_direct_on_the_gate_scenes() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let gate = world_from(&RestirScene::gate(), false);
     let camera = pose(0.0, 4.0, 0.0);
-    assert_flag_off(&mut window, &mut renderer, &gate, &camera);
-    assert_gate(&mut window, &mut renderer, &gate, &camera);
+    assert_flag_off(window, renderer, &gate, &camera);
+    assert_gate(window, renderer, &gate, &camera);
     let shadow = world_from(&RestirScene::shadow(), true);
-    assert_shadow(&mut window, &mut renderer, &shadow, &camera);
-    assert_turn(&mut window, &mut renderer, &shadow, &camera);
+    assert_shadow(window, renderer, &shadow, &camera);
+    assert_turn(window, renderer, &shadow, &camera);
 }
 
 fn names_have_restir(renderer: &Renderer) -> bool {

@@ -388,9 +388,9 @@ fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
         let k = per.len() as f64;
         let mu = per.iter().sum::<f64>() / k;
         let se = (per.iter().map(|x| (x - mu) * (x - mu)).sum::<f64>() / (k - 1.0)).sqrt() / k.sqrt();
-        let rel = ((got - want) / want.max(1.0e-6)) as f32;
+        let rel = (got - want) / want.max(1.0e-6);
         eprintln!("{name:>24}: moving exact {want:.1} mean {got:.1} rel {rel:+.4} (seeds {mu:+.4} se {se:.4})");
-        if want > 0.0 && rel.abs() > TOL && f64::from(rel.abs()) > 3.0 * se {
+        if want > 0.0 && rel.abs() > f64::from(TOL) && rel.abs() > 3.0 * se {
             failures.push(format!("{name}: rel {rel:+.4}"));
         }
     }

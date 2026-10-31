@@ -97,6 +97,35 @@ fn mark_changed(words: &mut [u32], changed_base: usize) {
     words[ANY_CHANGED_WORD] = u32::from(any);
 }
 
+/// Appends the changed-lamp bitset. Returns the bitset base and whether the
+/// layout changed.
+fn push_changes(
+    words: &mut Vec<u32>,
+    lamps: &[GpuLamp],
+    prev_lamps: &[GpuLamp],
+    count: usize,
+) -> (usize, bool) {
+    let changed_base = words.len();
+    let prev_points: Vec<(usize, &GpuLamp)> = point_lamps(prev_lamps).collect();
+    let now_points: Vec<(usize, &GpuLamp)> = point_lamps(lamps).collect();
+    let layout_changed = prev_points.len() != now_points.len()
+        || prev_points
+            .iter()
+            .zip(&now_points)
+            .any(|(old, new)| old.0 != new.0);
+    words.resize(changed_base + count.div_ceil(32), 0);
+    if !layout_changed {
+        for (slot, (old, new)) in prev_points.iter().zip(&now_points).enumerate() {
+            if !same_lamp(old.1, new.1) {
+                if let Some(word) = words.get_mut(changed_base + slot / 32) {
+                    *word |= 1 << (slot % 32);
+                }
+            }
+        }
+    }
+    (changed_base, layout_changed)
+}
+
 /// Point lamps in scene order, then the light tree. `scene_index` is the
 /// index `scene_lamp` uses, stored in the last word of each lamp.
 #[must_use]
@@ -149,24 +178,8 @@ pub fn prefix(
         return None;
     }
     words.extend(nodes);
-    let changed_base = words.len();
-    let prev_points: Vec<(usize, &GpuLamp)> = point_lamps(prev_lamps).collect();
-    let now_points: Vec<(usize, &GpuLamp)> = point_lamps(lamps).collect();
-    let layout_changed = prev_points.len() != now_points.len()
-        || prev_points
-            .iter()
-            .zip(&now_points)
-            .any(|(old, new)| old.0 != new.0);
-    words.resize(changed_base + refs.len().div_ceil(32), 0);
-    if !layout_changed {
-        for (slot, (old, new)) in prev_points.iter().zip(&now_points).enumerate() {
-            if !same_lamp(old.1, new.1) {
-                if let Some(word) = words.get_mut(changed_base + slot / 32) {
-                    *word |= 1 << (slot % 32);
-                }
-            }
-        }
-    }
+    let (changed_base, layout_changed) =
+        push_changes(&mut words, lamps, prev_lamps, refs.len());
     if words.len() > usize::try_from(PREFIX_CAP_WORDS).unwrap_or(usize::MAX) {
         return None;
     }
