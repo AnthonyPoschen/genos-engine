@@ -90,7 +90,9 @@ void balance_list(
     out uint m,
     out float target
 ) {
-    if (nslots == 2u && is_empty(in_lamp[0], in_m[0])) {
+    // A slot with LAMP_EMPTY but M > 0 drew candidates that all missed: it
+    // has no sample to offer but still counts in M and the MIS denominator.
+    if (nslots == 2u && in_m[0] == 0u) {
         if (is_empty(in_lamp[1], in_m[1])) {
             store_empty(lamp, w_sum, m, target);
         } else {
@@ -158,7 +160,7 @@ void balance_list(
     float denom = 0.0;
     uint count = 0u;
     for (uint i = 0u; i < nslots; i++) {
-        if (is_empty(in_lamp[i], in_m[i])) {
+        if (in_m[i] == 0u) {
             continue;
         }
         count += in_m[i];

@@ -416,9 +416,10 @@ void restir_spatial(uint pixel) {
             float in_tq[17];
             uint nslots = 1u;
             src_recv[0] = pixel;
-            in_lamp[0] = lamp;
+            in_lamp[0] = is_empty(lamp, m) ? LAMP_EMPTY : lamp;
             in_w[0] = w_sum;
-            in_m[0] = m;
+            // An empty reservoir still drew its candidates (stored as M 0).
+            in_m[0] = is_empty(lamp, m) ? RESTIR_CANDIDATES : m;
             in_target[0] = target;
             in_tq[0] = phat_at(pixel, lamp, n);
             for (uint s = 0u; s < nbor; s++) {
@@ -435,6 +436,10 @@ void restir_spatial(uint pixel) {
                 }
                 src_recv[nslots] = source;
                 restir_load4(next + source * stride, in_lamp[nslots], in_w[nslots], in_m[nslots], in_target[nslots]);
+                if (is_empty(in_lamp[nslots], in_m[nslots])) {
+                    in_lamp[nslots] = LAMP_EMPTY;
+                    in_m[nslots] = RESTIR_CANDIDATES;
+                }
                 in_tq[nslots] = phat_at(pixel, in_lamp[nslots], n);
                 nslots += 1u;
             }

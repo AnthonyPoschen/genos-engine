@@ -395,10 +395,12 @@ fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
 }
 
 /// `balance_list` (restir_spatial_ops.glsl) over the current pixel and one
-/// neighbour: empty slots carry no M and drop out of the MIS denominator.
+/// neighbour. An empty slot still drew CANDIDATES samples, so it keeps that M
+/// in the count and in the MIS denominator (it could have produced the pick).
 fn spatial(ps: &[Pixel], lamps: &[LiveLamp], slots: &[Res], unit: f32) -> Res {
     let empty = |r: &Res| r.lamp.is_none() || r.m == 0;
-    if slots.len() == 2 && empty(&slots[0]) {
+    let m_of = |r: &Res| if empty(r) { CANDIDATES } else { r.m };
+    if slots.len() == 2 && m_of(&slots[0]) == 0 {
         return if empty(&slots[1]) { Res::default() } else { slots[1] };
     }
     let here = &ps[0];
@@ -434,11 +436,8 @@ fn spatial(ps: &[Pixel], lamps: &[LiveLamp], slots: &[Res], unit: f32) -> Res {
     let mut denom = 0.0;
     let mut count = 0;
     for (r, p) in slots.iter().zip(ps) {
-        if empty(r) {
-            continue;
-        }
-        count += r.m;
-        denom += r.m as f32 * phat(p, &lamps[lamp]);
+        count += m_of(r);
+        denom += m_of(r) as f32 * phat(p, &lamps[lamp]);
     }
     if denom <= 0.0 || count == 0 {
         return Res::default();
