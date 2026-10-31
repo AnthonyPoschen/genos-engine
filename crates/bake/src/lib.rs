@@ -160,6 +160,18 @@ fn bake_phased(mesh: &BakeMesh, settings: &BakeSettings, key: u64, phases: &mut 
     Baked { key, sdf, cards }
 }
 
+/// Every mesh of `scene` with its `content_key`, built on all cores. The key
+/// hashes every texel of the scene, so on a textured level it costs about as
+/// much as the bake; the meshes are independent, so they run side by side.
+pub fn prepare_meshes<'a>(scene: &'a genos_load::GltfScene, settings: &BakeSettings) -> Vec<(BakeMesh<'a>, u64)> {
+    let indices: Vec<usize> = (0..scene.meshes.len()).collect();
+    sdf::parallel_map(&indices, |&index| {
+        let mesh = BakeMesh::from_gltf(scene, index);
+        let key = mesh.content_key(settings);
+        (mesh, key)
+    })
+}
+
 /// The cache file for a mesh under these settings.
 pub fn cache_path(mesh: &BakeMesh, settings: &BakeSettings) -> PathBuf {
     key_path(settings, mesh.content_key(settings))

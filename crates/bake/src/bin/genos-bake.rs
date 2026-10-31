@@ -17,7 +17,7 @@
 
 use std::time::Instant;
 
-use genos_bake::{key_path, read, rebake_phased, BakeMesh, BakeMode, BakePhases, BakeSettings};
+use genos_bake::{key_path, read, prepare_meshes, rebake_phased, BakeMode, BakePhases, BakeSettings};
 use genos_load::LoadPhases;
 
 fn main() {
@@ -60,11 +60,10 @@ fn run() -> Result<(), String> {
     for file in files {
         let scene =
             genos_load::load_gltf_file_phased(&file, &mut load).map_err(|e| format!("{file}: {e}"))?;
-        for index in 0..scene.meshes.len() {
-            let start = Instant::now();
-            let mesh = BakeMesh::from_gltf(&scene, index);
-            let key = mesh.content_key(&settings);
-            prepare += start.elapsed();
+        let start = Instant::now();
+        let meshes = prepare_meshes(&scene, &settings);
+        prepare += start.elapsed();
+        for (mesh, key) in meshes {
             let path = key_path(&settings, key);
             if !force && read(&path).is_some() {
                 println!("{file} {}: up to date ({})", mesh.name, path.display());
