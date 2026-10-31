@@ -25,16 +25,10 @@ pub(crate) const LIGHTING_TILE: u32 = 16;
 /// below that the tile shrinks with the picture (down to 4 px) so the probes keep
 /// the same spacing on screen, about 45 rows. A small picture would otherwise get
 /// probes a ninth of its height apart and lose detail a 720p picture keeps.
-/// GENOS_LIGHTING_TILE (4..64) overrides it to experiment.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
+/// A non-zero `probe_tile` setting (4..64, mirrored by GENOS_LIGHTING_TILE)
+/// replaces it.
 fn lighting_tile(height: u32) -> u32 {
-    genos_scene::lighting_env("GENOS_LIGHTING_TILE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .map_or((height / 45).clamp(4, LIGHTING_TILE), |t| t.clamp(4, 64))
+    (height / 45).clamp(4, LIGHTING_TILE)
 }
 
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
@@ -2866,11 +2860,11 @@ impl Gpu {
         // Movers ride after the changes: upload them too (S49/S50L sent only the
         // head and changes, so every mover read zeros on the GPU).
         let used = 4 * sent;
-        let atrous_ppm = lighting_atrous_ppm(Some(
+        let atrous_ppm = lighting_atrous_ppm(
             self.lighting
                 .atrous_dirty
                 .unwrap_or(self.lighting.settings.denoiser.dirty_fraction),
-        ));
+        );
         // GI can be on while this buffer is still the 4096-byte stand-in. Probes
         // and the world cache stay off, so the alloc key does not rebuild, and the
         // changes block would start past the end (the cache-ray offset). Bounce 0
@@ -3028,13 +3022,12 @@ impl Gpu {
         // geometry moved, the surface cache is off, or the block list cannot
         // cover the image. A small sun step, with the camera held, takes one
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
-        // forces the full picture.
+        // turns `compose_reuse` off in the settings, which forces the full picture.
         let compose_full = !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
-            || genos_scene::lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
             || blocks > LIGHTING_COMPOSE_CAP;
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
@@ -3824,21 +3817,12 @@ fn lighting_chg_on() -> bool {
     genos_scene::lighting_env_os("GENOS_LIGHTING_SC_TRACE").is_some()
 }
 
-/// `GENOS_LIGHTING_ATROUS_DIRTY` in millionths. Default 0.25: levels 1-5 keep
+/// The a-trous dirty fraction (`denoise_dirty`, mirrored by
+/// `GENOS_LIGHTING_ATROUS_DIRTY`) in millionths. Default 0.25: levels 1-5 keep
 /// the work lists while the fullest level is at or under a quarter of the
 /// filtered texels, and run the dense sweep above that. `0` is always dense,
-/// `1` keeps the lists up to the storage cap. `override_frac` wins (tests).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
-fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
-    let frac = override_frac.unwrap_or_else(|| {
-        genos_scene::lighting_env("GENOS_LIGHTING_ATROUS_DIRTY")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.25)
-    });
+/// `1` keeps the lists up to the storage cap.
+fn lighting_atrous_ppm(frac: f32) -> u32 {
     (frac.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
 }
 
