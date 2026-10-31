@@ -189,6 +189,10 @@ fn pixels() -> Vec<(&'static str, Pixel)> {
         ("open floor", Pixel { pos: v(1.7, 0.0, 3.9), n: up, two_sided: false }),
         ("dark corner", Pixel { pos: v(6.5, 0.0, 6.5), n: up, two_sided: false }),
         ("wall facing bright lamp", Pixel { pos: v(1.3, 0.5, 0.2), n: v(-1.0, 0.0, 0.0), two_sided: false }),
+        // Most candidates land on lamps behind this face (target 0), so many
+        // frames' initial reservoirs are empty.
+        ("outward wall past ring", Pixel { pos: v(17.0, 1.0, 0.0), n: v(1.0, 0.0, 0.0), two_sided: false }),
+        ("ceiling over dark corner", Pixel { pos: v(6.5, 6.0, 6.5), n: v(0.0, 1.0, 0.0), two_sided: false }),
     ]
 }
 
