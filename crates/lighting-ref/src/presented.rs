@@ -39,7 +39,11 @@ pub fn shot() -> Result<&'static Shot, String> {
 fn capture() -> Result<Shot, String> {
     let mut window = Window::open_proof(GRADE_WIDTH, GRADE_HEIGHT)?;
     let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = grade_camera();
     let mut frames = Vec::new();
     let mut medium_grade = None;

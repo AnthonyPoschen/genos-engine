@@ -55,22 +55,23 @@ fn world(walls: Vec<Wall>) -> World {
     })
 }
 
-fn open() -> Result<(Window, Renderer), String> {
+fn open() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(64, 64).map_err(|err| err.to_string())?;
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    Ok((window, renderer))
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    Ok(genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 #[test]
 fn resident_occluders_change_direct_path_gain() {
-    let (_window, mut renderer) = match open() {
-        Ok(pair) => pair,
+    let mut owner = match open() {
+        Ok(owner) => owner,
         Err(err) => {
             println!("device creation failed: {err}");
             return;
         }
     };
+    let renderer = &mut *owner.device;
     let listener = [0.0, 1.5, 0.0];
     let blocked = [0.0, 1.5, -6.0];
     let clear = [6.0, 1.5, -6.0];

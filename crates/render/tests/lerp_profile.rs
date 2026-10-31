@@ -40,14 +40,14 @@ fn present(mut scene: genos_scene::Scene) -> World {
     World::from_scene(scene)
 }
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn scene() -> genos_scene::Scene {
@@ -367,7 +367,9 @@ fn flicker(colors: &[[f32; 3]]) -> Option<(usize, f32, f32)> {
 
 #[test]
 fn the_orbit_stays_in_the_still_frame_band() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let loaded = scene();
     let center = red_box(&loaded);
     let mut world = present(loaded);
@@ -393,8 +395,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, START);
         let scene_cpu = scene_at.elapsed();
         one_frame(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut sim,
             boot,
@@ -422,8 +424,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, START);
         let scene_cpu = scene_at.elapsed();
         record(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut sim,
             boot,
@@ -437,7 +439,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
         .expect("still frame");
     }
     if timestamps {
-        finish_gpus(&mut renderer, &mut still.gpus);
+        finish_gpus(renderer, &mut still.gpus);
     }
     let still_samples = samples_of(&still);
     let (still_mid, still_report) = report("still", &still_samples, timestamps);
@@ -446,7 +448,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
     let width = renderer.width();
     let height = renderer.height();
     let before = sample(
-        &read_color(&mut window, &mut renderer, &world, &still_cam),
+        &read_color(window, renderer, &world, &still_cam),
         width,
         height,
         &still_cam,
@@ -465,8 +467,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, START);
         let scene_cpu = scene_at.elapsed();
         record(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut sim,
             boot,
@@ -480,13 +482,13 @@ fn the_orbit_stays_in_the_still_frame_band() {
         .expect("overlay frame");
     }
     if timestamps {
-        finish_gpus(&mut renderer, &mut overlay_run.gpus);
+        finish_gpus(renderer, &mut overlay_run.gpus);
     }
     let overlay_samples = samples_of(&overlay_run);
     let (overlay_mid, overlay_report) = report("overlay", &overlay_samples, timestamps);
     eprint!("{overlay_report}");
     let after = sample(
-        &read_color(&mut window, &mut renderer, &world, &still_cam),
+        &read_color(window, renderer, &world, &still_cam),
         width,
         height,
         &still_cam,
@@ -512,8 +514,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, angle);
         let scene_cpu = scene_at.elapsed();
         record(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut sim,
             boot,
@@ -527,7 +529,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
         .expect("lerp frame");
     }
     if timestamps {
-        finish_gpus(&mut renderer, &mut lerp.gpus);
+        finish_gpus(renderer, &mut lerp.gpus);
     }
     let lerp_samples = samples_of(&lerp);
     let (lerp_mid, lerp_report) = report("lerp", &lerp_samples, timestamps);
@@ -538,7 +540,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let angle = START + step as f32 / LERP_STEPS as f32 * std::f32::consts::TAU;
         place_lamp(&mut world, angle);
         let camera = orbit(center, angle);
-        let pixels = read_color(&mut window, &mut renderer, &world, &camera);
+        let pixels = read_color(window, renderer, &world, &camera);
         colors.push(sample(&pixels, width, height, &camera, point));
     }
     if let Some((index, a, b)) = flicker(&colors) {

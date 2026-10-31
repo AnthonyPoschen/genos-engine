@@ -127,13 +127,17 @@ fn red_box_path() -> Option<Codimation> {
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-camera: {err}");
-        std::process::exit(1);
-    }
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("genos-camera: {err}");
+            1
+        }
+    };
+    genos_window::exit(code);
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     let mut frames = None;
     let mut readback = None;
     let mut trace = false;
@@ -145,6 +149,8 @@ fn run() -> Result<(), String> {
     let mut scene_name = String::from("scene.rhai");
     let mut size = (1280u32, 720u32);
     let mut time_of_day = None;
+    let mut block_ms = None;
+    let mut close_early = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -270,10 +276,23 @@ fn run() -> Result<(), String> {
                     h.parse::<u32>().map_err(|err| err.to_string())?,
                 );
             }
+            "--lifecycle-block-ms" => {
+                let value = args.next().ok_or("--lifecycle-block-ms needs a value")?;
+                block_ms = Some(genos_window::parse_block_ms(
+                    "--lifecycle-block-ms",
+                    Some(&value),
+                )?);
+            }
+            "--lifecycle-close-early" => close_early = true,
+            other if genos_window::block_ms_needs_value(other) == Some(false) => {
+                block_ms = Some(genos_window::parse_block_ms(other, None)?);
+            }
             other => return Err(format!("unknown argument {other}")),
         }
     }
 
+    let block_ms = genos_window::block_ms_mirror(block_ms);
+    let close_early = genos_window::close_early_mirror(close_early);
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
@@ -283,10 +302,33 @@ fn run() -> Result<(), String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
-    let scene = match load_scene_pumped(&mut window, &mut renderer, scene_path) {
+    if first.closing {
+        return Ok(0);
+    }
+    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = block_ms {
+        owner.plant_block(stall);
+    }
+    if close_early || owner.window.pump().closing {
+        owner.quit(0);
+    }
+    {
+        let hold = std::sync::Arc::clone(&server_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard.take());
+            true
+        });
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let scene = match load_scene_pumped(window, renderer, scene_path) {
         Ok(scene) => scene,
-        Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+        Err(err) if err == "window closed during load" => return Ok(0),
         Err(err) => return Err(err),
     };
     let mut camera = match eye {
@@ -322,6 +364,9 @@ fn run() -> Result<(), String> {
     }
     let server = genos_mcp::Server::start_on(host.clone(), genos_mcp::listen_port())?;
     eprintln!("genos-camera mcp {}", server.url());
+    *server_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server);
     eprintln!(
         "genos-camera lighting http://127.0.0.1:{}/lighting",
         genos_mcp::listen_port()
@@ -401,7 +446,7 @@ fn run() -> Result<(), String> {
                 .as_mut()
                 .ok_or("detailed profile is missing its file")?;
             publish_profile(
-                &mut renderer,
+                renderer,
                 &mut profile_pending,
                 &mut profile,
                 stream,
@@ -651,7 +696,7 @@ fn run() -> Result<(), String> {
             let record = !paused;
             if let Some(gpu) = draw_gpu {
                 publish_profile(
-                    &mut renderer,
+                    renderer,
                     &mut profile_pending,
                     &mut profile,
                     stream,
@@ -668,7 +713,7 @@ fn run() -> Result<(), String> {
             } else {
                 profile_pending.push_back(PendingProfile { open, record });
                 publish_profile(
-                    &mut renderer,
+                    renderer,
                     &mut profile_pending,
                     &mut profile,
                     stream,
@@ -729,7 +774,7 @@ fn run() -> Result<(), String> {
             .as_mut()
             .ok_or("detailed profile is missing its file")?;
         publish_profile(
-            &mut renderer,
+            renderer,
             &mut profile_pending,
             &mut profile,
             stream,
@@ -743,15 +788,7 @@ fn run() -> Result<(), String> {
         bench.report(renderer.width(), renderer.height(), renderer.antialias());
     }
     println!("genos-camera frames={drawn}");
-    finish(window, renderer, 0);
-}
-
-fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
-    renderer.abandon();
-    std::process::exit(code);
+    Ok(0)
 }
 
 /// What [`take_scene_load`] returns while a worker decodes the scene file.

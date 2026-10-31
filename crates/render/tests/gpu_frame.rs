@@ -22,14 +22,14 @@ use genos_render::{DebugView, Renderer, SchedulePush, ViewMode, World};
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 /// Picture checks hold the work-cap controller off. Play leaves it on.
@@ -243,7 +243,9 @@ fn shipped_hall() -> World {
 /// High, no `--gi-metrics`. Two flight slots, so the third draw reads the first.
 #[test]
 fn the_budget_controller_scales_without_gi_metrics() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     assert!(
         !renderer.gi_metrics_enabled(),
         "the sample log is on; this test is normal play"
@@ -253,14 +255,14 @@ fn the_budget_controller_scales_without_gi_metrics() {
     let mut world = shipped_hall();
     world.scene.lighting.controller = true;
     let camera = Camera::opening();
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let early = renderer.budget_controller_scale();
     assert!(
         (early - 1.0).abs() < 1e-9,
         "scale moved before a flight slot was reused: {early}"
     );
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let scale = renderer.budget_controller_scale();
     let ms = renderer.lighting_pass_ms();
     let total: f64 = ms.iter().sum();
@@ -295,13 +297,15 @@ fn hall_lamp() -> World {
 
 #[test]
 fn the_gpu_frame_keeps_the_learned_light() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::opening();
 
     let dark = scene(Vec::new(), Vec::new(), Vec::new());
-    let black = draw(&mut window, &mut renderer, &dark, &camera);
+    let black = draw(window, renderer, &dark, &camera);
     let floor = sample(&black, width, height, &camera, [0.0, 0.0, 0.0]);
     assert!(
         brightness(floor) < 15.0,
@@ -328,11 +332,11 @@ fn the_gpu_frame_keeps_the_learned_light() {
         }],
         Vec::new(),
     );
-    let picture = draw(&mut window, &mut renderer, &blocked, &camera);
+    let picture = draw(window, renderer, &blocked, &camera);
     let lit_floor = sample(&picture, width, height, &camera, [-1.2, 0.0, 0.0]);
     let lit_face = sample(&picture, width, height, &camera, [-0.25, 1.2, 0.0]);
     let east = Camera::new(6.0, 0.0, -std::f32::consts::FRAC_PI_2);
-    let from_east = draw(&mut window, &mut renderer, &blocked, &east);
+    let from_east = draw(window, renderer, &blocked, &east);
     let far_face = sample(&from_east, width, height, &east, [0.25, 1.2, 0.0]);
     // The opening camera sees the wall's lit face where this floor point projects.
     let shadow_floor = sample(&from_east, width, height, &east, [1.2, 0.0, 0.0]);
@@ -365,7 +369,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             color_mix: -1.0,
         }],
     );
-    let tinted = draw(&mut window, &mut renderer, &overhead, &camera);
+    let tinted = draw(window, renderer, &overhead, &camera);
     let beside = sample(&tinted, width, height, &camera, [1.3, 0.0, 0.0]);
     assert!(
         beside[0] > beside[1] + 1.0 && beside[0] > beside[2] + 1.0,
@@ -392,7 +396,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             color_mix: -1.0,
         }],
     );
-    let sided = draw(&mut window, &mut renderer, &side, &camera);
+    let sided = draw(window, renderer, &side, &camera);
     // In the box's shadow and clear of its outline from this camera: at (1.6, 0, 0)
     // the sample block reached the 1.4 m box's corner and averaged in its own red
     // face, lit by the floor in front of it (engine 28 vs path-traced 28 there).
@@ -432,7 +436,7 @@ fn the_gpu_frame_keeps_the_learned_light() {
             color_mix: -1.0,
         }],
     );
-    let filled = draw(&mut window, &mut renderer, &bounce, &camera);
+    let filled = draw(window, renderer, &bounce, &camera);
     let near_shadow = sample(&filled, width, height, &camera, [2.2, 0.0, 0.0]);
     let far_shadow = sample(&filled, width, height, &camera, [1.1, 0.0, 0.0]);
     let behind = sample(&filled, width, height, &camera, [3.8, 0.0, 0.0]);
@@ -454,7 +458,9 @@ fn the_gpu_frame_keeps_the_learned_light() {
 
 #[test]
 fn a_normal_submit_returns_while_the_gpu_is_outstanding() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = scene(
         vec![Light {
             position: Vec3::new(0.0, 5.0, 0.0),
@@ -497,7 +503,9 @@ fn a_normal_submit_returns_while_the_gpu_is_outstanding() {
 
 #[test]
 fn a_far_miss_and_a_world_solid_tint_the_floor() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::new(0.0, -6.0, std::f32::consts::PI);
@@ -523,8 +531,8 @@ fn a_far_miss_and_a_world_solid_tint_the_floor() {
         }],
         Vec::new(),
     );
-    let bare = draw(&mut window, &mut renderer, &plain, &camera);
-    let tinted = draw(&mut window, &mut renderer, &far, &camera);
+    let bare = draw(window, renderer, &plain, &camera);
+    let tinted = draw(window, renderer, &far, &camera);
     let spot = [0.0, 0.0, 0.5];
     let before = sample(&bare, width, height, &camera, spot);
     let after = sample(&tinted, width, height, &camera, spot);
@@ -548,7 +556,7 @@ fn a_far_miss_and_a_world_solid_tint_the_floor() {
         }],
         Vec::new(),
     );
-    let carried = draw(&mut window, &mut renderer, &world_solid, &camera);
+    let carried = draw(window, renderer, &world_solid, &camera);
     let edge = sample(&carried, width, height, &camera, [0.0, 0.0, 6.5]);
     let open = sample(&bare, width, height, &camera, [0.0, 0.0, 6.5]);
     assert!(
@@ -559,7 +567,9 @@ fn a_far_miss_and_a_world_solid_tint_the_floor() {
 
 #[test]
 fn moving_a_middle_solid_moves_it_on_the_gpu() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::opening();
@@ -607,7 +617,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
             },
         ],
     );
-    let first = draw(&mut window, &mut renderer, &world, &camera);
+    let first = draw(window, renderer, &world, &camera);
     let on_red = sample(&first, width, height, &camera, [0.0, 1.15, 0.0]);
     let lead = |color: [f32; 3]| color[0] - color[2];
     assert!(
@@ -615,7 +625,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
         "the middle solid is not red: {on_red:?}"
     );
     world.scene.solids[1].position.x = 1.6;
-    let second = draw(&mut window, &mut renderer, &world, &camera);
+    let second = draw(window, renderer, &world, &camera);
     let old_spot = sample(&second, width, height, &camera, [0.0, 1.15, 0.0]);
     let new_spot = sample(&second, width, height, &camera, [1.6, 1.15, 0.0]);
     assert!(
@@ -630,7 +640,9 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
 
 #[test]
 fn an_earlier_frame_keeps_its_lamp_after_the_next_submit() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::opening();
@@ -660,7 +672,9 @@ fn an_earlier_frame_keeps_its_lamp_after_the_next_submit() {
 
 #[test]
 fn a_close_lamp_does_not_cross_the_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = scene(
@@ -685,8 +699,8 @@ fn a_close_lamp_does_not_cross_the_wall() {
     );
     let west = Camera::new(-3.5, 1.5, std::f32::consts::FRAC_PI_2);
     let east = Camera::new(3.5, 1.5, -std::f32::consts::FRAC_PI_2);
-    let lit = draw(&mut window, &mut renderer, &world, &west);
-    let back = draw(&mut window, &mut renderer, &world, &east);
+    let lit = draw(window, renderer, &world, &west);
+    let back = draw(window, renderer, &world, &east);
     let lit_face = sample(&lit, width, height, &west, [-0.25, 1.0, 1.7]);
     let lit_floor = sample(&lit, width, height, &west, [-0.5, 0.0, 1.7]);
     let back_corner = sample(&back, width, height, &east, [0.28, 1.2, 1.7]);
@@ -712,7 +726,9 @@ fn a_close_lamp_does_not_cross_the_wall() {
 
 #[test]
 fn the_wall_has_no_bright_dashes_and_the_cube_shadow_keeps_some_light() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = scene(
@@ -759,7 +775,7 @@ fn the_wall_has_no_bright_dashes_and_the_cube_shadow_keeps_some_light() {
         }],
     );
     let camera = Camera::new(0.2, -3.2, std::f32::consts::PI);
-    let pixels = draw(&mut window, &mut renderer, &world, &camera);
+    let pixels = draw(window, renderer, &world, &camera);
     let mut ridges = 0u32;
     let w = width as i32;
     let h = height as i32;
@@ -819,7 +835,9 @@ fn wall_line(pixels: &[u8], width: u32, height: u32, camera: &Camera) -> Vec<f32
 
 #[test]
 fn a_camera_spin_does_not_recolor_the_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = hall_lamp();
@@ -838,7 +856,7 @@ fn a_camera_spin_does_not_recolor_the_wall() {
     for step_i in 0..8 {
         let mut camera = Camera::new(0.4, 2.4, std::f32::consts::PI - 0.3 + step_i as f32 * 0.08);
         camera.pitch = -0.12;
-        let pixels = draw_game(&mut window, &mut renderer, &world, &camera);
+        let pixels = draw_game(window, renderer, &world, &camera);
         let aspect = width as f32 / height as f32;
         let colors: Vec<[f32; 3]> = points
             .iter()
@@ -874,7 +892,9 @@ fn a_camera_spin_does_not_recolor_the_wall() {
 
 #[test]
 fn walking_does_not_flip_the_light_between_states() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = shipped_hall();
@@ -890,7 +910,7 @@ fn walking_does_not_flip_the_light_between_states() {
         camera.position.z = 1.2 + step_i as f32 * (4.0 / 60.0);
         camera.position.x = (step_i as f32 * 0.03).sin() * 0.35;
         camera.yaw = std::f32::consts::PI + (step_i as f32 * 0.04).sin() * 0.2;
-        let pixels = draw_game(&mut window, &mut renderer, &world, &camera);
+        let pixels = draw_game(window, renderer, &world, &camera);
         let aspect = width as f32 / height as f32;
         let wall_px = if viewport_uv(&camera, aspect, wall).is_none() {
             [-1.0, -1.0, -1.0]
@@ -939,7 +959,9 @@ fn walking_does_not_flip_the_light_between_states() {
 
 #[test]
 fn a_turn_toward_the_lamp_does_not_pop_the_bounce() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = shipped_hall();
@@ -948,9 +970,9 @@ fn a_turn_toward_the_lamp_does_not_pop_the_bounce() {
     away.pitch = -0.45;
     let mut toward = away.clone();
     toward.yaw = 0.0;
-    let _away_px = draw(&mut window, &mut renderer, &world, &away);
-    let held = draw_game(&mut window, &mut renderer, &world, &toward);
-    let settled = draw(&mut window, &mut renderer, &world, &toward);
+    let _away_px = draw(window, renderer, &world, &away);
+    let held = draw_game(window, renderer, &world, &toward);
+    let settled = draw(window, renderer, &world, &toward);
     let aspect = width as f32 / height as f32;
     let mut worst = 0.0_f32;
     let mut note = String::new();
@@ -984,7 +1006,9 @@ fn a_turn_toward_the_lamp_does_not_pop_the_bounce() {
 
 #[test]
 fn a_small_step_does_not_flash_a_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = scene(
@@ -1014,8 +1038,8 @@ fn a_small_step_does_not_flash_a_wall() {
     stepped.position.z += 0.06;
     stepped.yaw += 0.012;
     stepped.pitch -= 0.008;
-    let here_px = draw(&mut window, &mut renderer, &world, &here);
-    let step_px = draw(&mut window, &mut renderer, &world, &stepped);
+    let here_px = draw(window, renderer, &world, &here);
+    let step_px = draw(window, renderer, &world, &stepped);
     let mut worst = 0.0_f32;
     for step_i in 0..12 {
         let point = [-1.2 + step_i as f32 * 0.2, 1.4, -0.28];
@@ -1037,7 +1061,9 @@ fn floor_line(pixels: &[u8], width: u32, height: u32, camera: &Camera) -> Vec<f3
 
 #[test]
 fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let wall = Wall {
@@ -1068,7 +1094,7 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
             Vec::new(),
         );
         for camera in &cameras {
-            let pixels = draw(&mut window, &mut renderer, &world, camera);
+            let pixels = draw(window, renderer, &world, camera);
             let wall_samples = wall_line(&pixels, width, height, camera);
             let floor_samples = floor_line(&pixels, width, height, camera);
             assert!(
@@ -1082,8 +1108,8 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
         }
         let north = Camera::new(0.0, 6.2, 0.0);
         let south = &cameras[0];
-        let lit = draw(&mut window, &mut renderer, &world, south);
-        let back = draw(&mut window, &mut renderer, &world, &north);
+        let lit = draw(window, renderer, &world, south);
+        let back = draw(window, renderer, &world, &north);
         let lit_face = brightness(sample(&lit, width, height, south, [0.2, 1.25, -0.28]));
         assert!(
             lit_face > 80.0,
@@ -1124,13 +1150,13 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
         }],
     );
     let camera = Camera::new(-0.6, -6.0, std::f32::consts::PI);
-    let pixels = draw(&mut window, &mut renderer, &shadow_world, &camera);
+    let pixels = draw(window, renderer, &shadow_world, &camera);
     let lit = sample(&pixels, width, height, &camera, [-2.2, 0.0, -2.5]);
     // Floor in front of the lit south face. The red leaves that face onto this ground.
     let shadow = sample(&pixels, width, height, &camera, [-0.4, 0.0, -2.4]);
     let lit_face = sample(&pixels, width, height, &camera, [-0.4, 0.6, -2.25]);
     let east = Camera::new(4.0, -1.5, -std::f32::consts::FRAC_PI_2);
-    let side = draw(&mut window, &mut renderer, &shadow_world, &east);
+    let side = draw(window, renderer, &shadow_world, &east);
     let far_side = sample(&side, width, height, &east, [0.35, 0.6, -1.5]);
     assert!(
         brightness(lit) > brightness(shadow) + 40.0,
@@ -1148,7 +1174,9 @@ fn lit_views_stay_smooth_and_low_lamps_stop_at_the_wall() {
 
 #[test]
 fn the_hallway_wall_matches_its_direct_light() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = shipped_hall();
@@ -1156,8 +1184,8 @@ fn the_hallway_wall_matches_its_direct_light() {
     // The long wall's hall face points +Z, so the sun misses it. Bounce stays dim.
     let mut lit = 0.0_f32;
     lit = lit.max(check_hall_wall(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &world,
         width,
         height,
@@ -1170,8 +1198,8 @@ fn the_hallway_wall_matches_its_direct_light() {
         [-1.0, 1.3, 10.12],
     ));
     lit = lit.max(check_hall_wall(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &world,
         width,
         height,
@@ -1184,8 +1212,8 @@ fn the_hallway_wall_matches_its_direct_light() {
         [3.8, 1.3, 8.02],
     ));
     check_hall_wall(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &world,
         width,
         height,
@@ -1245,7 +1273,9 @@ fn check_hall_wall(
 /// and the surface cache is off, so that light is the probe trace.
 #[test]
 fn an_empty_probe_outside_the_refresh_still_traces() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let _fill = FillOff;
     #[expect(
         clippy::disallowed_methods,
@@ -1256,7 +1286,7 @@ fn an_empty_probe_outside_the_refresh_still_traces() {
     }
     let width = renderer.width();
     let height = renderer.height();
-    show_bounce(&mut renderer);
+    show_bounce(renderer);
     let mut world = scene(
         vec![Light {
             position: Vec3::new(-5.0, 4.0, 0.0),
@@ -1285,12 +1315,12 @@ fn an_empty_probe_outside_the_refresh_still_traces() {
     let mut sky = Camera::new(0.0, 20.0, 0.0);
     sky.set_pose(Vec3::new(0.0, 20.0, 0.0), 0.0, 1.5);
     for _ in 0..8 {
-        submit(&mut window, &mut renderer, &world, &sky);
+        submit(window, renderer, &world, &sky);
     }
     let _ = renderer.lighting_probe_samples();
     let mut camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
     camera.set_pose(Vec3::new(2.2, 1.7, 1.2), std::f32::consts::PI, -0.35);
-    let picture = draw(&mut window, &mut renderer, &world, &camera);
+    let picture = draw(window, renderer, &world, &camera);
     let sched = renderer.last_schedule();
     let (inside, outside, outside_px, outside_bright) = bounce_span(&picture, width, height, &sched);
     let plan = sched.plan;
@@ -1318,7 +1348,9 @@ fn an_empty_probe_outside_the_refresh_still_traces() {
 /// crop a second time drops the kept-ray count from eight strata to under six.
 #[test]
 fn a_still_camera_keeps_probe_history_through_the_crop() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = gated(scene(
         vec![Light {
             position: Vec3::new(-5.0, 4.0, 0.0),
@@ -1339,12 +1371,12 @@ fn a_still_camera_keeps_probe_history_through_the_crop() {
         Vec::new(),
     ));
     let camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let [kept1, probes1] = renderer.lighting_probe_samples();
     for _ in 0..6 {
-        submit(&mut window, &mut renderer, &world, &camera);
+        submit(window, renderer, &world, &camera);
     }
-    let _ = draw(&mut window, &mut renderer, &world, &camera);
+    let _ = draw(window, renderer, &world, &camera);
     let sched = renderer.last_schedule();
     let [kept8, probes8] = renderer.lighting_probe_samples();
     eprintln!("history kept1 {kept1} probes1 {probes1} kept8 {kept8} probes8 {probes8}");
@@ -1369,10 +1401,12 @@ fn a_still_camera_keeps_probe_history_through_the_crop() {
 /// `cv.w > LIGHTING_LEVEL_READY` returns the empty cell as black.
 #[test]
 fn a_tail_view_skips_an_unfinished_parent() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
-    show_tail(&mut renderer);
+    show_tail(renderer);
     let mut world = scene(
         vec![Light {
             position: Vec3::new(-5.0, 4.0, 0.0),
@@ -1400,7 +1434,7 @@ fn a_tail_view_skips_an_unfinished_parent() {
     world.scene.lighting.bounce.count = genos_scene::LIGHTING_BOUNCES_UNLIMITED;
     let mut camera = Camera::new(2.2, 1.2, std::f32::consts::PI);
     camera.set_pose(Vec3::new(2.2, 1.7, 1.2), std::f32::consts::PI, -0.35);
-    let picture = draw(&mut window, &mut renderer, &world, &camera);
+    let picture = draw(window, renderer, &world, &camera);
     let at = [2.8f32, 1.2, 2.2];
     let lit = brightness(sample(&picture, width, height, &camera, at));
     eprintln!("tail unfinished parent {lit:.1}");
@@ -1416,10 +1450,12 @@ fn a_tail_view_skips_an_unfinished_parent() {
 /// floor. `budget_scale` 1/64 turns the direct gate on for that read.
 #[test]
 fn a_coarse_parent_stays_on_its_own_surface() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
-    show_bounce(&mut renderer);
+    show_bounce(renderer);
     let mut world = scene(
         vec![Light {
             position: Vec3::new(1.0, 2.4, 0.4),
@@ -1447,7 +1483,7 @@ fn a_coarse_parent_stays_on_its_own_surface() {
     for (i, eye) in [2.0f32, 2.15, 2.25, 2.2, 2.3, 2.2].into_iter().enumerate() {
         let mut cam = look_down(eye, 0.4);
         cam.pitch = -1.4;
-        let px = draw(&mut window, &mut renderer, &world, &cam);
+        let px = draw(window, renderer, &world, &cam);
         lit = viewport_uv(&cam, width as f32 / height as f32, [2.2, 0.0, 0.4])
             .map_or(-1.0, |_| brightness(sample(&px, width, height, &cam, [2.2, 0.0, 0.4])));
         let _ = write!(lit_line, " f{i}:{lit:.0}");
@@ -1455,7 +1491,7 @@ fn a_coarse_parent_stays_on_its_own_surface() {
     world = gated(world);
     let mut far = look_down(2.65, 0.4);
     far.pitch = -1.4;
-    let far_px = draw(&mut window, &mut renderer, &world, &far);
+    let far_px = draw(window, renderer, &world, &far);
     let hidden_at = [2.58f32, 0.0, 0.4];
     let hidden = brightness(sample(&far_px, width, height, &far, hidden_at));
     let sched = renderer.last_schedule();
@@ -1480,7 +1516,9 @@ fn a_coarse_parent_stays_on_its_own_surface() {
 
 #[test]
 fn the_corridor_carries_bounce_around_the_bend() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let mut world = present(
@@ -1499,9 +1537,9 @@ fn the_corridor_carries_bounce_around_the_bend() {
     let mouth_cam = Camera::new(0.0, 5.5, std::f32::consts::PI);
     let far_cam = Camera::new(0.2, 9.0, std::f32::consts::FRAC_PI_2);
     let out_cam = Camera::new(-6.2, 7.0, std::f32::consts::FRAC_PI_2);
-    let mouth_px = draw(&mut window, &mut renderer, &world, &mouth_cam);
-    let far_px = draw(&mut window, &mut renderer, &world, &far_cam);
-    let out_px = draw(&mut window, &mut renderer, &world, &out_cam);
+    let mouth_px = draw(window, renderer, &world, &mouth_cam);
+    let far_px = draw(window, renderer, &world, &far_cam);
+    let out_px = draw(window, renderer, &world, &out_cam);
     let mouth = brightness(sample(
         &mouth_px,
         width,
@@ -1512,7 +1550,7 @@ fn the_corridor_carries_bounce_around_the_bend() {
     let far = brightness(sample(&far_px, width, height, &far_cam, [4.2, 0.0, 9.0]));
     let outside = brightness(sample(&out_px, width, height, &out_cam, [-2.4, 0.0, 7.0]));
     world.scene.lights.clear();
-    let dark_px = draw(&mut window, &mut renderer, &world, &far_cam);
+    let dark_px = draw(window, renderer, &world, &far_cam);
     let dark = brightness(sample(&dark_px, width, height, &far_cam, [4.2, 0.0, 9.0]));
     println!("corridor mouth {mouth} far {far} outside {outside} dark {dark}");
     assert!(
@@ -1531,7 +1569,9 @@ fn the_corridor_carries_bounce_around_the_bend() {
 
 #[test]
 fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let mut world = present(
@@ -1549,8 +1589,8 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
     }];
     let shadow_cam = Camera::new(1.0, 6.0, -std::f32::consts::FRAC_PI_2);
     let gap_cam = Camera::new(1.0, 9.0, -std::f32::consts::FRAC_PI_2);
-    let shadow_px = draw(&mut window, &mut renderer, &world, &shadow_cam);
-    let gap_px = draw(&mut window, &mut renderer, &world, &gap_cam);
+    let shadow_px = draw(window, renderer, &world, &shadow_cam);
+    let gap_px = draw(window, renderer, &world, &gap_cam);
     let shadow_face = sample(&shadow_px, width, height, &shadow_cam, [-1.28, 1.1, 6.0]);
     let gap_face = sample(&gap_px, width, height, &gap_cam, [-1.28, 1.1, 9.0]);
     assert!(
@@ -1567,8 +1607,8 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
     beside_cam.pitch = -0.45;
     let mut hall_cam = Camera::new(0.0, 8.6, 0.0);
     hall_cam.pitch = -0.4;
-    let beside_px = draw(&mut window, &mut renderer, &world, &beside_cam);
-    let hall_px = draw(&mut window, &mut renderer, &world, &hall_cam);
+    let beside_px = draw(window, renderer, &world, &beside_cam);
+    let hall_px = draw(window, renderer, &world, &hall_cam);
     let beside = sample(&beside_px, width, height, &beside_cam, [0.8, 0.0, 1.8]);
     let hall = sample(&hall_px, width, height, &hall_cam, [0.0, 0.0, 6.4]);
     // From the path trace, not tuned: genos-debug tests/fire_reference.rs traces
@@ -1604,7 +1644,9 @@ fn opaque_wall() -> Wall {
 
 #[test]
 fn a_bright_lamp_does_not_cross_an_opaque_wall() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let east = Camera::new(2.4, 0.0, -std::f32::consts::FRAC_PI_2);
@@ -1621,9 +1663,9 @@ fn a_bright_lamp_does_not_cross_an_opaque_wall() {
         vec![opaque_wall()],
         Vec::new(),
     );
-    let east_px = draw(&mut window, &mut renderer, &world, &east);
-    let west_px = draw(&mut window, &mut renderer, &world, &west);
-    let floor_px = draw(&mut window, &mut renderer, &world, &floor_cam);
+    let east_px = draw(window, renderer, &world, &east);
+    let west_px = draw(window, renderer, &world, &west);
+    let floor_px = draw(window, renderer, &world, &floor_cam);
     let shadow_face = sample(&east_px, width, height, &east, [0.24, 1.2, 0.0]);
     let lit_face = sample(&west_px, width, height, &west, [-0.24, 1.2, 0.0]);
     let shadow_floor = sample(&floor_px, width, height, &floor_cam, [1.2, 0.0, 0.7]);
@@ -1645,9 +1687,9 @@ fn a_bright_lamp_does_not_cross_an_opaque_wall() {
         vec![opaque_wall()],
         Vec::new(),
     );
-    let east_px = draw(&mut window, &mut renderer, &above, &east);
-    let west_px = draw(&mut window, &mut renderer, &above, &west);
-    let floor_px = draw(&mut window, &mut renderer, &above, &floor_cam);
+    let east_px = draw(window, renderer, &above, &east);
+    let west_px = draw(window, renderer, &above, &west);
+    let floor_px = draw(window, renderer, &above, &floor_cam);
     let above_east = sample(&east_px, width, height, &east, [0.24, 1.2, 0.0]);
     let above_west = sample(&west_px, width, height, &west, [-0.24, 1.2, 0.0]);
     let above_floor = sample(&floor_px, width, height, &floor_cam, [1.2, 0.0, 0.7]);
@@ -1715,7 +1757,9 @@ fn on_screen(camera: &Camera, width: u32, height: u32, world: [f32; 3]) -> bool 
 /// Presented light on an open floor, and colored bounce inside a geometric shadow.
 #[test]
 fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let floor = scene(
@@ -1730,7 +1774,7 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
     );
     let mut cam = Camera::new(0.0, -4.0, std::f32::consts::PI);
     cam.pitch = -0.55;
-    let pixels = draw(&mut window, &mut renderer, &floor, &cam);
+    let pixels = draw(window, renderer, &floor, &cam);
     let step = 0.08_f32;
     let n = 8i32;
     let mut grid = Vec::new();
@@ -1840,7 +1884,7 @@ fn an_open_floor_falls_off_smoothly_and_a_shadow_keeps_colored_bounce() {
     );
     let mut shadow_cam = Camera::new(1.4, -5.5, std::f32::consts::PI);
     shadow_cam.pitch = -0.35;
-    let shadow_px = draw(&mut window, &mut renderer, &bounce, &shadow_cam);
+    let shadow_px = draw(window, renderer, &bounce, &shadow_cam);
     let mut line = Vec::new();
     for step_i in 0..8 {
         let x = 1.05 + step_i as f32 * 0.08;
@@ -1901,7 +1945,9 @@ fn draw_mode(
 
 #[test]
 fn wireframe_draws_wall_vertices_and_keeps_a_second_face() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::new(3.0, 0.0, -std::f32::consts::FRAC_PI_2);
@@ -1928,14 +1974,14 @@ fn wireframe_draws_wall_vertices_and_keeps_a_second_face() {
     let edge = [0.2, 2.4, 0.0];
     let vertex = [0.2, 2.4, 1.0];
 
-    let filled = draw_mode(&mut window, &mut renderer, &one, &camera, false);
+    let filled = draw_mode(window, renderer, &one, &camera, false);
     let filled_face = brightness(sample(&filled, width, height, &camera, face));
     assert!(
         filled_face > 25.0,
         "the wall face is not a filled shaded surface: {filled_face}"
     );
 
-    let lines = draw_mode(&mut window, &mut renderer, &one, &camera, true);
+    let lines = draw_mode(window, renderer, &one, &camera, true);
     let open_face = brightness(sample(&lines, width, height, &camera, face));
     let open_inside = brightness(sample(&lines, width, height, &camera, inside));
     let line = brightness(sample(&lines, width, height, &camera, edge));
@@ -1958,7 +2004,7 @@ fn wireframe_draws_wall_vertices_and_keeps_a_second_face() {
     );
 
     let two = scene(vec![lamp], vec![wall.clone(), wall], Vec::new());
-    let stacked = draw_mode(&mut window, &mut renderer, &two, &camera, true);
+    let stacked = draw_mode(window, renderer, &two, &camera, true);
     let stacked_line = brightness(sample(&stacked, width, height, &camera, edge));
     eprintln!(
         "wireframe filled {filled_face:.1} face {open_face:.1} inside {open_inside:.1} edge {line:.1} corner {point:.1} stacked {stacked_line:.1}"
@@ -1971,7 +2017,9 @@ fn wireframe_draws_wall_vertices_and_keeps_a_second_face() {
 
 #[test]
 fn the_shape_top_and_the_near_corridor_read_local_probes() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let path = std::path::Path::new(concat!(
@@ -1982,11 +2030,11 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
     let mut top_cam = Camera::new(0.0, 2.6, 0.0);
     top_cam.position.y = 4.2;
     top_cam.pitch = -0.95;
-    let lit_px = draw(&mut window, &mut renderer, &world, &top_cam);
+    let lit_px = draw(window, renderer, &world, &top_cam);
     let top = brightness(sample(&lit_px, width, height, &top_cam, [0.0, 1.2, 0.0]));
     let away = brightness(sample(&lit_px, width, height, &top_cam, [0.0, 0.55, 0.78]));
     world.scene.lights.clear();
-    let dark_px = draw(&mut window, &mut renderer, &world, &top_cam);
+    let dark_px = draw(window, renderer, &world, &top_cam);
     let dark_top = brightness(sample(&dark_px, width, height, &top_cam, [0.0, 1.2, 0.0]));
     eprintln!("shape top {top:.1} away {away:.1} dark {dark_top:.1}");
     assert!(
@@ -2008,7 +2056,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
     let mut leg_cam = Camera::new(0.0, 5.1, std::f32::consts::PI);
     leg_cam.position.y = 10.0;
     leg_cam.pitch = -1.43;
-    let leg_px = draw(&mut window, &mut renderer, &corridor, &leg_cam);
+    let leg_px = draw(window, renderer, &corridor, &leg_cam);
     let near = brightness(sample(&leg_px, width, height, &leg_cam, [0.0, 0.0, 6.35]));
     let next = brightness(sample(&leg_px, width, height, &leg_cam, [0.0, 0.0, 6.55]));
     let across = brightness(sample(&leg_px, width, height, &leg_cam, [-2.8, 0.0, 6.45]));

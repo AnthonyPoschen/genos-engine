@@ -8,7 +8,7 @@ Lighting is the reference for a debug binary and for observability. Another syst
 
 `tools/lighting/dump.py DIR N` splits those buffers into one file per component and channel: surface-cache and world-cache CSVs and slot atlases (value, sets, variance, TDL direct, last-use age, dirty-stamp age), probe irradiance, own strata, a kept-source CSV, per-pixel direct light, and N to N+1 diffs (slot delta atlases, a top-down map of flips over 5 %, a probe changed mask and count, a pixel-direct delta).
 
-Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`, or the file named by `GENOS_LIGHTING_TOGGLES_FILE` (re-read every frame). The toggles are `freeze_cache`, `direct_only`, `bounce_only`, and `freeze_probes`. The note is [S78S](experiments/S78S-counters-still-churn.md).
+Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`. The toggles are `freeze_cache`, `direct_only`, `bounce_only`, and `freeze_probes`. The note is [S78S](experiments/S78S-counters-still-churn.md).
 
 ## Stats counters
 

@@ -54,6 +54,8 @@ pub const MAX_HULL_VERTS: usize = 12;
 
 /// Triangle faces stored on one convex hull piece.
 pub const MAX_HULL_FACES: usize = 20;
+/// Feature-edge directions kept per hull for edge-edge separating axes.
+pub const MAX_HULL_EDGES: usize = 3 * MAX_HULL_FACES / 2;
 
 /// Convex pieces stored on one mesh collider.
 pub const MAX_MESH_PIECES: usize = 6;
@@ -81,6 +83,10 @@ pub struct Hull {
     pub vert_count: u8,
     pub faces: [HullFace; MAX_HULL_FACES],
     pub face_count: u8,
+    /// Unit feature-edge directions, one per parallel family, built with the
+    /// faces so the step does not rebuild them per contact.
+    pub edges: [Vec3; MAX_HULL_EDGES],
+    pub edge_count: u8,
 }
 
 impl Hull {
@@ -89,6 +95,8 @@ impl Hull {
         vert_count: 0,
         faces: [HullFace::EMPTY; MAX_HULL_FACES],
         face_count: 0,
+        edges: [Vec3::ZERO; MAX_HULL_EDGES],
+        edge_count: 0,
     };
 }
 

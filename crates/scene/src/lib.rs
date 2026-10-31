@@ -38,7 +38,9 @@ pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
     lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
-    DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings, LightingPreset,
+    DirectSettings, GiSettings, GpuBuckets, LightingExperimentSettings, parse_lighting_toggles,
+    LIGHTING_DEFAULT_SC_FLAGS, LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
+    LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES, LampPickMode, LampPickSettings, LightingPreset,
     LightingSettings, ProbeSettings, ScheduleMode, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
     LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,

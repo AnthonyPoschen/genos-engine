@@ -26,15 +26,15 @@ use genos_scene::{
 };
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     std::env::set_var("GENOS_GPU_TIMES", "30");
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 /// Picture checks hold the work-cap controller off. Play leaves it on.
@@ -157,7 +157,9 @@ fn run_case(
 
 #[test]
 fn presets_and_feature_off_skip_their_passes() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut camera = Camera::opening();
     let gi = [
         "compact",
@@ -247,8 +249,8 @@ fn presets_and_feature_off_skip_their_passes() {
     for (name, settings, run, zero) in cases {
         let mut world = room(settings);
         timed |= run_case(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut camera,
             name,
@@ -261,8 +263,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.direct.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "direct off",
@@ -274,8 +276,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.shadows.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "shadows off",
@@ -287,8 +289,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.gi.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "gi off",
@@ -300,8 +302,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.bounce.count = 0;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "bounces 0",
@@ -313,8 +315,8 @@ fn presets_and_feature_off_skip_their_passes() {
     one.bounce.count = 1;
     let mut world = room(one);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "bounces 1",
@@ -326,8 +328,8 @@ fn presets_and_feature_off_skip_their_passes() {
     two.bounce.count = 2;
     let mut world = room(two);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "bounces 2",
@@ -352,8 +354,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.probes.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "probes off",
@@ -365,8 +367,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.world_cache.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "world cache off",
@@ -378,8 +380,8 @@ fn presets_and_feature_off_skip_their_passes() {
     off.denoiser.enabled = false;
     let mut world = room(off);
     timed |= run_case(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &mut world,
         &mut camera,
         "denoise off",
@@ -406,8 +408,8 @@ fn presets_and_feature_off_skip_their_passes() {
         edit(&mut settings);
         let mut world = room(settings.clone());
         timed |= run_case(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut world,
             &mut camera,
             name,
@@ -658,7 +660,9 @@ fn assert_boxes(name: &str, pixels: &[u8], width: u32, height: u32, camera: &Cam
 /// inf in the shader shows up as one of those.
 #[test]
 fn presets_and_toggles_match_their_look() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = 320u32;
     let height = 180u32;
     let frames = 6u32;
@@ -708,8 +712,8 @@ fn presets_and_toggles_match_their_look() {
         let moving = name != "world cache off";
         let world = interior(settings);
         let pixels = shoot(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &world,
             &mut camera,
             frames,
@@ -733,7 +737,9 @@ fn presets_and_toggles_match_their_look() {
 /// each lower count records fewer dispatches.
 #[test]
 fn bounce_counts_brighten_the_shadow_and_skip_work() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = 320u32;
     let height = 180u32;
     let sample_at = [1.6, 0.02, 0.0];
@@ -827,11 +833,13 @@ fn shadow_corner(settings: LightingSettings) -> World {
 /// frame behind, so the sample starts after that.
 #[test]
 fn world_cache_off_still_is_not_slower() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let frames = 48u32;
     let on = still_lighting(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &interior(LightingSettings::preset(LightingPreset::High)),
         frames,
     );
@@ -842,7 +850,7 @@ fn world_cache_off_still_is_not_slower() {
     );
     let mut off_settings = LightingSettings::preset(LightingPreset::High);
     off_settings.world_cache.enabled = false;
-    let off = still_lighting(&mut window, &mut renderer, &interior(off_settings), frames);
+    let off = still_lighting(window, renderer, &interior(off_settings), frames);
     assert_eq!(off.1[index("cache_rays")], 0, "cache rays still dispatched");
     assert_eq!(off.1[index("hit_light")], 0, "hit light still dispatched");
     assert_eq!(off.1[index("trace")], 0, "probe trace still dispatched");

@@ -91,7 +91,10 @@ fn a_texcoord_hit_matches_its_slot() {
         "set 0 albedo {}",
         reference.diffuse_albedo()[0]
     );
-    assert!((before - 0.521_756).abs() < 1.0e-4, "picture_texcoord before {before}");
+    assert!(
+        (before - 0.521_756).abs() < 1.0e-4,
+        "picture_texcoord before {before}"
+    );
     assert!(after <= 1.0e-6, "picture_texcoord after {after}");
 }
 
@@ -146,9 +149,7 @@ fn the_furnace_picture_settles_and_the_lambert_picture_stays() {
 
 #[test]
 fn residency_stays_under_the_cap_and_the_lambert_picture_stays() {
-    use genos_load::{
-        mib_f32, Headroom, HeapSlice, Streamer, TextureView, VramBudget,
-    };
+    use genos_load::{mib_f32, Headroom, HeapSlice, Streamer, TextureView, VramBudget};
 
     let mib = |n: u64| n * 1024 * 1024;
     let levels = [mib(300), mib(75), mib(20)];
@@ -248,20 +249,15 @@ fn mip_score(colour: &[genos_load::Mip], normal: &[genos_load::Mip]) -> f32 {
         mistakes += 1.0;
     }
     if normal.last().is_none_or(|mip| {
-        mip.width != 1
-            || mip.height != 1
-            || mip.pixels.len() < 4
-            || {
-                let normal = genos_load::normal_from_bytes([
-                    mip.pixels[0],
-                    mip.pixels[1],
-                    mip.pixels[2],
-                    mip.pixels[3],
-                ]);
-                normal[0].abs() > 1.0e-6
-                    || normal[1].abs() > 1.0e-6
-                    || (normal[2] - 1.0).abs() > 1.0e-6
-            }
+        mip.width != 1 || mip.height != 1 || mip.pixels.len() < 4 || {
+            let normal = genos_load::normal_from_bytes([
+                mip.pixels[0],
+                mip.pixels[1],
+                mip.pixels[2],
+                mip.pixels[3],
+            ]);
+            normal[0].abs() > 1.0e-6 || normal[1].abs() > 1.0e-6 || (normal[2] - 1.0).abs() > 1.0e-6
+        }
     }) {
         mistakes += 1.0;
     }
