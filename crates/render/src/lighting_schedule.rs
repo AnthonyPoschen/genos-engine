@@ -711,10 +711,11 @@ fn refresh_rect(input: &ScreenBudget, tiles_x: u32, tiles_y: u32, grant_tiles: u
     (origin_x, origin_y, span_w, span_h, band_y, band_h)
 }
 
-/// Rotation cells per display axis. [`ROTATE_FRAMES_MAX`] is its square.
+/// Rotation cells per display axis. `ROTATE_FRAMES_MAX` is its square.
 const ROTATE_GRID: u32 = 4;
 /// Most frames before a gated rect has walked every display tile.
-pub const ROTATE_FRAMES_MAX: u32 = ROTATE_GRID * ROTATE_GRID;
+#[cfg(test)]
+const ROTATE_FRAMES_MAX: u32 = ROTATE_GRID * ROTATE_GRID;
 
 /// Origin of rotation cell `frame` over the display. Columns (rows) start at
 /// the leading edge of a turn, so the newest disocclusion refreshes first.
