@@ -175,6 +175,12 @@ pub fn prefix(
     words[13] = SPATIAL_NEIGHBORS;
     words[14] = SPATIAL_RADIUS;
     words[15] = u32::from(layout_changed);
+    if reuse_off() {
+        // Diagnostic: no temporal history (word 15 forces the temporal pass
+        // to treat history as invalid) and no spatial neighbours (word 13).
+        words[13] = 0;
+        words[15] = 1;
+    }
     words[16] = frame;
     words[17] = 0xC5A1_7E11 ^ frame;
     words[18] = 0x0051_5EED;
@@ -187,6 +193,20 @@ pub fn prefix(
         words,
         total_words: total,
         layout_changed,
+    })
+}
+
+/// `GENOS_RESTIR_REUSE=off` turns temporal and spatial reuse off, leaving
+/// initial candidates only. Diagnostic for bias hunts; logged once.
+fn reuse_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| {
+        #[expect(clippy::disallowed_methods, reason = "diagnostic knob read once")]
+        let off = std::env::var("GENOS_RESTIR_REUSE").is_ok_and(|v| v == "off");
+        if off {
+            eprintln!("restir: reuse off (temporal history invalid, spatial neighbours 0)");
+        }
+        off
     })
 }
 
