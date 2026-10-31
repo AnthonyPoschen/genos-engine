@@ -313,7 +313,12 @@ void restir_temporal(uint pixel) {
     if (h_m != 0u && h_lamp != LAMP_EMPTY) {
         uint hist_m = h_m;
         float hist_w = h_w;
-        cap_history(hist_m, hist_w, m);
+        // An empty initial reservoir still drew its candidates; restir_store4
+        // drops its M to 0, so restore the candidate count here. Without it
+        // the history skips every all-miss frame and reads 1/P(hit) too bright.
+        bool c_empty = is_empty(lamp, m);
+        uint m_now = c_empty ? restir_hdr(9u) : m;
+        cap_history(hist_m, hist_w, m_now);
         // Validation: the history sample is re-scored at this frame's point
         // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
         // out of reach, or switched off drops out (tq_h = 0). A lamp that
@@ -321,9 +326,9 @@ void restir_temporal(uint pixel) {
         // confidence: its W was built against the old target, so it gets an
         // equal vote instead of up to 20 frames' worth. Scaling w_sum with M
         // keeps the reservoir's W, so the estimate stays unbiased.
-        if (m != 0u && hist_m > m && restir_lamp_changed(h_lamp)) {
-            hist_w *= m_as_f(m) / m_as_f(hist_m);
-            hist_m = m;
+        if (m_now != 0u && hist_m > m_now && restir_lamp_changed(h_lamp)) {
+            hist_w *= m_as_f(m_now) / m_as_f(hist_m);
+            hist_m = m_now;
         }
         float tq_c = 0.0;
         if (lamp != LAMP_EMPTY && (tree ? lamp < restir_hdr(0u) : lamp < n)) {
@@ -333,12 +338,26 @@ void restir_temporal(uint pixel) {
         if (h_lamp != LAMP_EMPTY && (tree ? h_lamp < restir_hdr(0u) : h_lamp < n)) {
             tq_h = restir_phat(pixel, h_lamp);
         }
-        merge_pair(
-            lamp, w_sum, m, target, tq_c,
-            h_lamp, hist_w, hist_m, h_target, tq_h,
-            tq_c, tq_h,
-            unit,
-            out_lamp, out_w, out_m, out_target);
+        if (c_empty) {
+            // Merge with an empty current reservoir of M m_now: the history
+            // sample keeps its mass, the count grows, W shrinks to match.
+            float w_h_res = reservoir_w(h_lamp, hist_w, hist_m, h_target);
+            if (tq_h > 0.0 && w_h_res > 0.0) {
+                out_lamp = h_lamp;
+                out_m = hist_m + m_now;
+                out_target = tq_h;
+                out_w = m_as_f(hist_m) * w_h_res * tq_h;
+            } else {
+                store_empty(out_lamp, out_w, out_m, out_target);
+            }
+        } else {
+            merge_pair(
+                lamp, w_sum, m, target, tq_c,
+                h_lamp, hist_w, hist_m, h_target, tq_h,
+                tq_c, tq_h,
+                unit,
+                out_lamp, out_w, out_m, out_target);
+        }
     }
     uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
     uint at = next + pixel * stride;

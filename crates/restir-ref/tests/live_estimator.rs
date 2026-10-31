@@ -127,8 +127,10 @@ fn temporal(p: &Pixel, lamps: &[LiveLamp], c: Res, h: Res, unit: f32) -> Res {
         return c;
     }
     let mut h = h;
-    let cap = DEFAULT_M_CLAMP * c.m;
-    if c.m != 0 && h.m > cap {
+    // An empty initial reservoir still drew CANDIDATES samples (stored as M 0).
+    let m_now = if c.lamp.is_none() { CANDIDATES } else { c.m };
+    let cap = DEFAULT_M_CLAMP * m_now;
+    if m_now != 0 && h.m > cap {
         h.w_sum *= cap as f32 / h.m as f32;
         h.m = cap;
     }
@@ -137,7 +139,13 @@ fn temporal(p: &Pixel, lamps: &[LiveLamp], c: Res, h: Res, unit: f32) -> Res {
         h.m = M_CAP;
     }
     if c.lamp.is_none() {
-        return h;
+        // The empty current reservoir's M joins the count; W shrinks to match.
+        let tq_h = phat(p, &lamps[h.lamp.unwrap_or(0)]);
+        if tq_h <= 0.0 {
+            return Res::default();
+        }
+        let m = h.m + m_now;
+        return Res { lamp: h.lamp, w_sum: h.m as f32 * w_of(h) * tq_h, m, target: tq_h };
     }
     let tq_c = phat(p, &lamps[c.lamp.unwrap_or(0)]);
     let tq_h = phat(p, &lamps[h.lamp.unwrap_or(0)]);
