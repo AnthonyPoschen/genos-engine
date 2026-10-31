@@ -294,13 +294,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_ASYNC"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-async (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_ATROUS_DIRTY"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-denoise-dirty (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_BORROW"
@@ -309,13 +309,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_CACHE_HZ"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-hz (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_CACHE_PICKS"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-picks (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_CATCH_UP"
@@ -414,8 +414,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-fill (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_GI"
@@ -564,8 +564,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_FLAGS"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-sc-flags (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_LOCAL"
@@ -599,8 +599,8 @@ detail = "--surface-cache-ray-budget"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_SETTLE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-sc-settle (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_TRACE"
@@ -634,18 +634,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_TILE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-probe-tile (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_TOGGLES"
-kind = "todo"
-detail = "no CLI argument yet"
-
-[[var]]
-name = "GENOS_LIGHTING_TOGGLES_FILE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-toggles (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_URGENT"
@@ -664,8 +659,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_WORLD_CAP"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-world-cap (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_WORLD_CELL"
@@ -684,8 +679,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_YOUNG_ONLY"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-young-only (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_MENU_SHOT"
@@ -1145,11 +1140,6 @@ kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_TOGGLES; one-release warning"
 
 [[var]]
-name = "GENOS_GI2_TOGGLES_FILE"
-kind = "override"
-detail = "deprecated alias of GENOS_LIGHTING_TOGGLES_FILE; one-release warning"
-
-[[var]]
 name = "GENOS_GI2_UNFILLED"
 kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_UNFILLED; one-release warning"
@@ -1460,3 +1450,23 @@ name = "GENOS_PHYSICS_METRICS_OUT"
 kind = "mirror"
 detail = "--out"
 
+
+[[var]]
+name = "GENOS_LIFECYCLE_BLOCK_MS"
+kind = "mirror"
+detail = "--lifecycle-block-ms"
+
+[[var]]
+name = "GENOS_LIFECYCLE_CLOSE_EARLY"
+kind = "mirror"
+detail = "--lifecycle-close-early"
+
+[[var]]
+name = "GENOS_PBR_PARITY_DEVICE"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_TEST_TIMEOUT_SECS"
+kind = "test"
+detail = "material_stream watchdog seconds"

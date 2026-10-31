@@ -5,10 +5,12 @@
 //! Y is up. The values are plain `Copy` values, and the operations do not allocate.
 //! The medium closed forms are `f64`, with `f32` wrappers for the renderer.
 
+pub mod brdf;
 mod mat;
 mod media;
 pub mod optics;
 mod quat;
+pub mod tonemap;
 mod vec;
 
 pub use mat::{Mat3, Mat4};

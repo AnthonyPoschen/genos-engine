@@ -32,6 +32,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "bcdec_rs"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d521509f38a9ab0fce76656a0416161ee5d42c1eab6672b958391e2ac7a0e31"
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -105,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-math",
+ "genos-window",
 ]
 
 [[package]]
@@ -121,6 +128,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-mesh",
+ "genos-window",
 ]
 
 [[package]]
@@ -136,9 +144,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-cook"
+version = "0.1.0"
+dependencies = [
+ "bcdec_rs",
+ "genos-bake",
+ "genos-load",
+ "intel_tex_2",
+]
+
+[[package]]
 name = "genos-debug"
 version = "0.1.0"
 dependencies = [
+ "genos-fog-ref",
  "genos-gpuref",
  "genos-load",
  "genos-mcp",
@@ -157,6 +176,10 @@ dependencies = [
  "genos-render",
  "genos-window",
 ]
+
+[[package]]
+name = "genos-fog-ref"
+version = "0.1.0"
 
 [[package]]
 name = "genos-fracture"
@@ -247,6 +270,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-physics-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
+ "genos-mcp",
+ "genos-physics",
+ "genos-scene",
+]
+
+[[package]]
 name = "genos-render"
 version = "0.1.0"
 dependencies = [
@@ -324,6 +357,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "hermit-abi"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
+
+[[package]]
+name = "intel_tex_2"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7980d359170e7da4bc2421aa74c49d338a3153313e006d732a3430f1af375a60"
+dependencies = [
+ "ispc_rt",
+]
+
+[[package]]
+name = "ispc_rt"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a396f76fd253fab9945bb4c6080f515d0c4036bc30219462d199b58886fd37b4"
+dependencies = [
+ "libc",
+ "num_cpus",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -357,6 +415,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "num_cpus"
+version = "1.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
+dependencies = [
+ "hermit-abi",
+ "libc",
 ]
 
 [[package]]

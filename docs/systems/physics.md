@@ -58,7 +58,7 @@ A mesh collider is a few convex pieces, not the source triangles. Two concave me
 
 The camera calls this step from the scene crate. Lights have no collider.
 
-`debug/physics` is not in this change. The headless probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
+`debug/physics` (`genos-physics`) is the debug binary: headless, stats only, with the ship lanes, hull edge contacts, resting pile and 10k static grid scenes, per-step JSON stats, bitwise replay, checkpoint restore, and the `physics_*` MCP commands. See [debug/physics/README.md](../../debug/physics/README.md). The destruction metrics probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
 
 | Failure | Tunable | Probe |
 |---|---|---|

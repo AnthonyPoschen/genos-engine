@@ -9,6 +9,7 @@ lighting stage one fixed set of scenes and numbers to compare against master.
 make lighting-oracle                 # quick profile, out in genos-debug/oracle
 make lighting-oracle PROFILE=full    # every frame traced, adds sun x1
 scripts/lighting/oracle_run.sh quick /tmp/oracle   # same, explicit
+make lighting-oracle PROFILE=lamps   # many-lamp spin and switch only
 ```
 
 The runner starts a headless Weston on lavapipe (the same setup as the
@@ -23,6 +24,15 @@ JSON, one object per scenario) plus the pictures it scored.
 | `spin` | The box nearest the hall spinning at 2 rad/s, lamps on, at night | 240 |
 | `switch` | Dark room at midnight (lamps off for 10 s first), every lamp turns on in one frame | 8 dark + 120 |
 | `turn` | Camera turns 90 degrees in one second, then holds | 90 |
+| `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
+| `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
+
+The main scene has 5 point lamps. Every pixel then has at most 5 lit lamps and
+shades the exact sum (`LAMP_PICK_EXACT_LIT` is 8), so `spin` and `switch` never
+grade the random lamp path. The `lamps` profile exists to grade that path. Its
+script logs `LAMP_COVER`, the number of lamps whose reach holds the subject.
+That number is an upper bound on `point_lit`. The script fails if it is 8 or
+less.
 
 The `sun_speed` knob tops out at x64, so the script freezes the sun and steps
 `time_of_day` itself, one step per frame. Camera paths and the fixed 1/60 s
@@ -53,6 +63,20 @@ the trace pauses time, so it adds no settling.
 * `ref_err`: the same without the weight.
 * `grid_worst`, `grid_longest_run`: the PR #94 checkerboard metric
   (`scripts/lighting/grid_metric.py`, copied unchanged).
+* `grid_excess_worst`, `grid_excess_frame`, `grid_excess_longest_run`: for each
+  frame step that has a reference at both ends, the live grid score minus the
+  reference's grid score for the same step, clamped at 0. Real shadow motion
+  scores about the same in both and cancels, so what's left is the checkerboard
+  the live cache adds. Needs per-frame references:
+  `ORACLE_REF_EVERY_FRAME="sun-x100" ORACLE_ONLY="sun-x100" scripts/lighting/oracle_run.sh quick OUT`
+  (sun-x100 is 73 traces, about 40 min on lavapipe).
+
+**Gate note (31 Oct 2026, pending Anthony):** at 160x90 and x100 sun the
+reference path tracer itself scores `grid_worst` 0.45, because one shadow edge
+crossing an 8x8 tile decides the score (PR #98 diagnosis). The ADR 0022 F1 gate
+(sun-x100 `grid_worst` < 0.567, target <= 0.15) is proposed to move to
+`grid_excess_worst`, recalibrated from base. Until Anthony decides, the gate
+number is unchanged and `grid_worst` stays reported.
 * `unchanged`: recomputed-but-unchanged work. `px_share` is the share of 8x8
   tiles whose picture did not change while being recomputed; `refreshes` is
   the mean `cache_entries_refreshed` per frame and `refreshes_unchanged` the

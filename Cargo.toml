@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/input",
     "crates/math",
+    "crates/fog-ref",
     "crates/json",
     "crates/mesh",
     "crates/bake",
@@ -18,6 +19,7 @@ members = [
     "crates/lighting-ref",
     "crates/load",
     "crates/load-check",
+    "crates/cook",
     "crates/audio",
     "crates/audio-check",
     "crates/fog-check",
@@ -25,6 +27,7 @@ members = [
     "examples/stress",
     "debug/scene-lib",
     "debug/lighting",
+    "debug/physics",
 ]
 
 [workspace.lints.rust]
