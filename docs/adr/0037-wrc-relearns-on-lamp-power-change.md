@@ -89,3 +89,36 @@ A test in `crates/render/tests/lighting_frame.rs` on the lighting-v3 High preset
 - The worst-case switch frame must stay within the preset's frame budget.
 
 The energy number (indirect / 64-bounce reference ≥ 0.95) is tracked separately.
+
+## Remaining energy gaps (diagnosis, lighting-v3 34cc80c)
+
+**Measurement fix first.** `oracle_metrics.lin_luma` decoded the PNGs as sRGB. They actually store the shoulder tone, which is linear up to 0.64. The fix is PR #148, with a test and the fix as separate commits. With the right decode:
+
+- The bounce view equals live − direct (0.386 against 0.385). The earlier 0.146 against 0.241 was entirely the wrong decode.
+- The real gaps are larger than reported: indirect / 64-bounce ref is **0.77** with the WRC on and **0.88** with it off. The earlier figures were 0.87 and 0.94.
+
+Every number below uses the corrected decode. The setup is hall, 32 lamps, 22:00, settled, held camera, 160×90 lavapipe, with references b0 and b64. Each row changes one toggle; the hooks are local only and nothing is committed.
+
+| Toggle | WRC on @600 | WRC on @1800 | WRC off @600 / @1800 |
+|---|---|---|---|
+| baseline | 0.776 | 0.788 | 0.883 / 0.883 |
+| cells read only at ≥ 64 sets (`LIGHTING_SC_READ_SETS` 4 → 64) | 0.778 | 0.789 | 0.888 / 0.888 |
+| fixed 25 cm hit patches (`SC_FLAGS` 256) | 0.740 | 0.752 | 0.801 / 0.801 |
+| no cache light at hits, one bounce (`SC_FLAGS` 2097152) | 0.321 | 0.322 | 0.333 / 0.333 |
+
+All values are bounce / reference indirect. Direct / ref is 0.997 in every run.
+
+**What these rule in and out:**
+
+- **Cells read before they fill:** ruled out (+0.2 %).
+- **Max ray distance:** ruled out. The trace limit is 200 m, more than the hall.
+- **Coarse hit patches:** do not cause the loss. Forcing coarser 25 cm patches costs about 4 % (WRC on) and 8 % (WRC off), so patch size matters, but the shipped sizes are already the better case.
+- **Slow convergence:** the WRC on its own still gains about 1 % between 600 and 1800 frames, so part of its 11 % is slow convergence (the history lag above).
+- **Where the shared 12 % sits:** one bounce gives 0.33 of the reference indirect, and the cache's later bounces add 0.55, where the reference's later bounces give 0.67. So the shared 12 % sits in the multi-bounce chain through the light cache, not in the first bounce. That points at albedo or energy per cache hop, or truncation by the cache's own bounce depth. The direct term matches, and the first-bounce estimator was checked correct above.
+
+**Not measured in this pass:**
+
+- Normal-bucket leak at corners.
+- Probe ray count and termination.
+- Albedo per hop: the next toggle is to scale the hit albedo and see whether the gap scales like a geometric series.
+- Sky and ambient: at 22:00 the sky is near 0, so they are unlikely to matter here.
