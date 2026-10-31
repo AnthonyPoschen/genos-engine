@@ -101,7 +101,7 @@ fn initial(p: &Pixel, lamps: &[LiveLamp], tree: &LightTree, rng: &mut Rng) -> Re
     let recv = Receiver { position: p.pos, normal: p.n, albedo: v(1.0, 1.0, 1.0) };
     let mut r = Res::default();
     for _ in 0..CANDIDATES {
-        let draw = tree.sample(&recv, TreeFault::None, rng);
+        let draw = tree.sample_sided(&recv, TreeFault::None, rng, p.two_sided);
         let unit = rng.next_f32();
         r.m += 1;
         if let Some((lamp, pdf)) = draw {

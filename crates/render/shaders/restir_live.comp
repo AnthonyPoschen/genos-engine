@@ -114,6 +114,13 @@ bool restir_surface_of(uint recv, out vec3 pos, out vec3 n, out bool two_sided) 
     return g_surf_ok;
 }
 
+bool restir_receiver_two_sided(uint recv) {
+    vec3 pos;
+    vec3 n;
+    bool two_sided;
+    return restir_surface_of(recv, pos, n, two_sided) && two_sided;
+}
+
 void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
     px = 0.0;
     py = 0.0;

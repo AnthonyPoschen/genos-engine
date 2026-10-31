@@ -35,6 +35,10 @@ float tree_split_steps(float left_i, float right_i, float sum) {
 }
 
 #ifndef RESTIR_LIVE_RECEIVER
+bool restir_receiver_two_sided(uint recv) {
+    return false;
+}
+
 void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
     uint r = RESTIR_RECV_BASE + recv * 9u;
     px = load_f(r);
@@ -125,6 +129,10 @@ float node_importance(uint node, uint recv, bool ignore_distance) {
     }
     float inv = 1.0 / dist;
     float cos_alpha = tree_dot(nx, ny, nz, dx * inv, dy * inv, dz * inv);
+    // lamp_light lights a two-sided face with |n.l|: bound with |cos|.
+    if (restir_receiver_two_sided(recv)) {
+        cos_alpha = abs(cos_alpha);
+    }
     float sin_theta = radius * inv;
     if (sin_theta > 1.0) {
         sin_theta = 1.0;

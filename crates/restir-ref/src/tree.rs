@@ -204,6 +204,19 @@ impl LightTree {
         fault: TreeFault,
         rng: &mut Rng,
     ) -> Option<(usize, f32)> {
+        self.sample_sided(receiver, fault, rng, false)
+    }
+
+    /// `sample` for a receiver lit from both sides (`|n.l|`) when `two_sided`:
+    /// the cosine bound takes `|cos|`, so lamps behind the normal keep support.
+    #[must_use]
+    pub fn sample_sided(
+        &self,
+        receiver: &Receiver,
+        fault: TreeFault,
+        rng: &mut Rng,
+        two_sided: bool,
+    ) -> Option<(usize, f32)> {
         if self.nodes.is_empty() {
             return None;
         }
@@ -222,8 +235,8 @@ impl LightTree {
                 let _ = rng.next_f32();
                 return None;
             }
-            let left_i = self.importance(left, receiver, fault);
-            let right_i = self.importance(right, receiver, fault);
+            let left_i = self.importance_sided(left, receiver, fault, two_sided);
+            let right_i = self.importance_sided(right, receiver, fault, two_sided);
             let sum = left_i + right_i;
             if sum <= 0.0 {
                 let _ = rng.next_f32();
@@ -249,10 +262,14 @@ impl LightTree {
     /// Conservative importance of one node at `receiver`.
     #[must_use]
     pub fn importance(&self, index: u32, receiver: &Receiver, fault: TreeFault) -> f32 {
+        self.importance_sided(index, receiver, fault, false)
+    }
+
+    fn importance_sided(&self, index: u32, receiver: &Receiver, fault: TreeFault, two_sided: bool) -> f32 {
         let Some(node) = self.node_at(index) else {
             return 0.0;
         };
-        node_importance(node, receiver, fault)
+        node_importance_sided(node, receiver, fault, two_sided)
     }
 
     fn node_at(&self, index: u32) -> Option<Node> {
@@ -272,6 +289,20 @@ impl LightTree {
 )]
 #[must_use]
 pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32 {
+    node_importance_sided(node, receiver, fault, false)
+}
+
+/// `node_importance` with `|cos|` for a two-sided receiver.
+#[must_use]
+#[allow(
+    clippy::manual_midpoint,
+    reason = "the lavapipe walk uses 0.5 * (min + max), and midpoint is a different rounding"
+)]
+#[allow(
+    clippy::similar_names,
+    reason = "the three box gaps are the x y z components of one vector"
+)]
+pub fn node_importance_sided(node: Node, receiver: &Receiver, fault: TreeFault, two_sided: bool) -> f32 {
     if node.power <= 0.0 {
         return 0.0;
     }
@@ -303,10 +334,13 @@ pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32
         return node.power * geom;
     }
     let inv = 1.0 / dist;
-    let cos_alpha = 0.0
+    let mut cos_alpha = 0.0
         + receiver.normal.x * (dx * inv)
         + receiver.normal.y * (dy * inv)
         + receiver.normal.z * (dz * inv);
+    if two_sided {
+        cos_alpha = cos_alpha.abs();
+    }
     let mut sin_theta = node.radius * inv;
     if sin_theta > 1.0 {
         sin_theta = 1.0;
