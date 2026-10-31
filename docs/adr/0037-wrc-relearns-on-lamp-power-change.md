@@ -183,3 +183,21 @@ For the box, the reference's per-hop increments are 0.0825, 0.0606, 0.0472 and 0
 - **No fix is proposed yet.** No clear term turned up, so there is no failing test and no PR.
 
 Note: the first round-5 table (box f 0.49) came from a stale build that still had a round-4 hit-albedo hook. Every number above comes from a clean rebuild with all hooks neutral.
+
+### Patch probe, round 6 (lighting-v3 34cc80c, 31 Oct 2026)
+
+**Correction: the simple-geometry table was measured with the surface cache off.** The run script sets `world_cache: false` before the wait (as listed above), so `settings.world_mode()` is 0 from frame 5 on (a host print of the change head shows mode 3 for frames 1–4, then 0). In mode 0, `lighting_compact.comp` skips the whole surface-cache scheduling block. A slot-entry counter shows about 12,360 live slots visited each frame, of which 6,530 are 25 cm hit patches, and none of them is listed. The cache relights only in the first ~10 frames (about four hops), and is then read without any further relights. That is the "low fixed point" above, and it explains why no scheduling, freeze or estimator change moved the number.
+
+The thin-wall box at 900 frames, clean build (all debug hooks stashed), same camera and reference:
+
+| run | live | live/ref | f |
+|---|---|---|---|
+| `world_cache: false` (table above) | 0.1600 | 0.451 | 0.631 |
+| `world_cache` left on (surface cache, mode 3) | 0.1989 | 0.561 | 0.763 |
+
+Findings:
+
+- **The f ≈ 0.64 per-hop factor is not a per-hop energy loss.** It comes from the light cache stopping after about four rounds with the surface cache off. It is not a sampler, weight, E vs E/π, blend-sum or decay error.
+- **With the surface cache on, f = 0.76.** That is still short of the hall's ≈0.95 and of 1, so the gap with the cache on is still open. Those numbers need the same patch probe, run in mode 3.
+- **The read-stamp deadlock hypothesis from the probe session is withdrawn.** It was observed in mode 0, where the mode-3 scheduler never runs.
+- **No fix and no PR.** Whether mode 0 should keep relighting its light cache is a design question for Anthony, not a bug fix.
