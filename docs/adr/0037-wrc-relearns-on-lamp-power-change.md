@@ -314,6 +314,92 @@ Box live/ref was not rerun. No box-side code changed after round 10's 0.661.
 1. Linger: a lamp switch must mark the à-trous display field dirty (or repaint the texels inside the lamp's sphere), and it must reach the probes. Both are needed: fixing the field alone leaves about 14 %.
 2. Reset: one out-of-band sample must not trigger it. Next to test: a reset after several out-of-band samples in a row, or a reset driven only by the lamp-change record (LAMPOFF) with no sample band.
 
+## Round 12: lamp switch reaches the display field and probes; run-length reset (1 Nov 2026)
+
+Build: 34cc80c plus the regenerated `/home/box/shared/adr0037-hooks.patch` (8 files, +279/−13). New hooks, all 0 by default, packed into a second debug word (bit 0 `GENOS_DBG_FIELD`, bit 1 `GENOS_DBG_PROBE`, bits 2–3 `GENOS_DBG_RUN`, bit 4 `GENOS_DBG_FIELD2`):
+
+- `GENOS_DBG_FIELD`: a texel inside a switched lamp's range is relit and its pushed à-trous display field marked dirty.
+- `GENOS_DBG_FIELD2`: inside a switched lamp's range, no idle skip, and the pushed field is replaced rather than blended.
+- `GENOS_DBG_PROBE`: a kept probe hit that a switched lamp reaches is reshaded and its history dropped.
+- `GENOS_DBG_RUN`: 1 no band reset (lamp-change record only); M = 2 or 3 resets only after M out-of-band samples in a row.
+
+All runs use the r10 config, 160×90, lavapipe. FX = FIELD + PROBE + FIELD2 + RUN=3.
+
+### Linger (dark7; share of lit-minus-never left; gate ≤ 5 % at 120)
+
+| config | off 30 | off 120 | off 300 |
+|---|---|---|---|
+| r10 (round 10) | 92 % | 72 % | 38 % |
+| r10 + FIELD | 99 % | 69 % | 31 % |
+| r10 + FIELD + PROBE | 95 % | 65 % | 28 % |
+| r10 + FIELD + PROBE + FIELD2 | 64 % | 66 % | 30 % |
+| same + RUN=3 (run 1) | 42 % | 64 % | 30 % |
+| r10 + FX (run 2) | 44 % | **51 %** | 28 % |
+
+A further run (l12P1: 35 / 11 / 11 %) had a different lit level (0.435 against about 0.32) and its env was not recorded, so it is most likely a single-layer view, not the full picture, and is left out of the comparison.
+
+### Lag (onramp7; share of the settled lit bounce reached; gate ≥ 90 % at 300)
+
+Reference is the matching 1140-frame hall run (h12m1 or h12m3); against round 10's h10c3 reference each value is about 1–2 points lower.
+
+| config | on 60 | on 120 | on 300 | on 600 |
+|---|---|---|---|---|
+| r10 (round 10) | 24 % | 44 % | 74 % | 79 % |
+| r10 + FIELD + PROBE | 46 % | 60 % | **81 %** | 87 % |
+| r10 + FIELD + PROBE + FIELD2, RUN=3 | 96 % | 61 % | 79 % | 82 % |
+| r10 + FX | 96 % | 58 % | 79 % | 82 % |
+
+The 96 % at 60 frames with FIELD2 is a transient overshoot that falls back by 120 frames. It is not a pass.
+
+### Hall (hall9, 1140 frames; FIELD + PROBE + HIST, RUN = M)
+
+| | default | r10 (round 10) | RUN=1 | RUN=2 | RUN=3 |
+|---|---|---|---|---|---|
+| indirect/ref | 0.767 | 0.821 | 0.811 | 0.811 | 0.806 |
+| CONV=3 test passes | – | never | never | never | never |
+| still ms p50 / p90 (840–1140) | 0.09 / 0.12 | 270 / 326 | 35.7 / 46.7 | 96.3 / 156 | 58.9 / 83.2 |
+| flicker, per-pixel luma std | 0 | 0.00000 | 0.00000 | 0.00000 | 0.00000 |
+
+### Box (box, 900 frames, live/ref; must stay ≥ 0.66)
+
+| config | live/ref |
+|---|---|
+| r10, round 10 | 0.661 |
+| r10, rerun ×2 this round | 0.643, 0.671 |
+| r10 + RUN=3 | 0.639 |
+| r10 + FIELD + FIELD2 | 0.642 |
+| r10 + PROBE | 0.660 |
+| r10 + FIELD + PROBE | 0.647 |
+| r10 + FX | 0.635 |
+
+**The box gate sits inside run-to-run noise.** The same r10 config gave 0.643 and 0.671 in two runs, so a spread of about ±0.015. No FX hook can be said to lower the box. The 0.66 gate needs several runs per config, or a longer run, to mean anything.
+
+### Best combined config against all gates
+
+r10 + FX is the best single config. It passes no gate except flicker:
+
+| gate | target | r10 + FX | pass |
+|---|---|---|---|
+| linger at 120 | ≤ 5 % | 51 % | no |
+| lag at 300 | ≥ 90 % | 79 % (81 % without FIELD2/RUN) | no |
+| hall CONV=3 passes, still ms | ~0.1 ms | never; 59 ms | no |
+| hall indirect/ref | 1.0 (higher is better) | 0.806 | no |
+| flicker | 0 | 0 | yes |
+| box live/ref | ≥ 0.66 | 0.635 (noise ±0.015) | inconclusive |
+
+### What is still failing
+
+- **Linger: the field and probe hooks remove only about a third of the leftover light** (72 % to 51 %). Round 11's layer-3 diagnostic, which skips the pushed field entirely, reached 14 %. So the hooks don't yet clear the field everywhere the lamp lit: the lamp's range is probably too small for its bounce footprint, or dirty texels are only partly repainted per frame. The à-trous log still shows `dirty 0.0000` in screen mode, so the screen-mode filter history is not being reset either.
+- **Lag stays around 80 % at 300 frames** with every combination.
+- **The run-length reset makes the hall much cheaper, but it still never freezes.** RUN=1 (no band reset) cuts the idle cost from 270 ms to 36 ms. With RUN=1 the noise test is met from round 537 on, yet the drift test never passes, so CONV=3 never freezes.
+
+### Changes to the proposed design
+
+1. Linger: invalidate by the lamp's bounce footprint, not its direct range, and reset the screen-mode à-trous/denoise history on a lamp switch.
+2. Reset: prefer RUN=1 (lamp-change record only, no sample band). It is the cheapest and does not lower hall energy beyond the M = 2–3 variants.
+3. Convergence: the drift term needs a tolerance relative to hall noise, because the noise test alone already passes at RUN=1.
+4. Box gate: measure with at least 3 runs per config.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
