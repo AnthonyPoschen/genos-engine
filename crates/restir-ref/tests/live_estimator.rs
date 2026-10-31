@@ -10,7 +10,7 @@
 //! `merge_pair` (M clamp 20, M cap 160) and the shade `lamp_light * W` with
 //! `W = w_sum / (M * target)`. Spatial reuse is not mirrored here.
 //!
-//! Tolerance: 2 % of the exact sum per pixel, over 6000 frames x 4 seeds.
+//! Tolerance: 2 % of the exact sum per pixel, over 20000 frames x 8 seeds.
 
 #![allow(
     clippy::pedantic,
@@ -227,9 +227,9 @@ fn check(set: &[(&'static str, Pixel)]) {
     for (name, p) in set {
         let want = exact(p, &lamps);
         let mut got = Vec3::ZERO;
-        let seeds = [11u64, 23, 37, 41];
+        let seeds = [11u64, 23, 37, 41, 53, 67, 71, 89];
         for seed in seeds {
-            got += mean_estimate(p, &lamps, &tree, seed, 6000);
+            got += mean_estimate(p, &lamps, &tree, seed, 20000);
         }
         got = got * (1.0 / seeds.len() as f32);
         let rel = (luma(got) - luma(want)) / luma(want).max(1.0e-6);
