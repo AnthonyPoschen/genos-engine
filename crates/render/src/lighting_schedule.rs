@@ -567,7 +567,10 @@ pub fn screen_plan(input: ScreenBudget) -> ScreenPlan {
     // a jump is a still frame with full-screen à-trous (s6: about 7 ms of 11-15),
     // and without this the controller had no lever on it. Outside the rect the
     // shader keeps the filtered value (`lighting_slot_in_budget`).
-    let atrous = budget_mode_gates(input.denoise_grant, input.denoise_demand, input.changes > 0, input.scaled);
+    // #70: variance and à-trous always run on the full displayed crop. A held
+    // filtered value outside the rect showed as blotches, and the pass is cheap
+    // next to direct. The denoise grant no longer gates.
+    let atrous = false;
     let trace = budget_mode_gates(input.trace_grant, input.trace_demand, input.changes > 0, input.scaled);
     let cache_ray_grant = if input.scaled && input.cache_rays > 0 {
         input.cache_rays
@@ -671,6 +674,17 @@ fn refresh_rect(input: &ScreenBudget, tiles_x: u32, tiles_y: u32, grant_tiles: u
     let (dx, dy, dw, dh) = display;
     let mut origin_x = center_origin(dx, dw, span_w, tiles_x);
     let mut origin_y = center_origin(dy, dh, span_h, tiles_y);
+    if near_n == 0 && (span_w < dw || span_h < dh) {
+        // #70: a fixed centered rect left the display edges on held or
+        // handover-seeded values. The rect walks the display instead, leading
+        // edge of a turn first, so every display tile refreshes within
+        // ROTATE_FRAMES_MAX frames. That bound also floors the rect size.
+        span_w = span_w.max(dw.div_ceil(ROTATE_GRID)).min(dw);
+        span_h = span_h.max(dh.div_ceil(ROTATE_GRID)).min(dh);
+        let (x, y) = rotate_origin(display, (span_w, span_h), (input.turn_x, input.turn_y), input.frame);
+        origin_x = x;
+        origin_y = y;
+    }
     if near_n > 0 {
         let mut rect = TileRect {
             x: origin_x,
@@ -695,6 +709,32 @@ fn refresh_rect(input: &ScreenBudget, tiles_x: u32, tiles_y: u32, grant_tiles: u
         (input.frame % tiles_y) % tiles_y.saturating_sub(band_h).max(1)
     };
     (origin_x, origin_y, span_w, span_h, band_y, band_h)
+}
+
+/// Rotation cells per display axis. [`ROTATE_FRAMES_MAX`] is its square.
+const ROTATE_GRID: u32 = 4;
+/// Most frames before a gated rect has walked every display tile.
+pub const ROTATE_FRAMES_MAX: u32 = ROTATE_GRID * ROTATE_GRID;
+
+/// Origin of rotation cell `frame` over the display. Columns (rows) start at
+/// the leading edge of a turn, so the newest disocclusion refreshes first.
+/// The last cell on an axis is pulled back inside the display.
+fn rotate_origin(display: (u32, u32, u32, u32), span: (u32, u32), turn: (i32, i32), frame: u32) -> (u32, u32) {
+    let (dx, dy, dw, dh) = display;
+    let (span_w, span_h) = span;
+    let nx = dw.div_ceil(span_w.max(1)).max(1);
+    let ny = dh.div_ceil(span_h.max(1)).max(1);
+    let k = frame % nx.saturating_mul(ny).max(1);
+    let (mut cx, mut cy) = (k % nx, k / nx);
+    if turn.0 > 0 {
+        cx = nx - 1 - cx;
+    }
+    if turn.1 > 0 {
+        cy = ny - 1 - cy;
+    }
+    let x = (dx + cx * span_w).min(dx + dw.saturating_sub(span_w));
+    let y = (dy + cy * span_h).min(dy + dh.saturating_sub(span_h));
+    (x, y)
 }
 
 fn display_window(input: &ScreenBudget, tiles_x: u32, tiles_y: u32) -> (u32, u32, u32, u32) {
@@ -1305,7 +1345,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mover_gates_denoise_to_a_centered_rect() {
+    fn a_mover_does_not_gate_denoise() {
         let plan = screen_plan(ScreenBudget {
             tiles_x: 20,
             tiles_y: 12,
@@ -1326,16 +1366,11 @@ mod tests {
             turn_x: 0,
             turn_y: 0,
         });
-        assert!(plan.atrous_gate);
-        assert!(!plan.direct_gate);
-        assert!(plan.tile_w > 0 && plan.tile_h > 0);
-        let center_x = plan.tile_x + plan.tile_w / 2;
-        assert!((i64::from(center_x) - 10).abs() <= 1);
-        assert!(plan.tile_w * plan.tile_h < 20 * 12);
+        assert!(plan.gates_off(), "#70: denoise runs on the full crop");
     }
 
     #[test]
-    fn a_scaled_still_frame_gates_denoise() {
+    fn a_scaled_still_frame_keeps_denoise_on_the_full_crop() {
         let input = |scaled: bool| ScreenBudget {
             tiles_x: 20,
             tiles_y: 12,
@@ -1357,14 +1392,16 @@ mod tests {
             turn_y: 0,
         };
         // The settle after a jump: still, full-screen à-trous over the cap.
-        assert!(screen_plan(input(true)).atrous_gate);
+        let scaled = screen_plan(input(true));
+        assert!(!scaled.atrous_gate);
+        assert!(scaled.direct_gate || scaled.trace_gate || scaled.gates_off());
         let plan = screen_plan(input(false));
         assert!(!plan.atrous_gate);
         assert!(plan.gates_off());
     }
 
     #[test]
-    fn a_small_grant_centers_on_the_display_and_does_not_grow_into_the_guard() {
+    fn a_small_grant_starts_at_the_turn_edge_and_does_not_grow_into_the_guard() {
         // 128 tiles, grant 8. The display is 24 tiles, so the turn guard is not picked.
         let plan = screen_plan(ScreenBudget {
             tiles_x: 16,
@@ -1387,10 +1424,9 @@ mod tests {
             turn_y: 0,
         });
         assert!(plan.direct_gate);
-        assert_eq!(plan.tile_x, 3);
-        assert!(plan.tile_x + plan.tile_w <= 2 + 6);
-        let lit_origin = (16 - plan.tile_w) / 2;
-        assert_ne!(plan.tile_x, lit_origin);
+        // #70: the rotation's first cell sits on the leading (+x) display edge.
+        assert_eq!(plan.tile_x + plan.tile_w, 2 + 6);
+        assert!(plan.tile_x >= 2);
     }
 
     #[test]
@@ -1479,13 +1515,11 @@ mod tests {
     }
 
     #[test]
-    fn a_mover_at_720p_gates_denoise_and_leaves_direct_and_trace() {
+    fn a_mover_at_720p_leaves_every_pass_ungated() {
+        // #70: denoise no longer gates; direct and trace are covered at 720p.
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
         let push = schedule_push(&settings, 1.0, display(1280, 720), 16, 64, 2, 4);
-        assert!(push.plan.atrous_gate);
-        assert!(!push.plan.direct_gate);
-        assert!(!push.plan.trace_gate);
-        assert!(push.plan.tile_w * push.plan.tile_h < 80 * 45);
+        assert!(push.plan.gates_off());
     }
 
     #[test]
@@ -1494,7 +1528,7 @@ mod tests {
         let push = schedule_push(&settings, 1.0, display(1920, 1080), 16, 64, 1, 1);
         assert!(push.plan.direct_gate);
         assert!(push.plan.trace_gate);
-        assert!(push.plan.atrous_gate);
+        assert!(!push.plan.atrous_gate);
     }
 
     #[test]
