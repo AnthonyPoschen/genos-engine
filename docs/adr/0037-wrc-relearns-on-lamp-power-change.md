@@ -92,6 +92,68 @@ The best run hit the 590 s harness timeout after the first lamps-spin frame, bec
 
 Never freezing is not acceptable. On lavapipe it costs about 290 ms per frame. GPU numbers are not measured, and they are expected to be a far smaller absolute cost. This is why the design keeps the freeze and changes only *when* it starts: after the convergence test passes, rather than after a still-frame count. The next measurement is how many rounds that takes.
 
+## Round 8: clean hooks, convergence test, linger and lag (31 Oct 2026)
+
+### Correction to round 7
+
+The round-7 build still carried an old local hook, `DBG_PATCHVIEW = true` in `lighting_compose.comp`. It made pixels read the patch irradiance in place of the probes, so the "best" box, hall and lamps-spin numbers above are inflated. The idle-cost numbers are not affected.
+
+Round 8 uses only the env-gated hooks in `/home/box/shared/adr0037-hooks.patch`:
+
+- It is a patch against 34cc80c.
+- It contains `GENOS_DBG_NOFREEZE`, `GENOS_DBG_NO_YOUNG`, `GENOS_DBG_MEAN` (1 = exponential, 2 = count reset) and `GENOS_DBG_RESET_PCT` (0 means 10).
+- It adds convergence counters, read with `GENOS_LIGHTING_SC_TRACE`.
+- Every hook defaults to the shipped behaviour.
+- It applies cleanly to a fresh checkout of 34cc80c and builds.
+
+"Best" below means NOFREEZE + NO_YOUNG + MEAN=2 with the 10 % reset.
+
+| | default | best |
+|---|---|---|
+| box live/ref, 900 frames | 0.562 (f 0.764) | **0.694** (f 0.866) |
+| hall indirect/ref, 1140 frames | 0.765 | **0.844** |
+| hall still lighting ms p50 / p90 (lavapipe) | 0.09 / 0.12 | 323 / 465 |
+
+The policy change is still the largest single gain, but it closes about a third of the shortfall, not the 75–85 % that round 7 reported.
+
+### Convergence test
+
+Each round counts the WRC cells it relit and the share whose stored value moved by more than ε. The table asks when 8 consecutive rounds first have that share below 1 %.
+
+| scene | ε = 1 %: K = 8 passes at | ε = 0.5 %: passes at | share > 1 % over the run |
+|---|---|---|---|
+| box (1 lamp) | round 122, frame 126 | round 129, frame 133 | ≈1–2 %, with spikes to 7.5 % |
+| hall (32 lamps) | never (1348 rounds) | never | ≈70–80 % every round |
+
+- **A raw per-cell ε test does not work.** In the hall the 16-ray samples are noisy enough that most cells move by more than 1 % on every relight, so the test never passes and the cache would never freeze. In the box it passes at frame 126, long before the box stops brightening (live/ref keeps rising until frame 900), so it would freeze too early.
+- **The test has to be relative to noise.** The design should compare each cell's change with its own noise estimate (`lighting_wrc_check_take` already keeps a per-cell σ in GRAD2.w), or test the drift of the round's mean luma over K rounds instead of single cells.
+- **Extra unfrozen time and the real idle cost are still open.** They depend on that redesign.
+
+### Lamp-off linger and lamp-on lag (hall, 32 lamps, 22:00, bounce view, #148 decode)
+
+**Linger** (`dark7.rhai`): share of the lamp-added bounce still present after switch-off. The gate is 5 % or less by 120 frames.
+
+| | off 30 | off 120 | off 300 |
+|---|---|---|---|
+| default | 67 % | 57 % | 47 % |
+| best | 92 % | **91 %** | 90 % |
+
+**Lag** (`onramp7.rhai`): share of the settled lit bounce reached after switch-on. "Settled" is the same view lit for 1140 frames. The gate is 90 % or more by 300 frames.
+
+| | on 60 | on 120 | on 300 | on 600 |
+|---|---|---|---|---|
+| default | 18 % | 25 % | 33 % | 34 % |
+| best | 46 % | 71 % | **83 %** | 86 % |
+
+- **Lag improves a lot but misses the gate** (83 % at 300 frames against 90 %).
+- **Linger gets worse.** The upward-only reset and the never-ending relights keep the cells near the lit value. Nothing makes a cell forget when its sample drops. This confirms that the design needs the downward reset and the lamp-off entry in the lamp-change ring. Those are untested.
+
+### Changes to the proposed design
+
+1. Run the convergence test against per-cell noise σ, or as round-mean drift, not as a raw ε.
+2. Make the count reset symmetric (sample far below the mean), and record lamps that switch off in the change ring. Both are required by the linger gate.
+3. The next measurements are the rounds needed to pass the noise-relative test, and the 4070 idle cost, using the hooks patch.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
