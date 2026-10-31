@@ -40,6 +40,18 @@ def linear_from_display(c):
     return np.where(c <= 0.64, np.maximum(c, 0.0), 0.64 + 1.1 * k / (1.0 - k))
 
 
+# Shoulder ceiling: 0.64 + 0.14 = 0.78 (198.9/255). The PNG writers dither by
+# up to ~2/255, so anything within 3/255 of the ceiling is saturated: the tone
+# curve is flat there and the radiance that produced it is unrecoverable.
+SHOULDER_CEILING = 0.78
+CEILING_DITHER = 3.0 / 255.0
+
+
+def over_ceiling(rgb):
+    """Per-pixel mask: any channel at the shoulder ceiling (saturated)."""
+    return (rgb >= SHOULDER_CEILING - CEILING_DITHER).any(axis=-1)
+
+
 def load_rgb(path):
     from PIL import Image
     return np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
@@ -59,11 +71,15 @@ def block(a, b=2):
     return a[:h, :w].reshape(h // b, b, w // b, b).mean(axis=(1, 3))
 
 
-def ref_error(live, ref, dist=None):
-    """(near-weighted, unweighted) share of the light that is wrong."""
+def ref_error(live, ref, dist=None, mask=None):
+    """(near-weighted, unweighted) share of the light that is wrong.
+    mask: pixels (at ref resolution) excluded from numerator and denominator,
+    i.e. saturated pixels, reported separately as over_ceiling_px."""
     if live.shape != ref.shape:
         from PIL import Image
         live = np.asarray(Image.fromarray(live).resize(ref.shape[::-1], Image.BILINEAR))
+    if mask is not None:
+        live, ref = np.where(mask, 0.0, live), np.where(mask, 0.0, ref)
     l, r = block(live), block(ref)
     d = np.abs(l - r)
     plain = float(d.sum() / (r.sum() + 1e-6))
@@ -123,18 +139,25 @@ def score(out):
             if not os.path.exists(ref):
                 continue
             dp = stem + "-depth.png"
-            near, plain = ref_error(lin_luma(lv), lin_luma(ref), distance(dp) if os.path.exists(dp) else None)
-            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
+            lrgb, rrgb = load_rgb(lv), load_rgb(ref)
+            oc_live = over_ceiling(lrgb)
+            m = oc_live | over_ceiling(rrgb) if oc_live.shape == rrgb.shape[:2] else over_ceiling(rrgb)
+            near, plain = ref_error(linear_from_display(lrgb) @ LUM, linear_from_display(rrgb) @ LUM,
+                                    distance(dp) if os.path.exists(dp) else None, mask=m)
+            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain, int(oc_live.sum())))
         if per:
             near = [p[1] for p in per]
             worst = max(per, key=lambda p: p[1])
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
-                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4))
+                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4),
+                     over_ceiling_px=max(p[3] for p in per))
+            # Saturated live pixels hide unbounded radiance: a live failure.
+            s["over_ceiling_ok"] = s["over_ceiling_px"] == 0
             if n == "switch":
                 settled = per[-1][1]
-                s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
-                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}
+                s["frames_to_ref"] = next((f for f, e, *_ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
+                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, *_ in per}
         res[n] = s
     return res
 
