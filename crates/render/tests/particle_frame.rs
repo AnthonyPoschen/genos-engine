@@ -1,56 +1,11 @@
-#![cfg_attr(
-    test,
-    expect(
-        clippy::as_conversions,
-        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_lossless,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_possible_truncation,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_possible_wrap,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_precision_loss,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_sign_loss,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::too_many_arguments,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
 //! Presented fire. Pixel checks use `Renderer::draw` readback.
 //!

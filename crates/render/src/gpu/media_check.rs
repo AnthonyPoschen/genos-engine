@@ -463,10 +463,7 @@ impl Gpu {
             )?;
         }
         self.wait_fence(fence, "media done")?;
-        self.media_ms = self
-            .read_span(0)
-            .ok()
-            .map(|duration| duration.as_secs_f64() * 1000.0);
+        self.media_ms = self.read_span(0).ok().map(|duration| duration.as_secs_f64() * 1000.0);
         let values = read_f32s(self.fns.map_mem, self.fns.unmap_mem, self.device, memory, 5)?;
         let mut out = [0.0; 5];
         for (slot, value) in out.iter_mut().zip(values) {

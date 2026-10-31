@@ -1,14 +1,5 @@
-#![cfg_attr(
-    test,
-    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::doc_markdown,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
 //! Live ReSTIR DI (ADR 0022 stage C5) against brute direct on the gate scenes.
 //!
@@ -31,9 +22,7 @@ const SHADOW_AVG: u32 = 64;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
     let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)

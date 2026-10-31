@@ -33,7 +33,14 @@ fn main() {
     let media = compile_media_modules(&out);
     let denoise = compile_denoise_modules(&out);
     let lighting = compile_lighting_modules(&out);
-    write_shader_glue(&out, &raster, &media, &denoise, &lighting, &reflection_spv);
+    write_shader_glue(
+        &out,
+        &raster,
+        &media,
+        &denoise,
+        &lighting,
+        &reflection_spv,
+    );
     rerun_shader_pieces();
 }
 
@@ -89,7 +96,10 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
     // Not embedded: catches errors in a piece no pass includes yet.
     let reflections_check = "shaders/reflections_check.comp";
     println!("cargo:rerun-if-changed={reflections_check}");
-    compile(reflections_check, &out.join("reflections_check.comp.spv"));
+    compile(
+        reflections_check,
+        &out.join("reflections_check.comp.spv"),
+    );
     media
 }
 

@@ -213,13 +213,7 @@ impl Gpu {
         height: u32,
         slices: u32,
     ) {
-        self.barrier_on(
-            cmd,
-            0x800,
-            0x1000 | 0x4000,
-            0x40 | 0x20,
-            0x800 | 0x1000 | 0x2000,
-        );
+        self.barrier_on(cmd, 0x800, 0x1000 | 0x4000, 0x40 | 0x20, 0x800 | 0x1000 | 0x2000);
         let word = tail_word().to_ne_bytes();
         let head = column_header(width, height, slices);
         unsafe {

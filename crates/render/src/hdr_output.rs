@@ -460,9 +460,7 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
     }
     let bins = counts.len().min(4096);
     let counts = &counts[..bins];
-    let total = counts
-        .iter()
-        .fold(0_u32, |acc, count| acc.saturating_add(*count));
+    let total = counts.iter().fold(0_u32, |acc, count| acc.saturating_add(*count));
     if total == 0 {
         return 0.0;
     }
@@ -667,7 +665,10 @@ pub fn karis_downsample_rgb(rgb: &[f64], width: usize, height: usize) -> Image {
             let oy = y.saturating_mul(2);
             take(box2(rgb, width, height, ox, oy), 0.5);
             take(box2(rgb, width, height, ox.saturating_add(2), oy), 0.125);
-            take(box2(rgb, width, height, ox.saturating_sub(2), oy), 0.125);
+            take(
+                box2(rgb, width, height, ox.saturating_sub(2), oy),
+                0.125,
+            );
             take(box2(rgb, width, height, ox, oy.saturating_add(2)), 0.125);
             take(box2(rgb, width, height, ox, oy.saturating_sub(2)), 0.125);
             if sum_w > 0.0 {
@@ -698,13 +699,7 @@ fn box2(rgb: &[f64], width: usize, height: usize, x: usize, y: usize) -> [f64; 3
     let mut acc = [0.0; 3];
     for dy in 0..2 {
         for dx in 0..2 {
-            let sample = rgb_at(
-                rgb,
-                width,
-                height,
-                x.saturating_add(dx),
-                y.saturating_add(dy),
-            );
+            let sample = rgb_at(rgb, width, height, x.saturating_add(dx), y.saturating_add(dy));
             acc[0] += sample[0];
             acc[1] += sample[1];
             acc[2] += sample[2];
@@ -951,7 +946,11 @@ pub fn agx_lut_linear(index: usize) -> f64 {
 /// One lattice texel. The compose shader samples the buffer this fills.
 #[must_use]
 pub fn agx_lut_texel(x: usize, y: usize, z: usize) -> [f64; 3] {
-    agx_rec709([agx_lut_linear(x), agx_lut_linear(y), agx_lut_linear(z)])
+    agx_rec709([
+        agx_lut_linear(x),
+        agx_lut_linear(y),
+        agx_lut_linear(z),
+    ])
 }
 
 /// Packed `vec4` words, x-fastest. `w` is 0. Built once per process.
@@ -1096,8 +1095,7 @@ pub fn surface_choice(
     force_sdr: bool,
 ) -> (i32, i32, HdrSwapchain) {
     let mode = resolve_swapchain(host, listed, output, force_sdr);
-    if let Some((format, space)) =
-        swapchain_pair(mode, listed).filter(|_| mode != HdrSwapchain::Sdr)
+    if let Some((format, space)) = swapchain_pair(mode, listed).filter(|_| mode != HdrSwapchain::Sdr)
     {
         return (format, space, mode);
     }
@@ -1144,11 +1142,9 @@ fn listed_mode(mode: HdrSwapchain, listed: &[ListedFormat]) -> bool {
 #[must_use]
 pub fn swapchain_pair(mode: HdrSwapchain, listed: &[ListedFormat]) -> Option<(i32, i32)> {
     if mode == HdrSwapchain::Hdr10 {
-        if let Some(item) = listed
-            .iter()
-            .copied()
-            .find(|item| item.format == FORMAT_A2B10 && item.color_space == COLOR_SPACE_HDR10)
-        {
+        if let Some(item) = listed.iter().copied().find(|item| {
+            item.format == FORMAT_A2B10 && item.color_space == COLOR_SPACE_HDR10
+        }) {
             return Some((item.format, item.color_space));
         }
     }

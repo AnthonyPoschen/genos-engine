@@ -6,9 +6,9 @@ mod fog_pass;
 mod gltf_draw;
 mod gpu;
 mod hdr_output;
+mod material_stream;
 #[cfg(test)]
 mod lamp_pick;
-mod material_stream;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
@@ -16,8 +16,8 @@ mod pack;
 mod particles;
 mod pool;
 mod reflections;
-mod reflections_grade;
 mod restir_live;
+mod reflections_grade;
 mod scene_mesh;
 mod trace;
 mod unfilled;
@@ -25,52 +25,60 @@ mod wire;
 mod world;
 
 pub use aa::Antialias;
-pub use budget::{FrameMemory, ImageAdmit};
-pub use fog::{
-    apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,
-    frame_fog_view, grid_size, inject, integrate_samples, integrate_unshadowed, leak_broken,
-    leak_fixture, local_volume_leak, point_at, puff_volume, ray_dir, sample_depth_aware,
-    slice_edge, sphere_leak_broken, still_flicker, still_flicker_broken, still_flicker_fixture,
-    uniform_delta_transmittance, world_cache_inscatter, DepthTap, DirectSun, FogColumn, FogView,
-    FroxelGrid, GridSize, PixelRay, SliceSample, Z_FAR, Z_NEAR,
+pub use fog_pass::{
+    box_dispatch, box_volume, column_luma, column_peak, composed_frame_camera, composed_frame_scene,
+    flicker_dispatch, integrate_traced, media_dispatch, media_images, near_dispatch, near_images,
+    picture_from, picture_mean_abs, picture_unchanged, shaft_dispatch, shaft_image, smear_broken,
+    smear_dispatch, smear_fixture, smear_tracking, sphere_dispatch, sphere_volume, yaw_pop_broken,
+    yaw_pop_fixture, yaw_pop_rel, FogDispatch, YAW_FRAMES,
+    FogGpu, FogImage, FogPointLamp, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
+    FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
 };
 pub use fog_budget::{
     allocation_bytes, allocation_mb, allocation_mb_doubled, fit_pass, fog_probe,
     millisecond_ceiling, sample_cap, unfitted_milliseconds, FogProbe, PassCost,
 };
-pub use fog_pass::{
-    box_dispatch, box_volume, column_luma, column_peak, composed_frame_camera,
-    composed_frame_scene, flicker_dispatch, integrate_traced, media_dispatch, media_images,
-    near_dispatch, near_images, picture_from, picture_mean_abs, picture_unchanged, shaft_dispatch,
-    shaft_image, smear_broken, smear_dispatch, smear_fixture, smear_tracking, sphere_dispatch,
-    sphere_volume, yaw_pop_broken, yaw_pop_fixture, yaw_pop_rel, FogDispatch, FogGpu, FogImage,
-    FogPointLamp, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION,
-    FOG_SKIP_SHADOW, YAW_FRAMES,
+pub use fog::{
+    apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,
+    frame_fog_view, grid_size, inject, point_at, ray_dir,
+    integrate_samples, integrate_unshadowed,
+    leak_broken,
+    leak_fixture, local_volume_leak, puff_volume, sample_depth_aware, slice_edge, sphere_leak_broken,
+    still_flicker,
+    still_flicker_broken, still_flicker_fixture, uniform_delta_transmittance, world_cache_inscatter,
+    DepthTap, DirectSun,
+    FogColumn, FogView, FroxelGrid, GridSize, PixelRay, SliceSample, Z_FAR, Z_NEAR,
 };
+pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
     LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
-    MaterialStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats,
-    ViewMode,
+    MaterialStats, Renderer,
+    ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use hdr_output::{
-    aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,
-    bloom_downsample_weight_sum, bloom_pyramid, bloom_upsample, bloom_upsample_weight_sum,
-    camera_ev100, display_transform, ev100_from_luminance, exposure_adapt_outside,
-    exposure_from_camera, exposure_from_ev100, exposure_overshoot, exposure_still_change,
-    exposure_with_compensation, grade_peak, grade_relative, grade_weight, graphics_white_linear,
-    hdr10_pq, histogram_ev100, histogram_ev100_bins, histogram_ev100_from_counts,
-    karis_downsample_rgb, karis_firefly_response, karis_weight, legacy_display,
-    legacy_display_channel, near_grade, nits_from_display, pack_f32, pick_hdr_output, pq_st2084,
-    present_host, rec2020_from_rec709, rec709_y, resolve_swapchain, scene_luma, scene_peak_error,
-    scene_read_from_rgba, scene_referred, scrgb_code, scrgb_from_display, step_exposure,
-    still_pop_share, surface_choice, swapchain_format_code, swapchain_nits, swapchain_pair,
-    DisplayMode, HdrSwapchain, Image, ListedFormat, PresentHost, SceneRead, COLOR_SPACE_HDR10,
-    COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F,
-    FORMAT_RGBA8, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS, SCRGB_NITS_PER_CODE,
+    aces2_rec709, agx_rec709, bloom_commute_error, bloom_downsample, bloom_downsample_weight_sum,
+    bloom_pyramid, bloom_upsample,
+    bloom_upsample_weight_sum, camera_ev100, display_transform, ev100_from_luminance,
+    exposure_from_camera,
+    exposure_from_ev100, exposure_adapt_outside, exposure_overshoot, exposure_still_change,
+    exposure_with_compensation, grade_peak, grade_relative, grade_weight, histogram_ev100,
+    histogram_ev100_bins, histogram_ev100_from_counts, karis_downsample_rgb,
+    karis_firefly_response, karis_weight,
+    step_exposure, agx_display_linear, graphics_white_linear, hdr10_pq, nits_from_display,
+    rec2020_from_rec709, scrgb_from_display,
+    legacy_display, legacy_display_channel, near_grade, pack_f32, pick_hdr_output, present_host, pq_st2084,
+    rec709_y, resolve_swapchain, surface_choice, swapchain_format_code, swapchain_nits,
+    swapchain_pair,
+    scene_luma, scene_peak_error, scene_read_from_rgba, scene_referred, scrgb_code, still_pop_share,
+    DisplayMode,
+    HdrSwapchain, Image, ListedFormat, SceneRead, PresentHost, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
+    COLOR_SPACE_SRGB, FORMAT_A2B10,
+    FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS,
+    SCRGB_NITS_PER_CODE,
 };
 pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};

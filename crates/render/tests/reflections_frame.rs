@@ -1,6 +1,9 @@
 //! The presented frame composites the mirror and the portal and counts rays.
 
-#![expect(clippy::as_conversions, reason = "the readback index is a byte offset")]
+#![expect(
+    clippy::as_conversions,
+    reason = "the readback index is a byte offset"
+)]
 #![expect(clippy::expect_used, reason = "a failed fixture aborts the test")]
 #![expect(
     clippy::print_stderr,
@@ -13,9 +16,7 @@ use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(GRADE_WIDTH, GRADE_HEIGHT).expect("proof window");
     let frame = window.pump();
     let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)

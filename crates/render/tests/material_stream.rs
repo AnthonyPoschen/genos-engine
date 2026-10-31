@@ -164,7 +164,9 @@ fn stream_card(span: f32, place_z: f32, bounds_z: f32) -> Object {
 
 fn push_stream(world: &mut World, size: u32, red: u8, span: f32, place_z: f32, bounds_z: f32) {
     let object = world.objects.len();
-    world.objects.push(stream_card(span, place_z, bounds_z));
+    world
+        .objects
+        .push(stream_card(span, place_z, bounds_z));
     world.stream_textures.push(StreamedTexture {
         atlas: solid_atlas(size, red),
         object,

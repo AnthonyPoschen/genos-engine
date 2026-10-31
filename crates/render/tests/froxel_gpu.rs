@@ -9,8 +9,7 @@
 
 use genos_render::{
     column_peak, composed_frame_camera, composed_frame_scene, inject, integrate_unshadowed,
-    picture_mean_abs, picture_unchanged, DirectSun, FogDispatch, FogView, GridSize, Renderer,
-    World,
+    picture_mean_abs, picture_unchanged, DirectSun, FogDispatch, FogView, GridSize, Renderer, World,
 };
 use genos_scene::FogSettings;
 use genos_window::Window;

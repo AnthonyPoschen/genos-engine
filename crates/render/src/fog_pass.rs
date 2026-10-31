@@ -11,9 +11,11 @@ use genos_scene::{
 
 use crate::fog::{
     add, aligned_volume_point, apply_fog, dot, falloff, grid_size, height_closed_column,
-    height_segment_column, integrate_samples, integrate_unshadowed, length, length_sq, luma,
-    near_columns, normalize, point_at, ray_dir, scale, scale_color, slice_edge, sub, unit,
-    world_cache_inscatter, DirectSun, FogColumn, FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
+    height_segment_column,
+    integrate_samples,
+    integrate_unshadowed, length, length_sq, luma, near_columns, normalize, point_at, ray_dir,
+    scale, scale_color, slice_edge, sub, unit, world_cache_inscatter, DirectSun, FogColumn,
+    FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
 };
 use crate::trace::sees;
 
@@ -342,11 +344,7 @@ fn blob_luma(frame: u32) -> Vec<f32> {
     };
     let scene = empty_scene();
     let width = usize::try_from(size.width).unwrap_or(0);
-    let mut samples = vec![
-        0.0_f32;
-        size.cells()
-            .saturating_div(usize::try_from(size.slices.max(1)).unwrap_or(1))
-    ];
+    let mut samples = vec![0.0_f32; size.cells().saturating_div(usize::try_from(size.slices.max(1)).unwrap_or(1))];
     for y in 0..size.height {
         for x in 0..size.width {
             if !ray_hits_blob(&view, size, x, y) {
@@ -691,8 +689,7 @@ fn phase_coeff(
     p1: [f32; 3],
     mu: f32,
 ) -> f32 {
-    let mut coeff =
-        sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu);
+    let mut coeff = sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu);
     for volume in &settings.volumes {
         let mut local = 0.0_f32;
         for tap in 0..8 {
@@ -893,10 +890,7 @@ pub fn smear_dispatch(frame: u32) -> FogDispatch {
 /// In-scatter luminance, one value per column.
 #[must_use]
 pub fn column_luma(columns: &[FogColumn]) -> Vec<f32> {
-    columns
-        .iter()
-        .map(|column| luma(column.inscatter))
-        .collect()
+    columns.iter().map(|column| luma(column.inscatter)).collect()
 }
 
 /// `apply_fog` of `[0.05, 0.05, 0.06]` over the columns.
@@ -1014,3 +1008,4 @@ mod tests {
         assert!(picture_mean_abs(&[0, 10], &[0, 0]) > 0.0);
     }
 }
+
