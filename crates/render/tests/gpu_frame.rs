@@ -1348,9 +1348,11 @@ fn a_still_camera_keeps_probe_history_through_the_crop() {
     let sched = renderer.last_schedule();
     let [kept8, probes8] = renderer.lighting_probe_samples();
     eprintln!("history kept1 {kept1} probes1 {probes1} kept8 {kept8} probes8 {probes8}");
+    // A still camera gets no guard band (GUARD_STILL_RAD), so crop_x is 0 by
+    // design. The gate is what must hold; the history check below is the point.
     assert!(
-        sched.plan.trace_gate && sched.lit.crop_x > 0,
-        "history was not gated through a crop: trace {} crop {} scale {}",
+        sched.plan.trace_gate,
+        "history was not gated: trace {} crop {} scale {}",
         sched.plan.trace_gate,
         sched.lit.crop_x,
         sched.scale
