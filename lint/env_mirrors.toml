@@ -1477,6 +1477,11 @@ kind = "mirror"
 detail = "--restir-di"
 
 [[var]]
+name = "GENOS_RESTIR_REUSE"
+kind = "test"
+detail = "diagnostic: off drops ReSTIR temporal and spatial reuse (bias hunts)"
+
+[[var]]
 name = "GENOS_LIFECYCLE_BLOCK_MS"
 kind = "mirror"
 detail = "--lifecycle-block-ms"
