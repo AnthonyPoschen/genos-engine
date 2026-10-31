@@ -841,6 +841,7 @@ void main() {
     // W = w_sum / (M * p_hat(y)) (unbiased RIS). The lamp comes from the
     // reservoir prefix, so a lamp outside this pixel's cell list still
     // counts. One shadow ray, for y only.
+    vec3 e_restir = vec3(0.0);
     if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         uint la = restir_words[1u] + restir_lamp * 8u;
@@ -852,7 +853,8 @@ void main() {
         if (rlight.r + rlight.g + rlight.b > 0.0) {
             bool rvis = (gstats.ctrl_bits & 2u) == 0u || !trace_occluded(origin, rt);
             if (rvis) {
-                e += rlight * restir_w;
+                e_restir = rlight * restir_w;
+                e += e_restir;
             }
         }
     }
@@ -861,6 +863,9 @@ void main() {
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
         e_sun = vec3(0.0);
+#ifdef GENOS_RESTIR_DI
+        e_restir = vec3(0.0);
+#endif
     }
     if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         uint ts = tdl & 0x3FFFFFFFu;
@@ -948,18 +953,24 @@ void main() {
                 mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
             }
         }
+        // Only the reservoir sample is averaged. The suns and the flame are
+        // shaded exactly every frame, so they must not lag: a fast sun kept
+        // up to 31/32 of its old direction (sun-x100 on the 4070, 1 Nov).
         uint mean_n = min(mean_prev + 1u, RESTIR_MEAN_CAP);
+        vec3 e_exact = e - e_restir;
+        vec3 e_mean = e_restir;
         if (mean_prev > 0u) {
-            e = mean_e + (e - mean_e) / float(mean_n);
+            e_mean = mean_e + (e_restir - mean_e) / float(mean_n);
         }
+        e = e_exact + e_mean;
         LampReservoir mr;
         mr.lamp = 0u;
         mr.m = mean_n;
-        mr.w_sum = e.r;
-        mr.target = e.g;
+        mr.w_sum = e_mean.r;
+        mr.target = e_mean.g;
         uint mslot = lamp_res_slot_now();
         lamp_res_store(idx, mslot, mr);
-        lamp_geo_store(idx, mslot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR_MEAN, floatBitsToUint(e.b)));
+        lamp_geo_store(idx, mslot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR_MEAN, floatBitsToUint(e_mean.b)));
     }
 #endif
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
