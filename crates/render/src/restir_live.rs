@@ -218,7 +218,7 @@ pub fn prefix(
 /// `GENOS_RESTIR_REUSE=off` reasons.
 pub fn set_history_reset(words: &mut [u32], reset: bool) {
     if let Some(word) = words.get_mut(15) {
-        *word = u32::from(reset);
+        *word |= u32::from(reset);
     }
 }
 
