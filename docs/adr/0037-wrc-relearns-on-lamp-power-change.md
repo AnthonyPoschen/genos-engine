@@ -400,6 +400,13 @@ r10 + FX is the best single config. It passes no gate except flicker:
 3. Convergence: the drift term needs a tolerance relative to hall noise, because the noise test alone already passes at RUN=1.
 4. Box gate: measure with at least 3 runs per config.
 
+## Round 13 (in progress)
+
+Hooks R10 + FX with RUN=1, dark7 / onramp7, lavapipe 160x90.
+
+- Perfect-invalidation oracle (`GENOS_DBG_FOOT=7`, every cell counts as changed): aborted. It ran at about 0.4 fps on lavapipe and the script's wait timed out at frame 221. Replaced by a cold-start lit run as the switch-on oracle.
+- (a) Bounce-footprint clear (`GENOS_DBG_FOOT=3`, change sphere = lamp range + 3 m) plus no held filter in the change window: linger 47.0 / 49.2 / 27.6 % at 30 / 120 / 300 frames, against 43.8 / 50.6 / 27.8 % for round 12 FX. No change.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
