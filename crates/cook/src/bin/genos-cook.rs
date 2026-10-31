@@ -28,10 +28,13 @@ use genos_cook::{
     package, textures_path, AssetCook, Manifest, Outcome, Threads,
 };
 
-fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-cook: {err}");
-        std::process::exit(1);
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("genos-cook: {err}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 

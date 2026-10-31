@@ -34,7 +34,7 @@ mod knobs;
 mod stage;
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
@@ -84,6 +84,10 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --proof                   open the proof window (floats, takes no focus; --bench
                             always uses it, so the compositor keeps its size)
   --display NAME            Wayland display name. Omit it to use the session compositor.
+  --lifecycle-block-ms N    stall shutdown once, for the quit-gap test.
+                            GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
+  --lifecycle-close-early   quit before the first frame. GENOS_LIFECYCLE_CLOSE_EARLY
+                            applies only when this is omitted
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
@@ -284,6 +288,10 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
+    /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
+    block_ms: Option<Duration>,
+    /// `--lifecycle-close-early`. The mirror applies when this stays false.
+    close_early: bool,
     /// `LIGHTING_EXPERIMENT_FLAGS` passed, index and value, in order.
     lighting_experiments: Vec<(usize, String)>,
     /// Material flags, in order, including the values. The argument wins over the environment.
@@ -431,6 +439,8 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
+        block_ms: None,
+        close_early: false,
         lighting_experiments: Vec::new(),
         material_args: Vec::new(),
     };
@@ -548,8 +558,15 @@ fn options() -> Result<Options, String> {
             }
             "--help" | "-h" => {
                 println!("{USAGE}");
-                std::process::exit(0);
+                genos_window::exit(0);
             }
+            "--lifecycle-block-ms" => {
+                opts.block_ms = Some(genos_window::parse_block_ms(
+                    "--lifecycle-block-ms",
+                    Some(&value()?),
+                )?);
+            }
+            "--lifecycle-close-early" => opts.close_early = true,
             other if genos_load::material_flag_needs_value(other) == Some(true) => {
                 let next = value()?;
                 opts.material_args.push(other.to_string());
@@ -588,7 +605,14 @@ fn options() -> Result<Options, String> {
                                 genos_render::check_lighting_sun_arg(other, Some(&next))?;
                             }
                             Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
-                            None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                            None => {
+                                if genos_window::block_ms_needs_value(other) == Some(false) {
+                                    opts.block_ms =
+                                        Some(genos_window::parse_block_ms(other, None)?);
+                                } else {
+                                    return Err(format!("unknown argument {other}\n{USAGE}"));
+                                }
+                            }
                         },
                     },
                     },
@@ -637,14 +661,20 @@ fn options() -> Result<Options, String> {
             size: opts.size,
         });
     }
+    opts.block_ms = genos_window::block_ms_mirror(opts.block_ms);
+    opts.close_early = genos_window::close_early_mirror(opts.close_early);
     Ok(opts)
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-stress: {err}");
-        std::process::exit(1);
-    }
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("genos-stress: {err}");
+            1
+        }
+    };
+    genos_window::exit(code);
 }
 
 /// A fly camera at `view`. It has no colliders: the stress test flies through walls,
@@ -848,17 +878,13 @@ fn lighting_text(renderer: &Renderer) -> String {
     )
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
-        return gi_check::run(std::env::args().skip(2));
+        gi_check::run(std::env::args().skip(2))?;
+        return Ok(0);
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
-        return match genos_stress::lighting_ref::run(std::env::args().skip(2)) {
-            Ok(code) => {
-                std::process::exit(code);
-            }
-            Err(err) => Err(err),
-        };
+        return genos_stress::lighting_ref::run(std::env::args().skip(2));
     }
     if std::env::args().nth(1).as_deref() == Some("noise-gate") {
         // The settle check reads the lamp-pick diag counters. The argument is
@@ -866,7 +892,7 @@ fn run() -> Result<(), String> {
         std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
         return match genos_stress::noise_gate::run_args(std::env::args().skip(2)) {
             Ok(code) => {
-                std::process::exit(code);
+                genos_window::exit(code);
             }
             Err(err) => Err(err),
         };
@@ -926,26 +952,61 @@ fn run() -> Result<(), String> {
         window.set_title(&title_base);
     }
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    if first.closing {
+        return Ok(0);
+    }
+    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<genos_window::ThreadStop<bool>>,
+    ));
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
+    }
+    {
+        let hold = std::sync::Arc::clone(&server_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard.take());
+            true
+        });
+    }
+    {
+        let hold = std::sync::Arc::clone(&script_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.as_mut() {
+                Some(stop) => stop.release(),
+                None => true,
+            }
+        });
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     renderer.set_material_settings(stage.materials);
     stage.materials_dirty = false;
     if !opts.gltf.is_empty() {
-        match load_gltf_pumped(
-            &mut window,
-            &mut renderer,
-            &mut stage,
-            &camera,
-            opts.gltf.clone(),
-        ) {
+        match load_gltf_pumped(window, renderer, &mut stage, &camera, opts.gltf.clone()) {
             Ok(()) => {}
-            Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+            Err(err) if err == "window closed during load" => return Ok(0),
             Err(err) => return Err(err),
         }
     }
     stage.unfilled_count = renderer.unfilled().count;
     stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
-    let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
+    let server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
+    *server_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server);
     eprintln!(
         "genos-stress lighting http://127.0.0.1:{}/lighting",
         genos_mcp::listen_port()
@@ -961,20 +1022,23 @@ fn run() -> Result<(), String> {
     );
 
     if let Some(plan) = &opts.bench {
-        let text = bench::run(&mut renderer, &mut window, &mut stage, &camera, plan)?;
+        let text = bench::run(renderer, window, &mut stage, &camera, plan)?;
         println!("{text}");
         if let Some(path) = &opts.bench_out {
             std::fs::write(path, &text).map_err(|err| err.to_string())?;
         }
-        finish(window, renderer, 0);
+        return Ok(0);
     }
 
     let mut tools = genos_debug::Tools::new();
-    let mut script = opts.script.clone().map(|run| {
+    if let Some(run) = opts.script.clone() {
         tools.set_fixed_step(Some(bench::STEP));
         tools.set_out_dir(run.report_dir.clone());
-        genos_debug::script::spawn(run)
-    });
+        let handle = genos_debug::script::spawn(run);
+        *script_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(genos_window::ThreadStop::new(handle));
+    }
     if opts.step || opts.fixed_dt.is_some() {
         tools.set_fixed_step(Some(opts.fixed_dt.unwrap_or(bench::STEP)));
     }
@@ -1028,7 +1092,7 @@ fn run() -> Result<(), String> {
             }
         }
         if frame.closing {
-            finish(window, renderer, tools.quit_code().unwrap_or(0));
+            return Ok(script_exit_code(&script_hold, tools.quit_code().unwrap_or(0)));
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -1132,7 +1196,7 @@ fn run() -> Result<(), String> {
         }
         let capture_ui = stage.world.scene.debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut stage,
         });
@@ -1182,7 +1246,7 @@ fn run() -> Result<(), String> {
             );
         }
         tools.after_draw(
-            &mut renderer,
+            renderer,
             pixels.as_deref(),
             genos_debug::FrameTiming {
                 frame_ms: real_dt as f64 * 1000.0,
@@ -1197,7 +1261,7 @@ fn run() -> Result<(), String> {
                 .unwrap_or_default();
             genos_mcp::finish_shot(&png);
         }
-        genos_mcp::publish_lighting(&lighting_text(&renderer));
+        genos_mcp::publish_lighting(&lighting_text(renderer));
         genos_mcp::publish_settings(&settings_text(&stage));
         if let (Some(path), Some(pixels)) = (&opts.shot, pixels) {
             png::write_png(path, renderer.width(), renderer.height(), &pixels)?;
@@ -1214,33 +1278,31 @@ fn run() -> Result<(), String> {
             );
         }
         if last || tools.quit_code().is_some() {
-            let mut code = tools.quit_code().unwrap_or(0);
-            if let Some(handle) = script.as_ref() {
-                if handle.is_finished() {
-                    let passed = script
-                        .take()
-                        .and_then(|handle| handle.join().ok())
-                        .unwrap_or(false);
-                    if !passed {
-                        code = 1;
-                    }
-                }
-            }
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
             println!(
                 "genos-stress frames={drawn} {}",
                 renderer.material_stats().line()
             );
-            finish(window, renderer, code);
+            return Ok(code);
         }
     }
 }
 
-fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
-    renderer.abandon();
-    std::process::exit(code);
+fn script_exit_code(
+    slot: &std::sync::Mutex<Option<genos_window::ThreadStop<bool>>>,
+    code: i32,
+) -> i32 {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(stop) = guard.as_mut() else {
+        return code;
+    };
+    if stop.try_join() && stop.result().copied() == Some(false) {
+        1
+    } else {
+        code
+    }
 }
 
 fn loading_world() -> World {

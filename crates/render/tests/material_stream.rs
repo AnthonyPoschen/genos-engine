@@ -52,12 +52,15 @@ fn watchdog() {
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(secs));
             eprintln!("material_stream: timed out after {secs}s (GPU wait hung)");
-            std::process::exit(124);
+            genos_window::exit(124);
         });
     });
 }
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     watchdog();
     let guard = GPU
@@ -65,9 +68,10 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(640, 360).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, window, renderer)
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    let owner = genos_window::Lifecycle::new(window, renderer, permit);
+    (guard, owner)
 }
 
 fn scene() -> Scene {
@@ -289,20 +293,22 @@ fn channel_max(pixels: &[u8], offset: usize) -> u8 {
 
 #[test]
 fn the_frame_streamer_is_read_back() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Albedo,
         lamp: 0,
     });
     let world = world();
     let camera = Camera::new(0.0, 4.0, 0.0);
-    let first = draw(&mut window, &mut renderer, &world, &camera);
+    let first = draw(window, renderer, &world, &camera);
     let (count, _) = renderer.material_residency();
     let coarse = channel_max(&first, 2);
     let mut finest = None;
     let mut texel = [0u8; 2];
     for _ in 0..4 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        let _frame = draw(window, renderer, &world, &camera);
         finest = renderer.material_residency().1;
         texel = renderer.material_texel();
     }
@@ -334,18 +340,20 @@ fn the_frame_streamer_is_read_back() {
 
 #[test]
 fn a_smaller_heap_budget_evicts_on_the_renderer() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = renderer.material_settings();
     settings.headroom_percent = 0;
     settings.headroom_floor_mb = 0;
     renderer.set_material_settings(settings);
-    flood_meter(&mut renderer);
+    flood_meter(renderer);
     let world = large_world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     let mut committed = 0u64;
     let mut finest = None;
     for _ in 0..16 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        let _frame = draw(window, renderer, &world, &camera);
         committed = renderer.material_committed();
         finest = renderer.material_residency().1;
         if finest == Some(0) && committed > 65_536 {
@@ -362,7 +370,7 @@ fn a_smaller_heap_budget_evicts_on_the_renderer() {
     let mut target = 0u64;
     if ready {
         for frame in 1..=6 {
-            let _frame = draw(&mut window, &mut renderer, &world, &camera);
+            let _frame = draw(window, renderer, &world, &camera);
             now = renderer.material_committed();
             target = renderer.vram_budget().texture_target();
             if now <= target {
@@ -384,12 +392,14 @@ fn a_smaller_heap_budget_evicts_on_the_renderer() {
 
 #[test]
 fn an_out_of_device_memory_retry_frees_device_memory() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     let mut pages = 0u64;
     for _ in 0..8 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        let _frame = draw(window, renderer, &world, &camera);
         pages = renderer.material_page_bytes();
         if renderer.material_residency().1 == Some(0) && pages > 0 {
             break;
@@ -415,18 +425,20 @@ fn an_out_of_device_memory_retry_frees_device_memory() {
 
 #[test]
 fn eviction_order_on_real_textures_follows_importance() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = renderer.material_settings();
     settings.headroom_percent = 0;
     settings.headroom_floor_mb = 1;
     settings.dwell_frames = 0;
     renderer.set_material_settings(settings);
-    flood_meter(&mut renderer);
+    flood_meter(renderer);
     let mut world = ordered_world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     let mut loaded = false;
     for _ in 0..16 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        let _frame = draw(window, renderer, &world, &camera);
         loaded = (0..3).all(|index| renderer.material_finest(index) == Some(0));
         if loaded {
             break;
@@ -441,7 +453,7 @@ fn eviction_order_on_real_textures_follows_importance() {
     let mut got = Vec::new();
     if loaded {
         for _ in 0..4 {
-            let _frame = draw(&mut window, &mut renderer, &world, &camera);
+            let _frame = draw(window, renderer, &world, &camera);
             got = renderer.material_evicted();
             if got.len() >= 5 {
                 break;
@@ -472,12 +484,14 @@ fn eviction_order_on_real_textures_follows_importance() {
 
 #[test]
 fn the_renderer_reports_the_live_streamer() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     let mut stats = renderer.material_stats();
     for _ in 0..8 {
-        let _frame = draw(&mut window, &mut renderer, &world, &camera);
+        let _frame = draw(window, renderer, &world, &camera);
         stats = renderer.material_stats();
         if renderer.material_residency().1 == Some(0) && stats.committed > 0 {
             break;

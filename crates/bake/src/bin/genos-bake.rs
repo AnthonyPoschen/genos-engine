@@ -22,7 +22,7 @@ use genos_bake::{key_path, read, rebake_keyed, BakeMesh, BakeMode, BakeSettings}
 fn main() {
     if let Err(err) = run() {
         eprintln!("genos-bake: {err}");
-        std::process::exit(1);
+        genos_window::exit(1);
     }
 }
 

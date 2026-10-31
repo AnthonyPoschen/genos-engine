@@ -36,6 +36,10 @@ _Avoid_: Backend
 The operating-system object that shows a surface and can take focus.
 _Avoid_: Viewport, canvas
 
+**App lifecycle**:
+The owner of shutdown. The event loop stops producers, drains the GPU by polling fences, destroys the device, unmaps the window, and then exits. Opening the device returns a permit that this owner consumes. Dropping the device without that owner panics and does not wait idle.
+_Avoid_: quit path, teardown helper
+
 **Surface**:
 The renderable area a window presents.
 _Avoid_: Swapchain, framebuffer, screen

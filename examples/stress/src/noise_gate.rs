@@ -236,7 +236,11 @@ pub fn run(config: &Config) -> Result<i32, String> {
     let started = std::time::Instant::now();
     let mut window = Window::open_proof(config.width, config.height)?;
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = overlap_world(config.lamps);
@@ -259,8 +263,8 @@ pub fn run(config: &Config) -> Result<i32, String> {
         if config.broken { "broken" } else { "random" }
     );
     let mut live = capture_pass(
-        &mut window,
-        &mut renderer,
+        &mut *window,
+        &mut *renderer,
         &world,
         &pose,
         config,
@@ -268,8 +272,8 @@ pub fn run(config: &Config) -> Result<i32, String> {
         "live",
     )?;
     let mut exact = capture_pass(
-        &mut window,
-        &mut renderer,
+        &mut *window,
+        &mut *renderer,
         &world,
         &pose,
         config,
@@ -278,7 +282,7 @@ pub fn run(config: &Config) -> Result<i32, String> {
     )?;
     renderer.set_lamp_shade_gate(LampShadeGate::Product);
     renderer.set_lighting_settings(gate_lighting(config.preset));
-    let solos = solo_frames(&mut window, &mut renderer, &world, &pose)?;
+    let solos = solo_frames(&mut *window, &mut *renderer, &world, &pose)?;
     let reference = reference_of(&world.scene, &pose, width, height);
     let report = grade_captures(
         width,

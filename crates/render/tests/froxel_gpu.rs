@@ -16,11 +16,12 @@ use genos_window::Window;
 
 const COLUMN_ABS: f32 = 1.0e-3;
 
-fn open(width: u32, height: u32) -> Result<(Window, Renderer), String> {
+fn open(width: u32, height: u32) -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(width, height)?;
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    Ok((window, renderer))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    Ok(genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn height_fog() -> FogSettings {
@@ -66,7 +67,8 @@ fn peak_column(gpu: &[genos_render::FogColumn], cpu: &[genos_render::FogColumn])
 
 #[test]
 fn gpu_columns_match_the_unshadowed_integral() {
-    let (_window, mut renderer) = open(64, 64).expect("lavapipe device");
+    let mut owner = open(64, 64).expect("lavapipe device");
+    let renderer = &mut *owner.device;
     let settings = height_fog();
     let size = GridSize {
         width: 4,
@@ -106,7 +108,9 @@ fn gpu_columns_match_the_unshadowed_integral() {
 
 #[test]
 fn a_low_preset_frame_dispatches_the_froxel() {
-    let (mut window, mut renderer) = open(64, 64).expect("lavapipe device");
+    let mut owner = open(64, 64).expect("lavapipe device");
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let scene = composed_frame_scene(true);
     let world = World::from_scene(scene.clone());
     let camera = composed_frame_camera();
