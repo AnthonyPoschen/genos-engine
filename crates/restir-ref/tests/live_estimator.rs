@@ -526,9 +526,11 @@ fn live_estimator_firefly_pixel_mean_is_unbiased() {
     assert!(((mean - want) / want).abs() < 0.05, "biased: mean {mean} exact {want}");
 }
 
-/// Open: after the cone, range and 0.1 min-distance bounds the worst frame is
-/// still 325x (was 310x before; random-probe worst 37709x -> ~2900x). The
-/// unbounded dim ring lamps keep every upper node unbounded in range.
+/// Root cause: the root split. The ring of dim lamps has a box that holds the
+/// receiver, so its bound floors distance at 0.1 m and outweighs the bright
+/// lamp's side 1598 to 5.7: the lamp giving 91 % of the light got pdf 7e-4.
+/// The defensive power mixture in each split (tree.rs `split_steps_mixed`)
+/// lifts it to 1.2e-2. Worst frame 325x -> 29x.
 #[test]
 fn live_estimator_initial_shade_has_no_firefly() {
     let (want, _, worst) = firefly_pixel_shades();
@@ -536,7 +538,7 @@ fn live_estimator_initial_shade_has_no_firefly() {
 }
 
 #[test]
-#[ignore = "diagnostic"]
+#[ignore = "diagnostic: each lamp pick pdf against its share of the light"]
 fn diag_firefly_pdf_vs_share() {
     use genos_restir_ref::tree::{node_importance_sided, split_steps_mixed};
     let lamps = scene();
