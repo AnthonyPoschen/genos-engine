@@ -35,6 +35,22 @@ pub const NODE_WORDS: usize = 12;
 /// Distance floor (metres) when the shading point sits inside a cluster sphere.
 const MIN_DIST: f32 = 1.0e-3;
 
+/// Steps of `next_f32` (16 bits). The GPU copy is `TREE_STEPS`.
+const STEPS: f32 = 65536.0;
+
+/// Left share of a split in `next_f32` steps, rounded. 0 or `STEPS` when a
+/// side has no importance. The GPU copy is `tree_split_steps`.
+#[must_use]
+pub fn split_steps(left_i: f32, right_i: f32, sum: f32) -> f32 {
+    if right_i <= 0.0 {
+        return STEPS;
+    }
+    if left_i <= 0.0 {
+        return 0.0;
+    }
+    (left_i / sum * STEPS + 0.5).floor().clamp(1.0, STEPS - 1.0)
+}
+
 /// Fault injected into the node importance. The walk still covers every lamp
 /// with positive power, so the RIS weight stays unbiased. The draws change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -213,12 +229,17 @@ impl LightTree {
                 let _ = rng.next_f32();
                 return None;
             }
-            let mark = rng.next_f32() * sum;
-            if right_i <= 0.0 || mark < left_i {
-                pdf *= left_i / sum;
+            // next_f32 has 65536 steps. Quantize the left share to the same
+            // steps and charge the pdf that share, so the pdf is the real
+            // probability: a branch below one step was picked 1/65536 of the
+            // time while its pdf said far less, and phat/pdf blew up.
+            let left_q = split_steps(left_i, right_i, sum);
+            let draw = rng.next_f32() * STEPS;
+            if draw < left_q {
+                pdf *= left_q / STEPS;
                 node_index = left;
             } else {
-                pdf *= right_i / sum;
+                pdf *= (STEPS - left_q) / STEPS;
                 node_index = right;
             }
         }

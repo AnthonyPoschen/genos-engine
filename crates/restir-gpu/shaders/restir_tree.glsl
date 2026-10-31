@@ -21,6 +21,19 @@ const float HALF = 0.5;
 #define RESTIR_WORDS words
 #endif
 
+const float TREE_STEPS = 65536.0;
+
+float tree_split_steps(float left_i, float right_i, float sum) {
+    if (right_i <= 0.0) {
+        return TREE_STEPS;
+    }
+    if (left_i <= 0.0) {
+        return 0.0;
+    }
+    // A side with importance keeps at least one step, so no lamp loses support.
+    return clamp(floor(left_i / sum * TREE_STEPS + 0.5), 1.0, TREE_STEPS - 1.0);
+}
+
 #ifndef RESTIR_LIVE_RECEIVER
 void restir_receiver(uint recv, out float px, out float py, out float pz, out float nx, out float ny, out float nz) {
     uint r = RESTIR_RECV_BASE + recv * 9u;
@@ -163,12 +176,15 @@ void sample_tree(uint recv, out uint index, out float pdf, out bool hit) {
             pdf = 0.0;
             return;
         }
-        float mark = next_f32() * sum;
-        if (right_i <= 0.0 || mark < left_i) {
-            acc_pdf *= left_i / sum;
+        // next_f32 has 65536 steps: quantize the left share to them and charge
+        // that share, so the pdf is the real pick probability (tree.rs split_steps).
+        float left_q = tree_split_steps(left_i, right_i, sum);
+        float draw = next_f32() * TREE_STEPS;
+        if (draw < left_q) {
+            acc_pdf *= left_q / TREE_STEPS;
             node = left;
         } else {
-            acc_pdf *= right_i / sum;
+            acc_pdf *= (TREE_STEPS - left_q) / TREE_STEPS;
             node = right;
         }
     }
