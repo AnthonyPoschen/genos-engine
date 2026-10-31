@@ -138,10 +138,15 @@ impl Reference {
             height: self.image.height,
             rgb: spec
                 .iter()
-                .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+                .flat_map(|c| c.map(tone8))
                 .collect(),
         })
     }
+}
+
+/// [`tone`] as an 8-bit channel.
+fn tone8(v: f32) -> u8 {
+    (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 fn tone(x: f32) -> f32 {
@@ -564,7 +569,7 @@ pub fn render(setup: &RefSetup) -> Reference {
         .collect();
     let rgb = linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Reference {
         image: Image {
@@ -653,7 +658,7 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
     let rgb = out
         .linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Ok(Reference {
         image: Image {
@@ -770,7 +775,7 @@ fn load(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
     }
     let rgb = linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Some(Reference {
         image: Image {
