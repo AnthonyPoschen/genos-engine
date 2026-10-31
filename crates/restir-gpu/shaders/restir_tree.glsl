@@ -6,7 +6,10 @@ const uint PROPOSAL_TREE = 2u;
 const uint PROPOSAL_TREE_FAULT = 3u;
 const uint NODE_STRIDE = 12u;
 const uint NODE_LAMP_EMPTY = 0xffffffffu;
-const float TREE_MIN_DIST = 1.0e-3;
+// lamp_light's LAMP_RADIUS clamp; tree.rs MIN_DIST.
+const float TREE_MIN_DIST = 0.1;
+// restir_phat measures range from the lifted origin (tree.rs RANGE_SLACK).
+const float TREE_RANGE_SLACK = 0.02;
 const float HALF = 0.5;
 
 // The checker reads these from the push constant. The live direct pass
@@ -118,28 +121,50 @@ float node_importance(uint node, uint recv, bool ignore_distance) {
         box_dz = pz - max_z;
     }
     float box_dist2 = tree_dot(box_dx, box_dy, box_dz, box_dx, box_dy, box_dz);
+    float range = load_f(base + 11u);
+    if (range > 0.0) {
+        float reach = range + TREE_RANGE_SLACK;
+        if (box_dist2 > reach * reach) {
+            return 0.0;
+        }
+    }
+    bool two = restir_receiver_two_sided(recv);
+    if (!two) {
+        float front = 0.0
+            + nx * dx
+            + ny * dy
+            + nz * dz
+            + abs(nx) * (HALF * (max_x - min_x))
+            + abs(ny) * (HALF * (max_y - min_y))
+            + abs(nz) * (HALF * (max_z - min_z));
+        if (front <= 0.0) {
+            return 0.0;
+        }
+    }
     float floor2 = TREE_MIN_DIST * TREE_MIN_DIST;
     if (box_dist2 < floor2) {
         box_dist2 = floor2;
     }
     float geom = ignore_distance ? 1.0 : 1.0 / box_dist2;
+    // cos(max(alpha - theta_u, 0)), 1 inside the bounding sphere (tree.rs).
     float radius2 = radius * radius;
-    if (dist2 <= radius2) {
-        return power * geom;
+    float cos_bound = 1.0;
+    if (dist2 > radius2) {
+        float inv = 1.0 / dist;
+        float cos_alpha = tree_dot(nx, ny, nz, dx * inv, dy * inv, dz * inv);
+        if (two) {
+            cos_alpha = abs(cos_alpha);
+        }
+        float sin_theta = radius * inv;
+        if (sin_theta > 1.0) {
+            sin_theta = 1.0;
+        }
+        float cos_theta = tree_sqrt(1.0 - sin_theta * sin_theta);
+        if (cos_alpha < cos_theta) {
+            float sin_alpha = tree_sqrt(1.0 - cos_alpha * cos_alpha);
+            cos_bound = cos_alpha * cos_theta + sin_alpha * sin_theta;
+        }
     }
-    float inv = 1.0 / dist;
-    float cos_alpha = tree_dot(nx, ny, nz, dx * inv, dy * inv, dz * inv);
-    // lamp_light lights a two-sided face with |n.l|: bound with |cos|.
-    if (restir_receiver_two_sided(recv)) {
-        cos_alpha = abs(cos_alpha);
-    }
-    float sin_theta = radius * inv;
-    if (sin_theta > 1.0) {
-        sin_theta = 1.0;
-    }
-    float cos_theta = tree_sqrt(1.0 - sin_theta * sin_theta);
-    float sin_alpha = tree_sqrt(1.0 - cos_alpha * cos_alpha);
-    float cos_bound = cos_alpha * cos_theta + sin_alpha * sin_theta;
     if (cos_bound <= 0.0) {
         return 0.0;
     }

@@ -124,7 +124,11 @@ pub fn prefix(
         });
         scene_index.push(id);
     }
-    let tree = LightTree::build(&refs);
+    let ranges: Vec<f32> = scene_index
+        .iter()
+        .map(|id| lamps.get(usize::try_from(*id).unwrap_or(usize::MAX)).map_or(0.0, |item| item.range))
+        .collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
     let nodes = tree.pack_words();
     let mut words = vec![0u32; HEADER_WORDS];
     let lamp_base = words.len();
