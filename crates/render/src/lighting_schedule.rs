@@ -1550,14 +1550,15 @@ mod tests {
     #[test]
     fn high_guard_grows_the_lit_frame_around_the_display() {
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
-        let lit = lit_target(&settings, 1280, 720, 16, 0.0, 0.0);
+        // A still camera gets no band (GUARD_STILL_RAD). Turn left and up.
+        assert_eq!(lit_target(&settings, 1280, 720, 16, 0.0, 0.0).lit_w, 1280);
+        let lit = lit_target(&settings, 1280, 720, 16, -0.1, 0.1);
+        assert!(lit.crop_x > 0, "a left turn leads on the left edge");
         assert!(lit.lit_w > 1280);
         assert!(lit.lit_h > 720);
         assert_eq!(lit.lit_w % 16, 0);
         assert_eq!(lit.crop_x % 16, 0);
         assert!(lit.crop_x + 1280 <= lit.lit_w);
         assert!(lit.crop_y + 720 <= lit.lit_h);
-        let mid = lit.crop_x + 640;
-        assert!((i64::from(mid) - i64::from(lit.lit_w) / 2).abs() < 32);
     }
 }
