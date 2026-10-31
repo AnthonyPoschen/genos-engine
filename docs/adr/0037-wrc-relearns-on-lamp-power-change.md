@@ -456,6 +456,99 @@ The current architecture can't meet the linger and lag gates with local tuning.
 
 **Design change needed:** event-driven invalidation. A lamp power or on/off event must invalidate every history inside the lamp's influence footprint in the same frame: WRC cells, per-texel means and the display field, probe irradiance and its gather/filter hold, and screen-space or compose history. Each history then restarts from a cold count. The relight runs under a bounded per-frame budget (a capped number of cells or probes per frame, most important near the camera first), so a mass switch defers work rather than spiking the frame. CONV=4 then decides when to freeze again. FOOT=7 shows that relighting everything at once is far too expensive, so the budget is required.
 
+## Round 14
+
+Prototype of the round-13 design as one debug hook on lighting-v3 34cc80c (uncommitted, in `/home/box/shared/adr0037-hooks.patch`). Runs are R10 + FX with RUN=1 and CONV=4, on lavapipe at 160x90, one run per config unless noted.
+
+- `GENOS_DBG_EVT=1` (debug word 2, bit 8): on a recorded lamp power or on/off change, a WRC cell inside the change sphere restarts from zero samples (t = 0). Texel means restart (as TEXOFF). Probe gather and filter hold, plus compose's direct history, are off while the light is not quiet. The display field repaints through FIELD/FIELD2.
+- `GENOS_DBG_EVT_BUDGET=n` (bits 9-20, n/16): at most n cell restarts per frame. Cells within 6 m of the eye can use the whole budget and farther cells only half, which approximates nearest-first. A cell over budget is cleared to 0 and relights as new. This is not a true sort.
+- `GENOS_DBG_EVT=2` (bit 21): a proportional A-SVGF-style drop instead of the clear. A WRC cell's count is scaled by (1 - λ), where λ = |new - old| / max(new, old) is clamped to 0..1. **Limitation:** λ comes from this pass's sample against the stored mean, not from an old-seed re-trace, and only WRC cells use it. Texels, probes and compose behave as in EVT=1.
+
+### Linger (dark7; gate ≤ 5 % at 120)
+
+| config | off 30 | off 120 | off 300 |
+|---|---|---|---|
+| r13 best (FX) | 43.8 % | 50.6 % | 27.8 % |
+| EVT=1, budget 1024 | 36.8 % | 42.4 % | 24.9 % |
+| EVT=1, budget 8192 | 38.0 % | 40.6 % | 21.7 % |
+| EVT=2, budget 1024 | 36.7 % | 35.7 % | 18.1 % |
+
+### Lag (onramp7; gate ≥ 90 % at 300; reference: hall9 run h14)
+
+| config | on 60 | on 120 | on 300 | on 600 |
+|---|---|---|---|---|
+| r13 best | 95.2 % | 56.8 % | 78.6 % | 82.4 % |
+| EVT=1, budget 1024 | 97.9 % | 73.5 % | 89.9 % | 92.0 % |
+| EVT=1, budget 8192 | 96.4 % | 68.1 % | 85.9 % | 88.8 % |
+| EVT=2, budget 1024 | 97.4 % | 65.9 % | 85.1 % | 87.9 % |
+
+The "dark" baseline varies from 0.011 to 0.049 between runs, so lag figures carry about ±4 points of noise. EVT=1 at 1024 is at the gate, not clearly over it.
+
+### Switch-frame cost (lavapipe lighting ms; 120 frames after the switch vs 60 before)
+
+| run | switch | after p50 | after max | before p50 | WRC restarts / over-budget clears |
+|---|---|---|---|---|---|
+| EVT=1 1024, dark7 | on | 704 | 11075 | 87 | ~37k / ~196k |
+| EVT=1 1024, dark7 | off | 366 | 936 | 75 | ~34k / ~187k |
+| EVT=1 8192, dark7 | on | 716 | 945 | 95 | ~175k / 80k |
+| EVT=1 8192, dark7 | off | 323 | 716 | 76 | ~167k / 75k |
+| EVT=1 1024, onramp7 | on | 630 | 831 | 88 | |
+| EVT=2 1024, dark7 | off | 380 | 871 | 76 | 262k drops |
+| EVT=2 1024, onramp7 | on | 707 | 1037 | 103 | 295k drops |
+
+On lavapipe, a switch costs 4-8x the lit-but-unsettled frame (and far more than the 0.1 ms frozen still frame) for about 120 frames. The budget barely changes this. The cost is dominated by the no-hold probe gather/filter and full-rate relight, not by WRC restarts. The 11 s max on the first switch is a one-off stall, probably pipeline or allocation. A 4070 measurement is needed for real ms.
+
+### Hall and box (no lamp switches, so no EVT events fired)
+
+| | r13 | round 14 |
+|---|---|---|
+| hall indirect/ref | 0.801 | 0.817 |
+| hall freeze, EVT=1 8192, no HIST | frame 545 | never (run lacked GENOS_DBG_HIST=1) |
+| hall freeze, EVT=1 1024 + HIST=1 (h14e1) | frame 545 | **never**: no `dbgconv` line at all in 1980 frames |
+| hall freeze, EVT=2 1024 + HIST=1 (h14e2) | frame 545 | **never** |
+| hall still lighting p50 (no HIST / e1 / e2) | 0.11 ms | 47.6 / 48.5 / 45.8 ms (unfrozen) |
+| hall indirect/ref (e1 / e2, HIST=1) | 0.801 | 0.813 / 0.834 |
+| hall flicker per-pixel std (e1 / e2) | 0.00001 | 0.00003 / 0.00014 |
+| hall flicker (per-pixel std) | 0.00001 | 0.00005 |
+| box live/ref, 3 runs | 0.631 / 0.621 / 0.658 | 0.582 / 0.582 / 0.581 |
+
+The box is 0.582 over 3 runs, down from 0.637 in r13: **a regression**, with no lamp events fired. With HIST=1 the hall still never reaches a CONV=4 pass (the r13 hall run h13c4 logged `dbgconv pass mode 4 round 500 frame 545`; h14e1/e2 log no `dbgconv` line at all), so the round-14 flag set (FX plus EVT) disables or bypasses the CONV=4 settle path. That is the likeliest cause of both the box drop and the 46-48 ms unfrozen still cost; not yet traced to a line.
+
+### Step sizes (st_*.rhai: 32 point lamps step together at frame 568; budget 1024; conv % against each config's own pre (frames 560-567) and t600 levels)
+
+| step | config | old → new bounce | conv 30 / 120 / 300 | post-step f2f noise / settled | max mean-luma jump post / settled |
+|---|---|---|---|---|---|
+| 100 → 90 % | e0 default | 0.382 → 0.391 | 85 / 93 / 95 % | 0.5x | 0.0001 / 0.0003 |
+| | e1 clear | 0.404 → 0.457 | 85 / 100 / 100 % | 47x | 0.0043 / 0.0002 |
+| | e2 proportional | 0.416 → 0.457 | 90 / 100 / 100 % | 46x | 0.0021 / 0.0001 |
+| 100 → 110 % | e0 | 0.382 → 0.393 | 82 / 89 / 92 % | 1.3x | 0.0005 / 0.0006 |
+| | e1 | 0.419 → 0.484 | 69 / 99 / 100 % | 35x | 0.0051 / 0.0003 |
+| | e2 | 0.404 → 0.493 | 95 / 99 / 100 % | 34x | 0.0029 / 0.0004 |
+| 100 → 50 % | e0 | 0.382 → 0.387 | 99 / 100 / 100 % | 0.4x | 0.0001 / 0.0002 |
+| | e1 | 0.402 → 0.361 | -54 / 74 / 97 % | 36x | 0.0220 / 0.0008 |
+| | e2 | 0.414 → 0.353 | 13 / 86 / 99 % | 33x | 0.0208 / 0.0004 |
+| 50 → 100 % | e0 | 0.259 → 0.287 | 87 / 93 / 94 % | 2.1x | 0.0008 / 0.0002 |
+| | e1 | 0.205 → 0.378 | 70 / 85 / 99 % | 2254x (settled ≈ 0) | 0.0280 / 0.0000 |
+| | e2 | 0.279 → 0.386 | 53 / 93 / 99 % | 218x | 0.0204 / 0.0000 |
+
+**These step numbers do not measure step response cleanly; read them with these caveats:**
+- conv % uses each config's own settled levels, as intended. But the pre-step level is not converged at frame 560: the three configs start from 0.38, 0.40 and 0.42 on the same scene, and for e1/e2 the 90 % step makes bounce *rise* (0.40 → 0.46) when it should fall about 10 %. The EVT restart lets the cache climb toward its true level, so the "step" mixes the lamp change with leftover convergence.
+- e0 (default) barely moves on any step (+0.005 to +0.028, against expected −0.04 to +0.17). Its high conv % and missing noise come from not responding, not from responding well.
+- e1 and e2 do respond, but every step, even ±10 %, adds frame-to-frame noise 33-47x the settled level (218-2254x where the settled frame was frozen) and a mean-luma jump 5-25x the settled one. At 160x90 this reads as a visible pop then shimmer for the first ~30-120 frames. e2 is not quieter than e1 on mild steps, because λ is taken from one noisy new sample against the stored mean: on a ±10 % change the sample noise dominates λ, so cells drop most of their history anyway. This is the expected failure of the pass-sample λ; true A-SVGF compares same-seed old/new samples to cancel that noise.
+- The lamp-power-proportional variant (λ = |ΔP| / max(P_old, P_new) by the lamp's share) was not built this round (time).
+
+### Verdict
+
+**The design as prototyped does not meet the gates, and the proportional drop as built is not an all-rounder.**
+- Lag: EVT=1 at budget 1024 reaches 89.9 % at 300 (gate 90 %, within ±4 points of run noise). Budget 8192 and EVT=2 are worse (85-86 %).
+- Linger: 36-42 % left at 120 frames (EVT=2: 36 %) against a 5 % gate, whatever the budget. The stale light is in a history this hook does not clear, or is refilled from one; candidates are probe irradiance (r13: 12 % alone) and the display field beyond the lamp-range sphere.
+- Post-step noise: after every step, including ±10 %, EVT=1 and EVT=2 add 33-47x the settled frame-to-frame noise and a visible mean jump; default shows none, but only because default barely responds to power changes at all. EVT=2's λ comes from one new sample against the stored mean (not a same-seed A-SVGF re-trace), so on mild changes sample noise dominates λ and it drops nearly as much history as the hard clear. It is no better than EVT=1 on mild steps.
+- Settling: with the round-14 flags the hall never freezes (46-48 ms still cost on lavapipe vs 0.11 ms) and the box drops to 0.582; a regression to fix before anything else.
+- Switch cost: about 120 frames at 4-8x the frame cost on lavapipe; the cell budget does not bound it.
+- All-rounder (sun sweep, moving objects, spinning lamps, camera turn): **not tested** this round.
+
+Next: (1) find why CONV=4 never passes under FX+EVT and restore the freeze; (2) a λ from lamp power (|ΔP| / max(P_old, P_new) weighted by the lamp's share or distance falloff) or a true same-seed re-trace, so mild steps keep their history; (3) the oracle that zeroes probe irradiance and the whole display field on the switch frame, to locate the remaining ~40 % linger.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
