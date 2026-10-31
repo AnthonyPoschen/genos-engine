@@ -147,8 +147,20 @@ def self_test():
     same, _ = ref_error(ref, ref, dist)
     still = [ref, ref, ref]
     moving = [ref, ref * 1.2, ref * 1.44]
+    # Engine and reference PNGs store the shoulder tone (mesh::tone,
+    # hdr_shoulder.glsl), not sRGB: linear below 0.64, so 128/255 reads back
+    # as 128/255 and the shoulder undoes to the light that made it.
+    import tempfile
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as d:
+        Image.new("RGB", (2, 2), (128, 128, 128)).save(d + "/a.png")
+        Image.new("RGB", (2, 2), (180, 180, 180)).save(d + "/b.png")
+        la, lb = float(lin_luma(d + "/a.png").mean()), float(lin_luma(d + "/b.png").mean())
+    x = 180 / 255 - 0.64
+    tone_ok = abs(la - 128 / 255) < 1e-3 and abs(lb - (0.64 + 1.1 * x / (0.14 - x))) < 1e-2
+    print(json.dumps({"lin_luma_128": round(la, 4), "lin_luma_180": round(lb, 4)}))
     ok = (same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
-          and unchanged(still) == 1.0 and unchanged(moving) == 0.0)
+          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)]}))
     print("self-test", "ok" if ok else "FAIL")
