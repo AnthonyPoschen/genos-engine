@@ -939,13 +939,14 @@ void main() {
     // so a still pixel changed every frame by the sample noise and the grid
     // score never settled. Keep a capped running mean of the shaded colour per
     // pixel, reprojected like the reservoir and dropped on a disocclusion or a
-    // lamp-list change (header word 15).
+    // lamp-list change (header word 15) or any lamp change (word 39): a
+    // switched lamp kept 31/32 of its old light (switch f0 .853 vs .633 off).
     if (restir_pix && lamp_pix) {
         uint mean_px = 0u;
         float mean_z = 0.0;
         uint mean_prev = 0u;
         vec3 mean_e = e;
-        if (restir_words[15u] == 0u && lamp_pick_reproject(pos, n, mean_px, mean_z)) {
+        if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject(pos, n, mean_px, mean_z)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
                 LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
