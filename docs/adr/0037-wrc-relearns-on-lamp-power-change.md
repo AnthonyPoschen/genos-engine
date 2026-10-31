@@ -1,8 +1,106 @@
-# 0037: The world radiance cache relearns when a lamp's power changes
+# 0037: The light cache stops before the light converges
 
-Status: **Proposed** (needs Anthony's review before any renderer code).
+Status: **Proposed** (a design for Anthony to review; no renderer code yet).
 
-## Context
+Earlier rounds of this ADR were titled "The world radiance cache relearns when a lamp's power changes". The investigation log is kept in the appendix. Some of its "not the cause" findings were measured with the surface cache off (mode 0), so they do not hold for mode 3. Round 6 explains this.
+
+## Decision summary
+
+Three symptoms share one root cause:
+
+- lamp-off linger
+- lamp-on lag
+- the settled energy shortfall (box 0.58 of reference, hall 0.77)
+
+The cause is the surface cache's convergence and staleness policy (world mode 3). Each of its four rules stops or slows relighting before the multi-bounce light has converged:
+
+1. **Settled freeze** (`lighting_gpu.rs`, `frozen = lighting_stats().settled`). About 300 frames after the camera stops, light-cache rounds stop altogether. The freeze is set by a still-frame count, not by whether the light has converged.
+2. **Young-only rounds** (`lighting_gpu.rs`, `young_only` when `light_quiet >= 2`). Once the light is "quiet", only young patches relight. Cells at the 128-set cap and older texels never refresh.
+3. **Capped running mean** (`lighting_cache.comp`, mode-3 hit-patch branch). A full cell weighs a new sample at about 1/128, and its mean keeps the dark sets from early rounds when fewer bounces had arrived. Every later hop reads that lagging value.
+4. **Lamp power change not recorded** (`lighting_wrc_note_lamps` records only lamps with `color.w > 0`). A lamp switching off never triggers the fast local alpha.
+
+The proposal is one policy. Keep relighting until a measured convergence test passes, use a mean that forgets, and invalidate on lamp changes.
+
+## Proposed design
+
+1. **A convergence test replaces the still-frame freeze.**
+   - Each relight already computes the change between the new sample and the stored mean (`lighting_wrc_check_take`).
+   - Keep a per-round reduction: the share of relit cells whose relative luma change is above a threshold ε, for example 2% after noise allowance.
+   - The cache counts as settled only after K consecutive rounds (for example 8) with that share below a small fraction, for example 1%.
+   - Only then may the freeze and young-only rounds start.
+   - Any lamp, sun or geometry change clears the settled state, as camera motion does today.
+2. **A mean that forgets.**
+   - Replace the plain mean capped at 128 sets with an exponential mean: α = max(1/n, α_min), with α_min about 1/32, and a 1/8 floor for the first rounds.
+   - Also reset the count (t → 4) when the incoming sample's luma exceeds the mean by more than X (10% tested best). This happens when more bounces arrive or a lamp turns on.
+   - The symmetric case, a sample well below the mean (lamp off), should reset as well. This is to be tested with the linger scenario.
+3. **Lamp-change invalidation.**
+   - Record lamps whose power drops to 0 in the lamp-change ring.
+   - Cells within a changed lamp's reach take the local alpha or the reset above.
+4. **Keep the idle saving.**
+   - Once the test passes, freeze exactly as today. Idle cost then returns to the frozen ~0.1 ms.
+   - Extra work is spent only while the light is actually changing.
+   - This needs measuring: how many rounds the box and hall take to pass the test, and the cost per round until then.
+
+Each step needs a failing test first, on the scenes below, before any code.
+
+## Evidence
+
+### Patch probe, mode 3 (thin-wall box, albedo 0.8, frame-880 dump)
+
+The table compares each patch's stored E with a CPU 64-bounce reference irradiance at the same centre and normal.
+
+| Patch | Set count w | E / ref | Last relight |
+|---|---|---|---|
+| 0.125 m texels | ≈22 | 0.54–0.69 | ≈ frame 300 |
+| 0.25 m cells | 128 (cap) | 0.70–0.84 (mostly ≈0.82) | ≈ frame 216 |
+| 0.5 m cells | 9–21 | ≈0.51–0.61 | ≈ frame 5 (no longer read) |
+
+The dumps at frame 880 and frame 2680 are identical: nothing relights after about frame 300. The samples themselves are low, and the cache is frozen at an under-converged fixed point.
+
+### Policy toggles, thin-wall box (160×90 lavapipe, #148 tone decode, 64-bounce ref)
+
+| Run | live/ref, 900 frames | f, 900 | live/ref, 2700 frames | f, 2700 |
+|---|---|---|---|---|
+| default (34cc80c) | 0.581 | 0.781 | 0.583 | — |
+| stale check off | 0.564 | — | 0.567 | — |
+| no freeze | 0.638 | 0.828 | 0.647 | 0.834 |
+| no freeze + no young-only | — | — | 0.686 | 0.861 |
+| + exponential mean (α floor 1/8 under 64 sets, then 1/32) | 0.696 | 0.867 | 0.707 | 0.874 |
+| + count reset when sample > mean +10% | **0.740** | **0.893** | **0.741** | **0.894** |
+| + count reset when sample > mean +3% | 0.708 | 0.875 | 0.704 | 0.873 |
+
+The reset rule wins. 3% fires on noise and loses history. The remaining gap of about 0.26 is mostly in the 0.125 m texels, whose own mean (`LIGHTING_CACHE_MATURE`) was not changed in this round.
+
+### Hall and lamps-spin, best combination (no freeze + no young-only + reset at 10%)
+
+The hall is stress hall with 32 lamps, 22:00, sun frozen and the camera held. Indirect/ref is measured at 1140 frames. For lamps-spin, lamps are set to `move` after settling, and the near-weighted error (oracle `ref_err_near` weighting, #148 decode) is taken against a 64-bounce reference every 60 frames.
+
+| | default | best |
+|---|---|---|
+| hall indirect / ref | 0.768 | **0.966** |
+| hall direct / ref | 0.997 | 0.997 |
+| lamps-spin near error, frames +60 / +120 / +180 | 0.124 / 0.118 / 0.110 | **0.054** / — / — |
+
+The best run hit the 590 s harness timeout after the first lamps-spin frame, because lavapipe is slow without the freeze. Its lamps-spin figure is one frame.
+
+### Idle cost (hall, still camera, 300 frames after settling, lavapipe)
+
+| | lighting ms p50 | p90 |
+|---|---|---|
+| default (frozen) | 0.10 | 0.13 |
+| no freeze + no young-only | 289.8 | 462.6 |
+
+Never freezing is not acceptable. On lavapipe it costs about 290 ms per frame. GPU numbers are not measured, and they are expected to be a far smaller absolute cost. This is why the design keeps the freeze and changes only *when* it starts: after the convergence test passes, rather than after a still-frame count. The next measurement is how many rounds that takes.
+
+## Open questions for Anthony
+
+- The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
+- Whether the texel mean (`LIGHTING_CACHE_MATURE`) gets the same forgetting mean.
+- Whether mode 0 (world cache off) should keep relighting its light cache at all (round 6).
+
+## Appendix: investigation log (rounds 1–6)
+
+### Context
 
 On lighting-v3 (34cc80c), with the world radiance cache (WRC, world mode 3) on, bounce light remembers the old lamp state after lamps switch. The effect works in both directions:
 
@@ -31,7 +129,7 @@ The scenes are stress/hall with `lights 32`, 22:00, sun frozen, camera held, 160
 | indirect | 0.082 | 0.110 | 0.111 | 0.114 | 0.122 | 0.241 |
 | bounce, settle disabled (`light_quiet >= 100000`) | 0.025 | 0.039 | 0.040 | 0.043 | 0.046 | |
 
-### Cause
+#### Cause
 
 The stale light is held in the WRC cells' running mean (`lighting_cache.comp`, the mode-3 hit-patch branch).
 
@@ -47,7 +145,7 @@ Four things that are **not** the cause, from the tables:
 - **The lamp-change ring missing off lamps.** `lighting_wrc_note_lamps` only records lamps where `moved && l.color.w > 0.0`, so a lamp going to colour 0 is never recorded. This is a real gap, but recording off lamps alone changed nothing measurable.
 - **A π, cosine or irradiance-versus-radiance error.** The cell estimate is E = 2π/N Σ L cos θ over uniform-solid-angle directions (`lighting_hemi_dir` draws cos θ uniformly), which is correct. The hit returns `albedo/π · E` (`lighting_direct.comp` ~958, `reflectance = albedo / π`), also correct.
 
-### Energy loss (the "3.5× darker" and "6–10 % dark")
+#### Energy loss (the "3.5× darker" and "6–10 % dark")
 
 The 3.5× gap (0.041 against 0.144) is **this same history lag, not an energy-loss term**. It was measured 300 frames after switching on from dark.
 
@@ -60,7 +158,7 @@ When the scene is lit from the start and settled for 600 frames, against a 64-bo
 
 So the WRC on its own costs about 7 % of indirect light at convergence, on top of about 6 % that both paths share. I found no single clear wrong term (no π, cosine or double factor). The remaining suspects are coarse hit-patch size and normal-bucket leak at corners, and cells read before they are full. They need their own measurement, and this ADR does not decide them.
 
-## Options
+### Options
 
 - **(a) Relearn on lamp power change (recommended).**
   - Record a lamp in the change ring when its power changes, including going to 0. For a lamp that went off, record its old range and power.
@@ -71,7 +169,7 @@ So the WRC on its own costs about 7 % of indirect light at convergence, on top o
 - **(b) Fast blend or reset only where incoming light drops sharply.** Cheaper, but it is driven by noisy per-cell estimates. It risks flicker and still misses slow drift.
 - **(c) Settle only after the running averages converge.** Require cache rounds that scale with the time the cells need to converge after a light change before mode 3 counts as settled. This is useful robustness, but the switch-on test shows the settle rule is not the cause, so it fixes nothing by itself.
 
-## Interaction with existing decisions
+### Interaction with existing decisions
 
 - **ADR 0013 (local invalidation, lamp-change tracking, #59).** Option (a) extends the same ring. A power change becomes a change record like a move. No full-frame fallback, and work stays under the caps.
 - **Anthony's rules:**
@@ -80,7 +178,7 @@ So the WRC on its own costs about 7 % of indirect light at convergence, on top o
   - Worst-case light-switch events hit the frame budget: the work is capped and deferred, never forced.
   - Full-relight cost matters most: (a) re-gathers only the cells inside the switched lamps' spheres, never the whole cache.
 
-## Gate
+### Gate
 
 A test in `crates/render/tests/lighting_frame.rs` on the lighting-v3 High preset, Bounce view: hall, 32 lamps, 22:00, held camera.
 
@@ -90,7 +188,7 @@ A test in `crates/render/tests/lighting_frame.rs` on the lighting-v3 High preset
 
 The energy number (indirect / 64-bounce reference ≥ 0.95) is tracked separately.
 
-## Remaining energy gaps (diagnosis, lighting-v3 34cc80c)
+### Remaining energy gaps (diagnosis, lighting-v3 34cc80c)
 
 **Measurement fix first.** `oracle_metrics.lin_luma` decoded the PNGs as sRGB. They actually store the shoulder tone, which is linear up to 0.64. The fix is PR #148, with a test and the fix as separate commits. With the right decode:
 
@@ -123,7 +221,7 @@ All values are bounce / reference indirect. Direct / ref is 0.997 in every run.
 - Albedo per hop: the next toggle is to scale the hit albedo and see whether the gap scales like a geometric series.
 - Sky and ambient: at 22:00 the sky is near 0, so they are unlikely to matter here.
 
-### Per-bounce series (lighting-v3 34cc80c, 31 Oct 2026)
+#### Per-bounce series (lighting-v3 34cc80c, 31 Oct 2026)
 
 Stress hall, lamps lit, 160x90, live settled 900 frames, tone-inverse decode. Each value is a fraction of that row's 64-bounce reference indirect. `k` scales the albedo of every secondary hit, both live (`reflectance` in `lighting_direct.comp`) and in the reference (`path_from`). These were local debug hooks and were not committed.
 
@@ -143,7 +241,7 @@ Stress hall, lamps lit, 160x90, live settled 900 frames, tone-inverse decode. Ea
 - **Ruled out by reading the code:** rgb9e5 packing (it rounds to nearest, so it is unbiased), and the hit reflectance chain (tint·0.8/π is stored as ×π in unorm8, then read as /π, which matches the reference's LAMBERT).
 - **Still not measured:** the source of the ≈5 % per hop, with cache cell normal or position interpolation as the lead suspect, and a corner-free open-plane comparison.
 
-### Simple-geometry scenes (lighting-v3 34cc80c, 31 Oct 2026)
+#### Simple-geometry scenes (lighting-v3 34cc80c, 31 Oct 2026)
 
 These runs use `--scene` files with built-in shapes: an open 24 m floor with one wall, a 6×6×3 m closed box with 0.2 m walls, the same box with 1 m walls, and the box without its roof. Each has one small lamp. Other settings:
 
@@ -184,7 +282,7 @@ For the box, the reference's per-hop increments are 0.0825, 0.0606, 0.0472 and 0
 
 Note: the first round-5 table (box f 0.49) came from a stale build that still had a round-4 hit-albedo hook. Every number above comes from a clean rebuild with all hooks neutral.
 
-### Patch probe, round 6 (lighting-v3 34cc80c, 31 Oct 2026)
+#### Patch probe, round 6 (lighting-v3 34cc80c, 31 Oct 2026)
 
 **Correction: the simple-geometry table was measured with the surface cache off.** The run script sets `world_cache: false` before the wait (as listed above), so `settings.world_mode()` is 0 from frame 5 on (a host print of the change head shows mode 3 for frames 1–4, then 0). In mode 0, `lighting_compact.comp` skips the whole surface-cache scheduling block. A slot-entry counter shows about 12,360 live slots visited each frame, of which 6,530 are 25 cm hit patches, and none of them is listed. The cache relights only in the first ~10 frames (about four hops), and is then read without any further relights. That is the "low fixed point" above, and it explains why no scheduling, freeze or estimator change moved the number.
 
