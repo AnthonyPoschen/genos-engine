@@ -44,7 +44,7 @@ let trace = #{
     max_spp: 1024,
     seconds: 600,
     noise: 0.025,
-    bounces: 3
+    bounces: 64
 };
 trace.prefix = "expected-off";
 let off_trace = reference(trace);
