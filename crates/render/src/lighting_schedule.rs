@@ -1535,6 +1535,38 @@ mod tests {
         assert!((half.scale - 0.5).abs() < 1.0e-6);
     }
 
+    /// #70 4070 blotches: at the controller floor one centered rect never
+    /// reached the display edges. The rect walks the display, so every display
+    /// tile is refreshed within `ROTATE_FRAMES_MAX` still frames.
+    #[test]
+    fn a_floor_scale_refreshes_the_whole_display_within_the_rotation() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let lit = display(1920, 1080);
+        let (tw, th) = (1920u32.div_ceil(16), 1080u32.div_ceil(16));
+        let mut seen = vec![false; (tw * th) as usize];
+        for frame in 0..ROTATE_FRAMES_MAX {
+            let push = schedule_push(&settings, f64::from(SCALE_FLOOR), lit, 16, 64, 0, frame);
+            assert!(push.plan.direct_gate, "the floor scale gates direct");
+            for y in push.plan.tile_y..push.plan.tile_y + push.plan.tile_h {
+                for x in push.plan.tile_x..push.plan.tile_x + push.plan.tile_w {
+                    seen[(y * tw + x) as usize] = true;
+                }
+            }
+        }
+        let missed = seen.iter().filter(|s| !**s).count();
+        assert_eq!(missed, 0, "{missed} display tiles never refreshed in {ROTATE_FRAMES_MAX} frames");
+    }
+
+    /// Variance and à-trous are cheap next to direct, and a held filtered value
+    /// outside the rect showed as blotches. They always run on the full crop.
+    #[test]
+    fn denoise_never_gates() {
+        let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        let push = schedule_push(&settings, f64::from(SCALE_FLOOR), display(1920, 1080), 16, 64, 1, 3);
+        assert!(!push.plan.atrous_gate);
+        assert!(push.plan.direct_gate);
+    }
+
     #[test]
     fn global_mode_pushes_zero_schedule_words() {
         let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
