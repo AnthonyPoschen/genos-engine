@@ -549,6 +549,35 @@ The box is 0.582 over 3 runs, down from 0.637 in r13: **a regression**, with no 
 
 Next: (1) find why CONV=4 never passes under FX+EVT and restore the freeze; (2) a λ from lamp power (|ΔP| / max(P_old, P_new) weighted by the lamp's share or distance falloff) or a true same-seed re-trace, so mild steps keep their history; (3) the oracle that zeroes probe irradiance and the whole display field on the switch frame, to locate the remaining ~40 % linger.
 
+## Round 15
+
+Measurement fixes first, then a power-based λ (`GENOS_DBG_EVT=3`). Hooks are on lighting-v3 34cc80c (uncommitted; `/home/box/shared/adr0037-hooks.patch`). Runs use lavapipe at 160x90.
+
+### Why round 14's settle check never froze, and why the box dropped
+
+The EVT flags were not the cause. The settle test itself had two faults.
+
+- **Box 0.637 → 0.582.** Round 13's boxes ran with `CONV=3` (`r13.sh` sets `R10` to CONV=3), which never passed, so they never froze and kept converging. Round 14's boxes ran `CONV=4`, which passed at round 83 (frame 87) while the box was still rising. Box rounds alternate two cell sets, with round-mean luma about 0.5 and then 0.15. That makes the per-round step's standard deviation large, so mode 4's drift tolerance of 2·sd·√16 is too loose (`dbg_conv_note`, mode 4 arm).
+- **Hall never freezes.** Mode 4's noise test is per round: fewer than 1 % of relit cells may move by more than 3σ/√n, for 8 rounds in a row. After the sweep, a round relights only 1-10 cells, so a single noisy cell fails it. In r13 (`h13c4`), frames 538-545 happened to be clean, so it passed at 545. In r14 (`h14e1`), frames 538-543 each had one noisy cell. The next sweep then started at frame 550 and never went quiet. The same 0-2 noisy cells per round appear in r13 at frames 515-536, so r13's pass was luck.
+- **Step-test confound.** Round 14's e0 step runs had no CONV and froze as shipped (pre-step lighting 0.1 ms). The e1 and e2 runs had CONV=4 and never froze (pre-step 40 ms), so their pre-step levels were still rising when the lamp stepped. That is why the 90 % step went up under e1 and e2.
+
+**Fix: `GENOS_DBG_CONV=5`.** Counts are pooled over the last 32 rounds. It passes when two conditions hold:
+- noisy cells are under 1 % of relit cells, or under 1 % of the sweep's peak round;
+- the pooled mean of the last 32 rounds is within 0.5 % of the 32 rounds before it, since both windows mix the same cell sets.
+
+The step scripts (`st15_*.rhai`) now:
+- wait 1100 frames before the step;
+- log the settled level and the drift from frame 1000 to 1100;
+- capture at 1200 frames after the step, so "new level" no longer means t600.
+
+### EVT=3: power-based λ
+
+- On a lamp change, the change ring stores λ = |P_new − P_old| / max(P_new, P_old), with P ∝ range². It is packed in the top 8 bits of the ring entry's frame word, and a new or moved lamp counts as λ = 1.
+- Each cell takes λ × falloff, where falloff is 1 inside half the lamp's range and falls to 0.25 at the range edge. λ = 1 applies over the whole range, which is a hard clear.
+- WRC cells scale their count by t *= 1 − λ_cell.
+- Texels restart only where λ_cell ≥ 0.5.
+- **Limitation:** probe gather and filter, and compose, behave as in EVT=1 (no hold while the light isn't quiet). They are not scaled, because the probe history has no per-lamp count in reach.
+
 ## Open questions for Anthony
 
 - The values of ε, K and the reset threshold X, plus whether a downward reset (lamp off) uses the same X.
