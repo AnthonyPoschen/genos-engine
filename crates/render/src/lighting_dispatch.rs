@@ -137,8 +137,11 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         u32::from(settings.direct.refresh_frames > 1),
         u32::from(settings.denoiser.enabled && settings.denoiser.screen),
         // Bit 0: reservoirs are allocated. Bit 1: a second slot for spatial reuse.
-        // Radius 0 is one slot (temporal only).
-        u32::from(settings.lamp_pick.reuse()) | (u32::from(settings.lamp_pick.radius > 0) << 1),
+        // Radius 0 is one slot (temporal only). Bit 2: ReSTIR DI reservoirs, sized
+        // here while no frame is in flight, never while a frame records.
+        u32::from(settings.lamp_pick.reuse())
+            | (u32::from(settings.lamp_pick.radius > 0) << 1)
+            | (u32::from(settings.restir_di) << 2),
     )
 }
 

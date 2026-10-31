@@ -1175,10 +1175,23 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
-        if self.lighting.restir_buf.buffer.is_null() {
-            self.lighting.restir_buf =
-                self.make_buffer(256, 0x20 | 0x2 | 0x1, Memory::Device)?;
-        }
+        // ReSTIR reservoirs are sized here, after wait_all_inflight: a resize
+        // inside a recording frame destroyed a buffer the other frame in
+        // flight still read and rewrote descriptor sets a pending command
+        // buffer had bound (4070: rc=139 on exit, a hang on quit).
+        let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
+        self.destroy_buffer(&mut restir_old);
+        let restir_bytes = if settings.restir_di {
+            crate::restir_live::buffer_bytes(pixels)
+        } else {
+            256
+        };
+        self.lighting.restir_buf = self.make_buffer(restir_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
+        self.lighting.restir_w = if settings.restir_di { w } else { 0 };
+        self.lighting.restir_h = if settings.restir_di { h } else { 0 };
+        self.lighting.restir_clear = true;
+        self.lighting.restir_have_prev = false;
+        self.lighting.restir_slot = 0;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -2747,27 +2760,15 @@ impl Gpu {
             }
             self.note_pipeline_time("restir-direct", start);
         }
+        // make_lighting_targets sizes the reservoirs (the alloc key holds
+        // restir_di) while nothing is in flight. A frame never reallocates.
         let need = crate::restir_live::buffer_bytes(u64::from(pixels));
-        let resized = self.lighting.restir_w != width || self.lighting.restir_h != height;
-        if self.lighting.restir_buf.size < need || resized {
-            let mut old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
-            self.destroy_buffer(&mut old);
-            match self.make_buffer(need, 0x20 | 0x2 | 0x1, Memory::Device) {
-                Ok(buf) => self.lighting.restir_buf = buf,
-                Err(err) => {
-                    eprintln!("lighting: restir buffer off: {err}");
-                    return false;
-                }
-            }
-            self.lighting.restir_w = width;
-            self.lighting.restir_h = height;
-            self.lighting.restir_clear = true;
+        if self.lighting.restir_buf.size < need
+            || self.lighting.restir_w != width
+            || self.lighting.restir_h != height
+        {
             self.lighting.restir_have_prev = false;
-            self.lighting.restir_slot = 0;
-            if let Err(err) = self.write_lighting_sets() {
-                eprintln!("lighting: restir descriptors off: {err}");
-                return false;
-            }
+            return false;
         }
         // A moved or recoloured lamp no longer resets every pixel: its history
         // samples are flagged per lamp in the prefix, re-scored at the current
