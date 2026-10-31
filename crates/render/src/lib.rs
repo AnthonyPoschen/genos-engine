@@ -53,10 +53,11 @@ pub use budget::{FrameMemory, ImageAdmit};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
+    GpuKind,
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
     LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
-    MaterialStats, Renderer,
+    MaterialStats, Renderer, VkTraffic,
     ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats, ViewMode,
 };
 pub use hdr_output::{
@@ -99,9 +100,9 @@ pub use reflections::{
 pub use reflections_grade::{grade_camera, grade_world, GRADE_HEIGHT, GRADE_WIDTH};
 pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
-    agreement, direct_light, direct_light_in, first_outgoing, linear_from_display, luminance,
-    radiance, radiance_hits, ray_land, samples_toward, sees, trace as trace_ray, Hit as TraceHit,
-    Surfaces,
+    agreement, direct_light, direct_light_in, first_outgoing, lamps_in, linear_from_display,
+    luminance, radiance, radiance_hits, ray_land, samples_toward, sees, solid_contains,
+    trace as trace_ray, Hit as TraceHit, Surfaces,
 };
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{

@@ -86,6 +86,8 @@ pub fn call(name: &str, args: Value, timeout: Duration) -> Result<Value, String>
             name: name.to_string(),
             args,
         });
+        // Wake a host blocked in `take_wait`.
+        WAKE.notify_all();
         id
     };
     let deadline = Instant::now() + timeout;
@@ -115,6 +117,24 @@ pub fn take() -> Vec<Pending> {
     let mut queue = lock();
     queue.served = true;
     std::mem::take(&mut queue.waiting)
+}
+
+/// Like [`take`], but a host with no frame loop (a headless debug binary)
+/// blocks here until a command arrives or `timeout` passes.
+pub fn take_wait(timeout: Duration) -> Vec<Pending> {
+    let deadline = Instant::now() + timeout;
+    let mut queue = lock();
+    queue.served = true;
+    loop {
+        let now = Instant::now();
+        if !queue.waiting.is_empty() || now >= deadline {
+            return std::mem::take(&mut queue.waiting);
+        }
+        let (guard, _) = WAKE
+            .wait_timeout(queue, deadline.saturating_duration_since(now))
+            .unwrap_or_else(|err| err.into_inner());
+        queue = guard;
+    }
 }
 
 /// Answer command `id`. A caller that gave up is ignored.
@@ -156,5 +176,16 @@ mod tests {
         assert_eq!(out, json::int(7));
         frame.join().unwrap();
         assert!(call("nope", json::int(1), Duration::from_millis(10)).is_err());
+
+        // A host with no frame loop blocks in `take_wait` instead of polling.
+        assert!(take_wait(Duration::from_millis(1)).is_empty());
+        let host = std::thread::spawn(|| {
+            let pending = take_wait(Duration::from_secs(5));
+            let cmd = pending.into_iter().next().expect("woken with a command");
+            reply(cmd.id, Ok(cmd.args));
+        });
+        let out = call("echo", json::int(8), Duration::from_secs(5)).expect("reply");
+        assert_eq!(out, json::int(8));
+        host.join().unwrap();
     }
 }

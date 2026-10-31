@@ -1,8 +1,35 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The BVH must agree with brute force on every query.
 
@@ -119,4 +146,52 @@ fn one_sided_triangles_are_missed_from_behind() {
     assert!(Bvh::build(&[])
         .intersect(&[], [0.0; 3], [1.0, 0.0, 0.0], 1.0)
         .is_none());
+}
+
+/// Two far clusters leave empty SAH bins between them. An empty bin must not
+/// make every split look infinitely costly (Sponza's `leaf` had 16-triangle
+/// leaves spanning the whole atrium).
+#[test]
+fn far_clusters_split_across_empty_bins() {
+    let tris: Vec<MeshTriangle> = (0..16u16)
+        .map(|i| {
+            let x = if i % 2 == 0 { -10.0 } else { 10.0 } + f32::from(i) * 0.01;
+            MeshTriangle::flat(
+                [[x, 0.0, 0.0], [x + 0.01, 0.0, 0.0], [x, 0.01, 0.0]],
+                u32::from(i),
+                true,
+            )
+        })
+        .collect();
+    assert!(Bvh::build(&tris).node_count() > 1);
+}
+
+/// Coincident triangles tie on `t`. The lower index wins whatever the tree
+/// visits first, so a better build cannot change a bake.
+#[test]
+fn a_tie_goes_to_the_lower_index() {
+    let flat = |p: [[f32; 3]; 3], i: u16| MeshTriangle::flat(p, u32::from(i), true);
+    for a in 0..40u16 {
+        for b in 0..40u16 {
+            if a == b {
+                continue;
+            }
+            let mut tris: Vec<MeshTriangle> = (0..40u16)
+                .map(|i| {
+                    let x = f32::from(i) * 0.37 - 7.0;
+                    let z = f32::from(i * 7 % 11) - 5.0;
+                    flat([[x, z, 5.0], [x + 0.1, z, 5.0], [x, z + 0.1, 5.0]], i)
+                })
+                .collect();
+            let shared = [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]];
+            tris[usize::from(a)] = flat(shared, a);
+            tris[usize::from(b)] = flat(shared.map(|p| [p[0] * 2.0, p[1] * 2.0, 0.0]), b);
+            let hit = Bvh::build(&tris).intersect(&tris, [0.0, 0.0, 2.0], [0.0, 0.0, -1.0], 10.0);
+            assert_eq!(
+                hit.map(|h| h.triangle),
+                Some(u32::from(a.min(b))),
+                "{a} {b}"
+            );
+        }
+    }
 }

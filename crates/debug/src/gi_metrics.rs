@@ -30,7 +30,13 @@ use genos_render::GiSample;
 use crate::value::{num, obj, text};
 
 pub const FRAME_HEADER: &str =
-    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded\n";
+    "frame,direct_ms,atrous_ms,compose_ms,trace_ms,filter_ms,gather_ms,resolve_ms,lighting_ms,rays,cache_entries_refreshed,lamps_shaded,spec_ms\n";
+
+/// GPU time of the specular pass. Always 0: the live renderer has no specular
+/// pass yet (ADR 0024). The column is here so the lighting oracle
+/// (`scripts/lighting/oracle_metrics.py`) reads one name before and after that
+/// pass lands. When it does, time it like the other passes and drop this.
+const SPEC_MS: f64 = 0.0;
 
 pub const SUMMARY_HEADER: &str = "name,p50,p99\n";
 
@@ -109,6 +115,7 @@ pub fn summary_csv(samples: &[GiSample]) -> String {
         column(samples, |s| f64::from(s.lamps_shaded)),
         true,
     );
+    push("spec_ms", column(samples, |_| SPEC_MS), false);
     out
 }
 
@@ -122,7 +129,7 @@ pub fn frames_csv(samples: &[GiSample]) -> String {
 
 pub fn frame_row(sample: &GiSample) -> String {
     format!(
-        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{}\n",
+        "{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{},{},{},{:.4}\n",
         sample.seq,
         sample.direct_ms,
         sample.atrous_ms,
@@ -134,7 +141,8 @@ pub fn frame_row(sample: &GiSample) -> String {
         sample.lighting_ms,
         sample.rays,
         sample.cache_entries_refreshed,
-        sample.lamps_shaded
+        sample.lamps_shaded,
+        SPEC_MS
     )
 }
 
@@ -217,6 +225,7 @@ pub fn sample_value(sample: &GiSample) -> Value {
             num(f64::from(sample.cache_entries_refreshed)),
         ),
         ("lamps_shaded", num(f64::from(sample.lamps_shaded))),
+        ("spec_ms", num(SPEC_MS)),
     ])
 }
 
@@ -250,6 +259,7 @@ pub fn summary_value(samples: &[GiSample]) -> Value {
             count(|s| s.cache_entries_refreshed),
         ),
         ("lamps_shaded", count(|s| s.lamps_shaded)),
+        ("spec_ms", pair(|_| SPEC_MS)),
     ])
 }
 
@@ -329,6 +339,7 @@ mod tests {
             "rays",
             "cache_entries_refreshed",
             "lamps_shaded",
+            "spec_ms",
         ] {
             assert!(csv.contains(name), "{name} missing from {csv}");
         }
@@ -337,6 +348,8 @@ mod tests {
         let frames = frames_csv(&samples);
         assert!(frames.starts_with(FRAME_HEADER));
         assert!(frames.contains("1,1.0000,"));
+        // No specular pass yet: the column is there and reads 0.
+        assert!(frames.lines().nth(1).is_some_and(|row| row.ends_with(",0.0000")), "{frames}");
         assert!(scenario_name("s1-spin").is_ok());
         assert!(scenario_name("../x").is_err());
         assert!(scenario_name("").is_err());

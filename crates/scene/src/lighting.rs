@@ -502,6 +502,102 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
 }
 
+/// Surface cache switches the renderer uses when nothing sets `sc_flags`
+/// (`lighting_cache.glsl` lighting_sc_flags).
+pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6_007_050;
+
+/// Debug isolate toggle bits (`experiments.toggles`): attribute a change to
+/// exactly one component.
+pub const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
+pub const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
+pub const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
+pub const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
+const LIGHTING_TOGGLE_NAMES: [(&str, u32); 4] = [
+    ("freeze_cache", LIGHTING_TOGGLE_FREEZE_CACHE),
+    ("direct_only", LIGHTING_TOGGLE_DIRECT_ONLY),
+    ("bounce_only", LIGHTING_TOGGLE_BOUNCE_ONLY),
+    ("freeze_probes", LIGHTING_TOGGLE_FREEZE_PROBES),
+];
+
+/// Experiment and debug knobs of the lighting frame. Every preset uses the
+/// defaults, so they never change a preset's picture. All apply on the next
+/// frame without a rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingExperimentSettings {
+    /// Key `cache_async`. Light cache rounds run on the async compute queue,
+    /// at most one in flight. Off keeps them in the frame. A failed async
+    /// submit turns it off for the rest of the run.
+    pub cache_async: bool,
+    /// Key `cache_hz`. Light cache rounds per second of wall time. `0` runs
+    /// one every frame.
+    pub cache_hz: f32,
+    /// Key `cache_picks`. Light cache rays take the weighted lamp pick.
+    pub cache_picks: bool,
+    /// Key `fill`. A pixel with no lit probe reads its lit neighbours.
+    pub fill: bool,
+    /// Key `young_only`. Once a probe-path scene's light has held a full
+    /// sweep, rounds relight young patches only. The surface cache ignores it.
+    pub young_only: bool,
+    /// Key `world_cap`. Frames a world cell (mode 2) or ray sets a surface
+    /// cache texel (mode 3) averages, 1 to 999. `0` keeps the mode's default
+    /// (32 for mode 2, 64 for mode 3).
+    pub world_cap: u32,
+    /// Key `sc_settle`. Surface cache: frames still before the debug tools
+    /// call the picture settled. `0` uses the change counter.
+    pub sc_settle: u32,
+    /// Key `sc_flags`. Surface cache switch bits (`lighting_cache.glsl`).
+    /// `surface_cache.blend` still forces bits 20 and 30.
+    pub sc_flags: u32,
+    /// Key `toggles`. Debug isolate words, comma separated: `freeze_cache`,
+    /// `direct_only`, `bounce_only`, `freeze_probes`, or `none`.
+    pub toggles: u32,
+}
+
+impl Default for LightingExperimentSettings {
+    fn default() -> Self {
+        Self {
+            cache_async: false,
+            cache_hz: 0.0,
+            cache_picks: false,
+            fill: true,
+            young_only: true,
+            world_cap: 0,
+            sc_settle: 0,
+            sc_flags: LIGHTING_DEFAULT_SC_FLAGS,
+            toggles: 0,
+        }
+    }
+}
+
+/// Toggle words to bits. Unknown words fail.
+pub fn parse_lighting_toggles(text: &str) -> Result<u32, String> {
+    let mut bits = 0;
+    for word in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
+        if word == "none" {
+            continue;
+        }
+        bits |= LIGHTING_TOGGLE_NAMES
+            .iter()
+            .find(|(name, _)| *name == word)
+            .map(|(_, bit)| *bit)
+            .ok_or_else(|| format!("unknown lighting toggle {word}"))?;
+    }
+    Ok(bits)
+}
+
+fn toggles_text(bits: u32) -> String {
+    let words: Vec<&str> = LIGHTING_TOGGLE_NAMES
+        .iter()
+        .filter(|(_, bit)| bits & bit != 0)
+        .map(|(name, _)| *name)
+        .collect();
+    if words.is_empty() {
+        "none".into()
+    } else {
+        words.join(",")
+    }
+}
+
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
 /// only when a size knob changes.
 #[derive(Clone, Debug, PartialEq)]
@@ -528,6 +624,8 @@ pub struct LightingSettings {
     /// pass on the brute or lamp-pick shade. The light tree, the reservoirs,
     /// and the three passes run only while this is on.
     pub restir_di: bool,
+    /// Experiment and debug knobs. Defaults in every preset.
+    pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
@@ -706,6 +804,7 @@ impl LightingSettings {
             },
             lamp_pick: LampPickSettings::default(),
             restir_di: false,
+            experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
     }
@@ -763,6 +862,12 @@ impl LightingSettings {
         self.lamp_pick.candidates = self.lamp_pick.candidates.clamp(1, 32);
         self.lamp_pick.rays = self.lamp_pick.rays.clamp(1, 4);
         self.lamp_pick.radius = self.lamp_pick.radius.min(64);
+        self.experiments.cache_hz = if self.experiments.cache_hz.is_finite() {
+            self.experiments.cache_hz.max(0.0)
+        } else {
+            0.0
+        };
+        self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
     }
 
@@ -1132,6 +1237,16 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let x = &self.experiments;
+        let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
+        let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
+        let _ = writeln!(out, "cache_picks={}", bit(x.cache_picks));
+        let _ = writeln!(out, "fill={}", bit(x.fill));
+        let _ = writeln!(out, "young_only={}", bit(x.young_only));
+        let _ = writeln!(out, "world_cap={}", x.world_cap);
+        let _ = writeln!(out, "sc_settle={}", x.sc_settle);
+        let _ = writeln!(out, "sc_flags={}", x.sc_flags);
+        let _ = writeln!(out, "toggles={}", toggles_text(x.toggles));
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
@@ -1216,6 +1331,19 @@ impl LightingSettings {
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
+            "cache_async" => self.experiments.cache_async = on(value)?,
+            "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
+            "cache_picks" => self.experiments.cache_picks = on(value)?,
+            "fill" => self.experiments.fill = on(value)?,
+            "young_only" => self.experiments.young_only = on(value)?,
+            "world_cap" => self.experiments.world_cap = num_u32(value)?.min(999),
+            "sc_settle" => self.experiments.sc_settle = num_u32(value)?,
+            "sc_flags" => {
+                self.experiments.sc_flags = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("sc_flags is a whole number, got {value}"))?
+            }
+            "toggles" => self.experiments.toggles = parse_lighting_toggles(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
             "probes" => self.probes.enabled = on(value)?,
@@ -1406,6 +1534,15 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
             ("GENOS_RESTIR_DI", "restir_di"),
+            ("GENOS_LIGHTING_ASYNC", "cache_async"),
+            ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
+            ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
+            ("GENOS_LIGHTING_FILL", "fill"),
+            ("GENOS_LIGHTING_YOUNG_ONLY", "young_only"),
+            ("GENOS_LIGHTING_WORLD_CAP", "world_cap"),
+            ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
+            ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
+            ("GENOS_LIGHTING_TOGGLES", "toggles"),
         ];
         for (var, key) in keys {
             if let Ok(value) = lighting_env(var) {
@@ -1897,7 +2034,6 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_TILE", "GENOS_LIGHTING_TILE"),
     ("GENOS_GI2_TIME", "GENOS_LIGHTING_TIME"),
     ("GENOS_GI2_TOGGLES", "GENOS_LIGHTING_TOGGLES"),
-    ("GENOS_GI2_TOGGLES_FILE", "GENOS_LIGHTING_TOGGLES_FILE"),
     ("GENOS_GI2_UNFILLED", "GENOS_LIGHTING_UNFILLED"),
     ("GENOS_GI2_UNFILLED_DUMP", "GENOS_LIGHTING_UNFILLED_DUMP"),
     ("GENOS_GI2_UNFILLED_TINT", "GENOS_LIGHTING_UNFILLED_TINT"),

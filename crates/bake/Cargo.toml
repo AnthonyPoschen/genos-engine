@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 genos-load = { path = "../load" }
 genos-mesh = { path = "../mesh" }
+genos-window = { path = "../window" }
 
 [[test]]
 name = "materials_gate"

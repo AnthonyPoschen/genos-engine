@@ -20,7 +20,8 @@ use genos_scene::{
     load_str, AmbientMode, EngineSettings, LampPickMode, LightingPreset, LightingSettings,
     LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
     LAMP_PICK_SPATIAL_RADIUS,
-    SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED,
+    SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_DEFAULT_SC_FLAGS,
+    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
 };
 
 fn room() -> &'static str {
@@ -469,4 +470,62 @@ fn the_ambient_curve_interpolates_and_scales_the_sky_from_noon() {
     .expect("scene");
     assert_eq!(scene.lighting.ambient.mode, AmbientMode::Curve);
     assert!((scene.lighting.time_of_day - 9.0).abs() < 1.0e-5);
+}
+
+#[test]
+fn experiment_defaults_match_the_old_environment_defaults() {
+    for preset in LightingPreset::all() {
+        let x = LightingSettings::preset(*preset).experiments;
+        assert!(!x.cache_async);
+        assert_eq!(x.cache_hz, 0.0);
+        assert!(!x.cache_picks);
+        assert!(x.fill);
+        assert!(x.young_only);
+        assert_eq!(x.world_cap, 0);
+        assert_eq!(x.sc_settle, 0);
+        assert_eq!(x.sc_flags, LIGHTING_DEFAULT_SC_FLAGS);
+        assert_eq!(x.toggles, 0);
+    }
+    assert_eq!(LightingSettings::default().preset_label(), "high");
+}
+
+#[test]
+fn experiment_keys_round_trip() {
+    let mut settings = LightingSettings::default();
+    for (key, value) in [
+        ("cache_async", "on"),
+        ("cache_hz", "7.5"),
+        ("cache_picks", "1"),
+        ("fill", "off"),
+        ("young_only", "0"),
+        ("world_cap", "24"),
+        ("sc_settle", "300"),
+        ("sc_flags", "8192"),
+        ("toggles", "direct_only,bounce_only"),
+    ] {
+        settings.set_key(key, value).expect(key);
+    }
+    let x = settings.experiments;
+    assert!(x.cache_async && x.cache_picks && !x.fill && !x.young_only);
+    assert_eq!((x.cache_hz, x.world_cap, x.sc_settle, x.sc_flags), (7.5, 24, 300, 8192));
+    assert_eq!(x.toggles, LIGHTING_TOGGLE_DIRECT_ONLY | LIGHTING_TOGGLE_BOUNCE_ONLY);
+    let text = settings.to_text();
+    assert!(text.contains("toggles=direct_only,bounce_only"));
+    let parsed = LightingSettings::parse(&text).unwrap();
+    assert_eq!(parsed.experiments, x);
+    assert_eq!(parsed.preset_label(), "custom");
+    let back = LightingSettings::parse(&LightingSettings::default().to_text()).unwrap();
+    assert_eq!(back, LightingSettings::default());
+}
+
+#[test]
+fn experiment_keys_reject_bad_values() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.set_key("toggles", "freeze_everything").is_err());
+    assert!(settings.set_key("sc_flags", "-1").is_err());
+    assert!(settings.set_key("fill", "maybe").is_err());
+    settings.set_key("world_cap", "5000").unwrap();
+    assert_eq!(settings.experiments.world_cap, 999);
+    settings.set_key("toggles", "none").unwrap();
+    assert_eq!(settings.experiments.toggles, 0);
 }

@@ -14,6 +14,7 @@ genos-math = { path = "../math" }
 genos-mesh = { path = "../mesh" }
 genos-scene = { path = "../scene" }
 genos-restir-ref = { path = "../restir-ref" }
+genos-window = { path = "../window" }
 
 [dev-dependencies]
 genos-ui = { path = "../ui" }

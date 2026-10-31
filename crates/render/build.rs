@@ -100,6 +100,11 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         reflections_check,
         &out.join("reflections_check.comp.spv"),
     );
+    // Not embedded: GPU parity fixture for pbr_brdf.glsl (tests/pbr_parity.rs).
+    let pbr_check = "shaders/pbr_check.comp";
+    println!("cargo:rerun-if-changed={pbr_check}");
+    println!("cargo:rerun-if-changed=shaders/pbr_brdf.glsl");
+    compile(pbr_check, &out.join("pbr_check.comp.spv"));
     media
 }
 
@@ -317,6 +322,8 @@ fn rerun_shader_pieces() {
         "reflections_composite.frag",
         "reflections_ggx.frag",
         "reflections_check.comp",
+        "pbr_brdf.glsl",
+        "pbr_check.comp",
         "scene_data.glsl",
         "dither.glsl",
         "hdr_shoulder.glsl",
