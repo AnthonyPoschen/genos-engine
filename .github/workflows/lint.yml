@@ -98,7 +98,8 @@ jobs:
           # GPU picture/reference integration tests in render, stress and debug
           # take far too long on lavapipe; run only their unit tests here.
           gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug"
-          cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1
+          # lifecycle_quit needs the built windowed binaries; the quit-gap job runs it.
+          cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1 --skip every_binary_answers_pings_while_it_quits
           cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
           # Integration tests in those crates that never open a device: CPU
           # references, shader-source lints and CPU-side packing checks.
