@@ -1101,9 +1101,11 @@ pub fn schedule_push(
     let mut words = plan.words(lit.crop_x, lit.crop_y);
     // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
     words[0] |= 1 << 3;
-    if plan.cache_ray_grant > 0 {
-        words[0] |= plan.cache_ray_grant.min(0x00ff_ffff) << 8;
-    }
+    // #70 R4: the cache ray grant is not pushed. The trace pass cut it as a tail
+    // of the batch by position, so the same lists lost their rays every scaled
+    // frame and the turned view went dark (box hall: 47 -> 6 mean vs master at
+    // budget_scale 0.25). The controller cuts cache work per list through
+    // `refresh_budget_shift`, which drops by priority.
     let coarse_slots = u32::try_from(coarse_cap_bytes(preset) / 368).unwrap_or(u32::MAX);
     SchedulePush {
         words,

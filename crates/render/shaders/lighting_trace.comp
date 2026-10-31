@@ -98,13 +98,6 @@ void main() {
         ray += lighting_probe_rays();
     }
     uint rays_end = mode == 1u ? lighting_probe_rays() : lighting_all_rays();
-    // Cache-ray grant from the controller. Zero keeps the batch. Probe, fill,
-    // and kept-hit retraces are not this range.
-    uint ray_grant = pc.schedule.x >> 8u;
-    if (ray_grant != 0u && ray >= lighting_probe_rays() && ray < rays_end
-        && ray - lighting_probe_rays() >= ray_grant) {
-        return;
-    }
     uint at;
     vec3 origin;
     vec3 dir;
