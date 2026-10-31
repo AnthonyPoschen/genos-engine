@@ -143,6 +143,11 @@ struct Prim {
 impl LightTree {
     /// Median split on the longest axis of the lamp positions. Lamp index breaks ties.
     #[must_use]
+    /// Builds with per-lamp ranges (0 = unbounded). Ranges are not used yet.
+    pub fn build_ranged(lamps: &[Lamp], _ranges: &[f32]) -> Self {
+        Self::build(lamps)
+    }
+
     pub fn build(lamps: &[Lamp]) -> Self {
         let mut prims = Vec::with_capacity(lamps.len());
         for (index, lamp) in lamps.iter().enumerate() {

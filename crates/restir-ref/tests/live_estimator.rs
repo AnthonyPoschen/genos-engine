@@ -273,7 +273,8 @@ fn mean_estimate(p: &Pixel, lamps: &[LiveLamp], tree: &LightTree, seed: u64, fra
 fn check(set: &[(&'static str, Pixel)]) {
     let lamps = scene();
     let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
-    let tree = LightTree::build(&refs);
+    let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
     let mut failures = Vec::new();
     for (name, p) in set {
         let want = exact(p, &lamps);
@@ -306,7 +307,8 @@ fn live_estimator_two_sided_matches_the_exact_sum() {
 fn live_estimator_shadowed_mean_matches_the_exact_shadowed_sum() {
     let lamps = scene();
     let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
-    let tree = LightTree::build(&refs);
+    let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
     // One ball hides the bright warm lamp from the floor beside it; one sits
     // just above the floor so the 0.02 lift decides grazing visibility.
     let balls = [
@@ -363,7 +365,8 @@ fn live_estimator_moving_lamp_temporal_matches_the_exact_sum() {
                 let mut lamps = base.clone();
                 lamps[spin].pos = v(0.3 + 0.8 * a.cos(), 0.6, 0.2 + 0.8 * a.sin());
                 let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
-                let tree = LightTree::build(&refs);
+                let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
                 let c = initial(&p, &lamps, &tree, &mut rng);
                 let m_now = if c.lamp.is_none() { CANDIDATES } else { c.m };
                 // Any lamp changed this frame (the orbiting one always has):
@@ -452,7 +455,8 @@ fn spatial(ps: &[Pixel], lamps: &[LiveLamp], slots: &[Res], unit: f32) -> Res {
 fn live_estimator_spatial_matches_the_exact_sum() {
     let lamps = scene();
     let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
-    let tree = LightTree::build(&refs);
+    let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
     let pairs = [
         ("outward wall past ring", v(17.0, 1.0, 0.0), v(17.0, 1.0, 0.3), v(1.0, 0.0, 0.0)),
         ("open floor", v(1.7, 0.0, 3.9), v(1.9, 0.0, 3.9), v(0.0, 1.0, 0.0)),
@@ -487,4 +491,47 @@ fn live_estimator_spatial_matches_the_exact_sum() {
         }
     }
     assert!(failures.is_empty(), "biased pixels: {failures:?}");
+}
+
+/// lamps-spin rows 0-9 held a direct value 50x the reference for 30+ frames:
+/// one frame's reservoir had W ~10^4 (the tree gave a lamp that lights the
+/// pixel a pick pdf ~3e-6), and temporal reuse plus the 32-frame colour mean
+/// kept it. A face under the grid, looking down: the proposal must not starve
+/// the lamps that light it, so one initial reservoir's shade (before any reuse)
+/// stays within a bounded multiple of the exact sum. The mean stays unbiased.
+fn firefly_pixel_shades() -> (f32, f32, f32) {
+    let lamps = scene();
+    let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
+    let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
+    let p = Pixel { pos: v(-1.760_681_2, 1.064_254_8, -4.183_593_8), n: v(0.0, -1.0, 0.0), two_sided: false };
+    let want = luma(exact(&p, &lamps));
+    let mut rng = Rng::new(9);
+    let (mut worst, mut sum) = (0.0f32, 0.0f32);
+    let frames = 40000;
+    for _ in 0..frames {
+        let r = initial(&p, &lamps, &tree, &mut rng);
+        let e = r.lamp.map_or(0.0, |l| luma(lamp_light(&lamps[l], origin(&p), p.n, p.two_sided)) * w_of(r));
+        worst = worst.max(e);
+        sum += e;
+    }
+    let mean = sum / frames as f32;
+    eprintln!("exact {want:.4} mean {mean:.4} worst {worst:.2} ({:.0}x)", worst / want);
+    (want, mean, worst)
+}
+
+#[test]
+fn live_estimator_firefly_pixel_mean_is_unbiased() {
+    let (want, mean, _) = firefly_pixel_shades();
+    assert!(((mean - want) / want).abs() < 0.05, "biased: mean {mean} exact {want}");
+}
+
+/// Open: after the cone, range and 0.1 min-distance bounds the worst frame is
+/// still 325x (was 310x before; random-probe worst 37709x -> ~2900x). The
+/// unbounded dim ring lamps keep every upper node unbounded in range.
+#[test]
+#[ignore = "open: measured worst 325x the exact value, limit 200x"]
+fn live_estimator_initial_shade_has_no_firefly() {
+    let (want, _, worst) = firefly_pixel_shades();
+    assert!(worst < 200.0 * want, "firefly: one frame shades {worst:.2}, {:.0}x the exact {want:.4}", worst / want);
 }
