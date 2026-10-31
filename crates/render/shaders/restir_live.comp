@@ -142,14 +142,8 @@ void restir_receiver(uint recv, out float px, out float py, out float pz, out fl
     nz = n.z;
 }
 
-float restir_phat(uint recv, uint lamp) {
+float restir_phat_at(vec3 pos, vec3 n, bool two_sided, uint lamp) {
     if (lamp >= restir_hdr(0u)) {
-        return 0.0;
-    }
-    vec3 pos;
-    vec3 n;
-    bool two_sided;
-    if (!restir_surface_of(recv, pos, n, two_sided)) {
         return 0.0;
     }
     uint at = restir_hdr(1u) + lamp * 8u;
@@ -160,6 +154,16 @@ float restir_phat(uint recv, uint lamp) {
     vec3 target;
     vec3 light = lamp_light(src, origin, n, two_sided, target);
     return dot(light, RESTIR_LUMA);
+}
+
+float restir_phat(uint recv, uint lamp) {
+    vec3 pos;
+    vec3 n;
+    bool two_sided;
+    if (!restir_surface_of(recv, pos, n, two_sided)) {
+        return 0.0;
+    }
+    return restir_phat_at(pos, n, two_sided, lamp);
 }
 
 #include "restir_tree.glsl"
@@ -236,8 +240,13 @@ bool restir_depth_normal(float z_ref, float z_other, vec3 n_ref, vec3 n_other) {
     return dot(n_ref, n_other) >= RESTIR_NORMAL_MIN;
 }
 
-bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel) {
+// The history pixel and the surface it showed last frame (the point the
+// history reservoir's weights were built for), rebuilt from the previous
+// camera, the pixel centre, and the stored view depth.
+bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos, out vec3 hist_n) {
     hist_pixel = 0u;
+    hist_pos = vec3(0.0);
+    hist_n = vec3(0.0, 1.0, 0.0);
     if (restir_hdr(21u) == 0u) {
         return false;
     }
@@ -268,6 +277,10 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel) {
     uint geo = prev + hist_pixel * stride;
     float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
     vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
+    vec2 centre = floor(px) + RESTIR_NDC_HALF;
+    vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(width)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(height)));
+    hist_pos = eye + z_prev * (fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up);
+    hist_n = n_prev;
     return restir_depth_normal(z, z_prev, nrm, n_prev);
 }
 
@@ -300,7 +313,9 @@ void restir_temporal(uint pixel) {
     vec3 nrm;
     bool surfaced = restir_pixel_surface(pixel, pos, nrm);
     uint hist_pixel = 0u;
-    bool reuse = restir_hdr(15u) == 0u && surfaced && restir_reproject(pos, nrm, hist_pixel);
+    vec3 hist_pos;
+    vec3 hist_n;
+    bool reuse = restir_hdr(15u) == 0u && surfaced && restir_reproject(pos, nrm, hist_pixel, hist_pos, hist_n);
     uint stride = restir_hdr(19u);
     uint prev = restir_hdr(20u) == 0u ? restir_hdr(4u) : restir_hdr(5u);
     uint h_lamp;
@@ -341,34 +356,24 @@ void restir_temporal(uint pixel) {
             hist_w *= m_as_f(m_now) / m_as_f(hist_m);
             hist_m = m_now;
         }
-        float tq_c = 0.0;
-        if (lamp != LAMP_EMPTY && (tree ? lamp < restir_hdr(0u) : lamp < n)) {
-            tq_c = restir_phat(pixel, lamp);
-        }
-        float tq_h = 0.0;
-        if (h_lamp != LAMP_EMPTY && (tree ? h_lamp < restir_hdr(0u) : h_lamp < n)) {
-            tq_h = restir_phat(pixel, h_lamp);
-        }
-        if (c_empty) {
-            // Merge with an empty current reservoir of M m_now: the history
-            // sample keeps its mass, the count grows, W shrinks to match.
-            float w_h_res = reservoir_w(h_lamp, hist_w, hist_m, h_target);
-            if (tq_h > 0.0 && w_h_res > 0.0) {
-                out_lamp = h_lamp;
-                out_m = hist_m + m_now;
-                out_target = tq_h;
-                out_w = m_as_f(hist_m) * w_h_res * tq_h;
-            } else {
-                store_empty(out_lamp, out_w, out_m, out_target);
-            }
-        } else {
-            merge_pair(
-                lamp, w_sum, m, target, tq_c,
-                h_lamp, hist_w, hist_m, h_target, tq_h,
-                tq_c, tq_h,
-                unit,
-                out_lamp, out_w, out_m, out_target);
-        }
+        // Generalized balance heuristic (GRIS): each sample's MIS weight
+        // compares M * p_hat over both domains, with the history domain's
+        // p_hat taken at the surface the history pixel showed. Scoring both
+        // at this pixel (1/M weights) is unbiased only when the two points
+        // see the same lamps alike; after camera motion the history point is
+        // another surface, and near the camera that error was 29 % (turn).
+        bool two_sided = restir_receiver_two_sided(pixel);
+        bool c_ok = lamp != LAMP_EMPTY && (tree ? lamp < restir_hdr(0u) : lamp < n);
+        bool h_ok = h_lamp != LAMP_EMPTY && (tree ? h_lamp < restir_hdr(0u) : h_lamp < n);
+        float pc_c = c_ok && !c_empty ? restir_phat(pixel, lamp) : 0.0;
+        float ph_c = c_ok && !c_empty ? restir_phat_at(hist_pos, hist_n, two_sided, lamp) : 0.0;
+        float pc_h = h_ok ? restir_phat(pixel, h_lamp) : 0.0;
+        float ph_h = h_ok ? restir_phat_at(hist_pos, hist_n, two_sided, h_lamp) : 0.0;
+        merge_pair_balance(
+            c_empty ? LAMP_EMPTY : lamp, w_sum, m_now, target, pc_c, ph_c,
+            h_lamp, hist_w, hist_m, h_target, pc_h, ph_h,
+            unit,
+            out_lamp, out_w, out_m, out_target);
     }
     uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
     uint at = next + pixel * stride;

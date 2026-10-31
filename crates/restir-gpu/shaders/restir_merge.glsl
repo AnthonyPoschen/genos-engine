@@ -108,3 +108,42 @@ void merge_pair(
     m = count;
     target = tq;
 }
+
+// Two-domain generalized balance merge (Bitterli et al. 2020, Lin et al.
+// 2022): the canonical (current) and history reservoirs were built for
+// different points. `pc_*` is p_hat of a sample at the current point (the
+// integrand), `ph_*` at the history point. Weight of sample i:
+// M_i p_i(y_i) / (M_c p_c(y_i) + M_h p_h(y_i)). m_c counts an empty current
+// reservoir's candidates too (lamp_c empty, M = candidates drawn).
+void merge_pair_balance(
+    uint lamp_c, float w_c, uint m_c, float target_c, float pc_c, float ph_c,
+    uint lamp_h, float w_h, uint m_h, float target_h, float pc_h, float ph_h,
+    float unit,
+    out uint lamp, out float w_sum, out uint m, out float target
+) {
+    float mc = m_as_f(m_c);
+    float mh = m_as_f(m_h);
+    float wt_c = 0.0;
+    if (lamp_c != LAMP_EMPTY && m_c != 0u && pc_c > 0.0) {
+        float d = mc * pc_c + mh * ph_c;
+        float big_w = target_c > 0.0 ? w_c / (mc * target_c) : 0.0;
+        wt_c = d > 0.0 ? (mc * pc_c / d) * pc_c * big_w : 0.0;
+    }
+    float wt_h = 0.0;
+    if (!is_empty(lamp_h, m_h) && pc_h > 0.0 && ph_h > 0.0) {
+        float d = mc * pc_h + mh * ph_h;
+        wt_h = d > 0.0 ? (mh * ph_h / d) * pc_h * reservoir_w(lamp_h, w_h, m_h, target_h) : 0.0;
+    }
+    float area = wt_c + wt_h;
+    uint count = m_c + m_h;
+    if (!(area > 0.0) || count == 0u) {
+        store_empty(lamp, w_sum, m, target);
+        return;
+    }
+    bool pick_h = wt_h > 0.0 && (unit < wt_h / area || !(wt_c > 0.0));
+    lamp = pick_h ? lamp_h : lamp_c;
+    target = pick_h ? pc_h : pc_c;
+    // W = area / target; stored so that w_sum / (M * target) = W.
+    w_sum = area * m_as_f(count);
+    m = count;
+}
