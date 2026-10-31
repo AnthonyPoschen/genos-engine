@@ -2818,9 +2818,7 @@ impl Gpu {
             return false;
         };
         let reset = geom_reset || prefix.layout_changed || !self.lighting.restir_have_prev;
-        if let Some(word) = prefix.words.get_mut(15) {
-            *word = u32::from(reset);
-        }
+        crate::restir_live::set_history_reset(&mut prefix.words, reset);
         self.lighting.restir_prev_lamps.clone_from(&self.lighting.restir_lamps);
         if self.lighting.restir_clear {
             self.lighting.restir_clear = false;

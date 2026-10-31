@@ -213,6 +213,15 @@ pub fn prefix(
     })
 }
 
+/// Header word 15, the history-invalid flag the shaders read. `reset` is the
+/// frame's geometry/camera reset; the prefix already holds the lamp-layout and
+/// `GENOS_RESTIR_REUSE=off` reasons.
+pub fn set_history_reset(words: &mut [u32], reset: bool) {
+    if let Some(word) = words.get_mut(15) {
+        *word = u32::from(reset);
+    }
+}
+
 /// `GENOS_RESTIR_REUSE=off` turns temporal and spatial reuse off, leaving
 /// initial candidates only. Diagnostic for bias hunts; logged once.
 fn reuse_off() -> bool {
@@ -331,4 +340,20 @@ mod tests {
             .unwrap_or_else(|| panic!("prefix"));
         assert!(packed.layout_changed, "indices no longer match");
     }
+    #[test]
+    fn history_reset_keeps_prefix_reasons() {
+        // The prefix set word 15 (reuse off or a new lamp layout); a frame with
+        // no geometry reset must not clear it before the shaders read it.
+        let mut words = vec![0u32; 40];
+        words[15] = 1;
+        super::set_history_reset(&mut words, false);
+        assert_eq!(words[15], 1, "shader-visible word 15 disagrees with the host");
+        words[15] = 0;
+        super::set_history_reset(&mut words, true);
+        assert_eq!(words[15], 1);
+        words[15] = 0;
+        super::set_history_reset(&mut words, false);
+        assert_eq!(words[15], 0);
+    }
+
 }
