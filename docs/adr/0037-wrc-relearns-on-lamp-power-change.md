@@ -59,6 +59,8 @@ The dumps at frame 880 and frame 2680 are identical: nothing relights after abou
 
 ### Policy toggles, thin-wall box (160×90 lavapipe, #148 tone decode, 64-bounce ref)
 
+> **Superseded (round 7, inflated).** This build carried `DBG_PATCHVIEW = true` (see the round 8 correction). The "best" numbers here are not current. Use the round 8 and round 9 tables.
+
 | Run | live/ref, 900 frames | f, 900 | live/ref, 2700 frames | f, 2700 |
 |---|---|---|---|---|
 | default (34cc80c) | 0.581 | 0.781 | 0.583 | — |
@@ -73,6 +75,8 @@ The reset rule wins. 3% fires on noise and loses history. The remaining gap of a
 
 ### Hall and lamps-spin, best combination (no freeze + no young-only + reset at 10%)
 
+> **Superseded (round 7, inflated).** This build carried `DBG_PATCHVIEW = true` (see the round 8 correction). The "best" numbers here are not current. Use the round 8 and round 9 tables.
+
 The hall is stress hall with 32 lamps, 22:00, sun frozen and the camera held. Indirect/ref is measured at 1140 frames. For lamps-spin, lamps are set to `move` after settling, and the near-weighted error (oracle `ref_err_near` weighting, #148 decode) is taken against a 64-bounce reference every 60 frames.
 
 | | default | best |
@@ -85,12 +89,14 @@ The best run hit the 590 s harness timeout after the first lamps-spin frame, bec
 
 ### Idle cost (hall, still camera, 300 frames after settling, lavapipe)
 
+> **Superseded (round 7, inflated).** This build carried `DBG_PATCHVIEW = true` (see the round 8 correction). The "best" numbers here are not current. Use the round 8 and round 9 tables.
+
 | | lighting ms p50 | p90 |
 |---|---|---|
 | default (frozen) | 0.10 | 0.13 |
 | no freeze + no young-only | 289.8 | 462.6 |
 
-Never freezing is not acceptable. On lavapipe it costs about 290 ms per frame. GPU numbers are not measured, and they are expected to be a far smaller absolute cost. This is why the design keeps the freeze and changes only *when* it starts: after the convergence test passes, rather than after a still-frame count. The next measurement is how many rounds that takes.
+Never freezing is not acceptable. On lavapipe it costs about 290 ms per frame (round 8 clean hooks: 323 ms). GPU numbers are not measured, and they are expected to be a far smaller absolute cost. This is why the design keeps the freeze and changes only *when* it starts: after the convergence test passes, rather than after a still-frame count. The next measurement is how many rounds that takes.
 
 ## Round 8: clean hooks, convergence test, linger and lag (31 Oct 2026)
 
@@ -153,6 +159,47 @@ Each round counts the WRC cells it relit and the share whose stored value moved 
 1. Run the convergence test against per-cell noise σ, or as round-mean drift, not as a raw ε.
 2. Make the count reset symmetric (sample far below the mean), and record lamps that switch off in the change ring. Both are required by the linger gate.
 3. The next measurements are the rounds needed to pass the noise-relative test, and the 4070 idle cost, using the hooks patch.
+
+## Round 9: two-sided reset, lamp-off ring, noise-relative test (31 Oct 2026)
+
+Build: lighting-v3 34cc80c plus `/home/box/shared/adr0037-hooks.patch` (regenerated). `DBG_PATCHVIEW` and `DBG_WHOLE` are not in the tree. New hooks, all off by default:
+
+- `GENOS_DBG_MEAN=3`: two-sided count reset. When |sample − mean| > max(10 %, k·σ)·mean, the count drops to 4. σ is the per-cell relative noise in GRAD2.w. k comes from `GENOS_DBG_K` (default 3).
+- `GENOS_DBG_LAMPOFF=1`: `lighting_wrc_note_lamps` also records lamps that were lit and are now off, at their previous power. A WRC cell inside the old range sphere drops its count to 1.
+- `GENOS_DBG_CONV=1|2`: the freeze also waits for a convergence test. Mode 1 passes when, for 8 rounds in a row, under 1 % of relit cells have |change| > 3σ/√n. Mode 2 passes when the round-mean luma of relit cells is within 0.5 % of its value 8 rounds earlier, for 8 rounds in a row. The test resets on camera or light motion.
+
+"k3" below means CONV=1 + NO_YOUNG + MEAN=3, K=3 + LAMPOFF.
+
+### Correction to round 8
+
+The round-8 convergence counters wrote to `chg[12..17]`. Those slots already hold `CHG_G_HELD`, `G_DIRTY`, `G_MOVED`, `G_PICKS`, `TEX_WRITE` and `TEX_D0`, so **the round-8 convergence table is invalid** (shares above 1 were seen). Round 9 counts in the unused `diag[56..63]` words, and only while `GENOS_LIGHTING_SC_TRACE` is set.
+
+### Results
+
+| | default | k3 | k4 |
+|---|---|---|---|
+| box live/ref, 900 frames | 0.563 (f 0.764) | 0.566 (f 0.768) | 0.562 (f 0.763) |
+| box: noise test (mode 1) passes at | n/a | round 18, frame 22 | round 18, frame 22 |
+| hall indirect/ref, 1140 frames | 0.765 | **0.820** | not run |
+| hall: noise test passes at | n/a | never (1377 rounds) | not run |
+| hall: round-mean drift 0.5 % / 1 % / 2 % (offline) | n/a | never / never / never | not run |
+| hall still lighting ms p50 / p90 (frames 840–1140) | 0.09 / 0.12 | 232 / 295 (never froze) | not run |
+| hall still flicker, per-pixel frame-to-frame luma std | 0 | 0.00000 (mean-luma std 2e-6) | not run |
+| linger, off 30 / 120 / 300 (gate ≤ 5 % at 120) | 65 / 56 / 46 % | 90 / **70** / 43 % | not run |
+| lag, on 60 / 120 / 300 / 600 (gate ≥ 90 % at 300) | round 8: 18 / 25 / 33 / 34 % | 29 / 50 / **75** / 78 % | not run |
+
+Box drift (offline): within 2 % at frame 36 in every variant, and within 1 % only after frame ~930 for k3 and k4. The default never gets within 1 %.
+
+- **The noise-relative test passes too early in the box.** At frame 22 only the first relights have happened and the light is still rising. With k3 and the conv gate, the box ends no brighter than the default (0.566 against 0.563). In the box the k = 3 and k = 4 results are the same within noise.
+- **In the hall it never passes.** A share of 0.6–0.8 of relit cells stays above 1σ/√n every round. The stored σ is capped at 0.2, and that cap looks too low for 16-ray hall samples. So the cache never freezes and the idle cost stays near the no-freeze cost (232 ms against 323 ms in round 8). Flicker is not the issue: the frames are stable. The cost is.
+- Counter caveat: the hall `3σ` share exceeds 1 once at round ~232, so one counter is still double-counting there. Treat the hall share columns as approximate.
+- **Linger still fails.** The lamp-off ring with a reset to 1 still leaves 70 % at 120 frames. Lag improves from 33 % to 75 % at 300 frames, which is still short of 90 %.
+- **Hall indirect** rises from 0.765 to 0.820, below round 8's NOFREEZE best of 0.844.
+
+### Changes to the proposed design
+
+1. Neither test is a usable freeze trigger yet. A per-cell noise test needs a real σ (uncapped, or estimated from the ray count), and it needs a minimum sample count before it can pass. Round-mean drift over relit cells is too noisy, because each round relights a different subset.
+2. The linger failure is not explained by the cell count alone. The next step is to check whether the hall bounce view reads the texel cache (`LIGHTING_CACHE_MATURE`), which neither hook resets.
 
 ## Open questions for Anthony
 
