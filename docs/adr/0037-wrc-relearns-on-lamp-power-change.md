@@ -142,3 +142,44 @@ Stress hall, lamps lit, 160x90, live settled 900 frames, tone-inverse decode. Ea
 - **WRC on costs a further 9–12 % at every k**, including 3.6 % at one bounce. It is not mainly hop-dependent, which matches the history lag noted above.
 - **Ruled out by reading the code:** rgb9e5 packing (it rounds to nearest, so it is unbiased), and the hit reflectance chain (tint·0.8/π is stored as ×π in unorm8, then read as /π, which matches the reference's LAMBERT).
 - **Still not measured:** the source of the ≈5 % per hop, with cache cell normal or position interpolation as the lead suspect, and a corner-free open-plane comparison.
+
+### Simple-geometry scenes (lighting-v3 34cc80c, 31 Oct 2026)
+
+These runs use `--scene` files with built-in shapes: an open 24 m floor with one wall, a 6×6×3 m closed box with 0.2 m walls, the same box with 1 m walls, and the box without its roof. Each has one small lamp. Other settings:
+
+- `world_cache: false`, 160x90, live settled
+- tone-inverse decode, with scenes dim enough to stay in the linear range
+- direct light within 0.1 % of the reference in every scene
+
+`c_live` is live one-bounce, from surface-cache flag 2097152, which turns off cache reads at hits. Each scene is fitted to live = c_live / (1 − g·f), where g is the reference loop gain, g = 1 − b1/b64.
+
+| scene | ref b1 | ref b64 | live 1-bounce | live | live/ref | g | f |
+|---|---|---|---|---|---|---|---|
+| open plane + wall | 0.1480 | 0.1945 | 0.1417 | 0.1746 | 0.898 | 0.239 | ≈0.79 (ill-conditioned) |
+| closed box, thin walls | 0.0825 | 0.3544 | 0.0816 | 0.1600 | 0.451 | 0.767 | 0.64 |
+| closed box, 1 m walls | 0.0791 | 0.3372 | 0.0783 | 0.1562 | 0.463 | 0.765 | 0.65 |
+| box, no roof | 0.0386 | 0.0832 | 0.0377 | 0.0579 | 0.696 | 0.536 | 0.65 |
+
+For the box, the reference's per-hop increments are 0.0825, 0.0606, 0.0472 and 0.0365, so b2 = 0.143 and b3 = 0.190. Live, at 0.160, falls between b2 and b3.
+
+**Findings:**
+
+- **First bounce is exact in every scene,** at 0.96–0.99 of reference b1. The whole loss is in hops 2 and later, as in the hall.
+- **The per-hop factor is about 0.64–0.65 in every closed or semi-closed scene.** It does not change with wall thickness or with the roof. A 3 m room matched the 6 m box in a first pass. **So this is not a spatial or normal leak through thin walls or corners.** The loss is far larger than the hall's ≈0.95, which suggests the hall's high reflectance and large open area hide it. The open-plane f is ill-conditioned because g = 0.24.
+- **None of these changed the box value (0.1600 ± 0.0001):**
+  - Freezing: disabling the settle freeze, `GENOS_LIGHTING_SC_SETTLE=100000`
+  - Scheduling: disabling young-only scheduling; forcing every texel into the young list; flag 8192 (texels keep relighting at the cap)
+  - Hit reads: skipping the sized-texel read at hits, so every hit reads its hit-size patch
+  - Estimators: forcing `lighting_sc_sun_gain` to 1; SVGF off (flag 2^31); MSME off (flag 2^30)
+  - Earlier rounds: firefly sigma 1e5; flags 256, 32768 (fill unlit patches), 65536, 131072 and 1048576; waiting 3600 frames
+  - No cache relight aborted on a none-ray; a counter hook stayed at 0.
+- **The cache reaches a fixed point that is low.** It is not truncated by scheduling. Freezing at frame ~70 and relighting for 976 rounds give the same picture.
+- **Scaling the light that hits read from the cache by K** (live box: K = 0 → 0.0735, 0.7 → 0.126, 1.0 → 0.160, 1.3 → 0.207) gives a convex response. So the cache does carry more than one hop, but each hop is attenuated by ≈0.64.
+- **Ruled out by reading the code:**
+  - The relight estimator: E = 2π/N·Σ L·cos with uniform-in-cos θ directions is correct for those samples.
+  - `lighting_ray_light` decoding.
+  - The hit radiance at cache and probe rays, ρ/π·(E_direct + E_cache).
+- **Still open:** the irradiance of the 25 cm-and-up hit patch (`lighting_cache_irradiance`, found with `lighting_cache_find_sized(..., hsize)`) against the reference at the same point. Two leads remain: the patch's offered lighting point (`lighting_sc_offer`, `lighting_sc_centre`), and the WRC-cell running-mean commit in `lighting_cache.comp`. The next step is a probe that writes one patch's E next to the reference irradiance at its centre.
+- **No fix is proposed yet.** No clear term turned up, so there is no failing test and no PR.
+
+Note: the first round-5 table (box f 0.49) came from a stale build that still had a round-4 hit-albedo hook. Every number above comes from a clean rebuild with all hooks neutral.
