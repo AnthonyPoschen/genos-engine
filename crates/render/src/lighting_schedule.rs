@@ -1107,7 +1107,7 @@ pub fn schedule_push(
         tail: [
             lit.display_w,
             lit.display_h,
-            grant_u32(caps.spawns, scale),
+            caps.spawns,
             coarse_slots,
         ],
         plan,
