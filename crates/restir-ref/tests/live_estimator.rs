@@ -530,8 +530,45 @@ fn live_estimator_firefly_pixel_mean_is_unbiased() {
 /// still 325x (was 310x before; random-probe worst 37709x -> ~2900x). The
 /// unbounded dim ring lamps keep every upper node unbounded in range.
 #[test]
-#[ignore = "open: measured worst 325x the exact value, limit 200x"]
 fn live_estimator_initial_shade_has_no_firefly() {
     let (want, _, worst) = firefly_pixel_shades();
     assert!(worst < 200.0 * want, "firefly: one frame shades {worst:.2}, {:.0}x the exact {want:.4}", worst / want);
+}
+
+#[test]
+#[ignore = "diagnostic"]
+fn diag_firefly_pdf_vs_share() {
+    use genos_restir_ref::tree::{node_importance_sided, split_steps_mixed};
+    let lamps = scene();
+    let refs: Vec<Lamp> = lamps.iter().map(|l| Lamp { position: l.pos, intensity: l.color }).collect();
+    let ranges: Vec<f32> = lamps.iter().map(|l| l.range).collect();
+    let tree = LightTree::build_ranged(&refs, &ranges);
+    let p = Pixel { pos: v(-1.760_681_2, 1.064_254_8, -4.183_593_8), n: v(0.0, -1.0, 0.0), two_sided: false };
+    let recv = Receiver { position: p.pos, normal: p.n, albedo: v(1.0, 1.0, 1.0) };
+    let nodes = tree.nodes();
+    let total: f32 = lamps.iter().map(|l| phat(&p, l)).sum();
+    // walk every path
+    let mut stack = vec![(0u32, 1.0f32, String::new())];
+    let mut rows = vec![];
+    while let Some((i, pdf, path)) = stack.pop() {
+        let n = nodes[i as usize];
+        if (n.lamp as usize) < lamps.len() {
+            let l = n.lamp as usize;
+            let s = phat(&p, &lamps[l]);
+            rows.push((s / total, pdf, l, path));
+            continue;
+        }
+        let li = node_importance_sided(nodes[n.left as usize], &recv, TreeFault::None, false);
+        let ri = node_importance_sided(nodes[n.right as usize], &recv, TreeFault::None, false);
+        let q = split_steps_mixed(li, ri, nodes[n.left as usize].power, nodes[n.right as usize].power) / 65536.0;
+        stack.push((n.left, pdf * q, format!("{path} L({li:.3e}|{ri:.3e})")));
+        stack.push((n.right, pdf * (1.0 - q), format!("{path} R({li:.3e}|{ri:.3e})")));
+    }
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    for (share, pdf, l, path) in rows.iter().take(8) {
+        let pos = lamps[*l].pos;
+        eprintln!("lamp {l} {pos:?} share {share:.4e} pdf {pdf:.4e} ratio {:.1}\n   {path}", share / pdf);
+    }
+    let worst = rows.iter().filter(|r| r.0 > 0.0).max_by(|a, b| (a.0 / a.1).partial_cmp(&(b.0 / b.1)).unwrap()).unwrap();
+    eprintln!("WORST lamp {} share {:.3e} pdf {:.3e} ratio {:.1} {:?}\n   {}", worst.2, worst.0, worst.1, worst.0 / worst.1, lamps[worst.2].pos, worst.3);
 }

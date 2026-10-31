@@ -41,6 +41,32 @@ const RANGE_SLACK: f32 = 0.02;
 /// Steps of `next_f32` (16 bits). The GPU copy is `TREE_STEPS`.
 const STEPS: f32 = 65536.0;
 
+/// Weight of the power-only share in each split's defensive mixture.
+/// The GPU copy is `TREE_DEFENSIVE`.
+pub const DEFENSIVE: f32 = 0.1;
+
+/// Left share of a split in `next_f32` steps, rounded: the defensive mixture
+/// `(1 - a) * bound share + a * power share` when both sides have importance.
+/// The bound is only an upper bound: a box that holds the receiver (a ring of
+/// lamps around the room) floors its distance and outweighs a bright lamp next
+/// to the receiver by 300x. The power share keeps every lit lamp at least `a`
+/// times its share of power per split, and the pdf is still the exact pick
+/// probability. A zero side (range, back face) stays culled.
+/// The GPU copy is `tree_split_steps_mixed`.
+#[must_use]
+pub fn split_steps_mixed(left_i: f32, right_i: f32, left_p: f32, right_p: f32) -> f32 {
+    if right_i <= 0.0 {
+        return STEPS;
+    }
+    if left_i <= 0.0 {
+        return 0.0;
+    }
+    let bound = left_i / (left_i + right_i);
+    let power = left_p / (left_p + right_p);
+    let share = (1.0 - DEFENSIVE) * bound + DEFENSIVE * power;
+    (share * STEPS + 0.5).floor().clamp(1.0, STEPS - 1.0)
+}
+
 /// Left share of a split in `next_f32` steps, rounded. 0 or `STEPS` when a
 /// side has no importance. The GPU copy is `tree_split_steps`.
 #[must_use]
@@ -262,7 +288,9 @@ impl LightTree {
             // steps and charge the pdf that share, so the pdf is the real
             // probability: a branch below one step was picked 1/65536 of the
             // time while its pdf said far less, and phat/pdf blew up.
-            let left_q = split_steps(left_i, right_i, sum);
+            let left_p = self.node_at(left).map_or(0.0, |n| n.power);
+            let right_p = self.node_at(right).map_or(0.0, |n| n.power);
+            let left_q = split_steps_mixed(left_i, right_i, left_p, right_p);
             let draw = rng.next_f32() * STEPS;
             if draw < left_q {
                 pdf *= left_q / STEPS;

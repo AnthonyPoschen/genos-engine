@@ -37,6 +37,23 @@ float tree_split_steps(float left_i, float right_i, float sum) {
     return clamp(floor(left_i / sum * TREE_STEPS + 0.5), 1.0, TREE_STEPS - 1.0);
 }
 
+// Power-only share weight in each split's defensive mixture (tree.rs DEFENSIVE).
+const float TREE_DEFENSIVE = 0.1;
+
+// tree.rs split_steps_mixed: (1 - a) * bound share + a * power share.
+float tree_split_steps_mixed(float left_i, float right_i, float left_p, float right_p) {
+    if (right_i <= 0.0) {
+        return TREE_STEPS;
+    }
+    if (left_i <= 0.0) {
+        return 0.0;
+    }
+    float bound = left_i / (left_i + right_i);
+    float power = left_p / (left_p + right_p);
+    float share = (1.0 - TREE_DEFENSIVE) * bound + TREE_DEFENSIVE * power;
+    return clamp(floor(share * TREE_STEPS + 0.5), 1.0, TREE_STEPS - 1.0);
+}
+
 #ifndef RESTIR_LIVE_RECEIVER
 bool restir_receiver_two_sided(uint recv) {
     return false;
@@ -210,8 +227,10 @@ void sample_tree(uint recv, out uint index, out float pdf, out bool hit) {
             return;
         }
         // next_f32 has 65536 steps: quantize the left share to them and charge
-        // that share, so the pdf is the real pick probability (tree.rs split_steps).
-        float left_q = tree_split_steps(left_i, right_i, sum);
+        // that share, so the pdf is the real pick probability (tree.rs split_steps_mixed).
+        float left_p = load_f(RESTIR_TREE_BASE + left * NODE_STRIDE + 3u);
+        float right_p = load_f(RESTIR_TREE_BASE + right * NODE_STRIDE + 3u);
+        float left_q = tree_split_steps_mixed(left_i, right_i, left_p, right_p);
         float draw = next_f32() * TREE_STEPS;
         if (draw < left_q) {
             acc_pdf *= left_q / TREE_STEPS;
