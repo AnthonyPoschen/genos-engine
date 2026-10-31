@@ -504,7 +504,7 @@ pub struct SurfaceCacheSettings {
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
 /// (`lighting_cache.glsl` lighting_sc_flags).
-pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
+pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6_007_050;
 
 /// Debug isolate toggle bits (`experiments.toggles`): attribute a change to
 /// exactly one component.
