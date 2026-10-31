@@ -268,14 +268,22 @@ fn the_budget_controller_scales_without_gi_metrics() {
         renderer.gi_metrics_samples().is_empty(),
         "normal play recorded a GI sample"
     );
-    assert!(
-        scale < 1.0,
-        "High stayed at the preset cap without --gi-metrics: scale {scale} sum {total} buckets {ms:?}"
-    );
-    assert!(
-        total > 8.0,
-        "the retired lighting total was inside the 8 ms cap: {total} {ms:?}"
-    );
+    // The controller reads the retired total against the cap whatever the GPU.
+    // Lavapipe is far over 8 ms and must scale down; a 4070 can retire this
+    // hall inside the cap, where the scale holds at 1 (#70 gf70).
+    let cap = f64::from(renderer.last_schedule().lighting_cap_ms);
+    assert!(total > 0.0, "no retired lighting total without --gi-metrics: {ms:?}");
+    if total > cap {
+        assert!(
+            scale < 1.0,
+            "High stayed at the preset cap over the cap without --gi-metrics: scale {scale} sum {total} cap {cap} buckets {ms:?}"
+        );
+    } else {
+        assert!(
+            (scale - 1.0).abs() < 1e-9,
+            "the scale moved inside the cap: scale {scale} sum {total} cap {cap}"
+        );
+    }
 }
 
 /// Hall walls and the white lamp. The flame and the colored solids stay out.
