@@ -16,7 +16,7 @@ pub const HEADER_WORDS: usize = 64;
 pub const LAMP_STRIDE: usize = 8;
 /// Reservoir words per history slot (lamp, weight, M, target, depth, normal).
 pub const HIST_STRIDE: u32 = 6;
-pub const CANDIDATES: u32 = 8;
+pub const CANDIDATES: u32 = 4;
 pub const PROPOSAL_TREE: u32 = 2;
 pub const SPATIAL_NEIGHBORS: u32 = 4;
 pub const SPATIAL_RADIUS: u32 = 2;
