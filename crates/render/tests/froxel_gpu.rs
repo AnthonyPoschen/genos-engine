@@ -9,7 +9,8 @@
 
 use genos_render::{
     column_peak, composed_frame_camera, composed_frame_scene, inject, integrate_unshadowed,
-    picture_mean_abs, picture_unchanged, DirectSun, FogDispatch, FogView, GridSize, Renderer, World,
+    picture_mean_abs, picture_unchanged, DirectSun, FogDispatch, FogView, GridSize, Renderer,
+    World,
 };
 use genos_scene::FogSettings;
 use genos_window::Window;
@@ -179,8 +180,8 @@ fn gpu_froxel_matches_fog_ref_within_one_percent() {
             .expect("froxel dispatch");
         let err = f2_column_error(&frame, cam, grid, &gpu.columns);
         println!(
-            "f2 {name} rel_or_abs {err:.6} columns {}",
-            name = scene.name,
+            "f2 {} rel_or_abs {err:.6} columns {}",
+            scene.name,
             gpu.columns.len()
         );
         if err > F2_REL {
@@ -197,112 +198,121 @@ struct F2Scene {
 }
 
 fn f2_scenes() -> Vec<F2Scene> {
-    use genos_fog_ref::{Aabb, Light, Medium, Ray, Scene, V3};
+    vec![f2_uniform(), f2_height(), f2_lamp(), f2_shaft()]
+}
+
+fn f2_uniform() -> F2Scene {
+    use genos_fog_ref::{Light, Medium, Ray, Scene, V3};
     let sun = V3::new(0.5, 1.0, 0.0).norm();
-    let homogeneous = Scene {
-        medium: Medium::Homogeneous {
-            sigma_t: 0.2,
-            albedo: 0.8,
-            top: 5.0,
+    F2Scene {
+        name: "uniform density",
+        scene: Scene {
+            medium: Medium::Homogeneous {
+                sigma_t: 0.2,
+                albedo: 0.8,
+                top: 5.0,
+            },
+            g: 0.6,
+            lights: vec![Light::Sun {
+                to_light: sun,
+                irradiance: 3.0,
+            }],
+            occluders: vec![],
+            background: 0.5,
         },
-        g: 0.6,
-        lights: vec![Light::Sun {
-            to_light: sun,
-            irradiance: 3.0,
-        }],
-        occluders: vec![],
-        background: 0.5,
-    };
-    let yaw = 0.0_f64;
-    let height = Scene {
-        medium: Medium::Height {
-            sigma0: 0.3,
-            scale_height: 1.5,
-            albedo: 0.9,
+        ray: Ray {
+            o: V3::new(0.0, 1.0, 0.0),
+            d: V3::new(1.0, 0.0, 0.0),
+            tmax: 10.0,
         },
-        g: 0.3,
-        lights: vec![Light::Sun {
-            to_light: V3::new(1.0, 0.15, 0.3).norm(),
-            irradiance: 2.0,
-        }],
-        occluders: vec![],
-        background: 0.0,
-    };
+    }
+}
+
+fn f2_height() -> F2Scene {
+    use genos_fog_ref::{Light, Medium, Ray, Scene, V3};
     let down = V3::new(1.0, -0.2, 0.0).norm();
-    let lamp = Scene {
-        medium: Medium::Homogeneous {
-            sigma_t: 0.15,
-            albedo: 0.8,
-            top: f64::INFINITY,
+    F2Scene {
+        name: "height fog",
+        scene: Scene {
+            medium: Medium::Height {
+                sigma0: 0.3,
+                scale_height: 1.5,
+                albedo: 0.9,
+            },
+            g: 0.3,
+            lights: vec![Light::Sun {
+                to_light: V3::new(1.0, 0.15, 0.3).norm(),
+                irradiance: 2.0,
+            }],
+            occluders: vec![],
+            background: 0.0,
         },
-        g: 0.0,
-        lights: vec![Light::Point {
-            pos: V3::new(0.0, 2.0, 0.5),
-            intensity: 8.0,
-            on: true,
-        }],
-        occluders: vec![],
-        background: 0.0,
-    };
+        ray: Ray {
+            o: V3::new(0.0, 2.0, 0.0),
+            d: down,
+            tmax: 2.0 / -down.y,
+        },
+    }
+}
+
+fn f2_lamp() -> F2Scene {
+    use genos_fog_ref::{Light, Medium, Ray, Scene, V3};
+    F2Scene {
+        name: "lamp in fog",
+        scene: Scene {
+            medium: Medium::Homogeneous {
+                sigma_t: 0.15,
+                albedo: 0.8,
+                top: f64::INFINITY,
+            },
+            g: 0.0,
+            lights: vec![Light::Point {
+                pos: V3::new(0.0, 2.0, 0.5),
+                intensity: 8.0,
+                on: true,
+            }],
+            occluders: vec![],
+            background: 0.0,
+        },
+        ray: Ray {
+            o: V3::new(-5.0, 1.0, 0.0),
+            d: V3::new(1.0, 0.0, 0.0),
+            tmax: 10.0,
+        },
+    }
+}
+
+fn f2_shaft() -> F2Scene {
+    use genos_fog_ref::{Aabb, Light, Medium, Ray, Scene, V3};
     let (ceil_lo, ceil_hi, half, big) = (3.0, 3.2, 0.5, 10.0);
     let slab = |min, max| Aabb { min, max };
-    let shaft = Scene {
-        medium: Medium::Homogeneous {
-            sigma_t: 0.1,
-            albedo: 0.9,
-            top: ceil_lo,
-        },
-        g: 0.2,
-        lights: vec![Light::Sun {
-            to_light: V3::new(0.3, 1.0, 0.0).norm(),
-            irradiance: 5.0,
-        }],
-        occluders: vec![
-            slab(V3::new(-big, ceil_lo, -big), V3::new(-half, ceil_hi, big)),
-            slab(V3::new(half, ceil_lo, -big), V3::new(big, ceil_hi, big)),
-            slab(V3::new(-half, ceil_lo, -big), V3::new(half, ceil_hi, -half)),
-            slab(V3::new(-half, ceil_lo, half), V3::new(half, ceil_hi, big)),
-        ],
-        background: 0.0,
-    };
-    vec![
-        F2Scene {
-            name: "uniform density",
-            scene: homogeneous,
-            ray: Ray {
-                o: V3::new(0.0, 1.0, 0.0),
-                d: V3::new(yaw.cos(), 0.0, yaw.sin()),
-                tmax: 10.0,
+    F2Scene {
+        name: "sun shafts",
+        scene: Scene {
+            medium: Medium::Homogeneous {
+                sigma_t: 0.1,
+                albedo: 0.9,
+                top: ceil_lo,
             },
+            g: 0.2,
+            lights: vec![Light::Sun {
+                to_light: V3::new(0.3, 1.0, 0.0).norm(),
+                irradiance: 5.0,
+            }],
+            occluders: vec![
+                slab(V3::new(-big, ceil_lo, -big), V3::new(-half, ceil_hi, big)),
+                slab(V3::new(half, ceil_lo, -big), V3::new(big, ceil_hi, big)),
+                slab(V3::new(-half, ceil_lo, -big), V3::new(half, ceil_hi, -half)),
+                slab(V3::new(-half, ceil_lo, half), V3::new(half, ceil_hi, big)),
+            ],
+            background: 0.0,
         },
-        F2Scene {
-            name: "height fog",
-            scene: height,
-            ray: Ray {
-                o: V3::new(0.0, 2.0, 0.0),
-                d: down,
-                tmax: 2.0 / -down.y,
-            },
+        ray: Ray {
+            o: V3::new(-6.0, 1.0, 0.0),
+            d: V3::new(1.0, 0.0, 0.0),
+            tmax: 12.0,
         },
-        F2Scene {
-            name: "lamp in fog",
-            scene: lamp,
-            ray: Ray {
-                o: V3::new(-5.0, 1.0, 0.0),
-                d: V3::new(1.0, 0.0, 0.0),
-                tmax: 10.0,
-            },
-        },
-        F2Scene {
-            name: "sun shafts",
-            scene: shaft,
-            ray: Ray {
-                o: V3::new(-6.0, 1.0, 0.0),
-                d: V3::new(1.0, 0.0, 0.0),
-                tmax: 12.0,
-            },
-        },
-    ]
+    }
 }
 
 fn f2_camera(ray: &genos_fog_ref::Ray) -> genos_fog_ref::froxel::Camera {
@@ -340,7 +350,11 @@ fn cross64(a: genos_fog_ref::V3, b: genos_fog_ref::V3) -> genos_fog_ref::V3 {
 }
 
 fn f32_of(value: f64) -> f32 {
-    #[allow(clippy::cast_possible_truncation, reason = "fog-ref f64 narrows to the GPU f32 grid")]
+    #[allow(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "fog-ref f64 narrows to the GPU f32 grid"
+    )]
     {
         value as f32
     }
@@ -358,22 +372,32 @@ fn f2_job(
     let ty = f32_of((cam.fov_y * 0.5).tan());
     let view = FogView {
         origin: [f32_of(cam.pos.x), f32_of(cam.pos.y), f32_of(cam.pos.z)],
-        forward: [f32_of(cam.forward.x), f32_of(cam.forward.y), f32_of(cam.forward.z)],
+        forward: [
+            f32_of(cam.forward.x),
+            f32_of(cam.forward.y),
+            f32_of(cam.forward.z),
+        ],
         right: [f32_of(right.x), f32_of(right.y), f32_of(right.z)],
         up: [f32_of(up.x), f32_of(up.y), f32_of(up.z)],
         tan_half_x: ty * f32_of(cam.aspect),
         tan_half_y: ty,
     };
     let (density, height, thickness, albedo) = match scene.scene.medium {
-        Medium::Homogeneous { sigma_t, albedo, top } => (
+        Medium::Homogeneous {
+            sigma_t,
+            albedo,
+            top,
+        } => (
             f32_of(sigma_t),
             if top.is_finite() { f32_of(top) } else { 1.0e20 },
             0.0,
             f32_of(albedo),
         ),
-        Medium::Height { sigma0, scale_height, albedo } => {
-            (f32_of(sigma0), 0.0, f32_of(scale_height), f32_of(albedo))
-        }
+        Medium::Height {
+            sigma0,
+            scale_height,
+            albedo,
+        } => (f32_of(sigma0), 0.0, f32_of(scale_height), f32_of(albedo)),
     };
     let mut sun = DirectSun {
         toward: [0.0, 1.0, 0.0],
@@ -382,7 +406,10 @@ fn f2_job(
     let mut lamps = Vec::new();
     for light in &scene.scene.lights {
         match *light {
-            Light::Sun { to_light, irradiance } => {
+            Light::Sun {
+                to_light,
+                irradiance,
+            } => {
                 let e = f32_of(irradiance);
                 sun = DirectSun {
                     toward: [f32_of(to_light.x), f32_of(to_light.y), f32_of(to_light.z)],
