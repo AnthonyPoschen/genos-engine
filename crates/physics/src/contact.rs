@@ -3,10 +3,6 @@
     reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
 )]
 #![expect(
-    clippy::cast_possible_truncation,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
-#![expect(
     clippy::float_cmp,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
@@ -48,8 +44,6 @@ use crate::{Body, Hull, Mesh, Piece, Shape, MAX_HULL_EDGES, MAX_HULL_VERTS};
 /// Scratch lists for [`collide`], kept across passes and steps.
 #[derive(Clone, Debug)]
 pub(crate) struct Pairs {
-    /// Bounded bodies: low corner, high corner, index; sorted by low X.
-    boxes: Vec<(Vec3, Vec3, u32)>,
     planes: Vec<u32>,
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<Manifold>,
@@ -64,12 +58,42 @@ impl Pairs {
             sum.saturating_add(u32::from(manifold.count))
         })
     }
+
+    pub(crate) fn pair_list(&self) -> &[(u32, u32)] {
+        &self.pairs
+    }
+
+    pub(crate) fn solver_bodies(&mut self, bodies: &[crate::Body]) -> u32 {
+        self.wake.resize(bodies.len(), false);
+        self.wake.fill(false);
+        let mut count = 0_u32;
+        for &(left, right) in &self.pairs {
+            for index in [left, right] {
+                let Some(slot) = usize::try_from(index).ok() else {
+                    continue;
+                };
+                let Some(flag) = self.wake.get_mut(slot) else {
+                    continue;
+                };
+                if *flag {
+                    continue;
+                }
+                let Some(body) = bodies.get(slot) else {
+                    continue;
+                };
+                if body.inverse_mass > 0.0 && !body.sleeping {
+                    *flag = true;
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
 }
 
 impl Pairs {
     pub(crate) const fn new() -> Self {
         Self {
-            boxes: Vec::new(),
             planes: Vec::new(),
             pairs: Vec::new(),
             manifolds: Vec::new(),
@@ -81,56 +105,48 @@ impl Pairs {
 
 /// Bounds grow this much, so a pair a contact earlier in the same pass pushed
 /// together is still tested.
-const BOUNDS_MARGIN: f32 = 0.02;
+pub(crate) const BOUNDS_MARGIN: f32 = 0.02;
 
 /// One contact pass over every pair that can touch: bounds that meet (a sweep along
 /// X), and every bounded body against every plane. Two static bodies never move, so
 /// their pair is skipped. The pairs run in index order, the order a pass over every
 /// pair took.
+pub(crate) struct PairQuery<'a> {
+    pub layers: &'a crate::broadphase::LayerPairs,
+    pub trees: &'a mut crate::broadphase::Broadphase,
+    pub islands: &'a mut crate::island::Islands,
+}
+
 pub(crate) fn collide(
     bodies: &mut [Body],
     scratch: &mut Pairs,
+    query: &mut PairQuery<'_>,
     warm_start: bool,
     velocity: bool,
     rebuild: bool,
 ) -> u32 {
-    scratch.boxes.clear();
-    scratch.planes.clear();
-    scratch.pairs.clear();
-    for (index, body) in bodies.iter().enumerate() {
-        if body.presence != crate::Presence::Live {
-            continue;
-        }
-        match bounds(body) {
-            Some((lo, hi)) => {
-                let margin = Vec3::new(BOUNDS_MARGIN, BOUNDS_MARGIN, BOUNDS_MARGIN);
-                scratch.boxes.push((lo - margin, hi + margin, index as u32));
-            }
-            None => scratch.planes.push(index as u32),
-        }
+    if rebuild {
+        query.trees.fill(
+            bodies,
+            query.layers,
+            &mut scratch.pairs,
+            &mut scratch.planes,
+        );
+        let displaced = std::mem::take(&mut query.trees.displaced);
+        query
+            .islands
+            .wake_from_pairs(bodies, &scratch.pairs, &displaced);
+        query.trees.displaced = displaced;
+        query.islands.complete_wake(bodies);
+        scratch.pairs.retain(|(left, right)| {
+            let live = |index: u32| {
+                bodies
+                    .get(usize::try_from(index).unwrap_or(0))
+                    .is_some_and(|body| !body.sleeping && body.presence == crate::Presence::Live)
+            };
+            live(*left) && live(*right)
+        });
     }
-    scratch.boxes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
-    let moving = |i: u32| bodies[i as usize].inverse_mass != 0.0;
-    for (at, &(lo, hi, i)) in scratch.boxes.iter().enumerate() {
-        for &(lo2, hi2, j) in &scratch.boxes[at + 1..] {
-            if lo2.x > hi.x {
-                break;
-            }
-            let meet = lo2.y <= hi.y && lo.y <= hi2.y && lo2.z <= hi.z && lo.z <= hi2.z;
-            let debris_pair = bodies[i as usize].debris && bodies[j as usize].debris;
-            if meet && (moving(i) || moving(j)) && !debris_pair {
-                scratch.pairs.push((i.min(j), i.max(j)));
-            }
-        }
-    }
-    for &plane in &scratch.planes {
-        for &(_, _, i) in &scratch.boxes {
-            if moving(i) || moving(plane) {
-                scratch.pairs.push((i.min(plane), i.max(plane)));
-            }
-        }
-    }
-    scratch.pairs.sort_unstable();
     if rebuild {
         scratch.manifolds.clear();
         let pairs = std::mem::take(&mut scratch.pairs);
