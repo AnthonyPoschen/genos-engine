@@ -268,11 +268,8 @@ mod tests {
         session.run(240);
         let last = session.records.last().copied().unwrap_or(session.step());
         assert!(last.min_y > 0.3, "a cube sank to {}", last.min_y);
-        // Island sleep waits until every cube is calm, so a neighbour that is
-        // still moving keeps the pile awake. The old per-body sleep froze the
-        // calm cubes and the max speed fell under 0.5. The pile stays on the slab.
         assert!(
-            last.max_speed.is_finite() && last.max_speed < 8.0,
+            last.max_speed.is_finite() && last.max_speed < 0.5,
             "pile ran away at {}",
             last.max_speed
         );

@@ -137,14 +137,15 @@ pub(crate) fn collide(
             .islands
             .wake_from_pairs(bodies, &scratch.pairs, &displaced);
         query.trees.displaced = displaced;
-        query.islands.complete_wake(bodies);
         scratch.pairs.retain(|(left, right)| {
             let live = |index: u32| {
                 bodies
                     .get(usize::try_from(index).unwrap_or(0))
-                    .is_some_and(|body| !body.sleeping && body.presence == crate::Presence::Live)
+                    .is_some_and(|body| body.presence == crate::Presence::Live && !body.sleeping)
             };
-            live(*left) && live(*right)
+            // A sleeper stays in the manifold as infinite mass. Dropping the
+            // pair lets an awake neighbour fall through it.
+            live(*left) || live(*right)
         });
     }
     if rebuild {

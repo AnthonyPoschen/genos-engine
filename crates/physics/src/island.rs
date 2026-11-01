@@ -1,8 +1,7 @@
 //! Islands are the contact groups that sleep and wake together.
 //!
-//! A union-find over this step's dynamic pairs assigns the id. The island
-//! sleeps only when every dynamic member has stayed under the speed limits
-//! for the sleep time. Waking one member wakes the rest of that id.
+//! A union-find over this step's dynamic pairs assigns the id. Each body
+//! sleeps on its own timer. Waking one member wakes the rest of that id.
 
 use genos_math::Vec3;
 
@@ -11,20 +10,20 @@ use crate::{Body, Presence};
 #[derive(Clone, Debug)]
 pub struct Islands {
     parent: Vec<u32>,
-    hot: Vec<u8>,
     mark: Vec<u8>,
     pairs: Vec<(u32, u32)>,
     ids: Vec<u32>,
+    direct: Vec<u32>,
 }
 
 impl Islands {
     pub const fn new() -> Self {
         Self {
             parent: Vec::new(),
-            hot: Vec::new(),
             mark: Vec::new(),
             pairs: Vec::new(),
             ids: Vec::new(),
+            direct: Vec::new(),
         }
     }
 
@@ -62,40 +61,6 @@ impl Islands {
         islands
     }
 
-    /// Wake every dynamic body that shares an island with an awake one.
-    pub fn complete_wake(&mut self, bodies: &mut [Body]) {
-        let count = bodies.len();
-        self.mark.resize(count, 0);
-        self.mark.fill(0);
-        for &id in &self.ids {
-            let Some(body) = bodies.get(index_of(id)) else {
-                continue;
-            };
-            if !dynamic_live(body) || body.sleeping {
-                continue;
-            }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
-            self.mark[slot] = 1;
-        }
-        for &id in &self.ids {
-            let Some(body) = bodies.get_mut(index_of(id)) else {
-                continue;
-            };
-            if !dynamic_live(body) || !body.sleeping {
-                continue;
-            }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
-            if self.mark[slot] == 1 {
-                body.sleeping = false;
-                body.sleep_time = 0.0;
-            }
-        }
-    }
-
     /// A moving body, or one displaced this step, wakes the island it touches.
     pub fn wake_from_pairs(
         &mut self,
@@ -106,23 +71,38 @@ impl Islands {
         let count = bodies.len();
         self.mark.resize(count, 0);
         self.mark.fill(0);
+        self.direct.clear();
         for &(left, right) in pairs {
             let (Some(a), Some(b)) = (bodies.get(index_of(left)), bodies.get(index_of(right)))
             else {
                 continue;
             };
-            let wake_left = a.sleeping && hitter(b, right, displaced);
-            let wake_right = b.sleeping && hitter(a, left, displaced);
-            if wake_left {
-                if let Some(slot) = slot(a.island, count) {
-                    self.mark[slot] = 1;
+            if a.sleeping && hitter(b, right, displaced) {
+                if displaced.contains(&right) {
+                    if let Some(slot) = slot(a.island, count) {
+                        self.mark[slot] = 1;
+                    }
+                } else {
+                    self.direct.push(left);
                 }
             }
-            if wake_right {
-                if let Some(slot) = slot(b.island, count) {
-                    self.mark[slot] = 1;
+            if b.sleeping && hitter(a, left, displaced) {
+                if displaced.contains(&left) {
+                    if let Some(slot) = slot(b.island, count) {
+                        self.mark[slot] = 1;
+                    }
+                } else {
+                    self.direct.push(right);
                 }
             }
+        }
+        for slot in 0..self.direct.len() {
+            let id = self.direct[slot];
+            let Some(body) = bodies.get_mut(index_of(id)) else {
+                continue;
+            };
+            body.sleeping = false;
+            body.sleep_time = 0.0;
         }
         for &id in &self.ids {
             let Some(body) = bodies.get_mut(index_of(id)) else {
@@ -160,7 +140,7 @@ impl Islands {
             else {
                 continue;
             };
-            if dynamic_live(a) && dynamic_live(b) && !a.sleeping && !b.sleeping {
+            if dynamic_live(a) && dynamic_live(b) {
                 self.union(left, right);
             }
         }
@@ -168,19 +148,20 @@ impl Islands {
         let id_count = self.ids.len();
         for slot in 0..id_count {
             let id = self.ids[slot];
-            let live = bodies
-                .get(index_of(id))
-                .is_some_and(|body| dynamic_live(body) && !body.sleeping);
+            let live = bodies.get(index_of(id)).is_some_and(dynamic_live);
             if !live {
                 continue;
             }
             let root = self.find(id);
+            let sleeping = bodies.get(index_of(id)).is_some_and(|body| body.sleeping);
+            // An isolated sleeper keeps the island it fell asleep with.
+            if sleeping && root == id {
+                continue;
+            }
             if let Some(body) = bodies.get_mut(index_of(id)) {
                 body.island = root;
             }
         }
-        self.hot.resize(count, 0);
-        self.hot.fill(0);
         for &id in &self.ids {
             let Some(body) = bodies.get_mut(index_of(id)) else {
                 continue;
@@ -188,9 +169,6 @@ impl Islands {
             if !dynamic_live(body) || body.sleeping {
                 continue;
             }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
             let calm = body.velocity.length() < linear
                 && body.angular_velocity.length() < angular
                 && !body.motor
@@ -199,7 +177,6 @@ impl Islands {
                 body.sleep_time += dt;
             } else {
                 body.sleep_time = 0.0;
-                self.hot[slot] = 1;
             }
         }
         for &id in &self.ids {
@@ -209,40 +186,7 @@ impl Islands {
             if !dynamic_live(body) || body.sleeping {
                 continue;
             }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
-            if self.hot[slot] == 1 {
-                body.sleep_time = 0.0;
-            }
-        }
-        self.mark.resize(count, 0);
-        self.mark.fill(1);
-        for &id in &self.ids {
-            let Some(body) = bodies.get(index_of(id)) else {
-                continue;
-            };
-            if !dynamic_live(body) || body.sleeping {
-                continue;
-            }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
-            if self.hot[slot] == 1 || body.sleep_time < sleep_time {
-                self.mark[slot] = 0;
-            }
-        }
-        for &id in &self.ids {
-            let Some(body) = bodies.get_mut(index_of(id)) else {
-                continue;
-            };
-            if !dynamic_live(body) || body.sleeping {
-                continue;
-            }
-            let Some(slot) = slot(body.island, count) else {
-                continue;
-            };
-            if self.mark[slot] == 1 {
+            if body.sleep_time >= sleep_time {
                 body.sleeping = true;
                 body.velocity = Vec3::ZERO;
                 body.angular_velocity = Vec3::ZERO;

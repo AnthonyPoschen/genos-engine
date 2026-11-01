@@ -612,7 +612,6 @@ pub fn step(world: &mut World, dt: f32) {
             body.normal_impulse = 0.0;
         }
     }
-    world.islands.complete_wake(&mut world.bodies);
     world.step_stats = StepStats::zero();
     let (speculative, swept) = motion_flags(world);
     world.step_stats.ccd_applied = speculative || swept;
