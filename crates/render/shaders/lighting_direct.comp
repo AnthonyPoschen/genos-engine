@@ -882,16 +882,21 @@ void main() {
         }
     }
 #ifndef LIGHTING_DIRECT_PLAIN
-    // Hold off: the displayed colour is the running mean of the unbiased sample
-    // (`light * W * visibility`). Bitterli shows the current sample. This mean
-    // is only while the noise gate has the exact-sum hold off, so a still
-    // picture can be graded. Past LAMP_PICK_MEAN_CAP the colour stays and the
-    // pixel keeps tracing. Production does not set the bit.
+    // Hold off: the displayed colour is the running mean of the unbiased sample.
+    // The lobe off, that sample is irradiance (`light * W * visibility`) and
+    // compose applies the Lambert weight. The lobe on, it is this frame's
+    // Appendix B outgoing radiance (`pbr_eval` times that irradiance). Bitterli
+    // shows the current sample. This mean is only while the noise gate has the
+    // exact-sum hold off, so a still picture can be graded. Past
+    // LAMP_PICK_MEAN_CAP the colour stays and the pixel keeps tracing.
+    // Production does not set the bit. Averaging irradiance and then showing
+    // this frame's lobe leaves the picture on one lamp.
     if (idx < pixels && lamp_pix && lamp_pick_hold_off() && !shade_exact && !copied && chosen_n > 0u) {
         uint hist_px = 0u;
         float z_ignore = 0.0;
         uint prev_count = 0u;
-        vec3 prev = e;
+        vec3 shaded = lobe ? spec : e;
+        vec3 prev = shaded;
         if (lamp_pick_reproject(pos, n, hist_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(hist_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR) {
@@ -908,11 +913,16 @@ void main() {
         if (prev_count == 0u) {
             mean_count = 1u;
         } else if (prev_count >= LAMP_PICK_MEAN_CAP) {
-            e = prev;
+            shaded = prev;
             mean_count = LAMP_PICK_MEAN_CAP;
         } else {
             mean_count = prev_count + 1u;
-            e = prev + (e - prev) / float(mean_count);
+            shaded = prev + (shaded - prev) / float(mean_count);
+        }
+        if (lobe) {
+            spec = shaded;
+        } else {
+            e = shaded;
         }
     }
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
@@ -945,12 +955,15 @@ void main() {
             if (cur.lamp != LAMP_ALL) {
                 uint color_word = lighting_pack_rgb9e5(e);
                 if (lamp_pick_hold_off()) {
-                    // Full-precision mean. w_sum and target are free: this path
-                    // does not merge, and the picture quantizes once below.
+                    // Full-precision mean of the displayed sample. The lobe
+                    // stores outgoing radiance; off stores irradiance. w_sum
+                    // and target are free: this path does not merge, and the
+                    // picture quantizes once below.
+                    vec3 mean_rgb = lobe ? spec : e;
                     cur.m = mean_count;
-                    cur.w_sum = e.r;
-                    cur.target = e.g;
-                    color_word = floatBitsToUint(e.b);
+                    cur.w_sum = mean_rgb.r;
+                    cur.target = mean_rgb.g;
+                    color_word = floatBitsToUint(mean_rgb.b);
                 } else {
                     cur.m = lamp_res_samples(cur);
                 }
