@@ -229,6 +229,9 @@ pub(crate) struct Lighting {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// The last cache round's WRC samples still differ from the held light by
+    /// more than LIGHTING_DRAIN_GAP: the bounce is draining or filling, not settled.
+    draining: bool,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -476,6 +479,7 @@ impl Default for Lighting {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            draining: false,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -1270,7 +1274,9 @@ impl Gpu {
         let sc_relit = world_wait != 0
             || (world_mode == 3 && self.lighting.settings.experiments.sc_flags & 8192 != 0);
         let settled = if world_mode == 3 && sc_relit {
-            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 })
+                && self.lighting.light_quiet >= 2
+                && !self.lighting.draining
         } else if probe_only(&self.lighting.settings) {
             // Probe-only keeps relighting its batch, so the change counter never
             // drops. Settle on frames still and the light having held, the same
@@ -1582,6 +1588,13 @@ impl Gpu {
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
+        // The drain flag is read even in surface-cache mode: a still scene is
+        // not settled while the cache's bounce is still draining.
+        if self.lighting.stats_round[slot] && self.lighting.settings.world_mode() == 3 {
+            if let Ok(w) = self.read_stats16(self.lighting.stats[slot].memory) {
+                self.lighting.draining = w[LIGHTING_DRAIN_WORD + 2] != 0;
+            }
+        }
         let read = lighting_stats_wanted(
             self.lighting.settings.world_mode(),
             self.lighting.settings.experiments.sc_flags,
@@ -1708,6 +1721,7 @@ impl Gpu {
     /// from its light as it is now; `young_only`: the round took young patches only,
     /// so one that relit nothing found nothing left to light.
     fn note_lighting_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
+
         if !current {
             self.lighting.quiet = 0;
         } else if words[1] > 0 {
@@ -1771,6 +1785,7 @@ impl Gpu {
             let light = self.lighting.world_light == self.lighting.light_hash;
             let mut head = [0u32; 8];
             head.copy_from_slice(&words[..8]);
+            self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -1980,6 +1995,7 @@ impl Gpu {
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+                eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
             let mode_word = w[LIGHTING_ATROUS_STAT + 1];
@@ -3711,7 +3727,7 @@ const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 /// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
 /// mask follows, one bit per composed pixel, and is not part of this header.
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 144;
+const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
@@ -3720,7 +3736,11 @@ const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_UNFILLED_WORD: usize = 140;
 const LIGHTING_SHADED_WORD: usize = 141;
 /// Word 0 of the mask. Matches lighting_cache.glsl.
-const LIGHTING_UNFILLED_MASK_AT: usize = 144;
+const LIGHTING_UNFILLED_MASK_AT: usize = 148;
+/// Words 144 and 145: the cache round's WRC sample and held luminance sums (x256).
+/// Word 146: 1 while the cache is draining or filling (lighting_cache.glsl
+/// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
+const LIGHTING_DRAIN_WORD: usize = 144;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);

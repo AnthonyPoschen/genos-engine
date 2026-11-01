@@ -102,14 +102,23 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     float ctrl_ground_g;
     float ctrl_ground_b;
     // Unfilled-on-screen detector (compose). Pixels with no finished set, and
-    // shaded surface pixels. The two pads keep the mask at stats word 144
-    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 144-word header.
+    // shaded surface pixels. With the drain words the mask sits at stats word 148
+    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 148-word header.
     // The mask is one bit per pixel, 32 pixels a word, row-major, and is
     // written only while the detector is on.
     uint unfilled;
     uint shaded;
     uint unfilled_pad0;
     uint unfilled_pad1;
+    // Drain check (cache pass, mature WRC cells): this round's fresh sample
+    // luminance and the held luminance it replaces, x256. Their gap says the
+    // cache still carries light that is leaving (lighting_gpu.rs settled).
+    uint wrc_sample_sum;
+    uint wrc_held_sum;
+    // 1 while the cache is draining or filling (LIGHTING_DRAIN_FLAG_AT), for
+    // the host's settle test.
+    uint draining;
+    uint drain_pad1;
     uint mask[];
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
@@ -244,7 +253,7 @@ bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
 // Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint
 // (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
-// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 144.
+// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 148.
 const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
 const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
 bool lighting_px_unfilled = false;
@@ -1257,6 +1266,14 @@ bool lighting_sc_light_quiet() {
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
+// Drain check: the round's mature WRC sample and held luminance sums (x256),
+// and the flag the args pass sets from the last round's: their gap above
+// LIGHTING_DRAIN_GAP means the cache still holds light that is leaving (or
+// coming), so the settle rounds go on until the samples agree with it.
+const uint LIGHTING_DRAIN_SAMPLE_AT = LIGHTING_SC_HIST_AT + 80u;
+const uint LIGHTING_DRAIN_HELD_AT = LIGHTING_SC_HIST_AT + 81u;
+const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
+const float LIGHTING_DRAIN_GAP = 0.01;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
 uint lighting_sc_upd_override = ~0u;
@@ -2431,6 +2448,14 @@ void lighting_write_args() {
     if (lighting_world_mode() == 3u) {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
+        uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
+        if (dh > 0u) {
+            float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
+            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = gap > LIGHTING_DRAIN_GAP ? 1u : 0u;
+        }
+        ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
+        ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
+        gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
         uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
@@ -2683,6 +2708,9 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
 // is due each round (a whole set, lighting_compact.comp), the old light leaving
 // one bounce per round.
 bool lighting_lamp_settling() {
+    if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
+        return true;
+    }
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
         uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
         if (f != 0u && int(lighting_frame() - f) <= int(LIGHTING_WRC_CHANGE_FRAMES)) {
