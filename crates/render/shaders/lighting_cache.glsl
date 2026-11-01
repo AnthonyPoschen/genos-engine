@@ -1272,7 +1272,6 @@ bool lighting_sc_light_quiet() {
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
-bool lighting_lamp_changed_now();
 bool lighting_wrc_lone(uint slot);
 uint lighting_settle_turns(bool first);
 const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
@@ -2493,13 +2492,6 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_SETTLE_COUNT_AT] = 0u;
         ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT] = ckeys.key[LIGHTING_SETTLE_FIRST_AT];
         ckeys.key[LIGHTING_SETTLE_FIRST_AT] = 0u;
-        if (lighting_lamp_changed_now()) {
-            // A new lamp change starts its settle afresh whether or not the
-            // last one still settles: the first round takes everything, as it
-            // does from a settled cache, and the turns follow from its count.
-            ckeys.key[LIGHTING_SETTLE_LAST_AT] = 0u;
-            ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT] = 0u;
-        }
         uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
         if (dh > 0u) {
             float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
@@ -2789,15 +2781,6 @@ uint lighting_settle_turns(bool first) {
     uint rest = ckeys.key[LIGHTING_SETTLE_LAST_AT] - head;
     uint left = max(room - min(head / head_turns, room - room / 4u), 1u);
     return clamp((rest + left - 1u) / left, 1u, 64u);
-}
-bool lighting_lamp_changed_now() {
-    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
-        uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
-        if (f != 0u && int(lighting_frame() - f) <= 1) {
-            return true;
-        }
-    }
-    return false;
 }
 bool lighting_lamp_settling() {
     if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
