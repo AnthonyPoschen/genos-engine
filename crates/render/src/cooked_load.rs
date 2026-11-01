@@ -303,6 +303,10 @@ pub(crate) fn block_surface(
         .normal_texture
         .and_then(|slot| place_kind(images, &spaces, slot.image, MipSpace::Normal, BC5, normal))
         .unwrap_or([0; 4]);
+    let mut flags = 0;
+    if color_rect[2] > 0 {
+        flags |= crate::world::MAT_BASE;
+    }
     Surface {
         color: color_rect,
         normal: normal_rect,
@@ -312,6 +316,13 @@ pub(crate) fn block_surface(
             genos_load::AlphaMode::Blend => 0.5,
         },
         two_sided: m.double_sided,
+        roughness: m.roughness,
+        metallic: if flags & crate::world::MAT_BASE != 0 {
+            m.metallic
+        } else {
+            0.0
+        },
+        material_flags: flags,
     }
 }
 

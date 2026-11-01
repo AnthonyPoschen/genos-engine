@@ -916,6 +916,9 @@ impl Renderer {
                     color_rect,
                     normal_rect,
                     cutoff,
+                    roughness,
+                    metallic,
+                    material_flags,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -943,7 +946,7 @@ impl Renderer {
                         ],
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
-                        extra: [*cutoff, 0.0, 0.0, 0.0],
+                        extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
                     });
                     draws.push(DrawSpan {
                         shapes: true,

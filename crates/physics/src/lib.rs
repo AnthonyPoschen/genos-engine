@@ -36,15 +36,16 @@ mod ccd;
 mod contact;
 mod destruction;
 mod mesh;
+mod solver;
 
 pub use destruction::{
     allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
-    spawn_breakable, CHANGE_RECORDS_AWAIT_LIGHTING, ChunkChange, ChunkChangeKind,
-    DestructionReport,
+    spawn_breakable, ChunkChange, ChunkChangeKind, DestructionReport,
+    CHANGE_RECORDS_AWAIT_LIGHTING,
 };
 pub use genos_fracture::{cook, Asset, CookRequest};
 
-use genos_math::{Quat, Vec3};
+use genos_math::{Mat3, Quat, Vec3};
 
 /// Acceleration along -Y, in meters per second squared.
 pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -130,12 +131,16 @@ impl Piece {
 pub struct Mesh {
     pub pieces: [Piece; MAX_MESH_PIECES],
     pub count: u8,
+    /// Inverse of the unit-mass inertia about the local origin, from the
+    /// pieces' volume. A zero matrix means the build stored no tensor yet.
+    pub unit_inverse_inertia: Mat3,
 }
 
 impl Mesh {
     const EMPTY: Self = Self {
         pieces: [Piece::EMPTY; MAX_MESH_PIECES],
         count: 0,
+        unit_inverse_inertia: Mat3::IDENTITY,
     };
 
     fn pieces(&self) -> &[Piece] {
@@ -242,6 +247,10 @@ pub struct StepStats {
     pub dynamic_pair_impulses: u32,
     /// Advances taken by fast pairs whose travel exceeded the smaller radius.
     pub pair_slices: u32,
+    /// Contact points solved on the last narrow-phase pass.
+    pub contact_points: u32,
+    /// Dynamic bodies asleep at the end of the step.
+    pub sleeping_bodies: u32,
 }
 
 impl StepStats {
@@ -252,6 +261,8 @@ impl StepStats {
             toi_deferred: 0,
             dynamic_pair_impulses: 0,
             pair_slices: 0,
+            contact_points: 0,
+            sleeping_bodies: 0,
         }
     }
 }
@@ -281,6 +292,11 @@ pub struct Body {
     pub presence: Presence,
     /// Spawned chunk under the debris volume. Two debris bodies do not collide.
     pub debris: bool,
+    /// True after the body has been still long enough to leave the solver.
+    /// A contact from a moving body clears it. Static bodies stay false.
+    pub sleeping: bool,
+    /// Seconds spent under the sleep speed. Cleared when the body wakes.
+    pub sleep_time: f32,
 }
 
 impl Body {
@@ -337,6 +353,8 @@ impl Body {
             angular_velocity: Vec3::ZERO,
             presence: Presence::Live,
             debris: false,
+            sleeping: false,
+            sleep_time: 0.0,
         }
     }
 
@@ -469,38 +487,70 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
-    for _ in 0..4 {
-        let hits = contact::collide(&mut world.bodies, &mut world.pairs);
-        world.step_stats.dynamic_pair_impulses =
-            world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    // The narrow phase is built once. Later passes move the stored local
+    // points with the bodies and separate again, without another SAT.
+    let mut hits = 0_u32;
+    for pass in 0..4 {
+        hits = hits.saturating_add(contact::collide(
+            &mut world.bodies,
+            &mut world.pairs,
+            pass == 0,
+            pass == 0,
+            pass == 0,
+        ));
     }
+    world.step_stats.dynamic_pair_impulses =
+        world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    world.step_stats.contact_points = world.pairs.contact_point_count();
+    for body in &mut world.bodies {
+        settle_sleep(body, dt);
+    }
+    world.step_stats.sleeping_bodies = world
+        .bodies
+        .iter()
+        .filter(|body| body.sleeping)
+        .count()
+        .try_into()
+        .unwrap_or(0);
     if !world.breakables.is_empty() {
         destruction::after_step(world, dt);
     }
 }
 
 pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 || !(dt > 0.0) {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping || !(dt > 0.0) {
         return;
     }
     body.position += body.velocity * dt;
-    let spin = body.angular_velocity;
-    if spin.length_squared() <= 0.0 {
+    if body.angular_velocity.length_squared() <= 0.0 {
         return;
     }
-    // World-space ω: dq/dt = ½ ω q.
-    let omega = Quat::new(spin.x, spin.y, spin.z, 0.0);
-    let delta = quat_mul(omega, body.orientation) * (0.5 * dt);
-    body.orientation = (body.orientation + delta).normalize();
+    let local = conjugate(body.orientation).rotate(body.angular_velocity);
+    let stepped = solver::implicit_gyroscopic(local, inertia_diagonal(*body), dt);
+    body.angular_velocity = body.orientation.rotate(stepped);
+    body.orientation = solver::integrate_orientation(body.orientation, body.angular_velocity, dt);
 }
 
-fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
-    Quat::new(
-        lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
-        lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
-        lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
-        lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z,
-    )
+fn settle_sleep(body: &mut Body, dt: f32) {
+    if body.inverse_mass == 0.0
+        || body.presence != Presence::Live
+        || body.motor
+        || body.spring.is_some()
+        || body.sleeping
+    {
+        return;
+    }
+    let calm = body.velocity.length() < 0.12 && body.angular_velocity.length() < 0.25;
+    if calm {
+        body.sleep_time += dt;
+    } else {
+        body.sleep_time = 0.0;
+    }
+    if body.sleep_time >= 0.5 {
+        body.sleeping = true;
+        body.velocity = Vec3::ZERO;
+        body.angular_velocity = Vec3::ZERO;
+    }
 }
 
 fn conjugate(q: Quat) -> Quat {
@@ -508,7 +558,7 @@ fn conjugate(q: Quat) -> Quat {
 }
 
 /// Body-frame principal moments `(Ixx, Iyy, Izz)`.
-fn inertia_diagonal(body: Body) -> Vec3 {
+pub(crate) fn inertia_diagonal(body: Body) -> Vec3 {
     let mass = body.mass();
     if !mass.is_finite() {
         return Vec3::ZERO;
@@ -524,12 +574,175 @@ fn inertia_diagonal(body: Body) -> Vec3 {
             half_height,
         } => capsule_inertia(mass, radius, half_height),
         Shape::Plane { .. } => Vec3::ZERO,
-        Shape::Mesh(mesh) => {
-            let radius = mesh_extent(&mesh);
-            let moment = 0.4 * mass * radius * radius;
-            Vec3::new(moment, moment, moment)
+        Shape::Mesh(mesh) => mesh_principal(mass, &mesh),
+    }
+}
+
+/// Diagonal of the volume-integral inertia, for the gyroscopic step and energy.
+fn mesh_principal(mass: f32, mesh: &Mesh) -> Vec3 {
+    let inverse = mesh.unit_inverse_inertia;
+    let unit = invert_mat3(inverse).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(moment, moment, moment))
+    });
+    Vec3::new(unit.cols[0], unit.cols[4], unit.cols[8]) * mass
+}
+
+/// Unit-mass inertia inverse about the local origin.
+pub(crate) fn mesh_unit_inverse(mesh: &Mesh) -> Mat3 {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    for piece in mesh.pieces() {
+        match piece {
+            Piece::Cuboid { center, half } => {
+                let vol = 8.0 * half.x * half.y * half.z;
+                if vol <= 1.0e-12 {
+                    continue;
+                }
+                let local = box_inertia(vol, *half);
+                volume += vol;
+                let (xx, yy, zz, xy, yz, zx) = parallel_axis(local, vol, *center);
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
+            Piece::Hull(hull) => {
+                let (vol, xx, yy, zz, xy, yz, zx) = hull_moments(hull);
+                volume += vol;
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
         }
     }
+    if volume <= 1.0e-8 {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        return Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment));
+    }
+    let scale = 1.0 / volume;
+    let inertia = Mat3::from_cols([
+        ixx * scale,
+        ixy * scale,
+        izx * scale,
+        ixy * scale,
+        iyy * scale,
+        iyz * scale,
+        izx * scale,
+        iyz * scale,
+        izz * scale,
+    ]);
+    invert_mat3(inertia).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment))
+    })
+}
+
+/// `I_origin = I_center + m (|c|² I − c cᵀ)`.
+fn parallel_axis(local: Vec3, mass: f32, center: Vec3) -> (f32, f32, f32, f32, f32, f32) {
+    let r2 = center.length_squared();
+    (
+        local.x + mass * (r2 - center.x * center.x),
+        local.y + mass * (r2 - center.y * center.y),
+        local.z + mass * (r2 - center.z * center.z),
+        -mass * center.x * center.y,
+        -mass * center.y * center.z,
+        -mass * center.z * center.x,
+    )
+}
+
+/// Volume integrals of one hull about the local origin (unit density).
+///
+/// Each face triangle is a tetrahedron with the origin. The second moments
+/// follow Eberly's closed form for a tetrahedron with one vertex at the origin.
+fn hull_moments(hull: &Hull) -> (f32, f32, f32, f32, f32, f32, f32) {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    let count = hull.face_count as usize;
+    for face in hull.faces.iter().take(count) {
+        let a = hull.verts[face.index[0] as usize];
+        let b = hull.verts[face.index[1] as usize];
+        let c = hull.verts[face.index[2] as usize];
+        let vol = a.dot(b.cross(c)) / 6.0;
+        if vol.abs() < 1.0e-14 {
+            continue;
+        }
+        volume += vol;
+        ixx += second_diag(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        iyy += second_diag(a.x, b.x, c.x, a.z, b.z, c.z, vol);
+        izz += second_diag(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        ixy -= second_off(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        iyz -= second_off(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        izx -= second_off(a.z, b.z, c.z, a.x, b.x, c.x, vol);
+    }
+    (volume, ixx, iyy, izz, ixy, iyz, izx)
+}
+
+fn second_diag(y1: f32, y2: f32, y3: f32, z1: f32, z2: f32, z3: f32, volume: f32) -> f32 {
+    let sy = y1 * y1 + y2 * y2 + y3 * y3 + y1 * y2 + y1 * y3 + y2 * y3;
+    let sz = z1 * z1 + z2 * z2 + z3 * z3 + z1 * z2 + z1 * z3 + z2 * z3;
+    volume * (sy + sz) / 10.0
+}
+
+fn second_off(x1: f32, x2: f32, x3: f32, y1: f32, y2: f32, y3: f32, volume: f32) -> f32 {
+    let sum = 2.0 * (x1 * y1 + x2 * y2 + x3 * y3)
+        + x1 * y2
+        + x2 * y1
+        + x1 * y3
+        + x3 * y1
+        + x2 * y3
+        + x3 * y2;
+    volume * sum / 20.0
+}
+
+fn invert_mat3(m: Mat3) -> Option<Mat3> {
+    let c = m.cols;
+    let (m00, m01, m02) = (c[0], c[3], c[6]);
+    let (m10, m11, m12) = (c[1], c[4], c[7]);
+    let (m20, m21, m22) = (c[2], c[5], c[8]);
+    let c00 = m11 * m22 - m12 * m21;
+    let c01 = m12 * m20 - m10 * m22;
+    let c02 = m10 * m21 - m11 * m20;
+    let det = m00 * c00 + m01 * c01 + m02 * c02;
+    if det.abs() < 1.0e-14 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let c10 = m21 * m02 - m22 * m01;
+    let c11 = m22 * m00 - m20 * m02;
+    let c12 = m20 * m01 - m21 * m00;
+    let c20 = m01 * m12 - m02 * m11;
+    let c21 = m02 * m10 - m00 * m12;
+    let c22 = m00 * m11 - m01 * m10;
+    Some(Mat3::from_cols([
+        c00 * inv_det,
+        c01 * inv_det,
+        c02 * inv_det,
+        c10 * inv_det,
+        c11 * inv_det,
+        c12 * inv_det,
+        c20 * inv_det,
+        c21 * inv_det,
+        c22 * inv_det,
+    ]))
 }
 
 /// `Ixx = m/3 (hy² + hz²)` with half extents, which is `m/12` of the full side squares.
@@ -576,7 +789,11 @@ fn mesh_extent(mesh: &Mesh) -> f32 {
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 {
+    if body.sleeping && (body.velocity.length() > 0.25 || body.angular_velocity.length() > 0.4) {
+        body.sleeping = false;
+        body.sleep_time = 0.0;
+    }
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
         return;
     }
     let mut acceleration = gravity;
@@ -597,4 +814,53 @@ fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
         }
     }
     body.velocity += acceleration * dt;
+}
+
+#[cfg(test)]
+mod inertia_tests {
+    use super::{box_inertia, inertia_diagonal, Body};
+    use genos_math::Vec3;
+
+    fn cube(half: Vec3) -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x * half.x, y * half.y, z * half.z);
+        let (nnn, pnn, ppn, npn) = (
+            v(-1.0, -1.0, -1.0),
+            v(1.0, -1.0, -1.0),
+            v(1.0, 1.0, -1.0),
+            v(-1.0, 1.0, -1.0),
+        );
+        let (nnp, pnp, ppp, npp) = (
+            v(-1.0, -1.0, 1.0),
+            v(1.0, -1.0, 1.0),
+            v(1.0, 1.0, 1.0),
+            v(-1.0, 1.0, 1.0),
+        );
+        vec![
+            [pnn, ppn, ppp],
+            [pnn, ppp, pnp],
+            [nnn, nnp, npp],
+            [nnn, npp, npn],
+            [npn, npp, ppp],
+            [npn, ppp, ppn],
+            [nnn, pnn, pnp],
+            [nnn, pnp, nnp],
+            [nnp, pnp, ppp],
+            [nnp, ppp, npp],
+            [nnn, npn, ppn],
+            [nnn, ppn, pnn],
+        ]
+    }
+
+    #[test]
+    fn a_cube_hull_matches_the_box_moment() {
+        let half = Vec3::new(0.5, 0.4, 0.3);
+        let body = Body::mesh(Vec3::ZERO, 2.0, &cube(half));
+        let got = inertia_diagonal(body);
+        let expect = box_inertia(2.0, half);
+        let err = (got - expect).length() / expect.length();
+        assert!(
+            err < 0.02,
+            "hull inertia {got:?} vs box {expect:?}, relative {err}"
+        );
+    }
 }

@@ -94,6 +94,7 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA` | `crates/scene/src/lighting.rs:1247` | `--surface-cache-firefly-sigma` |
 | `GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET` | `crates/scene/src/lighting.rs:1248` | `--surface-cache-ray-budget` |
 | `GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS` | `crates/scene/src/lighting.rs:1249` | `--surface-cache-dormant-rays` |
+| `GENOS_LIGHTING_DIRECT_SPECULAR` | `crates/scene/src/lighting.rs` | `--lighting-direct-specular` |
 
 | Variable | Where | CLI today |
 |---|---|---|

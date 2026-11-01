@@ -35,6 +35,19 @@ vec4 material_fetch(vec4 rect, vec2 uv) {
     return texelFetch(material_color, c, lod);
 }
 
+float material_normal_alpha(vec4 rect, vec2 uv) {
+    ivec2 size = textureSize(material_normal, 0);
+    const float material_rect_present = 0.5;
+    if (uv.x < 0.0 || rect.z <= material_rect_present || size.x <= 0 || size.y <= 0) {
+        return 1.0;
+    }
+    int lod = int(atlas_mode.normal_lod);
+    ivec2 c = material_coord(size, rect, uv) >> lod;
+    ivec2 lod_size = textureSize(material_normal, lod);
+    c = clamp(c, ivec2(0), lod_size - ivec2(1));
+    return texelFetch(material_normal, c, lod).a;
+}
+
 vec3 material_normal_at(vec4 rect, vec2 uv) {
     ivec2 size = textureSize(material_normal, 0);
     if (uv.x < 0.0 || rect.z <= 0.5 || size.x <= 0 || size.y <= 0) {

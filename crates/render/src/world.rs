@@ -129,6 +129,15 @@ impl MaterialAtlas {
     }
 }
 
+/// G-buffer material flag: rgb is base colour, readers apply `(1 − metallic)`.
+pub const MAT_BASE: u32 = 1;
+/// Colour-atlas alpha is metallic (opaque materials with a metallic-roughness map).
+pub const MAT_ALPHA_METAL: u32 = 2;
+/// Normal-atlas alpha is roughness.
+pub const MAT_NORMAL_ROUGH: u32 = 4;
+/// Normal atlas is a flat normal plus roughness. Do not perturb.
+pub const MAT_FLAT_NORMAL: u32 = 8;
+
 /// A rectangle in a [`MaterialAtlas`], in texels. `w == 0` means no texture.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Surface {
@@ -137,6 +146,12 @@ pub struct Surface {
     /// Discard below this alpha. 0 keeps the whole surface.
     pub cutoff: f32,
     pub two_sided: bool,
+    /// Roughness factor used when the normal atlas does not carry roughness.
+    pub roughness: f32,
+    /// Metallic factor used when the colour atlas alpha is not metallic.
+    pub metallic: f32,
+    /// [`MAT_BASE`], [`MAT_ALPHA_METAL`], [`MAT_NORMAL_ROUGH`], [`MAT_FLAT_NORMAL`].
+    pub material_flags: u32,
 }
 
 #[derive(Clone, Debug)]

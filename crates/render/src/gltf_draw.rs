@@ -68,12 +68,13 @@
 //! Each primitive of each instance becomes one `DrawKind::Mesh` with its world pose,
 //! object-space normals, texture coordinates, and a shelf in the world's material
 //! atlases. The instance colour is the base-colour factor. The colour atlas stores
-//! sRGB of linear(base texture) × (1 − metallic), so the shader's multiply is the
-//! diffuse albedo from [`genos_load::shade_uv`] and metal is not applied twice.
-//! There is no specular lobe; roughness stays on the shade sample and is not
-//! lit. A mesh with no texture keeps [`surface_mean`], which is that same shade,
-//! so metal darkens it. The G-buffer and the world-space cache multiply this
-//! albedo; they do not keep a second material formula. The path tracer's Lambert
+//! sRGB of the linear base texture. The G-buffer stores that base and the
+//! metallic factor; readers scale by `(1 − metallic)` for the Lambert term, so
+//! metal is not applied twice. Roughness and metallic ride the material record
+//! (and, when present, the metallic-roughness texture) for the direct specular
+//! lobe. A mesh with no texture keeps [`surface_mean`], which is the diffuse
+//! shade, so an untextured metal stays dark and does not grow a lobe. The
+//! world-space cache multiplies the diffuse albedo. The path tracer's Lambert
 //! weight is the shade's diffuse albedo.
 //!
 //! A mesh that `affects_light` stands in as its bounding box for the analytic
@@ -83,7 +84,10 @@ use std::collections::HashMap;
 
 use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive};
 
-use crate::world::{transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World};
+use crate::world::{
+    transform_pose, Bounds, DrawKind, MaterialAtlas, Object, Surface, World, MAT_ALPHA_METAL,
+    MAT_BASE, MAT_FLAT_NORMAL, MAT_NORMAL_ROUGH,
+};
 
 impl World {
     /// Add every mesh instance of `scene`, placed by `place` (column-major, applied
@@ -412,13 +416,31 @@ fn build_surface(
     color: &mut Shelf,
     normal: &mut Shelf,
 ) -> Surface {
-    let color_rect = place_image(color, bake_diffuse(m, images));
-    let normal_rect = place_image(normal, copy_normal(m, images));
+    let store_metal = matches!(m.alpha_mode, AlphaMode::Opaque) && m.metallic_roughness_texture.is_some();
+    let color_rect = place_image(color, bake_diffuse(m, images, store_metal));
+    let (normal_image, flat_normal, rough_in_alpha) = bake_normal_rough(m, images);
+    let normal_rect = place_image(normal, normal_image);
+    let mut flags = 0;
+    if color_rect[2] > 0 {
+        flags |= MAT_BASE;
+    }
+    if store_metal {
+        flags |= MAT_ALPHA_METAL;
+    }
+    if rough_in_alpha {
+        flags |= MAT_NORMAL_ROUGH;
+    }
+    if flat_normal {
+        flags |= MAT_FLAT_NORMAL;
+    }
     Surface {
         color: color_rect,
         normal: normal_rect,
         cutoff: alpha_cutoff(m.alpha_mode),
         two_sided: m.double_sided,
+        roughness: m.roughness,
+        metallic: if flags & MAT_BASE != 0 { m.metallic } else { 0.0 },
+        material_flags: flags,
     }
 }
 
@@ -460,11 +482,11 @@ fn fit_shelf(w: u32, h: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
     (nw, nh, out)
 }
 
-/// sRGB bytes of linear(base) × (1 − metallic). Alpha stays the base texture's alpha.
-/// The base-colour factor is the instance colour, not baked here. The product is
-/// [`genos_load::shade_uv`] with that factor held at 1, so the shader's multiply
-/// is the shade's diffuse albedo.
-fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
+/// sRGB bytes of linear base colour. The base-colour factor is the instance
+/// colour, not baked here. Opaque materials with a metallic-roughness texture
+/// store metallic in alpha; every other material keeps the base texture's alpha
+/// for the cutoff test.
+fn bake_diffuse(m: &PbrMaterial, images: &[Image], store_metal: bool) -> Option<(u32, u32, Vec<u8>)> {
     let slot = m.base_color_texture?;
     let img = images.get(slot.image)?;
     let pixels = (img.width as usize)
@@ -482,14 +504,63 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)
             let v = (y as f32 + 0.5) / img.height as f32;
             let i = ((y * img.width + x) * 4) as usize;
             let sample = shade_uv(&unfactored, images, [u, v]);
-            let albedo = sample.diffuse_albedo();
             for c in 0..3 {
-                out[i + c] = linear_to_srgb_u8(albedo[c]);
+                out[i + c] = linear_to_srgb_u8(sample.base[c]);
             }
-            out[i + 3] = img.pixels[i + 3];
+            out[i + 3] = if store_metal {
+                quantize_u8(sample.metallic)
+            } else {
+                img.pixels[i + 3]
+            };
         }
     }
     Some((img.width, img.height, out))
+}
+
+/// Normal atlas plus roughness in alpha when a metallic-roughness texture exists.
+/// `flat` is a generated normal (rgb 0.5, 0.5, 1) used only to carry roughness.
+fn bake_normal_rough(m: &PbrMaterial, images: &[Image]) -> (Option<(u32, u32, Vec<u8>)>, bool, bool) {
+    let rough = m.metallic_roughness_texture.is_some();
+    let Some((w, h, mut rgba)) = copy_normal(m, images) else {
+        if !rough {
+            return (None, false, false);
+        }
+        let Some(slot) = m.metallic_roughness_texture else {
+            return (None, false, false);
+        };
+        let Some(img) = images.get(slot.image) else {
+            return (None, false, false);
+        };
+        if img.width == 0 || img.height == 0 {
+            return (None, false, false);
+        }
+        let mut rgba = vec![0u8; (img.width as usize) * (img.height as usize) * 4];
+        fill_roughness(m, images, img.width, img.height, &mut rgba);
+        for px in rgba.chunks_exact_mut(4) {
+            px[0] = 128;
+            px[1] = 128;
+            px[2] = 255;
+        }
+        return (Some((img.width, img.height, rgba)), true, true);
+    };
+    if rough {
+        fill_roughness(m, images, w, h, &mut rgba);
+    }
+    (Some((w, h, rgba)), false, rough)
+}
+
+fn fill_roughness(m: &PbrMaterial, images: &[Image], w: u32, h: u32, rgba: &mut [u8]) {
+    let mut unfactored = m.clone();
+    unfactored.base_color = [1.0, 1.0, 1.0, m.base_color[3]];
+    for y in 0..h {
+        for x in 0..w {
+            let u = (x as f32 + 0.5) / w as f32;
+            let v = (y as f32 + 0.5) / h as f32;
+            let sample = shade_uv(&unfactored, images, [u, v]);
+            let i = ((y * w + x) * 4) as usize;
+            rgba[i + 3] = quantize_u8(sample.roughness);
+        }
+    }
 }
 
 fn copy_normal(m: &PbrMaterial, images: &[Image]) -> Option<(u32, u32, Vec<u8>)> {
@@ -515,7 +586,11 @@ fn linear_to_srgb_u8(v: f32) -> u8 {
     } else {
         1.055 * v.powf(1.0 / 2.4) - 0.055
     };
-    (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    quantize_u8(s)
+}
+
+fn quantize_u8(s: f32) -> u8 {
+    (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 /// One primitive draw of one glTF instance.
@@ -897,13 +972,26 @@ mod tests {
     }
 
     #[test]
-    fn metal_is_baked_into_the_diffuse_atlas_and_not_into_an_untextured_mean() {
+    fn a_textured_metal_keeps_its_base_colour_in_the_atlas() {
         let scene = textured_quad(1.0, genos_load::AlphaMode::Opaque);
         let mut world = empty_world();
         world.add_gltf(&scene, &identity_pose(), false);
-        assert_eq!(world.color_atlas.rgba[0], 0);
+        assert_eq!(world.color_atlas.rgba[0], 255, "base colour stays in the atlas");
         assert_eq!(world.color_atlas.rgba[1], 0);
         assert_eq!(world.color_atlas.rgba[2], 0);
+        let surface = world.objects.iter().find_map(|object| {
+            if let DrawKind::Mesh { surface, .. } = &object.kind {
+                *surface
+            } else {
+                None
+            }
+        });
+        let Some(surface) = surface else {
+            panic!("not a mesh");
+        };
+        let surface = world.surfaces[surface];
+        assert_eq!(surface.metallic, 1.0);
+        assert_ne!(surface.material_flags & crate::world::MAT_BASE, 0);
     }
 
     #[test]

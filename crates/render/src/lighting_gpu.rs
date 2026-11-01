@@ -1084,7 +1084,7 @@ impl Gpu {
             }
             self.lighting.cache_full = want_cache;
         }
-        self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every

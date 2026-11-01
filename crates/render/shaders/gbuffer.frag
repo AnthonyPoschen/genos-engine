@@ -3,10 +3,9 @@
 // GI compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
-// Record (uvec4): x distance from the eye (float bits; all ones = nothing), y the normal
-// (octahedral, snorm 2x16), z albedo rgb and a flags byte (bit 0 two-sided), w
-// emitted light (shared-exponent RGB; the light pass moves it out and puts the
-// direct irradiance here).
+// Record (5 uints, gbuffer_layout.glsl): distance, octahedral normal, albedo plus
+// a two-sided flag, emission (the light pass overwrites it with direct light),
+// then roughness, metallic, and material flags.
 //
 // Particle cards, fog cards and unlit quads are not in GI yet: they discard.
 #extension GL_GOOGLE_include_directive : require
@@ -21,11 +20,15 @@ layout(location = 5) flat in uint v_emit;
 layout(location = 6) flat in vec4 v_atlas;
 layout(location = 7) flat in vec4 v_normal_atlas;
 layout(location = 8) flat in float v_cutoff;
+layout(location = 9) flat in float v_rough;
+layout(location = 10) flat in float v_metal;
+layout(location = 11) flat in uint v_mat;
 layout(location = 0) out vec4 out_color;
 
 #include "scene_data.glsl"
 #include "lighting_pack.glsl"
 #include "material_atlas.glsl"
+#include "gbuffer_layout.glsl"
 
 const float kSnormToSigned = 2.0;
 const float kSignedToSnorm = 0.5;
@@ -47,23 +50,21 @@ vec3 material_perturb(vec3 n, vec3 pos, vec2 uv, vec3 mapped) {
     return normalize(t / lt * tn.x + b / lb * tn.y + n * tn.z);
 }
 
-layout(std430, set = 0, binding = 6) buffer GBuffer {
-    uvec4 header;
-    uvec4 px[];
-} gbuf;
-
 void main() {
     // Particle cards and unlit quads stay out of the G-buffer. A textured
     // surface (uv.x >= 0) used to discard here; it now samples the atlas.
     if (v_shade < 0.5 || v_shade > 1.5) {
         discard;
     }
-    // v_albedo is the base-colour factor (or the untextured shade mean). The atlas
-    // is linear(base texture) × (1 − metallic) from the shared shade, so this
-    // product is the diffuse albedo. The world-space cache multiplies that albedo.
+    // v_albedo is the base-colour factor, or the untextured diffuse mean.
+    // A textured atlas stores base colour. Flag bit 0 tells readers to scale
+    // by (1 − metallic) so the Lambert term stays the diffuse albedo.
     vec3 albedo = v_albedo;
     vec3 n = normalize(v_normal);
-    if (v_uv.x >= 0.0 && v_atlas.z > 0.5) {
+    float rough = v_rough;
+    float metal = v_metal;
+    bool textured = v_uv.x >= 0.0 && v_atlas.z > 0.5;
+    if (textured) {
         vec4 texel = material_fetch(v_atlas, v_uv);
         if (v_cutoff > 0.0 && texel.a < v_cutoff) {
             discard;
@@ -73,13 +74,21 @@ void main() {
             rgb = vec3(material_linear(texel.r), material_linear(texel.g), material_linear(texel.b));
         }
         albedo *= rgb;
+        if ((v_mat & 2u) != 0u) {
+            metal = texel.a;
+        }
         if (v_normal_atlas.z > 0.5) {
-            // ADR 0035: Z is rebuilt from RG on the RGBA8 path and the BC5 path.
-            vec3 mapped = material_normal_at(v_normal_atlas, v_uv);
-            vec2 xy = mapped.xy * kSnormToSigned - 1.0;
-            float z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
-            mapped = vec3(mapped.xy, z * kSignedToSnorm + kSignedToSnorm);
-            n = material_perturb(n, v_pos, v_uv, mapped);
+            if ((v_mat & 8u) == 0u) {
+                // ADR 0035: Z is rebuilt from RG on the RGBA8 path and the BC5 path.
+                vec3 mapped = material_normal_at(v_normal_atlas, v_uv);
+                vec2 xy = mapped.xy * kSnormToSigned - 1.0;
+                float z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
+                mapped = vec3(mapped.xy, z * kSignedToSnorm + kSignedToSnorm);
+                n = material_perturb(n, v_pos, v_uv, mapped);
+            }
+            if ((v_mat & 4u) != 0u) {
+                rough = material_normal_alpha(v_normal_atlas, v_uv);
+            }
         }
     }
     bool two_sided = v_shade > 1.15;
@@ -93,11 +102,15 @@ void main() {
     // minimum over those fragments instead (records are all ones when empty, and
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
-    atomicMin(gbuf.px[i].x, floatBitsToUint(max(length(v_pos - scene.eye.xyz), 1.0e-6)));
-    atomicMin(gbuf.px[i].y, lighting_pack_normal(n));
-    atomicMin(gbuf.px[i].z, packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    float dist = max(length(v_pos - scene.eye.xyz), 1.0e-6);
+    atomicMin(gbuf.words[i * 5u], floatBitsToUint(dist));
+    atomicMin(gbuf.words[i * 5u + 1u], lighting_pack_normal(n));
+    atomicMin(gbuf.words[i * 5u + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
+    const float gbuf_flag_byte = 255.0;
+    atomicMin(gbuf.words[i * 5u + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
     if (v_emit != 0u) {
-        atomicMin(gbuf.px[i].w, v_emit);
+        atomicMin(gbuf.words[i * 5u + 3u], v_emit);
     }
     out_color = vec4(albedo, 1.0);
 }

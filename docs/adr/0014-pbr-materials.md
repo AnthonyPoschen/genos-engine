@@ -27,7 +27,7 @@ GI stores irradiance in the world-space surface light cache and refreshes it und
 
 ## Departures
 
-- **glTF 2.0 Appendix B and Filament.** The real-time shade omits the specular lobe. Appendix B's diffuse term is what GI and the Lambert picture use. The path tracer is the place the lobe lands.
+- **glTF 2.0 Appendix B and Filament.** `direct_specular` (default off until the 4070 direct-pass cost is measured) shades pixel direct with ADR 0025: Appendix B `fresnel_mix`, diffuse `base × (1 − metallic) / π` scaled by `1 − F`, GGX, height-correlated Smith visibility, Schlick Fresnel. The colour atlas stores base colour; the Lambert bounce read applies `(1 − metallic)`. Bounce, the cache, and `direct_specular=off` have no lobe and keep the Lambert weight `0.254647909`. An untextured mesh keeps the diffuse mean and does not grow a lobe. A masked material does not pack per-texel metallic into alpha (the cutoff still owns that byte), so its metal is the factor.
 - **gi-design, "Emissive surfaces", path 1.** A card texel there stores outgoing radiance. Here the surface light cache stores irradiance, and the shade adds emission. Cards in `.gbake` stay the bake product. They are not the runtime cache (ADR 0013).
 - **Current `surface_mean`.** It keeps base colour for metals. That stops being the shade. `metal_diffuse` fails a reader that still does it.
 - **glTF normal texture.** The spec requires a MikkTSpace tangent. The G-buffer uses a screen-space derivative. The cook stores the glTF tangent, or a Mikk tangent when the file has none. The derivative path is not the reference.
