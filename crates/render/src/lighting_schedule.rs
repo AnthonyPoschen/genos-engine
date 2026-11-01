@@ -1004,13 +1004,18 @@ pub fn lit_target(
     lit_frame(display_w, display_h, edges, tile)
 }
 
-/// Cache refresh budget shift: the settings shift only. #70 R3: the controller
-/// used to add one per halving of its scale (up to +6 at the floor), which
-/// starved cache refreshes and darkened the turned hall (box: 55 -> 17 mean
-/// |d| vs master once removed). Trace and a-trous still scale.
+/// Cache refresh budget shift: the settings shift plus one per halving of the
+/// controller scale (each step halves every per-round refresh budget), capped at 7.
 #[must_use]
-pub fn refresh_budget_shift(settings_shift: u32, _controller: bool, _scale: f64) -> u32 {
-    settings_shift.min(7)
+pub fn refresh_budget_shift(settings_shift: u32, controller: bool, scale: f64) -> u32 {
+    let extra = if controller && scale.is_finite() && scale > 0.0 && scale < 1.0 {
+        let halvings = (1.0 / scale.max(f64::from(SCALE_FLOOR))).log2().floor();
+        // In 0..=6 after the floor clamp.
+        trunc_u32(halvings.clamp(0.0, 7.0))
+    } else {
+        0
+    };
+    settings_shift.saturating_add(extra).min(7)
 }
 
 /// Gates, crop, and caps for the frame. Global mode pushes zeros.
@@ -1545,11 +1550,14 @@ mod tests {
     }
 
     #[test]
-    fn the_controller_scale_leaves_the_cache_refresh_budget() {
+    fn the_controller_scale_halves_the_cache_refresh_budget() {
         assert_eq!(refresh_budget_shift(0, true, 1.0), 0);
-        assert_eq!(refresh_budget_shift(1, true, 0.25), 1);
-        assert_eq!(refresh_budget_shift(2, true, 1.0 / 64.0), 2);
-        assert_eq!(refresh_budget_shift(9, false, 1.0), 7);
+        assert_eq!(refresh_budget_shift(0, true, 0.6), 0);
+        assert_eq!(refresh_budget_shift(0, true, 0.5), 1);
+        assert_eq!(refresh_budget_shift(1, true, 0.25), 3);
+        assert_eq!(refresh_budget_shift(0, false, 0.25), 0);
+        assert_eq!(refresh_budget_shift(5, true, 0.0), 5);
+        assert_eq!(refresh_budget_shift(2, true, 1.0 / 64.0), 7);
     }
 
     #[test]
