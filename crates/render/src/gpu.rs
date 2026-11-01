@@ -7092,7 +7092,9 @@ impl Gpu {
             }
         }
         for source in &self.stream_sources {
-            if source.sampled {
+            // RGBA blits the resident mip up to mip 0. Block formats are copied
+            // into the matching mip, so the fetch lod is that level.
+            if source.sampled && block_texel(source.chain.format) {
                 if let Some(level) = source.shown {
                     self.atlas_lod[usize::from(!source.color)] = level;
                 }

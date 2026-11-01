@@ -123,16 +123,8 @@ pub fn frame_views(
     height: u32,
     view_proj: &[f32; 16],
 ) -> Vec<TextureView> {
-    let color = atlas_live(
-        world.color_atlas.width,
-        world.color_atlas.height,
-        &world.color_atlas.rgba,
-    );
-    let normal = atlas_live(
-        world.normal_atlas.width,
-        world.normal_atlas.height,
-        &world.normal_atlas.rgba,
-    );
+    let color = atlas_live(&world.color_atlas);
+    let normal = atlas_live(&world.normal_atlas);
     let mut views = Vec::new();
     if let Some(index) = texture_index(color, normal, true) {
         views.push(atlas_view(
@@ -146,11 +138,7 @@ pub fn frame_views(
     }
     let mut index = views.len();
     for streamed in &world.stream_textures {
-        if !atlas_live(
-            streamed.atlas.width,
-            streamed.atlas.height,
-            &streamed.atlas.rgba,
-        ) {
+        if !atlas_live(&streamed.atlas) {
             continue;
         }
         views.push(streamed_view(
@@ -204,9 +192,15 @@ fn streamed_view(
     }
 }
 
-fn atlas_live(width: u32, height: u32, rgba: &[u8]) -> bool {
-    let texels = u64::from(width) * u64::from(height) * 4;
-    width > 0 && height > 0 && u64::try_from(rgba.len()).unwrap_or(0) >= texels
+fn atlas_live(atlas: &crate::world::MaterialAtlas) -> bool {
+    if atlas.width == 0 || atlas.height == 0 {
+        return false;
+    }
+    if atlas.block_format != 0 && !atlas.block_mips.is_empty() {
+        return true;
+    }
+    let texels = u64::from(atlas.width) * u64::from(atlas.height) * 4;
+    u64::try_from(atlas.rgba.len()).unwrap_or(0) >= texels
 }
 
 fn atlas_view(
