@@ -106,7 +106,7 @@ fn assert_at_rest(name: &str, restless: &[usize], rest: (f64, f64)) {
     eprintln!(
         "wrc_lamps_off {name}: at rest past frame {SETTLE_BY}: {} draining or unsettled, picture drift {:.4}",
         restless.len(),
-        rest.1 - rest.0
+        (rest.1 - rest.0).max(0.0)
     );
     assert!(
         restless.is_empty(),
