@@ -27,6 +27,9 @@ layout(location = 0) out vec4 out_color;
 #include "lighting_pack.glsl"
 #include "material_atlas.glsl"
 
+const float kSnormToSigned = 2.0;
+const float kSignedToSnorm = 0.5;
+
 // Screen-space tangent from the position and the uv. No stored tangents.
 vec3 material_perturb(vec3 n, vec3 pos, vec2 uv, vec3 mapped) {
     vec3 tn = mapped * 2.0 - 1.0;
@@ -73,9 +76,9 @@ void main() {
         if (v_normal_atlas.z > 0.5) {
             // ADR 0035: Z is rebuilt from RG on the RGBA8 path and the BC5 path.
             vec3 mapped = material_normal_at(v_normal_atlas, v_uv);
-            vec2 xy = mapped.xy * 2.0 - 1.0;
+            vec2 xy = mapped.xy * kSnormToSigned - 1.0;
             float z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
-            mapped = vec3(mapped.xy, z * 0.5 + 0.5);
+            mapped = vec3(mapped.xy, z * kSignedToSnorm + kSignedToSnorm);
             n = material_perturb(n, v_pos, v_uv, mapped);
         }
     }
