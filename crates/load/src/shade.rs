@@ -1,9 +1,9 @@
 //! One glTF metallic-roughness shade.
 //!
 //! The bake, the G-buffer's atlas and mean, and the path tracer all call this.
-//! Diffuse albedo is base colour times (1 − metallic). The real-time picture
-//! stays Lambert: callers multiply by their existing BRDF weight. The specular
-//! lobe is not evaluated here.
+//! Diffuse albedo is base colour times (1 − metallic). This function does not
+//! evaluate the specular lobe. Pixel direct does, in `pbr_brdf.glsl`, when
+//! `direct_specular` is on. Callers of `outgoing` still pass the Lambert weight.
 //!
 //! Departure from glTF 2.0 Appendix B and from Filament: no specular term.
 //! Departure from the glTF sampler default: a missing mag filter stays nearest,

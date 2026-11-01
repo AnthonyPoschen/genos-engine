@@ -24,7 +24,7 @@ A glTF 2.0 material looks the same to the G-buffer, the surface light cache, and
 |---|---|---|
 | `PbrMaterial` | `crates/load/src/gltf.rs` | Factors, metallic-roughness, normal, occlusion, emissive, `KHR_materials_emissive_strength`, alpha mode, double sided. `SUPPORTED_EXTENSIONS` is only the emissive-strength extension. |
 | `BakeMesh::surface` | `crates/bake/src/mesh.rs` | Diffuse albedo and emission at a UV. sRGB on base colour and emissive. Metallic-roughness is linear, metallic in B. Occlusion and the normal map are not read. Wrap is repeat. The sampler's wrap and filter are ignored. |
-| Colour and normal atlases | `crates/render/src/gltf_draw.rs`, `gbuffer.frag` | `bake_diffuse` stores sRGB of `linear(base) × (1 − metallic)`. The G-buffer multiplies by the base-colour factor. The normal uses a screen-space derivative tangent. Clamp and mirrored repeat are not in the shader. |
+| Colour and normal atlases | `crates/render/src/gltf_draw.rs`, `gbuffer.frag` | `bake_diffuse` stores sRGB of linear base colour. The G-buffer multiplies by the base-colour factor and, when the material flag is set, by `(1 − metallic)` at read time. Roughness is the factor, or the normal-atlas alpha when a metallic-roughness texture was baked. The normal uses a screen-space derivative tangent. Clamp and mirrored repeat are not in the shader. |
 | `surface_mean` | `gltf_draw.rs` | Area-weighted base colour and emission. Metallic does not darken it. That mean is the untextured draw colour and the SDF field's albedo. |
 | Path tracer | `crates/debug/src/reference.rs`, `crates/gpuref` | Flat albedo. The reference file says textures are not traced. |
 | `.gbake` | `crates/bake` | SDF and six cards. `content_key` is FNV-1a. Cards are not the runtime cache. |
