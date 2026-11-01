@@ -3,9 +3,20 @@
 // wall time, so the old bounce light leaving can be judged on screen.
 // Run (Anthony's PC, not CI):
 //   cargo run --release -p genos-stress -- --script examples/stress/scripts/wrc_drain_view.rhai
-// Measured on lavapipe (wrc_lamps_off): off 1 % of lit in 1 frame, moved away
-// 42 frames (gate 12 = 200 ms at 60 fps); see the PR for x0.5 and x2.
+// Measured on lavapipe (wrc_lamps_off, no reset, no pop): off black in 43
+// frames, moved away 45, x0.5 within 1 % in 40, x2 in 21 (gate 12 = 200 ms at
+// 60 fps). Waits go in 60-frame pieces: a command times out after ~120 s, so a
+// slow GPU (lavapipe, ~1 fps) still runs it.
 let STEP = 180;
+let WARM = 300;
+fn hold(frames) {
+    let left = frames;
+    while left > 0 {
+        let n = if left > 60 { 60 } else { left };
+        wait(#{ frames: n });
+        left -= n;
+    }
+}
 time(#{ fixed_dt: 0.0 });
 knob("time_of_day", 22.0);
 knob("sun", "freeze");
@@ -16,13 +27,13 @@ knob("lights", 32);
 knob("layout", "spread");
 knob("power", 1.0);
 camera(#{ position: [14.5, 1.7, 23.5], yaw: -0.3554, pitch: 0.08 });
-wait(#{ frames: 300 });
+hold(WARM);
 fn step(label, power, frames) {
     knob("power", power);
     log(`step ${label}: power ${power}`);
     wait(#{ frames: 12 });
     log(`${label} +12 frames: ${luminance(#{ region: [0.0, 0.0, 1.0, 1.0] })}`);
-    wait(#{ frames: frames - 12 });
+    hold(frames - 12);
     log(`${label} settled: ${luminance(#{ region: [0.0, 0.0, 1.0, 1.0] })}`);
     shot(label);
 }
