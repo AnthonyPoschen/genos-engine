@@ -1003,7 +1003,7 @@ New column "settled": first frame after which every later graded frame stays wit
 
 e3f and e3fR touch 5 % at t36 (0.03), then rebound to 0.08–0.10 from t120 and never come back; e3fSR sits at 0.061–0.064 from t24 to t120 and is the closest at t900. The reference itself drifts (e1 is 0.124 off its own t900 at t60). So e3fSR is better than e3f at every graded frame except t36–t60. Hypothesis tested and rejected: movers re-stamping their ring entry starve the spread. Making the spread age come from the oldest step entry (e3fSRb) just turns the spread off where lamps move and reproduces e3f exactly. Reverted; e3fSR (round 16) stays the best variant.
 
-### Round 17 (b): A-SVGF per-pixel change hook (WIP)
+### Round 17 (b): A-SVGF per-pixel change hook
 
 `GENOS_DBG_ASVGF_PX` (EVT=3 only, dbg2 bits 15-16; patch `0037/hooks-r17.patch`). The dirty
 list is composed as before and marks its blocks in a scratch slice. A second, whole-grid
@@ -1015,7 +1015,21 @@ Mode 3 (listed only) is the control, and it matches e3fSR (off t900 0.062 agains
 The first build used a single grid dispatch with `STAMP == frame` as the listed test. That
 does not match list membership: the picture froze bright (t900 3.6). It was fixed by keeping the list dispatch.
 
-| off | N+12 | mean N+1..12 | first ≤5% | t900 |
-|---|---|---|---|---|
-| e3fSR | 1.645 | 2.096 | never | 0.054 |
-| e3fSRA | 1.325 | 1.899 | never | 0.059 |
+| step | variant | N+12 | mean N+1..12 | first ≤5% | t900 |
+|---|---|---|---|---|---|
+| off | e3fSR | 1.645 | 2.096 | never | 0.054 |
+| off | e3fSRA | 1.325 | 1.899 | never | 0.059 |
+| on | e3fSR | 0.129 | 0.228 | 300 ms | 0.039 |
+| on | e3fSRA | 0.137 | 0.237 | 300 ms | 0.038 |
+| h50 | e3fSR | 0.068 | 0.094 | 400 ms | 0.030 |
+| h50 | e3fSRA | 0.071 | 0.095 | 400 ms | 0.030 |
+| x2 | e3fSR | 0.084 | 0.099 | 5000 ms | 0.047 |
+| x2 | e3fSRA | 0.087 | 0.104 | 5000 ms | 0.045 |
+| m90 | e3fSR | 0.020 | 0.020 | 17 ms | 0.009 |
+| m90 | e3fSRA | 0.020 | 0.020 | 17 ms | 0.012 |
+
+Verdict: the hook only helps lamp-off, and only partly. N+12 drops 19% and the mean drops 9%,
+but the picture still never comes within 5%. The other steps are unchanged within noise.
+Off is still limited by the cache. After the lamp-off frame the WRC bounce takes about 60
+frames to drain, and per-pixel screen history cannot speed up a source that is itself still
+stale. Shipped default unchanged. The hook stays debug-only.
