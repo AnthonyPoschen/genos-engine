@@ -330,6 +330,41 @@ fn a_yawed_hull_pile_sleeps_without_walking() {
 }
 
 #[test]
+fn a_face_offset_one_percent_does_not_yaw() {
+    let mut world = World::new(GRAVITY);
+    world.insert(Body::cuboid(
+        Vec3::new(0.0, -0.5, 0.0),
+        0.0,
+        Vec3::new(2.0, 0.5, 2.0),
+    ));
+    let half = 0.5_f32;
+    let mut box_body = Body::cuboid(Vec3::new(0.01, half, 0.0), 1.0, Vec3::new(half, half, half));
+    box_body.friction = 0.6;
+    world.insert(box_body);
+    for _ in 0..180 {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[1];
+    let yaw = yaw_about_y(body.orientation).abs();
+    assert!(
+        yaw < 0.02,
+        "1% face offset yawed {yaw} rad, spin {:?}",
+        body.angular_velocity
+    );
+    assert!(
+        body.angular_velocity.y.abs() < 0.05,
+        "1% face offset spun about the normal at {}",
+        body.angular_velocity.y
+    );
+}
+
+fn yaw_about_y(orientation: Quat) -> f32 {
+    let sin_y = 2.0 * (orientation.w * orientation.y + orientation.x * orientation.z);
+    let cos_y = 1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z);
+    sin_y.atan2(cos_y)
+}
+
+#[test]
 fn two_runs_of_the_overhang_match_bit_for_bit() {
     fn pose_bits(world: &World) -> Vec<u32> {
         let mut bits = Vec::new();

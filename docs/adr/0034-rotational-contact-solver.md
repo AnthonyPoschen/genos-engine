@@ -20,7 +20,8 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 
 - Friction uses the larger of the two coefficients, which is what `physics.md` already specified. The geometric mean would be zero against a default plane (friction 0) and would drop every existing ground-friction test.
 - Position correction is still linear. A rotational split impulse launched resting stacks, so the penetration pass moves centres only. The face manifold (incident face clipped to the reference face, at most four points) keeps the normal forces on the support instead of on one corner.
-- The normal impulse's moment is the moment of the total impulse at the face centroid. Per-corner normal torque on a symmetric face does not cancel under sequential impulses, and that residual spin walked the ship lanes together. Friction is still applied at each point.
+- The normal rows of a manifold are one block, solved together and clamped to stay non-negative, so point order cannot leave a residual moment. A twist-friction row about the normal resists spin in the contact plane. Tangential friction is still two rows per point.
+- Position passes after the first reuse the manifold. Each point keeps a body-frame anchor, and the separation is recomputed from those anchors instead of running the narrow phase again.
 - Sleep is per body, not an island graph. The proposal left sleep to a later decision. A settled pile needs it: 0.5 s under 0.12 m/s and 0.25 rad/s, woken by a moving contact. Springs and motors do not sleep.
 
 ## Tests
@@ -34,6 +35,7 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 - `two_boxes_colliding_off_centre_exchange_angular_momentum`
 - `a_yawed_hull_pile_sleeps_without_walking`
 - `a_cube_hull_matches_the_box_moment`
+- `a_face_offset_one_percent_does_not_yaw`
 
 ## Consequences
 

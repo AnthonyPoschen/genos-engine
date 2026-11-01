@@ -288,6 +288,13 @@ fn push_manifold(
         return;
     }
     let (t1, t2) = crate::solver::tangent_axes(normal);
+    let mut points = points;
+    let anchored = usize::from(count);
+    for point in &mut points[..anchored] {
+        point.local_a = conjugate(a.orientation).rotate(point.position - a.position);
+        point.local_b = conjugate(b.orientation).rotate(point.position - b.position);
+        point.depth0 = point.depth;
+    }
     out.push(Manifold {
         a: a_index,
         b: b_index,
@@ -296,6 +303,7 @@ fn push_manifold(
         points,
         count,
         tangent_axis: [t1, t2],
+        twist: 0.0,
     });
 }
 

@@ -487,19 +487,16 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
-    // Four positional passes. The narrow phase and the velocity rows run on
-    // the first pass; the later passes only separate the centres.
-    // overstated depth cannot throw a body. The velocity rows run inside.
+    // The narrow phase is built once. Later passes move the stored local
+    // points with the bodies and separate again, without another SAT.
     let mut hits = 0_u32;
     for pass in 0..4 {
-        // Velocity rows run once. Later passes rebuild the overlap so a
-        // correction cannot leave a body on the far side of a hull.
         hits = hits.saturating_add(contact::collide(
             &mut world.bodies,
             &mut world.pairs,
             pass == 0,
             pass == 0,
-            true,
+            pass == 0,
         ));
     }
     world.step_stats.dynamic_pair_impulses =

@@ -24,6 +24,12 @@ pub(crate) struct ContactPoint {
     pub tangent: [f32; 2],
     /// Target separating speed from restitution, captured before iterations.
     pub bias: f32,
+    /// Contact in each body's frame, so a later pass can move the point
+    /// and the separation with the body instead of rebuilding the narrow phase.
+    pub local_a: Vec3,
+    pub local_b: Vec3,
+    /// Penetration along the normal when the locals were stored.
+    pub depth0: f32,
 }
 
 impl ContactPoint {
@@ -34,6 +40,9 @@ impl ContactPoint {
             normal_impulse: 0.0,
             tangent: [0.0, 0.0],
             bias: 0.0,
+            local_a: Vec3::ZERO,
+            local_b: Vec3::ZERO,
+            depth0: depth,
         }
     }
 }
@@ -51,6 +60,8 @@ pub(crate) struct Manifold {
     /// Friction axes from the first frame of this contact, kept while the
     /// normal stays aligned so a warm impulse does not swap tangent.
     pub tangent_axis: [Vec3; 2],
+    /// Friction impulse about the contact normal. It resists twist.
+    pub twist: f32,
 }
 
 /// Velocity iterations, then a positional pass. Returns how many manifolds
@@ -63,6 +74,7 @@ pub(crate) fn solve(
     velocity: bool,
 ) -> u32 {
     wake_touched(bodies, manifolds, wake);
+    refresh_anchors(bodies, manifolds);
     prepare_bias(bodies, manifolds);
     if velocity {
         warm_start(bodies, manifolds, warm);
@@ -121,14 +133,10 @@ pub(crate) fn solve_pair(
         };
     }
     let (t1, t2) = tangents(normal);
+    let mut twist = 0.0_f32;
     for _ in 0..VELOCITY_ITERATIONS {
-        let before_a = a.angular_velocity;
-        let before_b = b.angular_velocity;
-        let mut total = Vec3::ZERO;
-        for point in points.iter_mut() {
-            total += normal_at_point(a, b, normal, point);
-        }
-        keep_centroid_torque(a, b, points, total, before_a, before_b);
+        solve_normal_block(a, b, normal, points);
+        twist = solve_twist(a, b, normal, points, twist);
         for point in points.iter_mut() {
             friction_at_point(a, b, t1, t2, point);
         }
@@ -229,9 +237,7 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
         let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
             continue;
         };
-        let before_a = a.angular_velocity;
-        let before_b = b.angular_velocity;
-        let mut total = Vec3::ZERO;
+        manifold.twist = previous.twist;
         for point in &mut manifold.points[..count] {
             let Some(cached) = previous.points[..prev_count].iter().find(|cached| {
                 (cached.position - point.position).length_squared() < WARM_DISTANCE_SQ
@@ -240,41 +246,55 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
             };
             point.normal_impulse = cached.normal_impulse;
             point.tangent = cached.tangent;
-            let impulse = manifold.normal * point.normal_impulse;
-            total += impulse;
             let ra = point.position - a.position;
             let rb = point.position - b.position;
-            apply(a, b, ra, rb, impulse, true);
-        }
-        keep_centroid_torque(a, b, &manifold.points[..count], total, before_a, before_b);
-        let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
-        for point in &manifold.points[..count] {
-            let ra = point.position - a.position;
-            let rb = point.position - b.position;
+            apply(a, b, ra, rb, manifold.normal * point.normal_impulse, true);
+            let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
             apply(a, b, ra, rb, t1 * point.tangent[0], true);
             apply(a, b, ra, rb, t2 * point.tangent[1], true);
         }
+        apply_twist(a, b, manifold.normal, manifold.twist);
     }
 }
 
 fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
     let count = usize_from_u8(manifold.count);
     let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
+    let normal = manifold.normal;
     let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
         return;
     };
     if both_inactive(a, b) {
         return;
     }
-    let before_a = a.angular_velocity;
-    let before_b = b.angular_velocity;
-    let mut total = Vec3::ZERO;
-    for index in 0..count {
-        total += normal_at_point(a, b, manifold.normal, &mut manifold.points[index]);
-    }
-    keep_centroid_torque(a, b, &manifold.points[..count], total, before_a, before_b);
+    solve_normal_block(a, b, normal, &mut manifold.points[..count]);
+    manifold.twist = solve_twist(a, b, normal, &manifold.points[..count], manifold.twist);
     for index in 0..count {
         friction_at_point(a, b, t1, t2, &mut manifold.points[index]);
+    }
+}
+
+/// Move each stored point with its body and recompute penetration from the
+/// two local anchors. Position correction then sees the gap it just changed.
+fn refresh_anchors(bodies: &[Body], manifolds: &mut [Manifold]) {
+    for manifold in manifolds.iter_mut() {
+        let (Some(a), Some(b)) = (
+            bodies.get(usize_from(manifold.a)),
+            bodies.get(usize_from(manifold.b)),
+        ) else {
+            continue;
+        };
+        let count = usize_from_u8(manifold.count);
+        let mut deepest = 0.0_f32;
+        for point in &mut manifold.points[..count] {
+            let pa = a.position + a.orientation.rotate(point.local_a);
+            let pb = b.position + b.orientation.rotate(point.local_b);
+            point.position = (pa + pb) * 0.5;
+            let opened = (pa - pb).dot(manifold.normal);
+            point.depth = point.depth0 - opened;
+            deepest = deepest.max(point.depth);
+        }
+        manifold.depth = deepest;
     }
 }
 
@@ -304,7 +324,219 @@ fn solve_position(bodies: &mut [Body], manifold: &mut Manifold) {
     manifold.depth -= (shift_a + shift_b).dot(manifold.normal);
 }
 
-fn normal_at_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut ContactPoint) -> Vec3 {
+/// One linear solve for every normal row of the manifold.
+///
+/// Sequential impulses visit the points in order, so a symmetric face keeps
+/// a residual moment. The block uses the same pre-velocity for every point
+/// and clamps the accumulated impulse to stay non-negative.
+fn solve_normal_block(a: &mut Body, b: &mut Body, normal: Vec3, points: &mut [ContactPoint]) {
+    let count = points.len().min(4);
+    if count == 0 {
+        return;
+    }
+    let mut ra = [Vec3::ZERO; 4];
+    let mut rb = [Vec3::ZERO; 4];
+    let mut rhs = [0.0_f32; 4];
+    let mut mass = [[0.0_f32; 4]; 4];
+    for index in 0..count {
+        ra[index] = points[index].position - a.position;
+        rb[index] = points[index].position - b.position;
+        let vn = (point_velocity(a, ra[index]) - point_velocity(b, rb[index])).dot(normal);
+        rhs[index] = -(vn - points[index].bias);
+    }
+    for row in 0..count {
+        for col in 0..count {
+            mass[row][col] = normal_coupling(a, b, ra[row], rb[row], ra[col], rb[col], normal);
+        }
+    }
+    let mut active = [true; 4];
+    let mut delta = [0.0_f32; 4];
+    for _ in 0..count {
+        for index in 0..count {
+            if !active[index] {
+                delta[index] = -points[index].normal_impulse;
+            }
+        }
+        let mut reduced = [[0.0_f32; 4]; 4];
+        let mut reduced_rhs = [0.0_f32; 4];
+        let mut map = [0_usize; 4];
+        let mut rows = 0_usize;
+        for index in 0..count {
+            if !active[index] {
+                continue;
+            }
+            let mut value = rhs[index];
+            for other in 0..count {
+                if !active[other] {
+                    value -= mass[index][other] * delta[other];
+                }
+            }
+            map[rows] = index;
+            reduced_rhs[rows] = value;
+            rows += 1;
+        }
+        for row in 0..rows {
+            for col in 0..rows {
+                reduced[row][col] = mass[map[row]][map[col]];
+            }
+        }
+        let Some(solved) = solve_dense(&reduced, &reduced_rhs, rows) else {
+            for point in points.iter_mut().take(count) {
+                normal_at_point(a, b, normal, point);
+            }
+            return;
+        };
+        let mut worst: Option<usize> = None;
+        let mut worst_lambda = 0.0_f32;
+        let mut feasible = true;
+        for row in 0..rows {
+            let index = map[row];
+            let lambda = points[index].normal_impulse + solved[row];
+            if lambda < -1.0e-5 {
+                feasible = false;
+                if worst.is_none() || lambda < worst_lambda {
+                    worst = Some(index);
+                    worst_lambda = lambda;
+                }
+            } else {
+                delta[index] = solved[row];
+            }
+        }
+        if feasible {
+            for index in 0..count {
+                let applied = normal * delta[index];
+                apply(a, b, ra[index], rb[index], applied, true);
+                if delta[index] != 0.0 {
+                    let magnitude = delta[index].abs();
+                    a.normal_impulse += magnitude;
+                    b.normal_impulse += magnitude;
+                }
+                points[index].normal_impulse =
+                    (points[index].normal_impulse + delta[index]).max(0.0);
+            }
+            return;
+        }
+        if let Some(index) = worst {
+            active[index] = false;
+        }
+    }
+}
+
+fn normal_coupling(
+    a: &Body,
+    b: &Body,
+    arm_a: Vec3,
+    arm_b: Vec3,
+    other_arm_a: Vec3,
+    other_arm_b: Vec3,
+    normal: Vec3,
+) -> f32 {
+    let lever_a = arm_a.cross(normal);
+    let other_a = other_arm_a.cross(normal);
+    let lever_b = arm_b.cross(normal);
+    let other_b = other_arm_b.cross(normal);
+    inv_mass(a) + inv_mass(b) + lever_a.dot(inv_inertia(a, other_a))
+        + lever_b.dot(inv_inertia(b, other_b))
+}
+
+/// Gauss-Jordan solve of `K x = rhs`. `None` when the active block is singular.
+#[expect(
+    clippy::needless_range_loop,
+    reason = "the augmented row is indexed by column during elimination"
+)]
+fn solve_dense(mass: &[[f32; 4]; 4], rhs: &[f32; 4], rows: usize) -> Option<[f32; 4]> {
+    if rows == 0 {
+        return Some([0.0; 4]);
+    }
+    let mut aug = [[0.0_f32; 5]; 4];
+    for row in 0..rows {
+        for col in 0..rows {
+            aug[row][col] = mass[row][col];
+        }
+        aug[row][rows] = rhs[row];
+    }
+    for col in 0..rows {
+        let mut pivot = col;
+        let mut best = aug[col][col].abs();
+        for row in (col + 1)..rows {
+            let value = aug[row][col].abs();
+            if value > best {
+                best = value;
+                pivot = row;
+            }
+        }
+        if best < 1.0e-10 {
+            return None;
+        }
+        if pivot != col {
+            aug.swap(col, pivot);
+        }
+        let div = aug[col][col];
+        for entry in col..=rows {
+            aug[col][entry] /= div;
+        }
+        for row in 0..rows {
+            if row == col {
+                continue;
+            }
+            let factor = aug[row][col];
+            for entry in col..=rows {
+                aug[row][entry] -= factor * aug[col][entry];
+            }
+        }
+    }
+    let mut solved = [0.0_f32; 4];
+    for row in 0..rows {
+        solved[row] = aug[row][rows];
+    }
+    Some(solved)
+}
+
+fn solve_twist(
+    a: &mut Body,
+    b: &mut Body,
+    normal: Vec3,
+    points: &[ContactPoint],
+    mut twist: f32,
+) -> f32 {
+    let total_normal: f32 = points.iter().map(|point| point.normal_impulse).sum();
+    if total_normal <= 0.0 {
+        return twist;
+    }
+    let mut centroid = Vec3::ZERO;
+    for point in points {
+        centroid += point.position;
+    }
+    centroid = centroid / f32::from(u8::try_from(points.len()).unwrap_or(1));
+    let mut radius = 0.0_f32;
+    for point in points {
+        let offset = point.position - centroid;
+        let tangential = offset - normal * offset.dot(normal);
+        radius = radius.max(tangential.length());
+    }
+    radius = radius.max(1.0e-3);
+    let friction = a.friction.max(b.friction).max(0.0);
+    let limit = friction * total_normal * radius;
+    let rel = (a.angular_velocity - b.angular_velocity).dot(normal);
+    let inertia = normal.dot(inv_inertia(a, normal)) + normal.dot(inv_inertia(b, normal));
+    if inertia <= 1.0e-8 {
+        return twist;
+    }
+    let old = twist;
+    twist = (twist - rel / inertia).clamp(-limit, limit);
+    apply_twist(a, b, normal, twist - old);
+    twist
+}
+
+fn apply_twist(a: &mut Body, b: &mut Body, normal: Vec3, impulse: f32) {
+    if impulse == 0.0 {
+        return;
+    }
+    a.angular_velocity += inv_inertia(a, normal * impulse);
+    b.angular_velocity -= inv_inertia(b, normal * impulse);
+}
+
+fn normal_at_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut ContactPoint) {
     let ra = point.position - a.position;
     let rb = point.position - b.position;
     let normal_impulse = normal_delta(a, b, normal, ra, rb, point);
@@ -314,7 +546,6 @@ fn normal_at_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut Contact
         a.normal_impulse += magnitude;
         b.normal_impulse += magnitude;
     }
-    normal_impulse
 }
 
 fn friction_at_point(a: &mut Body, b: &mut Body, t1: Vec3, t2: Vec3, point: &mut ContactPoint) {
@@ -322,42 +553,6 @@ fn friction_at_point(a: &mut Body, b: &mut Body, t1: Vec3, t2: Vec3, point: &mut
     let rb = point.position - b.position;
     let friction = friction_delta(a, b, t1, t2, ra, rb, point);
     apply(a, b, ra, rb, friction, true);
-}
-
-/// Replace this iteration's normal torque with the moment of the total
-/// impulse at the face centroid. Corner residuals on a symmetric face drop
-/// out; an off-centre face still spins.
-fn keep_centroid_torque(
-    a: &mut Body,
-    b: &mut Body,
-    points: &[ContactPoint],
-    impulse: Vec3,
-    before_a: Vec3,
-    before_b: Vec3,
-) {
-    if points.is_empty() {
-        return;
-    }
-    let mut centroid = Vec3::ZERO;
-    for point in points {
-        centroid += point.position;
-    }
-    centroid = centroid / f32::from(u8::try_from(points.len()).unwrap_or(1));
-    let scale = impulse.length();
-    if scale <= 1.0e-8 {
-        return;
-    }
-    let ra = centroid - a.position;
-    let rb = centroid - b.position;
-    let lever_a = ra.cross(impulse).length() / scale;
-    let lever_b = rb.cross(impulse).length() / scale;
-    // An offset face keeps the per-point moment, so a ledge still tips.
-    // A face centred on both bodies drops the corner residual.
-    if lever_a > 0.02 || lever_b > 0.02 {
-        return;
-    }
-    a.angular_velocity = before_a;
-    b.angular_velocity = before_b;
 }
 
 fn normal_delta(
@@ -390,7 +585,7 @@ fn friction_delta(
     point: &mut ContactPoint,
 ) -> Vec3 {
     let friction = a.friction.max(b.friction).max(0.0);
-    let limit = friction * point.normal_impulse;
+    let limit = (friction * point.normal_impulse).max(0.0);
     let mut impulse = Vec3::ZERO;
     for slot in 0..2 {
         let axis = if slot == 0 { t1 } else { t2 };
