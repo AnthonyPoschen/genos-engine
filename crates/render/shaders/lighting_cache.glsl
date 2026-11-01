@@ -2723,6 +2723,7 @@ float lighting_lamp_delta(vec3 p, uint updated) {
 void lighting_wrc_note_lamps() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     uint had = ckeys.key[LIGHTING_WRC_LAMPS_AT];
+    uint noted = 0u;
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_WRC_SNAP_AT + 4u * i;
@@ -2752,6 +2753,7 @@ void lighting_wrc_note_lamps() {
             // A new lamp: all of its light is new (the old place is far away).
             ckeys.key[ra + 7u] = floatBitsToUint(max(max(l.color.r, l.color.g), l.color.b));
             ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+            noted++;
         }
         ckeys.key[at] = floatBitsToUint(l.pos.x);
         ckeys.key[at + 1u] = floatBitsToUint(l.pos.y);
@@ -2759,7 +2761,22 @@ void lighting_wrc_note_lamps() {
         ckeys.key[at + 3u] = floatBitsToUint(l.color.w);
     }
     ckeys.key[LIGHTING_WRC_LAMPS_AT] = n;
-}
+    // More lamps changed this round than the ring holds: the later ones wrote
+    // over the earlier, whose old places no point would see as changed (their
+    // light, and its bounce, held where they were). One entry that reaches
+    // everywhere stands for them all: every point is changed, by an unknown
+    // amount (delta 0, lighting_lamp_delta).
+    if (noted > LIGHTING_WRC_RING) {
+        uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % LIGHTING_WRC_RING;
+        ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
+        uint ra = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * h;
+        for (uint k = 0u; k < 6u; k++) {
+            ckeys.key[ra + k] = floatBitsToUint(0.0);
+        }
+        ckeys.key[ra + 6u] = floatBitsToUint(3.0e38);
+        ckeys.key[ra + 7u] = floatBitsToUint(0.0);
+        ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+    }
 // Quarter of its set batch entry j (of slot) traces.
 uint lighting_cache_entry_quarter(uint j, uint slot) {
     uint i = 0u;
