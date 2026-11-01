@@ -492,14 +492,14 @@ pub fn step(world: &mut World, dt: f32) {
     // overstated depth cannot throw a body. The velocity rows run inside.
     let mut hits = 0_u32;
     for pass in 0..4 {
-        // The narrow phase is built once. Later passes only push the
-        // positions apart, so a hull pair does not rerun SAT three more times.
+        // Velocity rows run once. Later passes rebuild the overlap so a
+        // correction cannot leave a body on the far side of a hull.
         hits = hits.saturating_add(contact::collide(
             &mut world.bodies,
             &mut world.pairs,
             pass == 0,
             pass == 0,
-            pass == 0,
+            true,
         ));
     }
     world.step_stats.dynamic_pair_impulses =

@@ -1346,7 +1346,8 @@ fn face_clip(a: &Body, b: &Body, normal: Vec3) -> Option<([ContactPoint; 4], u8)
         let depth = plane - position.dot(normal);
         points[index] = ContactPoint::new(position, depth.max(0.0));
     }
-    Some((points, used as u8))
+    let count = u8::try_from(used).unwrap_or(u8::MAX);
+    Some((points, count))
 }
 
 fn face_polygon(body: &Body, direction: Vec3, out: &mut [Vec3]) -> Option<usize> {

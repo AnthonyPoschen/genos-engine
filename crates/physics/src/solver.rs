@@ -121,9 +121,16 @@ pub(crate) fn solve_pair(
         };
     }
     let (t1, t2) = tangents(normal);
-    for _ in 0..12 {
+    for _ in 0..VELOCITY_ITERATIONS {
+        let before_a = a.angular_velocity;
+        let before_b = b.angular_velocity;
+        let mut total = Vec3::ZERO;
         for point in points.iter_mut() {
-            velocity_point(a, b, normal, t1, t2, true, point);
+            total += normal_at_point(a, b, normal, point);
+        }
+        keep_centroid_torque(a, b, points, total, before_a, before_b);
+        for point in points.iter_mut() {
+            friction_at_point(a, b, t1, t2, point);
         }
     }
     let mut depth = points.iter().map(|point| point.depth).fold(0.0, f32::max);
@@ -219,6 +226,12 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
         }
         let count = usize_from_u8(manifold.count);
         let prev_count = usize_from_u8(previous.count);
+        let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
+            continue;
+        };
+        let before_a = a.angular_velocity;
+        let before_b = b.angular_velocity;
+        let mut total = Vec3::ZERO;
         for point in &mut manifold.points[..count] {
             let Some(cached) = previous.points[..prev_count].iter().find(|cached| {
                 (cached.position - point.position).length_squared() < WARM_DISTANCE_SQ
@@ -227,13 +240,17 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
             };
             point.normal_impulse = cached.normal_impulse;
             point.tangent = cached.tangent;
-            let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
-                continue;
-            };
+            let impulse = manifold.normal * point.normal_impulse;
+            total += impulse;
             let ra = point.position - a.position;
             let rb = point.position - b.position;
-            apply(a, b, ra, rb, manifold.normal * point.normal_impulse, true);
-            let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
+            apply(a, b, ra, rb, impulse, true);
+        }
+        keep_centroid_torque(a, b, &manifold.points[..count], total, before_a, before_b);
+        let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
+        for point in &manifold.points[..count] {
+            let ra = point.position - a.position;
+            let rb = point.position - b.position;
             apply(a, b, ra, rb, t1 * point.tangent[0], true);
             apply(a, b, ra, rb, t2 * point.tangent[1], true);
         }
@@ -243,27 +260,21 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
 fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
     let count = usize_from_u8(manifold.count);
     let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
+    let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
+        return;
+    };
+    if both_inactive(a, b) {
+        return;
+    }
+    let before_a = a.angular_velocity;
+    let before_b = b.angular_velocity;
+    let mut total = Vec3::ZERO;
     for index in 0..count {
-        let position = manifold.points[index].position;
-        let depth = manifold.points[index].depth;
-        let normal_impulse = manifold.points[index].normal_impulse;
-        let tangent = manifold.points[index].tangent;
-        let Some((a, b)) = pair_mut(bodies, manifold.a, manifold.b) else {
-            return;
-        };
-        if both_inactive(a, b) {
-            return;
-        }
-        let mut point = ContactPoint {
-            position,
-            depth,
-            normal_impulse,
-            tangent,
-            bias: manifold.points[index].bias,
-        };
-        velocity_point(a, b, manifold.normal, t1, t2, true, &mut point);
-        manifold.points[index].normal_impulse = point.normal_impulse;
-        manifold.points[index].tangent = point.tangent;
+        total += normal_at_point(a, b, manifold.normal, &mut manifold.points[index]);
+    }
+    keep_centroid_torque(a, b, &manifold.points[..count], total, before_a, before_b);
+    for index in 0..count {
+        friction_at_point(a, b, t1, t2, &mut manifold.points[index]);
     }
 }
 
@@ -293,26 +304,60 @@ fn solve_position(bodies: &mut [Body], manifold: &mut Manifold) {
     manifold.depth -= (shift_a + shift_b).dot(manifold.normal);
 }
 
-fn velocity_point(
-    a: &mut Body,
-    b: &mut Body,
-    normal: Vec3,
-    t1: Vec3,
-    t2: Vec3,
-    normal_torque: bool,
-    point: &mut ContactPoint,
-) {
+fn normal_at_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut ContactPoint) -> Vec3 {
     let ra = point.position - a.position;
     let rb = point.position - b.position;
     let normal_impulse = normal_delta(a, b, normal, ra, rb, point);
-    apply(a, b, ra, rb, normal_impulse, normal_torque);
+    apply(a, b, ra, rb, normal_impulse, true);
     if normal_impulse != Vec3::ZERO {
         let magnitude = normal_impulse.length();
         a.normal_impulse += magnitude;
         b.normal_impulse += magnitude;
     }
+    normal_impulse
+}
+
+fn friction_at_point(a: &mut Body, b: &mut Body, t1: Vec3, t2: Vec3, point: &mut ContactPoint) {
+    let ra = point.position - a.position;
+    let rb = point.position - b.position;
     let friction = friction_delta(a, b, t1, t2, ra, rb, point);
     apply(a, b, ra, rb, friction, true);
+}
+
+/// Replace this iteration's normal torque with the moment of the total
+/// impulse at the face centroid. Corner residuals on a symmetric face drop
+/// out; an off-centre face still spins.
+fn keep_centroid_torque(
+    a: &mut Body,
+    b: &mut Body,
+    points: &[ContactPoint],
+    impulse: Vec3,
+    before_a: Vec3,
+    before_b: Vec3,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let mut centroid = Vec3::ZERO;
+    for point in points {
+        centroid += point.position;
+    }
+    centroid = centroid / f32::from(u8::try_from(points.len()).unwrap_or(1));
+    let scale = impulse.length();
+    if scale <= 1.0e-8 {
+        return;
+    }
+    let ra = centroid - a.position;
+    let rb = centroid - b.position;
+    let lever_a = ra.cross(impulse).length() / scale;
+    let lever_b = rb.cross(impulse).length() / scale;
+    // An offset face keeps the per-point moment, so a ledge still tips.
+    // A face centred on both bodies drops the corner residual.
+    if lever_a > 0.02 || lever_b > 0.02 {
+        return;
+    }
+    a.angular_velocity = before_a;
+    b.angular_velocity = before_b;
 }
 
 fn normal_delta(
