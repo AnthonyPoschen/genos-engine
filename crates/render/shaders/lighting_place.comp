@@ -54,6 +54,24 @@ void main() {
     }
     work.v[lighting_probe_at(i)] = vec4(pos_out.xyz, min(pos_out.w, 1.0));
     work.v[lighting_probe_at(i) + 1u] = n_out;
+    // #70 R4: outside the refresh rect (trace gate), the stratum's kept hits stay
+    // only when its last origin is the same surface this probe stands on now:
+    // view depth within 2%, the point within 2% of that depth (the same tile
+    // once reprojected) and normals within dot 0.9. The stratum then keeps
+    // its old origin, so its ray directions still match the kept hits, and is
+    // marked w = 1.25 (valid, not S78K-held). Any other slot (a turn moved
+    // another surface under it, or it is new) traces as usual.
+    if ((pc.schedule.x & 4u) != 0u && pos_out.w > 0.5 && pos_out.w < 1.5 && was.w > 0.5
+        && !lighting_tile_kept(origin)) {
+        float dn = length(pos_out.xyz - scene.eye.xyz);
+        float dw = length(was.xyz - scene.eye.xyz);
+        if (abs(dw - dn) <= 0.02 * dn && length(was.xyz - pos_out.xyz) <= 0.02 * dn
+            && dot(wn, n_out.xyz) >= 0.9) {
+            work.v[lighting_stratum_at(i, lighting_stratum())] = vec4(was.xyz, 1.25);
+            work.v[lighting_stratum_at(i, lighting_stratum()) + 1u] = vec4(wn, n_out.w);
+            return;
+        }
+    }
     work.v[lighting_stratum_at(i, lighting_stratum())] = pos_out;
     work.v[lighting_stratum_at(i, lighting_stratum()) + 1u] = n_out;
 }

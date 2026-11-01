@@ -150,7 +150,10 @@ void main() {
         uint pr = ray / max(lighting_rays(), 1u);
         uint tile_px = max(pc.params.y, 1u);
         uvec2 pix = uvec2((pr % cols) * tile_px, (pr / cols) * tile_px);
-        if (!lighting_tile_kept(pix)) {
+        // #70 R4: only a stratum lighting_place accepted as the same surface
+        // (w = 1.25) keeps its hit; a moved slot traces.
+        float sw = work.v[lighting_stratum_at(pr, lighting_stratum())].w;
+        if (!lighting_tile_kept(pix) && abs(sw - 1.25) < 0.01) {
             vec4 cur = work.v[at];
             // A resized grid zeros the work buffer. x = 0 is the cleared slot,
             // which this gate would otherwise keep as a finished hit. Bit 4 is
