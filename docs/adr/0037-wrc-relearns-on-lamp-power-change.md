@@ -987,3 +987,18 @@ Not tested: e3fS (spread with the 16-entry ring). A step's entry falls out of th
 One e3fSR x0.5 frame (f1581) took 18.9 s. This is one sample and was not reproduced; box contention is suspected. The per-pixel A-SVGF change measurement for WRC cells has not been built. Fine texels already have the S74A gradient checks.
 
 Round 16 addendum (e3fR, RING32 without spread): on — N+12 0.180, mean N+1..12 0.341, first within 5% at 400 ms; m90 — N+12 0.019, 17 ms. Ring fix alone is worse on lamp-on than e3fSR (300 ms) or e3f (200 ms).
+
+## Round 17
+
+### (a) The e3fSR x2 "regression" is a metric artefact
+
+New column "settled": first frame after which every later graded frame stays within 5 % (t900 is the error at frame 900 against e1 t900).
+
+| x2 | N+12 | mean N+1..12 | first ≤5 % | settled | t900 |
+|---|---|---|---|---|---|
+| e3f | 0.136 | 0.165 | 600 ms | never | 0.080 |
+| e3fR | 0.124 | 0.153 | 600 ms | never | 0.077 |
+| e3fSR | 0.084 | 0.099 | 5000 ms | 5000 ms | 0.047 |
+| e3fSRb (spread age = oldest step entry, movers skipped) | 0.140 | 0.163 | 600 ms | never | 0.079 |
+
+e3f and e3fR touch 5 % at t36 (0.03), then rebound to 0.08–0.10 from t120 and never come back; e3fSR sits at 0.061–0.064 from t24 to t120 and is the closest at t900. The reference itself drifts (e1 is 0.124 off its own t900 at t60). So e3fSR is better than e3f at every graded frame except t36–t60. Hypothesis tested and rejected: movers re-stamping their ring entry starve the spread. Making the spread age come from the oldest step entry (e3fSRb) just turns the spread off where lamps move and reproduces e3f exactly. Reverted; e3fSR (round 16) stays the best variant.
