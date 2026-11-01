@@ -85,7 +85,23 @@ fn report_settle(name: &str, trail: &[f64], lit: f64) {
     );
 }
 
+/// How long the night stays lit before the change. The cache is in a
+/// different state at each (still settling from power-on, just settled, long
+/// settled), so every case runs at all three and must pass at each;
+/// `WRC_LIT_FRAMES` runs just one.
+const LIT_FRAMES: [usize; 3] = [250, 300, 420];
+
 fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
+    #[allow(clippy::disallowed_methods, reason = "a harness reads the environment")]
+    let only: Option<usize> = std::env::var("WRC_LIT_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    for lit_frames in only.map_or(LIT_FRAMES.to_vec(), |n| vec![n]) {
+        lamps_change_once(&format!("{name}@{lit_frames}"), off, black, lit_frames);
+    }
+}
+
+fn lamps_change_once(name: &str, off: fn(&mut Stage), black: bool, lit_frames: usize) {
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let size = window.pump();
     let (renderer, permit) =
@@ -126,11 +142,6 @@ fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
     stage.power = 1.0;
     stage.apply();
     let mut lit = 0.0;
-    #[allow(clippy::disallowed_methods, reason = "a harness reads the environment")]
-    let lit_frames: usize = std::env::var("WRC_LIT_FRAMES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(300);
     for f in 1..=lit_frames {
         lit = draw(&stage);
         if f % 100 == 0 {
