@@ -923,3 +923,65 @@ N+12). It does not make big changes land inside 200 ms: lamp-off is dominated by
 linger (~15 s, all variants), and medium steps take 0.6-1.5 s. The filter does not help bias.
 Next, in order: spread/defer relight (cost), measured gradients for lambda (x0.5 bias),
 and the WRC linger on lamp-off.
+
+## Round 16: spread relight and the lamp-change ring
+
+Hooks are in `docs/adr/0037/hooks-r16.patch`, which applies to lighting-v3 34cc80c. They work only under `GENOS_DBG_EVT=3` and reuse the `EVT_BUDGET` bits of dbg2, which that path does not use:
+
+- `GENOS_DBG_EVT_SPREAD=S` (bits 9-13): a WRC cell or fine texel that a lamp change reaches waits its turn before it relights.
+  - Cells within 6 m of the eye go at frame 0.
+  - Every other cell goes at frame 1 + hash(slot) % (S-1) after the change.
+  - A cell that is waiting keeps its old light and stays flagged, so it is delayed and never zeroed.
+- `GENOS_DBG_RING32=1` (bit 14): the lamp-change ring grows to 32 entries, and a lamp that only moved reuses its own entry.
+
+**Why the ring needed fixing.** The test scene has 3 moving lamps, and each of them wrote a new ring entry every round. A 16-entry ring therefore kept a lamp step for only about 5 rounds. After that, the e3f lambda and the change nomination no longer saw the step for any cell that had not been relit yet. Those cells kept the old light, which is the lamp-off linger. In e0, a lamp that switches off never enters the ring, so it lingers until the cells age out.
+
+**Relit volume.** The roughly 23k relights per frame after a step come from the global changing-light sweep (`still 0`, `due` 35k-97k), not from lamp-touched nomination. Spreading does not cut the total work: about 2.3M relights over 120 frames either way.
+
+Grading follows round 15. The reference is the e1 frame at t900, with 160x90 lavapipe frames. The `first ≤5 %` column is at 60 fps; over 200 ms means more than 12 frames.
+
+| step | variant | N+12 | mean N+1..12 | first ≤5 % | lighting ms p50 N+1..12 |
+|---|---|---|---|---|---|
+| off | e1 | 0.98 | 2.52 | 15000 ms | 912 |
+| off | e3f | 1.62 | 2.98 | never | 815 |
+| off | e3fR | 2.20 | 3.11 | never | 706 |
+| off | e3fSR | 1.65 | 2.10 | never | 642 |
+| on | e3f | 0.044 | 0.236 | 200 ms | 660 |
+| on | e3fSR | 0.129 | 0.228 | 300 ms | 535 |
+| x0.5 | e1 | 0.066 | 0.082 | 1500 ms | – |
+| x0.5 | e3f | 0.200 | 0.211 | never | 692 |
+| x0.5 | e3fR | 0.114 | 0.151 | 600 ms | 667 |
+| x0.5 | e3fSR | 0.068 | 0.094 | 400 ms | 652 |
+| x2 | e3f | 0.136 | 0.165 | 600 ms | 809 |
+| x2 | e3fR | 0.124 | 0.153 | 600 ms | – |
+| x2 | e3fSR | 0.084 | 0.099 | 5000 ms | 720 |
+| x0.9 | e1 | 0.025 | 0.032 | 17 ms | 688 |
+| x0.9 | e3f | 0.018 | 0.019 | 17 ms | 573 |
+| x0.9 | e3fSR | 0.020 | 0.020 | 17 ms | 575 |
+
+Lamp-off linger, measured as error against the reference at t120 / t300 / t900:
+
+| variant | t120 | t300 | t900 |
+|---|---|---|---|
+| e0 | 3.37 | 3.37 | 3.37 (never clears) |
+| e1 | 1.04 | 0.35 | 0 |
+| e3f | 1.05 | 0.44 | 0.140 |
+| e3fR | 1.10 | 0.44 | 0.125 |
+| e3fSR | 0.65 | 0.17 | 0.054 |
+
+Not tested: e3fS (spread with the 16-entry ring). A step's entry falls out of that ring before most cells get their turn, so the spread has no effect without the ring fix.
+
+**Proposed linger fix:**
+
+- In shipped code, a lamp that switches off enters the ring (the LAMPOFF behaviour).
+- Movers reuse their own entry.
+- The ring holds 32 entries.
+
+**Verdict.**
+
+- e3fSR fixes the x0.5 case (never → 400 ms) and cuts the lamp-off linger by about 2.6x at t900.
+- It lowers the mean error over the first 200 ms for off, on, x0.5 and x2.
+- Its cost is not worse: lighting p50 over N+1..12 is 535-720 ms, against 573-815 ms for e3f.
+- It regresses first ≤5 % for x2 (600 ms → 5000 ms) and N+12 for lamp on (0.044 → 0.129). The likely cause is the far cells in the last turn slots.
+
+One e3fSR x0.5 frame (f1581) took 18.9 s. This is one sample and was not reproduced; box contention is suspected. The per-pixel A-SVGF change measurement for WRC cells has not been built. Fine texels already have the S74A gradient checks.
