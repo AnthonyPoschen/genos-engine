@@ -85,11 +85,51 @@ fn report_settle(name: &str, trail: &[f64], lit: f64) {
     );
 }
 
+/// One lit frame at rest: draining past `CONVERGED_BY` or unsettled past
+/// `SETTLE_BY` counts as restless; `rest` spans the picture past `SETTLE_BY`.
+fn note_rest(
+    f: usize,
+    lit: f64,
+    settle: genos_render::SettleStats,
+    restless: &mut Vec<usize>,
+    rest: &mut (f64, f64),
+) {
+    if (f > CONVERGED_BY && settle.draining) || (f > SETTLE_BY && !settle.settled) {
+        restless.push(f);
+    }
+    if f > SETTLE_BY {
+        *rest = (rest.0.min(lit), rest.1.max(lit));
+    }
+}
+
+fn assert_at_rest(name: &str, restless: &[usize], rest: (f64, f64)) {
+    eprintln!(
+        "wrc_lamps_off {name}: at rest past frame {SETTLE_BY}: {} draining or unsettled, picture drift {:.4}",
+        restless.len(),
+        rest.1 - rest.0
+    );
+    assert!(
+        restless.is_empty(),
+        "{name}: a still lit night is draining past frame {CONVERGED_BY} or not settled past frame {SETTLE_BY} at {} frames (first {:?}): the cache keeps relighting at rest",
+        restless.len(),
+        restless.first()
+    );
+}
+
 /// How long the night stays lit before the change. The cache is in a
 /// different state at each (still settling from power-on, just settled, long
 /// settled), so every case runs at all three and must pass at each;
 /// `WRC_LIT_FRAMES` runs just one.
 const LIT_FRAMES: [usize; 3] = [250, 300, 420];
+
+/// Lit frames by which a still lit night has settled: the surface cache's 300
+/// still frames plus the drain hold and the stats ring's lag.
+const SETTLE_BY: usize = 330;
+
+/// Lit frames by which a still lit night has converged: its cache samples
+/// match the held light, so the drain flag is down (it may not keep
+/// re-arming on a few noisy cells and relight at rest).
+const CONVERGED_BY: usize = 200;
 
 fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
     #[allow(clippy::disallowed_methods, reason = "a harness reads the environment")]
@@ -124,6 +164,7 @@ fn lamps_change_once(name: &str, off: fn(&mut Stage), black: bool, lit_frames: u
     let mut camera = Camera::opening();
     camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
     let exposure = std::cell::Cell::new(0.0f64);
+    let settle = std::cell::Cell::new(genos_render::SettleStats::default());
     let mut draw = |stage: &Stage| {
         let _ = window.pump();
         let m = mean(
@@ -133,6 +174,7 @@ fn lamps_change_once(name: &str, off: fn(&mut Stage), black: bool, lit_frames: u
                 .expect("pixels"),
         );
         exposure.set(renderer.hdr_exposure());
+        settle.set(renderer.settle_stats());
         m
     };
     let mut never = 0.0;
@@ -142,8 +184,13 @@ fn lamps_change_once(name: &str, off: fn(&mut Stage), black: bool, lit_frames: u
     stage.power = 1.0;
     stage.apply();
     let mut lit = 0.0;
+    // At rest: once the lit night has held still past the settle window the
+    // cache must settle (stop relighting) and stay settled, as on master.
+    let mut restless = Vec::new();
+    let mut rest = (f64::MAX, f64::MIN);
     for f in 1..=lit_frames {
         lit = draw(&stage);
+        note_rest(f, lit, settle.get(), &mut restless, &mut rest);
         if f % 100 == 0 {
             eprintln!(
                 "wrc_lamps_off {name}: lit frame {f} mean {lit:.2} exposure {:.4}",
@@ -152,6 +199,7 @@ fn lamps_change_once(name: &str, off: fn(&mut Stage), black: bool, lit_frames: u
         }
     }
     assert!(lit > 4.0, "the lit reference is lit: mean {lit:.2}");
+    assert_at_rest(name, &restless, rest);
     off(&mut stage);
     let mut trail = Vec::new();
     let mut black_at = None;
