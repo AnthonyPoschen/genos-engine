@@ -1,7 +1,7 @@
-//! The gstats.diag words the screen pass uses as working state (list
+//! The `gstats.diag` words the screen pass uses as working state (list
 //! allocators and changed/fine/coarse counts) must never be written by a
-//! diagnostic. Before this, `lighting_dg(40u/41u)` in direct.comp and ad-hoc
-//! instrumentation on 61..63 changed the lit picture when LIGHTING_DIAG was on.
+//! diagnostic. Before this, `lighting_dg(40u/41u)` in `lighting_direct.comp` and
+//! ad-hoc instrumentation on 61..63 changed the lit picture when `LIGHTING_DIAG` was on.
 
 const RESERVED: [u32; 5] = [40, 41, 61, 62, 63];
 const SHADERS: [(&str, &str); 4] = [
@@ -11,13 +11,13 @@ const SHADERS: [(&str, &str); 4] = [
     ("lighting_screen.comp", include_str!("../shaders/lighting_screen.comp")),
 ];
 
-fn literal_after<'a>(src: &'a str, pat: &str) -> Vec<(usize, u32)> {
+fn literal_after(src: &str, pat: &str) -> Vec<(usize, u32)> {
     let mut out = Vec::new();
     for (n, line) in src.lines().enumerate() {
         let mut rest = line;
         while let Some(at) = rest.find(pat) {
             rest = &rest[at + pat.len()..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
             if let Ok(v) = digits.parse() {
                 out.push((n + 1, v));
             }
