@@ -121,6 +121,7 @@ void main() {
     bool wrc_cell = lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2;
     uint prev_updated = lighting_sc_updated(slot);
     lighting_sc_upd_override = prev_updated;
+    bool lone = lighting_wrc_lone(slot);
     uint first = lighting_probe_rays() + j * LIGHTING_CACHE_RAYS;
     vec3 e = vec3(0.0);
     float es = 0.0;
@@ -130,7 +131,7 @@ void main() {
         if (lighting_ray_none(v)) {
             return;
         }
-        vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
+        vec3 dir = lone ? lighting_dir(rkey, n, k % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS) : lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
         // S74A: the ray a later gradient check re-traces (same seed): one of

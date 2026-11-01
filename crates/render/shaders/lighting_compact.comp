@@ -127,11 +127,19 @@ void main() {
         // A lamp's bounce reaches past its range: while a lamp change settles
         // every cell, not only those inside a lamp's range, takes a whole set
         // each round through the young list, as a burst does.
+        // A WRC cell takes one 16-ray sample (a whole hemisphere, lighting_wrc_lone)
+        // every round instead of a whole set one round in the turns: the bounce
+        // chain through the cells moves one bounce a round, not one a cycle.
         bool settling = lighting_lamp_settling();
         if (settling) {
-            uint ms = lighting_sc_entries(slot, true);
+            // The WRC cells (the bounce chain) go every round; the rest in turns.
+            bool first = wrc;
+            uint ms = wrc ? 1u : lighting_sc_entries(slot, true);
             atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
-            if (((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns()) != 0u) {
+            if (first) {
+                atomicAdd(ckeys.key[LIGHTING_SETTLE_FIRST_AT], ms);
+            }
+            if (((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns(first)) != 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -447,7 +455,7 @@ void main() {
             return;
         }
         bool young = young_now;
-        uint m = lighting_sc_entries(slot, true);
+        uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
             uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
