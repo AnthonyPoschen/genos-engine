@@ -1101,3 +1101,49 @@ because the scaled-down energy sustains itself in the same way as the stale ener
 which means the ratio fires on a brightening as well. The likely cause is p_old: max(p_new, range²) is not
 the old power. The fix stays env-gated and is not shippable. Next step: take the real old peak power
 from ring word +7, and apply the scale only to the lamp share (pl), not to the whole cell.
+
+## Addendum (2026-11-01): exact per-lamp rescale, design for review
+
+Status: proposal only. Anthony reviews it before any code is written. It replaces the env-gated
+LAMPSCALE above, which scaled whole cells by one ratio and over-darkened partial dims.
+
+**Idea.** For fixed geometry and albedo, a cache entry's radiance is linear in each lamp's emitted
+power: L = Σ_i p_i · R_i + L_sun. If every entry also carries the share s_i = p_i R_i / L for its
+lamps, a power change p_i → p_i' rescales that entry exactly, with no relight:
+L' = L · (1 + Σ_i s_i (p_i'/p_i − 1)). That covers off (ratio 0), ×0.5 and ×2 in the same frame,
+for every bounce order, because the shares are carried through the bounces the same way the radiance
+is: a relight sums direct per-lamp light plus albedo × (hit radiance × hit shares).
+
+**Memory.** Exact shares for all 128 lamps per entry cost 128 × 2 B × 1 Mi slots = 256 MiB. That is
+over the ~200 MB lighting soft budget. Instead each entry keeps its top K lamps (u16 id + f16 share)
+plus a residual share for all the other lamps:
+
+| K | bytes per slot | 1 Mi slots |
+|---|---|---|
+| 4 | 4 × 4 + 2 = 18 → 20 (aligned) | 20 MiB |
+| 8 | 8 × 4 + 2 = 34 → 36 | 36 MiB |
+| 4, RGB shares (colour changes) | 4 × (2 + 6) + 6 = 38 → 40 | 40 MiB |
+
+Compute: each hit read loads K ids and shares and merges them into the writer's top K. That is about
+K extra loads and a small sort per hit ray. Measure it on the 4070 before you commit to it.
+
+**When it is exact.** The rescale is exact when only lamp power changes (off, dim, brighten, on
+again from a remembered state) and the changed lamp is among the entry's top K. It is also exact for
+every bounce order, because the shares carry the multi-bounce energy. That fixes the h50, m90 and
+on-step regressions LAMPSCALE showed.
+
+**When it is approximate.**
+- A changed lamp inside the residual: the residual scales by the residual lamps' mean power ratio.
+  That is an approximation, bounded by the residual share.
+- Shares are Monte Carlo estimates themselves, so the rescale error is the share's noise. That noise
+  shrinks with the sets the entry holds.
+- Colour changes are exact only with RGB shares (the last row of the table).
+- Non-linear steps in the estimator break linearity: the firefly clamp, the neighbourhood clamp, the
+  antilag clamp and the upward clamp on y. Entries clamped since their last relight rescale
+  approximately.
+- A lamp turned on from 0 has no share to scale: the old share is 0. It still needs the relight.
+
+**What it does not cover.** Moves, range changes, geometry or visibility changes, and any lamp the
+entry has never seen still need the relight (the settle queue on fix/wrc-drain). The rescale is a
+fast path for power changes only, and it uses no light-epoch tagging: old multi-bounce energy keeps
+its share and is rescaled, not discarded.
