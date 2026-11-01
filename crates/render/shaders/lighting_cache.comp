@@ -208,6 +208,7 @@ void main() {
         uint hu = uint(clamp(lo, 0.0, LIGHTING_DRAIN_LUM_MAX) * LIGHTING_DRAIN_SCALE);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT], su);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_HELD_AT], hu);
+        atomicAdd(ckeys.key[LIGHTING_DRAIN_CELLS_AT], 1u);
         atomicAdd(gstats.wrc_sample_sum, su);
         atomicAdd(gstats.wrc_held_sum, hu);
     }

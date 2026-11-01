@@ -1289,6 +1289,10 @@ const uint LIGHTING_SETTLE_FIRST_LAST_AT = LIGHTING_SC_HIST_AT + 83u;
 const uint LIGHTING_DRAIN_SAMPLE_AT = LIGHTING_SC_HIST_AT + 80u;
 const uint LIGHTING_DRAIN_HELD_AT = LIGHTING_SC_HIST_AT + 81u;
 const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
+// Cells in this round's drain sums. A gap over fewer is noise (a quiet round
+// relights a handful of cells), so it does not re-arm the flag.
+const uint LIGHTING_DRAIN_CELLS_AT = LIGHTING_SC_HIST_AT + 74u;
+const uint LIGHTING_DRAIN_MIN_CELLS = 256u;
 const float LIGHTING_DRAIN_GAP = 0.01;
 // Drain sums: only cells with this much sample weight (w) and held sets count,
 // each luminance clamped to LIGHTING_DRAIN_LUM_MAX and summed in 1/256 steps.
@@ -2499,10 +2503,12 @@ void lighting_write_args() {
             // LIGHTING_DRAIN_HOLD rounds, so it clears only after that many
             // agreeing rounds in a row, not on one lucky round.
             uint fl = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
-            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = gap > LIGHTING_DRAIN_GAP ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
+            bool heard = ckeys.key[LIGHTING_DRAIN_CELLS_AT] >= LIGHTING_DRAIN_MIN_CELLS;
+            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = heard && gap > LIGHTING_DRAIN_GAP ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
         }
         ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
+        ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
         uint first = min(lighting_young_count(), young_room);
         a = min(room, first + lighting_mature_count());
