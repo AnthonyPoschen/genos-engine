@@ -234,6 +234,8 @@ pub(crate) struct Lighting {
     /// The last cache round's WRC samples still differ from the held light by
     /// more than LIGHTING_DRAIN_GAP: the bounce is draining or filling, not settled.
     draining: bool,
+    /// The last read cache round's batch entries, 16 rays each (stats word 147).
+    round_entries: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -405,6 +407,8 @@ pub struct SettleStats {
     /// The surface cache's drain flag as the host last read it (a few frames
     /// old): its samples still differ from the held light, so it keeps relighting.
     pub draining: bool,
+    /// The last read cache round's batch entries (16 rays each), a few frames old.
+    pub round_entries: u32,
 }
 
 impl Default for Lighting {
@@ -485,6 +489,7 @@ impl Default for Lighting {
             light_hash: 0,
             light_quiet: 0,
             draining: false,
+            round_entries: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -1294,6 +1299,7 @@ impl Gpu {
             settled,
             still_frames: self.lighting.still,
             draining: self.lighting.draining,
+            round_entries: self.lighting.round_entries,
         }
     }
 
@@ -1604,6 +1610,9 @@ impl Gpu {
             if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
                 self.lighting.draining = flag != 0;
             }
+            if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
+                self.lighting.round_entries = e;
+            }
         }
         let read = lighting_stats_wanted(
             self.lighting.settings.world_mode(),
@@ -1803,6 +1812,7 @@ impl Gpu {
             let mut head = [0u32; 8];
             head.copy_from_slice(&words[..8]);
             self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
+            self.lighting.round_entries = words[LIGHTING_DRAIN_WORD + 3];
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -3772,6 +3782,7 @@ const LIGHTING_UNFILLED_MASK_AT: usize = 148;
 /// Words 144 and 145: the cache round's WRC sample and held luminance sums (x256).
 /// Word 146: 1 while the cache is draining or filling (lighting_cache.glsl
 /// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
+/// Word 147: the round's batch entries (16 rays each).
 const LIGHTING_DRAIN_WORD: usize = 144;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
