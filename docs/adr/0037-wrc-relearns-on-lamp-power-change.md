@@ -819,3 +819,107 @@ hard clear, as expected. The large-change noise (ratio 100-400) is the next targ
 reseeding from the reference or by spatial reuse, not from the history weights. It isn't
 an all-rounder yet: lamps-move relight costs about 870 ms on lavapipe, and the boxes
 outlier needs explaining before this is recommended over e1.
+
+## Round 15 follow-up: perceptual 200 ms grading, boxes outlier, A-SVGF gap, spread relight
+
+### Boxes 20.6 was a grading fault
+`an_ar.py` inverted the tonemap with `k` clipped at 0.999, so any live pixel coded above
+0.78 (the reference peaks at 0.753) decoded to about 1100. With the cap at 0.85, boxes
+error is e0 0.573, e1 0.560, e3f 0.566. No NaNs; the renderer was fine.
+
+All-rounder (near-camera error vs 64-bounce reference, fixed grader):
+
+| | still | sun | boxes | lamps | turn | lamps ms p50 |
+|---|---|---|---|---|---|---|
+| e0 | 0.231 | 0.086 | 0.573 | 0.104 | 0.101 | 189 |
+| e1 | 0.155 | 0.083 | 0.560 | 0.076 | 0.104 | 747 |
+| e3f | 0.144 | 0.084 | 0.566 | 0.098 | 0.104 | 1001 |
+
+Linger oracle (lamp off, e1, lag@120): probes 100, texels 98.9, WRC 72.3 (71.4 without
+holds). The lamp-off linger sits in the world radiance cache, not in history weights.
+
+### Perceptual grading (Anthony: ~200 ms = 12 frames at 60 fps)
+Harness st17 (`st17_{off,h50,x2,on}.rhai`): hall, near box, all 32 point lamps step at
+once after 1500 settle frames; captures N+1..N+12 then N+18..N+900. Error = mean
+|luma - ref| / mean ref, ref = e1 at N+900 (no path-traced capture in this harness).
+"First ≤5%" is the first capture within 5%, in ms at 60 fps. e3fF = e3f +
+`GENOS_DBG_EVTF=1` (existing a-trous luminance edge-stop widened by 1+3·clamp((8-t)/7)
+while history is thin).
+
+| step | variant | N+3 | N+5 | N+12 | mean N+1..12 | first ≤5% | over 200 ms by |
+|---|---|---|---|---|---|---|---|
+| full off | e0 | 3.42 | 3.41 | 3.40 | 3.41 | never | — |
+| | e1 | 3.45 | 3.00 | 0.98 | 2.52 | 15 000 ms | 14 800 ms |
+| | e3f | 3.62 | 3.49 | 1.62 | 2.98 | never (0.44 at N+300) | >14 800 ms |
+| | e3fF | 3.56 | 3.39 | 1.63 | 2.97 | never | >14 800 ms |
+| full on | e0 | 0.40 | 0.39 | 0.38 | 0.39 | never | — |
+| | e1 | 0.45 | 0.40 | 0.086 | 0.32 | 300 ms (relapses to 0.10 at N+60) | 100 ms |
+| | e3f | 0.39 | 0.32 | **0.044** | 0.24 | **200 ms** (relapses to 0.10 at N+60) | 0 |
+| | e3fF | 0.40 | 0.37 | 0.069 | 0.29 | 300 ms | 100 ms |
+| medium x0.5 | e0 | 0.101 | 0.100 | 0.100 | 0.101 | never | — |
+| | e1 | 0.113 | 0.080 | 0.066 | 0.082 | 1 500 ms | 1 300 ms |
+| | e3f | 0.217 | 0.214 | 0.200 | 0.211 | never vs e1 ref; own level at 800 ms | — |
+| | e3fF | 0.220 | 0.215 | 0.190 | 0.209 | never vs e1 ref; own level at 600 ms | — |
+| medium x2 | e0 | 0.279 | 0.278 | 0.275 | 0.278 | never | — |
+| | e1 | 0.167 | 0.131 | 0.062 | 0.109 | 1 500 ms | 1 300 ms |
+| | e3f | 0.179 | 0.172 | 0.136 | 0.165 | 600 ms | 400 ms |
+| | e3fF | 0.175 | 0.165 | 0.131 | 0.159 | 600 ms | 400 ms |
+
+Mild ±10% (round 15 st16 table above): e3f is already at 99% of its converged level by
+N+30, i.e. inside the window, with e0-level noise.
+
+Reading: only lamp-on reaches the 200 ms window (e3f exactly at N+12, then a relapse to
+10% by N+60 as the WRC re-relaxes). Lamp-off misses by ~15 s for every variant, which is
+the WRC linger the oracle isolates, not history. Medium steps miss by 0.4-1.3 s; at x0.5
+e3f stops 10-20% off e1's level (keeps too much old energy at lambda=0.5). The filter
+(e3fF) changes the mean error by <0.01: it cuts noise, not bias. Lavapipe at 160x90 runs
+~2-10 fps, so these are frame counts, not wall-clock perception; Anthony's viewing test
+below is the real judge.
+
+### A-SVGF (Schied, Peters, Dachsbacher 2018) vs ours
+1. **Gradient source.** Paper: per 3x3 stratum one previous-frame sample is forward
+   projected and re-shaded with the same random seed, giving a noise-free temporal gradient
+   that also catches shadow and indirect changes. Ours: lambda is analytic from lamp power
+   (|ΔP|/max with distance falloff); no gradient samples, so we miss indirect and occlusion
+   changes and cannot tell how much a cell really changed.
+2. **Where alpha applies.** Paper: per screen pixel, alpha = max over 3x3 of the
+   reconstructed (a-trous filtered) gradient, applied to colour and moments. Ours: per world
+   cache cell (WRC sample count scaled by 1-lambda); screen history (gather/filter/compose)
+   is still a hard no-hold while `!light_quiet`.
+3. **Spatial filter.** Paper: SVGF variance-guided a-trous (5 iterations), with variance
+   estimated spatially while history < 4 frames, which hides the noise of dropped history.
+   Ours: lighting-v3 has an a-trous filter; e3fF widens its luminance edge-stop while t<8.
+   It is not variance-guided and did not change bias.
+4. **Gradient reconstruction.** Paper filters the sparse gradients with an a-trous pass
+   before use; we have nothing to filter.
+Our remaining error is bias (WRC linger, partial-lambda retention), which A-SVGF's spatial
+filter does not fix. Item 1 (measured gradients) is the step that would fix the x0.5 case.
+
+### Spread relight over the 200 ms window (Anthony's idea)
+Measured (st17 off, sc trace): after the step e1/e3f relight ramps from ~11k to ~23.5k
+cells/frame and stays there, ~2.33M cell relights over 120 frames, against a field of
+~46k claimed cells; lavapipe lighting is ~800-980 ms/frame vs 63 ms before, about
+0.04 ms per relit cell. So the cost is not a one-frame spike to amortise; it is the whole
+field re-relaxing repeatedly. Relighting each cell once, spread over 12 frames, is
+~3.8k cells/frame ≈ +150 ms/frame on lavapipe (≈ 2.5x pre-step, vs ≈ 14x now), and ~50x
+less total work. Near-camera-first ordering would put visible cells in the first frames.
+Not tested: `GENOS_DBG_EVT_BUDGET` caps restarts by zeroing over-budget cells, which is not
+a defer, and a real defer queue (keep old value until the cell's slot) is new shader code.
+Next step: design note for a per-frame relight cap with an age-ordered pending list in
+`lighting_compact.comp`, then an e3f+spread variant graded on this table.
+
+### Viewing test
+`docs/adr/0037/view-lamp-step.sh` + `view-lamp-step.rhai`: hall, camera on the near box,
+all point lamps off → on → x0.5 → x1, 3 s each, five times. It builds lighting-v3
+34cc80c + `hooks-r15-e3f.patch` (regenerated, now includes EVTF) in
+`~/.cache/ge-adr37-view-src`, runs at nice 19 under `~/genos-bench.lock` with a 600 s
+timeout, and refuses port 8765. From a checkout of this branch:
+
+    V=e3fF GENOS_MCP_PORT=8815 sh docs/adr/0037/view-lamp-step.sh   # V = e0 | e1 | e3f | e3fF
+
+### Verdict
+Proportional drop is the right shape for mild changes and for lamp-on (e3f hits 4.4% at
+N+12). It does not make big changes land inside 200 ms: lamp-off is dominated by WRC
+linger (~15 s, all variants), and medium steps take 0.6-1.5 s. The filter does not help bias.
+Next, in order: spread/defer relight (cost), measured gradients for lambda (x0.5 bias),
+and the WRC linger on lamp-off.

@@ -1,5 +1,5 @@
 diff --git a/crates/render/shaders/lighting_cache.comp b/crates/render/shaders/lighting_cache.comp
-index 3b0231b..e6c277d 100644
+index 3b0231b..d03cd12 100644
 --- a/crates/render/shaders/lighting_cache.comp
 +++ b/crates/render/shaders/lighting_cache.comp
 @@ -18,6 +18,14 @@ void lighting_tex_put(uint slot, vec4 v) {
@@ -48,7 +48,7 @@ index 3b0231b..e6c277d 100644
 +        // (diag[42] counts them); cells within 6 m of the eye may use the whole budget,
 +        // farther ones only half (nearest first, approximately). Over budget: cleared to 0.
 +        if ((lighting_dbg2() & 256u) != 0u && old.w >= 0.5 && lighting_wrc_lamp_changed(cp, prev_updated)) {
-+            uint bud = ((lighting_dbg2() >> 9u) & 4095u) * 16u;
++            uint bud = ((lighting_dbg2() >> 9u) & 2047u) * 16u;
 +            bool near = length(cp - work.v[lighting_change_at() + 1u].xyz) < 6.0;
 +            uint k = atomicAdd(gstats.diag[42], 1u);
 +            // GENOS_DBG_EVT=2 (dbg2 bit 21): proportional A-SVGF-style drop instead of a hard
@@ -167,7 +167,7 @@ index 3b0231b..e6c277d 100644
          return;
      }
 diff --git a/crates/render/shaders/lighting_cache.glsl b/crates/render/shaders/lighting_cache.glsl
-index 4b3d7f5..7e16b37 100644
+index 4b3d7f5..e7de8bd 100644
 --- a/crates/render/shaders/lighting_cache.glsl
 +++ b/crates/render/shaders/lighting_cache.glsl
 @@ -1271,6 +1271,7 @@ bool lighting_sc_local_change(uint slot, out bool mover) {
@@ -338,7 +338,21 @@ index 4b3d7f5..7e16b37 100644
      float var;
      vec4 v = lighting_svgf_in(slot, var);
      bool spatial = var < 0.0;
-@@ -3707,7 +3797,9 @@ void lighting_svgf_push(uint slot) {
+@@ -3623,6 +3713,13 @@ void lighting_svgf_iter(uint slot, uint it) {
+     }
+     gv = gw > 0.0 ? gv / gw : varp;
+     float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
++    // ADR 0037 round 15g (GENOS_DBG_EVTF, dbg2 bit 20): a texel with a short history
++    // (EVT=3 cuts it in proportion to the lamp change) filters harder: the
++    // edge-stop widens up to 4x as the count falls from 8 to 1. 0 shipped.
++    if ((lighting_dbg2() & 1048576u) != 0u) {
++        float th = floor(max(cache.v[3u * slot + 2u].w, 0.0));
++        phi *= 1.0 + 3.0 * clamp((8.0 - th) / 7.0, 0.0, 1.0);
++    }
+     const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
+     vec3 sum = vec3(0.0);
+     float wm = 0.0;
+@@ -3707,7 +3804,9 @@ void lighting_svgf_push(uint slot) {
      // neighbour's) moved, when it leans on the WRC (W < 1: the cells change
      // without telling their texels), and otherwise one frame in
      // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
@@ -349,7 +363,7 @@ index 4b3d7f5..7e16b37 100644
          && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
          && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
          // S72V10 trusts the field for two frames from this stamp. The idle skip
-@@ -3759,6 +3851,14 @@ void lighting_svgf_push(uint slot) {
+@@ -3759,6 +3858,14 @@ void lighting_svgf_push(uint slot) {
      } else {
          outc = vec3(0.0);
      }
@@ -364,7 +378,7 @@ index 4b3d7f5..7e16b37 100644
      uint field_pack = lighting_pack_rgb9e5(outc);
      cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(field_pack);
      cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
-@@ -4120,13 +4220,18 @@ uint lighting_lamps_sig(uint seed, LampList list) {
+@@ -4120,13 +4227,18 @@ uint lighting_lamps_sig(uint seed, LampList list) {
  // refresh waits twice as long (LIGHTING_CHECK_MIN..MAX frames); otherwise the
  // cell is refreshed again next frame while nominated.
  const float LIGHTING_WRC_SIGMA_MAX = 0.2;
@@ -520,7 +534,7 @@ index cccdcdf..02e536c 100644
      }
  }
 diff --git a/crates/render/src/lighting_gpu.rs b/crates/render/src/lighting_gpu.rs
-index f1de68b..ffafce9 100644
+index f1de68b..64ce381 100644
 --- a/crates/render/src/lighting_gpu.rs
 +++ b/crates/render/src/lighting_gpu.rs
 @@ -2008,6 +2008,7 @@ impl Gpu {
@@ -548,7 +562,7 @@ index f1de68b..ffafce9 100644
          let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
          let changes = if had {
              lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
-@@ -2836,13 +2845,31 @@ impl Gpu {
+@@ -2836,13 +2845,34 @@ impl Gpu {
                      block[4 * v + c] = f(at + 4 * c);
                  }
              }
@@ -564,7 +578,10 @@ index f1de68b..ffafce9 100644
 +                // Round 14: bit 8 GENOS_DBG_EVT (clear every history in a switched lamp's
 +                // range), bits 9-20 GENOS_DBG_EVT_BUDGET / 16 (cells per frame, 0 = no cap).
 +                | (((e2("GENOS_DBG_EVT") != 0) as u32) << 8) | (((e2("GENOS_DBG_EVT") == 2) as u32) << 21) | (((e2("GENOS_DBG_EVT") == 3) as u32) << 22)
-+                | (((e2("GENOS_DBG_EVT_BUDGET") / 16).min(4095)) << 9);
++                | (((e2("GENOS_DBG_EVT_BUDGET") / 16).min(2047)) << 9)
++                // Round 15g: bit 20 GENOS_DBG_EVTF (a-trous luminance edge-stop widened on
++                // texels whose history the lamp change cut, A-SVGF style). 0 shipped.
++                | ((e2("GENOS_DBG_EVTF") & 1) << 20);
 +            block[4 + 3] = 1.0 + 2.0 * dbg2 as f32;
          }
          // The camera up's w (head 3.w) is unread: the flags' high bits.
@@ -582,7 +599,7 @@ index f1de68b..ffafce9 100644
          // A frame drawn from held light runs no probes: what it saw is still what
          // the probes last ran on.
          if !frozen {
-@@ -2964,7 +2991,8 @@ impl Gpu {
+@@ -2964,7 +2994,8 @@ impl Gpu {
          // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
          // round that relights nothing has nothing left to converge.
          let sc = self.lighting.settings.world_mode() == 3;
@@ -592,7 +609,7 @@ index f1de68b..ffafce9 100644
          self.lighting.stats_light[slot] = tracked;
          self.lighting.stats_young[slot] = young_only || sc;
          // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
-@@ -4529,3 +4557,96 @@ mod sun_step {
+@@ -4529,3 +4560,96 @@ mod sun_step {
  }
  
  include!("lighting_dispatch.rs");
