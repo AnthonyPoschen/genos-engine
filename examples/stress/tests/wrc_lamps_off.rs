@@ -51,6 +51,40 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
 /// Lit night, then `change`. With `black`, the frames until the picture is
 /// under 1 % of lit (gated); otherwise the frames until it stays within 1 % of
 /// lit of where it settles (the mean of its last 30 of 600 frames), reported.
+/// No pop: the picture moves from the lit level toward where it ends up and
+/// never past either by more than noise (1 % of lit).
+fn assert_no_pop(name: &str, trail: &[f64], lit: f64, black: bool) {
+    let end = if black {
+        0.0
+    } else {
+        let last30 = &trail[trail.len() - 30..];
+        last30.iter().sum::<f64>() / last30.len() as f64
+    };
+    let (lo, hi) = (lit.min(end) - 0.01 * lit, lit.max(end) + 0.01 * lit);
+    let pop = trail.iter().position(|m| *m < lo || *m > hi);
+    eprintln!("wrc_lamps_off {name}: range [{lo:.2}, {hi:.2}] first out at {pop:?}");
+    assert!(
+        pop.is_none(),
+        "{name}: frame {:?} at {:.2} is outside [{lo:.2}, {hi:.2}] (a pop)",
+        pop.map(|i| i + 1),
+        pop.map_or(0.0, |i| trail[i])
+    );
+}
+
+/// Frames until the picture stays within 1 % of lit of its settled level.
+fn report_settle(name: &str, trail: &[f64], lit: f64) {
+    let last30 = &trail[trail.len() - 30..];
+    let level = last30.iter().sum::<f64>() / last30.len() as f64;
+    let within = trail
+        .iter()
+        .rposition(|m| (m - level).abs() > 0.01 * lit)
+        .map_or(0, |i| i + 1);
+    eprintln!(
+        "wrc_lamps_off {name}: lit {lit:.3} settled {level:.3} within 1 % of lit at frame {within} ({:.0} ms at 60 fps)",
+        within as f64 * 1000.0 / 60.0
+    );
+}
+
 fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let size = window.pump();
@@ -129,34 +163,9 @@ fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
             .map(|m| format!("{m:.2}"))
             .collect::<Vec<_>>()
     );
-    // No pop: the picture moves from the lit level toward where it ends up and
-    // never past either by more than noise (1 % of lit).
-    let end = if black {
-        0.0
-    } else {
-        let last30 = &trail[trail.len() - 30..];
-        last30.iter().sum::<f64>() / last30.len() as f64
-    };
-    let (lo, hi) = (lit.min(end) - 0.01 * lit, lit.max(end) + 0.01 * lit);
-    let pop = trail.iter().position(|m| *m < lo || *m > hi);
-    eprintln!("wrc_lamps_off {name}: range [{lo:.2}, {hi:.2}] first out at {pop:?}");
-    assert!(
-        pop.is_none(),
-        "{name}: frame {:?} at {:.2} is outside [{lo:.2}, {hi:.2}] (a pop)",
-        pop.map(|i| i + 1),
-        pop.map_or(0.0, |i| trail[i])
-    );
+    assert_no_pop(name, &trail, lit, black);
     if !black {
-        let last30 = &trail[trail.len() - 30..];
-        let level = last30.iter().sum::<f64>() / last30.len() as f64;
-        let within = trail
-            .iter()
-            .rposition(|m| (m - level).abs() > 0.01 * lit)
-            .map_or(0, |i| i + 1);
-        eprintln!(
-            "wrc_lamps_off {name}: lit {lit:.3} settled {level:.3} within 1 % of lit at frame {within} ({:.0} ms at 60 fps)",
-            within as f64 * 1000.0 / 60.0
-        );
+        report_settle(name, &trail, lit);
         return;
     }
     assert!(
