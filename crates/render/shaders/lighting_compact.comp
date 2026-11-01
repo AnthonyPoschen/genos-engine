@@ -124,7 +124,11 @@ void main() {
             burst = false;
         }
         if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
-        if (wrc && !burst && LIGHTING_SC_SCHED) {
+        // A lamp's bounce reaches past its range: while a lamp change settles
+        // every cell, not only those inside a lamp's range, takes a whole set
+        // each round through the young list, as a burst does.
+        bool settling = lighting_lamp_settling();
+        if (wrc && !burst && !settling && LIGHTING_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
             if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
@@ -198,7 +202,7 @@ void main() {
         uint lvl = sparse_c ? lighting_sc_level(slot) : 2u;
         // S74A: under A-SVGF a change nearby only nominates checks (below).
         bool asvgf = LIGHTING_SC_ASVGF && !wrc && lighting_sc_svgf();
-        bool young_now = (((near && !asvgf) || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
+        bool young_now = settling || (((near && !asvgf) || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
         if (LIGHTING_SC_SCHED && !young_now) {
             uint updated = lighting_sc_updated(slot);
             int used = int(last - updated);

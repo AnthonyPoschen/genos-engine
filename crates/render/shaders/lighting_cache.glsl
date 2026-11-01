@@ -1253,6 +1253,7 @@ bool lighting_sc_light_quiet() {
 // longer does: the estimator tracks it (lighting_cache.comp, a floor on its blend
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
+bool lighting_lamp_settling();
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
 uint lighting_sc_upd_override = ~0u;
@@ -2595,7 +2596,7 @@ uint lighting_sc_interval(uint slot, float t) {
         return 0u;
     }
     bool mover;
-    if (lighting_sc_local_change(slot, mover) || lighting_sc_lamp_touched(slot)) {
+    if (lighting_sc_local_change(slot, mover) || lighting_sc_lamp_touched(slot) || lighting_lamp_settling()) {
         return 0u;
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
@@ -2672,6 +2673,20 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
 // range), written once a round by lighting_wrc_note_lamps.
 bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
     return lighting_lamp_delta(p, updated) >= 0.0;
+}
+// A lamp moved, changed range or went out within the last LIGHTING_WRC_CHANGE_FRAMES
+// frames. Its bounce light reaches past its range (every surface it lit relights
+// the others), so the whole cache is draining or filling until then: every texel
+// is due each round (a whole set, lighting_compact.comp), the old light leaving
+// one bounce per round.
+bool lighting_lamp_settling() {
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
+        if (f != 0u && int(lighting_frame() - f) <= int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            return true;
+        }
+    }
+    return false;
 }
 // S65C: how much the lamps that moved since frame `updated` changed the
 // unshadowed light at p (sum over moved lamps of brightest channel times
