@@ -20,7 +20,7 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 
 - Friction uses the larger of the two coefficients, which is what `physics.md` already specified. The geometric mean would be zero against a default plane (friction 0) and would drop every existing ground-friction test.
 - Position correction is still linear. A rotational split impulse launched resting stacks, so the penetration pass moves centres only. The face manifold (incident face clipped to the reference face, at most four points) keeps the normal forces on the support instead of on one corner.
-- A symmetric face leaves a small residual spin under sequential impulses. The CCD contact runs 32 iterations so a head-on hull pair does not spin into the linear time-of-impact sweep. Discrete contacts stay at eight.
+- A symmetric face leaves a small residual spin under sequential impulses. The CCD contact runs 12 iterations so a head-on hull pair does not spin into the linear time-of-impact sweep. Discrete contacts stay at eight.
 - Sleep is per body, not an island graph. The proposal left sleep to a later decision. A settled pile needs it: 0.5 s under 0.12 m/s and 0.25 rad/s, woken by a moving contact. Springs and motors do not sleep.
 
 ## Tests

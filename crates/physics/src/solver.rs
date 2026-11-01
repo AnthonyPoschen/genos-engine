@@ -121,7 +121,7 @@ pub(crate) fn solve_pair(
         };
     }
     let (t1, t2) = tangents(normal);
-    for _ in 0..32 {
+    for _ in 0..12 {
         for point in points.iter_mut() {
             velocity_point(a, b, normal, t1, t2, true, point);
         }
