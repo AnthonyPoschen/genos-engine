@@ -65,7 +65,21 @@ void main() {
         && !lighting_tile_kept(origin)) {
         float dn = length(pos_out.xyz - scene.eye.xyz);
         float dw = length(was.xyz - scene.eye.xyz);
-        if (abs(dw - dn) <= 0.02 * dn && length(was.xyz - pos_out.xyz) <= 0.02 * dn
+        // On screen last frame: the old origin projects inside last frame's
+        // camera (change head: eye, right.w tan half fov, up, forward.w aspect).
+        uint ch = lighting_change_at();
+        vec4 le = work.v[ch + 1u];
+        vec4 lr = work.v[ch + 2u];
+        vec4 lu = work.v[ch + 3u];
+        vec4 lf = work.v[ch + 4u];
+        vec3 d = was.xyz - le.xyz;
+        float z = dot(d, lf.xyz);
+        bool onscreen = le.w > 0.5 && z > 1.0e-4
+            && abs(dot(d, lr.xyz)) <= z * lr.w * lf.w && abs(dot(d, lu.xyz)) <= z * lr.w;
+        // A still camera traces every slot (the tile jitter keeps averaging);
+        // only a moving camera reprojects held hits.
+        bool moved = length(le.xyz - scene.eye.xyz) > 1.0e-4 || dot(lf.xyz, scene.view_forward.xyz) < 0.99999;
+        if (onscreen && abs(dw - dn) <= 0.02 * dn && length(was.xyz - pos_out.xyz) <= 0.02 * dn
             && dot(wn, n_out.xyz) >= 0.9) {
             work.v[lighting_stratum_at(i, lighting_stratum())] = vec4(was.xyz, 1.25);
             work.v[lighting_stratum_at(i, lighting_stratum()) + 1u] = vec4(wn, n_out.w);
