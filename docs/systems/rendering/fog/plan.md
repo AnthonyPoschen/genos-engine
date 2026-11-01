@@ -115,6 +115,25 @@ The preset grid (`w`, `h`, `d`, shadow rays, reuse taps) is the tunable. The ref
 - Determinism: injection is a function of the scene, the camera, and the fixed jitter. Reprojection is the identity. The same inputs return the same column.
 - Headless server: the reference does not draw. A headless server replicates fog settings only, as in the fog record.
 
+## F2 GPU half
+
+`FOG_F2_REFERENCE` on a froxel dispatch runs the same injection and front-to-back integral as `genos-fog-ref`: closed-form optical depth, two stratified shadow rays, the 4-neighbour reuse, and no tail past the reference far plane. The height-fog frame path does not set that flag, so its column stays the unshadowed integral. `crates/render/tests/froxel_gpu.rs` grades the Low grid on uniform density, height fog, a lamp, and a sun shaft. The gate is 1% relative where the reference is above 1e-3, otherwise 1e-5 absolute. Lavapipe timestamps are not the 4070 ceilings in ADR 0026.
+
+### Probes
+
+| Failure | Probe |
+| --- | --- |
+| GPU column drifts from fog-ref | `gpu_froxel_matches_fog_ref_within_one_percent` |
+| The flag is ignored and the height-fog integral comes back | the same test's per-scene `f2` line |
+
+### Networking
+
+- Replicated state: none. The GPU grid is rebuilt from the scene, the camera, and `reference_far`.
+- Authority: the machine that draws.
+- Prediction / rollback: none. A light change is in the next injection.
+- Determinism: the jitter table matches the CPU reference, so the same inputs return the same column.
+- Headless server: the dispatch does not draw. A headless server replicates fog settings only.
+
 ## No pops, no flicker
 
 - Fixed blue-noise jitter per froxel, constant for a still camera.
