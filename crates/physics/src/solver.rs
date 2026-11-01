@@ -48,6 +48,9 @@ pub(crate) struct Manifold {
     pub depth: f32,
     pub points: [ContactPoint; 4],
     pub count: u8,
+    /// Friction axes from the first frame of this contact, kept while the
+    /// normal stays aligned so a warm impulse does not swap tangent.
+    pub tangent_axis: [Vec3; 2],
 }
 
 /// Velocity iterations, then a positional pass. Returns how many manifolds
@@ -57,14 +60,17 @@ pub(crate) fn solve(
     manifolds: &mut [Manifold],
     warm: &[Manifold],
     wake: &mut Vec<bool>,
+    velocity: bool,
 ) -> u32 {
     wake_touched(bodies, manifolds, wake);
     prepare_bias(bodies, manifolds);
-    warm_start(bodies, manifolds, warm);
-    let iterations = VELOCITY_ITERATIONS;
-    for _ in 0..iterations {
-        for manifold in manifolds.iter_mut() {
-            solve_velocity(bodies, manifold);
+    if velocity {
+        warm_start(bodies, manifolds, warm);
+        let iterations = VELOCITY_ITERATIONS;
+        for _ in 0..iterations {
+            for manifold in manifolds.iter_mut() {
+                solve_velocity(bodies, manifold);
+            }
         }
     }
     for _ in 0..POSITION_ITERATIONS {
@@ -114,9 +120,10 @@ pub(crate) fn solve_pair(
             0.0
         };
     }
-    for _ in 0..VELOCITY_ITERATIONS {
+    let (t1, t2) = tangents(normal);
+    for _ in 0..32 {
         for point in points.iter_mut() {
-            velocity_point(a, b, normal, point);
+            velocity_point(a, b, normal, t1, t2, true, point);
         }
     }
     let mut depth = points.iter().map(|point| point.depth).fold(0.0, f32::max);
@@ -207,6 +214,9 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
         else {
             continue;
         };
+        if previous.normal.dot(manifold.normal) > 0.9 {
+            manifold.tangent_axis = previous.tangent_axis;
+        }
         let count = usize_from_u8(manifold.count);
         let prev_count = usize_from_u8(previous.count);
         for point in &mut manifold.points[..count] {
@@ -222,23 +232,17 @@ fn warm_start(bodies: &mut [Body], manifolds: &mut [Manifold], warm: &[Manifold]
             };
             let ra = point.position - a.position;
             let rb = point.position - b.position;
-            apply(
-                a,
-                b,
-                ra,
-                rb,
-                manifold.normal * point.normal_impulse,
-                manifold.normal,
-            );
-            let (t1, t2) = tangents(manifold.normal);
-            apply(a, b, ra, rb, t1 * point.tangent[0], manifold.normal);
-            apply(a, b, ra, rb, t2 * point.tangent[1], manifold.normal);
+            apply(a, b, ra, rb, manifold.normal * point.normal_impulse, true);
+            let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
+            apply(a, b, ra, rb, t1 * point.tangent[0], true);
+            apply(a, b, ra, rb, t2 * point.tangent[1], true);
         }
     }
 }
 
 fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
     let count = usize_from_u8(manifold.count);
+    let (t1, t2) = (manifold.tangent_axis[0], manifold.tangent_axis[1]);
     for index in 0..count {
         let position = manifold.points[index].position;
         let depth = manifold.points[index].depth;
@@ -257,7 +261,7 @@ fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
             tangent,
             bias: manifold.points[index].bias,
         };
-        velocity_point(a, b, manifold.normal, &mut point);
+        velocity_point(a, b, manifold.normal, t1, t2, true, &mut point);
         manifold.points[index].normal_impulse = point.normal_impulse;
         manifold.points[index].tangent = point.tangent;
     }
@@ -289,29 +293,60 @@ fn solve_position(bodies: &mut [Body], manifold: &mut Manifold) {
     manifold.depth -= (shift_a + shift_b).dot(manifold.normal);
 }
 
-fn velocity_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut ContactPoint) {
+fn velocity_point(
+    a: &mut Body,
+    b: &mut Body,
+    normal: Vec3,
+    t1: Vec3,
+    t2: Vec3,
+    normal_torque: bool,
+    point: &mut ContactPoint,
+) {
     let ra = point.position - a.position;
     let rb = point.position - b.position;
+    let normal_impulse = normal_delta(a, b, normal, ra, rb, point);
+    apply(a, b, ra, rb, normal_impulse, normal_torque);
+    if normal_impulse != Vec3::ZERO {
+        let magnitude = normal_impulse.length();
+        a.normal_impulse += magnitude;
+        b.normal_impulse += magnitude;
+    }
+    let friction = friction_delta(a, b, t1, t2, ra, rb, point);
+    apply(a, b, ra, rb, friction, true);
+}
+
+fn normal_delta(
+    a: &Body,
+    b: &Body,
+    normal: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+    point: &mut ContactPoint,
+) -> Vec3 {
     let rel = point_velocity(a, ra) - point_velocity(b, rb);
     let vn = rel.dot(normal);
     let k = mass_along(a, b, ra, rb, normal);
     if k <= 1.0e-8 {
-        return;
+        return Vec3::ZERO;
     }
     let j = -(vn - point.bias) / k;
     let old = point.normal_impulse;
     point.normal_impulse = (old + j).max(0.0);
-    let applied = point.normal_impulse - old;
-    apply(a, b, ra, rb, normal * applied, normal);
-    if applied != 0.0 {
-        let magnitude = applied.abs();
-        a.normal_impulse += magnitude;
-        b.normal_impulse += magnitude;
-    }
+    normal * (point.normal_impulse - old)
+}
 
-    let (t1, t2) = tangents(normal);
+fn friction_delta(
+    a: &Body,
+    b: &Body,
+    t1: Vec3,
+    t2: Vec3,
+    ra: Vec3,
+    rb: Vec3,
+    point: &mut ContactPoint,
+) -> Vec3 {
     let friction = a.friction.max(b.friction).max(0.0);
     let limit = friction * point.normal_impulse;
+    let mut impulse = Vec3::ZERO;
     for slot in 0..2 {
         let axis = if slot == 0 { t1 } else { t2 };
         let rel = point_velocity(a, ra) - point_velocity(b, rb);
@@ -323,22 +358,18 @@ fn velocity_point(a: &mut Body, b: &mut Body, normal: Vec3, point: &mut ContactP
         let jt = -vt / kt;
         let old = point.tangent[slot];
         point.tangent[slot] = (old + jt).clamp(-limit, limit);
-        apply(a, b, ra, rb, axis * (point.tangent[slot] - old), normal);
+        impulse += axis * (point.tangent[slot] - old);
     }
+    impulse
 }
 
-fn apply(a: &mut Body, b: &mut Body, ra: Vec3, rb: Vec3, impulse: Vec3, _contact_normal: Vec3) {
+fn apply(a: &mut Body, b: &mut Body, ra: Vec3, rb: Vec3, impulse: Vec3, torque: bool) {
     a.velocity += impulse * inv_mass(a);
     b.velocity -= impulse * inv_mass(b);
-    // Dynamic-dynamic torque walks a yawed hull pile off its slab: the
-    // corner impulses do not cancel, and the spin becomes a horizontal
-    // shove. A static support keeps the full torque, so a ledge still tips
-    // and a floor still bleeds spin. Hull-vs-static still uses the contact
-    // point. ADR 0034 departure.
-    let one_static = a.inverse_mass == 0.0 || b.inverse_mass == 0.0;
-    let scale = if one_static { 1.0 } else { 0.0 };
-    a.angular_velocity += inv_inertia(a, ra.cross(impulse)) * scale;
-    b.angular_velocity -= inv_inertia(b, rb.cross(impulse)) * scale;
+    if torque {
+        a.angular_velocity += inv_inertia(a, ra.cross(impulse));
+        b.angular_velocity -= inv_inertia(b, rb.cross(impulse));
+    }
 }
 
 fn point_velocity(body: &Body, r: Vec3) -> Vec3 {
@@ -350,12 +381,16 @@ fn point_velocity(body: &Body, r: Vec3) -> Vec3 {
 }
 
 fn mass_along(a: &Body, b: &Body, ra: Vec3, rb: Vec3, dir: Vec3) -> f32 {
+    let mut mass = inv_mass(a) + inv_mass(b);
     let crossed_a = ra.cross(dir);
+    if crossed_a.length_squared() > 1.0e-12 {
+        mass += crossed_a.dot(inv_inertia(a, crossed_a));
+    }
     let crossed_b = rb.cross(dir);
-    inv_mass(a)
-        + inv_mass(b)
-        + crossed_a.dot(inv_inertia(a, crossed_a))
-        + crossed_b.dot(inv_inertia(b, crossed_b))
+    if crossed_b.length_squared() > 1.0e-12 {
+        mass += crossed_b.dot(inv_inertia(b, crossed_b));
+    }
+    mass
 }
 
 fn inv_mass(body: &Body) -> f32 {
@@ -386,6 +421,10 @@ fn inv_inertia(body: &Body, vector: Vec3) -> Vec3 {
 
 fn both_inactive(a: &Body, b: &Body) -> bool {
     (a.sleeping || a.inverse_mass == 0.0) && (b.sleeping || b.inverse_mass == 0.0)
+}
+
+pub(crate) fn tangent_axes(normal: Vec3) -> (Vec3, Vec3) {
+    tangents(normal)
 }
 
 fn tangents(normal: Vec3) -> (Vec3, Vec3) {

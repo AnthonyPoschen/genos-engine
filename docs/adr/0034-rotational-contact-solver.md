@@ -9,7 +9,7 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 ## Decision
 
 1. **Contact carries a point.** Every narrow-phase pair builds a manifold of 1 to 4 world-space points with one normal and a depth. Sphere and capsule pairs use one point on the near side of the round surface. Box and hull pairs keep vertices that sit in the overlap, plus the centre projected onto the facing plane when that point lies in both shapes.
-2. **Inertia is diagonal in body space.** World inverse inertia is `R · I⁻¹ · Rᵀ` applied to a vector. A box uses `Ixx = m/3 (hy² + hz²)`. A sphere uses `2/5 m r²`. A capsule uses the existing cylinder-and-hemispheres diagonal. A mesh uses the bounding-sphere moment. Static and sleeping bodies use zero.
+2. **Inertia is diagonal in body space for primitives.** World inverse inertia is `R · I⁻¹ · Rᵀ` applied to a vector. A box uses `Ixx = m/3 (hy² + hz²)`. A sphere uses `2/5 m r²`. A capsule uses the existing cylinder-and-hemispheres diagonal. A mesh stores the inverse of the unit-mass inertia from the pieces' volume (tetrahedra for a hull, analytic box plus parallel axis for a cuboid piece). Static and sleeping bodies use zero.
 3. **Sequential impulses at the point.** Per point, `r = p − x`, relative velocity `v + ω × r`, effective mass `1 / (m⁻¹ₐ + m⁻¹ᵦ + (r×n)·I⁻¹(r×n) for each body)`. The accumulated normal impulse stays ≥ 0. The first of the four narrow-phase passes warm-starts from the previous step's points within 5 cm. Eight velocity iterations, fixed pair order, so the result is deterministic.
 4. **Friction at the point.** Two tangent directions, a Coulomb box `|λt| ≤ μ λn`. Rolling and torsional friction are out of scope.
 5. **Penetration recovery stays positional.** It moves the centres and does not change velocity, so it adds no kinetic energy. Restitution applies only above a 1 m/s closing speed, as a bias captured before the iterations.
@@ -19,9 +19,8 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 ## Departures from the proposal
 
 - Friction uses the larger of the two coefficients, which is what `physics.md` already specified. The geometric mean would be zero against a default plane (friction 0) and would drop every existing ground-friction test.
-- Hull inertia is the bounding-sphere moment already used for rotational energy, not a volume integral at `Shape::from_triangles`.
-- Position correction is linear and re-queried over four narrow-phase passes. A rotational split impulse launched resting stacks.
-- Angular impulse is applied only when one body is static. Full dynamic-dynamic torque at the corners of yawed hulls does not cancel, and the resting pile walks off the slab. A hull against a static body still uses the contact point.
+- Position correction is still linear. A rotational split impulse launched resting stacks, so the penetration pass moves centres only. The face manifold (incident face clipped to the reference face, at most four points) keeps the normal forces on the support instead of on one corner.
+- A symmetric face leaves a small residual spin under sequential impulses. The CCD contact runs 32 iterations so a head-on hull pair does not spin into the linear time-of-impact sweep. Discrete contacts stay at eight.
 - Sleep is per body, not an island graph. The proposal left sleep to a later decision. A settled pile needs it: 0.5 s under 0.12 m/s and 0.25 rad/s, woken by a moving contact. Springs and motors do not sleep.
 
 ## Tests
@@ -32,6 +31,9 @@ Status: **Accepted** (implemented from the proposal in PR #139).
 - `mechanical_energy_does_not_grow_over_six_hundred_steps`
 - `a_resting_stack_stays_put`
 - `two_runs_of_the_overhang_match_bit_for_bit`
+- `two_boxes_colliding_off_centre_exchange_angular_momentum`
+- `a_yawed_hull_pile_sleeps_without_walking`
+- `a_cube_hull_matches_the_box_moment`
 
 ## Consequences
 

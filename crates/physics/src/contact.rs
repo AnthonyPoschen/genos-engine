@@ -87,7 +87,13 @@ const BOUNDS_MARGIN: f32 = 0.02;
 /// X), and every bounded body against every plane. Two static bodies never move, so
 /// their pair is skipped. The pairs run in index order, the order a pass over every
 /// pair took.
-pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs, warm_start: bool) -> u32 {
+pub(crate) fn collide(
+    bodies: &mut [Body],
+    scratch: &mut Pairs,
+    warm_start: bool,
+    velocity: bool,
+    rebuild: bool,
+) -> u32 {
     scratch.boxes.clear();
     scratch.planes.clear();
     scratch.pairs.clear();
@@ -125,18 +131,26 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs, warm_start: bool
         }
     }
     scratch.pairs.sort_unstable();
-    scratch.manifolds.clear();
-    let pairs = std::mem::take(&mut scratch.pairs);
-    for (i, j) in &pairs {
-        append_manifolds(*i, *j, bodies, &mut scratch.manifolds);
+    if rebuild {
+        scratch.manifolds.clear();
+        let pairs = std::mem::take(&mut scratch.pairs);
+        for (i, j) in &pairs {
+            append_manifolds(*i, *j, bodies, &mut scratch.manifolds);
+        }
+        scratch.pairs = pairs;
     }
-    scratch.pairs = pairs;
     let warm = if warm_start {
         std::mem::take(&mut scratch.warm)
     } else {
         Vec::new()
     };
-    let hits = crate::solver::solve(bodies, &mut scratch.manifolds, &warm, &mut scratch.wake);
+    let hits = crate::solver::solve(
+        bodies,
+        &mut scratch.manifolds,
+        &warm,
+        &mut scratch.wake,
+        velocity,
+    );
     if warm_start {
         scratch.warm = warm;
         scratch.warm.clone_from(&scratch.manifolds);
@@ -273,6 +287,7 @@ fn push_manifold(
     if count == 0 {
         return;
     }
+    let (t1, t2) = crate::solver::tangent_axes(normal);
     out.push(Manifold {
         a: a_index,
         b: b_index,
@@ -280,6 +295,7 @@ fn push_manifold(
         depth,
         points,
         count,
+        tangent_axis: [t1, t2],
     });
 }
 
@@ -1304,6 +1320,385 @@ pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetratio
     crate::solver::solve_pair(a, b, normal, &mut points[..usize::from(count)])
 }
 
+/// Incident face of `a` clipped to the reference face of `b`.
+///
+/// `normal` points out of `b` into `a`. The polygon is the face of `a` that
+/// looks back along that normal, cut by the side planes of `b`'s facing
+/// face, then reduced to at most four points of the overlap.
+fn face_clip(a: &Body, b: &Body, normal: Vec3) -> Option<([ContactPoint; 4], u8)> {
+    let mut incident = [Vec3::ZERO; MAX_HULL_VERTS];
+    let count = face_polygon(a, -normal, &mut incident)?;
+    if count < 2 {
+        return None;
+    }
+    let mut clipped = [Vec3::ZERO; 16];
+    let kept = clip_to_body(&incident[..count], b, normal, &mut clipped);
+    if kept == 0 {
+        return None;
+    }
+    let mut chosen = [Vec3::ZERO; 4];
+    let used = reduce_polygon(&clipped[..kept], &mut chosen);
+    let support = support_of(b, normal);
+    let plane = support.dot(normal);
+    let mut points = [ContactPoint::new(Vec3::ZERO, 0.0); 4];
+    for index in 0..used {
+        let position = chosen[index];
+        let depth = plane - position.dot(normal);
+        points[index] = ContactPoint::new(position, depth.max(0.0));
+    }
+    Some((points, used as u8))
+}
+
+fn face_polygon(body: &Body, direction: Vec3, out: &mut [Vec3]) -> Option<usize> {
+    match body.shape {
+        Shape::Box { half_extents } => Some(box_face(body, half_extents, direction, out)),
+        Shape::Mesh(mesh) => mesh_face(body, &mesh, direction, out),
+        Shape::Sphere { .. } | Shape::Capsule { .. } | Shape::Plane { .. } => None,
+    }
+}
+
+fn box_face(body: &Body, half: Vec3, direction: Vec3, out: &mut [Vec3]) -> usize {
+    let local = conjugate(body.orientation).rotate(direction);
+    let (axis, sign) = dominant_axis(local);
+    let mut extent = Vec3::ZERO;
+    match axis {
+        0 => extent.x = sign * half.x,
+        1 => extent.y = sign * half.y,
+        _ => extent.z = sign * half.z,
+    }
+    let mut corners = [Vec3::ZERO; 4];
+    for (index, (u, v)) in [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut corner = extent;
+        match axis {
+            0 => {
+                corner.y = u * half.y;
+                corner.z = v * half.z;
+            }
+            1 => {
+                corner.x = u * half.x;
+                corner.z = v * half.z;
+            }
+            _ => {
+                corner.x = u * half.x;
+                corner.y = v * half.y;
+            }
+        }
+        corners[index] = body.position + body.orientation.rotate(corner);
+    }
+    out[..4].copy_from_slice(&corners);
+    4
+}
+
+fn dominant_axis(local: Vec3) -> (usize, f32) {
+    let ax = local.x.abs();
+    let ay = local.y.abs();
+    let az = local.z.abs();
+    if ax >= ay && ax >= az {
+        (0, if local.x >= 0.0 { 1.0 } else { -1.0 })
+    } else if ay >= az {
+        (1, if local.y >= 0.0 { 1.0 } else { -1.0 })
+    } else {
+        (2, if local.z >= 0.0 { 1.0 } else { -1.0 })
+    }
+}
+
+fn mesh_face(body: &Body, mesh: &Mesh, direction: Vec3, out: &mut [Vec3]) -> Option<usize> {
+    let mut best = f32::NEG_INFINITY;
+    let mut best_piece: Option<Piece> = None;
+    for piece in mesh.pieces() {
+        match piece {
+            Piece::Cuboid { half, .. } => {
+                let local = conjugate(body.orientation).rotate(direction);
+                let (axis, sign) = dominant_axis(local);
+                let mut offset = Vec3::ZERO;
+                match axis {
+                    0 => offset.x = sign * half.x,
+                    1 => offset.y = sign * half.y,
+                    _ => offset.z = sign * half.z,
+                }
+                let normal = body.orientation.rotate(offset).normalize_or(direction);
+                let score = normal.dot(direction);
+                if score > best {
+                    best = score;
+                    best_piece = Some(*piece);
+                }
+            }
+            Piece::Hull(hull) => {
+                let faces = hull.face_count as usize;
+                for face in hull.faces.iter().take(faces) {
+                    let normal = body.orientation.rotate(face.normal);
+                    let score = normal.dot(direction);
+                    if score > best {
+                        best = score;
+                        best_piece = Some(*piece);
+                    }
+                }
+            }
+        }
+    }
+    let piece = best_piece?;
+    match piece {
+        Piece::Cuboid { center, half } => {
+            let shifted = Body {
+                position: body.position + body.orientation.rotate(center),
+                ..*body
+            };
+            Some(box_face(&shifted, half, direction, out))
+        }
+        Piece::Hull(hull) => Some(hull_face_verts(body, &hull, direction, best, out)),
+    }
+}
+
+trait NormalizeOr {
+    fn normalize_or(self, fallback: Vec3) -> Vec3;
+}
+
+impl NormalizeOr for Vec3 {
+    fn normalize_or(self, fallback: Vec3) -> Vec3 {
+        let length = self.length();
+        if length < 1.0e-8 {
+            fallback
+        } else {
+            self / length
+        }
+    }
+}
+
+fn hull_face_verts(
+    body: &Body,
+    hull: &Hull,
+    direction: Vec3,
+    best: f32,
+    out: &mut [Vec3],
+) -> usize {
+    let mut verts = [Vec3::ZERO; MAX_HULL_VERTS];
+    let mut count = 0_usize;
+    let mut face_normal = direction;
+    let faces = hull.face_count as usize;
+    for face in hull.faces.iter().take(faces) {
+        let normal = body.orientation.rotate(face.normal);
+        if normal.dot(direction) < best - 0.05 {
+            continue;
+        }
+        face_normal = normal;
+        for slot in face.index {
+            let local = hull.verts[slot as usize];
+            let world = body.position + body.orientation.rotate(local);
+            let mut seen = false;
+            for other in verts.iter().take(count) {
+                if (*other - world).length_squared() < 1.0e-8 {
+                    seen = true;
+                    break;
+                }
+            }
+            if seen || count >= verts.len() {
+                continue;
+            }
+            verts[count] = world;
+            count += 1;
+        }
+    }
+    if count < 3 {
+        return count.min(out.len());
+    }
+    order_polygon(&mut verts[..count], face_normal);
+    let n = count.min(out.len());
+    out[..n].copy_from_slice(&verts[..n]);
+    n
+}
+
+fn order_polygon(verts: &mut [Vec3], normal: Vec3) {
+    let mut origin = Vec3::ZERO;
+    for vertex in verts.iter() {
+        origin += *vertex;
+    }
+    origin = origin / f32::from(u8::try_from(verts.len()).unwrap_or(1));
+    let tangent = perpendicular_axis(normal);
+    let bitangent = normal.cross(tangent);
+    verts.sort_by(|left, right| {
+        let left_offset = *left - origin;
+        let right_offset = *right - origin;
+        let left_angle = bitangent.dot(left_offset).atan2(tangent.dot(left_offset));
+        let right_angle = bitangent.dot(right_offset).atan2(tangent.dot(right_offset));
+        left_angle
+            .partial_cmp(&right_angle)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+fn perpendicular_axis(normal: Vec3) -> Vec3 {
+    let axis = if normal.x.abs() < 0.9 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
+    let side = normal.cross(axis);
+    let length = side.length();
+    if length < 1.0e-8 {
+        Vec3::X
+    } else {
+        side / length
+    }
+}
+
+fn clip_to_body(incident: &[Vec3], reference: &Body, normal: Vec3, out: &mut [Vec3]) -> usize {
+    match reference.shape {
+        Shape::Plane { .. } | Shape::Sphere { .. } | Shape::Capsule { .. } => {
+            let n = incident.len().min(out.len());
+            out[..n].copy_from_slice(&incident[..n]);
+            n
+        }
+        Shape::Box { .. } | Shape::Mesh(_) => {
+            let mut planes = [(Vec3::ZERO, 0.0_f32); 8];
+            let plane_count = reference_planes(reference, normal, &mut planes);
+            if plane_count == 0 {
+                let n = incident.len().min(out.len());
+                out[..n].copy_from_slice(&incident[..n]);
+                return n;
+            }
+            let mut current = [Vec3::ZERO; 16];
+            let mut n = incident.len().min(current.len());
+            current[..n].copy_from_slice(&incident[..n]);
+            let mut other = [Vec3::ZERO; 16];
+            for (plane_n, offset) in planes.iter().take(plane_count) {
+                n = clip_halfspace(&current[..n], *plane_n, *offset, &mut other);
+                current[..n].copy_from_slice(&other[..n]);
+            }
+            let kept = n.min(out.len());
+            out[..kept].copy_from_slice(&current[..kept]);
+            kept
+        }
+    }
+}
+
+/// Inward side planes of the face of `body` that faces `outward`.
+fn reference_planes(body: &Body, outward: Vec3, planes: &mut [(Vec3, f32); 8]) -> usize {
+    let mut polygon = [Vec3::ZERO; MAX_HULL_VERTS];
+    let Some(count) = face_polygon(body, outward, &mut polygon) else {
+        return 0;
+    };
+    if count < 3 {
+        return 0;
+    }
+    let mut center = Vec3::ZERO;
+    for vertex in polygon.iter().take(count) {
+        center += *vertex;
+    }
+    center = center / f32::from(u8::try_from(count).unwrap_or(1));
+    let mut n = 0_usize;
+    for index in 0..count {
+        if n >= planes.len() {
+            break;
+        }
+        let start = polygon[index];
+        let end = polygon[(index + 1) % count];
+        let edge = end - start;
+        if edge.length_squared() < 1.0e-10 {
+            continue;
+        }
+        let mut inward = outward.cross(edge);
+        let length = inward.length();
+        if length < 1.0e-8 {
+            continue;
+        }
+        inward = inward / length;
+        if inward.dot(center - start) < 0.0 {
+            inward = -inward;
+        }
+        planes[n] = (inward, inward.dot(start));
+        n += 1;
+    }
+    n
+}
+
+fn clip_halfspace(input: &[Vec3], normal: Vec3, offset: f32, output: &mut [Vec3]) -> usize {
+    if input.is_empty() {
+        return 0;
+    }
+    let inside = |point: Vec3| point.dot(normal) >= offset - 1.0e-5;
+    let mut count = 0_usize;
+    let mut previous = input[input.len() - 1];
+    let mut previous_in = inside(previous);
+    for &point in input {
+        let point_in = inside(point);
+        if point_in {
+            if !previous_in && count < output.len() {
+                output[count] = intersect_plane(previous, point, normal, offset);
+                count += 1;
+            }
+            if count < output.len() {
+                output[count] = point;
+                count += 1;
+            }
+        } else if previous_in && count < output.len() {
+            output[count] = intersect_plane(previous, point, normal, offset);
+            count += 1;
+        }
+        previous = point;
+        previous_in = point_in;
+    }
+    count
+}
+
+fn intersect_plane(from: Vec3, to: Vec3, normal: Vec3, offset: f32) -> Vec3 {
+    let start = from.dot(normal);
+    let end = to.dot(normal);
+    let denom = end - start;
+    if denom.abs() < 1.0e-8 {
+        return from;
+    }
+    let t = ((offset - start) / denom).clamp(0.0, 1.0);
+    from + (to - from) * t
+}
+
+/// Keep at most four points. The first is an extreme, then the furthest,
+/// then the two that add the most area, so a face does not collapse onto
+/// one corner.
+fn reduce_polygon(points: &[Vec3], out: &mut [Vec3; 4]) -> usize {
+    if points.len() <= 4 {
+        for (index, point) in points.iter().enumerate() {
+            out[index] = *point;
+        }
+        return points.len();
+    }
+    out[0] = points[0];
+    let mut far = 0_usize;
+    let mut far_d = -1.0_f32;
+    for (index, point) in points.iter().enumerate() {
+        let distance = (*point - out[0]).length_squared();
+        if distance > far_d {
+            far_d = distance;
+            far = index;
+        }
+    }
+    out[1] = points[far];
+    let mut best = 0_usize;
+    let mut best_area = -1.0_f32;
+    for (index, point) in points.iter().enumerate() {
+        let area = (out[1] - out[0]).cross(*point - out[0]).length_squared();
+        if area > best_area {
+            best_area = area;
+            best = index;
+        }
+    }
+    out[2] = points[best];
+    let mut fourth = 0_usize;
+    let mut fourth_area = -1.0_f32;
+    for (index, point) in points.iter().enumerate() {
+        let area = (out[1] - out[0]).cross(*point - out[0]).length_squared()
+            + (out[2] - out[1]).cross(*point - out[1]).length_squared();
+        if area > fourth_area {
+            fourth_area = area;
+            fourth = index;
+        }
+    }
+    out[3] = points[fourth];
+    4
+}
+
 fn contact_points(a: &Body, b: &Body, normal: Vec3, depth: f32) -> ([ContactPoint; 4], u8) {
     if let Some(point) = round_surface(a, b, normal) {
         return (
@@ -1326,6 +1721,9 @@ fn contact_points(a: &Body, b: &Body, normal: Vec3, depth: f32) -> ([ContactPoin
             ],
             1,
         );
+    }
+    if let Some(clipped) = face_clip(a, b, normal) {
+        return clipped;
     }
     let mut found = [(f32::NEG_INFINITY, Vec3::ZERO); 4];
     let mut count = 0_u8;

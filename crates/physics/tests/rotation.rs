@@ -247,8 +247,10 @@ fn two_boxes_colliding_off_centre_exchange_angular_momentum() {
     for _ in 0..40 {
         step(&mut world, DT);
     }
-    let spin_hitter = world.bodies[0].angular_velocity.length();
-    let spin_target = world.bodies[1].angular_velocity.length();
+    let hitter = &world.bodies[0];
+    let target = &world.bodies[1];
+    let spin_hitter = hitter.angular_velocity.length();
+    let spin_target = target.angular_velocity.length();
     assert!(
         spin_hitter > 0.15,
         "off-centre hitter gained no spin ({spin_hitter} rad/s)"
@@ -257,12 +259,22 @@ fn two_boxes_colliding_off_centre_exchange_angular_momentum() {
         spin_target > 0.15,
         "off-centre target gained no spin ({spin_target} rad/s)"
     );
-    let opposite = world.bodies[0].angular_velocity.dot(world.bodies[1].angular_velocity);
     assert!(
-        opposite < 0.0,
-        "spins did not oppose: {:?} and {:?}",
-        world.bodies[0].angular_velocity,
-        world.bodies[1].angular_velocity
+        target.velocity.x > 0.4,
+        "target took no forward momentum ({})",
+        target.velocity.x
+    );
+    assert!(
+        hitter.velocity.x < 2.4,
+        "hitter kept its speed ({})",
+        hitter.velocity.x
+    );
+    let shared = hitter.angular_velocity.y * target.angular_velocity.y;
+    assert!(
+        shared > 0.0,
+        "offset along z gives both bodies the same spin sense, got {:?} and {:?}",
+        hitter.angular_velocity,
+        target.angular_velocity
     );
 }
 
@@ -275,15 +287,25 @@ fn a_yawed_hull_pile_sleeps_without_walking() {
         &cube_tris(Vec3::new(4.0, 0.5, 4.0)),
     ));
     let cube = cube_tris(Vec3::new(0.45, 0.35, 0.45));
-    let yaws = [0.4_f32, 0.9, 1.3, 1.8, 2.2];
-    for (index, yaw) in yaws.into_iter().enumerate() {
-        let height = 0.4 + index as f32 * 0.75;
+    let layers = [
+        (0.4_f32, 0.4_f32),
+        (1.15, 0.9),
+        (1.9, 1.3),
+        (2.65, 1.8),
+        (3.4, 2.2),
+    ];
+    for (height, yaw) in layers {
         let mut body = Body::mesh(Vec3::new(0.0, height, 0.0), 1.0, &cube);
         body.friction = 0.7;
         body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
         world.insert(body);
     }
-    let start: Vec<Vec3> = world.bodies.iter().skip(1).map(|body| body.position).collect();
+    let start: Vec<Vec3> = world
+        .bodies
+        .iter()
+        .skip(1)
+        .map(|body| body.position)
+        .collect();
     for _ in 0..600 {
         step(&mut world, DT);
     }
@@ -304,10 +326,7 @@ fn a_yawed_hull_pile_sleeps_without_walking() {
             body.position
         );
     }
-    assert!(
-        drift < 0.75,
-        "yawed pile drifted {drift} m across the slab"
-    );
+    assert!(drift < 0.75, "yawed pile drifted {drift} m across the slab");
 }
 
 #[test]

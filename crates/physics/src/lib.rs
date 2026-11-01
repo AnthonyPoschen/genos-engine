@@ -487,13 +487,18 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
-    // Four narrow-phase passes. Each one re-reads the overlap, so a single
+    // Four positional passes. The narrow phase and the velocity rows run on
+    // the first pass; the later passes only separate the centres.
     // overstated depth cannot throw a body. The velocity rows run inside.
     let mut hits = 0_u32;
     for pass in 0..4 {
+        // The narrow phase is built once. Later passes only push the
+        // positions apart, so a hull pair does not rerun SAT three more times.
         hits = hits.saturating_add(contact::collide(
             &mut world.bodies,
             &mut world.pairs,
+            pass == 0,
+            pass == 0,
             pass == 0,
         ));
     }
@@ -713,23 +718,23 @@ fn second_off(x1: f32, x2: f32, x3: f32, y1: f32, y2: f32, y3: f32, volume: f32)
 
 fn invert_mat3(m: Mat3) -> Option<Mat3> {
     let c = m.cols;
-    let (a, b, d) = (c[0], c[3], c[6]);
-    let (e, f, g) = (c[1], c[4], c[7]);
-    let (h, i, j) = (c[2], c[5], c[8]);
-    let c00 = f * j - g * i;
-    let c01 = g * h - e * j;
-    let c02 = e * i - f * h;
-    let det = a * c00 + b * c01 + d * c02;
+    let (m00, m01, m02) = (c[0], c[3], c[6]);
+    let (m10, m11, m12) = (c[1], c[4], c[7]);
+    let (m20, m21, m22) = (c[2], c[5], c[8]);
+    let c00 = m11 * m22 - m12 * m21;
+    let c01 = m12 * m20 - m10 * m22;
+    let c02 = m10 * m21 - m11 * m20;
+    let det = m00 * c00 + m01 * c01 + m02 * c02;
     if det.abs() < 1.0e-14 {
         return None;
     }
     let inv_det = 1.0 / det;
-    let c10 = i * d - j * b;
-    let c11 = j * a - h * d;
-    let c12 = h * b - i * a;
-    let c20 = b * g - d * f;
-    let c21 = d * e - a * g;
-    let c22 = a * f - b * e;
+    let c10 = m21 * m02 - m22 * m01;
+    let c11 = m22 * m00 - m20 * m02;
+    let c12 = m20 * m01 - m21 * m00;
+    let c20 = m01 * m12 - m02 * m11;
+    let c21 = m02 * m10 - m00 * m12;
+    let c22 = m00 * m11 - m01 * m10;
     Some(Mat3::from_cols([
         c00 * inv_det,
         c01 * inv_det,
