@@ -2763,6 +2763,8 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
 // (lighting_compact.comp), traced as its own 4 x 4 hemisphere pattern so the
 // round's sample is not one band of the 64-ray set (wa = 1 keeps it whole).
 const float LIGHTING_WRC_CELL_SIZE = 0.2;
+// Texels on screen in the last frames (near the camera first) join the first settle tier.
+const int LIGHTING_SETTLE_SCREEN_FRAMES = 2;
 bool lighting_wrc_lone(uint slot) {
     return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE && lighting_lamp_settling();
 }

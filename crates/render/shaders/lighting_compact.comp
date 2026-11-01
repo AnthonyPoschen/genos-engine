@@ -132,8 +132,9 @@ void main() {
         // chain through the cells moves one bounce a round, not one a cycle.
         bool settling = lighting_lamp_settling();
         if (settling) {
-            // The WRC cells (the bounce chain) go every round; the rest in turns.
-            bool first = wrc;
+            // Near-camera errors show first: the WRC cells (the bounce chain)
+            // and the texels on screen go every round; the rest in turns.
+            bool first = wrc || lighting_sc_pixel_fresh(shown, LIGHTING_SETTLE_SCREEN_FRAMES);
             uint ms = wrc ? 1u : lighting_sc_entries(slot, true);
             atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
             if (first) {
