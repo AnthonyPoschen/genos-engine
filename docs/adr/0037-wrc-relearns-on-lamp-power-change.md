@@ -985,3 +985,5 @@ Not tested: e3fS (spread with the 16-entry ring). A step's entry falls out of th
 - It regresses first ≤5 % for x2 (600 ms → 5000 ms) and N+12 for lamp on (0.044 → 0.129). The likely cause is the far cells in the last turn slots.
 
 One e3fSR x0.5 frame (f1581) took 18.9 s. This is one sample and was not reproduced; box contention is suspected. The per-pixel A-SVGF change measurement for WRC cells has not been built. Fine texels already have the S74A gradient checks.
+
+Round 16 addendum (e3fR, RING32 without spread): on — N+12 0.180, mean N+1..12 0.341, first within 5% at 400 ms; m90 — N+12 0.019, 17 ms. Ring fix alone is worse on lamp-on than e3fSR (300 ms) or e3f (200 ms).
