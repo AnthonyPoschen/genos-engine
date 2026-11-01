@@ -350,18 +350,12 @@ fn world_with(scene_gltf: &genos_load::GltfScene) -> World {
     world
 }
 
-#[test]
-fn cooked_picture_matches_gltf_within_the_bc_bound_and_load_times_are_printed() {
-    let dir = temp("pic");
-    let source = fixture(&dir.join("src"));
-    let out = dir.join("cook");
-    cook_package(&source, &out);
-
+fn compare(label: &str, source: &Path, out: &Path, check: bool) {
     let cold = Instant::now();
-    let direct = genos_load::load_gltf_file(&source).unwrap();
+    let direct = genos_load::load_gltf_file(source).unwrap();
     let cold_ms = cold.elapsed().as_secs_f64() * 1e3;
     let warm_start = Instant::now();
-    let direct_warm = genos_load::load_gltf_file(&source).unwrap();
+    let direct_warm = genos_load::load_gltf_file(source).unwrap();
     let warm_gltf_ms = warm_start.elapsed().as_secs_f64() * 1e3;
     assert_eq!(geometry_of(&direct), geometry_of(&direct_warm));
 
@@ -389,7 +383,7 @@ fn cooked_picture_matches_gltf_within_the_bc_bound_and_load_times_are_printed() 
     let mut base = proof_world(true);
     let place = identity();
     let cold_c = Instant::now();
-    let report = base.add_cooked(&out, &source, &place, false, true);
+    let report = base.add_cooked(out, source, &place, false, true);
     let cold_cooked_ms = cold_c.elapsed().as_secs_f64() * 1e3;
     assert_eq!(report.fallback.len(), 0, "{:?}", report.fallback);
     assert_ne!(report.objects.len(), 0);
@@ -398,23 +392,73 @@ fn cooked_picture_matches_gltf_within_the_bc_bound_and_load_times_are_printed() 
 
     let mut again = proof_world(false);
     let warm_c = Instant::now();
-    let warm = again.add_cooked(&out, &source, &place, false, true);
+    let warm = again.add_cooked(out, source, &place, false, true);
     let warm_cooked_ms = warm_c.elapsed().as_secs_f64() * 1e3;
     assert_eq!(warm.objects.len(), report.objects.len());
 
     let (mean, p99) = picture_error(&gltf_pic, &cooked_pic);
-    eprintln!("cooked picture mean_abs {mean:.3}/255 p99 {p99}/255  (bound mean ≤ 3, p99 ≤ 16)");
     eprintln!(
-        "load ms  glTF cold {cold_ms:.2}  glTF warm {warm_gltf_ms:.2}  cooked cold {cold_cooked_ms:.2}  cooked warm {warm_cooked_ms:.2}"
+        "{label} picture mean_abs {mean:.3}/255 p99 {p99}/255  (bound mean ≤ 3, p99 ≤ 16)"
     );
     eprintln!(
-        "texture bytes  rgba atlases {rgba_bytes}  bc atlases {block_bytes}  delta {}",
+        "{label} load ms  glTF cold {cold_ms:.2}  glTF warm {warm_gltf_ms:.2}  cooked cold {cold_cooked_ms:.2}  cooked warm {warm_cooked_ms:.2}"
+    );
+    eprintln!(
+        "{label} texture bytes  rgba atlases {rgba_bytes}  bc atlases {block_bytes}  delta {}",
         i128::from(block_bytes) - i128::from(u64::try_from(rgba_bytes).unwrap())
     );
+    if check {
+        assert!(
+            mean <= 3.0,
+            "{label} mean absolute error {mean:.3}/255 exceeds 3/255"
+        );
+        assert!(p99 <= 16, "{label} p99 error {p99}/255 exceeds 16/255");
+    }
+}
+
+#[test]
+fn cooked_picture_matches_gltf_within_the_bc_bound_and_load_times_are_printed() {
+    let dir = temp("pic");
+    let source = fixture(&dir.join("src"));
+    let out = dir.join("cook");
+    cook_package(&source, &out);
+    compare("ramp", &source, &out, true);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn ensure_png(repo: &Path, rel: &str) {
+    let path = repo.join(rel);
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    if bytes.starts_with(b"version https://git-lfs.github.com/spec/v1") || bytes.is_empty() {
+        let status = std::process::Command::new("git")
+            .args(["lfs", "pull", "--include", rel])
+            .current_dir(repo)
+            .status()
+            .expect("git lfs pull");
+        assert!(status.success(), "git lfs pull {rel}");
+    }
+    let bytes = std::fs::read(&path).unwrap();
     assert!(
-        mean <= 3.0,
-        "mean absolute error {mean:.3}/255 exceeds 3/255"
+        bytes.starts_with(b"\x89PNG"),
+        "{rel} is not a PNG ({} bytes)",
+        bytes.len()
     );
-    assert!(p99 <= 16, "p99 error {p99}/255 exceeds 16/255");
+}
+
+#[test]
+fn sponza_floor_picture_matches_gltf_within_the_bc_bound() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let diffuse = "assets/built/sponza/textures/Sponza_Floor_diffuse.png";
+    let normal = "assets/built/sponza/textures/Sponza_Floor_normal.png";
+    ensure_png(&repo, diffuse);
+    ensure_png(&repo, normal);
+    let dir = temp("sponza-floor");
+    let source = fixture(&dir.join("src"));
+    let src = source.parent().unwrap();
+    std::fs::copy(repo.join(diffuse), src.join("color.png")).unwrap();
+    std::fs::copy(repo.join(normal), src.join("normal.png")).unwrap();
+    let out = dir.join("cook");
+    cook_package(&source, &out);
+    compare("sponza floor", &source, &out, true);
     let _ = std::fs::remove_dir_all(&dir);
 }
