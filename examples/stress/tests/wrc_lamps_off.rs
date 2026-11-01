@@ -29,8 +29,7 @@ fn mean(frame: &[u8]) -> f64 {
     sum as f64 / (frame.len() / 4 * 3).max(1) as f64
 }
 
-#[test]
-fn lamps_off_night_goes_black() {
+fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let size = window.pump();
     let (renderer, permit) =
@@ -63,8 +62,7 @@ fn lamps_off_night_goes_black() {
         lit = draw(&stage);
     }
     assert!(lit > 4.0, "the lit reference is lit: mean {lit:.2}");
-    stage.power = 0.0;
-    stage.apply();
+    off(&mut stage);
     let mut trail = Vec::new();
     let mut black_at = None;
     for f in 1..=600 {
@@ -76,7 +74,7 @@ fn lamps_off_night_goes_black() {
         }
     }
     eprintln!(
-        "wrc_lamps_off: never-lit {never:.3} lit {lit:.3} off first frames {:?} black at {black_at:?}",
+        "wrc_lamps_off {name}: never-lit {never:.3} lit {lit:.3} off first frames {:?} black at {black_at:?}",
         trail.iter().take(16).map(|m| format!("{m:.2}")).collect::<Vec<_>>()
     );
     assert!(never < 0.01 * lit, "never-lit night {never:.3} is not below 1 % of lit {lit:.3}");
@@ -86,4 +84,24 @@ fn lamps_off_night_goes_black() {
         "lamps off took {frames} frames to reach 1 % of lit (window {STEP_FRAMES}), last {:.3}",
         trail.last().copied().unwrap_or(0.0)
     );
+}
+
+#[test]
+fn lamps_off_night_goes_black() {
+    lamps_off_run("power", |stage| {
+        stage.power = 0.0;
+        stage.apply();
+    });
+}
+
+/// The same light leaving without a lamp-set change: every lamp moves far
+/// below the stage, so the cache's lamp-set reset does not fire and only
+/// the cache's own drain can take the bounce light out.
+#[test]
+fn lamps_moved_away_drain_without_a_reset() {
+    lamps_off_run("moved", |stage| {
+        for light in &mut stage.world.scene.lights {
+            light.position.y -= 1000.0;
+        }
+    });
 }
