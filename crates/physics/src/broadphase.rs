@@ -461,6 +461,18 @@ impl Broadphase {
         self.rebuild(bodies);
     }
 
+    /// Move one body between the static tree, the dynamic tree, and the plane list.
+    pub fn retarget(&mut self, bodies: &[Body], index: usize) {
+        let Ok(id) = u32::try_from(index) else {
+            return;
+        };
+        self.dynamics.retain(|stored| *stored != id);
+        self.planes.retain(|stored| *stored != id);
+        self.static_dirty = true;
+        self.static_settled = false;
+        self.note(bodies, index);
+    }
+
     pub fn forget(&mut self, index: usize) {
         let Ok(id) = u32::try_from(index) else {
             return;

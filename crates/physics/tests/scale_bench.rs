@@ -1,24 +1,3 @@
-#![cfg_attr(
-    test,
-    expect(
-        clippy::as_conversions,
-        reason = "grid coordinates stay small integers"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_possible_truncation,
-        reason = "grid coordinates stay small integers"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::cast_precision_loss,
-        reason = "grid coordinates stay small integers"
-    )
-)]
 //! Deterministic scale scenes. Prints bodies and microseconds per step.
 
 use std::time::Instant;
@@ -49,18 +28,21 @@ fn bench(name: &str, mut world: World, warm: u32, measure: u32) -> u128 {
     us
 }
 
-fn resting(count: i32) -> World {
+fn resting(count: u16) -> World {
     let mut world = World::new(GRAVITY);
     world.insert(Body::plane(Vec3::Y, 0.0));
-    let side = (count as f32).sqrt().ceil() as i32;
-    let mut placed = 0;
+    let mut side = 1_u16;
+    while u32::from(side) * u32::from(side) < u32::from(count) {
+        side += 1;
+    }
+    let mut placed = 0_u16;
     for x in 0..side {
         for z in 0..side {
             if placed == count {
                 return world;
             }
             world.insert(Body::sphere(
-                Vec3::new(x as f32 * 1.2, 0.5, z as f32 * 1.2),
+                Vec3::new(f32::from(x) * 1.2, 0.5, f32::from(z) * 1.2),
                 1.0,
                 0.5,
             ));
@@ -73,10 +55,10 @@ fn resting(count: i32) -> World {
 fn static_grid() -> World {
     let mut world = World::new(GRAVITY);
     let mut bodies = Vec::with_capacity(10_000);
-    for x in 0..100 {
-        for z in 0..100 {
+    for x in 0..100_u8 {
+        for z in 0..100_u8 {
             bodies.push(Body::cuboid(
-                Vec3::new(x as f32 * 2.0, 0.0, z as f32 * 2.0),
+                Vec3::new(f32::from(x) * 2.0, 0.0, f32::from(z) * 2.0),
                 0.0,
                 Vec3::new(0.9, 0.5, 0.9),
             ));

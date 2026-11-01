@@ -538,6 +538,15 @@ impl World {
         }
     }
 
+    /// A body changed mass or layer outside `insert`. Puts it in the matching tree.
+    pub fn reindex(&mut self, index: usize) {
+        let Some(body) = self.bodies.get_mut(index) else {
+            return;
+        };
+        broadphase::sync_layer(body);
+        self.broadphase.retarget(&self.bodies, index);
+    }
+
     /// Tombstone one body. Neighbours stay asleep.
     pub fn remove(&mut self, index: usize) {
         let Some(body) = self.bodies.get_mut(index) else {
