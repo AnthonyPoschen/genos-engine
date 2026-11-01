@@ -1004,14 +1004,25 @@ pub fn lit_target(
     lit_frame(display_w, display_h, edges, tile)
 }
 
+fn refresh_shift_cap() -> u32 {
+    std::env::var("GENOS_DBG_REFRESH_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(REFRESH_SHIFT_CAP)
+}
+
+/// Most halvings the controller adds to the cache refresh budget (#70 R4). The
+/// uncapped +6 at the floor starved cache refreshes through a turn. Box sweep
+/// (turn.rhai 640x360 High, turned mean |d| vs master): K=0 1.13, K=1 12.2,
+/// K=2 30.8, K=3 40.7, so 0. GENOS_DBG_REFRESH_CAP overrides it for a sweep.
+pub const REFRESH_SHIFT_CAP: u32 = 0;
+
 /// Cache refresh budget shift: the settings shift plus one per halving of the
-/// controller scale (each step halves every per-round refresh budget), capped at 7.
+/// controller scale (each step halves every per-round refresh budget), at most
+/// REFRESH_SHIFT_CAP extra, capped at 7.
 #[must_use]
 pub fn refresh_budget_shift(settings_shift: u32, controller: bool, scale: f64) -> u32 {
     let extra = if controller && scale.is_finite() && scale > 0.0 && scale < 1.0 {
         let halvings = (1.0 / scale.max(f64::from(SCALE_FLOOR))).log2().floor();
         // In 0..=6 after the floor clamp.
-        trunc_u32(halvings.clamp(0.0, 7.0))
+        trunc_u32(halvings.clamp(0.0, 7.0)).min(refresh_shift_cap())
     } else {
         0
     };
@@ -1550,14 +1561,15 @@ mod tests {
     }
 
     #[test]
-    fn the_controller_scale_halves_the_cache_refresh_budget() {
+    fn the_controller_scale_adds_at_most_the_cap_to_the_refresh_shift() {
+        let cap = REFRESH_SHIFT_CAP;
         assert_eq!(refresh_budget_shift(0, true, 1.0), 0);
-        assert_eq!(refresh_budget_shift(0, true, 0.6), 0);
-        assert_eq!(refresh_budget_shift(0, true, 0.5), 1);
-        assert_eq!(refresh_budget_shift(1, true, 0.25), 3);
+        assert_eq!(refresh_budget_shift(0, true, 0.5), 1.min(cap));
+        assert_eq!(refresh_budget_shift(1, true, 0.25), 1 + 2.min(cap));
         assert_eq!(refresh_budget_shift(0, false, 0.25), 0);
         assert_eq!(refresh_budget_shift(5, true, 0.0), 5);
-        assert_eq!(refresh_budget_shift(2, true, 1.0 / 64.0), 7);
+        assert_eq!(refresh_budget_shift(2, true, 1.0 / 64.0), 2 + cap);
+        assert_eq!(refresh_budget_shift(9, false, 1.0), 7);
     }
 
     #[test]
