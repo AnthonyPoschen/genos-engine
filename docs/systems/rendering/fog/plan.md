@@ -117,7 +117,7 @@ The preset grid (`w`, `h`, `d`, shadow rays, reuse taps) is the tunable. The ref
 
 ## F2 GPU half
 
-`FOG_F2_REFERENCE` on a froxel dispatch runs the same injection and front-to-back integral as `genos-fog-ref`: closed-form optical depth, two stratified shadow rays, the 4-neighbour reuse, and no tail past the reference far plane. The height-fog frame path does not set that flag, so its column stays the unshadowed integral. `crates/render/tests/froxel_gpu.rs` grades the Low grid on uniform density, height fog, a lamp, and a sun shaft. The gate is 1% relative where the reference is above 1e-3, otherwise 1e-5 absolute. Lavapipe timestamps are not the 4070 ceilings in ADR 0026.
+`FOG_F2_REFERENCE` on a froxel dispatch runs the same injection and front-to-back integral as `genos-fog-ref`: closed-form optical depth, two stratified shadow rays, the 4-neighbour reuse, and no tail past the reference far plane. The height-fog frame path does not set that flag, so its column stays the unshadowed integral. Potato still allocates no froxel, so a quit of that preset does not destroy an F2 pipeline. `crates/render/tests/froxel_gpu.rs` grades the Low grid on uniform density, height fog, a lamp, and a sun shaft. The gate is 1% relative where the reference is above 1e-3, otherwise 1e-5 absolute. Lavapipe timestamps are not the 4070 ceilings in ADR 0026.
 
 ### Probes
 
