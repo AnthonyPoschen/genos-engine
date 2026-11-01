@@ -1033,3 +1033,32 @@ but the picture still never comes within 5%. The other steps are unchanged withi
 Off is still limited by the cache. After the lamp-off frame the WRC bounce takes about 60
 frames to drain, and per-pixel screen history cannot speed up a source that is itself still
 stale. Shipped default unchanged. The hook stays debug-only.
+
+## Round 18
+
+### (a) Direct test: is lamp-off limited by stale cache light?
+
+Hooks (EVT=3, `hooks-r18.patch`): `GENOS_DBG_ORACLE_ALL=1` gives every cell lambda 1 (a
+full relight, with no range cut) on a lamp change. `GENOS_DBG_ORACLE_ALL=2` makes the compact
+pass zero every live cell not relit since the change, once, and then lets the cells relight.
+The table gives mean picture luminance (0-255) on the off step, where all 5 point lamps switch off at night:
+
+| run | pre | N+1 | N+12 | t60 | t300 | t900 | t1800 | t3600 |
+|---|---|---|---|---|---|---|---|---|
+| e1 (reference) | 134.8 | 100.4 | 55.9 | 23.4 | 28.8 | 20.5 | 19.6 | 19.4 |
+| e3fSRA | 135.7 | 73.7 | 53.0 | 22.6 | 24.4 | 20.0 | 19.5 | 19.1 |
+| oracle 1 (all relit) | 136.2 | 77.7 | 61.7 | 27.8 | 27.9 | 24.0 | – | – |
+| oracle 2 (all zeroed) | 136.3 | 0.6 | 0.0 | 0.0 | 0.0 | 0.0 | – | – |
+
+Confirmed, in a stronger form than expected:
+- **Nothing in the scene emits light after the step.** With the cache zeroed, the picture stays
+  black for 900 frames while about 850 cells a frame keep relighting. The direct pass is black
+  from N+1.
+- **The light left in e1 and e3fSRA is stale energy the cache keeps alive.** It plateaus at
+  about 19.4 out of 255 (14% of the pre-step picture) and is still there at t3600. It is not a
+  real source.
+- **A relight does not drain it.** Oracle 1 restarts every cell, but each fresh sample reads
+  neighbours that still hold the old light, so it is noisier and no darker.
+- **The off grade has been measuring against a wrong reference.** The e1 t900 frame used in
+  every earlier round is itself stale. That is why the off step "never converged" for every
+  variant. Lamp-off has to drop the stored light directly, not just restart it.
