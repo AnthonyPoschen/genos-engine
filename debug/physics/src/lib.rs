@@ -276,6 +276,29 @@ mod tests {
     }
 
     #[test]
+    fn resting_pile_settles_with_sleep_off() {
+        let mut session = Session::load(find("resting_pile").unwrap_or(&SCENES[0]));
+        // Sleep would zero the residual. The gate has to hold while every body stays awake.
+        session.world.sleep_time = 1.0e9;
+        session.run(240);
+        let last = session.records.last().copied().unwrap_or(session.step());
+        assert!(last.min_y > 0.3, "a cube sank to {}", last.min_y);
+        assert!(
+            last.max_speed.is_finite() && last.max_speed < 0.5,
+            "pile ran away at {}",
+            last.max_speed
+        );
+        let mut peak_spin = 0.0_f32;
+        for body in session.world.bodies.iter().skip(1) {
+            peak_spin = peak_spin.max(body.angular_velocity.length());
+        }
+        assert!(
+            peak_spin < 0.05,
+            "resting hull still spinning at {peak_spin} rad/s"
+        );
+    }
+
+    #[test]
     fn falling_edge_rests_on_the_static_edge() {
         let mut session = Session::load(find("hull_edges").unwrap_or(&SCENES[0]));
         session.run(60);
