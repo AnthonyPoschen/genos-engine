@@ -343,6 +343,12 @@ void main() {
                     // hints only nominate checks (lighting_compact.comp).
                     float lam = lighting_sc_lambda(slot);
                     k = (1.0 - lam) * k + lam;
+                    // Settling: the round's set whole here too. A-SVGF's lambda
+                    // ignored the hint, so a texel kept ~all its old light per
+                    // round and every WRC sample reading it drained ~2.5 %.
+                    if (hint >= 1.0) {
+                        k = 1.0;
+                    }
                 } else {
                     k = max(k, hint >= 1.0 ? 1.0 : min(hint, 0.9));
                 }

@@ -1274,6 +1274,7 @@ const uint LIGHTING_DRAIN_SAMPLE_AT = LIGHTING_SC_HIST_AT + 80u;
 const uint LIGHTING_DRAIN_HELD_AT = LIGHTING_SC_HIST_AT + 81u;
 const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
 const float LIGHTING_DRAIN_GAP = 0.01;
+const uint LIGHTING_DRAIN_HOLD = 8u;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
 uint lighting_sc_upd_override = ~0u;
@@ -2451,7 +2452,11 @@ void lighting_write_args() {
         uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
         if (dh > 0u) {
             float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
-            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = gap > LIGHTING_DRAIN_GAP ? 1u : 0u;
+            // Hysteresis: a gap above the threshold re-arms the flag for
+            // LIGHTING_DRAIN_HOLD rounds, so it clears only after that many
+            // agreeing rounds in a row, not on one lucky round.
+            uint fl = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
+            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = gap > LIGHTING_DRAIN_GAP ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
         }
         ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
