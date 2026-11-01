@@ -2774,21 +2774,26 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
     // surface reads texels keyed in the mover's frame, which move and turn with
     // it and keep their light (relit fast while it moves, as near any change).
+    // #142: one call site, so the lookup body is inlined once (two sites
+    // doubled the compose compile).
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
+    vec3 lpos = pos;
+    vec3 ln = n;
     if (om != ~0u) {
         lighting_obj_salt = lighting_mover(om, 1u).w;
-        vec4 r = lighting_world_irradiance_in(lighting_mover_to_local(om, pos, false), lighting_mover_to_local(om, n, true), pos, true);
-        lighting_obj_salt = 0.0;
-        return r;
+        lpos = lighting_mover_to_local(om, pos, false);
+        ln = lighting_mover_to_local(om, n, true);
     }
     // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
     // (an object that moved in the last LIGHTING_MOVER_KEEP frames) takes the screen
     // probes, which trace it as it is now, instead of world texels it sweeps
     // through.
-    if (mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
+    if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    return lighting_world_irradiance_in(pos, n, pos, false);
+    vec4 r = lighting_world_irradiance_in(lpos, ln, pos, om != ~0u);
+    lighting_obj_salt = 0.0;
+    return r;
 }
 // Debug view "texels" (lighting_compose.comp mode 9): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).
