@@ -309,6 +309,16 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
         &out.join("lighting_compose_hdr.comp.spv"),
         "GENOS_HDR_COMPOSE",
     );
+    // #142: the compose writes, run just before the read-only compose.
+    let maint = compile_glslc_define(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_maint.comp.spv"),
+        "GENOS_COMPOSE_MAINT",
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        maint.display()
+    ));
     let sun_hdr = compile_define(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),
