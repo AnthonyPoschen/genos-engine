@@ -100,12 +100,12 @@ const FACES: [(usize, f32, usize, usize); 6] = [
     (2, -1.0, 0, 1),
 ];
 
-pub fn build(mesh: &BakeMesh, s: &BakeSettings) -> Cards {
+/// Build over a BVH already built on `mesh.triangles`.
+pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> Cards {
     if mesh.triangles.is_empty() {
         return Cards::default();
     }
     let tris = &mesh.triangles;
-    let bvh = Bvh::build(tris);
     let b = mesh.bounds();
     let mut cards = Vec::new();
     for (face, &(axis, sign, u, v)) in FACES.iter().enumerate() {

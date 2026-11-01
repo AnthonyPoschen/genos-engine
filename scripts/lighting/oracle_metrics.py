@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Score a lighting harness run (scripts/lighting/oracle_run.sh) as compact JSON.
 
-Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn):
+Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn, and lamps-spin,
+lamps-switch from the lamps profile):
 
 * ref_err_near: near-camera-weighted error against the path-traced reference,
   sum(w |live - ref|) / sum(w ref) in linear luminance over 2x2 blocks, with
@@ -9,6 +10,14 @@ Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn):
 * ref_err: the same without the weight, for comparison.
 * grid_worst / grid_longest_run: the PR #94 checkerboard metric (grid_metric.py)
   over every saved frame of the uninterrupted pass.
+* grid_excess_worst / grid_excess_frame / grid_excess_longest_run: for every
+  frame step i-1 -> i where the oracle pass has a reference at both frames
+  (ORACLE_REF_EVERY_FRAME), the live grid score of the uninterrupted pass minus
+  the reference's grid score for the same step, clamped at 0. Real shadow
+  motion scores the same in both and cancels; only the checkerboard the live
+  cache adds is left. The run counts steps over 0.15, like grid_longest_run.
+  Proposed (pending Anthony) to replace grid_worst as the gate, which stays a
+  reported number.
 * unchanged: the recomputed-but-unchanged counter. Every lighting pass runs
   on every pixel each frame, so `px_share` is the share of 8x8 tiles whose
   picture did not change (|delta luminance| < 1/255) while it was recomputed;
@@ -16,8 +25,18 @@ Per scenario (sun-x100, sun-x10, sun-x1, spin, switch, turn):
   `refreshes_unchanged` the part of it that landed on unchanged tiles, assuming
   refreshes spread evenly over the screen (a screen-space proxy, not a
   per-texel count).
-* switch only: frames_to_ref, the first frame after the switch whose ref_err_near
+* switch and lamps-switch only: frames_to_ref, the first frame after the switch whose ref_err_near
   is within 1.1x of the settled frame's.
+
+* gloss-* scenarios (specular stage S0, docs/systems/lighting/specular-v3-design.md):
+  spec_err_near is ref_err_near over pixels whose reference specular share
+  (f*-reference-spec.png / f*-reference.png) is >= 0.2, worst and mean, and per
+  roughness row where the scenario names rows (gloss-sweep). spec_pop is the
+  worst frame-to-frame luminance step in the masked pixels of the live sequence
+  minus the same step in the reference sequence. gloss-switch adds
+  frames_to_ref as for switch. spec_ms is the median spec_ms column of the
+  gi_metrics CSV (lavapipe numbers only compare run against run). Without the
+  specular AOV the mask is reported as missing and the spec metrics are left out.
 
 `--self-test` checks the error, weight and counter on synthetic pictures.
 """
@@ -81,6 +100,28 @@ def unchanged(frames, tile=8, eps=1.0 / 255.0):
     return float(np.mean(shares)) if shares else 0.0
 
 
+def grid_excess(live, refs, tile=8, run_thr=0.15):
+    """live: {frame: luminance}, refs: {frame: luminance}. None when no step has both."""
+    worst, worst_at, run, longest, steps = 0.0, 0, 0, 0, 0
+    for i in sorted(refs):
+        if i - 1 not in refs or i not in live or i - 1 not in live:
+            run = 0
+            continue
+        gl, step = grid_metric.grid_score(live[i - 1], live[i], tile)
+        gr, _ = grid_metric.grid_score(refs[i - 1], refs[i], tile)
+        steps += 1
+        # Same rule as grid_metric.analyse: an unchanged frame has no pattern.
+        e = 0.0 if step < 0.002 else max(gl - gr, 0.0)
+        run = run + 1 if e > run_thr else 0
+        longest = max(longest, run)
+        if e > worst:
+            worst, worst_at = e, i
+    if not steps:
+        return None
+    return {"grid_excess_worst": round(worst, 4), "grid_excess_frame": worst_at,
+            "grid_excess_longest_run": longest, "grid_excess_steps": steps}
+
+
 def gi_refreshes(path):
     if not os.path.exists(path):
         return None
@@ -90,6 +131,93 @@ def gi_refreshes(path):
         return None
     return float(np.mean([float(r["cache_entries_refreshed"]) for r in rows])), \
         float(np.median([float(r["lighting_ms"]) for r in rows]))
+
+
+SPEC_SHARE = 0.2
+# gloss-sweep rows: five spheres at these roughness values, left to right,
+# metal row on top and dielectric row below (lighting_oracle_spec.rhai).
+SWEEP_ROUGHNESS = [0.05, 0.2, 0.4, 0.6, 0.9]
+
+
+def spec_mask(spec_ref, total_ref, share=SPEC_SHARE):
+    """Pixels where the reference light is at least `share` specular."""
+    return (total_ref > 1e-4) & (spec_ref >= share * np.maximum(total_ref, 1e-6))
+
+
+def masked_error(live, ref, mask, dist=None):
+    """ref_error's near-weighted share, over masked pixels only."""
+    d = np.abs(live - ref) * mask
+    r = ref * mask
+    w = np.ones_like(ref) if dist is None else 1.0 / np.maximum(dist, 0.5)
+    return float((w * d).sum() / ((w * r).sum() + 1e-6))
+
+
+def worst_step(frames, mask):
+    """Worst mean |delta luminance| between consecutive frames over the mask."""
+    if len(frames) < 2 or not mask.any():
+        return 0.0
+    return max(float(np.abs(b - a)[mask].mean()) for a, b in zip(frames, frames[1:]))
+
+
+def spec_pop(live, ref, mask):
+    return worst_step(live, mask) - worst_step(ref, mask)
+
+
+def sweep_rows(mask, cols=len(SWEEP_ROUGHNESS)):
+    """Masks for each roughness column (both metal and dielectric rows)."""
+    h, w = mask.shape
+    out = {}
+    for i, r in enumerate(SWEEP_ROUGHNESS[:cols]):
+        m = np.zeros_like(mask)
+        m[:, i * w // cols:(i + 1) * w // cols] = True
+        out[str(r)] = m & mask
+    return out
+
+
+def spec_ms(path):
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        rows = [r for r in csv.DictReader(f) if r.get("spec_ms") not in (None, "")]
+    return float(np.median([float(r["spec_ms"]) for r in rows])) if rows else None
+
+
+def score_spec(out, n, s):
+    per, lives, refs, mask_all = [], [], [], None
+    for lv in sorted(glob.glob(os.path.join(out, "oracle", n, "f*-live.png"))):
+        stem = lv[:-len("-live.png")]
+        ref, sp = stem + "-reference.png", stem + "-reference-spec.png"
+        if not (os.path.exists(ref) and os.path.exists(sp)):
+            continue
+        l, r = lin_luma(lv), lin_luma(ref)
+        if l.shape != r.shape:
+            continue
+        m = spec_mask(lin_luma(sp), r)
+        dp = stem + "-depth.png"
+        dist = distance(dp) if os.path.exists(dp) else None
+        f = int(re.search(r"f(\d+)$", stem).group(1))
+        per.append((f, masked_error(l, r, m, dist), m, l, r, dist))
+        lives.append(l); refs.append(r)
+        mask_all = m if mask_all is None else (mask_all | m)
+    if not per:
+        s["spec_mask"] = "missing"
+        return
+    errs = [p[1] for p in per]
+    worst = max(per, key=lambda p: p[1])
+    s.update(spec_frames=len(per), spec_err_near_worst=round(worst[1], 4),
+             spec_err_near_worst_frame=worst[0], spec_err_near_mean=round(float(np.mean(errs)), 4),
+             spec_mask_share=round(float(np.mean([p[2].mean() for p in per])), 4),
+             spec_pop=round(spec_pop(lives, refs, mask_all), 4))
+    if n == "gloss-sweep":
+        rows = {}
+        for k in SWEEP_ROUGHNESS:
+            rows[str(k)] = round(float(np.mean([masked_error(p[3], p[4], sweep_rows(p[2])[str(k)], p[5])
+                                                for p in per])), 4)
+        s["spec_err_near_by_roughness"] = rows
+    if n == "gloss-switch":
+        settled = per[-1][1]
+        s["frames_to_ref"] = next((f for f, e, *_ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
+        s["spec_err_near_by_frame"] = {str(p[0]): round(p[1], 4) for p in per}
 
 
 def score(out):
@@ -121,18 +249,56 @@ def score(out):
             dp = stem + "-depth.png"
             near, plain = ref_error(lin_luma(lv), lin_luma(ref), distance(dp) if os.path.exists(dp) else None)
             per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
+        refs = {int(re.search(r"f(\d+)-reference", p).group(1)): grid_metric.load(p)
+                for p in glob.glob(os.path.join(out, "oracle", n, "f*-reference.png"))}
+        if len(tfiles) >= 2 and refs:
+            live = {int(re.search(r"live-(\d+)", f).group(1)): grid_metric.load(f) for f in tfiles}
+            ex = grid_excess(live, refs)
+            if ex:
+                s.update(ex)
         if per:
             near = [p[1] for p in per]
             worst = max(per, key=lambda p: p[1])
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
                      ref_err_mean=round(float(np.mean([p[2] for p in per])), 4))
-            if n == "switch":
+            if n == "switch" or n == "lamps-switch":
                 settled = per[-1][1]
                 s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
                 s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}
+        if n.startswith("gloss-"):
+            score_spec(out, n, s)
+            ms = spec_ms(os.path.join(out, "gi", f"{n}-frames.csv"))
+            if ms is not None:
+                s["spec_ms_p50_lavapipe"] = round(ms, 2)
         res[n] = s
     return res
+
+
+def spec_self_test():
+    rng = np.random.default_rng(7)
+    diffuse = rng.uniform(0.2, 0.4, (32, 32)).astype(np.float32)
+    spec = np.zeros_like(diffuse)
+    spec[8:24, 8:24] = 0.6  # a glossy patch
+    total = diffuse + spec
+    m = spec_mask(spec, total)
+    mask_ok = bool(m[8:24, 8:24].all()) and not m[:8].any() and not m[24:].any()
+    e1 = masked_error(total + 0.05 * m, total, m)
+    e2 = masked_error(total + 0.10 * m, total, m)
+    e_off = masked_error(total + 0.10 * (~m), total, m)  # error outside the mask is ignored
+    linear = abs(e2 - 2 * e1) < 1e-4 and e1 > 0 and e_off < 1e-6
+    still = [total] * 5
+    spike = list(still); spike[2] = total + 0.3 * m
+    pop_caught = spec_pop(spike, still, m) > 0.25 and abs(spec_pop(still, still, m)) < 1e-6
+    lit = [total * 0.1, total, total]  # reference changes too: that step is not a pop
+    pop_ref = abs(spec_pop(lit, lit, m)) < 1e-6
+    rows = sweep_rows(np.ones((10, 50), bool))
+    rows_ok = len(rows) == 5 and all(v.sum() == 100 for v in rows.values())
+    ok = mask_ok and linear and pop_caught and pop_ref and rows_ok
+    print(json.dumps({"spec_mask": mask_ok, "spec_err_linear": [round(e1, 4), round(e2, 4)],
+                      "spec_pop_spike": pop_caught, "spec_pop_ref": pop_ref, "rows": rows_ok}))
+    print("spec self-test", "ok" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 def self_test():
@@ -147,12 +313,23 @@ def self_test():
     same, _ = ref_error(ref, ref, dist)
     still = [ref, ref, ref]
     moving = [ref, ref * 1.2, ref * 1.44]
-    ok = (same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
+    # A sliding edge in both live and reference cancels; a checkerboard only
+    # in live does not.
+    edge = [np.zeros((48, 48), np.float32) for _ in range(3)]
+    for k, e in enumerate(edge):
+        e[:, : 12 + 8 * k] = 0.5
+    board = [e.copy() for e in edge]
+    board[2] = board[2] + np.kron((np.indices((6, 6)).sum(0) % 2) * 0.2, np.ones((8, 8))).astype(np.float32)
+    ex_same = grid_excess(dict(enumerate(edge)), dict(enumerate(edge)))
+    ex_board = grid_excess(dict(enumerate(board)), dict(enumerate(edge)))
+    ok_ex = ex_same["grid_excess_worst"] == 0.0 and ex_board["grid_excess_worst"] > 0.15 \
+        and grid_excess({0: ref}, {5: ref}) is None
+    ok = (ok_ex and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
           and unchanged(still) == 1.0 and unchanged(moving) == 0.0)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)]}))
     print("self-test", "ok" if ok else "FAIL")
-    return 0 if ok and grid_metric.self_test() == 0 else 1
+    return 0 if ok and grid_metric.self_test() == 0 and spec_self_test() == 0 else 1
 
 
 def main():

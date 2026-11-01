@@ -14,13 +14,13 @@ The window does not lock the pointer when it opens. A click does not lock the po
 
 The compositor pings a mapped window (`xdg_wm_base.ping`). The answer is sent only while `Window::pump` or the seat dispatch reads the socket. Omarchy treats a missed ping as "Application not responding". The frame keeps the gap between dispatches inside 100 ms. `StallMeter` records the longest gap. The scene stores it as `EventLoopSettings.longest_stall_ms`.
 
-A scene file is read on a worker once the window is mapped. The frame draws a small loading picture and keeps pumping. Device waits, pipeline compiles, and copies larger than a megabyte run on the frame thread while a side thread dispatches the seat. That side thread stops before the next present or `pump`. Quit on `genos-lighting` joins the script thread, stops the MCP listener, and idles the device while the window is still mapped so that side thread can answer pings. It then destroys the device on the frame thread, destroys the window, and exits. Leaving the device for the driver to reclaim at `exit` races those threads and aborts in glibc (`corrupted size vs. prev_size`). A scene that is leaving is dropped on `genos-retire`, not on the frame thread. The current scene is not dropped on the way out.
+A scene file is read on a worker once the window is mapped. The frame draws a small loading picture and keeps pumping. Device waits, pipeline compiles, and copies larger than a megabyte run on the frame thread while a side thread dispatches the seat. That side thread stops before the next present or `pump`. Quit runs the app lifecycle below. A scene that is leaving is dropped on `genos-retire`, not on the frame thread. The current scene is not dropped on the way out.
 
 `lock_cursor` hides the cursor and confines it. `unlock_cursor` shows the cursor and lets it leave. Escape is a game action. The window does not bind Escape itself.
 
 `set_mode` asks for `WindowMode::Fullscreen` or `WindowMode::Windowed`. `WindowEvent::ModeChanged` arrives on a later pump, after the compositor applies the mode.
 
-`Window::open` is the player window. The class is `genos`. The title is `Genos`. The compositor can focus it and tile it.
+`Window::open` is the player window. The class is `genos`. The title is `Genos`. The compositor can focus it and tile it. The open attaches an opaque buffer before the first Vulkan present, so the toplevel is mapped and a close request is delivered before the first frame.
 
 `Window::open_proof` is the check window. The class is `genos-camera`. The title is `Genos Engine`. The Hyprland rule for that class floats the window and refuses focus. Checks pass `--proof` so they use this window. `make run` does not pass `--proof`.
 
@@ -34,7 +34,32 @@ The crate is `crates/window`, package `genos-window`.
 
 - `Window`, `Frame`, and `FocusGate` are in `src/lib.rs`.
 - `WindowEvent` and `WindowMode` are in `src/events.rs`.
+- The app lifecycle is in `src/lifecycle.rs`.
 - The Wayland seat, the pointer lock, and fullscreen are in `src/wayland_shim.c`.
+
+## App lifecycle
+
+`Lifecycle` owns the window and the device. Safe code cannot move either out. Shutdown is a state machine on the event thread: stop producers, drain the GPU, destroy resources, unmap, then exit. `Window::pump` runs before each step, so `xdg_wm_base.ping` is answered while the window is mapped.
+
+Producers are polled. A script thread is joined only when it has already finished. A thread that is still running is detached at once. Waiting out a join holds quit past the seat budget, and joining a worker blocked on the frame thread deadlocks. The MCP listener is dropped in that same step. Its accept thread is idle, so the join is short.
+
+The GPU drain does not call `vkDeviceWaitIdle`. One empty submit on the graphics queue, and one on the compute queue when that queue is distinct, is ordered after the last present. The machine polls those fences, the frame fences that have a submit in flight, the transfer fence when a copy is in flight, and the lighting world fence when a world submit is in flight. Each poll is one pump apart. A reset fence with no submit is not polled. The drain gives up after 48 ms and destruction continues. Destruction is a yield, then the lighting resources, the swapchain, the images and pipelines, `vkDestroyDevice`, the surface, and `vkDestroyInstance`. Each driver call runs while a side thread dispatches the seat. A real driver round-trips the Wayland socket inside `vkDestroySwapchainKHR` and `vkDestroyDevice`. If the client is not reading, that round-trip waits out the driver timeout and the compositor reports the window as not responding. The window is unmapped only after the device is gone. `genos_window::exit` flushes stdout and calls `_exit`, so the driver's atexit handler cannot wait a second time. It is the only way out of the process.
+
+`Renderer::open` returns a `ShutdownPermit`. `Lifecycle::new` is the constructor that consumes it. Dropping a live permit panics. Dropping the device without that release also panics, and that path does not call `vkDeviceWaitIdle`. In-frame device waits still pump the seat. A panic that is already unwinding leaks the device instead of waiting idle. The seat stays installed through destruction and is cleared when the window is unmapped.
+
+The longest gap between those pumps is printed as `lifecycle_quit_gap_ms=`. Each phase prints `lifecycle_phase_begin=<name>` before the call and `lifecycle_phase=<name> ms=<milliseconds>` when it returns, so a hang names the phase that has not finished. `lifecycle_quit_total_ms=` is the wall time from the quit request to the exit call, including the device drop and every drop after the window unmaps. `lifecycle_phase=exit_tail` is the stretch from the device drop to that call. `lifecycle_drain_forced=1` means a fence was still unsignaled after 48 ms and destruction continued. The budget is 100 ms for the quit gap, for each phase, and for the total. `--lifecycle-block-ms N` plants one wait of N milliseconds inside the device's fence poll (`drain_gpu`), with no pump inside the wait, so the quit-gap test can prove it catches a stall. Lavapipe signals a real fence at once. The plant is what fails the budget there. `GENOS_LIFECYCLE_BLOCK_MS` is the mirror and applies only when the flag was omitted. It is a test hook, not a player setting. A script thread that is still running is detached instead of joined.
+
+A close that arrives before the device opens drops the window and returns. A close that arrives during the device open, or `--lifecycle-close-early`, quits through this lifecycle before the frame loop. `GENOS_LIFECYCLE_CLOSE_EARLY` is the mirror and applies only when the flag was omitted. It is a test hook, not a player setting.
+
+Failure modes: a gap at or above 100 ms means teardown blocked the event thread (a device wait, a thread join, or a destroy step). A phase line at or above 100 ms names that step. Exit 134 and `corrupted size vs. prev_size` mean the device was left for the driver's exit handler while other threads were still alive. A panic containing `dropped outside the app lifecycle` means the permit or the device was dropped without `Lifecycle`. The probes are the phase lines, `lifecycle_quit_gap_ms`, `lifecycle_quit_total_ms`, the process exit code, `crates/window/tests/lifecycle_quit.rs`, and the permit tests in `crates/window/src/lifecycle.rs`. The quit-gap test covers the proof windows, the named windows (camera without `--proof`, stress and lighting with their panels), `genos-lighting --check`, the stress `lighting-ref` capture, and a quit while the script thread and the MCP listener are still running. It requires every phase and the total under 100 ms. It plants a 2000 ms fence on camera, stress, and lighting, and that plant must show `drain_gpu` at or above 1000 ms. It also passes `--lifecycle-close-early` on those three binaries and requires a quit through this lifecycle before any frame line.
+
+## Networking
+
+- Replicated state: none. The window, the seat, and the shutdown phase stay in the process that opened the surface.
+- Authority: that process. The compositor is the display server, not a game server.
+- Prediction / rollback: none. Pointer lock and mode are requests. The compositor confirms them on a later pump.
+- Determinism: shutdown polls fences for at most 48 ms. It does not wait an unbounded device idle. The quit gap is the longest dispatch interval. The phase lines are the per-step times.
+- Headless server: a gameplay server opens no window and does not run this lifecycle. `--headless` and `--proof` still map a window on a local compositor.
 
 ## Game use
 

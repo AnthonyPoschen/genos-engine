@@ -149,7 +149,7 @@ void main() {
     uint scale = max(gstats.ctrl_scale, 1u);
     uvec2 sp = (p / scale) * scale;
     uint sindex = sp.y * pc.dims.x + sp.x;
-    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[sindex].w);
+    vec3 direct = lighting_unpack_rgb9e5(gbuf_word(sindex, 3u));
     vec3 glow;
     if ((gstats.ctrl_bits & 1u) == 0u) {
         // The pixel direct pass did not run, so gbuf.w is still emission
@@ -157,7 +157,7 @@ void main() {
         // was never written. Reading that half unpacks uninitialised rgb9e5,
         // which is a solid red field with bright speckles.
         direct = vec3(0.0);
-        uint emitted = gbuf.px[index].w;
+        uint emitted = gbuf_word(index, 3u);
         glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
     } else {
         if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
@@ -170,7 +170,7 @@ void main() {
         }
     }
 #ifndef GENOS_COMPOSE_MAINT
-    gbuf.px[index] = uvec4(~0u);
+    gbuf_clear_pixel(index);
 #endif
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
@@ -232,7 +232,9 @@ void main() {
         direct = vec3(0.0);
         glow = vec3(0.0);
     }
-    vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+    vec3 c = (gstats.ctrl_bits & 2097152u) != 0u
+        ? direct + albedo * LAMBERT * bounce + glow
+        : albedo * LAMBERT * (direct + bounce) + glow;
     // The column is the integral through 64 m plus the height-fog tail. History
     // is off, so this is the pixel's own column and not a reprojection.
     // A zero fog header leaves the radiance alone. The scene image stores that result.

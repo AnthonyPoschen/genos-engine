@@ -13,9 +13,9 @@ void main() {
     // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
     // before that pass. The hash wavelet does not use these words.
     if (slot == 0u && (gstats.ctrl_bits & 524288u) != 0u) {
-        gstats.diag[61] = 0u;
-        gstats.diag[62] = 0u;
-        gstats.diag[63] = 0u;
+        gstats.diag[LIGHTING_DIAG_SCREEN_CHANGED] = 0u;
+        gstats.diag[LIGHTING_DIAG_SCREEN_FINE] = 0u;
+        gstats.diag[LIGHTING_DIAG_SCREEN_COARSE] = 0u;
     }
     if (lighting_dense()) {
         // S70A: the args pass (one group, after the counts are in).

@@ -111,6 +111,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-math",
+ "genos-window",
 ]
 
 [[package]]
@@ -127,6 +128,7 @@ version = "0.1.0"
 dependencies = [
  "genos-load",
  "genos-mesh",
+ "genos-window",
 ]
 
 [[package]]
@@ -282,6 +284,8 @@ name = "genos-render"
 version = "0.1.0"
 dependencies = [
  "genos-bake",
+ "genos-cook",
+ "genos-fog-ref",
  "genos-load",
  "genos-math",
  "genos-mesh",

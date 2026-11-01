@@ -15,7 +15,7 @@ crates/bake/src/sdf.rs 5
 crates/debug/src/image.rs 20
 crates/debug/src/noise_gate.rs 1
 crates/debug/src/png.rs 3
-crates/debug/src/reference.rs 24
+crates/debug/src/reference.rs 23
 crates/debug/src/script.rs 2
 crates/debug/src/tools.rs 10
 crates/debug/src/value.rs 4
@@ -45,9 +45,10 @@ crates/mcp/src/discover.rs 3
 crates/mcp/src/live.rs 1
 crates/mcp/tests/live_session.rs 1
 crates/math/src/media.rs 1
+crates/math/tests/brdf.rs 1
 crates/mesh/src/bvh.rs 5
 crates/mesh/tests/bvh.rs 2
-crates/physics/src/contact.rs 2
+crates/physics/src/contact.rs 0
 crates/physics/src/mesh.rs 8
 crates/render/src/aa_gpu.rs 2
 crates/render/src/debug_view.rs 1

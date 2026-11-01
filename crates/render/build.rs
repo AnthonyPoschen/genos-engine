@@ -273,6 +273,7 @@ fn rerun_shader_pieces() {
         "overlay.frag",
         "depth_mask.frag",
         "material_atlas.glsl",
+        "gbuffer_layout.glsl",
         "wire.vert",
         "wire.frag",
         "scene_rays.glsl",

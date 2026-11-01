@@ -17,6 +17,9 @@ Literature columns: GIBS (EA SEED 2021 surfels), DDGI (Majercik 2019 probes), Lu
 Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI —
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
+**Direct specular**: pixel direct light shaded with Appendix B `fresnel_mix` (diffuse `base × (1 − metallic) / π` scaled by `1 − F`, plus GGX `D · V · F`). `direct_specular` defaults off (Lambert on irradiance) until the 4070 cost check. Indirect light stays Lambert.
+Role: OUT · Literature: glTF 2.0 Appendix B; Filament `V_SmithGGXCorrelated` · More detail: [ADR 0025](../adr/0025-pbr-brdf-cpu-reference.md), [`pbr_brdf.glsl`](../../crates/render/shaders/pbr_brdf.glsl)
+
 **GI (indirect light)**: light that arrives after one or more bounces. `gi.enabled=false` skips every GI pass.
 Role: OUT · Literature: all of them · More detail: [../systems/gi-design.md](../systems/gi-design.md)
 
@@ -290,6 +293,8 @@ Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../
 **Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
+**App lifecycle**: the window-crate owner of shutdown. The event loop stops producers, polls GPU fences, destroys the device, unmaps, then exits. A quit that blocks the seat misses `xdg_wm_base.ping`.
+Role: TOOL · Literature: — (the seat ping is `xdg_wm_base.ping`) · More detail: [window.md](../systems/window.md)
 
 ### Specular, mirrors, portals, water
 Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. One term, one meaning.

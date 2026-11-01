@@ -316,6 +316,11 @@ pub struct DirectSettings {
     pub refresh_frames: u32,
     /// Pixel step. 1 lights every pixel. 2 lights every other pixel; compose copies it across.
     pub resolution_scale: u32,
+    /// Direct light uses the Appendix B mix (diffuse `base × (1 − metallic) / π`
+    /// scaled by `1 − F`, plus the GGX lobe). Off keeps the Lambert weight
+    /// `albedo * 0.254647909` on the summed irradiance. Off until the 4070
+    /// direct-pass cost is measured.
+    pub specular: bool,
 }
 
 /// Traced shadows. They share the direct dispatch; turning them off skips the
@@ -502,6 +507,105 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
 }
 
+/// Surface cache switches the renderer uses when nothing sets `sc_flags`
+/// (`lighting_cache.glsl` lighting_sc_flags).
+pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6_007_050;
+
+/// Debug isolate toggle bits (`experiments.toggles`): attribute a change to
+/// exactly one component.
+pub const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
+pub const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
+pub const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
+pub const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
+const LIGHTING_TOGGLE_NAMES: [(&str, u32); 4] = [
+    ("freeze_cache", LIGHTING_TOGGLE_FREEZE_CACHE),
+    ("direct_only", LIGHTING_TOGGLE_DIRECT_ONLY),
+    ("bounce_only", LIGHTING_TOGGLE_BOUNCE_ONLY),
+    ("freeze_probes", LIGHTING_TOGGLE_FREEZE_PROBES),
+];
+
+/// Experiment and debug knobs of the lighting frame. Every preset uses the
+/// defaults, so they never change a preset's picture. All apply on the next
+/// frame without a rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingExperimentSettings {
+    /// Key `cache_async`. Light cache rounds run on the async compute queue,
+    /// at most one in flight. Off keeps them in the frame. A failed async
+    /// submit turns it off for the rest of the run.
+    pub cache_async: bool,
+    /// Key `cache_hz`. Light cache rounds per second of wall time. `0` runs
+    /// one every frame.
+    pub cache_hz: f32,
+    /// Key `cache_picks`. Light cache rays take the weighted lamp pick.
+    pub cache_picks: bool,
+    /// Key `fill`. A pixel with no lit probe reads its lit neighbours.
+    pub fill: bool,
+    /// Key `young_only`. Once a probe-path scene's light has held a full
+    /// sweep, rounds relight young patches only. The surface cache ignores it.
+    pub young_only: bool,
+    /// Key `world_cap`. Frames a world cell (mode 2) or ray sets a surface
+    /// cache texel (mode 3) averages, 1 to 999. `0` keeps the mode's default
+    /// (32 for mode 2, 64 for mode 3).
+    pub world_cap: u32,
+    /// Key `sc_settle`. Surface cache: frames still before the debug tools
+    /// call the picture settled. `0` uses the change counter.
+    pub sc_settle: u32,
+    /// Key `sc_flags`. Surface cache switch bits (`lighting_cache.glsl`).
+    /// `surface_cache.blend` still forces bits 20 and 30.
+    pub sc_flags: u32,
+    /// Key `toggles`. Debug isolate words, comma separated: `freeze_cache`,
+    /// `direct_only`, `bounce_only`, `freeze_probes`, or `none`.
+    pub toggles: u32,
+}
+
+impl Default for LightingExperimentSettings {
+    fn default() -> Self {
+        Self {
+            cache_async: false,
+            cache_hz: 0.0,
+            cache_picks: false,
+            fill: true,
+            young_only: true,
+            world_cap: 0,
+            sc_settle: 0,
+            sc_flags: LIGHTING_DEFAULT_SC_FLAGS,
+            toggles: 0,
+        }
+    }
+}
+
+/// Toggle words to bits. Unknown words fail.
+pub fn parse_lighting_toggles(text: &str) -> Result<u32, String> {
+    let mut bits = 0;
+    for word in text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+    {
+        if word == "none" {
+            continue;
+        }
+        bits |= LIGHTING_TOGGLE_NAMES
+            .iter()
+            .find(|(name, _)| *name == word)
+            .map(|(_, bit)| *bit)
+            .ok_or_else(|| format!("unknown lighting toggle {word}"))?;
+    }
+    Ok(bits)
+}
+
+fn toggles_text(bits: u32) -> String {
+    let words: Vec<&str> = LIGHTING_TOGGLE_NAMES
+        .iter()
+        .filter(|(_, bit)| bits & bit != 0)
+        .map(|(name, _)| *name)
+        .collect();
+    if words.is_empty() {
+        "none".into()
+    } else {
+        words.join(",")
+    }
+}
+
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
 /// only when a size knob changes.
 #[derive(Clone, Debug, PartialEq)]
@@ -524,6 +628,8 @@ pub struct LightingSettings {
     /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
     /// Potato and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
+    /// Experiment and debug knobs. Defaults in every preset.
+    pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
@@ -541,8 +647,10 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {
-                s.lamp_pick =
-                    LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_SPATIAL_RADIUS);
+                s.lamp_pick = LampPickSettings::reservoir(
+                    LAMP_PICK_CANDIDATES_HIGH,
+                    LAMP_PICK_SPATIAL_RADIUS,
+                );
                 // Picture wavelet. The other presets keep the hash launch
                 // stored in `high_defaults`.
                 s.denoiser.screen = true;
@@ -636,6 +744,7 @@ impl LightingSettings {
                 max_lights: 0,
                 refresh_frames: 1,
                 resolution_scale: 1,
+                specular: false,
             },
             shadows: ShadowSettings {
                 enabled: true,
@@ -701,6 +810,7 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
     }
@@ -758,6 +868,12 @@ impl LightingSettings {
         self.lamp_pick.candidates = self.lamp_pick.candidates.clamp(1, 32);
         self.lamp_pick.rays = self.lamp_pick.rays.clamp(1, 4);
         self.lamp_pick.radius = self.lamp_pick.radius.min(64);
+        self.experiments.cache_hz = if self.experiments.cache_hz.is_finite() {
+            self.experiments.cache_hz.max(0.0)
+        } else {
+            0.0
+        };
+        self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
     }
 
@@ -1009,6 +1125,7 @@ impl LightingSettings {
         let _ = writeln!(out, "direct_lights={}", self.direct.max_lights);
         let _ = writeln!(out, "direct_refresh={}", self.direct.refresh_frames);
         let _ = writeln!(out, "direct_scale={}", self.direct.resolution_scale);
+        let _ = writeln!(out, "direct_specular={}", bit(self.direct.specular));
         let _ = writeln!(out, "shadows={}", bit(self.shadows.enabled));
         let _ = writeln!(out, "shadow_filter={}", self.shadows.filter.name());
         let _ = writeln!(out, "shadow_cell={}", num_text(self.shadows.cell_metres));
@@ -1126,6 +1243,16 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let x = &self.experiments;
+        let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
+        let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
+        let _ = writeln!(out, "cache_picks={}", bit(x.cache_picks));
+        let _ = writeln!(out, "fill={}", bit(x.fill));
+        let _ = writeln!(out, "young_only={}", bit(x.young_only));
+        let _ = writeln!(out, "world_cap={}", x.world_cap);
+        let _ = writeln!(out, "sc_settle={}", x.sc_settle);
+        let _ = writeln!(out, "sc_flags={}", x.sc_flags);
+        let _ = writeln!(out, "toggles={}", toggles_text(x.toggles));
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
@@ -1184,6 +1311,7 @@ impl LightingSettings {
             "direct_lights" => self.direct.max_lights = num_u32(value)?,
             "direct_refresh" => self.direct.refresh_frames = num_u32(value)?.max(1),
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
+            "direct_specular" => self.direct.specular = on(value)?,
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
                 self.shadows.filter = ShadowFilter::parse(value)
@@ -1210,6 +1338,19 @@ impl LightingSettings {
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
+            "cache_async" => self.experiments.cache_async = on(value)?,
+            "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
+            "cache_picks" => self.experiments.cache_picks = on(value)?,
+            "fill" => self.experiments.fill = on(value)?,
+            "young_only" => self.experiments.young_only = on(value)?,
+            "world_cap" => self.experiments.world_cap = num_u32(value)?.min(999),
+            "sc_settle" => self.experiments.sc_settle = num_u32(value)?,
+            "sc_flags" => {
+                self.experiments.sc_flags = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("sc_flags is a whole number, got {value}"))?
+            }
+            "toggles" => self.experiments.toggles = parse_lighting_toggles(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
             "probes" => self.probes.enabled = on(value)?,
@@ -1310,9 +1451,22 @@ impl LightingSettings {
         clippy::disallowed_methods,
         reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
     )]
-    pub fn apply_env(&mut self) {
+    pub fn apply_env(&mut self) -> Result<(), String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.apply_env_from(&refs, &|name| lighting_env(name).ok())
+    }
+
+    /// [`Self::apply_env`] over the given arguments and variable reader. A
+    /// malformed lighting argument or a variable its key rejects is an error,
+    /// not a silent skip. The preset, bounces, ambient and time mirrors stay
+    /// soft (an unparsable mirror is ignored).
+    fn apply_env_from(
+        &mut self,
+        refs: &[&str],
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        let lighting_env = |name: &str| env(name).ok_or(());
         let preset = lighting_env("GENOS_LIGHTING_PRESET").ok();
         let bounces = lighting_env("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = lighting_env("GENOS_LIGHTING_AMBIENT").ok();
@@ -1323,8 +1477,8 @@ impl LightingSettings {
         let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
-        let Ok(launch) = resolve_lighting_launch(
-            &refs,
+        let launch = resolve_lighting_launch(
+            refs,
             &LightingMirrors {
                 preset: preset.as_deref(),
                 bounces: bounces.as_deref(),
@@ -1337,15 +1491,14 @@ impl LightingSettings {
                 ray_budget: ray_budget.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
             },
-        ) else {
-            return;
-        };
+        )?;
         self.apply_launch(&launch);
         let keys = [
             ("GENOS_LIGHTING_DIRECT", "direct"),
             ("GENOS_LIGHTING_DIRECT_LIGHTS", "direct_lights"),
             ("GENOS_LIGHTING_DIRECT_REFRESH", "direct_refresh"),
             ("GENOS_LIGHTING_DIRECT_SCALE", "direct_scale"),
+            ("GENOS_LIGHTING_DIRECT_SPECULAR", "direct_specular"),
             ("GENOS_LIGHTING_SHADOWS", "shadows"),
             ("GENOS_LIGHTING_SHADOW_FILTER", "shadow_filter"),
             ("GENOS_LIGHTING_SHADOW_CELL", "shadow_cell"),
@@ -1398,10 +1551,23 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_LIGHTING_ASYNC", "cache_async"),
+            ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
+            ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
+            ("GENOS_LIGHTING_FILL", "fill"),
+            ("GENOS_LIGHTING_YOUNG_ONLY", "young_only"),
+            ("GENOS_LIGHTING_WORLD_CAP", "world_cap"),
+            ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
+            ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
+            ("GENOS_LIGHTING_TOGGLES", "toggles"),
         ];
         for (var, key) in keys {
+            if key == "direct_specular" && launch.direct_specular.is_some() {
+                continue;
+            }
             if let Ok(value) = lighting_env(var) {
-                let _ = self.set_key(key, &value);
+                self.set_key(key, &value)
+                    .map_err(|err| format!("{var}={value}: {err}"))?;
             }
         }
         if lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
@@ -1411,6 +1577,7 @@ impl LightingSettings {
         if lighting_env_flag("GENOS_LIGHTING_FULL_EFFORT") {
             self.apply_full_effort();
         }
+        Ok(())
     }
 
     fn apply_launch(&mut self, launch: &LightingLaunch) {
@@ -1438,6 +1605,9 @@ impl LightingSettings {
         }
         if let Some(rays) = launch.dormant_rays {
             self.surface_cache.dormant_rays = rays;
+        }
+        if let Some(specular) = launch.direct_specular {
+            self.direct.specular = specular;
         }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
@@ -1508,6 +1678,7 @@ struct LightingLaunch {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    direct_specular: Option<bool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1535,6 +1706,7 @@ enum LightingKind {
     FireflySigma,
     RayBudget,
     DormantRays,
+    DirectSpecular,
 }
 
 enum LightingFlag {
@@ -1547,6 +1719,7 @@ enum LightingFlag {
     FireflySigma(f32),
     RayBudget(u32),
     DormantRays(u32),
+    DirectSpecular(bool),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1622,6 +1795,7 @@ fn resolve_lighting_launch(
         dormant_rays: chosen
             .dormant_rays
             .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
+        direct_specular: chosen.direct_specular,
     })
 }
 
@@ -1636,6 +1810,7 @@ struct ChosenLighting {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    direct_specular: Option<bool>,
 }
 
 impl ChosenLighting {
@@ -1650,6 +1825,7 @@ impl ChosenLighting {
             LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
             LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
             LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
+            LightingFlag::DirectSpecular(on) => self.direct_specular = Some(on),
         }
     }
 }
@@ -1676,6 +1852,7 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
         "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
         "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
+        "lighting-direct-specular" => Some(LightingKind::DirectSpecular),
         _ => None,
     }
 }
@@ -1728,6 +1905,9 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         ),
         LightingKind::DormantRays => LightingFlag::DormantRays(
             num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::DirectSpecular => LightingFlag::DirectSpecular(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
         ),
     };
     Ok(Some(parsed))
@@ -1889,7 +2069,6 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_TILE", "GENOS_LIGHTING_TILE"),
     ("GENOS_GI2_TIME", "GENOS_LIGHTING_TIME"),
     ("GENOS_GI2_TOGGLES", "GENOS_LIGHTING_TOGGLES"),
-    ("GENOS_GI2_TOGGLES_FILE", "GENOS_LIGHTING_TOGGLES_FILE"),
     ("GENOS_GI2_UNFILLED", "GENOS_LIGHTING_UNFILLED"),
     ("GENOS_GI2_UNFILLED_DUMP", "GENOS_LIGHTING_UNFILLED_DUMP"),
     ("GENOS_GI2_UNFILLED_TINT", "GENOS_LIGHTING_UNFILLED_TINT"),
@@ -2062,6 +2241,23 @@ mod launch_tests {
         LightingMirrors::default()
     }
 
+    #[test]
+    fn apply_env_reports_a_bad_argument_or_key() {
+        let none = |_: &str| None;
+        let mut settings = LightingSettings::default();
+        let bad_arg = settings.apply_env_from(&["--bounces", "nope"], &none);
+        assert!(bad_arg.is_err_and(|err| err.contains("--bounces")));
+
+        let gi = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "nope".to_owned());
+        let bad_key = settings.apply_env_from(&[], &gi);
+        assert!(bad_key.is_err_and(|err| err.contains("GENOS_LIGHTING_GI=nope")));
+
+        let good = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "off".to_owned());
+        assert!(settings.apply_env_from(&["--bounces", "2"], &good).is_ok());
+        assert_eq!(settings.bounce.count, 2);
+        assert!(!settings.gi.enabled);
+    }
+
     fn hours_near(value: f32, hours: f32) {
         assert!((value - hours).abs() < 1.0e-4, "{value} is not {hours}");
     }
@@ -2209,6 +2405,19 @@ mod launch_tests {
         settings.apply_launch(&cli);
         assert!(settings.surface_cache.attach_movers);
         assert!(check_lighting_arg("--surface-cache-attach-movers", Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn direct_specular_argument_is_on_or_off() {
+        let on = resolve_lighting_launch(&["--lighting-direct-specular", "on"], &empty()).unwrap();
+        let mut settings = LightingSettings::default();
+        assert!(!settings.direct.specular);
+        settings.apply_launch(&on);
+        assert!(settings.direct.specular);
+        let off = resolve_lighting_launch(&["--lighting-direct-specular=off"], &empty()).unwrap();
+        settings.apply_launch(&off);
+        assert!(!settings.direct.specular);
+        assert!(check_lighting_arg("--lighting-direct-specular", Some("maybe")).is_err());
     }
 
     #[test]

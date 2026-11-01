@@ -16,6 +16,9 @@ layout(location = 5) flat out uint v_emit;
 layout(location = 6) flat out vec4 v_atlas;
 layout(location = 7) flat out vec4 v_normal_atlas;
 layout(location = 8) flat out float v_cutoff;
+layout(location = 9) flat out float v_rough;
+layout(location = 10) flat out float v_metal;
+layout(location = 11) flat out uint v_mat;
 invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
@@ -45,4 +48,14 @@ void main() {
     v_atlas = item.atlas;
     v_normal_atlas = item.normal_atlas;
     v_cutoff = item.extra.x;
+    // extra.y 0 is an unset record (identity instance). Negative is roughness 0.
+    float rough = item.extra.y;
+    if (rough == 0.0) {
+        rough = 1.0;
+    } else if (rough < 0.0) {
+        rough = 0.0;
+    }
+    v_rough = rough;
+    v_metal = item.extra.z;
+    v_mat = floatBitsToUint(item.extra.w);
 }

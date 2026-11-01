@@ -2,7 +2,7 @@
 
 use genos_fog_check::{evaluate, exit_code, format_lines, resolve, write_metrics};
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
@@ -13,9 +13,7 @@ fn main() {
             }
         }
     };
-    if code != 0 {
-        std::process::exit(code);
-    }
+    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
 enum RunError {

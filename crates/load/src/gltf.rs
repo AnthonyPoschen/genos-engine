@@ -253,6 +253,34 @@ pub(crate) fn decode_gltf(
     bytes: &[u8],
     resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
 ) -> Result<GltfScene, LoadError> {
+    decode_gltf_phased(bytes, resolve, &mut LoadPhases::default())
+}
+
+/// Wall time of each glTF load phase, for the cook tools' timing output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoadPhases {
+    /// Reading the file, the JSON, buffers and image bytes.
+    pub import: std::time::Duration,
+    /// PNG and JPEG decode.
+    pub decode: std::time::Duration,
+    /// Accessors, primitives, materials and the node tree.
+    pub meshes: std::time::Duration,
+    /// The mip chains.
+    pub mips: std::time::Duration,
+}
+
+/// [`decode_gltf`] that adds each phase's wall time to `phases`.
+pub(crate) fn decode_gltf_phased(
+    bytes: &[u8],
+    resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
+    phases: &mut LoadPhases,
+) -> Result<GltfScene, LoadError> {
+    let mut clock = std::time::Instant::now();
+    let mut lap = |slot: &mut std::time::Duration| {
+        let now = std::time::Instant::now();
+        *slot += now - clock;
+        clock = now;
+    };
     let (json, bin) = split_glb(bytes)?;
     let text = std::str::from_utf8(json).map_err(|_| LoadError::Unrecognized)?;
     let doc = genos_json::parse(text).map_err(|_| LoadError::Unrecognized)?;
@@ -290,18 +318,27 @@ pub(crate) fn decode_gltf(
         buffers: &buffers,
     };
 
-    let mut images = Vec::new();
+    // Read every image's bytes here (`resolve` is not Sync), then decode them
+    // on all cores. Embedded images are decoded straight from the buffer.
+    let mut encoded: Vec<std::borrow::Cow<'_, [u8]>> = Vec::new();
     for image in list(&doc, "images") {
-        let data = match (
-            image.get("uri").and_then(Value::as_str),
-            image.get("bufferView"),
-        ) {
-            (Some(uri), _) => read_uri(uri, resolve)?,
-            (None, Some(view)) => reader.view(index(view)?)?.to_vec(),
-            _ => return Err(LoadError::Unrecognized),
-        };
-        images.push(crate::decode_image(&data)?);
+        encoded.push(
+            match (
+                image.get("uri").and_then(Value::as_str),
+                image.get("bufferView"),
+            ) {
+                (Some(uri), _) => read_uri(uri, resolve)?.into(),
+                (None, Some(view)) => reader.view(index(view)?)?.into(),
+                _ => return Err(LoadError::Unrecognized),
+            },
+        );
     }
+    lap(&mut phases.import);
+    let images = parallel_map(&encoded, |data| crate::decode_image(data))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(encoded);
+    lap(&mut phases.decode);
     let materials = list(&doc, "materials")
         .iter()
         .map(|m| material(&doc, m, images.len()))
@@ -377,8 +414,10 @@ pub(crate) fn decode_gltf(
             stack.push((index(c)?, world, depth + 1));
         }
     }
+    lap(&mut phases.meshes);
     let mips = cook_mips(&images, &materials);
     let (resident_bytes, mip_fallback) = fit_mips(&mips);
+    lap(&mut phases.mips);
     Ok(GltfScene {
         meshes,
         materials,
@@ -419,11 +458,47 @@ fn level_colour(mip: &Mip) -> [f32; 4] {
 }
 
 fn cook_mips(images: &[Image], materials: &[PbrMaterial]) -> Vec<Vec<Mip>> {
-    images
+    let jobs: Vec<(&Image, MipSpace)> = images
         .iter()
         .zip(image_spaces(images.len(), materials))
-        .map(|(image, space)| mip_chain(image, space))
-        .collect()
+        .collect();
+    parallel_map(&jobs, |&(image, space)| mip_chain(image, space))
+}
+
+/// `f` over `items` on every core, in order. One item per job: images are few
+/// and uneven, so the threads take the next one as they finish.
+fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism()
+        .map_or(4, std::num::NonZeroUsize::get)
+        .min(items.len());
+    if threads <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(i) else { break };
+                        out.push((i, f(item)));
+                    }
+                    out
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| match w.join() {
+                Ok(out) => out,
+                Err(panic) => std::panic::resume_unwind(panic),
+            })
+            .collect()
+    });
+    done.sort_unstable_by_key(|d| d.0);
+    done.into_iter().map(|d| d.1).collect()
 }
 
 /// How each image is filtered, from the material slots that name it. An image
