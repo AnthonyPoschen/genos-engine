@@ -105,3 +105,29 @@ fn lamps_moved_away_drain_without_a_reset() {
         }
     });
 }
+
+/// Ground truth for the lit level `lamps_off_run` reaches: the CPU path-traced
+/// reference (unlimited bounces) of the same lit night, same pose and size,
+/// toned like the picture. Minutes on a CPU, so ignored by default:
+/// `--ignored --nocapture lit_reference_level`.
+#[test]
+#[ignore = "a CPU path trace, minutes"]
+fn lit_reference_level() {
+    let mix = LightMix { count: 32, dynamic_pct: 0, layout: Layout::Spread };
+    let mut stage = Stage::new(Scale::SMALL, 1, mix, 0.0, NIGHT, 120.0);
+    stage.sun_frozen = true;
+    stage.boxes_still = true;
+    stage.lamps_still = true;
+    stage.power = 1.0;
+    stage.apply();
+    let mut camera = Camera::opening();
+    camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
+    let mut setup = genos_debug::reference::RefSetup::from_camera(&stage.world.scene, &camera, WIDTH, HEIGHT, 64);
+    setup.noise_target = 0.01;
+    setup.max_spp = 16384;
+    setup.seconds = 900.0;
+    let r = genos_debug::reference::render(&setup);
+    let sum: u64 = r.image.rgb.iter().map(|&v| u64::from(v)).sum();
+    let level = sum as f64 / r.image.rgb.len().max(1) as f64;
+    eprintln!("wrc_lamps_off reference: lit {level:.3} spp {} noise {:.4} {:.0}s", r.spp, r.noise, r.seconds);
+}
