@@ -212,7 +212,21 @@ uint lighting_chg_bin(vec3 a, vec3 b) {
     return r < 0.002 ? 0u : (r < 0.01 ? 1u : (r < 0.05 ? 2u : 3u));
 }
 const bool LIGHTING_DIAG = false;
-void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG) atomicAdd(gstats.diag[i], v); }
+// gstats.diag words that carry live working state (not diagnostics). The
+// screen pass allocates its fine/coarse lists from SCREEN_LIST_* and decides
+// from the CHANGED/FINE/COARSE counts that compact clears each frame, so a
+// diagnostic write into them changes the picture. lighting_dg never writes
+// them; diagnostics must use other indices.
+const uint LIGHTING_DIAG_SCREEN_LIST_COARSE = 40u;
+const uint LIGHTING_DIAG_SCREEN_LIST_FINE = 41u;
+const uint LIGHTING_DIAG_SCREEN_CHANGED = 61u;
+const uint LIGHTING_DIAG_SCREEN_FINE = 62u;
+const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
+bool lighting_diag_reserved(uint i) {
+    return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
+        || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
+}
+void lighting_dg(uint i, uint v) { if (LIGHTING_DIAG && !lighting_diag_reserved(i)) atomicAdd(gstats.diag[i], v); }
 
 const float LIGHTING_CACHE_MATURE = 3.0;
 
