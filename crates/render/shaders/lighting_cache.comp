@@ -202,9 +202,9 @@ void main() {
     uint millionths = uint(clamp(change, 0.0, 1.0) * 1.0e6);
     atomicMax(gstats.max_change, millionths);
     atomicAdd(gstats.relit, 1u);
-    if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2 && old.w > 0.5) {
-        uint su = uint(clamp(ln, 0.0, 100.0) * 256.0);
-        uint hu = uint(clamp(lo, 0.0, 100.0) * 256.0);
+    if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_DRAIN_MATURE_W && old.w > LIGHTING_DRAIN_MATURE_SETS) {
+        uint su = uint(clamp(ln, 0.0, LIGHTING_DRAIN_LUM_MAX) * LIGHTING_DRAIN_SCALE);
+        uint hu = uint(clamp(lo, 0.0, LIGHTING_DRAIN_LUM_MAX) * LIGHTING_DRAIN_SCALE);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT], su);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_HELD_AT], hu);
         atomicAdd(gstats.wrc_sample_sum, su);

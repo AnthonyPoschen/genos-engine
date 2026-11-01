@@ -508,6 +508,10 @@ const uint LIGHTING_WRC_RING = 16u;
 // dimmed or brightened in place (1: all of it), 0 for one that moved or went out.
 const uint LIGHTING_WRC_RING_AT = LIGHTING_SC_HIST_AT + 17300u;
 const uint LIGHTING_WRC_RING_W = 10u;
+// Keep values (ring word 9) and how far a lamp may shift and still be in place.
+const float LIGHTING_KEEP_ALL = 1.0;
+const float LIGHTING_KEEP_NONE = 0.0;
+const float LIGHTING_LAMP_STILL = 1.0e-3;
 const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
@@ -1280,6 +1284,12 @@ const uint LIGHTING_DRAIN_SAMPLE_AT = LIGHTING_SC_HIST_AT + 80u;
 const uint LIGHTING_DRAIN_HELD_AT = LIGHTING_SC_HIST_AT + 81u;
 const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
 const float LIGHTING_DRAIN_GAP = 0.01;
+// Drain sums: only cells with this much sample weight (w) and held sets count,
+// each luminance clamped to LIGHTING_DRAIN_LUM_MAX and summed in 1/256 steps.
+const float LIGHTING_DRAIN_MATURE_W = 0.2;
+const float LIGHTING_DRAIN_MATURE_SETS = 0.5;
+const float LIGHTING_DRAIN_LUM_MAX = 100.0;
+const float LIGHTING_DRAIN_SCALE = 256.0;
 const uint LIGHTING_DRAIN_HOLD = 8u;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
@@ -2125,7 +2135,7 @@ bool lighting_gather_strict = false;
 float lighting_lamp_keep(vec3 p, uint updated);
 // The share of cell s's held light a strict gather reads (1: all of it).
 float lighting_gather_keep(vec3 p, uint s) {
-    return lighting_gather_strict ? lighting_lamp_keep(p, lighting_sc_updated(s)) : 1.0;
+    return lighting_gather_strict ? lighting_lamp_keep(p, lighting_sc_updated(s)) : LIGHTING_KEEP_ALL;
 }
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     if (!lighting_bounce_ok()) {
@@ -2214,7 +2224,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
-        if (keep <= 0.0) { lighting_hit_sunfrac = 0.0; }
+        if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
         return e.rgb * lighting_sc_sun_gain(slot) * keep;
     }
     return e.rgb;
@@ -2790,7 +2800,7 @@ float lighting_lamp_delta(vec3 p, uint updated) {
 // bound on its new light, so a dimmed lamp's bounce falls toward its new level
 // and never below it (0 for a lamp that moved or went out: its light leaves).
 float lighting_lamp_keep(vec3 p, uint updated) {
-    float keep = 1.0;
+    float keep = LIGHTING_KEEP_ALL;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
         uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
         uint f = ckeys.key[at + 8u];
@@ -2813,7 +2823,7 @@ void lighting_wrc_note_lamps() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     uint had = ckeys.key[LIGHTING_WRC_LAMPS_AT];
     uint noted = 0u;
-    float keep_all = 1.0;
+    float keep_all = LIGHTING_KEEP_ALL;
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_WRC_SNAP_AT + 4u * i;
@@ -2827,12 +2837,12 @@ void lighting_wrc_note_lamps() {
         bool recoloured = !fresh && ckeys.key[ca] != col;
         ckeys.key[ca] = col;
         float new_max = max(max(l.color.r, l.color.g), l.color.b);
-        bool in_place = !fresh && length(o.xyz - l.pos.xyz) <= 1.0e-3;
+        bool in_place = !fresh && length(o.xyz - l.pos.xyz) <= LIGHTING_LAMP_STILL;
         // A dim in place keeps every cell readable (1): read at new/old (a lower
         // bound) the half step still undershot to 60 of 85 (R28 g5), the relit
         // cells gathering too little while the rest refill.
-        float keep = in_place && new_max > 0.0 ? 1.0 : 0.0;
-        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
+        float keep = in_place && new_max > LIGHTING_KEEP_NONE ? LIGHTING_KEEP_ALL : LIGHTING_KEEP_NONE;
+        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > LIGHTING_LAMP_STILL || abs(o.w - l.color.w) > 1.0e-3;
         // A lamp that went out (range to 0) is a change too: its light leaves.
         if (moved && (l.color.w > 0.0 || (!fresh && o.w > 0.0))) {
             vec3 a = fresh ? l.pos.xyz : o.xyz;
