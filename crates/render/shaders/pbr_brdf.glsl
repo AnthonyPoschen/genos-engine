@@ -44,30 +44,8 @@ float pbr_fresnel_schlick(float f0, float v_dot_h) {
     return f0 + (1.0 - f0) * (m2 * m2 * m);
 }
 
-// Specular lobe F·D·V only, without the n·l factor. Dielectric F0 is 0.04.
-// The direct pass adds this to the engine Lambert weight. It does not replace
-// that weight with base/π: the tuned picture uses 0.254647909, and base/π
-// lifts every dielectric into the tone shoulder.
-vec3 pbr_specular(vec3 base_color, float metallic, float roughness,
-                  float n_dot_l, float n_dot_v, float n_dot_h, float n_cross_h_sq,
-                  float v_dot_h) {
-    if (n_dot_l <= 0.0 || n_dot_v <= 0.0) {
-        return vec3(0.0);
-    }
-    float alpha = pbr_alpha(roughness);
-    float dv = pbr_d_ggx(n_dot_h, n_cross_h_sq, alpha) * pbr_v_smith_ggx_correlated(n_dot_l, n_dot_v, alpha);
-    float m = clamp(metallic, 0.0, 1.0);
-    vec3 f = mix(
-        vec3(pbr_fresnel_schlick(PBR_DIELECTRIC_F0, v_dot_h)),
-        vec3(
-            pbr_fresnel_schlick(base_color.r, v_dot_h),
-            pbr_fresnel_schlick(base_color.g, v_dot_h),
-            pbr_fresnel_schlick(base_color.b, v_dot_h)),
-        m);
-    return f * dv;
-}
-
 // f(l, v) per channel, without the n·l factor.
+// Dielectric: (1 − F) · base / π + F · D · V. Metal: F(base) · D · V.
 vec3 pbr_eval(vec3 base_color, float metallic, float roughness,
               float n_dot_l, float n_dot_v, float n_dot_h, float n_cross_h_sq,
               float v_dot_h) {

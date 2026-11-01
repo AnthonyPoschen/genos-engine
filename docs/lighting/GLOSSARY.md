@@ -17,7 +17,7 @@ Literature columns: GIBS (EA SEED 2021 surfels), DDGI (Majercik 2019 probes), Lu
 Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI —
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
-**Direct specular**: the glTF specular lobe on pixel direct light (GGX `D`, height-correlated Smith `V`, Schlick `F`), added to the Lambert diffuse weight. `direct_specular=off` is Lambert only. Indirect light stays Lambert.
+**Direct specular**: pixel direct light shaded with Appendix B `fresnel_mix` (diffuse `base × (1 − metallic) / π` scaled by `1 − F`, plus GGX `D · V · F`). `direct_specular` defaults off (Lambert on irradiance) until the 4070 cost check. Indirect light stays Lambert.
 Role: OUT · Literature: glTF 2.0 Appendix B; Filament `V_SmithGGXCorrelated` · More detail: [ADR 0025](../adr/0025-pbr-brdf-cpu-reference.md), [`pbr_brdf.glsl`](../../crates/render/shaders/pbr_brdf.glsl)
 
 **GI (indirect light)**: light that arrives after one or more bounces. `gi.enabled=false` skips every GI pass.

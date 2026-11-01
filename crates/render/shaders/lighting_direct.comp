@@ -25,7 +25,6 @@ const float LAMP_PICK_HIST_LIFT = 0.02;
 // A stored depth of 0 is a miss. Exact and ReSTIR records stay positive.
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 const float DIRECT_DIR_EPS = 1.0e-6;
-const float DIRECT_LAMBERT = 0.254647909;
 void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
     uint v = lighting_pack_rgb9e5(light);
     uint at = lighting_kept_light_at() + h / 4u;
@@ -835,7 +834,9 @@ void main() {
                 vec3 cx = cross(ns, halfv);
                 float ncross = dot(cx, cx);
                 float vdh = dot(view, halfv);
-                spec += pbr_specular(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * add;
+                // add already includes n·l. pbr_eval is f without that factor:
+                // (1 − F) · base · (1 − metallic) / π + F · D · V, mixed by metallic.
+                spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * add;
             }
             if (k < list.suns.y) {
                 e_sun += add;
@@ -846,6 +847,7 @@ void main() {
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
         e_sun = vec3(0.0);
+        spec = vec3(0.0);
     }
     if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         uint ts = tdl & 0x3FFFFFFFu;
@@ -965,10 +967,11 @@ void main() {
         uint emitted = gbuf_word(idx, 3u);
         uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
         uint prev_e = outc.px[pixels + idx];
-        // Diffuse stays the engine Lambert weight. The lobe is only the specular term.
+        // Off: irradiance, and compose applies the Lambert weight.
+        // On: Appendix B outgoing radiance (pbr_eval already folded n·l into add).
         vec3 shown = e;
         if (lobe) {
-            shown = base * (1.0 - metal) * DIRECT_LAMBERT * e + spec;
+            shown = spec;
         }
         uint packed = lighting_pack_rgb9e5(shown);
         uint prev_d = 0u;

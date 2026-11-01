@@ -316,8 +316,10 @@ pub struct DirectSettings {
     pub refresh_frames: u32,
     /// Pixel step. 1 lights every pixel. 2 lights every other pixel; compose copies it across.
     pub resolution_scale: u32,
-    /// Direct light uses the glTF specular lobe (GGX plus diffuse). Off keeps
-    /// the Lambert weight `albedo * 0.254647909` on the summed irradiance.
+    /// Direct light uses the Appendix B mix (diffuse `base × (1 − metallic) / π`
+    /// scaled by `1 − F`, plus the GGX lobe). Off keeps the Lambert weight
+    /// `albedo * 0.254647909` on the summed irradiance. Off until the 4070
+    /// direct-pass cost is measured.
     pub specular: bool,
 }
 
@@ -742,7 +744,7 @@ impl LightingSettings {
                 max_lights: 0,
                 refresh_frames: 1,
                 resolution_scale: 1,
-                specular: true,
+                specular: false,
             },
             shadows: ShadowSettings {
                 enabled: true,

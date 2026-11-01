@@ -62,7 +62,7 @@ The Khronos glTF 2.0 specification, Appendix B (the BRDF), together with the Fil
 
 **This is the pick.** The file is already a glTF material. `BakeMesh::surface` already implements the diffuse and emissive lines. One function can be called from the G-buffer, a cache hit, and the path tracer, which is what a reference match needs.
 
-**Departures from Appendix B and from Filament.** The real-time picture evaluates the diffuse term only. Filament evaluates the specular lobe in the real-time shader. We store metallic and roughness and leave the lobe to a later lighting commit. Until that commit, a metal's Lambert picture is darker than the path tracer, and `picture_metal` stays `NOT-IMPLEMENTED`. A pass that paints the metal with its base colour fails `metal_diffuse`. F0 stays 0.04. `KHR_materials_ior` and `KHR_materials_specular` are kept on the import document and are not shaded.
+**Departures from Appendix B and from Filament.** Bounce, the cache, and the default picture evaluate the diffuse term only. `direct_specular` (default off until the 4070 cost check) shades pixel direct with Appendix B `fresnel_mix`. A metal's Lambert picture is darker than the path tracer, and `picture_metal` stays `NOT-IMPLEMENTED`. A pass that paints the metal with its base colour fails `metal_diffuse`. F0 stays 0.04. `KHR_materials_ior` and `KHR_materials_specular` are kept on the import document and are not shaded.
 
 ### B. OpenPBR as the runtime model
 
