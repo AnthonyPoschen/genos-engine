@@ -21,6 +21,7 @@ The crate is `crates/math`, package `genos-math`.
 - `Quat` is in `src/quat.rs`.
 - Fresnel, Snell, GGX, Beer–Lambert, mirror and portal maps, flat-water transmittance, and the Fresnel mirror-view budget are in `src/optics.rs`. The GLSL mirror is `crates/render/shaders/reflections.glsl`.
 - Participating-medium closed forms are in `src/media.rs`: transmittance, height-fog density, Henyey-Greenstein, the homogeneous in-scatter integral, and height-fog optical depth along a ray. `crates/render/shaders/media.glsl` is the GLSL mirror. `fog_along` and `height_fog_along` call the `f32` wrappers.
+- The hierarchical-Z screen-march reference is in `src/ssr.rs` ([ADR 0029](../adr/0029-reflections.md)). It is `f64`. It finds a hit in a depth buffer. It does not shade, and it does not call Vulkan.
 
 ## Game use
 
@@ -36,6 +37,8 @@ Positions, directions, and rotations stay `f32`. This crate does not build the V
 
 The medium closed forms are `f64` so the grade matches the analytic expression. The renderer calls the `f32` wrappers. A horizontal height-fog ray is `|cos θ| < 1e-4` (`HEIGHT_FOG_HORIZONTAL_COS`).
 
+The screen march is `f64` for the same reason. Its camera is the origin, looking down −Z, with the engine's Y-down pixel mapping. It is not `Camera`'s projection matrix. The renderer does not call it yet.
+
 ## Networking
 
 The closed forms are pure. Vectors are pure. Nothing here is replicated.
@@ -43,9 +46,10 @@ The closed forms are pure. Vectors are pure. Nothing here is replicated.
 - Replicated state: none.
 - Authority: none. Every caller evaluates the same function.
 - Prediction / rollback: none.
-- Determinism: the value is fixed by the arguments.
-- Headless server: the same functions. No grid and no picture.
+- Determinism: the value is fixed by the arguments. The hierarchical-Z march is fixed by the depth buffer, the ray, the thickness, and the step cap.
+- Headless server: the same functions. No grid and no picture. The march is one of those functions.
 
 ## Decisions
 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps engine math in this repository.
+- [ADR 0029](../adr/0029-reflections.md) puts the hierarchical-Z hit-finder here, proposed.
