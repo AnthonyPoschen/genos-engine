@@ -350,14 +350,7 @@ fn cross64(a: genos_fog_ref::V3, b: genos_fog_ref::V3) -> genos_fog_ref::V3 {
 }
 
 fn f32_of(value: f64) -> f32 {
-    #[allow(
-        clippy::as_conversions,
-        clippy::cast_possible_truncation,
-        reason = "fog-ref f64 narrows to the GPU f32 grid"
-    )]
-    {
-        value as f32
-    }
+    genos_render::pack_f32(value)
 }
 
 fn f2_job(

@@ -158,6 +158,18 @@ float froxel_sigma(vec3 p0, vec3 delta, float distance, vec3 centre) {
 // ADR 0026 F2. Bit 32 selects the fog-ref column: closed-form optical depth,
 // stratified shadow rays, 4-neighbour reuse, no history and no tail.
 const uint FROXEL_F2 = 32u;
+const float F2_JITTER_BIAS = 0.5;
+const float F2_BAYER_CELLS = 16.0;
+const float F2_DY_EPS = 1.0e-12;
+const float F2_TOP_FINITE = 1.0e19;
+const float F2_HEIGHT_REACH = 40.0;
+const float F2_LEG_UP = 1.0e-6;
+const float F2_LEG_FAR = 1.0e4;
+const float F2_AXIS_EPS = 1.0e-15;
+const float F2_SUN_OCCLUDE = 1.0e20;
+const float F2_LAMP_EPS = 1.0e-4;
+const float F2_COS_EPS = 1.0e-6;
+const float F2_TAU_EPS = 1.0e-9;
 
 bool froxel_f2_on() {
     return (fog.size.w & FROXEL_F2) != 0u;
@@ -167,7 +179,7 @@ float f2_jitter(uint col, uint row, uint slice, uint sample_i) {
     const uint bayer[16] = uint[16](0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
     const float phi = 0.6180339887498948;
     float stratum = float(bayer[(row % 4u) * 4u + col % 4u]);
-    float v = (stratum + 0.5) / 16.0 + float(slice) * phi + float(sample_i) * phi * phi;
+    float v = (stratum + F2_JITTER_BIAS) / F2_BAYER_CELLS + float(slice) * phi + float(sample_i) * phi * phi;
     return fract(v);
 }
 
@@ -189,7 +201,7 @@ float f2_tau(vec3 o, vec3 d, float t) {
     t = max(t, 0.0);
     if (fog.medium.z <= 0.0) {
         float inside;
-        if (abs(d.y) < 1.0e-12) {
+        if (abs(d.y) < F2_DY_EPS) {
             inside = o.y < fog.medium.y ? t : 0.0;
         } else {
             float cross_y = clamp((fog.medium.y - o.y) / d.y, 0.0, t);
@@ -198,7 +210,7 @@ float f2_tau(vec3 o, vec3 d, float t) {
         return max(fog.medium.x, 0.0) * inside;
     }
     float h = fog.medium.z;
-    if (abs(d.y) < 1.0e-12) {
+    if (abs(d.y) < F2_DY_EPS) {
         return fog.medium.x * exp(-o.y / h) * t;
     }
     return fog.medium.x * h / d.y * (exp(-o.y / h) - exp(-(o.y + t * d.y) / h));
@@ -216,21 +228,21 @@ float f2_leg(vec3 p, vec3 to_light) {
     bool finite_top = true;
     if (fog.medium.z <= 0.0) {
         top_y = fog.medium.y;
-        finite_top = top_y < 1.0e19;
+        finite_top = top_y < F2_TOP_FINITE;
     } else {
-        top_y = p.y + 40.0 * fog.medium.z;
+        top_y = p.y + F2_HEIGHT_REACH * fog.medium.z;
     }
-    if (to_light.y > 1.0e-6 && finite_top) {
+    if (to_light.y > F2_LEG_UP && finite_top) {
         return max((top_y - p.y) / to_light.y, 0.0);
     }
-    return 1.0e4;
+    return F2_LEG_FAR;
 }
 
 bool f2_blocks(vec3 bmin, vec3 bmax, vec3 o, vec3 d, float dist) {
     float near_t = 0.0;
     float far_t = dist;
     [[dont_unroll]] for (int axis = 0; axis < 3; axis++) {
-        if (abs(d[axis]) < 1.0e-15) {
+        if (abs(d[axis]) < F2_AXIS_EPS) {
             if (o[axis] < bmin[axis] || o[axis] > bmax[axis]) {
                 return false;
             }
@@ -269,7 +281,7 @@ float f2_direct(vec3 p, vec3 view, float u) {
         float tr = exp(-f2_tau(p, dir, reach));
         float mu = clamp(dot(dir, view), -1.0, 1.0);
         dirs[0] = dir;
-        occlude[0] = 1.0e20;
+        occlude[0] = F2_SUN_OCCLUDE;
         weight[0] = media_phase_hg(phase_g, mu) * fog.sun_color.r * tr;
         n = 1u;
     }
@@ -280,7 +292,7 @@ float f2_direct(vec3 p, vec3 view, float u) {
         }
         vec3 offset = fog.lamps[i].position.xyz - p;
         float r = length(offset);
-        if (r < 1.0e-4) {
+        if (r < F2_LAMP_EPS) {
             continue;
         }
         vec3 dir = offset / r;
@@ -322,7 +334,7 @@ struct F2Span {
 
 F2Span f2_span(uvec2 c, uint slice) {
     vec3 dir = normalize(froxel_offset(c));
-    float cos_v = max(dot(dir, fog.forward.xyz), 1.0e-6);
+    float cos_v = max(dot(dir, fog.forward.xyz), F2_COS_EPS);
     float t0 = f2_boundary(slice) / cos_v;
     float t1 = f2_boundary(slice + 1u) / cos_v;
     F2Span span;

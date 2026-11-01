@@ -97,7 +97,7 @@ void main() {
             F2Span span = f2_span(c, z);
             float tau = f2_tau(span.origin, span.dir, span.len);
             float source = f2_scatter(c, z);
-            float piece = tau > 1.0e-9
+            float piece = tau > F2_TAU_EPS
                 ? source * span.len * (1.0 - exp(-tau)) / tau
                 : source * span.len;
             inscatter += transmittance * vec3(piece);
