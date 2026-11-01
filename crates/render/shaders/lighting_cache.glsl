@@ -111,7 +111,7 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint unfilled_pad0;
     uint unfilled_pad1;
     // Drain check (cache pass, mature WRC cells): this round's fresh sample
-    // luminance and the held luminance it replaces, x256. Their gap says the
+    // luminance and the held luminance it replaces, x16. Their gap says the
     // cache still carries light that is leaving (lighting_gpu.rs settled).
     uint wrc_sample_sum;
     uint wrc_held_sum;
@@ -1266,6 +1266,10 @@ bool lighting_sc_light_quiet() {
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
+uint lighting_settle_turns();
+const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
+const uint LIGHTING_SETTLE_LAST_AT = LIGHTING_SC_HIST_AT + 77u;
+const uint LIGHTING_SETTLE_ROOM_AT = LIGHTING_SC_HIST_AT + 78u;
 // Drain check: the round's mature WRC sample and held luminance sums (x256),
 // and the flag the args pass sets from the last round's: their gap above
 // LIGHTING_DRAIN_GAP means the cache still holds light that is leaving (or
@@ -2449,6 +2453,13 @@ void lighting_write_args() {
     if (lighting_world_mode() == 3u) {
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
+        // While a lamp change settles the young list (every cell and texel, in
+        // turns, lighting_settle_turns) takes the whole room, not only the base
+        // share, so the cache gets as many full bounce rounds as it can.
+        uint young_room = (lighting_lamp_settling() ? lighting_sc_room() : lighting_sc_base_room()) >> sh;
+        ckeys.key[LIGHTING_SETTLE_ROOM_AT] = young_room;
+        ckeys.key[LIGHTING_SETTLE_LAST_AT] = ckeys.key[LIGHTING_SETTLE_COUNT_AT];
+        ckeys.key[LIGHTING_SETTLE_COUNT_AT] = 0u;
         uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
         if (dh > 0u) {
             float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
@@ -2461,7 +2472,7 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
-        uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
+        uint first = min(lighting_young_count(), young_room);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
@@ -2540,7 +2551,7 @@ uint lighting_cache_batch_slot(uint j) {
             return ~0u;
         }
     }
-    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? lighting_sc_base_room() >> lighting_sc_budget_shift() : room);
+    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? (ckeys.key[LIGHTING_SETTLE_ROOM_AT] != 0u ? ckeys.key[LIGHTING_SETTLE_ROOM_AT] : lighting_sc_base_room() >> lighting_sc_budget_shift()) : room);
     if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
@@ -2712,6 +2723,14 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
 // the others), so the whole cache is draining or filling until then: every texel
 // is due each round (a whole set, lighting_compact.comp), the old light leaving
 // one bounce per round.
+// Settle turns: the batch entries every cell and texel would take this round
+// (counted by the compact pass) and the young room the args pass gave last
+// round. Each takes its whole set one round in lighting_settle_turns, by hash,
+// so a full relight is spread evenly over that many rounds.
+uint lighting_settle_turns() {
+    uint room = max(ckeys.key[LIGHTING_SETTLE_ROOM_AT], 1u);
+    return clamp((ckeys.key[LIGHTING_SETTLE_LAST_AT] + room - 1u) / room, 1u, 64u);
+}
 bool lighting_lamp_settling() {
     if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
         return true;

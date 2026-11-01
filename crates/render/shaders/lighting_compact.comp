@@ -128,6 +128,14 @@ void main() {
         // every cell, not only those inside a lamp's range, takes a whole set
         // each round through the young list, as a burst does.
         bool settling = lighting_lamp_settling();
+        if (settling) {
+            uint ms = lighting_sc_entries(slot, true);
+            atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
+            if (((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns()) != 0u) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
+        }
         if (wrc && !burst && !settling && LIGHTING_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
             if (lighting_sc_expired(last, shown)) {

@@ -76,6 +76,9 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
     for f in 1..=600 {
         let m = draw(&stage);
         trail.push(m);
+        if f % 100 == 0 {
+            eprintln!("wrc_lamps_off {name}: off frame {f} mean {m:.2}");
+        }
         if m < 0.01 * lit {
             black_at = Some(f);
             break;
