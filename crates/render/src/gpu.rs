@@ -283,8 +283,6 @@ pub struct Renderer {
     gpu: Gpu,
     /// The world identity drawn last (0 before the first draw).
     world_identity: u64,
-    /// The lamp set drawn last: count and colors, not positions.
-    lamp_set: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -325,7 +323,6 @@ impl Renderer {
                 height,
                 wire_on: false,
                 world_identity: 0,
-                lamp_set: 0,
                 memory: FrameMemory::default(),
                 shapes: crate::pool::MeshPool::default(),
                 overlay_rects: Vec::new(),
@@ -845,36 +842,10 @@ impl Renderer {
             }
             self.world_identity = world.identity();
         }
-        // A lamp added, removed or recolored is a lighting scene change too: the
-        // cache never drains bounce from a lamp that is gone (a lamp switched off
-        // left ~29/255 on the corridor floor for good). Moving lamps keep their
-        // cache; the incremental path follows them. Suns (a non-zero direction)
-        // are left out: a sun or sky change is followed incrementally too, so
-        // adding or recoloring one must not drop every probe's rays.
-        let lamp_set = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            let lamps = || {
-                world
-                    .scene
-                    .lights
-                    .iter()
-                    .filter(|light| light.direction == genos_scene::Vec3::ZERO)
-            };
-            lamps().count().hash(&mut hasher);
-            for light in lamps() {
-                for c in light.color {
-                    c.to_bits().hash(&mut hasher);
-                }
-            }
-            hasher.finish()
-        };
-        if lamp_set != self.lamp_set {
-            if self.lamp_set != 0 {
-                self.reset_lighting_cache();
-            }
-            self.lamp_set = lamp_set;
-        }
+        // A lamp added, removed, recoloured or dimmed is followed incrementally
+        // (lighting_wrc_note_lamps: the change ring and the settle rounds drain
+        // the old bounce), not by dropping the cache: a reset showed the frame
+        // after a power step with no bounce at all, a pop below both levels.
         self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
