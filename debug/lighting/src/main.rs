@@ -2187,6 +2187,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_preset" => "Preset",
         "lighting_bounces" => "Bounce count",
         "lighting_direct" => "Direct light",
+        "lighting_direct_specular" => "Direct specular",
         "lighting_direct_refresh" => "Direct refresh frames",
         "lighting_gi_refresh" => "GI refresh frames",
         "lighting_budget_shift" => "Ray budget shift",

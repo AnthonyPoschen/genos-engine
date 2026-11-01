@@ -316,6 +316,9 @@ pub struct DirectSettings {
     pub refresh_frames: u32,
     /// Pixel step. 1 lights every pixel. 2 lights every other pixel; compose copies it across.
     pub resolution_scale: u32,
+    /// Direct light uses the glTF specular lobe (GGX plus diffuse). Off keeps
+    /// the Lambert weight `albedo * 0.254647909` on the summed irradiance.
+    pub specular: bool,
 }
 
 /// Traced shadows. They share the direct dispatch; turning them off skips the
@@ -572,7 +575,10 @@ impl Default for LightingExperimentSettings {
 /// Toggle words to bits. Unknown words fail.
 pub fn parse_lighting_toggles(text: &str) -> Result<u32, String> {
     let mut bits = 0;
-    for word in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
+    for word in text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+    {
         if word == "none" {
             continue;
         }
@@ -639,8 +645,10 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {
-                s.lamp_pick =
-                    LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_SPATIAL_RADIUS);
+                s.lamp_pick = LampPickSettings::reservoir(
+                    LAMP_PICK_CANDIDATES_HIGH,
+                    LAMP_PICK_SPATIAL_RADIUS,
+                );
                 // Picture wavelet. The other presets keep the hash launch
                 // stored in `high_defaults`.
                 s.denoiser.screen = true;
@@ -734,6 +742,7 @@ impl LightingSettings {
                 max_lights: 0,
                 refresh_frames: 1,
                 resolution_scale: 1,
+                specular: true,
             },
             shadows: ShadowSettings {
                 enabled: true,
@@ -1114,6 +1123,7 @@ impl LightingSettings {
         let _ = writeln!(out, "direct_lights={}", self.direct.max_lights);
         let _ = writeln!(out, "direct_refresh={}", self.direct.refresh_frames);
         let _ = writeln!(out, "direct_scale={}", self.direct.resolution_scale);
+        let _ = writeln!(out, "direct_specular={}", bit(self.direct.specular));
         let _ = writeln!(out, "shadows={}", bit(self.shadows.enabled));
         let _ = writeln!(out, "shadow_filter={}", self.shadows.filter.name());
         let _ = writeln!(out, "shadow_cell={}", num_text(self.shadows.cell_metres));
@@ -1299,6 +1309,7 @@ impl LightingSettings {
             "direct_lights" => self.direct.max_lights = num_u32(value)?,
             "direct_refresh" => self.direct.refresh_frames = num_u32(value)?.max(1),
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
+            "direct_specular" => self.direct.specular = on(value)?,
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
                 self.shadows.filter = ShadowFilter::parse(value)
@@ -1474,6 +1485,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_DIRECT_LIGHTS", "direct_lights"),
             ("GENOS_LIGHTING_DIRECT_REFRESH", "direct_refresh"),
             ("GENOS_LIGHTING_DIRECT_SCALE", "direct_scale"),
+            ("GENOS_LIGHTING_DIRECT_SPECULAR", "direct_specular"),
             ("GENOS_LIGHTING_SHADOWS", "shadows"),
             ("GENOS_LIGHTING_SHADOW_FILTER", "shadow_filter"),
             ("GENOS_LIGHTING_SHADOW_CELL", "shadow_cell"),
