@@ -502,10 +502,12 @@ uint lighting_sc_base_room() {
 }
 const uint LIGHTING_WRC_RING_HEAD_AT = LIGHTING_SC_HIST_AT + 69u;
 const uint LIGHTING_WRC_RING = 16u;
-// S65C: 9 words an entry (old place, new place, range, brightest channel,
-// frame), past the trickle list.
+// S65C: 10 words an entry (old place, new place, range, brightest channel,
+// frame, keep), past the trickle list. Keep is whether a point's held light stays
+// readable while it settles: 1 for a lamp
+// dimmed or brightened in place (1: all of it), 0 for one that moved or went out.
 const uint LIGHTING_WRC_RING_AT = LIGHTING_SC_HIST_AT + 17300u;
-const uint LIGHTING_WRC_RING_W = 9u;
+const uint LIGHTING_WRC_RING_W = 10u;
 const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
@@ -2115,12 +2117,15 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
-// While lamps settle, a cache ray (lighting_direct.comp) reads only cells
-// relit since the change: old light can't feed back into the new sets, and
+// While lamps settle, a cache ray (lighting_direct.comp) reads a cell not relit
+// since the change at only the share the change surely left (lighting_lamp_keep):
+// old light can't feed back into the new sets past its new level, and
 // multi-bounce is kept through the cells already relit.
 bool lighting_gather_strict = false;
-bool lighting_gather_skip(vec3 p, uint s) {
-    return lighting_gather_strict && lighting_wrc_lamp_changed(p, lighting_sc_updated(s));
+float lighting_lamp_keep(vec3 p, uint updated);
+// The share of cell s's held light a strict gather reads (1: all of it).
+float lighting_gather_keep(vec3 p, uint s) {
+    return lighting_gather_strict ? lighting_lamp_keep(p, lighting_sc_updated(s)) : 1.0;
 }
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     if (!lighting_bounce_ok()) {
@@ -2140,8 +2145,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
-                    if (lighting_gather_skip(pos, s)) { return vec3(0.0); }
-                    return v.rgb * lighting_sc_sun_gain(s);
+                    return v.rgb * lighting_sc_sun_gain(s) * lighting_gather_keep(pos, s);
                 }
             }
         }
@@ -2209,8 +2213,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        if (lighting_gather_skip(pos, slot)) { lighting_hit_sunfrac = 0.0; return vec3(0.0); }
-        return e.rgb * lighting_sc_sun_gain(slot);
+        float keep = lighting_gather_keep(pos, slot);
+        if (keep <= 0.0) { lighting_hit_sunfrac = 0.0; }
+        return e.rgb * lighting_sc_sun_gain(slot) * keep;
     }
     return e.rgb;
 }
@@ -2779,12 +2784,36 @@ float lighting_lamp_delta(vec3 p, uint updated) {
     }
     return delta;
 }
+// The share of p's light from before frame `updated` that the lamp changes since
+// then leave for sure (the smallest keep of the ring entries reaching p; 1 when
+// none does). A cell not relit since reads its held light times this: a lower
+// bound on its new light, so a dimmed lamp's bounce falls toward its new level
+// and never below it (0 for a lamp that moved or went out: its light leaves).
+float lighting_lamp_keep(vec3 p, uint updated) {
+    float keep = 1.0;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        keep = min(keep, uintBitsToFloat(ckeys.key[at + 9u]));
+    }
+    return keep;
+}
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
 void lighting_wrc_note_lamps() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     uint had = ckeys.key[LIGHTING_WRC_LAMPS_AT];
     uint noted = 0u;
+    float keep_all = 1.0;
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_WRC_SNAP_AT + 4u * i;
@@ -2797,6 +2826,12 @@ void lighting_wrc_note_lamps() {
         uint ca = LIGHTING_WRC_SNAP_COL_AT + i;
         bool recoloured = !fresh && ckeys.key[ca] != col;
         ckeys.key[ca] = col;
+        float new_max = max(max(l.color.r, l.color.g), l.color.b);
+        bool in_place = !fresh && length(o.xyz - l.pos.xyz) <= 1.0e-3;
+        // A dim in place keeps every cell readable (1): read at new/old (a lower
+        // bound) the half step still undershot to 60 of 85 (R28 g5), the relit
+        // cells gathering too little while the rest refill.
+        float keep = in_place && new_max > 0.0 ? 1.0 : 0.0;
         bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
         // A lamp that went out (range to 0) is a change too: its light leaves.
         if (moved && (l.color.w > 0.0 || (!fresh && o.w > 0.0))) {
@@ -2814,6 +2849,8 @@ void lighting_wrc_note_lamps() {
             // A new lamp: all of its light is new (the old place is far away).
             ckeys.key[ra + 7u] = floatBitsToUint(max(max(l.color.r, l.color.g), l.color.b));
             ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+            ckeys.key[ra + 9u] = floatBitsToUint(keep);
+            keep_all = min(keep_all, keep);
             noted++;
         }
         ckeys.key[at] = floatBitsToUint(l.pos.x);
@@ -2837,6 +2874,7 @@ void lighting_wrc_note_lamps() {
         ckeys.key[ra + 6u] = floatBitsToUint(3.0e38);
         ckeys.key[ra + 7u] = floatBitsToUint(0.0);
         ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+        ckeys.key[ra + 9u] = floatBitsToUint(keep_all);
     }
 }
 // Quarter of its set batch entry j (of slot) traces.
