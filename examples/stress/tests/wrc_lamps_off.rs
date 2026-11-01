@@ -30,6 +30,13 @@ fn mean(frame: &[u8]) -> f64 {
 }
 
 fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
+    lamps_change_run(name, off, true);
+}
+
+/// Lit night, then `change`. With `black`, the frames until the picture is
+/// under 1 % of lit (gated); otherwise the frames until it stays within 1 % of
+/// lit of where it settles (the mean of its last 30 of 600 frames), reported.
+fn lamps_change_run(name: &str, off: fn(&mut Stage), black: bool) {
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let size = window.pump();
     let (renderer, permit) =
@@ -79,7 +86,7 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
         if f % 100 == 0 {
             eprintln!("wrc_lamps_off {name}: off frame {f} mean {m:.2}");
         }
-        if m < 0.01 * lit {
+        if black && m < 0.01 * lit {
             black_at = Some(f);
             break;
         }
@@ -88,6 +95,16 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
         "wrc_lamps_off {name}: never-lit {never:.3} lit {lit:.3} off first frames {:?} black at {black_at:?}",
         trail.iter().take(16).map(|m| format!("{m:.2}")).collect::<Vec<_>>()
     );
+    if !black {
+        let last30 = &trail[trail.len() - 30..];
+        let level = last30.iter().sum::<f64>() / last30.len() as f64;
+        let within = trail.iter().rposition(|m| (m - level).abs() > 0.01 * lit).map_or(0, |i| i + 1);
+        eprintln!(
+            "wrc_lamps_off {name}: lit {lit:.3} settled {level:.3} within 1 % of lit at frame {within} ({:.0} ms at 60 fps)",
+            within as f64 * 1000.0 / 60.0
+        );
+        return;
+    }
     assert!(never < 0.01 * lit, "never-lit night {never:.3} is not below 1 % of lit {lit:.3}");
     let frames = black_at.unwrap_or(usize::MAX);
     assert!(
@@ -103,6 +120,24 @@ fn lamps_off_night_goes_black() {
         stage.power = 0.0;
         stage.apply();
     });
+}
+
+/// Lamp power halved, then doubled from lit: frames to settle, reported
+/// (not gated).
+#[test]
+fn lamps_half_power_settles() {
+    lamps_change_run("half", |stage| {
+        stage.power = 0.5;
+        stage.apply();
+    }, false);
+}
+
+#[test]
+fn lamps_double_power_settles() {
+    lamps_change_run("double", |stage| {
+        stage.power = 2.0;
+        stage.apply();
+    }, false);
 }
 
 /// The same light leaving without a lamp-set change: every lamp moves far
