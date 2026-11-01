@@ -18,7 +18,7 @@ Contact restitution is the larger value on the two bodies. Friction is the large
 
 A breakable starts as one body from a cooked `.gfract` asset. Chunks are not bodies until a bond's health reaches 0. `apply_damage` is the one call, whether the amount is a contact impulse or a game value. At health 0 the unsupported leaves spawn with the intact body's linear and angular velocity. A chunk that can still walk a live bond to `WORLD` stays inside the intact body, and that body stays static. Children of a still-supported parent stay unspawned. A spawned chunk under 0.02 m³ is debris. Debris does not collide with debris. It sleeps after 0.1 s under 0.4 m/s. Past `debris_budget`, the smallest asleep debris are tombstoned in place so later body indices do not move. `allow_slice` stays false. `step` does not slice. There is no fixed-joint solver, so a remaining bond between two dynamic chunks does not pull them together. A contact impulse on the intact body is applied to the largest non-world bond. Chunk-versus-chunk contacts do not call `apply_damage`. A world bond has no face, so its health is `health_per_area * 10`.
 
-A capsule is a segment along local Y plus a radius. `half_height` is the segment half-length. A box uses `half_extents` on the local axes. `orientation` aims the capsule segment and the box. The step turns `orientation` only when `angular_velocity` is non-zero: `dq/dt = ½ ω q`. Contact does not write a torque, so an impact leaves `angular_velocity` unchanged. Rotational energy is `½ ωᵀ I ω` with `I` diagonal in the body frame. A box uses `Ixx = m/3 (hy² + hz²)` on the half extents. A sphere uses `2/5 m r²`. A mesh uses the bounding-sphere moment.
+A capsule is a segment along local Y plus a radius. `half_height` is the segment half-length. A box uses `half_extents` on the local axes. `orientation` aims the capsule segment and the box. The step turns `orientation` only when `angular_velocity` is non-zero: `dq/dt = ½ ω q`, after an implicit gyroscopic step in the body frame so a free spin does not gain energy. Contact writes a torque. Each narrow-phase hit carries up to four world-space points. The normal impulse uses `v + ω × r` and the body-frame inertia rotated into the world. Friction is two tangent rows at the point, clamped to a Coulomb box. Restitution applies only when the closing speed is above 1 m/s. Position correction moves the centres and does not change velocity. A dynamic body with no spring and no motor sleeps after 0.5 s under 0.12 m/s and 0.25 rad/s. A moving contact wakes it. Rotational energy is `½ ωᵀ I ω` with `I` diagonal in the body frame. A box uses `Ixx = m/3 (hy² + hz²)` on the half extents. A sphere uses `2/5 m r²`. A mesh uses the volume integral of its convex pieces.
 
 `Shape::from_triangles` builds a mesh collider before the step. A convex mesh becomes one hull of at most 12 vertices. A concave mesh is split into at most 6 boxes, so a hole in the source stays open. Contact tests those pieces. The pieces stay on the occupied volume.
 
@@ -50,7 +50,7 @@ After `step`, `change_records` holds this tick's chunk records in `(breakable, c
 
 ## Limits
 
-There is no stack solver and no air drag. A large `dt` drifts from `½gt²`. Contact does not change angular velocity.
+There is no island solver and no air drag. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision. `--fixture spin` is one step of a long thin box, half extents `(0.02, 1.5, 0.02)` m, spinning a quarter turn about Z beside a block. `tunnel_count` is 1 when that block is still at rest. The closing bound's `|ω| r` term is what strikes it. `--fixture wide` is the same swept ships with centres 40 m apart, one step and no gravity. The 36 m gap needs more than one radius slice, so a time-of-impact cap of 1 counts in `tunnel_count`. `--fixture rotor` flies a 3 kg cube, half extents 1 m, at 2 rad/s about Z with no gravity. `rotational_energy_j` is `1/2 Izz ωz²` from that size and mass, 4 J.
 
@@ -72,6 +72,11 @@ The camera calls this step from the scene crate. Lights have no collider.
 | `step` slices | `allow_slice` | `allows_slice` is false |
 | A cull moves later bodies | tombstone in place | culled presence is `Culled`; the index stays |
 | A break dirties the whole GI cache | `emit_change_records` | `a_break_emits_local_bounds_and_does_not_mark_gi_dirty`. The server probe is `the_server_emits_no_change_records`. |
+| A box past an edge does not tip | contact point, inverse inertia | `a_box_past_the_edge_tips_and_one_over_the_ledge_stays` |
+| Spin on a floor does not slow | tangent rows, `friction` | `a_spinning_box_on_the_floor_slows_down` |
+| A hull pile jitters or never sleeps | 0.5 s, 0.12 m/s, 0.25 rad/s | `a_hull_pile_settles_and_sleeps_without_jitter`. `sleeping_bodies` on the debug step line |
+| Mechanical energy grows | implicit gyroscopic step, split position correction | `mechanical_energy_does_not_grow_over_six_hundred_steps` |
+| A resting stack walks off | four narrow-phase passes, centre projection | `a_resting_stack_stays_put` |
 
 ## Plan
 
