@@ -1002,3 +1002,20 @@ New column "settled": first frame after which every later graded frame stays wit
 | e3fSRb (spread age = oldest step entry, movers skipped) | 0.140 | 0.163 | 600 ms | never | 0.079 |
 
 e3f and e3fR touch 5 % at t36 (0.03), then rebound to 0.08–0.10 from t120 and never come back; e3fSR sits at 0.061–0.064 from t24 to t120 and is the closest at t900. The reference itself drifts (e1 is 0.124 off its own t900 at t60). So e3fSR is better than e3f at every graded frame except t36–t60. Hypothesis tested and rejected: movers re-stamping their ring entry starve the spread. Making the spread age come from the oldest step entry (e3fSRb) just turns the spread off where lamps move and reproduces e3f exactly. Reverted; e3fSR (round 16) stays the best variant.
+
+### Round 17 (b): A-SVGF per-pixel change hook (WIP)
+
+`GENOS_DBG_ASVGF_PX` (EVT=3 only, dbg2 bits 15-16; patch `0037/hooks-r17.patch`). The dirty
+list is composed as before and marks its blocks in a scratch slice. A second, whole-grid
+dispatch then handles the unlisted blocks: one pixel per 3x3 tile (rotating by frame % 9)
+re-shades and stores the relative luminance change g, filtered as the max over the 3x3
+neighbouring tiles with a 0.5 decay. Pixels whose g ≥ 0.02 re-shade and blend at
+alpha = clamp(0.3 + 20 g, 0.3, 1); the hard reset is kept only inside listed blocks.
+Mode 3 (listed only) is the control, and it matches e3fSR (off t900 0.062 against 0.054).
+The first build used a single grid dispatch with `STAMP == frame` as the listed test. That
+does not match list membership: the picture froze bright (t900 3.6). It was fixed by keeping the list dispatch.
+
+| off | N+12 | mean N+1..12 | first ≤5% | t900 |
+|---|---|---|---|---|
+| e3fSR | 1.645 | 2.096 | never | 0.054 |
+| e3fSRA | 1.325 | 1.899 | never | 0.059 |
