@@ -1588,11 +1588,15 @@ impl Gpu {
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
-        // The drain flag is read even in surface-cache mode: a still scene is
-        // not settled while the cache's bounce is still draining.
+        // The drain flag is the one exception, and it is not a sync read: the
+        // GPU decides draining itself (args pass, LIGHTING_DRAIN_FLAG_AT keeps
+        // the settle rounds going); the host only needs it so it does not idle
+        // the cache meanwhile. It is one word of this slot's stats ring buffer,
+        // whose fence the frame loop already waited (frames in flight), so the
+        // value is a few frames old and nothing waits on the GPU for it.
         if self.lighting.stats_round[slot] && self.lighting.settings.world_mode() == 3 {
-            if let Ok(w) = self.read_stats16(self.lighting.stats[slot].memory) {
-                self.lighting.draining = w[LIGHTING_DRAIN_WORD + 2] != 0;
+            if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
+                self.lighting.draining = flag != 0;
             }
         }
         let read = lighting_stats_wanted(
@@ -2068,6 +2072,21 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// One word of a stats ring buffer whose fence was already waited.
+    fn read_stats_word(&self, memory: Handle, word: usize) -> Result<u32, String> {
+        let value;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, (word * 4) as u64, 4, 0, &mut mapped),
+                "map lighting stats word",
+            )?;
+            value = std::ptr::read_unaligned(mapped as *const u32);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(value)
     }
 
     fn read_words(&self, memory: Handle, count: usize) -> Result<Vec<u32>, String> {
