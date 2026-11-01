@@ -1,16 +1,55 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::semicolon_if_nothing_returned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Lighting stress test: a big, fairly open building with windows, skylights and wide
 //! doorways, still and moving lamps, a sun on a day/night cycle, and coloured boxes
@@ -217,7 +256,10 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_MATERIAL_DWELL_FRAMES)
   --material-residency-mb N deprecated alias. Warns once and does not set a pool
                             (GENOS_MATERIAL_RESIDENCY_MB)
-  --watch PATH              texture to reload (GENOS_MATERIAL_WATCH)";
+  --watch PATH              texture to reload (GENOS_MATERIAL_WATCH)
+  --cooked DIR              load glTF from a genos-cook directory (ADR 0035).
+                            GENOS_COOKED applies only when this is omitted.
+                            Unset keeps the glTF and PNG path";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
@@ -299,6 +341,8 @@ struct Options {
     lighting_experiments: Vec<(usize, String)>,
     /// Material flags, in order, including the values. The argument wins over the environment.
     material_args: Vec<String>,
+    /// `--cooked`. The mirror applies when this stays empty.
+    cooked: Option<PathBuf>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -446,6 +490,7 @@ fn options() -> Result<Options, String> {
         close_early: false,
         lighting_experiments: Vec::new(),
         material_args: Vec::new(),
+        cooked: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -528,6 +573,7 @@ fn options() -> Result<Options, String> {
                 }
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
+            "--cooked" => opts.cooked = Some(PathBuf::from(value()?)),
             "--report" => report = Some(PathBuf::from(value()?)),
             "--out" => {
                 // The renderer reads this from the process arguments.
@@ -587,37 +633,37 @@ fn options() -> Result<Options, String> {
                         genos_scene::check_reflection_arg(other, next.as_deref())?;
                     }
                     None => match genos_scene::lighting_flag_needs_value(other) {
-                    Some(needs) => {
-                        let next = needs.then(|| value()).transpose()?;
-                        genos_scene::check_lighting_arg(other, next.as_deref())?;
-                        if let Some(hours) =
-                            genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
-                        {
-                            opts.time = knobs::day_from_hours(f64::from(hours));
+                        Some(needs) => {
+                            let next = needs.then(|| value()).transpose()?;
+                            genos_scene::check_lighting_arg(other, next.as_deref())?;
+                            if let Some(hours) =
+                                genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                            {
+                                opts.time = knobs::day_from_hours(f64::from(hours));
+                            }
                         }
-                    }
-                    None => match genos_render::gpu_times_flag_needs_value(other) {
-                        Some(true) => {
-                            let next = value()?;
-                            genos_render::check_gpu_times_arg(other, Some(&next))?;
-                        }
-                        Some(false) => genos_render::check_gpu_times_arg(other, None)?,
-                        None => match genos_render::lighting_sun_flag_needs_value(other) {
+                        None => match genos_render::gpu_times_flag_needs_value(other) {
                             Some(true) => {
                                 let next = value()?;
-                                genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                                genos_render::check_gpu_times_arg(other, Some(&next))?;
                             }
-                            Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
-                            None => {
-                                if genos_window::block_ms_needs_value(other) == Some(false) {
-                                    opts.block_ms =
-                                        Some(genos_window::parse_block_ms(other, None)?);
-                                } else {
-                                    return Err(format!("unknown argument {other}\n{USAGE}"));
+                            Some(false) => genos_render::check_gpu_times_arg(other, None)?,
+                            None => match genos_render::lighting_sun_flag_needs_value(other) {
+                                Some(true) => {
+                                    let next = value()?;
+                                    genos_render::check_lighting_sun_arg(other, Some(&next))?;
                                 }
-                            }
+                                Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
+                                None => {
+                                    if genos_window::block_ms_needs_value(other) == Some(false) {
+                                        opts.block_ms =
+                                            Some(genos_window::parse_block_ms(other, None)?);
+                                    } else {
+                                        return Err(format!("unknown argument {other}\n{USAGE}"));
+                                    }
+                                }
+                            },
                         },
-                    },
                     },
                 },
             },
@@ -759,21 +805,47 @@ fn settings_text(stage: &Stage) -> String {
 
 /// Flag, `LightingSettings` key, and the environment variable it mirrors.
 const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 11] = [
-    ("--lighting-cache-async", "cache_async", "GENOS_LIGHTING_ASYNC"),
+    (
+        "--lighting-cache-async",
+        "cache_async",
+        "GENOS_LIGHTING_ASYNC",
+    ),
     ("--lighting-cache-hz", "cache_hz", "GENOS_LIGHTING_CACHE_HZ"),
-    ("--lighting-cache-picks", "cache_picks", "GENOS_LIGHTING_CACHE_PICKS"),
+    (
+        "--lighting-cache-picks",
+        "cache_picks",
+        "GENOS_LIGHTING_CACHE_PICKS",
+    ),
     ("--lighting-fill", "fill", "GENOS_LIGHTING_FILL"),
-    ("--lighting-young-only", "young_only", "GENOS_LIGHTING_YOUNG_ONLY"),
-    ("--lighting-world-cap", "world_cap", "GENOS_LIGHTING_WORLD_CAP"),
-    ("--lighting-sc-settle", "sc_settle", "GENOS_LIGHTING_SC_SETTLE"),
+    (
+        "--lighting-young-only",
+        "young_only",
+        "GENOS_LIGHTING_YOUNG_ONLY",
+    ),
+    (
+        "--lighting-world-cap",
+        "world_cap",
+        "GENOS_LIGHTING_WORLD_CAP",
+    ),
+    (
+        "--lighting-sc-settle",
+        "sc_settle",
+        "GENOS_LIGHTING_SC_SETTLE",
+    ),
     ("--lighting-sc-flags", "sc_flags", "GENOS_LIGHTING_SC_FLAGS"),
     ("--lighting-toggles", "toggles", "GENOS_LIGHTING_TOGGLES"),
     ("--lighting-probe-tile", "probe_tile", "GENOS_LIGHTING_TILE"),
-    ("--lighting-denoise-dirty", "denoise_dirty", "GENOS_LIGHTING_ATROUS_DIRTY"),
+    (
+        "--lighting-denoise-dirty",
+        "denoise_dirty",
+        "GENOS_LIGHTING_ATROUS_DIRTY",
+    ),
 ];
 
 fn lighting_experiment_flag(flag: &str) -> Option<usize> {
-    LIGHTING_EXPERIMENT_FLAGS.iter().position(|(name, _, _)| *name == flag)
+    LIGHTING_EXPERIMENT_FLAGS
+        .iter()
+        .position(|(name, _, _)| *name == flag)
 }
 
 /// A passed flag wins over the matching environment variable. An omitted flag
@@ -861,7 +933,9 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
     }
     for (i, value) in &opts.lighting_experiments {
         let (flag, key, var) = LIGHTING_EXPERIMENT_FLAGS[*i];
-        check.set_key(key, value).map_err(|e| format!("{flag}: {e}"))?;
+        check
+            .set_key(key, value)
+            .map_err(|e| format!("{flag}: {e}"))?;
         std::env::set_var(var, value);
     }
     if let Some(every) = &opts.gpu_times {
@@ -958,7 +1032,8 @@ fn run() -> Result<i32, String> {
     if first.closing {
         return Ok(0);
     }
-    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
         None::<genos_window::ThreadStop<bool>>,
@@ -997,7 +1072,18 @@ fn run() -> Result<i32, String> {
     renderer.set_material_settings(stage.materials);
     stage.materials_dirty = false;
     if !opts.gltf.is_empty() {
-        match load_gltf_pumped(window, renderer, &mut stage, &camera, opts.gltf.clone()) {
+        let cooked = opts
+            .cooked
+            .clone()
+            .or_else(|| std::env::var_os("GENOS_COOKED").map(PathBuf::from));
+        match load_gltf_pumped(
+            window,
+            renderer,
+            &mut stage,
+            &camera,
+            opts.gltf.clone(),
+            cooked,
+        ) {
             Ok(()) => {}
             Err(err) if err == "window closed during load" => return Ok(0),
             Err(err) => return Err(err),
@@ -1040,7 +1126,8 @@ fn run() -> Result<i32, String> {
         let handle = genos_debug::script::spawn(run);
         *script_hold
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(genos_window::ThreadStop::new(handle));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(genos_window::ThreadStop::new(handle));
     }
     if opts.step || opts.fixed_dt.is_some() {
         tools.set_fixed_step(Some(opts.fixed_dt.unwrap_or(bench::STEP)));
@@ -1095,7 +1182,10 @@ fn run() -> Result<i32, String> {
             }
         }
         if frame.closing {
-            return Ok(script_exit_code(&script_hold, tools.quit_code().unwrap_or(0)));
+            return Ok(script_exit_code(
+                &script_hold,
+                tools.quit_code().unwrap_or(0),
+            ));
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -1334,7 +1424,12 @@ fn loading_world() -> World {
     })
 }
 
-fn bake_gltf(mut world: World, models: &[(PathBuf, [f32; 4])]) -> Result<World, String> {
+fn bake_gltf(
+    mut world: World,
+    models: &[(PathBuf, [f32; 4])],
+    cooked: Option<&std::path::Path>,
+    bc: bool,
+) -> Result<World, String> {
     for (path, [x, y, z, scale]) in models {
         let model =
             genos_load::load_gltf_file(path).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -1350,9 +1445,27 @@ fn bake_gltf(mut world: World, models: &[(PathBuf, [f32; 4])]) -> Result<World, 
         if std::env::var_os("GENOS_BAKE").is_none() {
             bake.mode = genos_render::bake::BakeMode::OnLoad;
         }
-        let added = world
-            .add_gltf_traced(&model, &place, &bake)
-            .map_err(|err| format!("{}: bake: {err:?}", path.display()))?;
+        let added = if let Some(dir) = cooked {
+            let report = world.add_cooked(dir, path, &place, false, bc);
+            for line in &report.fallback {
+                eprintln!("genos-stress: {line}");
+            }
+            eprintln!(
+                "genos-stress: cooked load {:.2} ms, texture bytes {}",
+                report.load_ms, report.texture_bytes
+            );
+            if report.objects.is_empty() {
+                world
+                    .add_gltf_traced(&model, &place, &bake)
+                    .map_err(|err| format!("{}: bake: {err:?}", path.display()))?
+            } else {
+                report.objects
+            }
+        } else {
+            world
+                .add_gltf_traced(&model, &place, &bake)
+                .map_err(|err| format!("{}: bake: {err:?}", path.display()))?
+        };
         eprintln!(
             "genos-stress: {} placed as {} mesh draws",
             path.display(),
@@ -1368,7 +1481,9 @@ fn load_gltf_pumped(
     stage: &mut Stage,
     camera: &Camera,
     models: Vec<(PathBuf, [f32; 4])>,
+    cooked: Option<PathBuf>,
 ) -> Result<(), String> {
+    let bc = renderer.bc_textures();
     let heavy = std::mem::replace(&mut stage.world, loading_world());
     let meter = window.stall_meter();
     let loaded = genos_window::run_pumped(
@@ -1382,7 +1497,7 @@ fn load_gltf_pumped(
             let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
             genos_window::PumpStep::Continue
         },
-        move || bake_gltf(heavy, &models),
+        move || bake_gltf(heavy, &models, cooked.as_deref(), bc),
     )?;
     stage.world = loaded?;
     Ok(())

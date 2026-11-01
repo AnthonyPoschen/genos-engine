@@ -1,4 +1,7 @@
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Load images, textures, meshes, animations, audio samples, and fonts.
 //!
@@ -8,16 +11,17 @@
 mod animation;
 mod bin;
 mod cache;
+mod cooked;
 mod emitters;
 mod error;
-mod mips;
-mod pages;
 mod gltf;
 mod import;
 mod inflate;
 mod jpeg;
 mod material;
 mod mesh;
+mod mips;
+mod pages;
 mod png;
 mod sha256;
 mod shade;
@@ -30,23 +34,24 @@ mod wav;
 
 pub use animation::{Animation, Transform, TransformKey};
 pub use cache::{object_path, store_import, store_object, write_atomic};
+pub use cooked::{
+    cooked_path, decode_geometry, decode_images, textures_path, CookedError, CookedGeometry,
+    CookedImage, CookedImages, Package,
+};
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
-pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
-pub use pages::{
-    miss_colour, mib_f32, HotReload, MaterialWatch,
-};
 pub use error::LoadError;
 pub use gltf::{
     image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
-    PbrMaterial,
-    Primitive, Sampler, TextureSlot,
+    PbrMaterial, Primitive, Sampler, TextureSlot,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
+pub use mips::{mip_chain, normal_from_bytes, Mip, MipSpace};
+pub use pages::{mib_f32, miss_colour, HotReload, MaterialWatch};
 pub use png::Image;
 pub use sha256::{hex, sha256, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
@@ -55,13 +60,13 @@ pub use stream::{
     gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, PendingCopy, Sampled,
     Streamer, TextureView, DEFAULT_DWELL, EVICT_LEVELS, EVICT_PER_FRAME,
 };
+pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
+pub use ttf::{Font, Glyph, OutlinePoint};
 pub use vram::{
     headroom_bytes, is_device_oom, retry_device_alloc, AllocError, Budget as VramBudget, Headroom,
     HeapSlice, DEFAULT_HEADROOM_FLOOR_MB, DEFAULT_HEADROOM_PERCENT, DEVICE_OOM,
     FALLBACK_HEAP_DIVISOR,
 };
-pub use texture::{MapClip, MapFrame, Rect, Texture, TextureMap};
-pub use ttf::{Font, Glyph, OutlinePoint};
 pub use wav::Pcm;
 
 fn read(source: &dyn ByteSource) -> Result<Vec<u8>, LoadError> {
@@ -107,7 +112,11 @@ pub fn load_gltf_file_phased(
     let start = std::time::Instant::now();
     let bytes = read(&FileSource::new(path))?;
     phases.import += start.elapsed();
-    gltf::decode_gltf_phased(&bytes, &|uri| FileSource::new(dir.join(uri)).read_bytes(), phases)
+    gltf::decode_gltf_phased(
+        &bytes,
+        &|uri| FileSource::new(dir.join(uri)).read_bytes(),
+        phases,
+    )
 }
 
 /// Decode PNG or JPEG bytes into an RGBA8 image.
