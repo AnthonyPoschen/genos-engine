@@ -2115,6 +2115,13 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
+// While lamps settle, a cache ray (lighting_direct.comp) reads only cells
+// relit since the change: old light can't feed back into the new sets, and
+// multi-bounce is kept through the cells already relit.
+bool lighting_gather_strict = false;
+bool lighting_gather_skip(vec3 p, uint s) {
+    return lighting_gather_strict && lighting_wrc_lamp_changed(p, lighting_sc_updated(s));
+}
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     if (!lighting_bounce_ok()) {
         return vec3(0.0);
@@ -2133,6 +2140,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
+                    if (lighting_gather_skip(pos, s)) { return vec3(0.0); }
                     return v.rgb * lighting_sc_sun_gain(s);
                 }
             }
@@ -2201,6 +2209,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
+        if (lighting_gather_skip(pos, slot)) { lighting_hit_sunfrac = 0.0; return vec3(0.0); }
         return e.rgb * lighting_sc_sun_gain(slot);
     }
     return e.rgb;
