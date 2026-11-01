@@ -329,7 +329,7 @@ void main() {
             if (tdl_sig != 0u && floatBitsToUint(d.z) == tdl_sig && lighting_frame() - floatBitsToUint(d.w) < LIGHTING_TDL_STALE) {
                 count = 0u;
                 tdl = ts | 0x80000000u;
-                lighting_dg(40u, 1u);
+                lighting_dg(36u, 1u);
             } else if (LIGHTING_TDL_CHECK && tdl_sig != 0u && floatBitsToUint(d.z) != 0u) {
                 // S78E: an entry past LIGHTING_TDL_STALE (same signature) is checked
                 // like a changed one, not recomputed: age alone is no reason.
@@ -343,7 +343,7 @@ void main() {
                 list = tl;
                 count = lamp_list_size(list);
             } else if (tdl_sig != 0u && atomicAdd(ckeys.key[LIGHTING_TDL_COUNT_AT], 1u) < LIGHTING_TDL_BUDGET) {
-                lighting_dg(41u, 1u);
+                lighting_dg(37u, 1u);
                 tdl = ts;
                 origin = tp + tn * 0.02;
                 n = tn;

@@ -44,7 +44,7 @@ pub const SCENES: [SceneInfo; 7] = [
     },
     SceneInfo {
         name: "resting_pile",
-        summary: "16 turned hull cubes dropped onto a static hull slab under gravity",
+        summary: "16 turned hull cubes (friction 0.6) dropped onto a static hull slab under gravity",
         steps: 240,
         build: resting_pile,
     },
@@ -210,6 +210,9 @@ fn resting_pile() -> World {
         for (x, z) in [(-0.6_f32, -0.6_f32), (0.6, -0.6), (-0.6, 0.6), (0.6, 0.6)] {
             let mut body = Body::mesh(Vec3::new(x, layer, z), 1.0, &cube);
             body.orientation = Quat::from_axis_angle(Vec3::Y, angle);
+            // Yawed neighbours overlap. With friction 0 the overlap's normal
+            // impulse is kept as horizontal speed and the columns walk off.
+            body.friction = 0.6;
             angle += 0.21;
             world.insert(body);
         }
