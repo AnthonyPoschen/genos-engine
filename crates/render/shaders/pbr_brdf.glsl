@@ -45,6 +45,7 @@ float pbr_fresnel_schlick(float f0, float v_dot_h) {
 }
 
 // f(l, v) per channel, without the n·l factor.
+// Dielectric: (1 − F) · base / π + F · D · V. Metal: F(base) · D · V.
 vec3 pbr_eval(vec3 base_color, float metallic, float roughness,
               float n_dot_l, float n_dot_v, float n_dot_h, float n_cross_h_sq,
               float v_dot_h) {

@@ -150,6 +150,9 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             16-ray entry every ceil(16 / N) frames
                             (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
+  --lighting-direct-specular on|off
+                            Appendix B shade on pixel direct (default off)
+                            (GENOS_LIGHTING_DIRECT_SPECULAR; the argument wins)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
   --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)

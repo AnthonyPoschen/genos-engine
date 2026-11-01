@@ -91,6 +91,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --fog-grid WxHxS       froxel columns, rows, and slices. 0 on an axis keeps
                          the preset (GENOS_FOG_GRID)
   --fog-samples N        cell budget. 0 dispatches the whole grid (GENOS_FOG_SAMPLES)
+  --lighting-direct-specular on|off
+                         Appendix B shade on pixel direct (default off)
+                         (GENOS_LIGHTING_DIRECT_SPECULAR; the argument wins)
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
                          (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
@@ -2187,6 +2190,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_preset" => "Preset",
         "lighting_bounces" => "Bounce count",
         "lighting_direct" => "Direct light",
+        "lighting_direct_specular" => "Direct specular",
         "lighting_direct_refresh" => "Direct refresh frames",
         "lighting_gi_refresh" => "GI refresh frames",
         "lighting_budget_shift" => "Ray budget shift",

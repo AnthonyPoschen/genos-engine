@@ -388,6 +388,11 @@ kind = "todo"
 detail = "no CLI argument yet"
 
 [[var]]
+name = "GENOS_LIGHTING_DIRECT_SPECULAR"
+kind = "mirror"
+detail = "--lighting-direct-specular"
+
+[[var]]
 name = "GENOS_LIGHTING_DUMP"
 kind = "todo"
 detail = "no CLI argument yet"

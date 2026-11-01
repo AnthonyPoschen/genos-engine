@@ -24,6 +24,15 @@ vec4 material_fetch(vec4 rect, vec2 uv) {
     return imageLoad(material_color, material_coord(size, rect, uv));
 }
 
+float material_normal_alpha(vec4 rect, vec2 uv) {
+    ivec2 size = imageSize(material_normal);
+    const float material_rect_present = 0.5;
+    if (uv.x < 0.0 || rect.z <= material_rect_present || size.x <= 0 || size.y <= 0) {
+        return 1.0;
+    }
+    return imageLoad(material_normal, material_coord(size, rect, uv)).a;
+}
+
 vec3 material_normal_at(vec4 rect, vec2 uv) {
     ivec2 size = imageSize(material_normal);
     if (uv.x < 0.0 || rect.z <= 0.5 || size.x <= 0 || size.y <= 0) {

@@ -12,6 +12,7 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "lighting_lamp_pick.glsl"
+#include "pbr_brdf.glsl"
 
 const bool LIGHTING_KEPT_SHOULD = true;
 // S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
@@ -23,6 +24,7 @@ const float LAMP_PICK_COPY_M = 0.005;
 const float LAMP_PICK_HIST_LIFT = 0.02;
 // A stored depth of 0 is a miss. Exact and ReSTIR records stay positive.
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
+const float DIRECT_DIR_EPS = 1.0e-6;
 void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
     uint v = lighting_pack_rgb9e5(light);
     uint at = lighting_kept_light_at() + h / 4u;
@@ -262,6 +264,10 @@ void main() {
     uint pix_sig = 0u;
     if (lighting_pix_reuse_on() && idx < pixels) {
         pix_sig = lighting_pix_sig(pos, n, two_sided, list);
+        // The lobe depends on the view. A still camera keeps the hold; a turn does not.
+        if ((gstats.ctrl_bits & 2097152u) != 0u) {
+            pix_sig ^= lighting_pack_normal(scene.eye.xyz - pos);
+        }
         // A one-lamp view must not reuse a held full sum.
         if ((scene.grid_at.w & 255u) == 6u) {
             pix_sig ^= lighting_hash(((scene.grid_at.w >> 8u) & 0xFFFFu) + 1u);
@@ -295,12 +301,12 @@ void main() {
             }
 #endif
             if (hold) {
-                uint emitted = gbuf.px[idx].w;
+                uint emitted = gbuf_word(idx, 3u);
                 uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
                 uint prev = outc.px[pixels + idx];
                 // Emitted stays out of the picture buffer; compose reads it here.
                 outc.px[pixels + idx] = glow;
-                gbuf.px[idx].w = floatBitsToUint(pv[c + 1u]);
+                gbuf.words[idx * 5u + 3u] = floatBitsToUint(pv[c + 1u]);
                 if (glow != prev) {
                     lighting_compose_mark_px(idx);
                 }
@@ -678,10 +684,28 @@ void main() {
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
-    vec3 e = copied ? copied_rgb : vec3(0.0);
+    bool lobe = (gstats.ctrl_bits & 2097152u) != 0u && idx < pixels;
+    bool copied_rgb_ok = copied && !lobe;
+    vec3 e = copied_rgb_ok ? copied_rgb : vec3(0.0);
     vec3 e_sun = vec3(0.0);
+    vec3 spec = vec3(0.0);
+    vec3 view = vec3(0.0, 1.0, 0.0);
+    vec3 ns = n;
+    vec3 base = vec3(1.0);
+    float rough = 1.0;
+    float metal = 0.0;
+    if (lobe) {
+        view = scene.eye.xyz - origin;
+        float vlen = length(view);
+        view = vlen > DIRECT_DIR_EPS ? view / vlen : vec3(0.0, 1.0, 0.0);
+        ns = n;
+        if (two_sided && dot(ns, view) < 0.0) {
+            ns = -ns;
+        }
+        gbuf_material(idx, base, rough, metal);
+    }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        if (copied) {
+        if (copied_rgb_ok) {
             break;
         }
         if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
@@ -794,6 +818,26 @@ void main() {
         if (shadow_lit) {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
+            if (lobe) {
+                vec3 ldir = target - origin;
+                float llen = length(ldir);
+                ldir = llen > LAMP_PICK_DEPTH_FLOOR ? ldir / llen : ns;
+                if (two_sided && dot(ns, ldir) < 0.0) {
+                    ldir = -ldir;
+                }
+                float ndl = max(dot(ns, ldir), 0.0);
+                float ndv = max(dot(ns, view), 0.0);
+                vec3 halfv = ldir + view;
+                float hlen = length(halfv);
+                halfv = hlen > DIRECT_DIR_EPS ? halfv / hlen : ns;
+                float ndh = dot(ns, halfv);
+                vec3 cx = cross(ns, halfv);
+                float ncross = dot(cx, cx);
+                float vdh = dot(view, halfv);
+                // add already includes n·l. pbr_eval is f without that factor:
+                // (1 − F) · base · (1 − metallic) / π + F · D · V, mixed by metallic.
+                spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * add;
+            }
             if (k < list.suns.y) {
                 e_sun += add;
             }
@@ -803,6 +847,7 @@ void main() {
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
         e_sun = vec3(0.0);
+        spec = vec3(0.0);
     }
     if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         uint ts = tdl & 0x3FFFFFFFu;
@@ -919,10 +964,16 @@ void main() {
     }
 #endif
     if (idx < pixels) {
-        uint emitted = gbuf.px[idx].w;
+        uint emitted = gbuf_word(idx, 3u);
         uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
         uint prev_e = outc.px[pixels + idx];
-        uint packed = lighting_pack_rgb9e5(e);
+        // Off: irradiance, and compose applies the Lambert weight.
+        // On: Appendix B outgoing radiance (pbr_eval already folded n·l into add).
+        vec3 shown = e;
+        if (lobe) {
+            shown = spec;
+        }
+        uint packed = lighting_pack_rgb9e5(shown);
         uint prev_d = 0u;
         uint prev_sig = 0u;
         bool tracked = lighting_pix_reuse_on();
@@ -932,7 +983,7 @@ void main() {
             prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
         }
         outc.px[pixels + idx] = glow;
-        gbuf.px[idx].w = packed;
+        gbuf.words[idx * 5u + 3u] = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
             work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
