@@ -47,9 +47,12 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
     stage.apply();
     let mut camera = Camera::opening();
     camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
+    let exposure = std::cell::Cell::new(0.0f64);
     let mut draw = |stage: &Stage| {
         let _ = window.pump();
-        mean(&renderer.draw(&stage.world, &camera, true).expect("draw").expect("pixels"))
+        let m = mean(&renderer.draw(&stage.world, &camera, true).expect("draw").expect("pixels"));
+        exposure.set(renderer.hdr_exposure());
+        m
     };
     let mut never = 0.0;
     for _ in 0..120 {
@@ -58,8 +61,13 @@ fn lamps_off_run(name: &str, off: fn(&mut Stage)) {
     stage.power = 1.0;
     stage.apply();
     let mut lit = 0.0;
-    for _ in 0..300 {
+    #[allow(clippy::disallowed_methods, reason = "a harness reads the environment")]
+    let lit_frames: usize = std::env::var("WRC_LIT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    for f in 1..=lit_frames {
         lit = draw(&stage);
+        if f % 100 == 0 {
+            eprintln!("wrc_lamps_off {name}: lit frame {f} mean {lit:.2} exposure {:.4}", exposure.get());
+        }
     }
     assert!(lit > 4.0, "the lit reference is lit: mean {lit:.2}");
     off(&mut stage);
