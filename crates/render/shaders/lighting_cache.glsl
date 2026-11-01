@@ -118,7 +118,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     // 1 while the cache is draining or filling (LIGHTING_DRAIN_FLAG_AT), for
     // the host's settle test.
     uint draining;
-    uint drain_pad1;
+    // The round's batch entries (16 rays each), for the host's cost test.
+    uint round_entries;
     uint mask[];
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
@@ -1272,6 +1273,7 @@ bool lighting_sc_light_quiet() {
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
+bool lighting_lamp_settling_raw();
 bool lighting_wrc_lone(uint slot);
 uint lighting_settle_turns(bool first);
 const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
@@ -1292,6 +1294,11 @@ const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
 // Cells in this round's drain sums. A gap over fewer is noise (a quiet round
 // relights a handful of cells), so it does not re-arm the flag.
 const uint LIGHTING_DRAIN_CELLS_AT = LIGHTING_SC_HIST_AT + 74u;
+// Settle rounds in a row (lighting_lamp_settling), capped at LIGHTING_SETTLE_ROUNDS.
+const uint LIGHTING_SETTLE_STREAK_AT = LIGHTING_SC_HIST_AT + 75u;
+const uint LIGHTING_SETTLE_ROUNDS = 20u;
+// Frame of the newest lamp change the streak has seen.
+const uint LIGHTING_SETTLE_SEEN_AT = LIGHTING_SC_HIST_AT + 84u;
 const uint LIGHTING_DRAIN_MIN_CELLS = 256u;
 const float LIGHTING_DRAIN_GAP = 0.01;
 // Drain sums: only cells with this much sample weight (w) and held sets count,
@@ -2485,6 +2492,19 @@ void lighting_write_args() {
     uint s = 0u;
     uint g = 0u;
     if (lighting_world_mode() == 3u) {
+        uint streak = ckeys.key[LIGHTING_SETTLE_STREAK_AT];
+        // A lamp change after a quiet spell (not one more step of lamps that
+        // keep changing) gets a fresh burst.
+        uint newest = 0u;
+        [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+            newest = max(newest, ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u]);
+        }
+        uint seen = ckeys.key[LIGHTING_SETTLE_SEEN_AT];
+        if (newest != seen && newest - seen > LIGHTING_SETTLE_ROUNDS) {
+            streak = 0u;
+        }
+        ckeys.key[LIGHTING_SETTLE_SEEN_AT] = newest;
+        ckeys.key[LIGHTING_SETTLE_STREAK_AT] = lighting_lamp_settling_raw() ? min(streak + 1u, LIGHTING_SETTLE_ROUNDS) : 0u;
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
         // While a lamp change settles the young list (every cell and texel, in
@@ -2542,6 +2562,7 @@ void lighting_write_args() {
     // hold one 16-ray entry for every non-empty list.
     lighting_sc_cap_lists(a, b, c, g, s);
     uint e = a + b + c + g + s;
+    gstats.round_entries = e;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
@@ -2788,7 +2809,15 @@ uint lighting_settle_turns(bool first) {
     uint left = max(room - min(head / head_turns, room - room / 4u), 1u);
     return clamp((rest + left - 1u) / left, 1u, 64u);
 }
+// A scene whose lamps never stop changing would settle forever, every round at
+// the settle cost (whole room to the young list, WRC lone samples, strict
+// gathers). Settling is a burst: at most LIGHTING_SETTLE_ROUNDS rounds in a row
+// (about Anthony's 200 ms window at 60 fps, with the two-tier turns), then the
+// cache relights at the normal rate until a round no longer settles.
 bool lighting_lamp_settling() {
+    return ckeys.key[LIGHTING_SETTLE_STREAK_AT] < LIGHTING_SETTLE_ROUNDS && lighting_lamp_settling_raw();
+}
+bool lighting_lamp_settling_raw() {
     if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
         return true;
     }
