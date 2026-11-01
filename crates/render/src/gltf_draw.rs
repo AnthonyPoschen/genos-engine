@@ -428,7 +428,7 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image], store_metal: bool) -> Option<
                 out[i + c] = linear_to_srgb_u8(sample.base[c]);
             }
             out[i + 3] = if store_metal {
-                (sample.metallic.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+                quantize_u8(sample.metallic)
             } else {
                 img.pixels[i + 3]
             };
@@ -478,7 +478,7 @@ fn fill_roughness(m: &PbrMaterial, images: &[Image], w: u32, h: u32, rgba: &mut 
             let v = (y as f32 + 0.5) / h as f32;
             let sample = shade_uv(&unfactored, images, [u, v]);
             let i = ((y * w + x) * 4) as usize;
-            rgba[i + 3] = (sample.roughness.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            rgba[i + 3] = quantize_u8(sample.roughness);
         }
     }
 }
@@ -504,7 +504,11 @@ fn linear_to_srgb_u8(v: f32) -> u8 {
     } else {
         1.055 * v.powf(1.0 / 2.4) - 0.055
     };
-    (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
+    quantize_u8(s)
+}
+
+fn quantize_u8(s: f32) -> u8 {
+    (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
 /// One primitive draw of one glTF instance.
