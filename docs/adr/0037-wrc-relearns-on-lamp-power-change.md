@@ -1084,3 +1084,20 @@ normalised by the pre-step mean:
 | e3fSRA + LAMPSCALE | 0.000 | 0.000 | 17 ms (N+1) | 0.000 |
 
 Under the old e1-t900 grade this run scores 1.0, because it is "too dark". That grade is the stale reference.
+
+All steps with LAMPSCALE. Off is graded against the true (black) reference; the others are graded against e1 t900. Each cell is e3fSRA → e3fSRAL. The 200 ms target is N+12.
+
+| step | N+12 | mean N+1..12 | first ≤5% (over 200 ms) |
+|---|---|---|---|
+| off | 0.328 → **0.000** | 0.409 → **0.000** | never → **17 ms (−183)** |
+| on | 0.137 → 0.348 | 0.237 → 0.394 | 300 (+100) → 1000 (+800) |
+| h50 | 0.071 → 0.271 | 0.095 → 0.273 | 400 (+200) → never |
+| x2 | 0.087 → 0.088 | 0.104 → 0.105 | 5000 (+4800) → 5000 (+4800) |
+| m90 | 0.020 → 0.065 | 0.020 → 0.065 | 17 (−183) → never |
+
+Verdict: the fix solves the off step but over-darkens the partial dims. On h50 the picture holds at
+about 81/255 against about 111 for e1, and on m90 the error holds at 0.065. The cache never recovers,
+because the scaled-down energy sustains itself in the same way as the stale energy. On also regresses,
+which means the ratio fires on a brightening as well. The likely cause is p_old: max(p_new, range²) is not
+the old power. The fix stays env-gated and is not shippable. Next step: take the real old peak power
+from ring word +7, and apply the scale only to the lamp share (pl), not to the whole cell.
