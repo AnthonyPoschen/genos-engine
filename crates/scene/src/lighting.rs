@@ -1451,9 +1451,22 @@ impl LightingSettings {
         clippy::disallowed_methods,
         reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
     )]
-    pub fn apply_env(&mut self) {
+    pub fn apply_env(&mut self) -> Result<(), String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.apply_env_from(&refs, &|name| lighting_env(name).ok())
+    }
+
+    /// [`Self::apply_env`] over the given arguments and variable reader. A
+    /// malformed lighting argument or a variable its key rejects is an error,
+    /// not a silent skip. The preset, bounces, ambient and time mirrors stay
+    /// soft (an unparsable mirror is ignored).
+    fn apply_env_from(
+        &mut self,
+        refs: &[&str],
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        let lighting_env = |name: &str| env(name).ok_or(());
         let preset = lighting_env("GENOS_LIGHTING_PRESET").ok();
         let bounces = lighting_env("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = lighting_env("GENOS_LIGHTING_AMBIENT").ok();
@@ -1464,8 +1477,8 @@ impl LightingSettings {
         let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
-        let Ok(launch) = resolve_lighting_launch(
-            &refs,
+        let launch = resolve_lighting_launch(
+            refs,
             &LightingMirrors {
                 preset: preset.as_deref(),
                 bounces: bounces.as_deref(),
@@ -1478,9 +1491,7 @@ impl LightingSettings {
                 ray_budget: ray_budget.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
             },
-        ) else {
-            return;
-        };
+        )?;
         self.apply_launch(&launch);
         let keys = [
             ("GENOS_LIGHTING_DIRECT", "direct"),
@@ -1555,7 +1566,8 @@ impl LightingSettings {
                 continue;
             }
             if let Ok(value) = lighting_env(var) {
-                let _ = self.set_key(key, &value);
+                self.set_key(key, &value)
+                    .map_err(|err| format!("{var}={value}: {err}"))?;
             }
         }
         if lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
@@ -1565,6 +1577,7 @@ impl LightingSettings {
         if lighting_env_flag("GENOS_LIGHTING_FULL_EFFORT") {
             self.apply_full_effort();
         }
+        Ok(())
     }
 
     fn apply_launch(&mut self, launch: &LightingLaunch) {
@@ -2226,6 +2239,23 @@ mod launch_tests {
 
     fn empty() -> LightingMirrors<'static> {
         LightingMirrors::default()
+    }
+
+    #[test]
+    fn apply_env_reports_a_bad_argument_or_key() {
+        let none = |_: &str| None;
+        let mut settings = LightingSettings::default();
+        let bad_arg = settings.apply_env_from(&["--bounces", "nope"], &none);
+        assert!(bad_arg.is_err_and(|err| err.contains("--bounces")));
+
+        let gi = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "nope".to_owned());
+        let bad_key = settings.apply_env_from(&[], &gi);
+        assert!(bad_key.is_err_and(|err| err.contains("GENOS_LIGHTING_GI=nope")));
+
+        let good = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "off".to_owned());
+        assert!(settings.apply_env_from(&["--bounces", "2"], &good).is_ok());
+        assert_eq!(settings.bounce.count, 2);
+        assert!(!settings.gi.enabled);
     }
 
     fn hours_near(value: f32, hours: f32) {

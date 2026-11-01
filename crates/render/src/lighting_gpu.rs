@@ -2176,7 +2176,7 @@ impl Gpu {
             .override_settings
             .clone()
             .unwrap_or_else(|| scene.lighting.clone());
-        desired.apply_env();
+        desired.apply_env()?;
         desired.sanitize();
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
