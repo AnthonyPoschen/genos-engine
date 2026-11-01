@@ -219,6 +219,12 @@ fn emission_adds_and_is_not_reflected() {
     assert_eq!(shade(&m, c, [10.0; 3]), [4.0, 2.0, 1.0]);
 }
 
+/// The cases are unit vectors. f32 is the shader input.
+#[allow(clippy::cast_possible_truncation)]
+fn unit_f32(v: [f64; 3]) -> [f32; 3] {
+    [v[0] as f32, v[1] as f32, v[2] as f32]
+}
+
 /// f32 Filament / glTF shade, the same arithmetic as `pbr_brdf.glsl`:
 /// GGX `D` from `|n × h|²` (the form fixed in #107) and height-correlated
 /// Smith `V` (`0.5 / (gv + gl)`, Filament `V_SmithGGXCorrelated`).
@@ -333,9 +339,9 @@ fn shader_form_matches_the_reference_on_vector_cases() {
                                 base,
                                 metal,
                                 rough,
-                                n.map(|c| c as f32),
-                                l.map(|c| c as f32),
-                                v.map(|c| c as f32),
+                                unit_f32(n),
+                                unit_f32(l),
+                                unit_f32(v),
                             );
                             let reference = eval(
                                 &Material {
