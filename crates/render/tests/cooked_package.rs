@@ -1,16 +1,3 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "test fixture bytes"))]
-#![cfg_attr(
-    test,
-    expect(clippy::cast_possible_truncation, reason = "test fixture bytes")
-)]
-#![cfg_attr(
-    test,
-    expect(clippy::cast_precision_loss, reason = "picture error mean")
-)]
-#![cfg_attr(
-    test,
-    expect(clippy::cast_sign_loss, reason = "picture error percentile")
-)]
 #![cfg_attr(
     test,
     expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
@@ -111,15 +98,18 @@ fn write_png(path: &Path, width: u32, height: u32, rgba: &[u8]) {
 fn fixture(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let w = 32u32;
-    let mut rgba = vec![0u8; (w * w * 4) as usize];
-    let mut nrm = vec![0u8; (w * w * 4) as usize];
+    let texels = usize::try_from(w).unwrap() * usize::try_from(w).unwrap() * 4;
+    let mut rgba = vec![0u8; texels];
+    let mut nrm = vec![0u8; texels];
     for y in 0..w {
         for x in 0..w {
-            let i = ((y * w + x) * 4) as usize;
+            let i = (usize::try_from(y).unwrap() * usize::try_from(w).unwrap()
+                + usize::try_from(x).unwrap())
+                * 4;
             // One step per 4×4 block. A steeper ramp blows the ADR's p99 on
             // BC7's basic profile; this one stays inside it.
-            rgba[i] = 96 + (x / 4) as u8;
-            rgba[i + 1] = 140 + (y / 8) as u8;
+            rgba[i] = 96 + u8::try_from(x / 4).unwrap();
+            rgba[i + 1] = 140 + u8::try_from(y / 8).unwrap();
             rgba[i + 2] = 180;
             rgba[i + 3] = 255;
             nrm[i] = 128;
@@ -269,30 +259,36 @@ fn settle(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &
     picture
 }
 
-fn picture_error(a: &[u8], b: &[u8]) -> (f64, u8) {
+fn picture_error(a: &[u8], b: &[u8]) -> (u64, usize, u8) {
     let n = a.len().min(b.len()) / 4;
     let mut sum = 0u64;
     let mut hist = [0u32; 256];
     for i in 0..n {
         for c in 0..3 {
-            let d = u32::from(a[i * 4 + c].abs_diff(b[i * 4 + c]));
-            sum += u64::from(d);
-            hist[d as usize] += 1;
+            let d = usize::from(a[i * 4 + c].abs_diff(b[i * 4 + c]));
+            sum += u64::from(u8::try_from(d).unwrap());
+            hist[d] += 1;
         }
     }
     let samples = (n * 3).max(1);
-    let mean = sum as f64 / samples as f64;
-    let mut seen = 0u32;
+    let mut seen = 0u64;
     let mut p99 = 0u8;
-    let target = ((samples as f64) * 0.99).ceil() as u32;
+    let target = u64::try_from((samples * 99).div_ceil(100)).unwrap();
     for (d, count) in hist.iter().enumerate() {
-        seen += count;
+        seen += u64::from(*count);
         if seen >= target {
-            p99 = d as u8;
+            p99 = u8::try_from(d).unwrap();
             break;
         }
     }
-    (mean, p99)
+    (sum, samples, p99)
+}
+
+fn mean_text(sum: u64, samples: usize) -> String {
+    let samples = u64::try_from(samples).unwrap();
+    let whole = sum / samples;
+    let frac = (sum % samples) * 1000 / samples;
+    format!("{whole}.{frac:03}")
 }
 
 fn identity() -> [f32; 16] {
@@ -396,10 +392,9 @@ fn compare(label: &str, source: &Path, out: &Path, check: bool) {
     let warm_cooked_ms = warm_c.elapsed().as_secs_f64() * 1e3;
     assert_eq!(warm.objects.len(), report.objects.len());
 
-    let (mean, p99) = picture_error(&gltf_pic, &cooked_pic);
-    eprintln!(
-        "{label} picture mean_abs {mean:.3}/255 p99 {p99}/255  (bound mean ≤ 3, p99 ≤ 16)"
-    );
+    let (sum, samples, p99) = picture_error(&gltf_pic, &cooked_pic);
+    let mean = mean_text(sum, samples);
+    eprintln!("{label} picture mean_abs {mean}/255 p99 {p99}/255  (bound mean ≤ 3, p99 ≤ 16)");
     eprintln!(
         "{label} load ms  glTF cold {cold_ms:.2}  glTF warm {warm_gltf_ms:.2}  cooked cold {cold_cooked_ms:.2}  cooked warm {warm_cooked_ms:.2}"
     );
@@ -408,9 +403,10 @@ fn compare(label: &str, source: &Path, out: &Path, check: bool) {
         i128::from(block_bytes) - i128::from(u64::try_from(rgba_bytes).unwrap())
     );
     if check {
+        let samples = u64::try_from(samples).unwrap();
         assert!(
-            mean <= 3.0,
-            "{label} mean absolute error {mean:.3}/255 exceeds 3/255"
+            sum <= samples * 3,
+            "{label} mean absolute error {mean}/255 exceeds 3/255"
         );
         assert!(p99 <= 16, "{label} p99 error {p99}/255 exceeds 16/255");
     }
