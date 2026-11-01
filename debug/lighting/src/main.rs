@@ -1,21 +1,78 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::large_enum_variant,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Lighting debug binary. Scenes come from `debug/scenes/`. Arguments choose the
 //! scene, the checkpoint, the lighting preset, and where pictures land.
@@ -116,6 +173,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          The scene step is 1/60. genos-stress is not this path
   --report DIR           script report (default <out>/gi/<script name>)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
+  --cooked DIR           load a glTF scene from a genos-cook directory (ADR 0035).
+                         GENOS_COOKED applies only when this is omitted.
+                         Unset keeps the glTF and PNG path
   --unfilled             show the texels view (slots with fewer than 4 sets are dim)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
@@ -373,7 +433,8 @@ fn run() -> Result<i32, String> {
     if first.closing {
         return Ok(0);
     }
-    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
         None::<genos_window::ThreadStop<bool>>,
@@ -512,14 +573,7 @@ fn run() -> Result<i32, String> {
             &mut tracked_collapsed,
             &mut tracked_tab,
         );
-        hotkeys(
-            &mut app,
-            &input,
-            &keys,
-            &mut camera,
-            &mut tools,
-            renderer,
-        )?;
+        hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
         let page_keys = !camera.captured && menu_open;
@@ -748,7 +802,8 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     if first.closing {
         return Ok(());
     }
-    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = opts.block_ms {
         owner.plant_block(stall);
@@ -1176,6 +1231,15 @@ fn gltf_bytes_absent(err: &str) -> bool {
     err.contains("Git LFS pointer") || err.contains("file not found")
 }
 
+static COOKED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn cooked_dir() -> Option<PathBuf> {
+    COOKED
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("GENOS_COOKED").map(PathBuf::from))
+}
+
 fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
     match &entry.kind {
         Kind::Stress(spec) => {
@@ -1257,9 +1321,25 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
             if std::env::var_os("GENOS_BAKE").is_none() {
                 bake.mode = genos_render::bake::BakeMode::OnLoad;
             }
-            world
-                .add_gltf_traced(&model, &identity_pose(), &bake)
-                .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+            if let Some(dir) = cooked_dir() {
+                let report = world.add_cooked(&dir, &full, &identity_pose(), false, true);
+                for line in &report.fallback {
+                    eprintln!("genos-lighting: {line}");
+                }
+                eprintln!(
+                    "genos-lighting: cooked load {:.2} ms, texture bytes {}",
+                    report.load_ms, report.texture_bytes
+                );
+                if report.objects.is_empty() {
+                    world
+                        .add_gltf_traced(&model, &identity_pose(), &bake)
+                        .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+                }
+            } else {
+                world
+                    .add_gltf_traced(&model, &identity_pose(), &bake)
+                    .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+            }
             Ok(Show::Still(world))
         }
     }
@@ -1730,8 +1810,16 @@ fn setting_piece(
         )
         .map(Piece::Row),
         "fps" => Some(Piece::Row(fps_row(fps))),
-        "enabled" => Some(Piece::Row(reflection_check("enabled", ID_REFL_ENABLED, reflections(app).enabled))),
-        "water" => Some(Piece::Row(reflection_check("water", ID_REFL_WATER, reflections(app).water))),
+        "enabled" => Some(Piece::Row(reflection_check(
+            "enabled",
+            ID_REFL_ENABLED,
+            reflections(app).enabled,
+        ))),
+        "water" => Some(Piece::Row(reflection_check(
+            "water",
+            ID_REFL_WATER,
+            reflections(app).water,
+        ))),
         "rough_cutoff" => Some(Piece::Row(reflection_slider(
             "rough_cutoff",
             ID_REFL_ROUGH,
@@ -1780,7 +1868,10 @@ fn setting_piece(
                 genos_scene::Caustics::Image => 1.0,
                 genos_scene::Caustics::Cache => 2.0,
             },
-            ["off", "image", "cache"].into_iter().map(str::to_string).collect(),
+            ["off", "image", "cache"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         )
         .map(Piece::Row),
         "tracer" => drop_row(
@@ -1843,12 +1934,7 @@ fn setting_piece(
         "hdr_ev100" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
-                "EV100",
-                ID_HDR_EV,
-                hdr.ev100,
-                -8.0,
-                16.0,
-                0.1,
+                "EV100", ID_HDR_EV, hdr.ev100, -8.0, 16.0, 0.1,
             )))
         }
         "hdr_compensation" => {
@@ -1865,12 +1951,7 @@ fn setting_piece(
         "hdr_iso" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
-                "ISO",
-                ID_HDR_ISO,
-                hdr.iso,
-                50.0,
-                6400.0,
-                50.0,
+                "ISO", ID_HDR_ISO, hdr.iso, 50.0, 6400.0, 50.0,
             )))
         }
         "hdr_aperture" => {
@@ -2238,7 +2319,14 @@ fn reflection_slider(label: &str, id: u32, value: f64, min: f64, max: f64, step:
     PanelRow {
         label: label.into(),
         buttons: Vec::new(),
-        slider: Some(PanelSlider::range(id, value, min, max, step, format!("{value}"))),
+        slider: Some(PanelSlider::range(
+            id,
+            value,
+            min,
+            max,
+            step,
+            format!("{value}"),
+        )),
         dropdown: None,
         checks: Vec::new(),
     }
@@ -2325,7 +2413,9 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
     } else if id == ID_HDR_EV {
         app.scene().hdr.set_key("ev100", &format!("{value}"))?;
     } else if id == ID_HDR_COMP {
-        app.scene().hdr.set_key("compensation", &format!("{value}"))?;
+        app.scene()
+            .hdr
+            .set_key("compensation", &format!("{value}"))?;
     } else if id == ID_HDR_ISO {
         app.scene().hdr.set_key("iso", &format!("{value}"))?;
     } else if id == ID_HDR_APERTURE {
@@ -2392,14 +2482,24 @@ fn select(
         } else {
             &["off", "software", "ray_query"]
         };
-        let key = if id == ID_REFL_CAUSTICS { "caustics" } else { "tracer" };
+        let key = if id == ID_REFL_CAUSTICS {
+            "caustics"
+        } else {
+            "tracer"
+        };
         let name = names.get(index).copied().unwrap_or(names[0]);
         app.scene().reflections.set_key(key, name)?;
     } else if id == ID_HDR_EXPOSURE {
-        let mode = ["auto", "camera", "fixed"].get(index).copied().unwrap_or("auto");
+        let mode = ["auto", "camera", "fixed"]
+            .get(index)
+            .copied()
+            .unwrap_or("auto");
         app.scene().hdr.set_key("exposure_mode", mode)?;
     } else if id == ID_HDR_DISPLAY {
-        let mode = ["agx", "aces", "legacy"].get(index).copied().unwrap_or("legacy");
+        let mode = ["agx", "aces", "legacy"]
+            .get(index)
+            .copied()
+            .unwrap_or("legacy");
         app.scene().hdr.set_key("display", mode)?;
     } else if id == ID_HDR_OUTPUT {
         let mode = ["auto", "sdr", "hdr10", "scrgb"]
@@ -2450,7 +2550,11 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         return Ok(());
     }
     if id == ID_REFL_ENABLED || id == ID_REFL_WATER {
-        let key = if id == ID_REFL_ENABLED { "enabled" } else { "water" };
+        let key = if id == ID_REFL_ENABLED {
+            "enabled"
+        } else {
+            "water"
+        };
         app.scene()
             .reflections
             .set_key(key, if on { "on" } else { "off" })?;
@@ -2621,6 +2725,11 @@ fn options() -> Result<Options, String> {
             "--script" => script = Some(PathBuf::from(need_arg(&mut args, "--script")?)),
             "--report" => report = Some(PathBuf::from(need_arg(&mut args, "--report")?)),
             "--lighting-debug" => lighting_debug = true,
+            "--cooked" => {
+                COOKED
+                    .set(PathBuf::from(need_arg(&mut args, "--cooked")?))
+                    .ok();
+            }
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
             "--denoise-launch" => denoise_launch = Some(need_arg(&mut args, "--denoise-launch")?),
@@ -2680,8 +2789,7 @@ fn options() -> Result<Options, String> {
             }
             "--lifecycle-close-early" => close_early = true,
             "--fog" | "--fog-density" | "--fog-height" | "--fog-thickness" | "--fog-albedo"
-            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid"
-            | "--fog-samples" => {
+            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid" | "--fog-samples" => {
                 take_fog(&mut fog_cli, &arg, &mut args)?;
             }
             other => {
@@ -3011,10 +3119,7 @@ mod tests {
             .iter()
             .map(|choice| choice.name.as_str())
             .collect();
-        assert_eq!(
-            lamp_names,
-            ["off", "hits", "pixels", "both", "reuse"]
-        );
+        assert_eq!(lamp_names, ["off", "hits", "pixels", "both", "reuse"]);
         assert_eq!(lamp.value, 4.0, "high uses the lamp reservoir (reuse)");
         let sliders: Vec<&str> = rows
             .iter()
@@ -3242,17 +3347,9 @@ mod tests {
                 "Info"
             ]
         );
-        let scene = tabs
-            .tabs
-            .iter()
-            .find(|tab| tab.title == "Scene")
-            .unwrap();
+        let scene = tabs.tabs.iter().find(|tab| tab.title == "Scene").unwrap();
         assert!(matches!(scene.blocks[0], genos_ui::PanelBlock::Rows(_)));
-        let direct = tabs
-            .tabs
-            .iter()
-            .find(|tab| tab.title == "Lamps")
-            .unwrap();
+        let direct = tabs.tabs.iter().find(|tab| tab.title == "Lamps").unwrap();
         assert!(direct.blocks.iter().any(|block| matches!(
             block,
             genos_ui::PanelBlock::Section(section)
@@ -3437,7 +3534,11 @@ mod tests {
         .expect("push");
         assert_eq!(app.scene().menu.tab, "GI");
         assert!(
-            app.scene().menu.collapsed.iter().any(|name| name == "direct"),
+            app.scene()
+                .menu
+                .collapsed
+                .iter()
+                .any(|name| name == "direct"),
             "collapsed={:?}",
             app.scene().menu.collapsed
         );
@@ -3530,7 +3631,10 @@ mod tests {
         use std::time::{Duration, Instant};
         fn wait_ms(ms: u64) {
             let pair = (Mutex::new(()), Condvar::new());
-            let guard = pair.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = pair
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
         }
         let root = genos_scene_lib::repo_root();
@@ -3548,7 +3652,8 @@ mod tests {
             .as_ref()
             .err()
             .is_some_and(|err| super::gltf_bytes_absent(err));
-        let log = std::fs::File::create(std::env::temp_dir().join("genos-stall-load.log")).expect("log");
+        let log =
+            std::fs::File::create(std::env::temp_dir().join("genos-stall-load.log")).expect("log");
         let mut app = super::App::open(entries, root, log).expect("app");
         let meter = genos_window::StallMeter::new();
         meter.mark();
@@ -3560,10 +3665,7 @@ mod tests {
             meter.mark();
             match app.take_load() {
                 Ok(genos_debug::LoadPace::Pending) => {
-                    assert!(
-                        Instant::now() <= deadline,
-                        "scene load did not finish"
-                    );
+                    assert!(Instant::now() <= deadline, "scene load did not finish");
                     wait_ms(16);
                 }
                 Ok(genos_debug::LoadPace::Ready) => break,

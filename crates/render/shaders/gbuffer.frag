@@ -65,9 +65,18 @@ void main() {
         if (v_cutoff > 0.0 && texel.a < v_cutoff) {
             discard;
         }
-        albedo *= vec3(material_linear(texel.r), material_linear(texel.g), material_linear(texel.b));
+        vec3 rgb = texel.rgb;
+        if (atlas_mode.color_linear == 0u) {
+            rgb = vec3(material_linear(texel.r), material_linear(texel.g), material_linear(texel.b));
+        }
+        albedo *= rgb;
         if (v_normal_atlas.z > 0.5) {
-            n = material_perturb(n, v_pos, v_uv, material_normal_at(v_normal_atlas, v_uv));
+            // ADR 0035: Z is rebuilt from RG on the RGBA8 path and the BC5 path.
+            vec3 mapped = material_normal_at(v_normal_atlas, v_uv);
+            vec2 xy = mapped.xy * 2.0 - 1.0;
+            float z = sqrt(max(0.0, 1.0 - dot(xy, xy)));
+            mapped = vec3(mapped.xy, z * 0.5 + 0.5);
+            n = material_perturb(n, v_pos, v_uv, mapped);
         }
     }
     bool two_sided = v_shade > 1.15;

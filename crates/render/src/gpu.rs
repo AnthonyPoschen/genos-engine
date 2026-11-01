@@ -318,25 +318,28 @@ impl Renderer {
         let height = gpu.extent_h;
         let unfilled = gpu.unfilled;
         let permit = genos_window::ShutdownPermit::issue();
-        Ok((Self {
-            gpu,
-            width,
-            height,
-            wire_on: false,
-            world_identity: 0,
-            lamp_set: 0,
-            memory: FrameMemory::default(),
-            shapes: crate::pool::MeshPool::default(),
-            overlay_rects: Vec::new(),
-            overlay_lines: Vec::new(),
-            overlay_verts: Vec::new(),
-            keep_pictures: false,
-            debug: debug_view::DebugState {
-                unfilled,
-                ..debug_view::DebugState::default()
+        Ok((
+            Self {
+                gpu,
+                width,
+                height,
+                wire_on: false,
+                world_identity: 0,
+                lamp_set: 0,
+                memory: FrameMemory::default(),
+                shapes: crate::pool::MeshPool::default(),
+                overlay_rects: Vec::new(),
+                overlay_lines: Vec::new(),
+                overlay_verts: Vec::new(),
+                keep_pictures: false,
+                debug: debug_view::DebugState {
+                    unfilled,
+                    ..debug_view::DebugState::default()
+                },
+                slow_fence: None,
             },
-            slow_fence: None,
-        }, permit))
+            permit,
+        ))
     }
 
     /// Answer compositor pings on a side thread during device waits and pipeline compiles.
@@ -570,6 +573,12 @@ impl Renderer {
             times.samples.clear();
             times.recorded = 0;
         }
+    }
+
+    /// The device enabled BC7 and BC5 (`textureCompressionBC`).
+    #[must_use]
+    pub fn bc_textures(&self) -> bool {
+        self.gpu.bc_textures
     }
 
     /// Material knobs in force. `texture_quality` does not follow the VRAM size.
@@ -884,7 +893,8 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
-        let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
+        let views =
+            crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
         self.gpu.tick_materials(self.memory.accounted(), &views)?;
         self.fund_stream_pages()?;
         self.gpu.submit_transfer()?;
@@ -1123,7 +1133,10 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn run_fog(&mut self, job: &crate::fog_pass::FogDispatch) -> Result<crate::fog_pass::FogGpu, String> {
+    pub fn run_fog(
+        &mut self,
+        job: &crate::fog_pass::FogDispatch,
+    ) -> Result<crate::fog_pass::FogGpu, String> {
         self.gpu.run_fog(job)
     }
 
@@ -1132,7 +1145,11 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device has no timestamp queries or the dispatch fails.
-    pub fn froxel_sample_ms(&mut self, preset: LightingPreset, samples: u32) -> Result<f64, String> {
+    pub fn froxel_sample_ms(
+        &mut self,
+        preset: LightingPreset,
+        samples: u32,
+    ) -> Result<f64, String> {
         self.gpu.froxel_sample_ms(preset, samples)
     }
 
@@ -1151,14 +1168,22 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the image or buffer allocation fails.
-    pub fn froxel_allocation(&mut self, preset: LightingPreset, doubled: bool) -> Result<u64, String> {
+    pub fn froxel_allocation(
+        &mut self,
+        preset: LightingPreset,
+        doubled: bool,
+    ) -> Result<u64, String> {
         self.gpu.froxel_allocation(preset, doubled)
     }
 
     /// Probe for the debug page. `pass_ms` is the last frame's froxel timestamp.
     /// History stays off, so accepts and rejects stay 0.
     #[must_use]
-    pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
+    pub fn fog_frame_probe(
+        &self,
+        fog: &genos_scene::FogSettings,
+        preset: LightingPreset,
+    ) -> crate::fog_budget::FogProbe {
         let mut probe = crate::fog_budget::fog_probe(fog, preset);
         if probe.dispatches == 0 || !self.gpu.froxel_wrote {
             probe.dispatches = 0;
@@ -1536,6 +1561,17 @@ struct Gpu {
     sampled_size: [(u32, u32); 2],
     sampled_layout: [u32; 2],
     sampled_cleared: [bool; 2],
+    /// `VkFormat` of the two sampled atlases. 37 is RGBA8.
+    sampled_format: [i32; 2],
+    sampled_mips: [u32; 2],
+    /// Nearest sampler for texelFetch of the atlases.
+    atlas_sampler: Handle,
+    /// `color_linear`, `color_lod`, `normal_lod`, pad. Host uniform, binding 1.
+    atlas_mode: Buffer,
+    atlas_linear: u32,
+    atlas_lod: [u32; 2],
+    /// The device enabled `textureCompressionBC`.
+    bc_textures: bool,
     /// One texel copied from the colour atlas by the transfer. The CPU never
     /// stores a mip byte here.
     atlas_readback: Buffer,
@@ -1714,10 +1750,12 @@ struct Buffer {
 struct StreamSource {
     index: usize,
     color: bool,
+    /// This chain is the image the fragment shader fetches.
+    sampled: bool,
     chain: crate::material_stream::Chain,
     staging: Buffer,
     mip_offset: Vec<u64>,
-    /// Mip last blitted into the device atlas. `None` until the first copy.
+    /// Mip last copied into the device atlas. `None` until the first copy.
     shown: Option<u32>,
 }
 
@@ -1805,6 +1843,8 @@ struct Fns {
     cmd_clear_color: FnClearColor,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
+    create_sampler: FnCreateSem,
+    destroy_sampler: Fn2,
     create_fence: FnFence,
     destroy_fence: Fn2,
     wait_fences: FnWait,
@@ -2286,10 +2326,18 @@ impl Gpu {
             } else {
                 None
             };
-            // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
-            // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
+            // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
+            // G-buffer, and textureCompressionBC (22) when the device has it.
+            type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
+            let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
+            let mut have = [0u32; 55];
+            get_features(physical, have.as_mut_ptr());
+            let bc_textures = have[22] != 0;
             let mut features = [0u32; 55];
             features[26] = 1;
+            if bc_textures {
+                features[22] = 1;
+            }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
             let hdr_meta_ext = b"VK_EXT_hdr_metadata\0";
@@ -2422,6 +2470,13 @@ impl Gpu {
                 sampled_size: [(0, 0), (0, 0)],
                 sampled_layout: [0, 0],
                 sampled_cleared: [false, false],
+                sampled_format: [37, 37],
+                sampled_mips: [1, 1],
+                atlas_sampler: std::ptr::null_mut(),
+                atlas_mode: Buffer::empty(),
+                atlas_linear: 0,
+                atlas_lod: [0, 0],
+                bc_textures,
                 atlas_readback: Buffer::empty(),
                 page_readback: Buffer::empty(),
                 material_key: 0,
@@ -2826,7 +2881,10 @@ impl Gpu {
             }
             let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
             let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
-            listed.push(crate::hdr_output::ListedFormat { format, color_space });
+            listed.push(crate::hdr_output::ListedFormat {
+                format,
+                color_space,
+            });
         }
         let force_sdr = self.lighting.hdr.legacy_bytes
             || matches!(
@@ -3321,7 +3379,11 @@ impl Gpu {
         if cmd == self.audio_cmd {
             return Some(3);
         }
-        if self.froxel.as_ref().is_some_and(|targets| targets.cmd == cmd) {
+        if self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| targets.cmd == cmd)
+        {
             return Some(4);
         }
         if self
@@ -3346,14 +3408,7 @@ impl Gpu {
         let buffer = self.make_buffer_queues(size, 1, Memory::Upload, families)?;
         let mut mapped = std::ptr::null_mut();
         let result = unsafe {
-            (self.fns.map_mem)(
-                self.device,
-                buffer.memory,
-                0,
-                buffer.size,
-                0,
-                &mut mapped,
-            )
+            (self.fns.map_mem)(self.device, buffer.memory, 0, buffer.size, 0, &mut mapped)
         };
         if result != VK_SUCCESS {
             let mut buffer = buffer;
@@ -3382,10 +3437,8 @@ impl Gpu {
             for extra in &mut overflow {
                 self.drop_staged(extra);
             }
-            let mut main = std::mem::replace(
-                &mut self.stage.slots[index].main,
-                stage::Staged::empty(),
-            );
+            let mut main =
+                std::mem::replace(&mut self.stage.slots[index].main, stage::Staged::empty());
             self.drop_staged(&mut main);
         }
     }
@@ -3404,7 +3457,10 @@ impl Gpu {
             self.drop_staged(extra);
         }
         if filled > main_size && main_size > 0 {
-            let cap = filled.max(4096).checked_next_power_of_two().unwrap_or(filled);
+            let cap = filled
+                .max(4096)
+                .checked_next_power_of_two()
+                .unwrap_or(filled);
             if let Ok(created) = self.make_stage(cap, &families) {
                 let mut old = std::mem::replace(&mut self.stage.slots[index].main, created);
                 self.drop_staged(&mut old);
@@ -3487,13 +3543,7 @@ impl Gpu {
             size,
         };
         unsafe {
-            (self.fns.cmd_copy_buffer)(
-                cmd,
-                src,
-                dst,
-                1,
-                &region as *const Region as *const u8,
-            );
+            (self.fns.cmd_copy_buffer)(cmd, src, dst, 1, &region as *const Region as *const u8);
         }
         Ok(())
     }
@@ -3546,6 +3596,7 @@ impl Gpu {
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.write_atlas_mode()?;
             self.init_fresh_atlas();
             self.update_resident_scene()?;
             self.update_resident_fields()?;
@@ -4299,7 +4350,11 @@ impl Gpu {
         if src.is_null() || dst.is_null() {
             return;
         }
-        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        let size = self
+            .lighting
+            .scene_lin
+            .size
+            .min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -4309,7 +4364,11 @@ impl Gpu {
             dst: u64,
             size: u64,
         }
-        let region = Region { src: 0, dst: 0, size };
+        let region = Region {
+            src: 0,
+            dst: 0,
+            size,
+        };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
@@ -4415,10 +4474,18 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            // Atlas mode: color_linear and the resident lods. Fragment only.
+            Binding {
+                binding: 1,
+                kind: 6,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
             // Device-local colour atlas. Fragment only: the depth mask and the G-buffer.
             Binding {
                 binding: 4,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4441,7 +4508,7 @@ impl Gpu {
             // Device-local normal atlas. Same readers as binding 4.
             Binding {
                 binding: 7,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4478,9 +4545,14 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
-        self.sampled_color = self.make_atlas_image(1, 1)?;
-        self.sampled_normal = self.make_atlas_image(1, 1)?;
+        self.atlas_sampler = self.make_sampler()?;
+        self.atlas_mode = self.make_buffer(16, 0x10, Memory::Upload)?;
+        self.write_buffer(&self.atlas_mode, &[0u8; 16])?;
+        self.sampled_color = self.make_atlas_image(1, 1, 37, 1)?;
+        self.sampled_normal = self.make_atlas_image(1, 1, 37, 1)?;
         self.sampled_size = [(1, 1), (1, 1)];
+        self.sampled_format = [37, 37];
+        self.sampled_mips = [1, 1];
         self.atlas_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         self.page_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         // The CPU never stores a mip here. A skipped copy reads back as zero.
@@ -4513,8 +4585,12 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        // Two raster sets: five storage buffers plus the two material images.
-        let sizes = [Size { kind: 7, count: 16 }, Size { kind: 3, count: 8 }];
+        // Two raster sets: storage buffers, the atlas-mode uniform, and two samplers.
+        let sizes = [
+            Size { kind: 7, count: 16 },
+            Size { kind: 6, count: 4 },
+            Size { kind: 1, count: 8 },
+        ];
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -4682,13 +4758,18 @@ impl Gpu {
             view: Handle,
             layout: u32,
         }
+        let mode = BufInfo {
+            buffer: self.atlas_mode.buffer,
+            offset: 0,
+            range: 16,
+        };
         let color_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_color.view,
             layout: 1,
         };
         let normal_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_normal.view,
             layout: 1,
         };
@@ -4757,10 +4838,22 @@ impl Gpu {
                 s_type: 35,
                 next: std::ptr::null(),
                 set,
+                binding: 1,
+                element: 0,
+                count: 1,
+                kind: 6,
+                image: std::ptr::null(),
+                buffer: &mode,
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
                 binding: 4,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &color_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -4772,7 +4865,7 @@ impl Gpu {
                 binding: 7,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &normal_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -5480,19 +5573,45 @@ impl Gpu {
         atlas: &crate::world::MaterialAtlas,
         sampled: bool,
     ) -> Result<(), String> {
-        let Some(chain) = crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
-        else {
-            return Ok(());
+        let chain = if atlas.block_format != 0 && !atlas.block_mips.is_empty() {
+            crate::material_stream::Chain {
+                width: atlas.width,
+                height: atlas.height,
+                levels: atlas.block_mips.clone(),
+                format: i32::try_from(atlas.block_format).unwrap_or(37),
+            }
+        } else {
+            let Some(chain) =
+                crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
+            else {
+                return Ok(());
+            };
+            chain
         };
         if sampled {
-            self.ensure_sampled(color, chain.width, chain.height)?;
+            self.ensure_sampled(
+                color,
+                chain.width,
+                chain.height,
+                chain.format,
+                u32::try_from(chain.levels.len()).unwrap_or(1),
+            )?;
+            if color && chain.format == 146 {
+                self.atlas_linear = 1;
+            }
+            if color && chain.format == 37 {
+                self.atlas_linear = 0;
+                self.atlas_lod[0] = 0;
+            }
+            if !color && chain.format == 37 {
+                self.atlas_lod[1] = 0;
+            }
         }
         let started = Instant::now();
         let bytes = chain.level_bytes();
         let total = chain.total_bytes();
         let index = self.streamer.texture_count();
-        self.streamer
-            .add_texture(chain.width, chain.height, &bytes);
+        self.streamer.add_texture(chain.width, chain.height, &bytes);
         let elapsed = started.elapsed().as_millis().max(1);
         let ms = u32::try_from(elapsed).unwrap_or(u32::MAX);
         self.streamer.observe_disk(total, ms);
@@ -5501,6 +5620,7 @@ impl Gpu {
         self.stream_sources.push(StreamSource {
             index,
             color,
+            sampled,
             chain,
             staging,
             mip_offset,
@@ -5509,13 +5629,25 @@ impl Gpu {
         Ok(())
     }
 
-    fn ensure_sampled(&mut self, color: bool, width: u32, height: u32) -> Result<(), String> {
+    fn ensure_sampled(
+        &mut self,
+        color: bool,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<(), String> {
         let slot = usize::from(!color);
-        if self.sampled_size[slot] == (width, height) && !self.sampled_image(color).image.is_null()
+        if self.sampled_size[slot] == (width, height)
+            && self.sampled_format[slot] == format
+            && self.sampled_mips[slot] == mips.max(1)
+            && !self.sampled_image(color).image.is_null()
         {
             return Ok(());
         }
-        let image = self.make_atlas_image(width, height)?;
+        let image = self.make_atlas_image(width, height, format, mips)?;
+        self.sampled_format[slot] = format;
+        self.sampled_mips[slot] = mips.max(1);
         let mut old = if color {
             std::mem::replace(&mut self.sampled_color, image)
         } else {
@@ -6364,7 +6496,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind image",
             )?;
-            let view = self.make_view(image, format, aspect)?;
+            let view = self.make_view(image, format, aspect, 1)?;
             Ok(Image {
                 image,
                 view,
@@ -6373,8 +6505,14 @@ impl Gpu {
         }
     }
 
-    /// Device-local atlas the fragment shader loads. Transfer is the only writer.
-    fn make_atlas_image(&self, width: u32, height: u32) -> Result<Image, String> {
+    /// Device-local atlas the fragment shader fetches. Transfer is the only writer.
+    fn make_atlas_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<Image, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -6406,17 +6544,18 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width.max(1),
                 h: height.max(1),
                 d: 1,
             },
-            mips: 1,
+            mips: mips.max(1),
             layers: 1,
             samples: 1,
             tiling: 0,
-            usage: 0x1 | 0x2 | 0x8,
+            // TRANSFER_SRC | TRANSFER_DST | SAMPLED. Block formats are not storage images.
+            usage: 0x1 | 0x2 | 0x4,
             sharing: u32::from(shared),
             queue_count: if shared { 2 } else { 0 },
             queues: if shared {
@@ -6446,7 +6585,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind atlas",
             )?;
-            let view = self.make_view(image, 37, 1)?;
+            let view = self.make_view(image, format, 1, mips.max(1))?;
             Ok(Image {
                 image,
                 view,
@@ -6455,7 +6594,13 @@ impl Gpu {
         }
     }
 
-    fn make_view(&self, image: Handle, format: i32, aspect: u32) -> Result<Handle, String> {
+    fn make_view(
+        &self,
+        image: Handle,
+        format: i32,
+        aspect: u32,
+        levels: u32,
+    ) -> Result<Handle, String> {
         #[repr(C)]
         struct Comp {
             r: u32,
@@ -6498,7 +6643,7 @@ impl Gpu {
             range: Range {
                 aspect,
                 mip: 0,
-                levels: 1,
+                levels: levels.max(1),
                 layer: 0,
                 layers: 1,
             },
@@ -6847,7 +6992,8 @@ impl Gpu {
         raw[8..16].copy_from_slice(&next.to_ne_bytes());
         unsafe { query(self.physical, raw.as_mut_ptr()) };
         let props = parse_mem_props(&raw[16..]);
-        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let heap_count =
+            u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
         let mut heap_budget = 0u64;
         let mut heap_usage = 0u64;
         for index in 0..heap_count {
@@ -6943,6 +7089,13 @@ impl Gpu {
                 .find(|source| source.index == index)
             {
                 source.shown = Some(level);
+            }
+        }
+        for source in &self.stream_sources {
+            if source.sampled {
+                if let Some(level) = source.shown {
+                    self.atlas_lod[usize::from(!source.color)] = level;
+                }
             }
         }
         self.finish_atlas_draw(true, true);
@@ -7052,7 +7205,11 @@ impl Gpu {
     }
 
     fn record_mip_copy(&self, index: usize, level: u32) -> u64 {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return 0;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -7078,8 +7235,9 @@ impl Gpu {
             page.layout,
             width,
             height,
+            block_texel(source.chain.format),
         );
-        u64::from(width) * u64::from(height) * 4
+        u64::try_from(mip.rgba.len()).unwrap_or(0)
     }
 
     /// Move the atlas to transfer-dest and clear it once. A later blit overwrites
@@ -7106,7 +7264,9 @@ impl Gpu {
             self.sampled_layout[slot] = 7;
         }
         if !self.sampled_cleared[slot] {
-            self.clear_color(self.transfer_cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             self.sampled_cleared[slot] = true;
         }
     }
@@ -7123,7 +7283,9 @@ impl Gpu {
                 continue;
             }
             self.cmd_image_barrier(self.cmd, image, 0, 7, 0x1, 0x1000, 0, 0x1000);
-            self.clear_color(self.cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.cmd, image, 7);
+            }
             self.cmd_image_barrier(self.cmd, image, 7, 1, 0x1000, 0x80, 0x1000, 0x20);
             self.sampled_layout[slot] = 1;
             self.sampled_cleared[slot] = true;
@@ -7155,7 +7317,7 @@ impl Gpu {
             0x800,
         );
         self.sampled_layout[slot] = 1;
-        if readback {
+        if readback && !block_texel(self.sampled_format[0]) {
             self.copy_atlas_texel(image);
         }
     }
@@ -7165,7 +7327,11 @@ impl Gpu {
     }
 
     fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -7174,16 +7340,21 @@ impl Gpu {
         let Some(mip) = source.chain.levels.get(slot) else {
             return;
         };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
-        else {
+        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
             return;
         };
-        self.publish_resident(&page, source.color);
+        self.publish_resident(&page, source.color, level);
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
     /// handle and not a staging buffer.
-    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+    fn copied_page(
+        &self,
+        index: usize,
+        level: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ResidentPage> {
         let page = self.stream_pages.iter().find(|page| {
             page.index == index && page.level == level && page.copied && !page.image.is_null()
         })?;
@@ -7195,21 +7366,26 @@ impl Gpu {
     }
 
     /// Blit `page` into the device atlas. This is the only atlas write.
-    fn publish_resident(&self, page: &ResidentPage, color: bool) {
+    fn publish_resident(&self, page: &ResidentPage, color: bool, level: u32) {
+        let slot = usize::from(!color);
         let atlas = self.sampled_image(color).image;
-        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!color)];
+        let (atlas_w, atlas_h) = self.sampled_size[slot];
         if atlas.is_null() || page.image.is_null() {
             return;
         }
-        self.blit_nearest(
-            page.image,
-            atlas,
-            page.width,
-            page.height,
-            atlas_w.max(1),
-            atlas_h.max(1),
-        );
-        if color {
+        if block_texel(self.sampled_format[slot]) {
+            self.copy_same_size(page.image, atlas, page.width, page.height, level);
+        } else {
+            self.blit_nearest(
+                page.image,
+                atlas,
+                page.width,
+                page.height,
+                atlas_w.max(1),
+                atlas_h.max(1),
+            );
+        }
+        if color && !block_texel(self.sampled_format[slot]) {
             self.copy_page_texel(page.image);
         }
     }
@@ -7251,7 +7427,9 @@ impl Gpu {
             if buffer.is_null() || size < 4 {
                 continue;
             }
-            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+            self.transfer_buffer_barrier(
+                buffer, size, src_stage, dst_stage, src_access, dst_access,
+            );
         }
     }
 
@@ -7328,6 +7506,134 @@ impl Gpu {
                 color.as_ptr().cast(),
                 1,
                 &range as *const Range as *const u8,
+            );
+        }
+    }
+
+    fn write_atlas_mode(&self) -> Result<(), String> {
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&self.atlas_linear.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.atlas_lod[0].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.atlas_lod[1].to_le_bytes());
+        self.write_buffer(&self.atlas_mode, &bytes)
+    }
+
+    fn make_sampler(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            mag: i32,
+            min: i32,
+            mip: i32,
+            addr_u: i32,
+            addr_v: i32,
+            addr_w: i32,
+            bias: f32,
+            aniso: u32,
+            max_aniso: f32,
+            compare: u32,
+            compare_op: i32,
+            min_lod: f32,
+            max_lod: f32,
+            border: [f32; 4],
+            unnorm: u32,
+        }
+        let info = Info {
+            s_type: 31,
+            next: std::ptr::null(),
+            flags: 0,
+            mag: 0,
+            min: 0,
+            mip: 0,
+            addr_u: 2,
+            addr_v: 2,
+            addr_w: 2,
+            bias: 0.0,
+            aniso: 0,
+            max_aniso: 1.0,
+            compare: 0,
+            compare_op: 0,
+            min_lod: 0.0,
+            max_lod: 16.0,
+            border: [0.0; 4],
+            unnorm: 0,
+        };
+        let mut sampler = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_sampler)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut sampler,
+                ),
+                "sampler",
+            )?;
+        }
+        Ok(sampler)
+    }
+
+    /// Copy a block page into one mip of the atlas. Both images are the same size.
+    fn copy_same_size(&self, src: Handle, dst: Handle, width: u32, height: u32, dst_mip: u32) {
+        #[repr(C)]
+        struct Sub {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Off {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        #[repr(C)]
+        struct Ext {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Copy {
+            src: Sub,
+            src_off: Off,
+            dst: Sub,
+            dst_off: Off,
+            extent: Ext,
+        }
+        let copy = Copy {
+            src: Sub {
+                aspect: 1,
+                mip: 0,
+                layer: 0,
+                count: 1,
+            },
+            src_off: Off { x: 0, y: 0, z: 0 },
+            dst: Sub {
+                aspect: 1,
+                mip: dst_mip,
+                layer: 0,
+                count: 1,
+            },
+            dst_off: Off { x: 0, y: 0, z: 0 },
+            extent: Ext {
+                w: width,
+                h: height,
+                d: 1,
+            },
+        };
+        unsafe {
+            (self.fns.cmd_copy_image)(
+                self.transfer_cmd,
+                src,
+                6,
+                dst,
+                7,
+                1,
+                &copy as *const Copy as *const u8,
             );
         }
     }
@@ -7460,7 +7766,12 @@ impl Gpu {
         }
     }
 
-    fn create_unbound_image(&self, width: u32, height: u32) -> Result<UnboundImage, String> {
+    fn create_unbound_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> Result<UnboundImage, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -7490,7 +7801,7 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width,
                 h: height,
@@ -7537,6 +7848,7 @@ impl Gpu {
         old_layout: u32,
         width: u32,
         height: u32,
+        block: bool,
     ) {
         #[repr(C)]
         struct Range {
@@ -7659,9 +7971,11 @@ impl Gpu {
                     &barrier as *const Barrier as *const u8,
                 );
             }
-            // Zero first. The buffer copy is the only writer of a real texel.
-            // Skipping that copy leaves the clear, and the blit publishes black.
-            self.clear_color(self.transfer_cmd, image, 7);
+            // Zero first on an uncompressed page. A block image cannot be cleared
+            // with vkCmdClearColorImage. Skipping the copy leaves the previous texel.
+            if !block {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             (self.fns.cmd_barrier)(
                 self.transfer_cmd,
                 0x1000,
@@ -7823,7 +8137,11 @@ impl Gpu {
             let Some(mip) = source.chain.levels.get(slot) else {
                 continue;
             };
-            let image = self.create_unbound_image(mip.width.max(1), mip.height.max(1))?;
+            let image = self.create_unbound_image(
+                mip.width.max(1),
+                mip.height.max(1),
+                source.chain.format,
+            )?;
             self.stream_pages.push(StreamPage {
                 index,
                 level,
@@ -7849,14 +8167,7 @@ impl Gpu {
         dst_access: u32,
     ) {
         self.cmd_image_barrier(
-            self.cmd,
-            image,
-            old,
-            new,
-            src_stage,
-            dst_stage,
-            src_access,
-            dst_access,
+            self.cmd, image, old, new, src_stage, dst_stage, src_access, dst_access,
         );
     }
 
@@ -7905,7 +8216,7 @@ impl Gpu {
             range: Range {
                 aspect: 1,
                 mip: 0,
-                levels: 1,
+                levels: u32::MAX,
                 layer: 0,
                 layers: 1,
             },
@@ -8363,7 +8674,8 @@ impl Gpu {
             return false;
         };
         self.shutdown_fence = graphics;
-        let distinct = !self.compute_queue.is_null() && !std::ptr::eq(self.compute_queue, self.queue);
+        let distinct =
+            !self.compute_queue.is_null() && !std::ptr::eq(self.compute_queue, self.queue);
         if distinct {
             let Ok(fence) = self.make_plain_fence() else {
                 self.destroy_shutdown_fences();
@@ -8378,8 +8690,8 @@ impl Gpu {
             self.destroy_shutdown_fences();
             return false;
         }
-        let compute_submitted = !distinct
-            || block(|| self.submit_empty(self.compute_queue, self.shutdown_compute));
+        let compute_submitted =
+            !distinct || block(|| self.submit_empty(self.compute_queue, self.shutdown_compute));
         if distinct && !compute_submitted {
             unsafe {
                 (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
@@ -8511,6 +8823,12 @@ impl Gpu {
             self.destroy_image(&mut sampled_normal);
             self.destroy_buffer(&mut atlas_readback);
             self.destroy_buffer(&mut page_readback);
+            let mut atlas_mode = std::mem::replace(&mut self.atlas_mode, Buffer::empty());
+            self.destroy_buffer(&mut atlas_mode);
+            if !self.atlas_sampler.is_null() {
+                (self.fns.destroy_sampler)(self.device, self.atlas_sampler, std::ptr::null());
+                self.atlas_sampler = std::ptr::null_mut();
+            }
             if !self.transfer_done.is_null() {
                 (self.fns.destroy_sem)(self.device, self.transfer_done, std::ptr::null());
                 self.transfer_done = std::ptr::null_mut();
@@ -8722,7 +9040,8 @@ fn device_extension_present(
             unsafe extern "system" fn(Handle, *const c_void, *mut u32, *mut u8) -> VkResult;
         let enumerate: Enumerate = transmute(raw);
         let mut count = 0u32;
-        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0 || count == 0
+        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0
+            || count == 0
         {
             return false;
         }
@@ -8871,6 +9190,8 @@ fn load_fns(
             cmd_clear_color: d!("vkCmdClearColorImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
+            create_sampler: d!("vkCreateSampler"),
+            destroy_sampler: d!("vkDestroySampler"),
             create_fence: d!("vkCreateFence"),
             destroy_fence: d!("vkDestroyFence"),
             wait_fences: d!("vkWaitForFences"),
@@ -9421,4 +9742,8 @@ impl GpuKind {
             Self::Hardware
         }
     }
+}
+
+fn block_texel(format: i32) -> bool {
+    matches!(format, 141 | 145 | 146 | 157 | 158)
 }

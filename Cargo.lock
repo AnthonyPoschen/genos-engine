@@ -284,6 +284,7 @@ name = "genos-render"
 version = "0.1.0"
 dependencies = [
  "genos-bake",
+ "genos-cook",
  "genos-fog-ref",
  "genos-load",
  "genos-math",
