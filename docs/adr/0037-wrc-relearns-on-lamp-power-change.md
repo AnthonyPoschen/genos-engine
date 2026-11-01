@@ -785,3 +785,37 @@ Findings:
 - **With the surface cache on, f = 0.76.** That is still short of the hall's ≈0.95 and of 1, so the gap with the cache on is still open. Those numbers need the same patch probe, run in mode 3.
 - **The read-stamp deadlock hypothesis from the probe session is withdrawn.** It was observed in mode 0, where the mode-3 scheduler never runs.
 - **No fix and no PR.** Whether mode 0 should keep relighting its light cache is a design question for Anthony, not a bug fix.
+
+## Round 15 results: proportional history drop (EVT=3 fixed, "e3f")
+
+Harness st16 (settle 1400 f, lamp step ~f1508), lavapipe 160x90 hall, switch ms from
+capture-free window f1545-1625. e3f = `GENOS_DBG_EVT=3` plus the fix in
+`0037/hooks-r15-e3f.patch` (no LAMPOFF clamp and no local3 floor under EVT=3; compact
+nominates only cells with lambda >= 0.25). e0 = shipped, e1 = hard clear on lamp change.
+Lavapipe is shared with other workers, so ms values carry roughly ±30% noise.
+
+| step | noise ratio e0 / e1 / e3f | switch p50 ms e0 / e1 / e3f | lag@120 % e0 / e1 / e3f |
+|---|---|---|---|
+| mild -10% (m90) | 0.33 / 78.8 / **2.56** | 36* / 630 / **136** | 86.0 / 99.9 / **99.8** |
+| mild +10% (p110) | 0.95 / 43.9 / **0.30** | 107 / 83 / 130 | 85.2 / 98.5 / 98.9 |
+| medium x0.5 (h50) | 0.65 / 93.0 / **16.6** | 59 / 543 / **158** | 92.9 / 80.5 / 74.0 |
+| medium x2 (u50) | 5.45 / 309 / **160** | 62 / 616 / **212** | 91.5 / 82.9 / 90.0 |
+| full off | 0.83 / 284 / 96.9 | 92 / 477 / 455 | 85.7 / 73.9 / 75.8 |
+| full on | 4.00 / 484 / 420 | 94 / 103 / 845 | 78.6 / 80.8 / 81.8 |
+
+\* m90 e0 ms window was polluted by captures in that run.
+
+All-rounder, e3f only (near-camera error vs 64-bounce reference; ms p50):
+still 0.150 / 41 ms, sun 0.082 / 134 ms, boxes 20.6 (outlier, probably a grading fault;
+baseline not yet run), lamps 0.084 / 868 ms, turn 0.091 / 175 ms.
+For comparison, still error is e0 0.230 and e1 0.142. The ar2_e0/ar2_e1 baselines for
+sun, boxes, lamps and turn, and linger oracle layers 5/6, were still running when this was written.
+
+Verdict: proportional drop works for mild changes. It gets e1's freshness (lag@120 about
+99% against e0's 85%) with close to e0's noise (ratio 0.3-2.6 against e1's 44-79), and it
+costs a quarter of e1's relight time. For medium changes it is about halfway between e0
+and e1 in noise, and it is no better than e1 for lag. For full on/off it is effectively a
+hard clear, as expected. The large-change noise (ratio 100-400) is the next target, by
+reseeding from the reference or by spatial reuse, not from the history weights. It isn't
+an all-rounder yet: lamps-move relight costs about 870 ms on lavapipe, and the boxes
+outlier needs explaining before this is recommended over e1.
