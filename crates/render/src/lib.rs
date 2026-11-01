@@ -30,8 +30,8 @@ pub use fog_pass::{
     picture_from, picture_mean_abs, picture_unchanged, shaft_dispatch, shaft_image, smear_broken,
     smear_dispatch, smear_fixture, smear_tracking, sphere_dispatch, sphere_volume, yaw_pop_broken,
     yaw_pop_fixture, yaw_pop_rel, FogDispatch, YAW_FRAMES,
-    FogGpu, FogImage, FogPointLamp, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
-    FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
+    FogGpu, FogImage, FogPointLamp, FOG_F2_REFERENCE, FOG_FLIP_G, FOG_IGNORE_SPHERE,
+    FOG_LINEAR_SLICE, FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW,
 };
 pub use fog_budget::{
     allocation_bytes, allocation_mb, allocation_mb_doubled, fit_pass, fog_probe,
