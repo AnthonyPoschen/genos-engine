@@ -45,6 +45,7 @@ crates/mcp/src/discover.rs 3
 crates/mcp/src/live.rs 1
 crates/mcp/tests/live_session.rs 1
 crates/math/src/media.rs 1
+crates/math/tests/brdf.rs 1
 crates/mesh/src/bvh.rs 5
 crates/mesh/tests/bvh.rs 2
 crates/physics/src/contact.rs 2

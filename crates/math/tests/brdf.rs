@@ -220,7 +220,14 @@ fn emission_adds_and_is_not_reflected() {
 }
 
 /// The cases are unit vectors. f32 is the shader input.
-#[allow(clippy::cast_possible_truncation)]
+#[allow(
+    clippy::as_conversions,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
 fn unit_f32(v: [f64; 3]) -> [f32; 3] {
     [v[0] as f32, v[1] as f32, v[2] as f32]
 }
