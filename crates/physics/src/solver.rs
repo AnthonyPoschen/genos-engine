@@ -370,13 +370,17 @@ fn inv_inertia(body: &Body, vector: Vec3) -> Vec3 {
     if inv_mass(body) == 0.0 {
         return Vec3::ZERO;
     }
-    let inertia = inertia_diagonal(*body);
     let local = conjugate(body.orientation).rotate(vector);
-    let scaled = Vec3::new(
-        recip(inertia.x) * local.x,
-        recip(inertia.y) * local.y,
-        recip(inertia.z) * local.z,
-    );
+    let scaled = if let crate::Shape::Mesh(mesh) = body.shape {
+        mesh.unit_inverse_inertia.transform(local) * body.inverse_mass
+    } else {
+        let inertia = inertia_diagonal(*body);
+        Vec3::new(
+            recip(inertia.x) * local.x,
+            recip(inertia.y) * local.y,
+            recip(inertia.z) * local.z,
+        )
+    };
     body.orientation.rotate(scaled)
 }
 

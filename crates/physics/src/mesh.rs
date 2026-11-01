@@ -30,9 +30,14 @@ pub(crate) fn simplify(triangles: &[[Vec3; 3]]) -> Mesh {
         let mut mesh = Mesh::EMPTY;
         mesh.pieces[0] = Piece::Hull(hull_from_points(&points));
         mesh.count = 1;
-        return mesh;
+        return seal(mesh);
     }
-    voxel_boxes(triangles)
+    seal(voxel_boxes(triangles))
+}
+
+fn seal(mut mesh: Mesh) -> Mesh {
+    mesh.unit_inverse_inertia = crate::mesh_unit_inverse(&mesh);
+    mesh
 }
 
 fn is_convex(triangles: &[[Vec3; 3]]) -> bool {

@@ -45,7 +45,7 @@ pub use destruction::{
 };
 pub use genos_fracture::{cook, Asset, CookRequest};
 
-use genos_math::{Quat, Vec3};
+use genos_math::{Mat3, Quat, Vec3};
 
 /// Acceleration along -Y, in meters per second squared.
 pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -131,12 +131,16 @@ impl Piece {
 pub struct Mesh {
     pub pieces: [Piece; MAX_MESH_PIECES],
     pub count: u8,
+    /// Inverse of the unit-mass inertia about the local origin, from the
+    /// pieces' volume. A zero matrix means the build stored no tensor yet.
+    pub unit_inverse_inertia: Mat3,
 }
 
 impl Mesh {
     const EMPTY: Self = Self {
         pieces: [Piece::EMPTY; MAX_MESH_PIECES],
         count: 0,
+        unit_inverse_inertia: Mat3::IDENTITY,
     };
 
     fn pieces(&self) -> &[Piece] {
@@ -568,12 +572,175 @@ pub(crate) fn inertia_diagonal(body: Body) -> Vec3 {
             half_height,
         } => capsule_inertia(mass, radius, half_height),
         Shape::Plane { .. } => Vec3::ZERO,
-        Shape::Mesh(mesh) => {
-            let radius = mesh_extent(&mesh);
-            let moment = 0.4 * mass * radius * radius;
-            Vec3::new(moment, moment, moment)
+        Shape::Mesh(mesh) => mesh_principal(mass, &mesh),
+    }
+}
+
+/// Diagonal of the volume-integral inertia, for the gyroscopic step and energy.
+fn mesh_principal(mass: f32, mesh: &Mesh) -> Vec3 {
+    let inverse = mesh.unit_inverse_inertia;
+    let unit = invert_mat3(inverse).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(moment, moment, moment))
+    });
+    Vec3::new(unit.cols[0], unit.cols[4], unit.cols[8]) * mass
+}
+
+/// Unit-mass inertia inverse about the local origin.
+pub(crate) fn mesh_unit_inverse(mesh: &Mesh) -> Mat3 {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    for piece in mesh.pieces() {
+        match piece {
+            Piece::Cuboid { center, half } => {
+                let vol = 8.0 * half.x * half.y * half.z;
+                if vol <= 1.0e-12 {
+                    continue;
+                }
+                let local = box_inertia(vol, *half);
+                volume += vol;
+                let (xx, yy, zz, xy, yz, zx) = parallel_axis(local, vol, *center);
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
+            Piece::Hull(hull) => {
+                let (vol, xx, yy, zz, xy, yz, zx) = hull_moments(hull);
+                volume += vol;
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
         }
     }
+    if volume <= 1.0e-8 {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        return Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment));
+    }
+    let scale = 1.0 / volume;
+    let inertia = Mat3::from_cols([
+        ixx * scale,
+        ixy * scale,
+        izx * scale,
+        ixy * scale,
+        iyy * scale,
+        iyz * scale,
+        izx * scale,
+        iyz * scale,
+        izz * scale,
+    ]);
+    invert_mat3(inertia).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment))
+    })
+}
+
+/// `I_origin = I_center + m (|c|² I − c cᵀ)`.
+fn parallel_axis(local: Vec3, mass: f32, center: Vec3) -> (f32, f32, f32, f32, f32, f32) {
+    let r2 = center.length_squared();
+    (
+        local.x + mass * (r2 - center.x * center.x),
+        local.y + mass * (r2 - center.y * center.y),
+        local.z + mass * (r2 - center.z * center.z),
+        -mass * center.x * center.y,
+        -mass * center.y * center.z,
+        -mass * center.z * center.x,
+    )
+}
+
+/// Volume integrals of one hull about the local origin (unit density).
+///
+/// Each face triangle is a tetrahedron with the origin. The second moments
+/// follow Eberly's closed form for a tetrahedron with one vertex at the origin.
+fn hull_moments(hull: &Hull) -> (f32, f32, f32, f32, f32, f32, f32) {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    let count = hull.face_count as usize;
+    for face in hull.faces.iter().take(count) {
+        let a = hull.verts[face.index[0] as usize];
+        let b = hull.verts[face.index[1] as usize];
+        let c = hull.verts[face.index[2] as usize];
+        let vol = a.dot(b.cross(c)) / 6.0;
+        if vol.abs() < 1.0e-14 {
+            continue;
+        }
+        volume += vol;
+        ixx += second_diag(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        iyy += second_diag(a.x, b.x, c.x, a.z, b.z, c.z, vol);
+        izz += second_diag(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        ixy -= second_off(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        iyz -= second_off(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        izx -= second_off(a.z, b.z, c.z, a.x, b.x, c.x, vol);
+    }
+    (volume, ixx, iyy, izz, ixy, iyz, izx)
+}
+
+fn second_diag(y1: f32, y2: f32, y3: f32, z1: f32, z2: f32, z3: f32, volume: f32) -> f32 {
+    let sy = y1 * y1 + y2 * y2 + y3 * y3 + y1 * y2 + y1 * y3 + y2 * y3;
+    let sz = z1 * z1 + z2 * z2 + z3 * z3 + z1 * z2 + z1 * z3 + z2 * z3;
+    volume * (sy + sz) / 10.0
+}
+
+fn second_off(x1: f32, x2: f32, x3: f32, y1: f32, y2: f32, y3: f32, volume: f32) -> f32 {
+    let sum = 2.0 * (x1 * y1 + x2 * y2 + x3 * y3)
+        + x1 * y2
+        + x2 * y1
+        + x1 * y3
+        + x3 * y1
+        + x2 * y3
+        + x3 * y2;
+    volume * sum / 20.0
+}
+
+fn invert_mat3(m: Mat3) -> Option<Mat3> {
+    let c = m.cols;
+    let (a, b, d) = (c[0], c[3], c[6]);
+    let (e, f, g) = (c[1], c[4], c[7]);
+    let (h, i, j) = (c[2], c[5], c[8]);
+    let c00 = f * j - g * i;
+    let c01 = g * h - e * j;
+    let c02 = e * i - f * h;
+    let det = a * c00 + b * c01 + d * c02;
+    if det.abs() < 1.0e-14 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let c10 = i * d - j * b;
+    let c11 = j * a - h * d;
+    let c12 = h * b - i * a;
+    let c20 = b * g - d * f;
+    let c21 = d * e - a * g;
+    let c22 = a * f - b * e;
+    Some(Mat3::from_cols([
+        c00 * inv_det,
+        c01 * inv_det,
+        c02 * inv_det,
+        c10 * inv_det,
+        c11 * inv_det,
+        c12 * inv_det,
+        c20 * inv_det,
+        c21 * inv_det,
+        c22 * inv_det,
+    ]))
 }
 
 /// `Ixx = m/3 (hy² + hz²)` with half extents, which is `m/12` of the full side squares.
@@ -645,4 +812,53 @@ fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
         }
     }
     body.velocity += acceleration * dt;
+}
+
+#[cfg(test)]
+mod inertia_tests {
+    use super::{box_inertia, inertia_diagonal, Body};
+    use genos_math::Vec3;
+
+    fn cube(half: Vec3) -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x * half.x, y * half.y, z * half.z);
+        let (nnn, pnn, ppn, npn) = (
+            v(-1.0, -1.0, -1.0),
+            v(1.0, -1.0, -1.0),
+            v(1.0, 1.0, -1.0),
+            v(-1.0, 1.0, -1.0),
+        );
+        let (nnp, pnp, ppp, npp) = (
+            v(-1.0, -1.0, 1.0),
+            v(1.0, -1.0, 1.0),
+            v(1.0, 1.0, 1.0),
+            v(-1.0, 1.0, 1.0),
+        );
+        vec![
+            [pnn, ppn, ppp],
+            [pnn, ppp, pnp],
+            [nnn, nnp, npp],
+            [nnn, npp, npn],
+            [npn, npp, ppp],
+            [npn, ppp, ppn],
+            [nnn, pnn, pnp],
+            [nnn, pnp, nnp],
+            [nnp, pnp, ppp],
+            [nnp, ppp, npp],
+            [nnn, npn, ppn],
+            [nnn, ppn, pnn],
+        ]
+    }
+
+    #[test]
+    fn a_cube_hull_matches_the_box_moment() {
+        let half = Vec3::new(0.5, 0.4, 0.3);
+        let body = Body::mesh(Vec3::ZERO, 2.0, &cube(half));
+        let got = inertia_diagonal(body);
+        let expect = box_inertia(2.0, half);
+        let err = (got - expect).length() / expect.length();
+        assert!(
+            err < 0.02,
+            "hull inertia {got:?} vs box {expect:?}, relative {err}"
+        );
+    }
 }
