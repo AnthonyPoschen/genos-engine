@@ -1062,3 +1062,25 @@ Confirmed, in a stronger form than expected:
 - **The off grade has been measuring against a wrong reference.** The e1 t900 frame used in
   every earlier round is itself stale. That is why the off step "never converged" for every
   variant. Lamp-off has to drop the stored light directly, not just restart it.
+
+### (b) Fix: `GENOS_DBG_LAMPSCALE=1` (on top of e3fSRA)
+
+In the round right after a lamp ring note, the compact pass multiplies each live cell by
+g = fs + (1-fs)·r, where:
+- fs is the cell's sun share;
+- r = Σ p_new·w / Σ p_old·w over the scene lamps, clamped to [0,1], with w = 1/d² and no range
+  cut.
+
+The scale reaches the radiance, the estimator (w is scaled by g²) and the packed lamp term. Multi-bounce
+energy drops in the same step, and the spread queue then refines it.
+
+Off step, graded against the true reference (the zero-oracle t900 frame, which is black) and
+normalised by the pre-step mean:
+
+| variant | N+12 | mean N+1..12 | first ≤5% | t900 |
+|---|---|---|---|---|
+| e1 | 0.283 | 0.504 | never | 0.143 |
+| e3fSRA | 0.328 | 0.409 | never | 0.138 |
+| e3fSRA + LAMPSCALE | 0.000 | 0.000 | 17 ms (N+1) | 0.000 |
+
+Under the old e1-t900 grade this run scores 1.0, because it is "too dark". That grade is the stale reference.
