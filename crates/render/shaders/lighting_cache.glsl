@@ -2777,6 +2777,7 @@ void lighting_wrc_note_lamps() {
         ckeys.key[ra + 7u] = floatBitsToUint(0.0);
         ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
     }
+}
 // Quarter of its set batch entry j (of slot) traces.
 uint lighting_cache_entry_quarter(uint j, uint slot) {
     uint i = 0u;
