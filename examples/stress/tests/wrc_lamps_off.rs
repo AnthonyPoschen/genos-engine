@@ -23,7 +23,7 @@ const STEP_FRAMES: usize = 12;
 
 fn mean(frame: &[u8]) -> f64 {
     let mut sum = 0u64;
-    for px in frame.chunks_exact(4) {
+    for px in frame.as_chunks::<4>().0 {
         sum += u64::from(px[0]) + u64::from(px[1]) + u64::from(px[2]);
     }
     sum as f64 / (frame.len() / 4 * 3).max(1) as f64
