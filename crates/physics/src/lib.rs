@@ -36,11 +36,12 @@ mod ccd;
 mod contact;
 mod destruction;
 mod mesh;
+mod solver;
 
 pub use destruction::{
     allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
-    spawn_breakable, CHANGE_RECORDS_AWAIT_LIGHTING, ChunkChange, ChunkChangeKind,
-    DestructionReport,
+    spawn_breakable, ChunkChange, ChunkChangeKind, DestructionReport,
+    CHANGE_RECORDS_AWAIT_LIGHTING,
 };
 pub use genos_fracture::{cook, Asset, CookRequest};
 
@@ -242,6 +243,10 @@ pub struct StepStats {
     pub dynamic_pair_impulses: u32,
     /// Advances taken by fast pairs whose travel exceeded the smaller radius.
     pub pair_slices: u32,
+    /// Contact points solved on the last narrow-phase pass.
+    pub contact_points: u32,
+    /// Dynamic bodies asleep at the end of the step.
+    pub sleeping_bodies: u32,
 }
 
 impl StepStats {
@@ -252,6 +257,8 @@ impl StepStats {
             toi_deferred: 0,
             dynamic_pair_impulses: 0,
             pair_slices: 0,
+            contact_points: 0,
+            sleeping_bodies: 0,
         }
     }
 }
@@ -284,6 +291,8 @@ pub struct Body {
     /// True after the body has been still long enough to leave the solver.
     /// A contact from a moving body clears it. Static bodies stay false.
     pub sleeping: bool,
+    /// Seconds spent under the sleep speed. Cleared when the body wakes.
+    pub sleep_time: f32,
 }
 
 impl Body {
@@ -341,6 +350,7 @@ impl Body {
             presence: Presence::Live,
             debris: false,
             sleeping: false,
+            sleep_time: 0.0,
         }
     }
 
@@ -473,38 +483,68 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
-    for _ in 0..4 {
-        let hits = contact::collide(&mut world.bodies, &mut world.pairs);
-        world.step_stats.dynamic_pair_impulses =
-            world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    // Four narrow-phase passes. Each one re-reads the overlap, so a single
+    // overstated depth cannot throw a body. The velocity rows run inside.
+    let mut hits = 0_u32;
+    for pass in 0..4 {
+        hits = hits.saturating_add(contact::collide(
+            &mut world.bodies,
+            &mut world.pairs,
+            pass == 0,
+        ));
     }
+    world.step_stats.dynamic_pair_impulses =
+        world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    world.step_stats.contact_points = world.pairs.contact_point_count();
+    for body in &mut world.bodies {
+        settle_sleep(body, dt);
+    }
+    world.step_stats.sleeping_bodies = world
+        .bodies
+        .iter()
+        .filter(|body| body.sleeping)
+        .count()
+        .try_into()
+        .unwrap_or(0);
     if !world.breakables.is_empty() {
         destruction::after_step(world, dt);
     }
 }
 
 pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 || !(dt > 0.0) {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping || !(dt > 0.0) {
         return;
     }
     body.position += body.velocity * dt;
-    let spin = body.angular_velocity;
-    if spin.length_squared() <= 0.0 {
+    if body.angular_velocity.length_squared() <= 0.0 {
         return;
     }
-    // World-space ω: dq/dt = ½ ω q.
-    let omega = Quat::new(spin.x, spin.y, spin.z, 0.0);
-    let delta = quat_mul(omega, body.orientation) * (0.5 * dt);
-    body.orientation = (body.orientation + delta).normalize();
+    let local = conjugate(body.orientation).rotate(body.angular_velocity);
+    let stepped = solver::implicit_gyroscopic(local, inertia_diagonal(*body), dt);
+    body.angular_velocity = body.orientation.rotate(stepped);
+    body.orientation = solver::integrate_orientation(body.orientation, body.angular_velocity, dt);
 }
 
-fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
-    Quat::new(
-        lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
-        lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
-        lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
-        lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z,
-    )
+fn settle_sleep(body: &mut Body, dt: f32) {
+    if body.inverse_mass == 0.0
+        || body.presence != Presence::Live
+        || body.motor
+        || body.spring.is_some()
+        || body.sleeping
+    {
+        return;
+    }
+    let calm = body.velocity.length() < 0.12 && body.angular_velocity.length() < 0.25;
+    if calm {
+        body.sleep_time += dt;
+    } else {
+        body.sleep_time = 0.0;
+    }
+    if body.sleep_time >= 0.5 {
+        body.sleeping = true;
+        body.velocity = Vec3::ZERO;
+        body.angular_velocity = Vec3::ZERO;
+    }
 }
 
 fn conjugate(q: Quat) -> Quat {
@@ -512,7 +552,7 @@ fn conjugate(q: Quat) -> Quat {
 }
 
 /// Body-frame principal moments `(Ixx, Iyy, Izz)`.
-fn inertia_diagonal(body: Body) -> Vec3 {
+pub(crate) fn inertia_diagonal(body: Body) -> Vec3 {
     let mass = body.mass();
     if !mass.is_finite() {
         return Vec3::ZERO;
@@ -580,7 +620,11 @@ fn mesh_extent(mesh: &Mesh) -> f32 {
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 {
+    if body.sleeping && (body.velocity.length() > 0.25 || body.angular_velocity.length() > 0.4) {
+        body.sleeping = false;
+        body.sleep_time = 0.0;
+    }
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
         return;
     }
     let mut acceleration = gravity;

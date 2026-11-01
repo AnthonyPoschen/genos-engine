@@ -28,13 +28,15 @@ pub struct StepRecord {
     pub max_speed: f32,
     pub min_y: f32,
     pub hash: u64,
+    pub contact_points: u32,
+    pub sleeping_bodies: u32,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\"}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -47,7 +49,7 @@ impl StepRecord {
             self.rotational_energy,
             self.max_speed,
             self.min_y,
-            self.hash,
+            self.hash, self.contact_points, self.sleeping_bodies,
         )
     }
 }
@@ -125,6 +127,8 @@ impl Session {
             max_speed: 0.0,
             min_y: f32::INFINITY,
             hash: state_hash(&self.world.bodies),
+            contact_points: stats.contact_points,
+            sleeping_bodies: stats.sleeping_bodies,
         };
         for body in self
             .world

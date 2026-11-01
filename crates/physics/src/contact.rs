@@ -42,10 +42,8 @@
 
 use genos_math::{Quat, Vec3};
 
-use crate::{Body, Hull, Mesh, Piece, Shape, MAX_HULL_EDGES};
-
-const SLOP: f32 = 0.001;
-const PERCENT: f32 = 0.8;
+use crate::solver::{ContactPoint, Manifold};
+use crate::{Body, Hull, Mesh, Piece, Shape, MAX_HULL_EDGES, MAX_HULL_VERTS};
 
 /// Scratch lists for [`collide`], kept across passes and steps.
 #[derive(Clone, Debug)]
@@ -54,6 +52,18 @@ pub(crate) struct Pairs {
     boxes: Vec<(Vec3, Vec3, u32)>,
     planes: Vec<u32>,
     pairs: Vec<(u32, u32)>,
+    manifolds: Vec<Manifold>,
+    /// Last step's manifolds, impulses included, for the warm start.
+    warm: Vec<Manifold>,
+    wake: Vec<bool>,
+}
+
+impl Pairs {
+    pub(crate) fn contact_point_count(&self) -> u32 {
+        self.manifolds.iter().fold(0_u32, |sum, manifold| {
+            sum.saturating_add(u32::from(manifold.count))
+        })
+    }
 }
 
 impl Pairs {
@@ -62,6 +72,9 @@ impl Pairs {
             boxes: Vec::new(),
             planes: Vec::new(),
             pairs: Vec::new(),
+            manifolds: Vec::new(),
+            warm: Vec::new(),
+            wake: Vec::new(),
         }
     }
 }
@@ -74,7 +87,7 @@ const BOUNDS_MARGIN: f32 = 0.02;
 /// X), and every bounded body against every plane. Two static bodies never move, so
 /// their pair is skipped. The pairs run in index order, the order a pass over every
 /// pair took.
-pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
+pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs, warm_start: bool) -> u32 {
     scratch.boxes.clear();
     scratch.planes.clear();
     scratch.pairs.clear();
@@ -112,10 +125,21 @@ pub(crate) fn collide(bodies: &mut [Body], scratch: &mut Pairs) -> u32 {
         }
     }
     scratch.pairs.sort_unstable();
-    let mut hits = 0_u32;
-    for &(i, j) in &scratch.pairs {
-        let (left, right) = bodies.split_at_mut(j as usize);
-        hits = hits.saturating_add(collide_pair(&mut left[i as usize], &mut right[0]));
+    scratch.manifolds.clear();
+    let pairs = std::mem::take(&mut scratch.pairs);
+    for (i, j) in &pairs {
+        append_manifolds(*i, *j, bodies, &mut scratch.manifolds);
+    }
+    scratch.pairs = pairs;
+    let warm = if warm_start {
+        std::mem::take(&mut scratch.warm)
+    } else {
+        Vec::new()
+    };
+    let hits = crate::solver::solve(bodies, &mut scratch.manifolds, &warm, &mut scratch.wake);
+    if warm_start {
+        scratch.warm = warm;
+        scratch.warm.clone_from(&scratch.manifolds);
     }
     hits
 }
@@ -166,49 +190,101 @@ pub(crate) fn bounds(body: &Body) -> Option<(Vec3, Vec3)> {
     Some((lo, hi))
 }
 
-fn collide_pair(a: &mut Body, b: &mut Body) -> u32 {
+fn append_manifolds(i: u32, j: u32, bodies: &[Body], out: &mut Vec<Manifold>) {
+    let (Some(a), Some(b)) = (bodies.get(usize_index(i)), bodies.get(usize_index(j))) else {
+        return;
+    };
     match (a.shape, b.shape) {
-        (Shape::Plane { .. }, Shape::Plane { .. }) => 0,
-        (Shape::Plane { normal, offset }, _) => collide_plane(b, a, normal, offset),
-        (_, Shape::Plane { normal, offset }) => collide_plane(a, b, normal, offset),
-        (Shape::Mesh(mesh), _) => collide_mesh(a, mesh, b),
-        (_, Shape::Mesh(mesh)) => mesh_contact(b, &mesh, a).map_or(0, |(normal, depth)| {
-            u32::from(solve_contact(a, b, -normal, depth))
-        }),
-        _ => primitive_contact(a, b).map_or(0, |(normal, depth)| {
-            u32::from(solve_contact(a, b, normal, depth))
-        }),
+        (Shape::Plane { .. }, Shape::Plane { .. }) => {}
+        (Shape::Plane { normal, offset }, _) => {
+            append_plane(j, i, b, a, normal, offset, out);
+        }
+        (_, Shape::Plane { normal, offset }) => append_plane(i, j, a, b, normal, offset, out),
+        (Shape::Mesh(mesh), _) => append_mesh(i, j, a, mesh, b, false, out),
+        (_, Shape::Mesh(mesh)) => append_mesh(j, i, b, mesh, a, true, out),
+        _ => {
+            if let Some((normal, depth)) = primitive_contact(a, b) {
+                push_manifold(i, j, a, b, normal, depth, out);
+            }
+        }
     }
 }
 
-fn collide_plane(body: &mut Body, plane: &mut Body, normal: Vec3, offset: f32) -> u32 {
+fn append_plane(
+    body_index: u32,
+    plane_index: u32,
+    body: &Body,
+    plane: &Body,
+    normal: Vec3,
+    offset: f32,
+    out: &mut Vec<Manifold>,
+) {
     match body.shape {
         Shape::Mesh(mesh) => {
-            let mut hits = 0_u32;
             for piece in mesh.pieces() {
                 if let Some((hit_normal, depth)) = piece_plane(body, *piece, normal, offset) {
-                    hits = hits
-                        .saturating_add(u32::from(solve_contact(body, plane, hit_normal, depth)));
+                    push_manifold(body_index, plane_index, body, plane, hit_normal, depth, out);
                 }
             }
-            hits
         }
         _ => {
             let point = support_point(body, -normal, None);
             let dist = normal.dot(point) - offset;
             if dist < 0.0 {
-                u32::from(solve_contact(body, plane, normal, -dist))
-            } else {
-                0
+                push_manifold(body_index, plane_index, body, plane, normal, -dist, out);
             }
         }
     }
 }
 
-fn collide_mesh(a: &mut Body, mesh: Mesh, b: &mut Body) -> u32 {
-    mesh_contact(a, &mesh, b).map_or(0, |(normal, depth)| {
-        u32::from(solve_contact(a, b, normal, depth))
-    })
+fn append_mesh(
+    owner_index: u32,
+    other_index: u32,
+    owner: &Body,
+    mesh: Mesh,
+    other: &Body,
+    flip: bool,
+    out: &mut Vec<Manifold>,
+) {
+    let Some((normal, depth)) = mesh_contact(owner, &mesh, other) else {
+        return;
+    };
+    if flip {
+        push_manifold(other_index, owner_index, other, owner, -normal, depth, out);
+    } else {
+        push_manifold(owner_index, other_index, owner, other, normal, depth, out);
+    }
+}
+
+fn push_manifold(
+    a_index: u32,
+    b_index: u32,
+    a: &Body,
+    b: &Body,
+    normal: Vec3,
+    depth: f32,
+    out: &mut Vec<Manifold>,
+) {
+    let normal = unit(normal);
+    if !depth.is_finite() || depth <= 0.0 || !normal.x.is_finite() {
+        return;
+    }
+    let (points, count) = contact_points(a, b, normal, depth);
+    if count == 0 {
+        return;
+    }
+    out.push(Manifold {
+        a: a_index,
+        b: b_index,
+        normal,
+        depth,
+        points,
+        count,
+    });
+}
+
+fn usize_index(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(0)
 }
 
 fn mesh_contact(owner: &Body, mesh: &Mesh, other: &Body) -> Option<(Vec3, f32)> {
@@ -1221,44 +1297,297 @@ fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
 /// Returns whether both bodies were dynamic and a closing impulse was stored.
 pub(crate) fn solve_contact(a: &mut Body, b: &mut Body, normal: Vec3, penetration: f32) -> bool {
     let normal = unit(normal);
-    let inv = a.inverse_mass + b.inverse_mass;
-    if inv <= 0.0 || !penetration.is_finite() || !normal.x.is_finite() {
+    if a.inverse_mass + b.inverse_mass <= 0.0 || !penetration.is_finite() || !normal.x.is_finite() {
         return false;
     }
-    let rel = a.velocity - b.velocity;
-    let vn = rel.dot(normal);
-    let dynamic_hit = if vn < 0.0 {
-        let restitution = a.restitution.max(b.restitution).clamp(0.0, 1.0);
-        let j = -(1.0 + restitution) * vn / inv;
-        let impulse = normal * j;
-        a.normal_impulse += j;
-        b.normal_impulse += j;
-        a.velocity += impulse * a.inverse_mass;
-        b.velocity -= impulse * b.inverse_mass;
+    let (mut points, count) = contact_points(a, b, normal, penetration.max(0.0));
+    crate::solver::solve_pair(a, b, normal, &mut points[..usize::from(count)])
+}
 
-        let tangent_vec = rel - normal * vn;
-        let vt = tangent_vec.length();
-        if vt > 1.0e-6 {
-            let friction = a.friction.max(b.friction).max(0.0);
-            if friction > 0.0 {
-                let tangent = tangent_vec / vt;
-                let jt = (-vt / inv).clamp(-friction * j, friction * j);
-                let kick = tangent * jt;
-                a.velocity += kick * a.inverse_mass;
-                b.velocity -= kick * b.inverse_mass;
+fn contact_points(a: &Body, b: &Body, normal: Vec3, depth: f32) -> ([ContactPoint; 4], u8) {
+    if let Some(point) = round_surface(a, b, normal) {
+        return (
+            [
+                ContactPoint::new(point, depth),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+            ],
+            1,
+        );
+    }
+    if let Some(point) = round_surface(b, a, -normal) {
+        return (
+            [
+                ContactPoint::new(point, depth),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+            ],
+            1,
+        );
+    }
+    let mut found = [(f32::NEG_INFINITY, Vec3::ZERO); 4];
+    let mut count = 0_u8;
+    // `normal` points from `b` toward `a`. Keep the vertices of either body
+    // that actually sit in the overlap, measured against the facing plane.
+    collect_face(a, b, normal, depth, &mut found, &mut count);
+    if count == 0 {
+        collect_face(b, a, -normal, depth, &mut found, &mut count);
+    }
+    if count == 0 {
+        let point = support_point(a, -normal, None);
+        return (
+            [
+                ContactPoint::new(point, depth),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+                ContactPoint::new(Vec3::ZERO, 0.0),
+            ],
+            1,
+        );
+    }
+    let mut points = [ContactPoint::new(Vec3::ZERO, 0.0); 4];
+    for (index, (point_depth, position)) in found.into_iter().take(usize::from(count)).enumerate() {
+        points[index] = ContactPoint::new(position, point_depth);
+    }
+    (points, count)
+}
+
+/// Surface point of a sphere or capsule. `outward` points from the other body
+/// toward `body`, so the contact sits on the near side and `r` stays along
+/// the normal. A segment endpoint would torque a capsule that is only translating.
+fn round_surface(body: &Body, _other: &Body, outward: Vec3) -> Option<Vec3> {
+    match body.shape {
+        Shape::Sphere { radius } => Some(body.position - outward * radius),
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            let (start, end) = segment(body, half_height);
+            let on_axis = closest_on_segment(body.position - outward, start, end);
+            Some(on_axis - outward * radius)
+        }
+        Shape::Box { .. } | Shape::Plane { .. } | Shape::Mesh(_) => None,
+    }
+}
+
+/// Vertices of `owner` that lie inside `other`. `outward` points out of `other`
+/// toward `owner`, so the facing plane is `other`'s support along `outward`.
+fn collect_face(
+    owner: &Body,
+    other: &Body,
+    outward: Vec3,
+    sat_depth: f32,
+    found: &mut [(f32, Vec3); 4],
+    count: &mut u8,
+) {
+    let mut verts = [Vec3::ZERO; MAX_HULL_VERTS];
+    let n = write_vertices(owner, &mut verts);
+    let band = sat_depth + 0.02;
+    // The centre projected onto the facing plane. When that point lies in
+    // both shapes the normal force can sit under the centre, so a body
+    // whose centre is over the support does not tip off a corner.
+    let support = support_of(other, outward);
+    let gap = owner.position.dot(outward) - support.dot(outward);
+    let projected = owner.position - outward * gap;
+    if contains_point(other, projected, 0.001) && contains_point(owner, projected, 0.02) {
+        let depth = point_depth(other, projected, outward);
+        if (-0.002..=band).contains(&depth) {
+            insert_point(found, count, depth, projected);
+        }
+    }
+    for vertex in verts.iter().take(n) {
+        if !contains_point(other, *vertex, 0.02) {
+            continue;
+        }
+        let depth = point_depth(other, *vertex, outward);
+        if !(-0.002..=band).contains(&depth) {
+            continue;
+        }
+        insert_point(found, count, depth, *vertex);
+    }
+}
+
+fn insert_point(found: &mut [(f32, Vec3); 4], count: &mut u8, depth: f32, position: Vec3) {
+    if *count < 4 {
+        found[usize::from(*count)] = (depth, position);
+        *count += 1;
+        return;
+    }
+    let mut low = 0_usize;
+    for index in 1..4 {
+        if found[index].0 < found[low].0 {
+            low = index;
+        }
+    }
+    if depth > found[low].0 {
+        found[low] = (depth, position);
+    }
+}
+
+fn write_vertices(body: &Body, out: &mut [Vec3; MAX_HULL_VERTS]) -> usize {
+    match body.shape {
+        Shape::Sphere { .. } => {
+            out[0] = body.position;
+            1
+        }
+        Shape::Capsule { half_height, .. } => {
+            let (start, end) = segment(body, half_height);
+            out[0] = start;
+            out[1] = end;
+            2
+        }
+        Shape::Box { half_extents } => write_box(
+            body.position,
+            body.orientation,
+            Vec3::ZERO,
+            half_extents,
+            out,
+        ),
+        Shape::Plane { .. } => 0,
+        Shape::Mesh(mesh) => {
+            let mut n = 0_usize;
+            for piece in mesh.pieces() {
+                if n >= MAX_HULL_VERTS {
+                    break;
+                }
+                match piece {
+                    Piece::Cuboid { center, half } => {
+                        let mut corners = [Vec3::ZERO; 8];
+                        let written = write_box(
+                            body.position,
+                            body.orientation,
+                            *center,
+                            *half,
+                            &mut corners,
+                        );
+                        for corner in corners.iter().take(written) {
+                            if n >= MAX_HULL_VERTS {
+                                break;
+                            }
+                            out[n] = *corner;
+                            n += 1;
+                        }
+                    }
+                    Piece::Hull(hull) => {
+                        for vert in hull.verts.iter().take(usize::from(hull.vert_count)) {
+                            if n >= MAX_HULL_VERTS {
+                                break;
+                            }
+                            out[n] = body.position + body.orientation.rotate(*vert);
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            n
+        }
+    }
+}
+
+fn write_box(
+    position: Vec3,
+    orientation: Quat,
+    center: Vec3,
+    half: Vec3,
+    out: &mut [Vec3],
+) -> usize {
+    let mut n = 0_usize;
+    for x in [-half.x, half.x] {
+        for y in [-half.y, half.y] {
+            for z in [-half.z, half.z] {
+                if n >= out.len() {
+                    return n;
+                }
+                out[n] = position + orientation.rotate(center + Vec3::new(x, y, z));
+                n += 1;
             }
         }
-        a.inverse_mass > 0.0 && b.inverse_mass > 0.0
-    } else {
-        false
-    };
-    let depth = penetration - SLOP;
-    if depth > 0.0 {
-        let correction = normal * (depth * PERCENT / inv);
-        a.position += correction * a.inverse_mass;
-        b.position -= correction * b.inverse_mass;
     }
-    dynamic_hit
+    n
+}
+
+fn contains_point(body: &Body, point: Vec3, slop: f32) -> bool {
+    match body.shape {
+        Shape::Plane { normal, offset } => normal.dot(point) - offset <= slop,
+        Shape::Sphere { radius } => (point - body.position).length() <= radius + slop,
+        Shape::Capsule {
+            radius,
+            half_height,
+        } => {
+            let (start, end) = segment(body, half_height);
+            (point - closest_on_segment(point, start, end)).length() <= radius + slop
+        }
+        Shape::Box { half_extents } => {
+            let local = conjugate(body.orientation).rotate(point - body.position);
+            local.x.abs() <= half_extents.x + slop
+                && local.y.abs() <= half_extents.y + slop
+                && local.z.abs() <= half_extents.z + slop
+        }
+        Shape::Mesh(mesh) => mesh.pieces().iter().any(|piece| match piece {
+            Piece::Cuboid { center, half } => {
+                let origin = body.position + body.orientation.rotate(*center);
+                let local = conjugate(body.orientation).rotate(point - origin);
+                local.x.abs() <= half.x + slop
+                    && local.y.abs() <= half.y + slop
+                    && local.z.abs() <= half.z + slop
+            }
+            Piece::Hull(hull) => hull
+                .faces
+                .iter()
+                .take(usize::from(hull.face_count))
+                .all(|face| {
+                    let normal = body.orientation.rotate(face.normal);
+                    let plane = body.position + body.orientation.rotate(face.normal * face.offset);
+                    normal.dot(point - plane) <= slop
+                }),
+        }),
+    }
+}
+
+fn point_depth(body: &Body, point: Vec3, normal: Vec3) -> f32 {
+    match body.shape {
+        Shape::Plane {
+            normal: plane_n,
+            offset,
+        } => {
+            let axis = if plane_n.dot(normal) >= 0.0 {
+                plane_n
+            } else {
+                -plane_n
+            };
+            let plane_offset = if plane_n.dot(normal) >= 0.0 {
+                offset
+            } else {
+                -offset
+            };
+            plane_offset - axis.dot(point)
+        }
+        _ => support_of(body, normal).dot(normal) - point.dot(normal),
+    }
+}
+
+fn support_of(body: &Body, dir: Vec3) -> Vec3 {
+    match body.shape {
+        Shape::Mesh(mesh) => {
+            let mut best = body.position;
+            let mut best_dot = f32::NEG_INFINITY;
+            let mut found = false;
+            for piece in mesh.pieces() {
+                let point = piece_support(body, piece, dir);
+                let score = point.dot(dir);
+                if !found || score > best_dot {
+                    best = point;
+                    best_dot = score;
+                    found = true;
+                }
+            }
+            best
+        }
+        Shape::Plane { normal, offset } => normal * offset,
+        _ => support_point(body, dir, None),
+    }
 }
 
 #[cfg(test)]
