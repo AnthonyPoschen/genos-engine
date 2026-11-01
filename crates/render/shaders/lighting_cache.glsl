@@ -501,6 +501,9 @@ const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
 const uint LIGHTING_WRC_BG_AT = LIGHTING_WRC_CHG_AT + LIGHTING_WRC_REFRESH;
+// Per-lamp colour hash for lighting_wrc_note_lamps (LIGHTING_WRC_SNAP_LAMPS words),
+// past the background list's LIGHTING_WRC_REFRESH_CELLS entries, before LIGHTING_LS_AT.
+const uint LIGHTING_WRC_SNAP_COL_AT = LIGHTING_WRC_BG_AT + 2048u;
 
 // World irradiance cells (experiment, GENOS_LIGHTING_WORLD): the change block's head w
 // is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
@@ -2726,8 +2729,15 @@ void lighting_wrc_note_lamps() {
         vec4 o = vec4(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]),
                       uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
         bool fresh = i >= had;
-        bool moved = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
-        if (moved && l.color.w > 0.0) {
+        // Colour and power (color.rgb) are a change too: the light at every
+        // surface it reaches, and its bounce, changes with them.
+        uint col = lighting_hash(floatBitsToUint(l.color.r) ^ lighting_hash(floatBitsToUint(l.color.g) ^ lighting_hash(floatBitsToUint(l.color.b)))) | 1u;
+        uint ca = LIGHTING_WRC_SNAP_COL_AT + i;
+        bool recoloured = !fresh && ckeys.key[ca] != col;
+        ckeys.key[ca] = col;
+        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
+        // A lamp that went out (range to 0) is a change too: its light leaves.
+        if (moved && (l.color.w > 0.0 || (!fresh && o.w > 0.0))) {
             vec3 a = fresh ? l.pos.xyz : o.xyz;
             uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % LIGHTING_WRC_RING;
             ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
