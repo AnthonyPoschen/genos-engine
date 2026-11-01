@@ -281,6 +281,9 @@ pub struct Body {
     pub presence: Presence,
     /// Spawned chunk under the debris volume. Two debris bodies do not collide.
     pub debris: bool,
+    /// True after the body has been still long enough to leave the solver.
+    /// A contact from a moving body clears it. Static bodies stay false.
+    pub sleeping: bool,
 }
 
 impl Body {
@@ -337,6 +340,7 @@ impl Body {
             angular_velocity: Vec3::ZERO,
             presence: Presence::Live,
             debris: false,
+            sleeping: false,
         }
     }
 
