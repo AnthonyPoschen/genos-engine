@@ -234,6 +234,83 @@ fn a_resting_stack_stays_put() {
 }
 
 #[test]
+fn two_boxes_colliding_off_centre_exchange_angular_momentum() {
+    let mut world = World::new(Vec3::ZERO);
+    let mut hitter = Body::cuboid(Vec3::new(-1.2, 0.5, 0.0), 1.0, Vec3::new(0.5, 0.5, 0.5));
+    hitter.velocity = Vec3::new(3.0, 0.0, 0.0);
+    world.insert(hitter);
+    world.insert(Body::cuboid(
+        Vec3::new(0.15, 0.5, 0.55),
+        1.0,
+        Vec3::new(0.5, 0.5, 0.5),
+    ));
+    for _ in 0..40 {
+        step(&mut world, DT);
+    }
+    let spin_hitter = world.bodies[0].angular_velocity.length();
+    let spin_target = world.bodies[1].angular_velocity.length();
+    assert!(
+        spin_hitter > 0.15,
+        "off-centre hitter gained no spin ({spin_hitter} rad/s)"
+    );
+    assert!(
+        spin_target > 0.15,
+        "off-centre target gained no spin ({spin_target} rad/s)"
+    );
+    let opposite = world.bodies[0].angular_velocity.dot(world.bodies[1].angular_velocity);
+    assert!(
+        opposite < 0.0,
+        "spins did not oppose: {:?} and {:?}",
+        world.bodies[0].angular_velocity,
+        world.bodies[1].angular_velocity
+    );
+}
+
+#[test]
+fn a_yawed_hull_pile_sleeps_without_walking() {
+    let mut world = World::new(GRAVITY);
+    world.insert(Body::mesh(
+        Vec3::new(0.0, -0.5, 0.0),
+        0.0,
+        &cube_tris(Vec3::new(4.0, 0.5, 4.0)),
+    ));
+    let cube = cube_tris(Vec3::new(0.45, 0.35, 0.45));
+    let yaws = [0.4_f32, 0.9, 1.3, 1.8, 2.2];
+    for (index, yaw) in yaws.into_iter().enumerate() {
+        let height = 0.4 + index as f32 * 0.75;
+        let mut body = Body::mesh(Vec3::new(0.0, height, 0.0), 1.0, &cube);
+        body.friction = 0.7;
+        body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
+        world.insert(body);
+    }
+    let start: Vec<Vec3> = world.bodies.iter().skip(1).map(|body| body.position).collect();
+    for _ in 0..600 {
+        step(&mut world, DT);
+    }
+    let mut drift = 0.0_f32;
+    for (body, from) in world.bodies.iter().skip(1).zip(start) {
+        assert!(
+            body.sleeping,
+            "yawed hull at {:?} stayed awake, speed {} spin {}",
+            body.position,
+            body.velocity.length(),
+            body.angular_velocity.length()
+        );
+        let moved = Vec3::new(body.position.x - from.x, 0.0, body.position.z - from.z).length();
+        drift = drift.max(moved);
+        assert!(
+            body.position.x.abs() < 1.5 && body.position.z.abs() < 1.5,
+            "hull walked to {:?}",
+            body.position
+        );
+    }
+    assert!(
+        drift < 0.75,
+        "yawed pile drifted {drift} m across the slab"
+    );
+}
+
+#[test]
 fn two_runs_of_the_overhang_match_bit_for_bit() {
     fn pose_bits(world: &World) -> Vec<u32> {
         let mut bits = Vec::new();
