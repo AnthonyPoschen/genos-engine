@@ -4147,7 +4147,10 @@ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
     // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
     cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
-    if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
+    // The check's 16 rays read the cells around it. While a lamp change settles
+    // those still hold the old bounce, so a check against them would confirm the
+    // held value it is meant to test: it cannot confirm then, it escalates.
+    if (!lighting_lamp_settling() && d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
         cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
