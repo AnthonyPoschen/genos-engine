@@ -56,6 +56,8 @@ fn still_sample_slots(pixels: u64) -> u64 {
 }
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
+const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -400,6 +402,9 @@ pub struct SettleStats {
     pub settled: bool,
     /// Frames in a row the scene has not changed.
     pub still_frames: u32,
+    /// The surface cache's drain flag as the host last read it (a few frames
+    /// old): its samples still differ from the held light, so it keeps relighting.
+    pub draining: bool,
 }
 
 impl Default for Lighting {
@@ -1288,6 +1293,7 @@ impl Gpu {
         SettleStats {
             settled,
             still_frames: self.lighting.still,
+            draining: self.lighting.draining,
         }
     }
 
@@ -1694,6 +1700,13 @@ impl Gpu {
                 for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
+            }
+            // Settled: the cache holds its light and runs no rounds, so the drain
+            // flag would keep the last value its args pass wrote. The host settled
+            // on a flag a few frames old, and the GPU may have re-armed it since;
+            // left set, every pixel's direct pass keeps gathering strictly at rest.
+            if self.lighting.cache_full && self.lighting.settings.world_mode() == 3 && self.lighting_stats().settled {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, LIGHTING_DRAIN_FLAG_AT * 4, 4, 0);
             }
             let cmd = self.cmd;
             let dst = self.lighting.gbuf.buffer;
