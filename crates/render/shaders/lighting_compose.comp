@@ -17,6 +17,20 @@
 // stays in outc[0..pixels); emitted light for this frame is outc[pixels..).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
+// #142 (docs/systems/lighting/compose-read-only-design.md): compose is a pure
+// lookup. Its surface-cache claims, stamps, resample, parent seeds, first fill
+// and sc_offer compiled into this pipeline made the NVIDIA compile ~20 s and
+// vkDestroyDevice wait for its background recompile. GENOS_COMPOSE_MAINT is the
+// maintenance compile of this file: dispatched over the same blocks just before
+// compose, it does those writes and draws nothing. Specialization constant 0
+// true is the kill switch (GENOS_COMPOSE_SC_WRITES=1): compose writes as before
+// and the maintenance pass is skipped.
+#ifdef GENOS_COMPOSE_MAINT
+#define LIGHTING_SC_WRITES true
+#else
+layout(constant_id = 0) const bool COMPOSE_SC_WRITES = false;
+#define LIGHTING_SC_WRITES COMPOSE_SC_WRITES
+#endif
 #include "lighting_common.glsl"
 #include "dither.glsl"
 #include "froxel_compose.glsl"
@@ -155,7 +169,9 @@ void main() {
             glow = vec3(0.0);
         }
     }
+#ifndef GENOS_COMPOSE_MAINT
     gbuf.px[index] = uvec4(~0u);
+#endif
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }
@@ -163,6 +179,11 @@ void main() {
     // 4 normal, 5 depth, 6 light, 7 texels.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
+#ifdef GENOS_COMPOSE_MAINT
+    if (mode == 3u || mode == 4u || mode == 5u || mode == 7u || mode == 8u) {
+        return;
+    }
+#endif
     if (mode == 3u || mode == 4u || mode == 5u) {
         float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
         shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
@@ -191,6 +212,9 @@ void main() {
     if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
         bounce = indirect(p, pos, n);
     }
+#ifdef GENOS_COMPOSE_MAINT
+    return;
+#endif
     if ((gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;
