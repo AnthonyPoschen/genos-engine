@@ -1073,7 +1073,7 @@ pub fn schedule_push(
         0
     };
     let denoise_demand = if settings.denoiser.enabled { pixels } else { 0 };
-    let mut plan = screen_plan(ScreenBudget {
+    let plan = screen_plan(ScreenBudget {
         tiles_x,
         tiles_y,
         shadow_grant: grant_u32(caps.fresh_shadow_rays, scale),
@@ -1093,9 +1093,6 @@ pub fn schedule_push(
         turn_x: turn_sign(lit.right, lit.left),
         turn_y: turn_sign(lit.top, lit.bottom),
     });
-    // #70 R3: direct runs on the full crop. A held direct value outside the
-    // rect showed as blotches on a turn.
-    plan.direct_gate = false;
     let mut words = plan.words(lit.crop_x, lit.crop_y);
     // Bit 3: detail levels (25 cm through 4 m). The shader also requires world-cache mode 3.
     words[0] |= 1 << 3;
@@ -1524,10 +1521,10 @@ mod tests {
     }
 
     #[test]
-    fn high_1080p_with_a_change_gates_trace_only() {
+    fn high_1080p_with_a_change_gates_direct_and_trace() {
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
         let push = schedule_push(&settings, 1.0, display(1920, 1080), 16, 64, 1, 1);
-        assert!(!push.plan.direct_gate);
+        assert!(push.plan.direct_gate);
         assert!(push.plan.trace_gate);
         assert!(!push.plan.atrous_gate);
     }
@@ -1578,6 +1575,7 @@ mod tests {
         let mut seen = vec![false; (tw * th) as usize];
         for frame in 0..ROTATE_FRAMES_MAX {
             let push = schedule_push(&settings, f64::from(SCALE_FLOOR), lit, 16, 64, 0, frame);
+            assert!(push.plan.direct_gate, "the floor scale gates direct");
             for y in push.plan.tile_y..push.plan.tile_y + push.plan.tile_h {
                 for x in push.plan.tile_x..push.plan.tile_x + push.plan.tile_w {
                     seen[(y * tw + x) as usize] = true;
@@ -1595,7 +1593,7 @@ mod tests {
         let settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
         let push = schedule_push(&settings, f64::from(SCALE_FLOOR), display(1920, 1080), 16, 64, 1, 3);
         assert!(!push.plan.atrous_gate);
-        assert!(!push.plan.direct_gate);
+        assert!(push.plan.direct_gate);
     }
 
     #[test]
