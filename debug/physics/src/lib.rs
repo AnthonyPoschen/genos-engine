@@ -30,13 +30,19 @@ pub struct StepRecord {
     pub hash: u64,
     pub contact_points: u32,
     pub sleeping_bodies: u32,
+    pub pair_tests: u32,
+    pub broadphase_builds: u32,
+    pub tree_nodes: u32,
+    pub islands: u32,
+    pub awake_bodies: u32,
+    pub solver_bodies: u32,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{}}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -49,7 +55,15 @@ impl StepRecord {
             self.rotational_energy,
             self.max_speed,
             self.min_y,
-            self.hash, self.contact_points, self.sleeping_bodies,
+            self.hash,
+            self.contact_points,
+            self.sleeping_bodies,
+            self.pair_tests,
+            self.broadphase_builds,
+            self.tree_nodes,
+            self.islands,
+            self.awake_bodies,
+            self.solver_bodies,
         )
     }
 }
@@ -129,6 +143,12 @@ impl Session {
             hash: state_hash(&self.world.bodies),
             contact_points: stats.contact_points,
             sleeping_bodies: stats.sleeping_bodies,
+            pair_tests: stats.pair_tests,
+            broadphase_builds: stats.broadphase_builds,
+            tree_nodes: stats.tree_nodes,
+            islands: stats.islands,
+            awake_bodies: stats.awake_bodies,
+            solver_bodies: stats.solver_bodies,
         };
         for body in self
             .world
@@ -249,8 +269,8 @@ mod tests {
         let last = session.records.last().copied().unwrap_or(session.step());
         assert!(last.min_y > 0.3, "a cube sank to {}", last.min_y);
         assert!(
-            last.max_speed < 0.5,
-            "pile still moving at {}",
+            last.max_speed.is_finite() && last.max_speed < 0.5,
+            "pile ran away at {}",
             last.max_speed
         );
     }
@@ -267,6 +287,53 @@ mod tests {
             top.position.y
         );
         assert!(top.velocity.length() < 1.0e-3);
+    }
+
+    #[test]
+    fn layer_filter_drops_the_debris_pair() {
+        let mut session = Session::load(find("layer_filter").unwrap_or(&SCENES[0]));
+        let record = session.step();
+        assert_eq!(record.pair_tests, 0);
+        assert!(!session.world.in_static_tree(0));
+        assert!(session.world.in_dynamic_tree(0));
+        assert!(session.world.in_dynamic_tree(1));
+    }
+
+    #[test]
+    fn static_grid_keeps_statics_out_of_the_dynamic_tree() {
+        let session = Session::load(find("static_grid_10k").unwrap_or(&SCENES[0]));
+        assert!(session.world.in_static_tree(0));
+        assert!(!session.world.in_dynamic_tree(0));
+        let sphere = session.world.bodies.len() - 1;
+        assert!(session.world.in_dynamic_tree(sphere));
+        assert!(!session.world.in_static_tree(sphere));
+    }
+
+    #[test]
+    fn sleep_island_wakes_only_the_touched_stack() {
+        let mut session = Session::load(find("sleep_island").unwrap_or(&SCENES[0]));
+        session.run(180);
+        assert!(session.world.bodies[1].sleeping);
+        assert!(session.world.bodies[2].sleeping);
+        assert!(session.world.bodies[3].sleeping);
+        assert!(session.world.bodies[4].sleeping);
+        assert_eq!(
+            session.world.bodies[1].island,
+            session.world.bodies[2].island
+        );
+        let sphere = session.world.insert(genos_physics::Body::sphere(
+            genos_math::Vec3::new(0.0, 3.0, 0.0),
+            0.0,
+            0.4,
+        ));
+        session
+            .world
+            .set_position(sphere, genos_math::Vec3::new(0.0, 1.6, 0.0));
+        let record = session.step();
+        assert!(!session.world.bodies[1].sleeping);
+        assert!(!session.world.bodies[2].sleeping);
+        assert!(session.world.bodies[3].sleeping);
+        assert!(record.solver_bodies >= 2);
     }
 
     #[test]
