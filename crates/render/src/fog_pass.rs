@@ -36,6 +36,10 @@ pub const FOG_IGNORE_SPHERE: u32 = 4;
 pub const FOG_LINEAR_SLICE: u32 = 8;
 /// Henyey-Greenstein `g` is negated.
 pub const FOG_FLIP_G: u32 = 16;
+/// Density, integrate, and the column follow `genos-fog-ref` (ADR 0026 F2).
+/// Slice edges run from the eye to [`FogDispatch::reference_far`]. Shadow rays
+/// use that crate's jitter, and a previous volume is not read.
+pub const FOG_F2_REFERENCE: u32 = 32;
 
 /// One GPU froxel dispatch. `scene` None forces [`FOG_SKIP_SHADOW`].
 #[derive(Clone, Debug)]
@@ -58,6 +62,9 @@ pub struct FogDispatch {
     pub stop_slices: u32,
     /// Copy the extinction image back. The leak rows need it.
     pub read_extinction: bool,
+    /// View-depth of the last slice when [`FOG_F2_REFERENCE`] is set, metres.
+    /// Zero keeps the 64 m grid.
+    pub reference_far: f32,
 }
 
 /// Columns, and the extinction image when it was requested.
@@ -787,6 +794,7 @@ pub fn media_dispatch(flags: u32, stop_slices: u32) -> FogDispatch {
         flags,
         stop_slices,
         read_extinction: false,
+        reference_far: 0.0,
     }
 }
 
@@ -811,6 +819,7 @@ pub fn shaft_dispatch(flags: u32) -> FogDispatch {
         flags,
         stop_slices: 0,
         read_extinction: false,
+        reference_far: 0.0,
     }
 }
 

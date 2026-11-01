@@ -16,6 +16,7 @@ genos-scene = { path = "../scene" }
 genos-window = { path = "../window" }
 
 [dev-dependencies]
+genos-fog-ref = { path = "../fog-ref" }
 genos-ui = { path = "../ui" }
 genos-window = { path = "../window" }
 
