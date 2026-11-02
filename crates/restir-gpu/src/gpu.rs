@@ -958,6 +958,20 @@ unsafe fn run_shader(
         signal_count: 0,
         signals: std::ptr::null(),
     };
+    // Warmup: lavapipe JITs the pipeline on its first submit, and the plan's
+    // `frame_ms` is one step after a warmup. The buffer is read and written in
+    // place, so the input words go back before the timed submit.
+    vk_check(
+        submit(
+            queue,
+            1,
+            &raw const submit_info as *const u8,
+            std::ptr::null_mut(),
+        ),
+        "warmup submit",
+    )?;
+    vk_check(idle(queue), "warmup wait")?;
+    std::slice::from_raw_parts_mut(mapped.cast::<u32>(), words.len()).copy_from_slice(words);
     let started = std::time::Instant::now();
     vk_check(
         submit(
