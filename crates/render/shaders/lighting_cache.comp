@@ -121,6 +121,7 @@ void main() {
     bool wrc_cell = lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2;
     uint prev_updated = lighting_sc_updated(slot);
     lighting_sc_upd_override = prev_updated;
+    bool lone = lighting_wrc_lone(slot);
     uint first = lighting_probe_rays() + j * LIGHTING_CACHE_RAYS;
     vec3 e = vec3(0.0);
     float es = 0.0;
@@ -130,7 +131,7 @@ void main() {
         if (lighting_ray_none(v)) {
             return;
         }
-        vec3 dir = lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
+        vec3 dir = lone ? lighting_dir(rkey, n, k % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS) : lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
         // S74A: the ray a later gradient check re-traces (same seed): one of
@@ -202,6 +203,15 @@ void main() {
     uint millionths = uint(clamp(change, 0.0, 1.0) * 1.0e6);
     atomicMax(gstats.max_change, millionths);
     atomicAdd(gstats.relit, 1u);
+    if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_DRAIN_MATURE_W && old.w > LIGHTING_DRAIN_MATURE_SETS) {
+        uint su = uint(clamp(ln, 0.0, LIGHTING_DRAIN_LUM_MAX) * LIGHTING_DRAIN_SCALE);
+        uint hu = uint(clamp(lo, 0.0, LIGHTING_DRAIN_LUM_MAX) * LIGHTING_DRAIN_SCALE);
+        atomicAdd(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT], su);
+        atomicAdd(ckeys.key[LIGHTING_DRAIN_HELD_AT], hu);
+        atomicAdd(ckeys.key[LIGHTING_DRAIN_CELLS_AT], 1u);
+        atomicAdd(gstats.wrc_sample_sum, su);
+        atomicAdd(gstats.wrc_held_sum, hu);
+    }
     if (old.w > LIGHTING_CACHE_MATURE - 0.5) {
         atomicMax(gstats.mature_change, millionths);
         atomicAdd(gstats.mature_relit, 1u);
@@ -235,6 +245,14 @@ void main() {
             wa = max(wa, LIGHTING_WRC_LOCAL_ALPHA * add);
         } else if (!lighting_sc_light_quiet()) {
             wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
+        }
+        // While a lamp change settles, each round's sets carry the change one
+        // bounce further and the old light leaves one bounce per round
+        // (lighting_lamp_settling): a cell takes the round's set whole. An
+        // average with the sets before keeps the old light at its weight, a
+        // gain near 1 per round where the light has gone.
+        if (lighting_lamp_settling()) {
+            wa = 1.0;
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
@@ -312,6 +330,10 @@ void main() {
                 float vb = mix(b.x, clamp(dot(msmel, 0.5 * sm / vec3(max(1.0e-5, dev))), 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
+                // Settling (as the cells above): the round's set whole.
+                if (lighting_lamp_settling()) {
+                    hint = 1.0;
+                }
                 // S72T: while young (under 16 sets) never faster than the plain
                 // mean 1 / (n + 1), the least-noise estimate of a still signal
                 // (the hint still overrides it).
@@ -323,8 +345,14 @@ void main() {
                     // hints only nominate checks (lighting_compact.comp).
                     float lam = lighting_sc_lambda(slot);
                     k = (1.0 - lam) * k + lam;
+                    // Settling: the round's set whole here too. A-SVGF's lambda
+                    // ignored the hint, so a texel kept ~all its old light per
+                    // round and every WRC sample reading it drained ~2.5 %.
+                    if (hint >= 1.0) {
+                        k = 1.0;
+                    }
                 } else {
-                    k = max(k, min(hint, 0.9));
+                    k = max(k, hint >= 1.0 ? 1.0 : min(hint, 0.9));
                 }
                 vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);

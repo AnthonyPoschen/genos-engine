@@ -124,7 +124,28 @@ void main() {
             burst = false;
         }
         if (!wrc) { lighting_dg(19u, 1u); if (near) lighting_dg(28u, 1u); if (on_screen) lighting_dg(30u, 1u); }
-        if (wrc && !burst && LIGHTING_SC_SCHED) {
+        // A lamp's bounce reaches past its range: while a lamp change settles
+        // every cell, not only those inside a lamp's range, takes a whole set
+        // each round through the young list, as a burst does.
+        // A WRC cell takes one 16-ray sample (a whole hemisphere, lighting_wrc_lone)
+        // every round instead of a whole set one round in the turns: the bounce
+        // chain through the cells moves one bounce a round, not one a cycle.
+        bool settling = lighting_lamp_settling();
+        if (settling) {
+            // Near-camera errors show first: the WRC cells (the bounce chain)
+            // and the texels on screen go every round; the rest in turns.
+            bool first = wrc || lighting_sc_pixel_fresh(shown, LIGHTING_SETTLE_SCREEN_FRAMES);
+            uint ms = wrc ? 1u : lighting_sc_entries(slot, true);
+            atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
+            if (first) {
+                atomicAdd(ckeys.key[LIGHTING_SETTLE_FIRST_AT], ms);
+            }
+            if (((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns(first)) != 0u) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
+        }
+        if (wrc && !burst && !settling && LIGHTING_SC_SCHED) {
             // WRC refresh (fixed budget): change-driven list, else background.
             if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
@@ -198,7 +219,7 @@ void main() {
         uint lvl = sparse_c ? lighting_sc_level(slot) : 2u;
         // S74A: under A-SVGF a change nearby only nominates checks (below).
         bool asvgf = LIGHTING_SC_ASVGF && !wrc && lighting_sc_svgf();
-        bool young_now = (((near && !asvgf) || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
+        bool young_now = settling || (((near && !asvgf) || burst) && !(lvl == 0u && lighting_sc_backlog())) || (!LIGHTING_SC_SCHED && t < 1.5);
         if (LIGHTING_SC_SCHED && !young_now) {
             uint updated = lighting_sc_updated(slot);
             int used = int(last - updated);
@@ -435,7 +456,7 @@ void main() {
             return;
         }
         bool young = young_now;
-        uint m = lighting_sc_entries(slot, true);
+        uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
             uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);

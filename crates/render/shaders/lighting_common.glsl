@@ -504,6 +504,10 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = p + n * 0.02;
     uint q = lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
     uint rk = lighting_sc_ray_key(slot, key);
+    if (lighting_wrc_lone(slot)) {
+        dir = lighting_dir(rk, n, r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS);
+        return true;
+    }
     dir = lighting_dir(rk, n, lighting_sc_stratum(rk, q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
     return true;
 }

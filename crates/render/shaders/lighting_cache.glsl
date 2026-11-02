@@ -110,14 +110,24 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     float ctrl_ground_g;
     float ctrl_ground_b;
     // Unfilled-on-screen detector (compose). Pixels with no finished set, and
-    // shaded surface pixels. The two pads keep the mask at stats word 144
-    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 144-word header.
+    // shaded surface pixels. With the drain words the mask sits at stats word 148
+    // (lighting_gpu.rs LIGHTING_UNFILLED_MASK_AT), after the 148-word header.
     // The mask is one bit per pixel, 32 pixels a word, row-major, and is
     // written only while the detector is on.
     uint unfilled;
     uint shaded;
     uint unfilled_pad0;
     uint unfilled_pad1;
+    // Drain check (cache pass, mature WRC cells): this round's fresh sample
+    // luminance and the held luminance it replaces, x16. Their gap says the
+    // cache still carries light that is leaving (lighting_gpu.rs settled).
+    uint wrc_sample_sum;
+    uint wrc_held_sum;
+    // 1 while the cache is draining or filling (LIGHTING_DRAIN_FLAG_AT), for
+    // the host's settle test.
+    uint draining;
+    // The round's batch entries (16 rays each), for the host's cost test.
+    uint round_entries;
     uint mask[];
 } gstats;
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
@@ -266,7 +276,7 @@ bool lighting_sc_display = false;
 uvec2 lighting_compose_px = uvec2(0u);
 // Unfilled-on-screen detector. Bits of scene.grid_at.w: 24 count, 25 magenta tint
 // (debug_view.rs). Off is a uniform test and no atomics. The mask word count is
-// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 144.
+// lighting_gpu.rs LIGHTING_UNFILLED_MASK_CAP; word 0 is stats word 148.
 const float LIGHTING_UNFILLED_MIN_SETS = 1.0;
 const uint LIGHTING_UNFILLED_MASK_CAP = 276480u;
 bool lighting_px_unfilled = false;
@@ -515,14 +525,23 @@ uint lighting_sc_base_room() {
 }
 const uint LIGHTING_WRC_RING_HEAD_AT = LIGHTING_SC_HIST_AT + 69u;
 const uint LIGHTING_WRC_RING = 16u;
-// S65C: 9 words an entry (old place, new place, range, brightest channel,
-// frame), past the trickle list.
+// S65C: 10 words an entry (old place, new place, range, brightest channel,
+// frame, keep), past the trickle list. Keep is whether a point's held light stays
+// readable while it settles: 1 for a lamp
+// dimmed or brightened in place (1: all of it), 0 for one that moved or went out.
 const uint LIGHTING_WRC_RING_AT = LIGHTING_SC_HIST_AT + 17300u;
-const uint LIGHTING_WRC_RING_W = 9u;
+const uint LIGHTING_WRC_RING_W = 10u;
+// Keep values (ring word 9) and how far a lamp may shift and still be in place.
+const float LIGHTING_KEEP_ALL = 1.0;
+const float LIGHTING_KEEP_NONE = 0.0;
+const float LIGHTING_LAMP_STILL = 1.0e-3;
 const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
 const uint LIGHTING_WRC_BG_AT = LIGHTING_WRC_CHG_AT + LIGHTING_WRC_REFRESH;
+// Per-lamp colour hash for lighting_wrc_note_lamps (LIGHTING_WRC_SNAP_LAMPS words),
+// past the background list's LIGHTING_WRC_REFRESH_CELLS entries, before LIGHTING_LS_AT.
+const uint LIGHTING_WRC_SNAP_COL_AT = LIGHTING_WRC_BG_AT + 2048u;
 
 // World irradiance cells (experiment, GENOS_LIGHTING_WORLD): the change block's head w
 // is mode * 1000 + cap. Mode 1: pixels read the light cache's patches,
@@ -1277,6 +1296,43 @@ bool lighting_sc_light_quiet() {
 // longer does: the estimator tracks it (lighting_cache.comp, a floor on its blend
 // while the light changes, LIGHTING_SC_CHANGE_ALPHA).
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
+bool lighting_lamp_settling();
+bool lighting_lamp_settling_raw();
+bool lighting_wrc_lone(uint slot);
+uint lighting_settle_turns(bool first);
+const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
+const uint LIGHTING_SETTLE_LAST_AT = LIGHTING_SC_HIST_AT + 77u;
+const uint LIGHTING_SETTLE_ROOM_AT = LIGHTING_SC_HIST_AT + 78u;
+// Of the settle count, the first tier's entries (the WRC cells' lone samples:
+// every round when they fit; the rest take turns in what they leave): this
+// round's, then last round's.
+const uint LIGHTING_SETTLE_FIRST_AT = LIGHTING_SC_HIST_AT + 79u;
+const uint LIGHTING_SETTLE_FIRST_LAST_AT = LIGHTING_SC_HIST_AT + 83u;
+// Drain check: the round's mature WRC sample and held luminance sums (x256),
+// and the flag the args pass sets from the last round's: their gap above
+// LIGHTING_DRAIN_GAP means the cache still holds light that is leaving (or
+// coming), so the settle rounds go on until the samples agree with it.
+const uint LIGHTING_DRAIN_SAMPLE_AT = LIGHTING_SC_HIST_AT + 80u;
+const uint LIGHTING_DRAIN_HELD_AT = LIGHTING_SC_HIST_AT + 81u;
+const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
+// Cells in this round's drain sums. A gap over fewer is noise (a quiet round
+// relights a handful of cells), so it does not re-arm the flag.
+const uint LIGHTING_DRAIN_CELLS_AT = LIGHTING_SC_HIST_AT + 74u;
+// Lamp changes in a row, each within LIGHTING_SETTLE_ROUNDS frames of the last,
+// capped at LIGHTING_SETTLE_ROUNDS (lighting_lamp_settling).
+const uint LIGHTING_SETTLE_STREAK_AT = LIGHTING_SC_HIST_AT + 75u;
+const uint LIGHTING_SETTLE_ROUNDS = 20u;
+// Frame of the newest lamp change the streak has seen.
+const uint LIGHTING_SETTLE_SEEN_AT = LIGHTING_SC_HIST_AT + 84u;
+const uint LIGHTING_DRAIN_MIN_CELLS = 256u;
+const float LIGHTING_DRAIN_GAP = 0.01;
+// Drain sums: only cells with this much sample weight (w) and held sets count,
+// each luminance clamped to LIGHTING_DRAIN_LUM_MAX and summed in 1/256 steps.
+const float LIGHTING_DRAIN_MATURE_W = 0.2;
+const float LIGHTING_DRAIN_MATURE_SETS = 0.5;
+const float LIGHTING_DRAIN_LUM_MAX = 100.0;
+const float LIGHTING_DRAIN_SCALE = 256.0;
+const uint LIGHTING_DRAIN_HOLD = 8u;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
 uint lighting_sc_upd_override = ~0u;
@@ -2116,6 +2172,16 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
+// While lamps settle, a cache ray (lighting_direct.comp) reads a cell not relit
+// since the change at only the share the change surely left (lighting_lamp_keep):
+// old light can't feed back into the new sets past its new level, and
+// multi-bounce is kept through the cells already relit.
+bool lighting_gather_strict = false;
+float lighting_lamp_keep(vec3 p, uint updated);
+// The share of cell s's held light a strict gather reads (1: all of it).
+float lighting_gather_keep(vec3 p, uint s) {
+    return lighting_gather_strict ? lighting_lamp_keep(p, lighting_sc_updated(s)) : LIGHTING_KEEP_ALL;
+}
 vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     if (!lighting_bounce_ok()) {
         return vec3(0.0);
@@ -2134,7 +2200,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
                     lighting_bounce_path = 0u;
                     cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
                     lighting_hit_sunfrac = lighting_sc_sunfrac_now(s);
-                    return v.rgb * lighting_sc_sun_gain(s);
+                    return v.rgb * lighting_sc_sun_gain(s) * lighting_gather_keep(pos, s);
                 }
             }
         }
@@ -2206,7 +2272,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
-        return e.rgb * lighting_sc_sun_gain(slot);
+        float keep = lighting_gather_keep(pos, slot);
+        if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
+        return e.rgb * lighting_sc_sun_gain(slot) * keep;
     }
     return e.rgb;
 }
@@ -2456,9 +2524,52 @@ void lighting_write_args() {
     uint s = 0u;
     uint g = 0u;
     if (lighting_world_mode() == 3u) {
+        uint streak = ckeys.key[LIGHTING_SETTLE_STREAK_AT];
+        // A lamp change after a quiet spell (not one more step of lamps that
+        // keep changing) gets a fresh burst.
+        uint newest = 0u;
+        [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+            newest = max(newest, ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u]);
+        }
+        uint seen = ckeys.key[LIGHTING_SETTLE_SEEN_AT];
+        // The streak counts rounds that bring one more lamp change while the
+        // last is still young; a one-off change (or the first fill) never
+        // grows it, so it drains at the full settle rate. Once the changes
+        // stop for LIGHTING_SETTLE_ROUNDS frames the burst re-arms and drains
+        // what the capped rounds left.
+        if (newest == 0u || int(lighting_frame() - newest) > int(LIGHTING_SETTLE_ROUNDS)) {
+            streak = 0u;
+        } else if (newest != seen) {
+            streak = (seen != 0u && int(newest - seen) <= int(LIGHTING_SETTLE_ROUNDS)) ? min(streak + 1u, LIGHTING_SETTLE_ROUNDS) : 0u;
+        }
+        ckeys.key[LIGHTING_SETTLE_SEEN_AT] = newest;
+        ckeys.key[LIGHTING_SETTLE_STREAK_AT] = streak;
         uint sh = lighting_sc_budget_shift();
         uint room = lighting_sc_room() >> sh;
-        uint first = min(lighting_young_count(), lighting_sc_base_room() >> sh);
+        // While a lamp change settles the young list (every cell and texel, in
+        // turns, lighting_settle_turns) takes the whole room, not only the base
+        // share, so the cache gets as many full bounce rounds as it can.
+        uint young_room = (lighting_lamp_settling() ? lighting_sc_room() : lighting_sc_base_room()) >> sh;
+        ckeys.key[LIGHTING_SETTLE_ROOM_AT] = young_room;
+        ckeys.key[LIGHTING_SETTLE_LAST_AT] = ckeys.key[LIGHTING_SETTLE_COUNT_AT];
+        ckeys.key[LIGHTING_SETTLE_COUNT_AT] = 0u;
+        ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT] = ckeys.key[LIGHTING_SETTLE_FIRST_AT];
+        ckeys.key[LIGHTING_SETTLE_FIRST_AT] = 0u;
+        uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
+        if (dh > 0u) {
+            float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
+            // Hysteresis: a gap above the threshold re-arms the flag for
+            // LIGHTING_DRAIN_HOLD rounds, so it clears only after that many
+            // agreeing rounds in a row, not on one lucky round.
+            uint fl = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
+            bool heard = ckeys.key[LIGHTING_DRAIN_CELLS_AT] >= LIGHTING_DRAIN_MIN_CELLS;
+            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = heard && gap > LIGHTING_DRAIN_GAP ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
+        }
+        ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
+        ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
+        ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
+        gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
+        uint first = min(lighting_young_count(), young_room);
         a = min(room, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
@@ -2490,6 +2601,7 @@ void lighting_write_args() {
     // hold one 16-ray entry for every non-empty list.
     lighting_sc_cap_lists(a, b, c, g, s);
     uint e = a + b + c + g + s;
+    gstats.round_entries = e;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = a + b + c + g;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((e * LIGHTING_CACHE_RAYS + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
@@ -2537,7 +2649,7 @@ uint lighting_cache_batch_slot(uint j) {
             return ~0u;
         }
     }
-    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? lighting_sc_base_room() >> lighting_sc_budget_shift() : room);
+    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? (ckeys.key[LIGHTING_SETTLE_ROOM_AT] != 0u ? ckeys.key[LIGHTING_SETTLE_ROOM_AT] : lighting_sc_base_room() >> lighting_sc_budget_shift()) : room);
     if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
@@ -2626,7 +2738,7 @@ uint lighting_sc_interval(uint slot, float t) {
         return 0u;
     }
     bool mover;
-    if (lighting_sc_local_change(slot, mover) || lighting_sc_lamp_touched(slot)) {
+    if (lighting_sc_local_change(slot, mover) || lighting_sc_lamp_touched(slot) || lighting_lamp_settling()) {
         return 0u;
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
@@ -2704,6 +2816,58 @@ void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
 bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
     return lighting_lamp_delta(p, updated) >= 0.0;
 }
+// A lamp moved, changed range or went out within the last LIGHTING_WRC_CHANGE_FRAMES
+// frames. Its bounce light reaches past its range (every surface it lit relights
+// the others), so the whole cache is draining or filling until then: every texel
+// is due each round (a whole set, lighting_compact.comp), the old light leaving
+// one bounce per round.
+// Settle turns: the batch entries every cell and texel would take this round
+// (counted by the compact pass) and the young room the args pass gave last
+// round. Each takes its whole set one round in lighting_settle_turns, by hash,
+// so a full relight is spread evenly over that many rounds.
+// A WRC cell relit while a lamp change settles: one 16-ray sample a round
+// (lighting_compact.comp), traced as its own 4 x 4 hemisphere pattern so the
+// round's sample is not one band of the 64-ray set (wa = 1 keeps it whole).
+const float LIGHTING_WRC_CELL_SIZE = 0.2;
+// Texels on screen in the last frames (near the camera first) join the first settle tier.
+const int LIGHTING_SETTLE_SCREEN_FRAMES = 2;
+bool lighting_wrc_lone(uint slot) {
+    return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE && lighting_lamp_settling();
+}
+uint lighting_settle_turns(bool first) {
+    // The first tier (WRC cells) shares the room; the rest
+    // take turns in what it leaves (at least a quarter of the room), so the
+    // young list does not overflow and drop the same texels every round.
+    uint room = max(ckeys.key[LIGHTING_SETTLE_ROOM_AT], 1u);
+    uint head = min(ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT], ckeys.key[LIGHTING_SETTLE_LAST_AT]);
+    uint head_turns = clamp((head + room - 1u) / room, 1u, 64u);
+    if (first) {
+        return head_turns;
+    }
+    uint rest = ckeys.key[LIGHTING_SETTLE_LAST_AT] - head;
+    uint left = max(room - min(head / head_turns, room - room / 4u), 1u);
+    return clamp((rest + left - 1u) / left, 1u, 64u);
+}
+// A scene whose lamps never stop changing would settle forever, every round at
+// the settle cost (whole room to the young list, WRC lone samples, strict
+// gathers). Settling stops after LIGHTING_SETTLE_ROUNDS back-to-back changes
+// (lamps that keep moving relight at the normal rate) and resumes once they
+// have been still that long.
+bool lighting_lamp_settling() {
+    return ckeys.key[LIGHTING_SETTLE_STREAK_AT] < LIGHTING_SETTLE_ROUNDS && lighting_lamp_settling_raw();
+}
+bool lighting_lamp_settling_raw() {
+    if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
+        return true;
+    }
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
+        if (f != 0u && int(lighting_frame() - f) <= int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            return true;
+        }
+    }
+    return false;
+}
 // S65C: how much the lamps that moved since frame `updated` changed the
 // unshadowed light at p (sum over moved lamps of brightest channel times
 // |1/d_new^2 - 1/d_old^2| inside their range; -1 when none reaches p). The
@@ -2731,19 +2895,57 @@ float lighting_lamp_delta(vec3 p, uint updated) {
     }
     return delta;
 }
+// The share of p's light from before frame `updated` that the lamp changes since
+// then leave for sure (the smallest keep of the ring entries reaching p; 1 when
+// none does). A cell not relit since reads its held light times this: a lower
+// bound on its new light, so a dimmed lamp's bounce falls toward its new level
+// and never below it (0 for a lamp that moved or went out: its light leaves).
+float lighting_lamp_keep(vec3 p, uint updated) {
+    float keep = LIGHTING_KEEP_ALL;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        keep = min(keep, uintBitsToFloat(ckeys.key[at + 9u]));
+    }
+    return keep;
+}
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
 void lighting_wrc_note_lamps() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     uint had = ckeys.key[LIGHTING_WRC_LAMPS_AT];
+    uint noted = 0u;
+    float keep_all = LIGHTING_KEEP_ALL;
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_WRC_SNAP_AT + 4u * i;
         vec4 o = vec4(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]),
                       uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
         bool fresh = i >= had;
-        bool moved = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
-        if (moved && l.color.w > 0.0) {
+        // Colour and power (color.rgb) are a change too: the light at every
+        // surface it reaches, and its bounce, changes with them.
+        uint col = lighting_hash(floatBitsToUint(l.color.r) ^ lighting_hash(floatBitsToUint(l.color.g) ^ lighting_hash(floatBitsToUint(l.color.b)))) | 1u;
+        uint ca = LIGHTING_WRC_SNAP_COL_AT + i;
+        bool recoloured = !fresh && ckeys.key[ca] != col;
+        ckeys.key[ca] = col;
+        float new_max = max(max(l.color.r, l.color.g), l.color.b);
+        bool in_place = !fresh && length(o.xyz - l.pos.xyz) <= LIGHTING_LAMP_STILL;
+        // A dim in place keeps every cell readable (1): read at new/old (a lower
+        // bound) the half step still undershot to 60 of 85 (R28 g5), the relit
+        // cells gathering too little while the rest refill.
+        float keep = in_place && new_max > LIGHTING_KEEP_NONE ? LIGHTING_KEEP_ALL : LIGHTING_KEEP_NONE;
+        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > LIGHTING_LAMP_STILL || abs(o.w - l.color.w) > 1.0e-3;
+        // A lamp that went out (range to 0) is a change too: its light leaves.
+        if (moved && (l.color.w > 0.0 || (!fresh && o.w > 0.0))) {
             vec3 a = fresh ? l.pos.xyz : o.xyz;
             uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % LIGHTING_WRC_RING;
             ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
@@ -2758,6 +2960,9 @@ void lighting_wrc_note_lamps() {
             // A new lamp: all of its light is new (the old place is far away).
             ckeys.key[ra + 7u] = floatBitsToUint(max(max(l.color.r, l.color.g), l.color.b));
             ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+            ckeys.key[ra + 9u] = floatBitsToUint(keep);
+            keep_all = min(keep_all, keep);
+            noted++;
         }
         ckeys.key[at] = floatBitsToUint(l.pos.x);
         ckeys.key[at + 1u] = floatBitsToUint(l.pos.y);
@@ -2765,6 +2970,23 @@ void lighting_wrc_note_lamps() {
         ckeys.key[at + 3u] = floatBitsToUint(l.color.w);
     }
     ckeys.key[LIGHTING_WRC_LAMPS_AT] = n;
+    // More lamps changed this round than the ring holds: the later ones wrote
+    // over the earlier, whose old places no point would see as changed (their
+    // light, and its bounce, held where they were). One entry that reaches
+    // everywhere stands for them all: every point is changed, by an unknown
+    // amount (delta 0, lighting_lamp_delta).
+    if (noted > LIGHTING_WRC_RING) {
+        uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % LIGHTING_WRC_RING;
+        ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
+        uint ra = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * h;
+        for (uint k = 0u; k < 6u; k++) {
+            ckeys.key[ra + k] = floatBitsToUint(0.0);
+        }
+        ckeys.key[ra + 6u] = floatBitsToUint(3.0e38);
+        ckeys.key[ra + 7u] = floatBitsToUint(0.0);
+        ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+        ckeys.key[ra + 9u] = floatBitsToUint(keep_all);
+    }
 }
 // Quarter of its set batch entry j (of slot) traces.
 uint lighting_cache_entry_quarter(uint j, uint slot) {
@@ -4179,7 +4401,10 @@ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
     // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
     cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
-    if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
+    // The check's 16 rays read the cells around it. While a lamp change settles
+    // those still hold the old bounce, so a check against them would confirm the
+    // held value it is meant to test: it cannot confirm then, it escalates.
+    if (!lighting_lamp_settling() && d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
         cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);

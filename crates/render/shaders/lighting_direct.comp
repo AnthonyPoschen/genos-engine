@@ -1019,7 +1019,9 @@ void main() {
         if ((gstats.ctrl_bits & 512u) == 0u) {
             glow = vec3(0.0);
         }
+        lighting_gather_strict = !probe_hit && !fill_hit && lighting_lamp_settling();
         vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
+        lighting_gather_strict = false;
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
         if (fill_hit) {
