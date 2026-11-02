@@ -327,7 +327,7 @@ mod tests {
         );
         assert!(at(&packed.words, 2) >= 1, "a lamp is a leaf");
         assert!(packed.total_words > u64::try_from(packed.words.len()).unwrap_or(0));
-        assert_eq!(at(&packed.words, 12), 160, "history M cap");
+        assert_eq!(at(&packed.words, 12), super::M_CAP, "history M cap");
         assert!(!packed.layout_changed);
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
         assert_eq!(packed.words.get(changed).copied(), Some(0), "nothing moved");
