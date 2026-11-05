@@ -512,6 +512,16 @@ pub struct SurfaceCacheSettings {
     /// pixels and texel seeds read it. Off is today's per-axis read. Forces
     /// `sc_flags` bit 23.
     pub sh_cells: bool,
+    /// Drain check significance, in standard errors (ADR 0039 stage 1).
+    ///
+    /// Each round sums the mature 25 cm cells' new sample luminance and their
+    /// held luminance. A gap above 1 % between the sums keeps the cache
+    /// settling (each cell takes its new sample whole), so a lamp change drains
+    /// fast. In a noisy scene a few rays' noise alone moves the sums by more
+    /// than 1 %, so the check also needs the gap to exceed this many standard
+    /// errors of the round's own per-cell differences. `0` drops that test (the
+    /// 1 % gap alone, as before).
+    pub drain_sigma: f32,
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -777,6 +787,7 @@ impl LightingSettings {
                 ray_budget: 0,
                 dormant_rays: 0,
                 sh_cells: false,
+                drain_sigma: 4.0,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -842,6 +853,11 @@ impl LightingSettings {
             8.0
         };
         self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
+        self.surface_cache.drain_sigma = if self.surface_cache.drain_sigma.is_finite() {
+            self.surface_cache.drain_sigma.max(0.0)
+        } else {
+            4.0
+        };
         if let Some(mode) = self.gi.world_mode {
             self.gi.world_mode = Some(mode.min(3));
         }
@@ -1176,6 +1192,11 @@ impl LightingSettings {
             "surface_cache.sh_cells={}",
             bit(self.surface_cache.sh_cells)
         );
+        let _ = writeln!(
+            out,
+            "surface_cache.drain_sigma={}",
+            num_text(self.surface_cache.drain_sigma)
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1357,6 +1378,15 @@ impl LightingSettings {
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
+            "surface_cache.drain_sigma" => {
+                let sigma = num_f32(value)?;
+                if !sigma.is_finite() || sigma < 0.0 {
+                    return Err(format!(
+                        "surface_cache.drain_sigma is a non-negative number, got {value}"
+                    ));
+                }
+                self.surface_cache.drain_sigma = sigma;
+            }
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
             "cache_picks" => self.experiments.cache_picks = on(value)?,

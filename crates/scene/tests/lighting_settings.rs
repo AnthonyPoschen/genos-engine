@@ -78,6 +78,25 @@ fn cells_only_toggle_parses() {
 }
 
 #[test]
+fn surface_cache_drain_sigma_round_trips_and_rejects_negatives() {
+    let mut settings = LightingSettings::default();
+    assert!((settings.surface_cache.drain_sigma - 4.0).abs() < 1.0e-6);
+    settings.set_key("surface_cache.drain_sigma", "2.5").unwrap();
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!((parsed.surface_cache.drain_sigma - 2.5).abs() < 1.0e-6);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings.set_key("surface_cache.drain_sigma", "0").unwrap();
+    assert_eq!(settings.surface_cache.drain_sigma, 0.0);
+    assert!(settings.set_key("surface_cache.drain_sigma", "-1").is_err());
+    assert!(settings.set_key("surface_cache.drain_sigma", "nan").is_err());
+    settings.surface_cache.drain_sigma = f32::INFINITY;
+    settings.sanitize();
+    assert!((settings.surface_cache.drain_sigma - 4.0).abs() < 1.0e-6);
+    settings.set_key("surface_cache.drain_sigma", "4").unwrap();
+    assert_eq!(settings.preset_label(), "high");
+}
+
+#[test]
 fn surface_cache_blend_and_firefly_sigma_round_trip() {
     let mut settings = LightingSettings::default();
     assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);

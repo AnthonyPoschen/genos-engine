@@ -1335,6 +1335,15 @@ const uint LIGHTING_DRAIN_FLAG_AT = LIGHTING_SC_HIST_AT + 82u;
 // Cells in this round's drain sums. A gap over fewer is noise (a quiet round
 // relights a handful of cells), so it does not re-arm the flag.
 const uint LIGHTING_DRAIN_CELLS_AT = LIGHTING_SC_HIST_AT + 74u;
+// Sum over the round's drain cells of their squared sample-held gap, in the
+// sums' 1/256 steps squared and divided by 256 (each capped at
+// LIGHTING_DRAIN_SQ_MAX). With no drain the gaps are noise and their sum
+// varies by sqrt(256 * this) steps: a gap within lighting_sc_drain_sigma()
+// of that is noise, not light leaving. In an open scene a few rays' noise
+// alone is over 1 %, and the flag (which makes each cell its last sample)
+// kept itself on.
+const uint LIGHTING_DRAIN_SQ_AT = LIGHTING_SC_HIST_AT + 85u;
+const uint LIGHTING_DRAIN_SQ_MAX = 65535u;
 // Lamp changes in a row, each within LIGHTING_SETTLE_ROUNDS frames of the last,
 // capped at LIGHTING_SETTLE_ROUNDS (lighting_lamp_settling).
 const uint LIGHTING_SETTLE_STREAK_AT = LIGHTING_SC_HIST_AT + 75u;
@@ -1349,6 +1358,9 @@ const float LIGHTING_DRAIN_MATURE_W = 0.2;
 const float LIGHTING_DRAIN_MATURE_SETS = 0.5;
 const float LIGHTING_DRAIN_LUM_MAX = 100.0;
 const float LIGHTING_DRAIN_SCALE = 256.0;
+// sqrt(LIGHTING_DRAIN_SCALE): SQ stores (du^2)>>8, so 16*sqrt(SQ) recovers
+// the RMS of the per-cell |su-hu| gaps in the same x256 luminance units.
+const float LIGHTING_DRAIN_SQ_SCALE = 16.0;
 const uint LIGHTING_DRAIN_HOLD = 8u;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
@@ -2463,6 +2475,12 @@ const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 float lighting_sc_firefly_sigma() {
     return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 13u]);
 }
+// surface_cache.drain_sigma (ADR 0039 stage 1): the drain check re-arms only
+// when the round's gap also exceeds this many standard errors of its own
+// per-cell differences (LIGHTING_DRAIN_SQ_AT). 0 is the 1 % gap alone.
+float lighting_sc_drain_sigma() {
+    return uintBitsToFloat(ckeys.key[LIGHTING_ARGS_AT + 14u]);
+}
 // surface_cache.ray_budget. 0 keeps the existing dispatch lists. A total under
 // the budget is unchanged (lighting_sc_cap_lists).
 uint lighting_sc_ray_budget() {
@@ -2732,11 +2750,16 @@ void lighting_write_args() {
             // agreeing rounds in a row, not on one lucky round.
             uint fl = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
             bool heard = ckeys.key[LIGHTING_DRAIN_CELLS_AT] >= LIGHTING_DRAIN_MIN_CELLS;
-            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = heard && gap > LIGHTING_DRAIN_GAP ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
+            float diff = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh));
+            float noise = LIGHTING_DRAIN_SQ_SCALE * sqrt(float(ckeys.key[LIGHTING_DRAIN_SQ_AT]));
+            float sigma = lighting_sc_drain_sigma();
+            bool signal = sigma <= 0.0 || diff > sigma * noise;
+            ckeys.key[LIGHTING_DRAIN_FLAG_AT] = heard && gap > LIGHTING_DRAIN_GAP && signal ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
         }
         ckeys.key[LIGHTING_DRAIN_SAMPLE_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_HELD_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
+        ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
         uint first = min(lighting_young_count(), young_room);
         a = min(room, first + lighting_mature_count());
