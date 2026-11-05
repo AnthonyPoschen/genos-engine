@@ -1,4 +1,4 @@
-#![cfg_attr(test, expect(clippy::panic, clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, clippy::expect_used, clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
 
 //! The world-cell read must not mix cells from the two off-axis surfaces at a
 //! corner. A slanted ray hit reads the dominant axis' plane only (ADR 0039 S2).
