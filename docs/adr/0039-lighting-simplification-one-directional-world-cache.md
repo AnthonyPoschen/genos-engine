@@ -198,3 +198,7 @@ The BCC lattice is the 3D analogue of the triangular lattice. For volumetric sig
 ### Lighting memory setting
 
 The fixed cell pool becomes its own **lighting memory** value, separate from texture and model quality, so a player on a 3, 4 or 6 GB card can trade lighting quality against model quality. It follows `docs/engine/settings-principles.md` (a key on `LightingSettings`, on the MCP catalogue and in the debug menu) and replaces ADR 0036's fixed per-preset slot count with a byte budget the presets default (placeholders: ~150 MB Low to ~500 MB High). The defaults are picked from the crate's accuracy-vs-memory sweep (64, 128, 256 and 512 MB equivalents), then confirmed by ADR 0036's measured occupancy on the GPU.
+
+### Tuning order and low-spec knobs
+
+Tune on the 4070 first, but design the low-spec knobs in now: **pool size (lighting memory), cell size and ray counts are parameters, never hard-coded** (settings values per `docs/engine/settings-principles.md`, presets only set defaults), so Low presets for 3–6 GB cards can be tuned later without a redesign. `crates/cache-ref` takes the same three as parameters.
