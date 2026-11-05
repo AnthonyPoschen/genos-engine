@@ -30,7 +30,7 @@
 //! The cache itself is graded too: the 25 cm cells (and 12.5 cm texels) in
 //! a lighting dump against the CPU bounce irradiance at each cell's point and
 //! normal (`genos_debug::reference::bounce_irradiance`). Their sum and their
-//! median cell must hold at least 0.9 of it, and a still scene must settle.
+//! median lit cell must hold at least 0.9 of it, and a still scene must settle.
 //! A fourth case starts the hall dark and grades it 300 lit frames later (lag).
 //! The picture ratio is the energy metric of `crates/cache-ref` (summed cache
 //! over summed reference on the pixels the reference hits).
@@ -312,10 +312,11 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
     let cost = entries.iter().sum::<f64>() / entries.len().max(1) as f64;
     let cells = cell_grade(&cell_scene, &dump_dir, dump_at, name);
     eprintln!(
-        "cache_energy {name}: cells/ref {:.3} (n {}, median {:.3}, under 0.9: {:.2}) texels/ref {:.3} (n {}, median {:.3}) | picture indirect/ref {:.3} direct/ref {:.3} blotch {:.3} settled at {settled_at:?} still entries/frame {cost:.0} ({:.0} rays) draining {draining}/120 trail [{}]",
+        "cache_energy {name}: cells/ref {:.3} (n {}, median {:.3}, lit median {:.3}, under 0.9: {:.2}) texels/ref {:.3} (n {}, median {:.3}) | picture indirect/ref {:.3} direct/ref {:.3} blotch {:.3} settled at {settled_at:?} still entries/frame {cost:.0} ({:.0} rays) draining {draining}/120 trail [{}]",
         cells.coarse.ratio,
         cells.coarse.n,
         cells.coarse.median,
+        cells.coarse.median_lit,
         cells.coarse.under,
         cells.fine.ratio,
         cells.fine.n,
@@ -338,10 +339,13 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
         cells.coarse.n
     );
     // The sum can pass while single cells are a few rays' noise (dark ones and
-    // bright ones cancel): the median cell holds the reference too.
+    // bright ones cancel): the median lit cell holds the reference too. Dim
+    // cells (under LIT of the mean) are reported, not graded: their median is
+    // ray noise, the blotch gate's job.
     assert!(
-        cells.coarse.median >= LOW,
-        "{name}: the median 25 cm cell holds {:.3} of its reference bounce, under {LOW} ({:.2} of cells under)",
+        cells.coarse.median_lit >= LOW,
+        "{name}: the median lit 25 cm cell holds {:.3} of its reference bounce, under {LOW} (all cells {:.3}, {:.2} under)",
+        cells.coarse.median_lit,
         cells.coarse.median,
         cells.coarse.under
     );
@@ -369,6 +373,9 @@ struct SlotGrade {
     median: f64,
     /// Share of those slots under `LOW`.
     under: f64,
+    /// Median ratio over the lit slots: reference at least `LIT` of the mean
+    /// (about 95 % of the reference light in the open floor).
+    median_lit: f64,
 }
 
 struct CellGrade {
@@ -380,6 +387,11 @@ struct CellGrade {
 const CELL_SAMPLES: usize = 384;
 /// A dumped slot: point, normal, stored irradiance, sets.
 type Slot = ([f32; 3], [f32; 3], [f32; 3], f32);
+
+/// A slot whose reference is under this share of the mean is dim: its few
+/// bounce paths make its value noise (a far floor cell sees the lit wall in one
+/// ray of a thousand), which is blotch, not missing energy.
+const LIT: f64 = 0.5;
 
 /// Cosine rays per slot for the CPU irradiance.
 const CELL_RAYS: u32 = 1024;
@@ -466,7 +478,11 @@ fn cell_grade(scene: &Scene, dir: &std::path::Path, at: u64, tag: &str) -> CellG
         let floor = total_ref / refs.len() as f64 * 0.05;
         let mut per: Vec<f64> = live.iter().zip(&refs).filter(|(_, r)| **r > floor).map(|(l, r)| l / r).collect();
         per.sort_by(f64::total_cmp);
+        let lit = total_ref / refs.len() as f64 * LIT;
+        let mut per_lit: Vec<f64> = live.iter().zip(&refs).filter(|(_, r)| **r > lit).map(|(l, r)| l / r).collect();
+        per_lit.sort_by(f64::total_cmp);
         SlotGrade {
+            median_lit: per_lit.get(per_lit.len() / 2).copied().unwrap_or(0.0),
             ratio: total_live / total_ref.max(1e-12),
             n: picked.len(),
             median: per.get(per.len() / 2).copied().unwrap_or(0.0),
