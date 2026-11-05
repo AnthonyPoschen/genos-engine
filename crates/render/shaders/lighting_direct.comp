@@ -331,6 +331,13 @@ void main() {
     vec3 n_hit = n;
     if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u) {
         uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+        // A hit off screen has no pixel texel, only the hit patch its bounce
+        // lookup claimed (lighting_cache_irradiance). Its direct light is held
+        // there too; without it each such hit walked every lamp in range every
+        // relight (~80 % of the GI-on direct pass's lamp work, gi-on-direct-fix.md).
+        if (ts == ~0u) {
+            ts = lighting_cache_find_sized(pos, n, false, lighting_hit_size_n(pos, n), pos);
+        }
         vec3 tp;
         vec3 tn;
         if (ts != ~0u && lighting_sc_texel_world(ts, tp, tn)) {
