@@ -151,3 +151,50 @@ All **est**, to be replaced by stage measurements.
 3. **Movers:** a mover-only probe helper is acceptable if cells can't keep up with moving objects.
 4. **Order:** stage 2 may be prototyped in parallel on the box, but merges only after stage 1 passes its gates.
 5. **Budget:** SH memory counts against the ~200 MB lighting soft budget once ADR 0036's per-preset sizing and the reservoir trimming have landed.
+
+## Addendum A (5 Nov 2026): stages 2b and 2c, cell layout, lighting memory
+
+Status: **Proposed**. Adds two stages between stage 2 and stage 3, a cell-layout choice, and a lighting-memory setting. Research and sources: `/home/box/shared/ge-notes/cache-ray-feedback-research.md`. The CPU reference is `crates/cache-ref`. Measured numbers live in that crate's report and the PR, not here. Every byte count below is **est** until the crate or a GPU stage measures it.
+
+### Principles
+
+- **One-way stays.** Cells are built from their own rays only; texels and pixels only read cells. Letting texel rays feed cells ("lend rays") was studied and is **parked**: it is not part of any stage.
+- **Memory is the constraint, ray and lookup ALU are not.** Prefer compact encodings (shared exponents, quantised gradients, octahedral or relative packing) even when decode costs more. Lookup cost is reported as counters (points fetched, ALU ops per lookup) and never disqualifies a variant on its own.
+- **Accuracy against the path-traced reference stays the primary gate.** No stage may be less accurate than the stage before it on any reference scene (as above).
+
+### Stage 2b: in-cell position data
+
+Each cell also records **where** its own rays start and how far they go, so a read can correct the cell value for the reader's position:
+
+| Field | What | Compact size (**est**, RGB engine) | How a read uses it |
+|---|---|---|---|
+| Ray-start centroid μ | mean origin of the cell's rays, offset from the cell point | 3 × u8 = 3 B | Anchor for the gradient (the value is placed where it was measured, not at the cell point) |
+| Clamped L0 gradient ∇ | least-squares slope of the L0 term over ray starts | 3 × i8 relative to L0 (luminance gradient, applied to all channels) = 3 B | `E(p) = E + ∇·(p − μ)`, clamped so it cannot go negative and to `L0 / max(R, h/2)` (Ward/Heckbert gradient limit, Křivánek clamping) |
+| Mean hit distance R | harmonic mean of the cell's ray lengths | 1 B (log-encoded) | Gradient clamp; later a validity weight |
+| Side bit | sign of the dominant normal axis, hashed into the key | 0 B per cell (two-sided cells use two entries) | A read only blends entries of its own side, so the two faces of a thin wall do not share light |
+
+With SH-L1 in a shared-exponent layout (L0 RGB as RGB9E5, L1 as i8 relative to L0, **est** 13 B), a 2b cell is **est ~20 B** against 24 B for plain fp16 SH-L1. The accumulation side (this frame's sums) is transient and not in that figure.
+
+**Gates (CPU reference first, then lavapipe):** on every reference scene, against plain SH-L1 at the same layout and memory:
+- blotch lower;
+- leak no higher (thin-wall dark face);
+- energy ≥ 0.9 of reference and within 1 % of plain SH-L1's energy;
+- linger ≤ 5 % at 120 frames and lag ≥ 90 % at 300 frames (as stage 1);
+- pop (99th-percentile frame-to-frame change in steady state) no worse than plain;
+- no negative irradiance anywhere.
+
+### Stage 2c: sum-based subdivision with hysteresis
+
+Cells split into 8 children near the camera (projected size) and where their own data says light varies across the cell (`|∇|·h / L0` above a threshold, with enough samples). State is kept as **sums and counts**, so a merge is exact addition. A split seeds each child from the parent's 2b model evaluated at the child (centroid + gradient), as a **low-confidence seed** (never more than a few samples' weight; lamp-change clear drops it first, as the seed rule above). Children trace extra rays only while below a minimum sample count. Readers cross-fade parent → child by the child's sample count, so a split does not pop.
+
+Hysteresis: split and merge thresholds with a gap (distance band and data band), plus a minimum dwell in frames after any change.
+
+**Gates:** blotch close to static 12.5 cm cells (within 10 %) at lower memory; pop at the split frame ≤ 1 steady-state σ; zero split/merge toggles over 600 frames of a camera dolly across the threshold; with a deliberately skewed origin distribution, seeded children's energy within 1 % of reference behaviour; fewer catch-up rays than zero-start children; linger and lag unchanged.
+
+### Cell layout: cubic or body-centred cubic (BCC)
+
+The BCC lattice is the 3D analogue of the triangular lattice. For volumetric signals it needs roughly 30 % fewer samples than a cubic lattice for the same reconstruction (Entezari, Van De Ville, Möller, *Practical box splines for reconstruction on the body centered cubic lattice*, TVCG 2008: twice as efficient as tensor-product B-splines at equal density; the ~30 % figure is quoted by Csébfalvi, *BCC-splines*, WSCG 2008). Our signal lives on surfaces, not in a volume, so the gain has to be measured. The crate compares both layouts **at equal memory** and **at equal accuracy** (memory each needs to reach the same blotch, leak and energy). BCC reads are linear interpolation over the 4 points of the BCC tetrahedron containing the reader (fewer fetches than trilinear's 8, more ALU); subdivision of a BCC point is a BCC lattice at half spacing (each point's Voronoi cell is a truncated octahedron, which does not nest, so children are assigned by nearest point rather than exact containment). The layout is decided by the crate's numbers before stage 2c starts on the GPU.
+
+### Lighting memory setting
+
+The fixed cell pool becomes its own **lighting memory** value, separate from texture and model quality, so a player on a 3, 4 or 6 GB card can trade lighting quality against model quality. It follows `docs/engine/settings-principles.md` (a key on `LightingSettings`, on the MCP catalogue and in the debug menu) and replaces ADR 0036's fixed per-preset slot count with a byte budget the presets default (placeholders: ~150 MB Low to ~500 MB High). The defaults are picked from the crate's accuracy-vs-memory sweep (64, 128, 256 and 512 MB equivalents), then confirmed by ADR 0036's measured occupancy on the GPU.
