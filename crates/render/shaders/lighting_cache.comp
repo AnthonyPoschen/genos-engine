@@ -281,7 +281,7 @@ void main() {
             vec3 nx = sx * (wr * LIGHTING_SH_Y1);
             vec3 ny = sy * (wr * LIGHTING_SH_Y1);
             vec3 nz = sz * (wr * LIGHTING_SH_Y1);
-            if (old.w >= 0.5) {
+            if (old.w >= LIGHTING_CACHE_HAS_W) {
                 vec3 o0;
                 vec3 ox;
                 vec3 oy;

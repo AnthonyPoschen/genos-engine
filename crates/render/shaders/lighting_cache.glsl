@@ -617,6 +617,16 @@ const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
 // |n| below this); axis-aligned hits tilt the hit cell (= its mean, master's
 // read). 99.97 % of the SH lookups were axis-aligned ray hits (simplify-s2 step 7).
 const float LIGHTING_SH_HIT_SLANT = 0.999;
+// fp16 pack clamp (half max is ~65504; stay under so packHalf2x16 stays finite).
+const float LIGHTING_SH_HALF_CLAMP = 65000.0;
+// Skip a lattice axis when |n_a| is below this (weight would be tiny).
+const float LIGHTING_SH_AXIS_MIN = 0.35;
+// SH tilt read only when the hit cell is under this many LIGHTING_SH_CELL.
+const float LIGHTING_SH_HIT_SPAN = 1.2;
+// Cell/texel w threshold: has light (shared with the mean path's 0.5).
+const float LIGHTING_CACHE_HAS_W = 0.5;
+// Half a cell on the lattice (UV centre offset).
+const float LIGHTING_CELL_HALF = 0.5;
 // Sets a texel inside a change, or under a light that is changing, averages over
 // (a short running mean on one fixed set: quick, and no flicker).
 const float LIGHTING_SC_MOVING = 2.0;
@@ -2080,7 +2090,7 @@ bool lighting_sh_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u;
 }
 uint lighting_sh_half2(float a, float b) {
-    return packHalf2x16(clamp(vec2(a, b), vec2(-65000.0), vec2(65000.0)));
+    return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
 }
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
     if (!LIGHTING_SH_HALF) {
@@ -2159,7 +2169,7 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     float ws = 0.0;
     uint looks = 0u;
     [[dont_unroll]] for (uint ax = 0u; ax < 3u; ax++) {
-        if (abs(n[ax]) < 0.35) {
+        if (abs(n[ax]) < LIGHTING_SH_AXIS_MIN) {
             continue;
         }
         float wa = n[ax] * n[ax];
@@ -2167,7 +2177,7 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
         an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
         uint ua = (ax + 1u) % 3u;
         uint ub = (ax + 2u) % 3u;
-        vec2 uv = vec2(p[ua], p[ub]) / cs - 0.5;
+        vec2 uv = vec2(p[ua], p[ub]) / cs - LIGHTING_CELL_HALF;
         vec2 g0 = floor(uv);
         vec2 fr = uv - g0;
         [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
@@ -2177,16 +2187,16 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
                 continue;
             }
             vec3 q = p;
-            q[ua] = (c.x + 0.5) * cs;
-            q[ub] = (c.y + 0.5) * cs;
+            q[ua] = (c.x + LIGHTING_CELL_HALF) * cs;
+            q[ub] = (c.y + LIGHTING_CELL_HALF) * cs;
             q[ax] = p[ax] - ((q[ua] - p[ua]) * n[ua] + (q[ub] - p[ub]) * n[ub]) / n[ax];
             looks += 1u;
             uint s = lighting_cache_find_sized(q, an, false, cs, p);
-            if (s == ~0u || abs(dot(cache.v[3u * s].xyz - p, n)) > 0.5 * cs) {
+            if (s == ~0u || abs(dot(cache.v[3u * s].xyz - p, n)) > LIGHTING_CELL_HALF * cs) {
                 continue;
             }
             vec4 v = cache.v[3u * s + 2u];
-            if (v.w < 0.5) {
+            if (v.w < LIGHTING_CACHE_HAS_W) {
                 continue;
             }
             if (LIGHTING_SC_WRITES) {
@@ -2447,9 +2457,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         if (lighting_sh_on() && lighting_obj_salt < 0.5) {
             vec3 an = abs(n);
             bool slanted = max(an.x, max(an.y, an.z)) < LIGHTING_SH_HIT_SLANT;
-            if ((lighting_sc_display || slanted) && hsize < 1.2 * LIGHTING_SH_CELL) {
+            if ((lighting_sc_display || slanted) && hsize < LIGHTING_SH_HIT_SPAN * LIGHTING_SH_CELL) {
                 vec4 b = lighting_sh_read(pos, n, false);
-                if (b.w > 0.5) {
+                if (b.w > LIGHTING_CACHE_HAS_W) {
                     return b.rgb * keep;
                 }
             }
