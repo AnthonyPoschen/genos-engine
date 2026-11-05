@@ -56,6 +56,8 @@ fn still_sample_slots(pixels: u64) -> u64 {
 }
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
+const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -229,6 +231,11 @@ pub(crate) struct Lighting {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// The last cache round's WRC samples still differ from the held light by
+    /// more than LIGHTING_DRAIN_GAP: the bounce is draining or filling, not settled.
+    draining: bool,
+    /// The last read cache round's batch entries, 16 rays each (stats word 147).
+    round_entries: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -290,6 +297,13 @@ pub(crate) struct Lighting {
     meter_pipe: Handle,
     /// Compose with the scene image and bloom. The plain pipe stays free of them.
     compose_hdr_pipe: Handle,
+    /// #142: compose's surface-cache writes (claims, stamps, fills, seeds,
+    /// offers), dispatched over compose's blocks just before it. Null when the
+    /// kill switch keeps them in compose.
+    compose_maint_pipe: Handle,
+    /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
+    /// constant 0, writes compiled into compose and no maintenance pass.
+    compose_writes: bool,
     /// Sun compose with the scene image and bloom.
     sun_hdr_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
@@ -414,6 +428,11 @@ pub struct SettleStats {
     pub settled: bool,
     /// Frames in a row the scene has not changed.
     pub still_frames: u32,
+    /// The surface cache's drain flag as the host last read it (a few frames
+    /// old): its samples still differ from the held light, so it keeps relighting.
+    pub draining: bool,
+    /// The last read cache round's batch entries (16 rays each), a few frames old.
+    pub round_entries: u32,
 }
 
 impl Default for Lighting {
@@ -493,6 +512,8 @@ impl Default for Lighting {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            draining: false,
+            round_entries: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -527,6 +548,8 @@ impl Default for Lighting {
             bloom_pipe: std::ptr::null_mut(),
             meter_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
+            compose_maint_pipe: std::ptr::null_mut(),
+            compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
@@ -799,8 +822,19 @@ impl Gpu {
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
-            self.lighting.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, LIGHTING_PASS_NAMES[k])?;
+            // Pass 7 is compose: specialization constant 0 (#142 kill switch).
+            let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
+            self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
+        }
+        if !self.lighting.compose_writes {
+            let start = Instant::now();
+            self.lighting.compose_maint_pipe = self.make_compute_pipe(
+                LIGHTING_COMPOSE_MAINT_SPV,
+                self.lighting.layout,
+                "lighting compose maint",
+            )?;
+            self.note_pipeline_time("lighting compose maint", start);
         }
         let start = Instant::now();
         self.lighting.atrous_plain = self.make_compute_pipe(
@@ -916,7 +950,39 @@ impl Gpu {
     }
 
     fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
+        self.make_compute_pipe_spec(code, layout, what, None)
+    }
+
+    /// `spec` is the 32-bit value of specialization constant 0 (a GLSL bool is
+    /// a VkBool32), or none.
+    fn make_compute_pipe_spec(&self, code: &[u8], layout: Handle, what: &str, spec: Option<u32>) -> Result<Handle, String> {
         let module = self.shader(code)?;
+        #[repr(C)]
+        struct MapEntry {
+            id: u32,
+            offset: u32,
+            size: usize,
+        }
+        #[repr(C)]
+        struct SpecInfo {
+            count: u32,
+            entries: *const MapEntry,
+            size: usize,
+            data: *const c_void,
+        }
+        let value = spec.unwrap_or(0);
+        let entry = MapEntry { id: 0, offset: 0, size: 4 };
+        let spec_info = SpecInfo {
+            count: 1,
+            entries: &entry,
+            size: 4,
+            data: &value as *const u32 as *const c_void,
+        };
+        let spec_ptr = if spec.is_some() {
+            &spec_info as *const SpecInfo as *const c_void
+        } else {
+            std::ptr::null()
+        };
         #[repr(C)]
         struct Stage {
             s_type: i32,
@@ -948,7 +1014,7 @@ impl Gpu {
                 stage: 0x20,
                 module,
                 name: b"main\0".as_ptr() as *const i8,
-                spec: std::ptr::null(),
+                spec: spec_ptr,
             },
             layout,
             base: std::ptr::null_mut(),
@@ -1115,7 +1181,7 @@ impl Gpu {
             }
             self.lighting.cache_full = want_cache;
         }
-        self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every
@@ -1319,7 +1385,9 @@ impl Gpu {
         let sc_relit = world_wait != 0
             || (world_mode == 3 && self.lighting.settings.experiments.sc_flags & 8192 != 0);
         let settled = if world_mode == 3 && sc_relit {
-            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 })
+                && self.lighting.light_quiet >= 2
+                && !self.lighting.draining
         } else if probe_only(&self.lighting.settings) {
             // Probe-only keeps relighting its batch, so the change counter never
             // drops. Settle on frames still and the light having held, the same
@@ -1331,6 +1399,8 @@ impl Gpu {
         SettleStats {
             settled,
             still_frames: self.lighting.still,
+            draining: self.lighting.draining,
+            round_entries: self.lighting.round_entries,
         }
     }
 
@@ -1442,10 +1512,11 @@ impl Gpu {
             return Ok(());
         }
         let start = Instant::now();
-        self.lighting.compose_hdr_pipe = self.make_compute_pipe(
+        self.lighting.compose_hdr_pipe = self.make_compute_pipe_spec(
             LIGHTING_COMPOSE_HDR_SPV,
             self.lighting.layout,
             "lighting compose hdr",
+            Some(u32::from(self.lighting.compose_writes)),
         )?;
         self.note_pipeline_time("lighting compose hdr", start);
         Ok(())
@@ -1642,6 +1713,20 @@ impl Gpu {
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
+        // The drain flag is the one exception, and it is not a sync read: the
+        // GPU decides draining itself (args pass, LIGHTING_DRAIN_FLAG_AT keeps
+        // the settle rounds going); the host only needs it so it does not idle
+        // the cache meanwhile. It is one word of this slot's stats ring buffer,
+        // whose fence the frame loop already waited (frames in flight), so the
+        // value is a few frames old and nothing waits on the GPU for it.
+        if self.lighting.stats_round[slot] && self.lighting.settings.world_mode() == 3 {
+            if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
+                self.lighting.draining = flag != 0;
+            }
+            if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
+                self.lighting.round_entries = e;
+            }
+        }
         let read = lighting_stats_wanted(
             self.lighting.settings.world_mode(),
             self.lighting.settings.experiments.sc_flags,
@@ -1738,6 +1823,13 @@ impl Gpu {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
+            // Settled: the cache holds its light and runs no rounds, so the drain
+            // flag would keep the last value its args pass wrote. The host settled
+            // on a flag a few frames old, and the GPU may have re-armed it since;
+            // left set, every pixel's direct pass keeps gathering strictly at rest.
+            if self.lighting.cache_full && self.lighting.settings.world_mode() == 3 && self.lighting_stats().settled {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, LIGHTING_DRAIN_FLAG_AT * 4, 4, 0);
+            }
             let cmd = self.cmd;
             let dst = self.lighting.gbuf.buffer;
             self.write_device(cmd, dst, 0, pod_bytes(&header))?;
@@ -1768,6 +1860,7 @@ impl Gpu {
     /// from its light as it is now; `young_only`: the round took young patches only,
     /// so one that relit nothing found nothing left to light.
     fn note_lighting_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
+
         if !current {
             self.lighting.quiet = 0;
         } else if words[1] > 0 {
@@ -1831,6 +1924,8 @@ impl Gpu {
             let light = self.lighting.world_light == self.lighting.light_hash;
             let mut head = [0u32; 8];
             head.copy_from_slice(&words[..8]);
+            self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
+            self.lighting.round_entries = words[LIGHTING_DRAIN_WORD + 3];
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -2043,6 +2138,7 @@ impl Gpu {
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+                eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
             let mode_word = w[LIGHTING_ATROUS_STAT + 1];
@@ -2115,6 +2211,21 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// One word of a stats ring buffer whose fence was already waited.
+    fn read_stats_word(&self, memory: Handle, word: usize) -> Result<u32, String> {
+        let value;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, (word * 4) as u64, 4, 0, &mut mapped),
+                "map lighting stats word",
+            )?;
+            value = std::ptr::read_unaligned(mapped as *const u32);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(value)
     }
 
     fn read_words(&self, memory: Handle, count: usize) -> Result<Vec<u32>, String> {
@@ -2239,7 +2350,7 @@ impl Gpu {
             .override_settings
             .clone()
             .unwrap_or_else(|| scene.lighting.clone());
-        desired.apply_env();
+        desired.apply_env()?;
         desired.sanitize();
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
@@ -3565,6 +3676,22 @@ impl Gpu {
                 } else {
                     self.lighting.pipes[pass]
                 };
+                if pass == 7 && !sun_compose && !self.lighting.compose_maint_pipe.is_null() {
+                    // #142: the cache writes compose used to make, over the same
+                    // pixels, before compose reads the cache (and clears the
+                    // G-buffer record this pass reads).
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.compose_maint_pipe);
+                    if compose_full {
+                        (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
+                    } else {
+                        (self.fns.cmd_dispatch_indirect)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            lighting_compose_at() * 4,
+                        );
+                    }
+                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
@@ -3927,6 +4054,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.bloom_pipe))
                 .chain(std::iter::once(&mut self.lighting.meter_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
@@ -3974,7 +4102,7 @@ const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 /// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
 /// mask follows, one bit per composed pixel, and is not part of this header.
 /// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 144;
+const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
@@ -3983,7 +4111,12 @@ const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 const LIGHTING_UNFILLED_WORD: usize = 140;
 const LIGHTING_SHADED_WORD: usize = 141;
 /// Word 0 of the mask. Matches lighting_cache.glsl.
-const LIGHTING_UNFILLED_MASK_AT: usize = 144;
+const LIGHTING_UNFILLED_MASK_AT: usize = 148;
+/// Words 144 and 145: the cache round's WRC sample and held luminance sums (x256).
+/// Word 146: 1 while the cache is draining or filling (lighting_cache.glsl
+/// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
+/// Word 147: the round's batch entries (16 rays each).
+const LIGHTING_DRAIN_WORD: usize = 144;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);

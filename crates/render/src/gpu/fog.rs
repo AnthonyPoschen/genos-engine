@@ -70,7 +70,7 @@ impl Gpu {
         let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
         let (sun, lamps) = sun_and_lamps(&scene.lights);
         self.froxel_frame = Some(FrameJob {
-            params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0),
+            params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),
             width: size.width,
             height: size.height,
             slices: size.slices,
@@ -275,6 +275,7 @@ impl Gpu {
             &job.lamps,
             flags,
             job.stop_slices,
+            job.reference_far,
         );
         let scene = scene_bytes_for(job);
         let (
@@ -428,6 +429,7 @@ impl Gpu {
             flags: 0,
             stop_slices: 0,
             read_extinction: false,
+            reference_far: 0.0,
         };
         let gpu = self.run_fog(&job)?;
         if self.timestamp_period <= 0.0 {
@@ -458,6 +460,7 @@ impl Gpu {
             flags: 0,
             stop_slices: 0,
             read_extinction: false,
+            reference_far: 0.0,
         };
         let gpu = self.run_fog(&job)?;
         if self.timestamp_period <= 0.0 {
@@ -1637,6 +1640,7 @@ fn encode_params(
     lamps: &[FogPointLamp],
     flags: u32,
     stop_slices: u32,
+    reference_far: f32,
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(PARAM_BYTES);
     push_u32(&mut bytes, size.width);
@@ -1646,7 +1650,7 @@ fn encode_params(
     push_f32(&mut bytes, view.origin[0]);
     push_f32(&mut bytes, view.origin[1]);
     push_f32(&mut bytes, view.origin[2]);
-    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, reference_far);
     push_f32(&mut bytes, view.forward[0]);
     push_f32(&mut bytes, view.forward[1]);
     push_f32(&mut bytes, view.forward[2]);
@@ -1676,7 +1680,13 @@ fn encode_params(
     push_u32(&mut bytes, u32::try_from(volumes).unwrap_or(0));
     push_u32(&mut bytes, u32::try_from(lamp_count).unwrap_or(0));
     push_u32(&mut bytes, stop_slices);
-    push_u32(&mut bytes, 0);
+    // F2 shadow rays per froxel. Low, High, and Ultra use 2 (ADR 0026).
+    let f2_rays = if flags & crate::fog_pass::FOG_F2_REFERENCE != 0 {
+        2
+    } else {
+        0
+    };
+    push_u32(&mut bytes, f2_rays);
     for volume in settings.volumes.iter().take(MAX_VOLUMES) {
         push_f32(&mut bytes, volume.position[0]);
         push_f32(&mut bytes, volume.position[1]);

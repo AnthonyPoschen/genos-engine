@@ -20,8 +20,11 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 |---|---|---|
 | `ship_lanes` | Four swept wedge-hull pairs head on at 30, 120, 600 and 3000 m/s from 36 m. | `crates/physics/tests/ship_impact.rs` |
 | `hull_edges` | Static crossed cubes 1 cm apart and 5 cm overlapped, and a cube falling edge-first onto a static edge. | `crates/physics/tests/hull_edges.rs` |
-| `resting_pile` | 16 turned hull cubes dropped onto a static hull slab. | settle and sink checks |
-| `static_grid_10k` | 10 000 static boxes on a 100 x 100 grid, 8 spheres falling onto it. | broadphase cost |
+| `resting_pile` | 16 turned hull cubes, friction 0.6, dropped onto a static hull slab. | settle and sink checks, including sleep off |
+| `static_grid_10k` | 10 000 static boxes on a 100 x 100 grid, inserted as one batch, 8 spheres falling onto it. | broadphase cost; statics stay out of the dynamic tree |
+| `resting_1025` | 1 024 spheres on a plane. | scale bench |
+| `layer_filter` | Two overlapping debris spheres. | `pair_tests` stays 0 |
+| `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -30,7 +33,9 @@ files describe lighting geometry and have no bodies, masses or velocities.
 
 `step`, `step_us`, `bodies`, `ccd_applied`, `toi_failed`, `toi_deferred`,
 `pair_slices`, `dynamic_pair_impulses`, `linear_energy`, `rotational_energy`,
-`max_speed`, `min_y`, and `hash`: FNV-1a over every body's pose and velocities,
+`max_speed`, `min_y`, `hash`, `contact_points`, `sleeping_bodies`,
+`pair_tests`, `broadphase_builds`, `tree_nodes`, `islands`, `awake_bodies`,
+and `solver_bodies`. `hash` is FNV-1a over every body's pose and velocities,
 bit for bit. Equal hashes at a step mean equal state.
 
 ## MCP and `POST /cmd/<name>`

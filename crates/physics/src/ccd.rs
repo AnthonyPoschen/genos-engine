@@ -495,12 +495,10 @@ pub(crate) fn prepare_swept(
     scratch: &mut CcdScratch,
     cap: u32,
     dt: f32,
+    any_swept: bool,
     stats: &mut crate::StepStats,
 ) {
     scratch.pairs.clear();
-    let any_swept = bodies
-        .iter()
-        .any(|body| body.motion == MotionQuality::Swept);
     if !any_swept {
         if !scratch.covered.is_empty() {
             scratch.covered.fill(0);

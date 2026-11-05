@@ -26,25 +26,28 @@
 //! One collision step for dynamic bodies.
 //!
 //! `step` advances the world in place. Gravity, a move wish, spring forces, and
-//! contact run in that call. Contact tests only the pairs whose bounds meet (a
-//! sweep along X), so a world of hundreds of walls costs about as much per body as
-//! a room of a few.
+//! contact run in that call. Contact tests the pairs the static tree and the
+//! dynamic tree report. A static body is not in the dynamic tree, and two
+//! statics are not a pair.
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
 
+mod broadphase;
 mod ccd;
 mod contact;
 mod destruction;
+mod island;
 mod mesh;
+mod solver;
 
 pub use destruction::{
     allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
-    spawn_breakable, CHANGE_RECORDS_AWAIT_LIGHTING, ChunkChange, ChunkChangeKind,
-    DestructionReport,
+    spawn_breakable, ChunkChange, ChunkChangeKind, DestructionReport,
+    CHANGE_RECORDS_AWAIT_LIGHTING,
 };
 pub use genos_fracture::{cook, Asset, CookRequest};
 
-use genos_math::{Quat, Vec3};
+use genos_math::{Mat3, Quat, Vec3};
 
 /// Acceleration along -Y, in meters per second squared.
 pub const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -130,12 +133,16 @@ impl Piece {
 pub struct Mesh {
     pub pieces: [Piece; MAX_MESH_PIECES],
     pub count: u8,
+    /// Inverse of the unit-mass inertia about the local origin, from the
+    /// pieces' volume. A zero matrix means the build stored no tensor yet.
+    pub unit_inverse_inertia: Mat3,
 }
 
 impl Mesh {
     const EMPTY: Self = Self {
         pieces: [Piece::EMPTY; MAX_MESH_PIECES],
         count: 0,
+        unit_inverse_inertia: Mat3::IDENTITY,
     };
 
     fn pieces(&self) -> &[Piece] {
@@ -242,6 +249,22 @@ pub struct StepStats {
     pub dynamic_pair_impulses: u32,
     /// Advances taken by fast pairs whose travel exceeded the smaller radius.
     pub pair_slices: u32,
+    /// Contact points solved on the last narrow-phase pass.
+    pub contact_points: u32,
+    /// Dynamic bodies asleep at the end of the step.
+    pub sleeping_bodies: u32,
+    /// Pairs that reached the narrow phase.
+    pub pair_tests: u32,
+    /// Times the broadphase built or refit a tree this step.
+    pub broadphase_builds: u32,
+    /// Nodes in the static tree plus the dynamic tree.
+    pub tree_nodes: u32,
+    /// Contact islands that still have a dynamic body.
+    pub islands: u32,
+    /// Dynamic bodies that are not sleeping.
+    pub awake_bodies: u32,
+    /// Dynamic bodies the narrow phase handed to the solver.
+    pub solver_bodies: u32,
 }
 
 impl StepStats {
@@ -252,6 +275,14 @@ impl StepStats {
             toi_deferred: 0,
             dynamic_pair_impulses: 0,
             pair_slices: 0,
+            contact_points: 0,
+            sleeping_bodies: 0,
+            pair_tests: 0,
+            broadphase_builds: 0,
+            tree_nodes: 0,
+            islands: 0,
+            awake_bodies: 0,
+            solver_bodies: 0,
         }
     }
 }
@@ -281,6 +312,17 @@ pub struct Body {
     pub presence: Presence,
     /// Spawned chunk under the debris volume. Two debris bodies do not collide.
     pub debris: bool,
+    /// True after the body has been still long enough to leave the solver.
+    /// A contact from a moving body clears it. Static bodies stay false.
+    pub sleeping: bool,
+    /// Seconds spent under the sleep speed. Cleared when the body wakes.
+    pub sleep_time: f32,
+    /// `u16::MAX` until a caller picks an object layer. Then 0 static, 1 dynamic, 2 debris.
+    pub object_layer: u16,
+    /// 0 lives in the static tree. Anything else lives in the dynamic tree.
+    pub broad_phase_layer: u8,
+    /// Island id. Bodies that share an id sleep and wake together.
+    pub island: u32,
 }
 
 impl Body {
@@ -337,7 +379,20 @@ impl Body {
             angular_velocity: Vec3::ZERO,
             presence: Presence::Live,
             debris: false,
+            sleeping: false,
+            sleep_time: 0.0,
+            object_layer: u16::MAX,
+            broad_phase_layer: 0,
+            island: 0,
         }
+    }
+
+    /// Pin this body to an object layer. Debris stays in the dynamic tree.
+    #[must_use]
+    pub const fn with_layer(mut self, layer: u16) -> Self {
+        self.object_layer = layer;
+        self.broad_phase_layer = if layer == 0 { 0 } else { 1 };
+        self
     }
 
     /// `½ ωᵀ I ω` in joules. `I` is diagonal in the body frame. Zero when `ω` is zero.
@@ -379,10 +434,20 @@ pub struct World {
     pub emit_change_records: bool,
     /// Replaced at the start of each `step`.
     pub step_stats: StepStats,
+    /// Linear speed under which a body can sleep. Default 0.12 m/s.
+    pub sleep_linear: f32,
+    /// Angular speed under which a body can sleep. Default 0.25 rad/s.
+    pub sleep_angular: f32,
+    /// How long every member of an island must stay calm. Default 0.5 s.
+    pub sleep_time: f32,
+    /// Which object layers produce pairs.
+    pub layer_pairs: broadphase::LayerPairs,
     /// The contact pass's lists, kept so a step after the first does not allocate.
     pairs: contact::Pairs,
     /// Swept-pair scratch, kept so a later step does not allocate.
     ccd_scratch: ccd::CcdScratch,
+    broadphase: broadphase::Broadphase,
+    islands: island::Islands,
 }
 
 /// Two worlds are equal when their bodies and gravity are.
@@ -403,15 +468,126 @@ impl World {
             change_records: Vec::new(),
             emit_change_records: true,
             step_stats: StepStats::zero(),
+            sleep_linear: 0.12,
+            sleep_angular: 0.25,
+            sleep_time: 0.5,
+            layer_pairs: broadphase::LayerPairs::standard(),
             pairs: contact::Pairs::new(),
             ccd_scratch: ccd::CcdScratch::new(),
+            broadphase: broadphase::Broadphase::new(),
+            islands: island::Islands::new(),
         }
     }
 
     /// Store one body. Returns its index in `bodies`.
-    pub fn insert(&mut self, body: Body) -> usize {
+    pub fn insert(&mut self, mut body: Body) -> usize {
+        broadphase::sync_layer(&mut body);
+        let index = self.bodies.len();
+        body.island = u32::try_from(index).unwrap_or(0);
         self.bodies.push(body);
-        self.bodies.len() - 1
+        self.broadphase.insert_one(&self.bodies, index);
+        index
+    }
+
+    /// Build the trees for this batch in one pass.
+    pub fn insert_many(&mut self, bodies: impl IntoIterator<Item = Body>) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for mut body in bodies {
+            broadphase::sync_layer(&mut body);
+            let index = self.bodies.len();
+            body.island = u32::try_from(index).unwrap_or(0);
+            self.bodies.push(body);
+            ids.push(index);
+        }
+        self.broadphase.insert_batch(&self.bodies);
+        ids
+    }
+
+    /// Replace both trees with a tight median build.
+    pub fn refit(&mut self) {
+        for body in &mut self.bodies {
+            broadphase::sync_layer(body);
+        }
+        self.broadphase.rebuild(&self.bodies);
+    }
+
+    /// Move a body and wake its island. The leaf grows until [`refit`](Self::refit).
+    pub fn set_position(&mut self, index: usize, position: Vec3) {
+        let Some(body) = self.bodies.get_mut(index) else {
+            return;
+        };
+        body.position = position;
+        let id = u32::try_from(index).unwrap_or(0);
+        if !self.broadphase.displaced.contains(&id) {
+            self.broadphase.displaced.push(id);
+        }
+        self.wake(index);
+        self.broadphase.expand(&self.bodies, index);
+    }
+
+    /// Wake every dynamic body that shares this body's island.
+    pub fn wake(&mut self, index: usize) {
+        let Some(island) = self.bodies.get(index).map(|body| body.island) else {
+            return;
+        };
+        for body in &mut self.bodies {
+            if body.island == island && body.inverse_mass > 0.0 {
+                body.sleeping = false;
+                body.sleep_time = 0.0;
+            }
+        }
+    }
+
+    /// A body changed mass or layer outside `insert`. Puts it in the matching tree.
+    pub fn reindex(&mut self, index: usize) {
+        let Some(body) = self.bodies.get_mut(index) else {
+            return;
+        };
+        broadphase::sync_layer(body);
+        self.broadphase.retarget(&self.bodies, index);
+    }
+
+    /// Tombstone one body. Neighbours stay asleep.
+    pub fn remove(&mut self, index: usize) {
+        let Some(body) = self.bodies.get_mut(index) else {
+            return;
+        };
+        body.presence = Presence::Culled;
+        self.broadphase.forget(index);
+    }
+
+    #[must_use]
+    pub fn in_static_tree(&self, index: usize) -> bool {
+        self.broadphase.in_static(index)
+    }
+
+    #[must_use]
+    pub fn in_dynamic_tree(&self, index: usize) -> bool {
+        self.broadphase.in_dynamic(index)
+    }
+
+    #[must_use]
+    pub fn tree_node_count(&self) -> u32 {
+        self.broadphase.node_count()
+    }
+
+    #[must_use]
+    pub fn static_rebuilds(&self) -> u32 {
+        self.broadphase.static_rebuilds
+    }
+
+    /// Pairs the current trees report. Does not refit and does not step.
+    #[must_use]
+    pub fn overlapping_pairs(&mut self) -> Vec<(u32, u32)> {
+        let mut pairs = Vec::new();
+        let mut planes = Vec::new();
+        self.broadphase
+            .fill(&self.bodies, &self.layer_pairs, &mut pairs, &mut planes);
+        pairs
+    }
+
+    pub fn set_layer_pair(&mut self, a: u16, b: u16, accept: bool) {
+        self.layer_pairs.set(a, b, accept);
     }
 }
 
@@ -421,36 +597,48 @@ pub fn step(world: &mut World, dt: f32) {
         return;
     }
     world.change_records.clear();
+    world.islands.bind(world.broadphase.dynamic_ids());
     let gravity = world.gravity;
-    for body in &mut world.bodies {
+    let dynamic_count = world.broadphase.dynamic_count();
+    for slot in 0..dynamic_count {
+        let id = world.broadphase.dynamic_at(slot);
+        let Some(body) = world.bodies.get_mut(usize_index(id)) else {
+            continue;
+        };
         body.normal_impulse = 0.0;
         apply_forces(body, gravity, dt);
         if body.motor {
             body.velocity.x = body.wish.x;
             body.velocity.z = body.wish.z;
         }
+        broadphase::sync_layer(body);
+    }
+    for item in &world.breakables {
+        let Some(intact) = item.intact else {
+            continue;
+        };
+        if let Some(body) = world.bodies.get_mut(intact) {
+            body.normal_impulse = 0.0;
+        }
     }
     world.step_stats = StepStats::zero();
-    let speculative = world
-        .bodies
-        .iter()
-        .any(|body| body.motion == MotionQuality::Speculative);
-    let swept = world
-        .bodies
-        .iter()
-        .any(|body| body.motion == MotionQuality::Swept);
+    let (speculative, swept) = motion_flags(world);
     world.step_stats.ccd_applied = speculative || swept;
     ccd::prepare_swept(
         &world.bodies,
         &mut world.ccd_scratch,
         world.swept_pair_cap,
         dt,
+        swept,
         &mut world.step_stats,
     );
     if speculative {
         ccd::speculative(&mut world.bodies, dt, world.speculative_margin);
     }
-    for index in 0..world.bodies.len() {
+    let dynamic_count = world.broadphase.dynamic_count();
+    for slot in 0..dynamic_count {
+        let id = world.broadphase.dynamic_at(slot);
+        let index = usize_index(id);
         let Some(body) = world.bodies.get_mut(index) else {
             continue;
         };
@@ -469,38 +657,115 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
-    for _ in 0..4 {
-        let hits = contact::collide(&mut world.bodies, &mut world.pairs);
-        world.step_stats.dynamic_pair_impulses =
-            world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    // The narrow phase is built once. Later passes move the stored local
+    // points with the bodies and separate again, without another SAT.
+    world.broadphase.prepare(&world.bodies);
+    let mut hits = 0_u32;
+    for pass in 0..4 {
+        let mut query = contact::PairQuery {
+            layers: &world.layer_pairs,
+            trees: &mut world.broadphase,
+            islands: &mut world.islands,
+        };
+        hits = hits.saturating_add(contact::collide(
+            &mut world.bodies,
+            &mut world.pairs,
+            &mut query,
+            pass == 0,
+            pass == 0,
+            pass == 0,
+        ));
     }
+    close_step(world, hits, dt);
     if !world.breakables.is_empty() {
         destruction::after_step(world, dt);
     }
 }
 
+fn close_step(world: &mut World, hits: u32, dt: f32) {
+    world.step_stats.dynamic_pair_impulses =
+        world.step_stats.dynamic_pair_impulses.saturating_add(hits);
+    world.step_stats.contact_points = world.pairs.contact_point_count();
+    world.islands.store_pairs(world.pairs.pair_list());
+    world.islands.assign_and_sleep(
+        &mut world.bodies,
+        dt,
+        world.sleep_linear,
+        world.sleep_angular,
+        world.sleep_time,
+    );
+    world.step_stats.sleeping_bodies = sleeping_dynamics(world);
+    world.step_stats.pair_tests = u32::try_from(world.pairs.pair_list().len()).unwrap_or(u32::MAX);
+    world.step_stats.broadphase_builds = 1;
+    world.step_stats.tree_nodes = world.broadphase.node_count();
+    world.step_stats.islands = world.islands.count(&world.bodies);
+    world.step_stats.awake_bodies = awake_dynamics(world);
+    world.step_stats.solver_bodies = world.pairs.solver_bodies(&world.bodies);
+    world.broadphase.displaced.clear();
+}
+
+fn usize_index(index: u32) -> usize {
+    usize::try_from(index).unwrap_or(usize::MAX)
+}
+
+fn motion_flags(world: &World) -> (bool, bool) {
+    let mut speculative = false;
+    let mut swept = false;
+    for slot in 0..world.broadphase.dynamic_count() {
+        let id = world.broadphase.dynamic_at(slot);
+        let Some(body) = world.bodies.get(usize_index(id)) else {
+            continue;
+        };
+        speculative |= body.motion == MotionQuality::Speculative;
+        swept |= body.motion == MotionQuality::Swept;
+        if speculative && swept {
+            break;
+        }
+    }
+    (speculative, swept)
+}
+
+fn sleeping_dynamics(world: &World) -> u32 {
+    let mut count = 0_u32;
+    for slot in 0..world.broadphase.dynamic_count() {
+        let id = world.broadphase.dynamic_at(slot);
+        let asleep = world
+            .bodies
+            .get(usize_index(id))
+            .is_some_and(|body| body.sleeping);
+        if asleep {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn awake_dynamics(world: &World) -> u32 {
+    let mut count = 0_u32;
+    for slot in 0..world.broadphase.dynamic_count() {
+        let id = world.broadphase.dynamic_at(slot);
+        let awake = world.bodies.get(usize_index(id)).is_some_and(|body| {
+            body.inverse_mass > 0.0 && !body.sleeping && body.presence == Presence::Live
+        });
+        if awake {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
 pub(crate) fn integrate_body(body: &mut Body, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 || !(dt > 0.0) {
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping || !(dt > 0.0) {
         return;
     }
     body.position += body.velocity * dt;
-    let spin = body.angular_velocity;
-    if spin.length_squared() <= 0.0 {
+    if body.angular_velocity.length_squared() <= 0.0 {
         return;
     }
-    // World-space ω: dq/dt = ½ ω q.
-    let omega = Quat::new(spin.x, spin.y, spin.z, 0.0);
-    let delta = quat_mul(omega, body.orientation) * (0.5 * dt);
-    body.orientation = (body.orientation + delta).normalize();
-}
-
-fn quat_mul(lhs: Quat, rhs: Quat) -> Quat {
-    Quat::new(
-        lhs.w * rhs.x + lhs.x * rhs.w + lhs.y * rhs.z - lhs.z * rhs.y,
-        lhs.w * rhs.y - lhs.x * rhs.z + lhs.y * rhs.w + lhs.z * rhs.x,
-        lhs.w * rhs.z + lhs.x * rhs.y - lhs.y * rhs.x + lhs.z * rhs.w,
-        lhs.w * rhs.w - lhs.x * rhs.x - lhs.y * rhs.y - lhs.z * rhs.z,
-    )
+    let local = conjugate(body.orientation).rotate(body.angular_velocity);
+    let stepped = solver::implicit_gyroscopic(local, inertia_diagonal(*body), dt);
+    body.angular_velocity = body.orientation.rotate(stepped);
+    body.orientation = solver::integrate_orientation(body.orientation, body.angular_velocity, dt);
 }
 
 fn conjugate(q: Quat) -> Quat {
@@ -508,7 +773,7 @@ fn conjugate(q: Quat) -> Quat {
 }
 
 /// Body-frame principal moments `(Ixx, Iyy, Izz)`.
-fn inertia_diagonal(body: Body) -> Vec3 {
+pub(crate) fn inertia_diagonal(body: Body) -> Vec3 {
     let mass = body.mass();
     if !mass.is_finite() {
         return Vec3::ZERO;
@@ -524,12 +789,175 @@ fn inertia_diagonal(body: Body) -> Vec3 {
             half_height,
         } => capsule_inertia(mass, radius, half_height),
         Shape::Plane { .. } => Vec3::ZERO,
-        Shape::Mesh(mesh) => {
-            let radius = mesh_extent(&mesh);
-            let moment = 0.4 * mass * radius * radius;
-            Vec3::new(moment, moment, moment)
+        Shape::Mesh(mesh) => mesh_principal(mass, &mesh),
+    }
+}
+
+/// Diagonal of the volume-integral inertia, for the gyroscopic step and energy.
+fn mesh_principal(mass: f32, mesh: &Mesh) -> Vec3 {
+    let inverse = mesh.unit_inverse_inertia;
+    let unit = invert_mat3(inverse).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(moment, moment, moment))
+    });
+    Vec3::new(unit.cols[0], unit.cols[4], unit.cols[8]) * mass
+}
+
+/// Unit-mass inertia inverse about the local origin.
+pub(crate) fn mesh_unit_inverse(mesh: &Mesh) -> Mat3 {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    for piece in mesh.pieces() {
+        match piece {
+            Piece::Cuboid { center, half } => {
+                let vol = 8.0 * half.x * half.y * half.z;
+                if vol <= 1.0e-12 {
+                    continue;
+                }
+                let local = box_inertia(vol, *half);
+                volume += vol;
+                let (xx, yy, zz, xy, yz, zx) = parallel_axis(local, vol, *center);
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
+            Piece::Hull(hull) => {
+                let (vol, xx, yy, zz, xy, yz, zx) = hull_moments(hull);
+                volume += vol;
+                ixx += xx;
+                iyy += yy;
+                izz += zz;
+                ixy += xy;
+                iyz += yz;
+                izx += zx;
+            }
         }
     }
+    if volume <= 1.0e-8 {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        return Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment));
+    }
+    let scale = 1.0 / volume;
+    let inertia = Mat3::from_cols([
+        ixx * scale,
+        ixy * scale,
+        izx * scale,
+        ixy * scale,
+        iyy * scale,
+        iyz * scale,
+        izx * scale,
+        iyz * scale,
+        izz * scale,
+    ]);
+    invert_mat3(inertia).unwrap_or_else(|| {
+        let radius = mesh_extent(mesh).max(1.0e-3);
+        let moment = 0.4 * radius * radius;
+        Mat3::from_scale(Vec3::new(1.0 / moment, 1.0 / moment, 1.0 / moment))
+    })
+}
+
+/// `I_origin = I_center + m (|c|² I − c cᵀ)`.
+fn parallel_axis(local: Vec3, mass: f32, center: Vec3) -> (f32, f32, f32, f32, f32, f32) {
+    let r2 = center.length_squared();
+    (
+        local.x + mass * (r2 - center.x * center.x),
+        local.y + mass * (r2 - center.y * center.y),
+        local.z + mass * (r2 - center.z * center.z),
+        -mass * center.x * center.y,
+        -mass * center.y * center.z,
+        -mass * center.z * center.x,
+    )
+}
+
+/// Volume integrals of one hull about the local origin (unit density).
+///
+/// Each face triangle is a tetrahedron with the origin. The second moments
+/// follow Eberly's closed form for a tetrahedron with one vertex at the origin.
+fn hull_moments(hull: &Hull) -> (f32, f32, f32, f32, f32, f32, f32) {
+    let mut volume = 0.0_f32;
+    let mut ixx = 0.0_f32;
+    let mut iyy = 0.0_f32;
+    let mut izz = 0.0_f32;
+    let mut ixy = 0.0_f32;
+    let mut iyz = 0.0_f32;
+    let mut izx = 0.0_f32;
+    let count = hull.face_count as usize;
+    for face in hull.faces.iter().take(count) {
+        let a = hull.verts[face.index[0] as usize];
+        let b = hull.verts[face.index[1] as usize];
+        let c = hull.verts[face.index[2] as usize];
+        let vol = a.dot(b.cross(c)) / 6.0;
+        if vol.abs() < 1.0e-14 {
+            continue;
+        }
+        volume += vol;
+        ixx += second_diag(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        iyy += second_diag(a.x, b.x, c.x, a.z, b.z, c.z, vol);
+        izz += second_diag(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        ixy -= second_off(a.x, b.x, c.x, a.y, b.y, c.y, vol);
+        iyz -= second_off(a.y, b.y, c.y, a.z, b.z, c.z, vol);
+        izx -= second_off(a.z, b.z, c.z, a.x, b.x, c.x, vol);
+    }
+    (volume, ixx, iyy, izz, ixy, iyz, izx)
+}
+
+fn second_diag(y1: f32, y2: f32, y3: f32, z1: f32, z2: f32, z3: f32, volume: f32) -> f32 {
+    let sy = y1 * y1 + y2 * y2 + y3 * y3 + y1 * y2 + y1 * y3 + y2 * y3;
+    let sz = z1 * z1 + z2 * z2 + z3 * z3 + z1 * z2 + z1 * z3 + z2 * z3;
+    volume * (sy + sz) / 10.0
+}
+
+fn second_off(x1: f32, x2: f32, x3: f32, y1: f32, y2: f32, y3: f32, volume: f32) -> f32 {
+    let sum = 2.0 * (x1 * y1 + x2 * y2 + x3 * y3)
+        + x1 * y2
+        + x2 * y1
+        + x1 * y3
+        + x3 * y1
+        + x2 * y3
+        + x3 * y2;
+    volume * sum / 20.0
+}
+
+fn invert_mat3(m: Mat3) -> Option<Mat3> {
+    let c = m.cols;
+    let (m00, m01, m02) = (c[0], c[3], c[6]);
+    let (m10, m11, m12) = (c[1], c[4], c[7]);
+    let (m20, m21, m22) = (c[2], c[5], c[8]);
+    let c00 = m11 * m22 - m12 * m21;
+    let c01 = m12 * m20 - m10 * m22;
+    let c02 = m10 * m21 - m11 * m20;
+    let det = m00 * c00 + m01 * c01 + m02 * c02;
+    if det.abs() < 1.0e-14 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let c10 = m21 * m02 - m22 * m01;
+    let c11 = m22 * m00 - m20 * m02;
+    let c12 = m20 * m01 - m21 * m00;
+    let c20 = m01 * m12 - m02 * m11;
+    let c21 = m02 * m10 - m00 * m12;
+    let c22 = m00 * m11 - m01 * m10;
+    Some(Mat3::from_cols([
+        c00 * inv_det,
+        c01 * inv_det,
+        c02 * inv_det,
+        c10 * inv_det,
+        c11 * inv_det,
+        c12 * inv_det,
+        c20 * inv_det,
+        c21 * inv_det,
+        c22 * inv_det,
+    ]))
 }
 
 /// `Ixx = m/3 (hy² + hz²)` with half extents, which is `m/12` of the full side squares.
@@ -576,7 +1004,11 @@ fn mesh_extent(mesh: &Mesh) -> f32 {
 }
 
 fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
-    if body.presence != Presence::Live || body.inverse_mass == 0.0 {
+    if body.sleeping && (body.velocity.length() > 0.25 || body.angular_velocity.length() > 0.4) {
+        body.sleeping = false;
+        body.sleep_time = 0.0;
+    }
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
         return;
     }
     let mut acceleration = gravity;
@@ -597,4 +1029,132 @@ fn apply_forces(body: &mut Body, gravity: Vec3, dt: f32) {
         }
     }
     body.velocity += acceleration * dt;
+}
+
+#[cfg(test)]
+mod inertia_tests {
+    use super::{box_inertia, inertia_diagonal, step, Body, World};
+    use crate::contact;
+    use genos_math::Vec3;
+
+    fn cube(half: Vec3) -> Vec<[Vec3; 3]> {
+        let v = |x: f32, y: f32, z: f32| Vec3::new(x * half.x, y * half.y, z * half.z);
+        let (nnn, pnn, ppn, npn) = (
+            v(-1.0, -1.0, -1.0),
+            v(1.0, -1.0, -1.0),
+            v(1.0, 1.0, -1.0),
+            v(-1.0, 1.0, -1.0),
+        );
+        let (nnp, pnp, ppp, npp) = (
+            v(-1.0, -1.0, 1.0),
+            v(1.0, -1.0, 1.0),
+            v(1.0, 1.0, 1.0),
+            v(-1.0, 1.0, 1.0),
+        );
+        vec![
+            [pnn, ppn, ppp],
+            [pnn, ppp, pnp],
+            [nnn, nnp, npp],
+            [nnn, npp, npn],
+            [npn, npp, ppp],
+            [npn, ppp, ppn],
+            [nnn, pnn, pnp],
+            [nnn, pnp, nnp],
+            [nnp, pnp, ppp],
+            [nnp, ppp, npp],
+            [nnn, npn, ppn],
+            [nnn, ppn, pnn],
+        ]
+    }
+
+    #[test]
+    fn tree_pairs_match_a_sweep_after_forty_steps() {
+        use genos_math::Quat;
+        fn cube(h: Vec3) -> Vec<[Vec3; 3]> {
+            let v = |x: f32, y: f32, z: f32| Vec3::new(x * h.x, y * h.y, z * h.z);
+            let (nnn, pnn, ppn, npn) = (
+                v(-1., -1., -1.),
+                v(1., -1., -1.),
+                v(1., 1., -1.),
+                v(-1., 1., -1.),
+            );
+            let (nnp, pnp, ppp, npp) = (
+                v(-1., -1., 1.),
+                v(1., -1., 1.),
+                v(1., 1., 1.),
+                v(-1., 1., 1.),
+            );
+            vec![
+                [pnn, ppn, ppp],
+                [pnn, ppp, pnp],
+                [nnn, nnp, npp],
+                [nnn, npp, npn],
+                [npn, npp, ppp],
+                [npn, ppp, ppn],
+                [nnn, pnn, pnp],
+                [nnn, pnp, nnp],
+                [nnp, pnp, ppp],
+                [nnp, ppp, npp],
+                [nnn, npn, ppn],
+                [nnn, ppn, pnn],
+            ]
+        }
+        let mut world = World::new(Vec3::new(0.0, -9.81, 0.0));
+        world.insert(Body::mesh(
+            Vec3::new(0.0, -0.5, 0.0),
+            0.0,
+            &cube(Vec3::new(4.0, 0.5, 4.0)),
+        ));
+        let block = cube(Vec3::new(0.5, 0.5, 0.5));
+        let mut angle = 0.0_f32;
+        for layer in [0.6_f32, 1.8, 3.0, 4.2] {
+            for (x, z) in [(-0.6_f32, -0.6_f32), (0.6, -0.6), (-0.6, 0.6), (0.6, 0.6)] {
+                let mut body = Body::mesh(Vec3::new(x, layer, z), 1.0, &block);
+                body.orientation = Quat::from_axis_angle(Vec3::Y, angle);
+                angle += 0.21;
+                world.insert(body);
+            }
+        }
+        for _ in 0..40 {
+            step(&mut world, 1.0 / 60.0);
+        }
+        let tree = world.overlapping_pairs();
+        let mut sweep = Vec::new();
+        let margin = Vec3::new(0.02, 0.02, 0.02);
+        let mut boxes = Vec::new();
+        for (index, body) in world.bodies.iter().enumerate() {
+            if let Some((lo, hi)) = contact::bounds(body) {
+                boxes.push((lo - margin, hi + margin, u32::try_from(index).unwrap_or(0)));
+            }
+        }
+        boxes.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+        for (at, &(lo, hi, i)) in boxes.iter().enumerate() {
+            for &(lo2, hi2, j) in &boxes[at + 1..] {
+                if lo2.x > hi.x {
+                    break;
+                }
+                let meet = lo2.y <= hi.y && lo.y <= hi2.y && lo2.z <= hi.z && lo.z <= hi2.z;
+                let moving = world.bodies[i as usize].inverse_mass != 0.0
+                    || world.bodies[j as usize].inverse_mass != 0.0;
+                if meet && moving {
+                    sweep.push((i.min(j), i.max(j)));
+                }
+            }
+        }
+        sweep.sort_unstable();
+        assert_eq!(tree, sweep, "tree {} sweep {}", tree.len(), sweep.len());
+    }
+
+    #[test]
+    fn a_cube_hull_matches_the_box_moment() {
+        let half = Vec3::new(0.5, 0.4, 0.3);
+        let body = Body::mesh(Vec3::ZERO, 2.0, &cube(half));
+        let got = inertia_diagonal(body);
+        let expect = box_inertia(2.0, half);
+        let err = (got - expect).length() / expect.length();
+        assert!(
+            err < 0.02,
+            "hull inertia {got:?} vs box {expect:?}, relative {err}"
+        );
+    }
 }

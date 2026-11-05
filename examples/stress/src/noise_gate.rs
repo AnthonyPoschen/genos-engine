@@ -63,6 +63,7 @@ Lavapipe times are not a result. The report is <out>/metrics.json.
   --preset NAME    potato, day-cycle, gi-1bounce, low, medium, high
   --lamps N        lamps on a grid (default 16, at least 9). Intensity is 3/N
   --broken         uniform pick, shade weight 1, no pairwise weight
+  --specular       shade pixel direct with the GGX lobe (direct_specular on)
   --out DIR        report directory (default ./genos-debug/noise)
   --pan-yaw RAD    yaw swept over the pan (default 0.35)
   --help           this text
@@ -78,6 +79,8 @@ pub struct Config {
     pub preset: Option<LightingPreset>,
     pub lamps: u32,
     pub broken: bool,
+    /// Appendix B lobe on pixel direct. Off is the Lambert picture.
+    pub specular: bool,
     pub out: PathBuf,
     pub pan_yaw: f32,
 }
@@ -94,6 +97,7 @@ impl Config {
             preset: None,
             lamps: 16,
             broken: false,
+            specular: false,
             out,
             pan_yaw: 0.35,
         }
@@ -117,6 +121,7 @@ where
     let mut preset = None;
     let mut lamps = 16u32;
     let mut broken = false;
+    let mut specular = false;
     let mut out = PathBuf::from("genos-debug/noise");
     let mut pan_yaw = 0.35f32;
     let mut it = args.into_iter();
@@ -165,6 +170,7 @@ where
                     .map_err(|_| format!("--lamps {} is not a count", text.as_ref()))?;
             }
             "--broken" => broken = true,
+            "--specular" => specular = true,
             "--out" => {
                 let text = it.next().ok_or("--out needs a directory")?;
                 out = PathBuf::from(text.as_ref());
@@ -204,6 +210,7 @@ where
         preset,
         lamps,
         broken,
+        specular,
         out,
         pan_yaw,
     }))
@@ -260,7 +267,13 @@ pub fn run(config: &Config) -> Result<i32, String> {
         config.settle,
         config.frames,
         config.preset.map_or("direct-quiet", LightingPreset::name),
-        if config.broken { "broken" } else { "random" }
+        if config.broken {
+            "broken"
+        } else if config.specular {
+            "random specular"
+        } else {
+            "random"
+        }
     );
     let mut live = capture_pass(
         &mut *window,
@@ -281,7 +294,7 @@ pub fn run(config: &Config) -> Result<i32, String> {
         "exact",
     )?;
     renderer.set_lamp_shade_gate(LampShadeGate::Product);
-    renderer.set_lighting_settings(gate_lighting(config.preset));
+    renderer.set_lighting_settings(gate_lighting(config.preset, config.specular));
     let solos = solo_frames(&mut *window, &mut *renderer, &world, &pose)?;
     let reference = reference_of(&world.scene, &pose, width, height);
     let report = grade_captures(
@@ -385,7 +398,7 @@ fn capture_pass(
     gate: LampShadeGate,
     label: &str,
 ) -> Result<Pass, String> {
-    renderer.set_lighting_settings(gate_lighting(config.preset));
+    renderer.set_lighting_settings(gate_lighting(config.preset, config.specular));
     renderer.set_lamp_shade_gate(gate);
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
@@ -580,7 +593,7 @@ fn overlap_world(n: u32) -> World {
     World::from_scene(scene)
 }
 
-fn gate_lighting(preset: Option<LightingPreset>) -> LightingSettings {
+fn gate_lighting(preset: Option<LightingPreset>, specular: bool) -> LightingSettings {
     let mut settings = if let Some(preset) = preset {
         LightingSettings::preset(preset)
     } else {
@@ -600,6 +613,7 @@ fn gate_lighting(preset: Option<LightingPreset>) -> LightingSettings {
     settings.ambient.mode = AmbientMode::Off;
     settings.shadows.enabled = true;
     settings.compose_reuse = false;
+    settings.direct.specular = specular;
     settings
 }
 
@@ -622,6 +636,7 @@ mod tests {
         assert_eq!(config.frames, 64);
         assert_eq!(config.lamps, 16);
         assert!(!config.broken);
+        assert!(!config.specular);
         assert!(config.preset.is_none());
         assert!((config.pan_yaw - 0.35).abs() < 1.0e-6);
     }
@@ -630,6 +645,16 @@ mod tests {
     fn a_short_pan_is_refused() {
         let err = parse(["--frames", "4"]).unwrap_err();
         assert!(err.contains("at least 9"), "{err}");
+    }
+
+    #[test]
+    fn specular_is_a_flag() {
+        let config = parse(["--specular"]).unwrap().unwrap();
+        assert!(config.specular);
+        assert!(!config.broken);
+        let lighting = gate_lighting(None, true);
+        assert!(lighting.direct.specular);
+        assert!(!gate_lighting(None, false).direct.specular);
     }
 
     #[test]
@@ -642,6 +667,7 @@ mod tests {
     fn broken_is_a_flag_and_sixteen_lamps_keep_the_three_lamp_budget() {
         let config = parse(["--lamps", "16", "--broken"]).unwrap().unwrap();
         assert!(config.broken);
+        assert!(!config.specular);
         assert_eq!(config.lamps, 16);
         let world = overlap_world(16);
         assert_eq!(world.scene.lights.len(), 16);

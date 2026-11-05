@@ -268,6 +268,11 @@ kind = "todo"
 detail = "no CLI argument yet"
 
 [[var]]
+name = "GENOS_COOKED"
+kind = "mirror"
+detail = "--cooked"
+
+[[var]]
 name = "GENOS_GPUREF_FLIP"
 kind = "todo"
 detail = "no CLI argument yet"
@@ -386,6 +391,11 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_DIRECT_SCALE"
 kind = "todo"
 detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_DIRECT_SPECULAR"
+kind = "mirror"
+detail = "--lighting-direct-specular"
 
 [[var]]
 name = "GENOS_LIGHTING_DUMP"
@@ -1500,3 +1510,13 @@ detail = "harness only"
 name = "GENOS_TEST_TIMEOUT_SECS"
 kind = "test"
 detail = "material_stream watchdog seconds"
+
+[[var]]
+name = "GENOS_COMPOSE_MAINT"
+kind = "build"
+detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"
+
+[[var]]
+name = "GENOS_COMPOSE_SC_WRITES"
+kind = "override"
+detail = "read-only compose is primary; 1 sets compose spec constant 0 so compose writes the cache again (A/B kill switch)"

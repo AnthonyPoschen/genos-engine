@@ -210,8 +210,11 @@ fn compare(files: &[PathBuf], settings: &BakeSettings) -> Result<(), String> {
     let mut same = true;
     for file in files {
         let start = Instant::now();
-        let direct = genos_load::load_gltf_file(file).map_err(|e| e.to_string())?;
+        let mut phases = genos_load::LoadPhases::default();
+        let direct =
+            genos_load::load_gltf_file_phased(file, &mut phases).map_err(|e| e.to_string())?;
         let direct_ms = ms(start);
+        let pms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         let doc = genos_load::import_file(file).map_err(|e| e.to_string())?;
         let bytes = encode(&cook(&doc, settings).map_err(|e| e.to_string())?);
         let start = Instant::now();
@@ -221,9 +224,13 @@ fn compare(files: &[PathBuf], settings: &BakeSettings) -> Result<(), String> {
         let ok = meshes == direct.meshes && loaded.instances == direct.instances;
         same &= ok;
         println!(
-            "{}: {} direct {direct_ms:.2} ms, cooked {cooked_ms:.2} ms, {} bytes",
+            "{}: {} direct {direct_ms:.2} ms (import {:.2}, decode {:.2}, meshes {:.2}, mips {:.2}), cooked {cooked_ms:.2} ms, {} bytes",
             file.display(),
             if ok { "same" } else { "DIFFERENT" },
+            pms(phases.import),
+            pms(phases.decode),
+            pms(phases.meshes),
+            pms(phases.mips),
             bytes.len()
         );
     }

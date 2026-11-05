@@ -76,8 +76,14 @@ pub struct MaterialAtlas {
     pub width: u32,
     pub height: u32,
     /// Row-major RGBA8, length `width * height * 4`. Top to bottom.
+    /// Empty when [`Self::block_format`] is a block format.
     pub rgba: Vec<u8>,
     pub key: u64,
+    /// `VkFormat`. 0 is RGBA8 in `rgba`. 146 is BC7 sRGB, 141 is BC5.
+    pub block_format: u32,
+    /// Prebuilt mips, finest first. Block bytes, not RGBA. The streamer copies
+    /// these and does not filter them (ADR 0035).
+    pub block_mips: Vec<crate::material_stream::MipLevel>,
 }
 
 impl MaterialAtlas {
@@ -91,26 +97,46 @@ impl MaterialAtlas {
             height,
             rgba,
             key: 0,
+            block_format: 0,
+            block_mips: Vec::new(),
         };
         atlas.rehash();
         atlas
     }
 
-    fn rehash(&mut self) {
+    pub(crate) fn rehash(&mut self) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        if self.width == 0 || self.height == 0 || self.rgba.is_empty() {
+        if self.width == 0
+            || self.height == 0
+            || (self.rgba.is_empty() && self.block_mips.is_empty())
+        {
             self.key = 0;
             return;
         }
         let mut hasher = DefaultHasher::new();
         self.width.hash(&mut hasher);
         self.height.hash(&mut hasher);
+        self.block_format.hash(&mut hasher);
         self.rgba.hash(&mut hasher);
+        for mip in &self.block_mips {
+            mip.width.hash(&mut hasher);
+            mip.height.hash(&mut hasher);
+            mip.rgba.hash(&mut hasher);
+        }
         let key = hasher.finish();
         self.key = if key == 0 { 1 } else { key };
     }
 }
+
+/// G-buffer material flag: rgb is base colour, readers apply `(1 − metallic)`.
+pub const MAT_BASE: u32 = 1;
+/// Colour-atlas alpha is metallic (opaque materials with a metallic-roughness map).
+pub const MAT_ALPHA_METAL: u32 = 2;
+/// Normal-atlas alpha is roughness.
+pub const MAT_NORMAL_ROUGH: u32 = 4;
+/// Normal atlas is a flat normal plus roughness. Do not perturb.
+pub const MAT_FLAT_NORMAL: u32 = 8;
 
 /// A rectangle in a [`MaterialAtlas`], in texels. `w == 0` means no texture.
 #[derive(Clone, Copy, Debug, Default)]
@@ -120,6 +146,12 @@ pub struct Surface {
     /// Discard below this alpha. 0 keeps the whole surface.
     pub cutoff: f32,
     pub two_sided: bool,
+    /// Roughness factor used when the normal atlas does not carry roughness.
+    pub roughness: f32,
+    /// Metallic factor used when the colour atlas alpha is not metallic.
+    pub metallic: f32,
+    /// [`MAT_BASE`], [`MAT_ALPHA_METAL`], [`MAT_NORMAL_ROUGH`], [`MAT_FLAT_NORMAL`].
+    pub material_flags: u32,
 }
 
 #[derive(Clone, Debug)]

@@ -127,6 +127,9 @@ fn world() -> World {
         normal: [0, 0, 0, 0],
         cutoff: 0.0,
         two_sided: false,
+        roughness: 1.0,
+        metallic: 0.0,
+        material_flags: 0,
     });
     let vertices = vec![[-1.2, 0.3, 0.0], [1.2, 0.3, 0.0], [0.0, 2.4, 0.0]];
     let texcoords = vec![[0.0, 1.0], [1.0, 1.0], [0.0, 0.0]];

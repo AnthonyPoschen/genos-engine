@@ -224,6 +224,14 @@ _Avoid_: Stream, backend
 One image with frame rectangles and named clips for 2D animation.
 _Avoid_: Sprite sheet, atlas
 
+**Object layer**:
+The collision group on a body. Layer 0 is static, layer 1 is dynamic, and layer 2 is debris. The world pair table decides which groups produce a contact. Debris does not meet debris.
+_Avoid_: Collision channel, mask bit
+
+**Island**:
+The set of dynamic bodies joined by a contact. They sleep together and they wake together.
+_Avoid_: Sleep group, simulation island
+
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline

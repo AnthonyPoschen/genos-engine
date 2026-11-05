@@ -219,6 +219,174 @@ fn emission_adds_and_is_not_reflected() {
     assert_eq!(shade(&m, c, [10.0; 3]), [4.0, 2.0, 1.0]);
 }
 
+/// The cases are unit vectors. f32 is the shader input.
+#[allow(
+    clippy::as_conversions,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
+fn unit_f32(v: [f64; 3]) -> [f32; 3] {
+    [v[0] as f32, v[1] as f32, v[2] as f32]
+}
+
+/// f32 Filament / glTF shade, the same arithmetic as `pbr_brdf.glsl`:
+/// GGX `D` from `|n × h|²` (the form fixed in #107) and height-correlated
+/// Smith `V` (`0.5 / (gv + gl)`, Filament `V_SmithGGXCorrelated`).
+fn emulate_shader(
+    base: [f32; 3],
+    metallic: f32,
+    roughness: f32,
+    n: [f32; 3],
+    l: [f32; 3],
+    v: [f32; 3],
+) -> [f32; 3] {
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    fn normalize(a: [f32; 3]) -> [f32; 3] {
+        let len = dot(a, a).sqrt();
+        [a[0] / len, a[1] / len, a[2] / len]
+    }
+    let n_dot_l = dot(n, l);
+    let n_dot_v = dot(n, v);
+    if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
+        return [0.0; 3];
+    }
+    let h = normalize(add(l, v));
+    let n_dot_h = dot(n, h);
+    let v_dot_h = dot(v, h);
+    let cx = cross(n, h);
+    let n_cross_h_sq = dot(cx, cx);
+    let alpha = roughness.clamp(0.0, 1.0);
+    let alpha = alpha * alpha;
+    let a2 = alpha * alpha;
+    let d = if n_dot_h <= 0.0 {
+        0.0
+    } else {
+        let den = n_dot_h * n_dot_h * a2 + n_cross_h_sq;
+        a2 / (std::f32::consts::PI * den * den)
+    };
+    let gv = n_dot_l * (n_dot_v * n_dot_v * (1.0 - a2) + a2).sqrt();
+    let gl = n_dot_v * (n_dot_l * n_dot_l * (1.0 - a2) + a2).sqrt();
+    let s = gv + gl;
+    let vis = if s > 0.0 { 0.5 / s } else { 0.0 };
+    let dv = d * vis;
+    let m = metallic.clamp(0.0, 1.0);
+    let fresnel = |f0: f32| {
+        let k = 1.0 - v_dot_h.clamp(0.0, 1.0);
+        let k2 = k * k;
+        f0 + (1.0 - f0) * (k2 * k2 * k)
+    };
+    let fd = fresnel(0.04);
+    std::array::from_fn(|channel| {
+        let base = base[channel];
+        let dielectric = (1.0 - fd) * (base / std::f32::consts::PI) + fd * dv;
+        let metal = fresnel(base) * dv;
+        dielectric * (1.0 - m) + metal * m
+    })
+}
+
+fn rel_err(got: f64, want: f64) -> f64 {
+    let scale = want.abs().max(1.0e-6);
+    (got - want).abs() / scale
+}
+
+/// Stage 3 gate, before the direct pass: the shader's f32 lobe against the
+/// f64 reference on full normal / view / light vectors.
+#[test]
+fn shader_form_matches_the_reference_on_vector_cases() {
+    let normals = [
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        normalize64([0.2, 0.9, 0.3]),
+        normalize64([-0.4, 0.4, 0.8]),
+    ];
+    let views = [
+        [0.0, 1.0, 0.0],
+        [0.0, 0.6, 0.8],
+        normalize64([0.3, 0.2, 0.9]),
+        normalize64([-0.5, 0.7, 0.2]),
+    ];
+    let lights = [
+        [0.0, 1.0, 0.0],
+        [0.6, 0.8, 0.0],
+        normalize64([0.2, 0.5, 0.8]),
+        normalize64([-0.7, 0.3, 0.4]),
+    ];
+    let roughness = [0.15_f32, 0.3, 0.55, 1.0];
+    let metallic = [0.0_f32, 0.35, 1.0];
+    let bases = [[1.0_f32, 1.0, 1.0], [0.8, 0.1, 0.05], [0.04, 0.6, 0.3]];
+    let mut worst = 0.0_f64;
+    let mut seen = 0u32;
+    for n in normals {
+        for v in views {
+            for l in lights {
+                let ndl = dot64(n, l);
+                let ndv = dot64(n, v);
+                if ndl <= 0.05 || ndv <= 0.05 {
+                    continue;
+                }
+                for &rough in &roughness {
+                    for &metal in &metallic {
+                        for base in bases {
+                            let emu = emulate_shader(
+                                base,
+                                metal,
+                                rough,
+                                unit_f32(n),
+                                unit_f32(l),
+                                unit_f32(v),
+                            );
+                            let reference = eval(
+                                &Material {
+                                    base_color: base.map(f64::from),
+                                    metallic: f64::from(metal),
+                                    roughness: f64::from(rough),
+                                    emissive: [0.0; 3],
+                                    emissive_strength: 1.0,
+                                },
+                                Cosines::from_dirs(n, l, v),
+                            );
+                            for channel in 0..3 {
+                                worst =
+                                    worst.max(rel_err(f64::from(emu[channel]), reference[channel]));
+                            }
+                            seen += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(seen > 100, "the case grid collapsed: {seen}");
+    assert!(
+        worst <= 1.0e-4,
+        "shader form vs reference relative error {worst} over {seen} cases"
+    );
+}
+
+fn dot64(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn normalize64(a: [f64; 3]) -> [f64; 3] {
+    let len = dot64(a, a).sqrt();
+    [a[0] / len, a[1] / len, a[2] / len]
+}
+
 /// Closed form: a white metal at roughness 1 seen head-on has D = 1/π and
 /// V = 1/(2(1 + n·l)), so its albedo is `∫₀¹ u/(1+u) du = 1 − ln 2`.
 #[test]

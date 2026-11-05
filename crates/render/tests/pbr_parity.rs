@@ -52,8 +52,11 @@ const F_LIMIT: f64 = 1.0e-2;
 /// Below this the comparison is absolute, so a zero reference is not a divide.
 const FLOOR: f64 = 1.0e-6;
 
-fn device_wanted(name: &str) -> bool {
+fn device_wanted(name: &str, forced: Option<&str>) -> bool {
     let lower = name.to_ascii_lowercase();
+    if let Some(want) = forced {
+        return lower.contains(&want.to_ascii_lowercase());
+    }
     match std::env::var("GENOS_PBR_PARITY_DEVICE") {
         Ok(want) if !want.is_empty() => lower.contains(&want.to_ascii_lowercase()),
         _ => !lower.contains("llvmpipe"),
@@ -155,7 +158,7 @@ fn device_name(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-fn dispatch(broken: u32) -> Result<(String, Vec<f32>), String> {
+fn dispatch(broken: u32, device: Option<&str>) -> Result<(String, Vec<f32>), String> {
     unsafe {
         let lib = dlopen(c"libvulkan.so.1".as_ptr(), 2);
         if lib.is_null() {
@@ -244,7 +247,7 @@ fn dispatch(broken: u32) -> Result<(String, Vec<f32>), String> {
             let mut prop = [0u8; 1024];
             get_props(physical, prop.as_mut_ptr());
             let name = device_name(&prop[20..276]);
-            if !device_wanted(&name) {
+            if !device_wanted(&name, device) {
                 continue;
             }
             let mut family_count = 0u32;
@@ -917,7 +920,7 @@ unsafe extern "C" {
 fn gpu_brdf_matches_the_cpu_reference_and_a_broken_shade_fails() {
     let cpu = cpu_words();
     assert_eq!(cpu.len(), WORDS);
-    let (name, gpu) = dispatch(0).unwrap_or_else(|err| panic!("{err}"));
+    let (name, gpu) = dispatch(0, None).unwrap_or_else(|err| panic!("{err}"));
     for (slot, label) in [(0, "D"), (1, "V"), (2, "F")] {
         let (err, row) = worst(&gpu, &cpu, |s| s == slot);
         assert!(
@@ -934,7 +937,7 @@ fn gpu_brdf_matches_the_cpu_reference_and_a_broken_shade_fails() {
     );
     println!("pbr parity on {name}: f worst {f_err:.3e} (gate {F_LIMIT})");
 
-    let (_name, broken) = dispatch(1).unwrap_or_else(|err| panic!("{err}"));
+    let (_name, broken) = dispatch(1, None).unwrap_or_else(|err| panic!("{err}"));
     let (terms, _) = worst(&broken, &cpu, |s| s < 3);
     assert!(
         terms <= TERM_LIMIT,
@@ -945,4 +948,29 @@ fn gpu_brdf_matches_the_cpu_reference_and_a_broken_shade_fails() {
         broken_f > F_LIMIT,
         "dropping the (1 - F) diffuse weight still matched within {F_LIMIT} ({broken_f})"
     );
+}
+
+/// Same harness as stage 2, forced onto lavapipe. This is the picture check
+/// for the lobe the direct pass will call: `D`, `V`, `F` and `f`.
+#[test]
+fn lavapipe_harness_matches_the_cpu_reference() {
+    let cpu = cpu_words();
+    let (name, gpu) = dispatch(0, Some("llvmpipe")).unwrap_or_else(|err| panic!("{err}"));
+    assert!(
+        name.to_ascii_lowercase().contains("llvmpipe"),
+        "expected lavapipe, ran on {name}"
+    );
+    for (slot, label) in [(0, "D"), (1, "V"), (2, "F")] {
+        let (err, row) = worst(&gpu, &cpu, |s| s == slot);
+        assert!(
+            err <= TERM_LIMIT,
+            "{label} relative error {err} > {TERM_LIMIT} at row {row} on {name}"
+        );
+    }
+    let (f_err, f_row) = worst(&gpu, &cpu, |s| s >= 3);
+    assert!(
+        f_err <= F_LIMIT,
+        "f relative error {f_err} > {F_LIMIT} at row {f_row} on {name}"
+    );
+    println!("lavapipe pbr parity on {name}: f worst {f_err:.3e}");
 }

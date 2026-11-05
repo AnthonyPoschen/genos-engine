@@ -1,3 +1,11 @@
+#![expect(
+    clippy::as_conversions,
+    reason = "grid coordinates stay small integers"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "grid coordinates stay small integers"
+)]
 //! The physics debug scenes. Each one is a fixture a physics test also runs,
 //! built here in code because the shared `debug/scenes/*.scene` files describe
 //! lighting geometry, not bodies.
@@ -21,7 +29,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 4] = [
+pub const SCENES: [SceneInfo; 7] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -36,7 +44,7 @@ pub const SCENES: [SceneInfo; 4] = [
     },
     SceneInfo {
         name: "resting_pile",
-        summary: "16 turned hull cubes dropped onto a static hull slab under gravity",
+        summary: "16 turned hull cubes (friction 0.6) dropped onto a static hull slab under gravity",
         steps: 240,
         build: resting_pile,
     },
@@ -45,6 +53,24 @@ pub const SCENES: [SceneInfo; 4] = [
         summary: "10 000 static boxes on a 100 x 100 grid with 8 spheres falling onto it",
         steps: 60,
         build: static_grid_10k,
+    },
+    SceneInfo {
+        name: "resting_1025",
+        summary: "1 024 resting spheres on a plane (scale bench)",
+        steps: 30,
+        build: resting_1025,
+    },
+    SceneInfo {
+        name: "layer_filter",
+        summary: "two overlapping debris spheres; the layer table drops the pair",
+        steps: 1,
+        build: layer_filter,
+    },
+    SceneInfo {
+        name: "sleep_island",
+        summary: "two stacks of boxes that sleep apart; a displaced sphere wakes one island",
+        steps: 180,
+        build: sleep_island,
     },
 ];
 
@@ -184,6 +210,9 @@ fn resting_pile() -> World {
         for (x, z) in [(-0.6_f32, -0.6_f32), (0.6, -0.6), (-0.6, 0.6), (0.6, 0.6)] {
             let mut body = Body::mesh(Vec3::new(x, layer, z), 1.0, &cube);
             body.orientation = Quat::from_axis_angle(Vec3::Y, angle);
+            // Yawed neighbours overlap. With friction 0 the overlap's normal
+            // impulse is kept as horizontal speed and the columns walk off.
+            body.friction = 0.6;
             angle += 0.21;
             world.insert(body);
         }
@@ -193,11 +222,12 @@ fn resting_pile() -> World {
 
 fn static_grid_10k() -> World {
     let mut world = World::new(Vec3::new(0.0, -9.81, 0.0));
+    let mut boxes = Vec::with_capacity(10_000);
     let mut x = -99.0;
     for _ in 0..100 {
         let mut z = -99.0;
         for _ in 0..100 {
-            world.insert(Body::cuboid(
+            boxes.push(Body::cuboid(
                 Vec3::new(x, 0.0, z),
                 0.0,
                 Vec3::new(0.9, 0.5, 0.9),
@@ -206,10 +236,50 @@ fn static_grid_10k() -> World {
         }
         x += 2.0;
     }
+    world.insert_many(boxes);
     let mut x = -7.0;
     for _ in 0..8 {
         world.insert(Body::sphere(Vec3::new(x, 4.0, 1.0), 1.0, 0.5));
         x += 2.0;
+    }
+    world
+}
+
+fn resting_1025() -> World {
+    let mut world = World::new(Vec3::new(0.0, -9.81, 0.0));
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    for x in 0..32 {
+        for z in 0..32 {
+            world.insert(Body::sphere(
+                Vec3::new(x as f32 * 1.2, 0.5, z as f32 * 1.2),
+                1.0,
+                0.5,
+            ));
+        }
+    }
+    world
+}
+
+fn layer_filter() -> World {
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(Body::sphere(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.5).with_layer(2));
+    world.insert(Body::sphere(Vec3::new(0.2, 1.0, 0.0), 1.0, 0.5).with_layer(2));
+    world
+}
+
+fn sleep_island() -> World {
+    let mut world = World::new(Vec3::new(0.0, -9.81, 0.0));
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    for x in [0.0_f32, 6.0] {
+        for level in 0..2 {
+            let mut body = Body::cuboid(
+                Vec3::new(x, 0.5 + level as f32, 0.0),
+                1.0,
+                Vec3::new(0.5, 0.5, 0.5),
+            );
+            body.friction = 0.8;
+            world.insert(body);
+        }
     }
     world
 }
