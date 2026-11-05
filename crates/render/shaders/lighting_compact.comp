@@ -279,7 +279,7 @@ void main() {
                             uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
                             lighting_dg(50u, 1u);
                             if (at >= ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) lighting_dg(52u, 1u);
-                            else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); atomicMax(gstats.diag[54], od); } }
+                            else { lighting_dg(51u, 1u); if (lighting_sc_check_next(slot) != 0u && int(od) > 0 && int(od) < 100000) { lighting_dg(53u, od); if (LIGHTING_DIAG) atomicMax(gstats.diag[54], od); } }
                             if (at < ((LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift())) {
                                 lighting_dg(hinted ? 5u : 6u, 1u);
                                 ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
