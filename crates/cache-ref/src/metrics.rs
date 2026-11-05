@@ -182,3 +182,18 @@ pub fn pop(scene: &Scene, before: &[f64], after: &[f64], reference: &[f64]) -> f
     let idx = floor_usize(0.99 * fl(v.len() - 1));
     v[idx]
 }
+
+/// Mean relative error over a selected receiver region.
+#[must_use]
+pub fn mean_rel_error_in(region: &[usize], live: &[f64], reference: &[f64]) -> f64 {
+    if region.is_empty() {
+        return 0.0;
+    }
+    let mean = region.iter().map(|&i| reference[i]).sum::<f64>() / fl(region.len());
+    let floor = 0.05 * mean;
+    region
+        .iter()
+        .map(|&i| (live[i] - reference[i]).abs() / (reference[i] + floor))
+        .sum::<f64>()
+        / fl(region.len())
+}

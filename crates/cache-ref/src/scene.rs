@@ -41,6 +41,8 @@ pub enum Timeline {
     Static,
     /// Lamps on for frames `0..off_frame`, then off.
     LampOff { off_frame: usize },
+    /// Lamps off for frames `0..on_frame`, then on (lag and fill timing).
+    LampOn { on_frame: usize },
     /// Camera moves from `from` to `to` over `frames` frames, then holds.
     /// Camera held at `from` for `start` frames (cache warm-up), then moved
     /// to `to` over `frames` frames, then held.
@@ -68,11 +70,12 @@ pub struct Scene {
 }
 
 /// Names accepted by [`Scene::by_name`].
-pub const SCENES: [&str; 6] = [
+pub const SCENES: [&str; 7] = [
     "contact",
     "near-wall",
     "thin-wall",
     "lamp-off",
+    "lamp-on",
     "shadow-edge",
     "dolly",
 ];
@@ -128,6 +131,11 @@ impl Scene {
                 boxes.push(contact_box);
                 timeline = Timeline::LampOff { off_frame: 300 };
                 ("lamp-off", vec![lamp(2.9, 2.2, 2.9, 6.0)])
+            }
+            "lamp-on" => {
+                boxes.push(contact_box);
+                timeline = Timeline::LampOn { on_frame: 300 };
+                ("lamp-on", vec![lamp(2.9, 2.2, 2.9, 6.0)])
             }
             "shadow-edge" => {
                 boxes.push(Aabb::new(V3::new(1.0, 1.2, 1.0), V3::new(2.0, 1.25, 3.0)));
@@ -186,6 +194,7 @@ impl Scene {
     pub fn lamps_on(&self, frame: usize) -> bool {
         match self.timeline {
             Timeline::LampOff { off_frame } => frame < off_frame,
+            Timeline::LampOn { on_frame } => frame >= on_frame,
             Timeline::Static | Timeline::Dolly { .. } => true,
         }
     }
@@ -203,7 +212,7 @@ impl Scene {
                 let t = (fl(frame.saturating_sub(start)) / fl(frames.max(1))).min(1.0);
                 from.add(to.sub(from).scale(t))
             }
-            Timeline::Static | Timeline::LampOff { .. } => self.camera,
+            Timeline::Static | Timeline::LampOff { .. } | Timeline::LampOn { .. } => self.camera,
         }
     }
 

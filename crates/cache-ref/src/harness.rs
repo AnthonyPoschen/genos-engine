@@ -231,7 +231,7 @@ pub fn run_dolly(
 ) -> (DollyResult, Vec<bool>) {
     let (start, hold_from) = match s.scene.timeline {
         Timeline::Dolly { start, frames, .. } => (start, start + frames),
-        Timeline::Static | Timeline::LampOff { .. } => (0, 0),
+        Timeline::Static | Timeline::LampOff { .. } | Timeline::LampOn { .. } => (0, 0),
     };
     let mut all = Vec::new();
     let mut mask_out = Vec::new();

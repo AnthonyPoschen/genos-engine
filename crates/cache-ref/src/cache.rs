@@ -559,6 +559,35 @@ impl<'a> Sim<'a> {
             .is_some()
     }
 
+    /// The two stage-2 seed representations from exactly the same cell state.
+    /// `(scalar axis irradiance, SH irradiance at the texel's true normal)`.
+    #[must_use]
+    pub fn seed_values(&self, p: V3, n: V3) -> (f64, f64) {
+        let side = side_of(n, &self.cfg);
+        let (pts, cnt) = self.lat.stencil(p);
+        let (mut scalar, mut directional, mut wsum) = (0.0, 0.0, 0.0);
+        for (k, w) in &pts[..cnt] {
+            let key = Key {
+                side,
+                k: *k,
+                child: None,
+            };
+            if let Some(&i) = self.index.get(&key) {
+                let c = &self.cells[i];
+                if c.n > 0.0 {
+                    scalar += w * PI * crate::sh::Y0 * c.sh[0];
+                    directional += w * self.eval(i, p, n);
+                    wsum += w;
+                }
+            }
+        }
+        if wsum > 1e-6 {
+            (scalar / wsum, directional / wsum)
+        } else {
+            (0.0, 0.0)
+        }
+    }
+
     /// Lookup cost proxy per read at level 0.
     #[must_use]
     pub fn lookup_cost(&self) -> LookupCost {

@@ -38,8 +38,9 @@
 //! Replicated state: none; the cache is client-side lighting.
 //! Authority: the checker process.
 //! Prediction / rollback: none.
-//! Determinism: fixed seeds; one PCG32 stream per fixed work chunk, so results
-//! do not depend on the thread count.
+//! Determinism: fixed seeds; one PCG32 stream per fixed work chunk, so cell and
+//! path-trace results do not depend on thread count. Stage-3 texel checks are
+//! intentionally single-threaded because their Monte Carlo sequence is per texel.
 //! Headless server: this crate is headless.
 
 pub mod cache;
@@ -52,3 +53,4 @@ pub mod report;
 pub mod rng;
 pub mod scene;
 pub mod sh;
+pub mod texel;
