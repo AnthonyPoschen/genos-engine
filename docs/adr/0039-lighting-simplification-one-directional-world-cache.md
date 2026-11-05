@@ -1,6 +1,6 @@
 # 0039: Lighting simplification: one directional world cache, texels as detail, retire screen probes
 
-Status: **Proposed** (5 Nov 2026). No renderer code changes until Anthony accepts it.
+Status: **Accepted** (approved by Anthony Poschen, 5 Nov 2026).
 
 Builds on ADR 0012 (GI), ADR 0013 (local invalidation, ~200 MB lighting VRAM), ADR 0036 (cache sized per preset), ADR 0037 (cache convergence, linger and lag; PR #147) and the ReSTIR + world-cell light lists proposal (PR #164). Evidence: `/home/box/shared/ge-notes/lighting-challenge-5nov.md`, checked against master 067aa856.
 
@@ -62,7 +62,11 @@ Reason: ADR 0037 round 13 found old light chained across five histories feeding 
 
 ## Stages, each gated on the path-traced reference first
 
-Each stage is its own PR, behind a setting, A/B against the stage before it. 4070 ms is reported for every stage. Nothing is deleted until its replacement passes. The direct-light track (D1, D2) runs in parallel with the bounce track.
+**Validation rules:**
+- Accuracy against the path-traced reference is the primary gate. No stage may be less accurate than the stage before it, on any reference scene.
+- Validation is headless on lavapipe only (no GPU access assumed) until a stage passes its accuracy gates. Only then is it benchmarked on the 4070.
+
+Each stage is its own PR, behind a setting, A/B against the stage before it. 4070 ms is reported for every stage once its accuracy gates pass. Nothing is deleted until its replacement passes. The direct-light track (D1, D2) runs in parallel with the bounce track.
 
 | # | Stage | Gates (all on the oracle unless stated) |
 |---|---|---|
@@ -140,10 +144,10 @@ All **est**, to be replaced by stage measurements.
 - `docs/systems/gi-design.md` and the lighting README are updated when each stage lands, not before.
 - The probe passes (place, trace, gather, filter) leave the frame graph at stage 5, or shrink to movers.
 
-## Open questions for Anthony
+## Decisions on the open questions (Anthony, 5 Nov 2026)
 
-1. **SH-L1 precision:** RGB fp16 (~24 MB at 1M slots, coloured bounce by direction) or luminance-only direction on the existing RGB (~12 MB, colour doesn't vary with direction)? Proposal: RGB fp16.
-2. **Low:** should Low get a coarse cell layer and lose its probes too, or keep probe-only GI until there are real 1060 numbers? Proposal: keep probes on Low until measured.
-3. **Movers:** if cells can't follow movers fast enough, is a mover-only probe helper acceptable, or must movers be solved in the cells (e.g. object-local cells)?
-4. **Order:** stage 1 (ADR 0037) blocks everything. Do you want stage 2 prototyped in parallel on the box (gated the same way) to de-risk it, or strictly in order?
-5. **Budget:** do this ADR's 12–48 MB count against the 200 MB soft budget now, or only after ADR 0036 and reservoir trimming land?
+1. **SH precision:** colour (RGB) SH-L1 in fp16, ~24 MB **est** at 1M slots.
+2. **Low:** keeps its screen probes until real GTX 1060 numbers exist. Retiring probes applies to Medium and above first.
+3. **Movers:** a mover-only probe helper is acceptable if cells can't keep up with moving objects.
+4. **Order:** stage 2 may be prototyped in parallel on the box, but merges only after stage 1 passes its gates.
+5. **Budget:** SH memory counts against the ~200 MB lighting soft budget once ADR 0036's per-preset sizing and the reservoir trimming have landed.
