@@ -1450,11 +1450,9 @@ uint lighting_sc_ray_key(uint slot, uint key) {
     if (!lighting_sc_light_quiet() && t >= lighting_sc_light_window() - 0.5 && (lighting_sc_flags() & 1024u) == 0u) {
         // Under changing light the count holds, so the set turns with the rounds.
         set += lighting_round();
-    } else if (((lighting_sc_flags() & 8192u) != 0u || cache.v[3u * slot + 1u].w > 0.2) && t >= lighting_sc_cap(slot) - 0.5) {
-        // Relit at the cap (flag 8192; WRC cells always, they keep relighting):
-        // a new set each time, not set 0 over again (one set's noise would be all
-        // the running mean ends up with: far floor cells read 0.05-1.6 of the
-        // reference, cache_energy floor).
+    } else if ((lighting_sc_flags() & 8192u) != 0u && t >= lighting_sc_cap(slot) - 0.5) {
+        // Relit at the cap (flag 8192): a new set each time, not set 0 over again
+        // (one set's noise would be all the running mean ends up with).
         set += lighting_round() * 7919u + 1u;
     }
     set %= uint(lighting_sc_cap(slot));
