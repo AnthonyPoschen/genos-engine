@@ -1,0 +1,15 @@
+[package]
+name = "genos-cache-ref"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CPU reference for the ADR 0039 world cache (SH-L1 cells, stage 2b position data, 2c subdivision, cubic vs BCC). No window and no Vulkan device."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "cache-ref"
+path = "src/bin/cache_ref.rs"
+
+[dependencies]
