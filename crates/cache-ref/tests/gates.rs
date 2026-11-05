@@ -142,3 +142,19 @@ fn stage_2b_gates() -> Result<(), String> {
     assert!(timing.lag >= 0.9, "2b lag {}", timing.lag);
     Ok(())
 }
+
+/// The lighting-memory mapping is self-consistent: the cell size picked for a
+/// pool needs that pool back.
+#[test]
+fn pool_mapping_round_trips() {
+    use genos_cache_ref::report::{cell_for_pool, pool_mb, WORLD_CELLS_AT_25CM};
+    for mb in [64.0, 128.0, 256.0, 512.0] {
+        let h = cell_for_pool(mb, WORLD_CELLS_AT_25CM, 34, 0.25);
+        let ratio = (0.25 / h) * (0.25 / h);
+        let back = pool_mb(ratio * 1000.0, 1000.0, WORLD_CELLS_AT_25CM, 34);
+        assert!(
+            (back - mb).abs() < 1e-6 * mb,
+            "{mb} MiB -> {h} m -> {back} MiB"
+        );
+    }
+}

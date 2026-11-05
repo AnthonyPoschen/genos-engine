@@ -314,3 +314,313 @@ pub fn variants(b: &Bench, k: Knobs, specs: &str) -> String {
     }
     out
 }
+
+/// Scenes the layout and lighting-memory sweep grades (smooth and thin-wall).
+pub const SWEEP_SCENES: [&str; 2] = ["contact", "thin-wall"];
+
+/// World size the lighting-memory figures are scaled to: cells a whole world
+/// needs at the 25 cm cubic reference, as a parameter. The default is ADR
+/// 0036's measured worst live slot count on High (407,116), taken as if every
+/// slot were a 25 cm cell. Real slots mix 25 cm cells and 12.5 cm texels, so
+/// this overstates the memory a given cell size needs (conservative).
+pub const WORLD_CELLS_AT_25CM: f64 = 407_116.0;
+
+/// One layout × cell-size point of the sweep.
+#[derive(Clone, Copy, Debug)]
+pub struct SweepPoint {
+    pub layout: crate::lattice::Layout,
+    pub cell_size: f64,
+    /// Estimated world pool in MiB at this density.
+    pub pool_mb: f64,
+    /// Per [`SWEEP_SCENES`] scene.
+    pub metrics: [Metrics; 2],
+}
+
+/// Lighting memory in MiB (est) that a cell count scaled to the world needs.
+#[must_use]
+pub fn pool_mb(room_cells: f64, room_cells_ref: f64, world_cells: f64, bytes: u32) -> f64 {
+    world_cells * room_cells / room_cells_ref.max(1.0) * f64::from(bytes) / 1_048_576.0
+}
+
+/// Cubic-equivalent cell size whose world pool fits `mb` (est), from the
+/// 1/h² surface scaling.
+#[must_use]
+pub fn cell_for_pool(mb: f64, world_cells: f64, bytes: u32, ref_cell: f64) -> f64 {
+    let cells = mb * 1_048_576.0 / f64::from(bytes);
+    ref_cell * (world_cells / cells).sqrt()
+}
+
+/// Cubic vs BCC over cell sizes with the recommended 2b, and the lighting
+/// memory each point needs. Equal memory: rows at the same pool. Equal
+/// accuracy: the pool each layout needs to reach a blotch target, interpolated
+/// in log memory between sweep points.
+#[must_use]
+pub fn sweep(
+    b: &Bench,
+    k: Knobs,
+    cells: &[f64],
+    world_cells: f64,
+    pools: &[f64],
+) -> (String, Vec<SweepPoint>) {
+    use crate::lattice::{Lattice, Layout};
+    let mut out = String::new();
+    let rec = k.stage_2b();
+    let bytes = rec.engine_bytes_per_cell();
+    let _ = writeln!(
+        out,
+        "## Layout and lighting memory sweep\n\n2b recommended, {} rays/cell/frame (rays scale with cells), history {}, pixels {:.3} m, reference {} spp, seeds {:?}. Pool MiB are **est**: {bytes} B/cell × world cells, world cells = {world_cells:.0} × (room cells / room cells at 25 cm cubic). Cell size is the cubic-equivalent density (BCC cube edge = h·2^(1/3)).\n",
+        k.rays_per_cell, k.history_frames, b.pixel_size, b.ref_spp, b.seeds
+    );
+    let _ = writeln!(
+        out,
+        "Cubic-equivalent cell size per pool at {bytes} B/cell: "
+    );
+    for &mb in pools {
+        let _ = write!(
+            out,
+            "{mb:.0} MiB → {:.3} m; ",
+            cell_for_pool(mb, world_cells, bytes, 0.25)
+        );
+    }
+    out.push_str("\n\n");
+    let prepared: Vec<_> = SWEEP_SCENES.iter().filter_map(|n| b.prepare(n)).collect();
+    let mut pts = Vec::new();
+    let mut room_ref = [0.0f64; 2];
+    for layout in [Layout::Cubic, Layout::Bcc] {
+        for &h in cells {
+            let cfg = CacheConfig {
+                layout,
+                cell_size: h,
+                ..rec
+            };
+            let mut ms = [Metrics::default(), Metrics::default()];
+            for (i, s) in prepared.iter().enumerate().take(2) {
+                ms[i] = harness::run_static(b, s, cfg);
+            }
+            if layout == Layout::Cubic && (h - 0.25).abs() < 1e-9 {
+                room_ref = [ms[0].cells, ms[1].cells];
+            }
+            pts.push(SweepPoint {
+                layout,
+                cell_size: h,
+                pool_mb: 0.0,
+                metrics: ms,
+            });
+        }
+    }
+    if room_ref[0] <= 0.0 {
+        let c0 = pts.first().map_or(1.0, |p| p.metrics[0].cells);
+        let h0 = pts.first().map_or(0.25, |p| p.cell_size);
+        room_ref[0] = c0 * (h0 / 0.25) * (h0 / 0.25);
+    }
+    for p in &mut pts {
+        p.pool_mb = pool_mb(p.metrics[0].cells, room_ref[0], world_cells, bytes);
+    }
+    let _ = writeln!(
+        out,
+        "| layout | cell (m) | pool MiB est | lookup fetches / ALU | contact energy | contact blotch | contact rel err | thin-wall energy | thin-wall blotch | thin-wall leak | room cells (contact) | rays/frame (contact) |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
+    );
+    for p in &pts {
+        let lc = Lattice::with_density_of_cubic(p.layout, p.cell_size).lookup_cost();
+        let [c, t] = p.metrics;
+        let _ = writeln!(
+            out,
+            "| {} | {:.4} | {:.1} | {} / {} | {:.3} | {:.4} | {:.3} | {:.3} | {:.4} | {:+.3} | {:.0} | {:.0} |",
+            p.layout.name(),
+            p.cell_size,
+            p.pool_mb,
+            lc.fetches,
+            lc.alu,
+            c.energy,
+            c.blotch,
+            c.mean_rel_error,
+            t.energy,
+            t.blotch,
+            t.leak,
+            c.cells,
+            c.rays_per_frame
+        );
+    }
+    out.push('\n');
+    equal_accuracy(&mut out, &pts);
+    (out, pts)
+}
+
+/// Equal-accuracy lines: pool each layout needs for cubic's best blotch + 10 %.
+fn equal_accuracy(out: &mut String, pts: &[SweepPoint]) {
+    use crate::lattice::Layout;
+    let target = pts
+        .iter()
+        .filter(|p| p.layout == Layout::Cubic)
+        .map(|p| p.metrics[0].blotch)
+        .fold(f64::INFINITY, f64::min);
+    let target = target * 1.1;
+    let _ = writeln!(
+        out,
+        "Equal accuracy: pool each layout needs for contact blotch ≤ {target:.4} (110 % of cubic's best in this sweep), log-interpolated:\n"
+    );
+    for layout in [Layout::Cubic, Layout::Bcc] {
+        let mut xs: Vec<(f64, f64)> = pts
+            .iter()
+            .filter(|p| p.layout == layout)
+            .map(|p| (p.pool_mb, p.metrics[0].blotch))
+            .collect();
+        xs.sort_by(|a, c| a.0.total_cmp(&c.0));
+        let mb = mb_to_reach(&xs, target);
+        let _ = writeln!(
+            out,
+            "- {}: {}",
+            layout.name(),
+            mb.map_or_else(
+                || "not reached in sweep".to_owned(),
+                |v| format!("{v:.1} MiB est")
+            )
+        );
+    }
+    out.push('\n');
+}
+
+/// First memory at which blotch falls to `target`, interpolating in log MiB.
+fn mb_to_reach(xs: &[(f64, f64)], target: f64) -> Option<f64> {
+    let first = xs.first()?;
+    if first.1 <= target {
+        return Some(first.0);
+    }
+    xs.windows(2).find_map(|w| {
+        let (a, c) = (w[0], w[1]);
+        if c.1 > target || a.1 <= c.1 {
+            return None;
+        }
+        let t = (a.1 - target) / (a.1 - c.1);
+        Some((a.0.ln() + t * (c.0.ln() - a.0.ln())).exp())
+    })
+}
+
+/// Stage 2c on the dolly: static 25 cm and 12.5 cm 2b against subdivision
+/// with each seed rule, plus a skewed-origin pass and lamp-off timing.
+#[must_use]
+pub fn subdiv(b: &Bench, k: Knobs, frames: usize) -> String {
+    use crate::cache::{Seed, Subdiv};
+    let mut out = String::new();
+    let rec = k.stage_2b();
+    let fine = CacheConfig {
+        cell_size: k.cell_size / 2.0,
+        ..rec
+    };
+    let with = |seed: Seed| CacheConfig {
+        subdiv: Some(Subdiv {
+            seed,
+            ..Subdiv::default()
+        }),
+        ..rec
+    };
+    let _ = writeln!(
+        out,
+        "## Stage 2c subdivision on the dolly\n\nParent cell {:.3} m, children {:.3} m, {} rays/cell/frame, 160 warm frames at the start pose, then {frames} frames (dolly 300, then held); pop max is over those {frames} frames, seeds {:?}. Subdiv defaults: {:?}.\n",
+        k.cell_size,
+        k.cell_size / 2.0,
+        k.rays_per_cell,
+        b.seeds,
+        Subdiv::default()
+    );
+    let Some(s) = b.prepare("dolly") else {
+        return out;
+    };
+    let runs = [
+        ("static 2b, parent size", rec),
+        ("static 2b, child size", fine),
+        ("2c, zero-seeded children", with(Seed::Zero)),
+        ("2c, parent-copy seed", with(Seed::Copy)),
+        ("2c, 2b-model seed", with(Seed::Model)),
+        (
+            "2c, 2b-model seed worth 32 samples",
+            CacheConfig {
+                subdiv: Some(Subdiv {
+                    seed_n: 32.0,
+                    ..Subdiv::default()
+                }),
+                ..rec
+            },
+        ),
+    ];
+    let mut mask = Vec::new();
+    let mut rows = Vec::new();
+    for (label, cfg) in runs {
+        let (r, m) = harness::run_dolly(b, &s, cfg, frames);
+        if cfg.subdiv.is_some() && mask.is_empty() {
+            mask = m;
+        }
+        rows.push((label, cfg, r));
+    }
+    let _ = writeln!(
+        out,
+        "| config | B/cell est | energy | blotch (split pixels) | pop max | pop steady | splits | merges | toggles after hold | catch-up rays | peak cells | rays |\n|---|---|---|---|---|---|---|---|---|---|---|---|"
+    );
+    for (label, cfg, r) in &rows {
+        let blotch = if cfg.subdiv.is_some() {
+            r.blotch_split
+        } else {
+            harness::static_blotch_in(b, &s, *cfg, &mask)
+        };
+        let _ = writeln!(
+            out,
+            "| {label} | {} | {:.3} | {:.4} | {:.4} | {:.4} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |",
+            cfg.engine_bytes_per_cell(),
+            r.energy,
+            blotch,
+            r.pop_max,
+            r.pop_steady,
+            r.splits,
+            r.merges,
+            r.toggles_after_hold,
+            r.catch_up_rays,
+            r.peak_cells,
+            r.rays
+        );
+    }
+    out.push('\n');
+    subdiv_extras(&mut out, b, k, &s, frames);
+    out
+}
+
+/// Skewed-origin and lamp-off passes for [`subdiv`].
+fn subdiv_extras(out: &mut String, b: &Bench, k: Knobs, s: &harness::Prepared, frames: usize) {
+    use crate::cache::{Seed, Subdiv};
+    let rec = k.stage_2b();
+    let with = |seed: Seed| CacheConfig {
+        subdiv: Some(Subdiv {
+            seed,
+            ..Subdiv::default()
+        }),
+        ..rec
+    };
+    let _ = writeln!(
+        out,
+        "### Skewed origins (selection skew {}, 1/q weighted)\n\n| config | energy | blotch (split pixels) |\n|---|---|---|",
+        rec.skew
+    );
+    for (label, seed) in [
+        ("2c, parent-copy seed", Seed::Copy),
+        ("2c, 2b-model seed", Seed::Model),
+    ] {
+        let cfg = CacheConfig {
+            selection: Selection::SkewWeighted,
+            ..with(seed)
+        };
+        let (r, _) = harness::run_dolly(b, s, cfg, frames);
+        let _ = writeln!(out, "| {label} | {:.3} | {:.4} |", r.energy, r.blotch_split);
+    }
+    out.push('\n');
+    if let Some(lo) = b.prepare("lamp-off") {
+        let _ = writeln!(
+            out,
+            "### lamp-off with subdivision\n\n| config | lag | linger at +{} |\n|---|---|---|",
+            k.linger_after
+        );
+        for (label, cfg) in [("static 2b", rec), ("2c, 2b-model seed", with(Seed::Model))] {
+            let t = harness::run_lamp_off(b, &lo, cfg, k.linger_after);
+            let _ = writeln!(out, "| {label} | {:.3} | {:.4} |", t.lag, t.linger);
+        }
+        out.push('\n');
+    }
+}

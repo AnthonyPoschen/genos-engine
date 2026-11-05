@@ -229,19 +229,23 @@ pub fn run_dolly(
     cfg: CacheConfig,
     frames: usize,
 ) -> (DollyResult, Vec<bool>) {
-    let hold_from = match s.scene.timeline {
-        Timeline::Dolly { frames, .. } => frames,
-        Timeline::Static | Timeline::LampOff { .. } => 0,
+    let (start, hold_from) = match s.scene.timeline {
+        Timeline::Dolly { start, frames, .. } => (start, start + frames),
+        Timeline::Static | Timeline::LampOff { .. } => (0, 0),
     };
     let mut all = Vec::new();
     let mut mask_out = Vec::new();
     for &seed in &b.seeds {
         let mut sim = Sim::new(&s.scene, cfg, seed, b.threads);
-        let mut prev = sim.display();
+        let mut prev;
         let mut pops = Vec::new();
         let mut tail = Vec::new();
         let mut toggles_at_hold = 0;
-        for f in 0..frames {
+        for _ in 0..start {
+            sim.step();
+        }
+        prev = sim.display();
+        for f in start..start + frames {
             sim.step();
             if f + 1 == hold_from + 60 {
                 toggles_at_hold = sim.counters.splits + sim.counters.merges;

@@ -6,6 +6,9 @@
 //!     [--history 32] [--pixel 0.05] [--spp 2048] [--seeds 11,12,13,14]
 //!     [--warm 160] [--samples 8] [--threads N] [--skews 8,64] [--out DIR]
 //! cargo run --release -p genos-cache-ref -- variants [--configs "plain;side+pos+compact"] [same flags]
+//! cargo run --release -p genos-cache-ref -- sweep [--cells 0.25,0.177,0.125,0.088,0.0625]
+//!     [--pools 64,128,256,512] [--world-cells 407116] [same flags]
+//! cargo run --release -p genos-cache-ref -- subdiv [--frames 600] [same flags]
 //! ```
 
 use std::fs;
@@ -22,6 +25,16 @@ struct Args {
     out: PathBuf,
     specs: String,
     skews: Vec<f64>,
+    cells: Vec<f64>,
+    pools: Vec<f64>,
+    world_cells: f64,
+    frames: usize,
+}
+
+fn floats(flag: &str, val: &str) -> Result<Vec<f64>, String> {
+    val.split(',')
+        .map(|s| s.trim().parse::<f64>().map_err(|e| format!("{flag}: {e}")))
+        .collect()
 }
 
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -30,6 +43,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     let mut out = PathBuf::from("genos-debug/cache-ref");
     let mut specs = report::DEFAULT_SPECS.to_owned();
     let mut skews = vec![8.0, 64.0];
+    let mut cells = vec![0.25, 0.177, 0.125, 0.088, 0.0625];
+    let mut pools = vec![64.0, 128.0, 256.0, 512.0];
+    let mut world_cells = report::WORLD_CELLS_AT_25CM;
+    let mut frames = 600;
     let cmd = args.first().cloned().ok_or("missing command: compare")?;
     let mut it = args.iter().skip(1);
     while let Some(flag) = it.next() {
@@ -54,12 +71,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             }
             "--out" => out = PathBuf::from(val),
             "--configs" => specs.clone_from(val),
-            "--skews" => {
-                skews = val
-                    .split(',')
-                    .map(|s| s.trim().parse::<f64>().map_err(|e| format!("--skews: {e}")))
-                    .collect::<Result<_, _>>()?;
-            }
+            "--skews" => skews = floats(flag, val)?,
+            "--cells" => cells = floats(flag, val)?,
+            "--pools" => pools = floats(flag, val)?,
+            "--world-cells" => world_cells = f()?,
+            "--frames" => frames = u()?,
             _ => return Err(format!("unknown flag {flag}")),
         }
     }
@@ -71,6 +87,10 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         out,
         specs,
         skews,
+        cells,
+        pools,
+        world_cells,
+        frames,
     })
 }
 
@@ -83,6 +103,10 @@ fn main() -> ExitCode {
         out,
         specs,
         skews,
+        cells,
+        pools,
+        world_cells,
+        frames,
     } = match parse_args(&args) {
         Ok(v) => v,
         Err(e) => {
@@ -93,6 +117,8 @@ fn main() -> ExitCode {
     let text = match cmd.as_str() {
         "compare" => report::compare(&b, k, &skews).0,
         "variants" => report::variants(&b, k, &specs),
+        "sweep" => report::sweep(&b, k, &cells, world_cells, &pools).0,
+        "subdiv" => report::subdiv(&b, k, frames),
         _ => {
             eprintln!("cache-ref: unknown command {cmd}");
             return ExitCode::from(2);

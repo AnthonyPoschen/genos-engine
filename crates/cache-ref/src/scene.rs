@@ -42,7 +42,14 @@ pub enum Timeline {
     /// Lamps on for frames `0..off_frame`, then off.
     LampOff { off_frame: usize },
     /// Camera moves from `from` to `to` over `frames` frames, then holds.
-    Dolly { from: V3, to: V3, frames: usize },
+    /// Camera held at `from` for `start` frames (cache warm-up), then moved
+    /// to `to` over `frames` frames, then held.
+    Dolly {
+        from: V3,
+        to: V3,
+        start: usize,
+        frames: usize,
+    },
 }
 
 /// A scene: geometry, lamps, receivers, regions, timeline and camera.
@@ -131,6 +138,7 @@ impl Scene {
                 timeline = Timeline::Dolly {
                     from: V3::new(3.8, 2.0, 3.8),
                     to: V3::new(2.3, 0.9, 2.3),
+                    start: 160,
                     frames: 300,
                 };
                 camera = V3::new(3.8, 2.0, 3.8);
@@ -186,8 +194,13 @@ impl Scene {
     #[must_use]
     pub fn camera_at(&self, frame: usize) -> V3 {
         match self.timeline {
-            Timeline::Dolly { from, to, frames } => {
-                let t = (fl(frame) / fl(frames.max(1))).min(1.0);
+            Timeline::Dolly {
+                from,
+                to,
+                start,
+                frames,
+            } => {
+                let t = (fl(frame.saturating_sub(start)) / fl(frames.max(1))).min(1.0);
                 from.add(to.sub(from).scale(t))
             }
             Timeline::Static | Timeline::LampOff { .. } => self.camera,
