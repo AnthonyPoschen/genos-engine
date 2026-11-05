@@ -225,13 +225,15 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
 // the mean on oblique floors and walls during a turn, which put raw
 // one-sample noise on screen. Only a tap holding a mean (`geo_tag`) counts.
 const float RESTIR_MEAN_DEPTH_REL = 0.1;
+const float RESTIR_MEAN_EPS = 1.0e-3;  // behind-camera and grazing-ray guard
+const float RESTIR_MEAN_HALF = 0.5;  // pixel centre, NDC half-extent, flag test
 bool restir_mean_reproject(vec3 pos, vec3 nrm, uint geo_tag, out uint hist_pixel) {
     hist_pixel = 0u;
     if (!lighting_gi_on()) {
         return false;
     }
     vec4 eye = work.v[lighting_change_at() + 1u];
-    if (eye.w < 0.5) {
+    if (eye.w < RESTIR_MEAN_HALF) {
         return false;
     }
     vec3 right = work.v[lighting_change_at() + 2u].xyz;
@@ -239,16 +241,16 @@ bool restir_mean_reproject(vec3 pos, vec3 nrm, uint geo_tag, out uint hist_pixel
     vec3 up = work.v[lighting_change_at() + 3u].xyz;
     vec3 fwd = work.v[lighting_change_at() + 4u].xyz;
     float aspect = work.v[lighting_change_at() + 4u].w;
-    if (dot(fwd, fwd) < 0.5 || t == 0.0) {
+    if (dot(fwd, fwd) < RESTIR_MEAN_HALF || t == 0.0) {
         return false;
     }
     vec3 rel = pos - eye.xyz;
     float z = dot(rel, fwd);
-    if (z <= 1.0e-3) {
+    if (z <= RESTIR_MEAN_EPS) {
         return false;
     }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
-    vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+    vec2 px = vec2((ndc.x + 1.0) * RESTIR_MEAN_HALF * float(pc.dims.x), (1.0 - ndc.y) * RESTIR_MEAN_HALF * float(pc.dims.y));
     if (px.x < 0.0 || px.y < 0.0 || px.x >= float(pc.dims.x) || px.y >= float(pc.dims.y)) {
         return false;
     }
@@ -265,11 +267,11 @@ bool restir_mean_reproject(vec3 pos, vec3 nrm, uint geo_tag, out uint hist_pixel
         if (geo.z != geo_tag || !(z_prev > 0.0)) {
             continue;
         }
-        vec2 c = vec2(q) + 0.5;
-        vec2 ndc_h = vec2(c.x / (0.5 * float(pc.dims.x)) - 1.0, 1.0 - c.y / (0.5 * float(pc.dims.y)));
+        vec2 c = vec2(q) + RESTIR_MEAN_HALF;
+        vec2 ndc_h = vec2(c.x / (RESTIR_MEAN_HALF * float(pc.dims.x)) - 1.0, 1.0 - c.y / (RESTIR_MEAN_HALF * float(pc.dims.y)));
         vec3 dir_h = fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up;
         float denom = dot(dir_h, nrm);
-        float z_cmp = abs(denom) > 1.0e-3 ? dot(rel, nrm) / denom : z;
+        float z_cmp = abs(denom) > RESTIR_MEAN_EPS ? dot(rel, nrm) / denom : z;
         float gap = abs(z_cmp - z_prev);
         if (!(z_cmp > 0.0) || (gap / z_cmp > RESTIR_MEAN_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS)) {
             continue;
