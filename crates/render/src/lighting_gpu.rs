@@ -375,8 +375,15 @@ pub struct LightingAtrousStats {
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
 /// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
-/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
-/// surface-cache trace already uses 53..55).
+/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
+/// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
+/// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
+/// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
+/// `fill_shade`). `near_tests` is non-due kept hits that ran the near-change
+/// walk, `px_lamps` / `hit_lamps` the lamp-list entries at shaded pixels and
+/// shaded hits (`diag[34]`, `diag[38]`, `diag[39]`). A `LIGHTING_DIAG` shader
+/// build also writes these words from the surface-cache trace, so read them
+/// from a default build.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
@@ -387,6 +394,14 @@ pub struct LampPickCounts {
     pub copied: u32,
     pub exact: u32,
     pub restir: u32,
+    pub kept_live: u32,
+    pub kept_due: u32,
+    pub kept_shade: u32,
+    pub fill_live: u32,
+    pub fill_shade: u32,
+    pub near_tests: u32,
+    pub px_lamps: u32,
+    pub hit_lamps: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -1383,6 +1398,14 @@ impl Gpu {
                 copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
+                kept_live: w[LAMP_PICK_DIAG_WORD + 5],
+                kept_due: w[LAMP_PICK_DIAG_WORD + 6],
+                kept_shade: w[LAMP_PICK_DIAG_WORD + 7],
+                fill_live: w[LAMP_PICK_DIAG_WORD + 8],
+                fill_shade: w[LAMP_PICK_DIAG_WORD + 12],
+                near_tests: w[LAMP_PICK_DIAG_WORD - 14],
+                px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
+                hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
             })
             .unwrap_or_default()
     }
