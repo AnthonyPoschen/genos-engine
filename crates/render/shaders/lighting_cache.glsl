@@ -610,6 +610,9 @@ const float LIGHTING_SC_TEXEL = 0.125;
 // Ray-hit patches (flag 256): one size too, LIGHTING_SC_HIT (was 25 cm doubling past
 // 8 m from the eye).
 const float LIGHTING_SC_HIT = 0.25;
+// ADR 0039 stage 2: the SH-L1 cells are the ray-hit cells (one knob for both;
+// a low-spec preset changes LIGHTING_SC_HIT, never a literal).
+const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
 // Sets a texel inside a change, or under a light that is changing, averages over
 // (a short running mean on one fixed set: quick, and no flicker).
 const float LIGHTING_SC_MOVING = 2.0;
@@ -859,8 +862,8 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 // The whole search window is checked for the key before anything is claimed: a
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
 // second, unlit copy of that patch.
-// LIGHTING_SH_AT (defined with the SH reads below), for the claim's reset.
-const uint LIGHTING_SC_SH_AT_CLAIM = 23u * LIGHTING_CACHE_SLOTS;
+// ADR 0039 stage 2 SH-L1 store (defined with the SH reads below), for the claim's reset.
+void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -904,12 +907,7 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             }
             // ADR 0039 stage 2: no harmonics from the slot's last owner.
             if (lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u) {
-                cache.v[LIGHTING_SC_SH_AT_CLAIM + slot] = vec4(0.0);
-                if ((slot & 1u) == 0u) {
-                    cache.v[LIGHTING_SC_SH_AT_CLAIM + LIGHTING_CACHE_SLOTS + (slot >> 1u)].xy = vec2(0.0);
-                } else {
-                    cache.v[LIGHTING_SC_SH_AT_CLAIM + LIGHTING_CACHE_SLOTS + (slot >> 1u)].zw = vec2(0.0);
-                }
+                lighting_sh_put(slot, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
             }
             lighting_compose_cover(slot);
             return slot;
@@ -2019,7 +2017,7 @@ vec4 lighting_sc_own_shown(uint slot);
 // S72V10: the 25 cm WRC cells' light as of now, bilinear over the coplanar
 // cells with sets (no recursion into lighting_sc_shown); w 1 when any.
 vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
-    const float cs = 0.25;
+    const float cs = LIGHTING_SC_HIT;
     uint ax = lighting_axis(n) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
@@ -2051,11 +2049,14 @@ vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
 // cell also keeps the colour SH-L1 of the light its relight rays brought in
 // (lighting_cache.comp; the same rays, no new ones), blended with the same
 // alpha as its mean. c0 = sum w Y0 L, c1 = sum w Y1 L dir, w = 2 pi / rays,
-// twelve halves: c0.rgb, c1x.rgb, c1y.rgb, c1z.rgb. Six words a slot: four in
-// LIGHTING_SH_AT, two in half a vec4 of LIGHTING_SH_B_AT (slots paired).
+// twelve values: c0.rgb, c1x.rgb, c1y.rgb, c1z.rgb. fp16 (LIGHTING_SH_HALF,
+// lighting_cache_slots.glsl): six words a slot, four in LIGHTING_SH_AT, two in
+// half a vec4 of LIGHTING_SH_B_AT (slots paired). fp32: three vec4 a slot.
 // crates/render/src/lighting_sh.rs is the CPU reference and its tests.
 const uint LIGHTING_SH_AT = 23u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SH_B_AT = 24u * LIGHTING_CACHE_SLOTS;
+// fp32 only (LIGHTING_SH_HALF false): the third region.
+const uint LIGHTING_SH_C_AT = 25u * LIGHTING_CACHE_SLOTS;
 const float LIGHTING_SH_Y0 = 0.2820948;
 const float LIGHTING_SH_Y1 = 0.4886025;
 const float LIGHTING_SH_A1 = 2.0943951;
@@ -2066,6 +2067,12 @@ uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-65000.0), vec2(65000.0)));
 }
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
+    if (!LIGHTING_SH_HALF) {
+        cache.v[LIGHTING_SH_AT + slot] = vec4(c0, cx.r);
+        cache.v[LIGHTING_SH_B_AT + slot] = vec4(cx.gb, cy.rg);
+        cache.v[LIGHTING_SH_C_AT + slot] = vec4(cy.b, cz);
+        return;
+    }
     cache.v[LIGHTING_SH_AT + slot] = uintBitsToFloat(uvec4(
         lighting_sh_half2(c0.r, c0.g), lighting_sh_half2(c0.b, cx.r),
         lighting_sh_half2(cx.g, cx.b), lighting_sh_half2(cy.r, cy.g)));
@@ -2077,6 +2084,16 @@ void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
     }
 }
 void lighting_sh_get(uint slot, out vec3 c0, out vec3 cx, out vec3 cy, out vec3 cz) {
+    if (!LIGHTING_SH_HALF) {
+        vec4 a = cache.v[LIGHTING_SH_AT + slot];
+        vec4 b = cache.v[LIGHTING_SH_B_AT + slot];
+        vec4 c = cache.v[LIGHTING_SH_C_AT + slot];
+        c0 = a.xyz;
+        cx = vec3(a.w, b.xy);
+        cy = vec3(b.zw, c.x);
+        cz = c.yzw;
+        return;
+    }
     uvec4 a = floatBitsToUint(cache.v[LIGHTING_SH_AT + slot]);
     vec4 bv = cache.v[LIGHTING_SH_B_AT + (slot >> 1u)];
     uvec2 b = floatBitsToUint((slot & 1u) == 0u ? bv.xy : bv.zw);
@@ -2115,7 +2132,7 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
 // claims the cell under p on its main axis, so a surface no ray hits still
 // gets one.
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
-    const float cs = 0.25;
+    const float cs = LIGHTING_SH_CELL;
     if (claim && LIGHTING_SC_WRITES) {
         uint c = lighting_cache_find_sized(p, n, true, cs, p);
         if (c != ~0u) {
@@ -2412,7 +2429,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         // across the 25 cm cells there (a coarser hit cell: its own, tilted).
         // Mover-frame cells keep the per-axis read.
         if (lighting_sh_on() && lighting_obj_salt < 0.5) {
-            if (hsize < 0.3) {
+            if (hsize < 1.2 * LIGHTING_SH_CELL) {
                 vec4 b = lighting_sh_read(pos, n, false);
                 if (b.w > 0.5) {
                     return b.rgb * keep;
@@ -3224,7 +3241,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             return vec4(lighting_sh_read(pos, n, true).rgb, 1.0);
         }
         if (LIGHTING_SC_WRITES) {
-            uint c = lighting_cache_find_sized(pos, n, true, 0.25, pos);
+            uint c = lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
             if (c != ~0u) {
                 cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
             }
@@ -4161,7 +4178,7 @@ void lighting_svgf_push(uint slot) {
     // Coarse: the WRC cells (2x size) bilinear, their filtered values and masks.
     vec3 p = cache.v[3u * slot].xyz;
     vec3 n = nb.xyz;
-    float cs = 0.25;
+    float cs = LIGHTING_SC_HIT;
     uint ax = lighting_axis(n) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;

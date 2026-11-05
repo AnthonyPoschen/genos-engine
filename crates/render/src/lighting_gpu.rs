@@ -37,6 +37,11 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
+/// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
+/// or fp32 (48 B). lighting_cache_slots.glsl `LIGHTING_SH_HALF` has the same value.
+const LIGHTING_SH_HALF: bool = true;
+/// Cache bytes a slot: 23 vec4 regions plus the SH-L1 (1.5 vec4 at fp16, 3 at fp32).
+const LIGHTING_CACHE_SLOT_BYTES: u64 = 368 + if LIGHTING_SH_HALF { 24 } else { 48 };
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
@@ -1133,10 +1138,10 @@ impl Gpu {
                     Memory::Device,
                     &share,
                 )?;
-                // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1 (1.5 vec4:
-                // LIGHTING_SH_AT, LIGHTING_SH_B_AT in lighting_cache.glsl).
+                // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1
+                // (LIGHTING_SH_AT.. in lighting_cache.glsl, LIGHTING_SH_HALF).
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * 392,
+                    LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_SLOT_BYTES,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -4579,3 +4584,27 @@ mod sun_step {
 }
 
 include!("lighting_dispatch.rs");
+
+#[cfg(test)]
+mod sh_knob_tests {
+    use super::*;
+
+    /// The low-spec SH storage knob is one value in two places: the shader's
+    /// layout and the buffer Rust allocates for it must agree.
+    #[test]
+    fn sh_storage_knob_matches_the_shader_and_sizes_the_cache() {
+        let glsl = include_str!("../shaders/lighting_cache_slots.glsl");
+        let line = glsl
+            .lines()
+            .find(|l| l.starts_with("const bool LIGHTING_SH_HALF"))
+            .expect("LIGHTING_SH_HALF in lighting_cache_slots.glsl");
+        assert_eq!(line.contains("true"), LIGHTING_SH_HALF, "{line}");
+        let sh_bytes = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
+        assert_eq!(sh_bytes, if LIGHTING_SH_HALF { 24 } else { 48 });
+        let rays = glsl
+            .lines()
+            .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
+            .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
+        assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
+    }
+}
