@@ -171,17 +171,29 @@ Each cell also records **where** its own rays start and how far they go, so a re
 | Ray-start centroid μ | mean origin of the cell's rays, offset from the cell point | 3 × u8 = 3 B | Anchor for the gradient (the value is placed where it was measured, not at the cell point) |
 | Clamped L0 gradient ∇ | least-squares slope of the L0 term over ray starts | 3 × i8 relative to L0 (luminance gradient, applied to all channels) = 3 B | `E(p) = E + ∇·(p − μ)`, clamped so it cannot go negative and to `L0 / max(R, h/2)` (Ward/Heckbert gradient limit, Křivánek clamping) |
 | Mean hit distance R | harmonic mean of the cell's ray lengths | 1 B (log-encoded) | Gradient clamp; later a validity weight |
-| Side bit | sign of the dominant normal axis, hashed into the key | 0 B per cell (two-sided cells use two entries) | A read only blends entries of its own side, so the two faces of a thin wall do not share light |
+| Axis key (replaces the side bit) | dominant normal axis and its sign (6 classes, as today's cache), hashed into the key | 0 B per cell (a cell touched from several classes uses one entry per class) | A read only blends entries of its own class. The 1-bit side key of the first draft let a wall face and the floor beside it share a cell; on the CPU reference it raised the thin-wall leak instead of lowering it |
+| Irradiance scale k | running mean of the cell's measured cosine irradiance over its SH-L1 irradiance at the mean normal, clamped to [¼, 4] | 1 B (log-encoded) | Reads multiply by k. SH-L1 under-reads light that arrives from one hemisphere only (E = ¼∫L + ½∫L cos θ instead of ∫L cos θ), so plain SH-L1 cells lose 17–33 % of the energy on the reference scenes |
+| Gradient variance | running variance of the per-frame gradient estimate | 1 B (log-encoded) | Wiener shrink of the gradient, `s = |∇|² / (|∇|² + var / n)`, so a noisy young gradient does not raise pop |
 
-With SH-L1 in a shared-exponent layout (L0 RGB as RGB9E5, L1 as i8 relative to L0, **est** 13 B), a 2b cell is **est ~20 B** against 24 B for plain fp16 SH-L1. The accumulation side (this frame's sums) is transient and not in that figure.
+With SH-L1 in a shared-exponent layout (L0 RGB as RGB9E5, L1 as i8 relative to L0, **est** 13 B), a 2b cell is **est ~22 B** (13 + 7 position + 2 for k and the gradient variance) against 24 B for plain fp16 SH-L1; with a 12 B key, count and age, **est 34 B** against 36 B per entry. The accumulation side (this frame's sums) is transient and not in that figure.
+
+**Read visibility (optional, counted not assumed).** A read may drop a neighbour cell when a short ray from the reader to that cell's centroid is blocked (the stage 4 "reject cells on the far side" rule, applied early). It costs one short occlusion ray per neighbour read (8 cubic, 4 BCC). On the CPU reference it halves the thin-wall leak but does not remove it: lattice points that sit inside a 5 cm wall own surface on both sides. Subdivision (2c) or stage 4 has to finish that.
+
+**Departure in the CPU reference.** After a lamp change the reference holds the history cap at the clear value for 24 frames (`recover_frames`), so stale bounces flush. This stands in for ADR 0037's convergence fix; without it linger at +120 is ~8 %.
 
 **Gates (CPU reference first, then lavapipe):** on every reference scene, against plain SH-L1 at the same layout and memory:
 - blotch lower;
 - leak no higher (thin-wall dark face);
-- energy ≥ 0.9 of reference and within 1 % of plain SH-L1's energy;
+- energy ≥ 0.9 of reference and within 1 % of plain SH-L1's energy (see the reading note below);
 - linger ≤ 5 % at 120 frames and lag ≥ 90 % at 300 frames (as stage 1);
 - pop (99th-percentile frame-to-frame change in steady state) no worse than plain;
 - no negative irradiance anywhere.
+
+Reading note (5 Nov, after the first CPU run): plain SH-L1 is itself 17–33 % low, so "within 1 % of plain" and "leak no higher than plain" compare against a biased baseline. The gates are kept as written and reported literally; the PR also reports each config's leak in excess of its own energy bias. Accuracy against the reference stays the primary gate.
+
+**Must-fail variants (negative controls).** If either passes, the harness is too weak and every other result is void:
+- F3, texel feedback: texels push their own error back into the cell. Must fail linger at +120 frames (> 5 %).
+- F2, skewed origins without 1/q weights: choosing ray origins in proportion to a hardness score (skew 8 and 64) and averaging them unweighted. Must show a hard-spot bias beyond 3 seed standard deviations of uniform selection, and the 1/q-weighted control must remove it.
 
 ### Stage 2c: sum-based subdivision with hysteresis
 
@@ -193,7 +205,7 @@ Hysteresis: split and merge thresholds with a gap (distance band and data band),
 
 ### Cell layout: cubic or body-centred cubic (BCC)
 
-The BCC lattice is the 3D analogue of the triangular lattice. For volumetric signals it needs roughly 30 % fewer samples than a cubic lattice for the same reconstruction (Entezari, Van De Ville, Möller, *Practical box splines for reconstruction on the body centered cubic lattice*, TVCG 2008: twice as efficient as tensor-product B-splines at equal density; the ~30 % figure is quoted by Csébfalvi, *BCC-splines*, WSCG 2008). Our signal lives on surfaces, not in a volume, so the gain has to be measured. The crate compares both layouts **at equal memory** and **at equal accuracy** (memory each needs to reach the same blotch, leak and energy). BCC reads are linear interpolation over the 4 points of the BCC tetrahedron containing the reader (fewer fetches than trilinear's 8, more ALU); subdivision of a BCC point is a BCC lattice at half spacing (each point's Voronoi cell is a truncated octahedron, which does not nest, so children are assigned by nearest point rather than exact containment). The layout is decided by the crate's numbers before stage 2c starts on the GPU.
+The BCC lattice is the 3D analogue of the triangular lattice. For volumetric signals it needs 29.3 % fewer samples than a cubic lattice for the same reconstruction (Theußl, Möller, Gröller, *Optimal regular volume sampling*, IEEE Visualization 2001: the same accuracy as a Cartesian grid with 29.3 % fewer samples for isotropic band-limited volumes; Entezari, Van De Ville, Möller, *Practical box splines for reconstruction on the body centered cubic lattice*, TVCG 2008: reconstruction filters for BCC). Our signal lives on surfaces, not in a volume, so the gain has to be measured. The crate compares both layouts **at equal memory** and **at equal accuracy** (memory each needs to reach the same blotch, leak and energy). BCC reads are linear interpolation over the 4 points of the BCC tetrahedron containing the reader (fewer fetches than trilinear's 8, more ALU); subdivision of a BCC point is a BCC lattice at half spacing (each point's Voronoi cell is a truncated octahedron, which does not nest, so children are assigned by nearest point rather than exact containment). On a surface the gain need not carry over: at equal volume density a plane cuts more BCC Voronoi cells than cubic ones, so BCC can need more entries for the same surface (first CPU sweep, contact room: 31–38 % more). The comparison therefore uses entry counts measured on the scenes, not lattice density. The layout is decided by the crate's numbers before stage 2c starts on the GPU.
 
 ### Lighting memory setting
 
