@@ -2,7 +2,7 @@
 
 Status: **Proposed** (5 Nov 2026). No renderer code changes until Anthony accepts it.
 
-Builds on ADR 0012 (GI), ADR 0013 (local invalidation, ~200 MB lighting VRAM), ADR 0036 (cache sized per preset, PR #136 era), ADR 0037 (cache convergence, linger and lag; PR #147) and the ReSTIR + world-cell light lists proposal (PR #164). Evidence: `/home/box/shared/ge-notes/lighting-challenge-5nov.md`, checked against master 067aa856.
+Builds on ADR 0012 (GI), ADR 0013 (local invalidation, ~200 MB lighting VRAM), ADR 0036 (cache sized per preset), ADR 0037 (cache convergence, linger and lag; PR #147) and the ReSTIR + world-cell light lists proposal (PR #164). Evidence: `/home/box/shared/ge-notes/lighting-challenge-5nov.md`, checked against master 067aa856.
 
 All numbers are measured on the 4070 at 2560x1440 unless marked **est**.
 
