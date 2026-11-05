@@ -1341,6 +1341,9 @@ const float LIGHTING_DRAIN_MATURE_W = 0.2;
 const float LIGHTING_DRAIN_MATURE_SETS = 0.5;
 const float LIGHTING_DRAIN_LUM_MAX = 100.0;
 const float LIGHTING_DRAIN_SCALE = 256.0;
+// sqrt(LIGHTING_DRAIN_SCALE): SQ stores (du^2)>>8, so 16*sqrt(SQ) recovers
+// the RMS of the per-cell |su-hu| gaps in the same x256 luminance units.
+const float LIGHTING_DRAIN_SQ_SCALE = 16.0;
 const uint LIGHTING_DRAIN_HOLD = 8u;
 // The cache pass sets this to the texel's last relight before it stamps the new
 // one (~0u: read the stamp).
@@ -2579,7 +2582,7 @@ void lighting_write_args() {
             uint fl = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
             bool heard = ckeys.key[LIGHTING_DRAIN_CELLS_AT] >= LIGHTING_DRAIN_MIN_CELLS;
             float diff = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh));
-            float noise = 16.0 * sqrt(float(ckeys.key[LIGHTING_DRAIN_SQ_AT]));
+            float noise = LIGHTING_DRAIN_SQ_SCALE * sqrt(float(ckeys.key[LIGHTING_DRAIN_SQ_AT]));
             float sigma = lighting_sc_drain_sigma();
             bool signal = sigma <= 0.0 || diff > sigma * noise;
             ckeys.key[LIGHTING_DRAIN_FLAG_AT] = heard && gap > LIGHTING_DRAIN_GAP && signal ? LIGHTING_DRAIN_HOLD : (fl > 0u ? fl - 1u : 0u);
