@@ -126,6 +126,86 @@ cargo run --release -p genos-stress -- --scene stress --size 2560x1440 --gi-metr
 
 `ref_err_near` is no worse than master. `grid_worst` ≤ 0.15. The direct pass is ≤ 3 ms at 1440p. Those are the ADR 0022 stage C gates. A miss drops or reworks the stage. It does not land on a promise. `ref_err_near` and `grid_worst` are fields in `metrics.json` under the oracle directory (`genos-debug/oracle` with the flag off, `genos-debug/oracle-restir` with `GENOS_RESTIR_DI=on`). The direct-pass milliseconds are `light=` on the stderr `LIGHTING_MS` line of the stress run. With the flag on, that line also prints `restir_initial`, `restir_temporal`, and `restir_spatial`, and `light=` includes their sum.
 
+## Addendum: world-space light lists (ReGIR), Proposed (5 Nov 2026)
+
+Status: Proposed. No renderer code until Anthony accepts it. The numbers here are estimates unless they say measured.
+
+### Why
+
+C5 turn error is 0.539 against 0.403 with the flag off. Spin and switch are close to the flag-off numbers. When a pixel loses its history it has 4 fresh tree candidates and one shaded sample. That shows as noise until `M` grows back. Anthony asked (5 Nov) whether light-sampling data should live on surfaces instead. The answer is a hybrid:
+
+- World-space cells hold a short list of the lights that matter there. This is ReGIR (Boksansky, Jukarainen, and Wyman, "Rendering Many Lights with Grid-Based Reservoirs", Ray Tracing Gems II, 2021, and RTXDI's ReGIR mode). A cell survives camera moves and is shared by every pixel that lands in it.
+- Per-pixel reservoirs stay. A cell is too coarse for shadow edges and for how the lighting changes with surface direction.
+- A pixel that has history keeps it, including through camera moves. A pixel that is newly visible starts from its cell's list instead of from nothing.
+
+Constraints that do not change: ReSTIR replaces the old per-light pass. There is no exact-sum fallback at any lamp count. The ADR 0022 stage C gates stay as written above.
+
+### Cells
+
+- The cells reuse the light cache's keying: the same world hash, the cell size doubling with camera distance, and the point taken half a cell in from the surface along the normal (`crates/render/shaders/lighting_cache.glsl`). They also key on the same six facing axes, because a Lambertian receiver ignores lamps behind it, so a cell that mixes floor and ceiling wastes its list.
+- They are coarser than the cache: about 1 m near the eye (4× the 25 cm WRC cell), doubling with distance. Light lists vary slowly in space, and the build cost scales with the number of cells.
+- They go in a separate small table, not in the 368 B cache entries. The granularity, the lifetime, and the eviction rules all differ, and one table must not starve the other. Only the hash and the keying code are shared.
+- Only active cells are built: those a pixel read this frame or last frame, compacted into a list. Cells nobody reads are not built. A cold cell is built the first frame a pixel asks for it, so a disoccluded pixel never reads an empty list.
+
+### Building and updating the lists
+
+- Each active cell holds K slots: K = 16 on High and Ultra, 8 on Medium and Low. Each slot is a light index plus that slot's contribution weight `W`.
+- Every slot is a fresh RIS draw each frame. The candidates come from the C4 light tree, and the target is the cell's conservative bound (below). Nothing is carried from frame to frame, so the lists hold no history of their own.
+- The lists are built after the lamp upload in the same frame. A lamp that turns on, off, or changes power is in the next list with no lag. A moving lamp is placed at this frame's position. A removed lamp cannot leave a dangling index, because no list outlives its frame.
+- The cell lists add nothing to the lamp-change rules. Pixel history still follows the existing C5 change record and the 80 `M` cap. Moving lamps still stale by at most the `M` cap, as `a_moved_lamp_stops_being_stale_inside_the_m_clamp` checks.
+
+### Unbiased resampling from cells
+
+This is the part that has to be right first.
+
+- **Cell target.** For each lamp, it is the largest unshadowed contribution over the cell's bounds and over the facing axis's hemisphere of normals. It is never a value at the cell centre. Any lamp that can light any point in the cell has a nonzero chance of being in the list. Dropping a lamp this way would bias the image with no sign of it in the noise, and that is the failure this design must not have.
+- **Slot weight.** Each slot's `W` is the RIS contribution weight of its draw, so it is an unbiased estimate of 1/p for that light. Feeding the slot into a pixel's reservoir with `W` in place of 1/p is GRIS resampling from samples with contribution weights (Lin et al., SIGGRAPH 2022). Neighbouring pixels share slots, which correlates their noise but does not bias them.
+- **Mixing with the tree.** Each pixel's initial candidates are a mix of cell draws (a uniform pick from the K slots) and tree draws. They are combined with constant MIS weights in proportion to each strategy's candidate count. Constant weights are unbiased only when both strategies cover the pixel target's support. The tree covers it by construction, and the conservative cell target covers it by the rule above. At least one tree candidate per pixel stays as the defensive strategy.
+- **Choosing the mix.** The split may depend on the pixel's history: thin history (low `M`, a disocclusion) means more cell candidates and more spatial neighbours, which is the paper's answer for thin history. The split depends only on state from before this frame's draws, so it does not bias the estimate.
+- Temporal and spatial merges are unchanged: the balance weight and the C3 history rule.
+
+### Temporal reprojection
+
+- On a camera move, a pixel looks up where its surface was last frame and keeps that reservoir if depth and normal agree, under the same thresholds the spatial pass uses. History is dropped only on disocclusion, a depth or normal break, or a change record. Agreed with Anthony on 5 Nov. That screen-space fix is in the #120 work now and does not depend on cells.
+- Cells cover what reprojection cannot: a newly uncovered band starts from a list that is already close, and from spatial neighbours. It no longer starts from 4 tree candidates.
+- The CPU reference's "history is the same index" departure ends at stage R0 below. The checker gains a camera shift and a disocclusion band.
+
+### VRAM
+
+| Item | High / Ultra (1440p) | Low (1080p, GTX 1060 6 GB, 4 GB floor) |
+|---|---|---|
+| Cell table, capped active cells | 32K cells × (4 B key + 16 × 8 B) ≈ 4.3 MB | 8K × (4 + 8 × 8) ≈ 0.55 MB |
+| Active-cell list | ≈ 0.25 MB | ≈ 0.06 MB |
+
+The cell lists fit inside the ~200 MB lighting soft budget and the 4 GB floor. The reservoirs already there do not. At about 64 B per pixel plus the prefix, C5 is about 236 MB at 1440p (above) and roughly 130 MB at Low's 1080p. That is beside this addendum, but it is the larger VRAM risk for ReSTIR as a whole (open question 3). The active-cell cap scales with resolution like ADR 0036. When it overflows, the farthest cells fall back to tree-only candidates. That is still unbiased, only noisier.
+
+### Cost (estimates, unmeasured)
+
+- **4070, 1440p.** The build is about 32K cells × 16 slots × a few tree candidates. That is well under the 3.7M px × 4 tree walks the initial pass does now (measured 3.09 ms), so the target is ≤ 0.5 ms. On the pixel side, one hash lookup plus a slot read replaces some tree walks, so the initial pass should get cheaper. The ADR 0022 gate is the whole direct pass ≤ 3 ms. Today it is about 7 ms over. Cells are justified by error first, and they must not add to that overrun.
+- **GTX 1060, Low, 1080p.** That is 2.07M px, ~192 GB/s, 8K cells, 8 slots, and 1–2 cell candidates plus 1 tree candidate per pixel. Low's direct-light share of the 60 fps frame is the cap. It is unmeasured, and no 1060 run is planned in this addendum (open question 4).
+
+### Test plan (reference first)
+
+1. **R0, CPU (`crates/restir-ref`).** Add cells to the receiver grid, the conservative cell target, the K-slot RIS build, and `Proposal::Cells` mixed with the tree. Gates: multi-seed `ref_err_near` ≤ 0.05 against the brute sum on gate, shadow, open, many, and a new turn scene (camera shift plus disocclusion band). The turn scene must beat tree-only at the same candidate count on frame-1 variance in the disoccluded band.
+   - Faults that must fail: a centre-point cell target (bias beyond 0.05 on a scene built to expose it) and dropping the defensive tree candidate on that scene.
+   - Before grading anything new, re-run the flag-off path and the existing gates so the reference itself is confirmed first.
+2. **R1, GPU cell build on lavapipe.** For a fixed seed, CPU and GPU cell slots match: 0 index mismatches and `W` within 1e-3. A perturbed seed fails.
+3. **R2, pixel candidates from cells.** These sit behind a sub-switch of `restir_di`, off by default. Lavapipe reservoir diff against R0, and the C5 lavapipe check (`Scene::gate`, `Scene::shadow`, `ref_err_near` 0.05).
+4. **R3, product grade on the 4070.** This is one batched session: `make lighting-oracle` with and without the switch, and the stress run as in C5. The pass condition is the turn error at or below the flag-off 0.403, with spin and switch no worse, `grid_worst` ≤ 0.15, and the direct-pass milliseconds against the 3 ms gate.
+
+### Stages
+
+R0 → R1 → R2 → R3, each a small PR into the #120 branch. The 4070 is used only in R3. Reprojection that keeps history is already in progress and lands first, so R3 measures what cells add on top of it. If R3 misses, the cells are dropped or reworked, and ReSTIR does not regain an exact sum.
+
+### Open questions for Anthony
+
+1. Cell size near the eye: 1 m (proposed), or 0.5 m at twice the build cost.
+2. Should cells key on the facing axis (proposed) or on position only, as RTXDI does? Position only means fewer cells and a weaker list on thin geometry.
+3. The existing reservoirs are about 236 MB at 1440p, above the 200 MB soft budget. Should they get a separate memory pass (for example, packing to 32 B), or is Ultra/High allowed over it as gi-design permits for speed?
+4. GTX 1060 numbers: is there a Low-floor card available, or does Low stay estimated until one is?
+
+References added: Boksansky, Jukarainen, and Wyman, "Rendering Many Lights with Grid-Based Reservoirs", Ray Tracing Gems II, 2021. NVIDIA RTXDI, ReGIR mode. Lin et al., "Generalized Resampled Importance Sampling", SIGGRAPH 2022.
+
 ## References
 
 - [ADR 0022](../../adr/0022-lighting-v3-compute-architecture.md)
