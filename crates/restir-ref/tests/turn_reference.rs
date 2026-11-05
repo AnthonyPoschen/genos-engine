@@ -47,8 +47,8 @@ pub fn live_config() -> Config {
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Row {
-    pub bias: f32,
-    pub rmse: f32,
+    pub bias: f64,
+    pub rmse: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +62,7 @@ pub struct TurnStats {
 
 /// Per-pixel relative (bias, rmse) at the last frame over every seed, with
 /// the turn's column drops (`turning`) or with the camera still.
-fn run(scene: &Scene, boost: Option<Boost>, turning: bool) -> (Vec<f32>, Vec<f32>, usize, usize) {
+fn run(scene: &Scene, boost: Option<Boost>, turning: bool) -> (Vec<f64>, Vec<f64>, usize, u32) {
     let scene = scene.clone();
     let (w, n) = (scene.width, scene.receivers.len());
     let exact: Vec<f32> = scene
@@ -85,7 +85,7 @@ fn run(scene: &Scene, boost: Option<Boost>, turning: bool) -> (Vec<f32>, Vec<f32
                 s.drop_history(&drop);
             }
             out = s.step();
-            max_shadow_rays = max_shadow_rays.max(s.counters().shadow_rays as usize);
+            max_shadow_rays = max_shadow_rays.max(s.counters().shadow_rays);
         }
         for (i, rgb) in out.iter().enumerate() {
             let x = f64::from(luminance(*rgb));
@@ -95,11 +95,11 @@ fn run(scene: &Scene, boost: Option<Boost>, turning: bool) -> (Vec<f32>, Vec<f32
     }
     let e = |i: usize| f64::from(exact[i]).max(1e-6);
     let bias = (0..n)
-        .map(|i| ((sum[i] / SEEDS as f64 - e(i)).abs() / e(i)) as f32)
-        .collect();
+        .map(|i| (sum[i] / SEEDS as f64 - e(i)).abs() / e(i))
+        .collect::<Vec<f64>>();
     let rmse = (0..n)
-        .map(|i| ((sq[i] / SEEDS as f64).sqrt() / e(i)) as f32)
-        .collect();
+        .map(|i| (sq[i] / SEEDS as f64).sqrt() / e(i))
+        .collect::<Vec<f64>>();
     (bias, rmse, w, max_shadow_rays)
 }
 
@@ -114,13 +114,13 @@ pub fn turn(scene: &Scene, boost: Option<Boost>) -> TurnStats {
     let second_col = (last - WARMUP - 1) % w;
     let row = |pick: &dyn Fn(usize) -> bool| {
         let idx: Vec<usize> = (0..bias.len()).filter(|&i| pick(i)).collect();
-        let k = idx.len() as f32;
+        let k = idx.len() as f64;
         Row {
-            bias: idx.iter().map(|&i| bias[i]).sum::<f32>() / k,
+            bias: idx.iter().map(|&i| bias[i]).sum::<f64>() / k,
             rmse: idx
                 .iter()
                 .map(|&i| rmse[i] / still[i].max(1e-6))
-                .sum::<f32>()
+                .sum::<f64>()
                 / k,
         }
     };
@@ -129,7 +129,7 @@ pub fn turn(scene: &Scene, boost: Option<Boost>) -> TurnStats {
         second: row(&|i| i % w == second_col),
         steady: row(&|i| i % w != fresh_col && i % w != second_col),
         all: row(&|_| true),
-        max_shadow_rays: rays as u32,
+        max_shadow_rays: rays,
     }
 }
 
@@ -137,7 +137,7 @@ pub fn turn(scene: &Scene, boost: Option<Boost>) -> TurnStats {
 fn turn_reference_is_unbiased_with_one_shadow_ray() {
     let base = turn(&Scene::shadow(), None);
     eprintln!("turn base: {base:?}");
-    let n = Scene::shadow().receivers.len() as u32;
+    let n = u32::try_from(Scene::shadow().receivers.len()).expect("small grid");
     assert!(base.max_shadow_rays <= n, "one shadow ray per pixel");
     // 600 seeds: a pixel's mean has a standard error of about rmse / 24.
     for r in [base.fresh, base.second, base.all] {

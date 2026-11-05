@@ -136,6 +136,15 @@ fn depth_normal(p: &Params, z_ref: f32, z_other: f32, n_ref: V, n_other: V) -> b
     dot(n_ref, n_other) >= 0.9
 }
 
+/// Pixel `floor(px) + offset`, or `None` off the grid. Lossless: the floor is
+/// found by search, not an `f32` to integer cast.
+fn tap(px: [f32; 2], ox: isize, oy: isize) -> Option<(usize, usize)> {
+    let floor = |v: f32, n: usize| (0..n).find(|&i| (i + 1) as f32 > v);
+    let qx = floor(px[0], W)?.checked_add_signed(ox).filter(|&q| q < W)?;
+    let qy = floor(px[1], H)?.checked_add_signed(oy).filter(|&q| q < H)?;
+    Some((qx, qy))
+}
+
 /// Mirror of `restir_reproject`.
 fn reproject(p: &Params, prev: &Cam, hist: &[(V, V, f32)], pos: V, nrm: V) -> bool {
     let rel = sub(pos, prev.eye);
@@ -154,17 +163,16 @@ fn reproject(p: &Params, prev: &Cam, hist: &[(V, V, f32)], pos: V, nrm: V) -> bo
     if px[0] < 0.0 || px[1] < 0.0 || px[0] >= W as f32 || px[1] >= H as f32 {
         return false;
     }
-    let offs: &[(i32, i32)] = if p.search {
+    let offs: &[(isize, isize)] = if p.search {
         &[(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
     } else {
         &[(0, 0)]
     };
     for &(ox, oy) in offs {
-        let (qx, qy) = (px[0].floor() as i32 + ox, px[1].floor() as i32 + oy);
-        if qx < 0 || qy < 0 || qx >= W as i32 || qy >= H as i32 {
+        let Some((qx, qy)) = tap(px, ox, oy) else {
             continue;
-        }
-        let (_, n_prev, z_prev) = hist[qy as usize * W + qx as usize];
+        };
+        let (_, n_prev, z_prev) = hist[qy * W + qx];
         let z_cmp = if p.candidate_ray {
             let d = ray(prev, qx as f32 + 0.5, qy as f32 + 0.5);
             let den = dot(d, nrm);
@@ -195,11 +203,10 @@ fn same_plane_nearby(prev: &Cam, hist: &[(V, V, f32)], pos: V, n: V) -> bool {
     [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)]
         .iter()
         .any(|&(ox, oy)| {
-            let (qx, qy) = (px[0].floor() as i32 + ox, px[1].floor() as i32 + oy);
-            if qx < 0 || qy < 0 || qx >= W as i32 || qy >= H as i32 {
+            let Some((qx, qy)) = tap(px, ox, oy) else {
                 return false;
-            }
-            let (hp, hn, _) = hist[qy as usize * W + qx as usize];
+            };
+            let (hp, hn, _) = hist[qy * W + qx];
             dot(hn, n) > 0.999 && dot(sub(hp, pos), n).abs() < 1e-3
         })
 }
