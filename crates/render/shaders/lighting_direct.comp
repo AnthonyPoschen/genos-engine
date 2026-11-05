@@ -220,6 +220,9 @@ void main() {
         uint s = (h / lighting_rays()) % LIGHTING_STRATA;
         uint cur = lighting_stratum();
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+        if (lamp_pick_diag() && urgent && s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA) {
+            atomicAdd(gstats.diag[34u], 1u);
+        }
         if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
             return;
         }
@@ -268,9 +271,6 @@ void main() {
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
     uint count = lamp_list_size(list);
-    if (lamp_pick_diag() && probe_hit) {
-        atomicAdd(gstats.diag[fill_hit ? 60u : 55u], 1u);
-    }
     // S78J: a pixel whose point and lamps match last frame's, in a quiet frame.
     uint pix_sig = 0u;
     if (lighting_pix_reuse_on() && idx < pixels) {
@@ -362,6 +362,14 @@ void main() {
                 count = lamp_list_size(list);
             }
         }
+    }
+    // Diag: hits past every early return (a held texel walks no lamps), and
+    // the lamp-list entries the shade below walks.
+    if (lamp_pick_diag() && probe_hit) {
+        atomicAdd(gstats.diag[fill_hit ? 60u : 55u], 1u);
+    }
+    if (lamp_pick_diag() && (probe_hit || idx < pixels)) {
+        atomicAdd(gstats.diag[probe_hit ? 39u : 38u], count);
     }
     // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
     // lamps picked systematically in proportion to their unshadowed light, each
