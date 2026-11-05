@@ -148,6 +148,9 @@ Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen mo
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.
 Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-design.md#world-probes-radiance-cache](../systems/gi-design.md#world-probes-radiance-cache)
 
+**SH cells**: (ADR 0039 stage 2, `surface_cache.sh_cells`) a 25 cm WRC cell also keeps colour SH-L1 (four RGB coefficients, fp16, 24 B) built from the relight rays it already traces. A read takes the cell's exact mean plus the band-1 change to the reader's true normal (the tilt read), blended bilinearly over the cells around the point, so slanted surfaces and ray hits stop snapping to one axis.
+Role: STORE · Literature: Lumen WRC (SH per probe); DDGI irradiance (octahedral, not SH) · More detail: ADR 0039 (PR #165), `crates/render/src/lighting_sh.rs`
+
 **Acceleration grid** (proposed, not built): a spatial lookup that finds entries near a point in a big world.
 Role: STORE · Literature: GIBS trapezoid grid (§1.7) · More detail: [GIBS.md §1.7](research/GIBS.md)
 

@@ -2408,6 +2408,18 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
+        // ADR 0039 stage 2: the cells read at the hit's true normal, blended
+        // across the 25 cm cells there (a coarser hit cell: its own, tilted).
+        // Mover-frame cells keep the per-axis read.
+        if (lighting_sh_on() && lighting_obj_salt < 0.5) {
+            if (hsize < 0.3) {
+                vec4 b = lighting_sh_read(pos, n, false);
+                if (b.w > 0.5) {
+                    return b.rgb * keep;
+                }
+            }
+            return lighting_sh_tilt(slot, e.rgb, cache.v[3u * slot + 1u].xyz, n) * lighting_sc_sun_gain(slot) * keep;
+        }
         return e.rgb * lighting_sc_sun_gain(slot) * keep;
     }
     return e.rgb;
@@ -3204,7 +3216,27 @@ float lighting_sc_debug_variance(vec3 pos, vec3 n) {
 }
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = lighting_world_mode();
+    // Cache-only view (toggle cells_only): the 25 cm cells alone, black where
+    // none is lit, never texels or probes. SH cells read at the true normal;
+    // off, the per-axis bilinear read (lighting_sc_wrc_now).
+    if (mode == 3u && (lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
+        if (lighting_sh_on()) {
+            return vec4(lighting_sh_read(pos, n, true).rgb, 1.0);
+        }
+        if (LIGHTING_SC_WRITES) {
+            uint c = lighting_cache_find_sized(pos, n, true, 0.25, pos);
+            if (c != ~0u) {
+                cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
+            }
+        }
+        return vec4(lighting_sc_wrc_now(pos, n).rgb, 1.0);
+    }
     if (lighting_sc_slanted(n)) {
+        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal
+        // instead of the probes (a mover's stay on the probes).
+        if (lighting_sh_on() && !obj) {
+            return lighting_sh_read(pos, n, true);
+        }
         return vec4(0.0);
     }
     uint ax = lighting_axis(n) >> 1u;
