@@ -257,8 +257,7 @@ void main() {
         // and this is the S69C skip.
         if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
-            float dlt = lighting_lamp_delta(pos, traced);
-            if ((dlt < 0.0 || dlt < 1.0e-3) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
                 return;
             }
         }
