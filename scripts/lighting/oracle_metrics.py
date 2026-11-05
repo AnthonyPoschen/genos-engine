@@ -38,6 +38,17 @@ lamps-switch from the lamps profile):
   gi_metrics CSV (lavapipe numbers only compare run against run). Without the
   specular AOV the mask is reported as missing and the spec metrics are left out.
 
+* blotch_mean / blotch_worst (every scenario with references): the gi-check
+  still-frame blotch (examples/stress/src/gi_check/metrics.rs `blotch`): the
+  error band blurred s px minus blurred 6 s px, over the reference blurred s px
+  plus 5% of its mean, averaged over the picture. s = 4 px at 320 wide, scaled
+  to the run's width (2 px at the oracle's 160 x 90). Only arm against arm at
+  the same size compares; the gi-check room numbers (ADR 0039: 0.021 at 25 cm,
+  0.014 at 12.5 cm) are 320 x 180 of a 640 x 360 run.
+* slant* scenarios (ADR 0039 stage 2): slant_mid_err_worst / _mean, the
+  unweighted error over the middle half of the picture (where the turned box
+  is), per reference frame.
+
 `--self-test` checks the error, weight and counter on synthetic pictures.
 """
 import csv, glob, json, os, re, sys
@@ -90,6 +101,40 @@ def ref_error(live, ref, dist=None):
     w = 1.0 / np.maximum(block(dist), 0.5)
     near = float((w * d).sum() / ((w * r).sum() + 1e-6))
     return near, plain
+
+
+def _kernel(s):
+    r = int(3.0 * s + 0.5)
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    k = np.exp(-(x * x) / (2.0 * s * s))
+    return k / k.sum()
+
+
+def gblur(a, s):
+    """Separable Gaussian, edges repeated (gi_check/metrics.rs `blur`)."""
+    k = _kernel(s)
+    r = len(k) // 2
+    a = np.asarray(a, np.float64)
+    p = np.pad(a, ((0, 0), (r, r)), mode="edge")
+    t = sum(kv * p[:, i:i + a.shape[1]] for i, kv in enumerate(k))
+    p = np.pad(t, ((r, r), (0, 0)), mode="edge")
+    return sum(kv * p[i:i + a.shape[0], :] for i, kv in enumerate(k))
+
+
+def blotch(live, ref, s=None):
+    """gi_check/metrics.rs `blotch`; s defaults to 4 px per 320 px of width."""
+    if s is None:
+        s = 4.0 * ref.shape[1] / 320.0
+    e = np.asarray(live, np.float64) - np.asarray(ref, np.float64)
+    base = gblur(ref, s) + 0.05 * float(np.mean(ref))
+    return float(np.mean(np.abs(gblur(e, s) - gblur(e, 6.0 * s)) / base))
+
+
+def mid_err(live, ref):
+    """Unweighted error over the middle half of the picture (each axis)."""
+    h, w = ref.shape
+    sl = (slice(h // 4, h - h // 4), slice(w // 4, w - w // 4))
+    return ref_error(live[sl], ref[sl])[1]
 
 
 def unchanged(frames, tile=8, eps=1.0 / 255.0):
@@ -241,14 +286,25 @@ def score(out):
                 s["lighting_ms_p50_lavapipe"] = round(gi[1], 1)
             s["unchanged"] = u
         per = []
+        blots = []
+        mids = []
         for lv in sorted(glob.glob(os.path.join(out, "oracle", n, "f*-live.png"))):
             stem = lv[:-len("-live.png")]
             ref = stem + "-reference.png"
             if not os.path.exists(ref):
                 continue
             dp = stem + "-depth.png"
-            near, plain = ref_error(lin_luma(lv), lin_luma(ref), distance(dp) if os.path.exists(dp) else None)
+            ll, rl = lin_luma(lv), lin_luma(ref)
+            near, plain = ref_error(ll, rl, distance(dp) if os.path.exists(dp) else None)
             per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
+            if ll.shape == rl.shape:
+                blots.append(blotch(ll, rl))
+                if n.startswith("slant"):
+                    mids.append(mid_err(ll, rl))
+        if blots:
+            s.update(blotch_mean=round(float(np.mean(blots)), 4), blotch_worst=round(max(blots), 4))
+        if mids:
+            s.update(slant_mid_err_mean=round(float(np.mean(mids)), 4), slant_mid_err_worst=round(max(mids), 4))
         refs = {int(re.search(r"f(\d+)-reference", p).group(1)): grid_metric.load(p)
                 for p in glob.glob(os.path.join(out, "oracle", n, "f*-reference.png"))}
         if len(tfiles) >= 2 and refs:
@@ -324,10 +380,19 @@ def self_test():
     ex_board = grid_excess(dict(enumerate(board)), dict(enumerate(edge)))
     ok_ex = ex_same["grid_excess_worst"] == 0.0 and ex_board["grid_excess_worst"] > 0.15 \
         and grid_excess({0: ref}, {5: ref}) is None
-    ok = (ok_ex and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
+    # Blotch: an even bias over the picture does not count, a 16 px blob does;
+    # a blob twice as strong scores about twice as much.
+    flat = np.full((90, 160), 0.3, np.float32)
+    blob = flat.copy(); blob[37:53, 72:88] += 0.06
+    blob2 = flat.copy(); blob2[37:53, 72:88] += 0.12
+    b_bias, b_blob, b_blob2 = blotch(flat * 1.2, flat), blotch(blob, flat), blotch(blob2, flat)
+    ok_blotch = b_bias < 1e-9 and b_blob > 1e-3 and abs(b_blob2 / b_blob - 2.0) < 0.05
+    ok_mid = mid_err(blob, flat) > 3 * ref_error(blob, flat)[1] and mid_err(flat, flat) < 1e-9
+    ok = (ok_ex and ok_blotch and ok_mid and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
           and unchanged(still) == 1.0 and unchanged(moving) == 0.0)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
-                      "plain": [round(p1, 4), round(p2, 4)]}))
+                      "plain": [round(p1, 4), round(p2, 4)],
+                      "blotch": [b_bias, round(b_blob, 4), round(b_blob2, 4)], "mid": ok_mid}))
     print("self-test", "ok" if ok else "FAIL")
     return 0 if ok and grid_metric.self_test() == 0 and spec_self_test() == 0 else 1
 
