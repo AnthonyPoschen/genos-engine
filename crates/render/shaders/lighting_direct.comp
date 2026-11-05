@@ -393,7 +393,10 @@ void main() {
     bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool tdl_check = tdl != ~0u && (tdl & 0x40000000u) != 0u;
-    bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check;
+    // TDL-new used to shade every lamp (exact). With hitsize, new is the remaining
+    // GI-on excess alongside check; seed it with CACHE_PICKS like check (stable u).
+    bool tdl_new = tdl != ~0u && (tdl & 0xC0000000u) == 0u;
+    bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check || tdl_new;
     // Weighted point-lamp picking shares this loop's one trace. The sun stays
     // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
     // `pick` as it was, so today's shade is unchanged.
@@ -429,6 +432,8 @@ void main() {
             }
         } else if (tdl_check) {
             u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) ^ lighting_frame() * 0x9e3779b9u));
+        } else if (tdl_new) {
+            u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) * 0x85ebca6bu + 0x27d4eb2fu));
         } else {
             // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
             // so a still hit relights to the same value (no crawl).
