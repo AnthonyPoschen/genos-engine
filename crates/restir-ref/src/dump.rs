@@ -12,8 +12,8 @@ use genos_math::Vec3;
 use crate::metrics::{frames_to_ref, grid_worst, ref_err_luma, ref_err_near, GateLimits};
 use crate::reservoir::{reservoir_w, Reservoir, Weighting, LAMP_EMPTY};
 use crate::restir::{Config, History, Proposal};
-use crate::tree::TreeFault;
 use crate::shade::{Aabb, Lamp, Receiver, Scene};
+use crate::tree::TreeFault;
 
 const KIND: &str = "genos-restir-reference";
 const VERSION: i64 = 1;

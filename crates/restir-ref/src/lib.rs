@@ -49,6 +49,6 @@ pub mod tree;
 pub use dump::{diff_dumps, encode_dump, parse_dump, Diff, Dump};
 pub use harness::{encode_report, evaluate, write_run, EvalSpec, Report};
 pub use metrics::{frames_to_ref, grid_worst, ref_err_near, GateLimits};
-pub use restir::{Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
-pub use tree::{LightTree, TreeFault};
+pub use restir::{Boost, Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
 pub use shade::Scene;
+pub use tree::{LightTree, TreeFault};

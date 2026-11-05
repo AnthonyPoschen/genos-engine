@@ -195,7 +195,11 @@ impl LightTree {
                 lamp: lamp_id,
                 position: lamp.position,
                 power,
-                range: ranges.get(index).copied().filter(|r| *r > 0.0).unwrap_or(0.0),
+                range: ranges
+                    .get(index)
+                    .copied()
+                    .filter(|r| *r > 0.0)
+                    .unwrap_or(0.0),
             });
         }
         let mut nodes = Vec::new();
@@ -309,7 +313,13 @@ impl LightTree {
         self.importance_sided(index, receiver, fault, false)
     }
 
-    fn importance_sided(&self, index: u32, receiver: &Receiver, fault: TreeFault, two_sided: bool) -> f32 {
+    fn importance_sided(
+        &self,
+        index: u32,
+        receiver: &Receiver,
+        fault: TreeFault,
+        two_sided: bool,
+    ) -> f32 {
         let Some(node) = self.node_at(index) else {
             return 0.0;
         };
@@ -346,7 +356,12 @@ pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32
     clippy::similar_names,
     reason = "the three box gaps are the x y z components of one vector"
 )]
-pub fn node_importance_sided(node: Node, receiver: &Receiver, fault: TreeFault, two_sided: bool) -> f32 {
+pub fn node_importance_sided(
+    node: Node,
+    receiver: &Receiver,
+    fault: TreeFault,
+    two_sided: bool,
+) -> f32 {
     if node.power <= 0.0 {
         return 0.0;
     }
@@ -507,7 +522,11 @@ fn join(nodes: &[Node], left: u32, right: u32) -> Node {
         max,
         power: left_node.power + right_node.power,
         radius,
-        range: if left_node.range > 0.0 && right_node.range > 0.0 { max2(left_node.range, right_node.range) } else { 0.0 },
+        range: if left_node.range > 0.0 && right_node.range > 0.0 {
+            max2(left_node.range, right_node.range)
+        } else {
+            0.0
+        },
         left,
         right,
         lamp: LAMP_EMPTY,

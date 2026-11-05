@@ -12,8 +12,8 @@ use std::process::ExitCode;
 use genos_restir_ref::metrics::GateLimits;
 use genos_restir_ref::reservoir::Weighting;
 use genos_restir_ref::restir::{Config, History, Proposal};
-use genos_restir_ref::TreeFault;
 use genos_restir_ref::shade::Scene;
+use genos_restir_ref::TreeFault;
 use genos_restir_ref::{diff_dumps, evaluate, parse_dump, write_run, EvalSpec, Report};
 
 const DEFAULT_OUT: &str = "genos-debug/restir";
