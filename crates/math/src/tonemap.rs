@@ -2,14 +2,14 @@
 //!
 //! These are the closed forms the post passes must match. They are `f64` and
 //! need no GPU, so `cargo test -p genos-math` checks them headless.
-//! `crates/render/src/hdr_output.rs` holds the same formulas today; ADR 0027
-//! moves its scalar curves to call these.
+//! `crates/render/src/hdr_output.rs` calls these. It does not keep a second copy.
 
 /// Graphics white on both HDR paths, in nits (ITU-R BT.2408).
 pub const GRAPHICS_WHITE_NITS: f64 = 203.0;
-/// Fixed HDR10 peak until the display's own peak is read.
+/// Sigmoid top when the surface reports no peak. BT.2408's HDR reference.
+/// A display that reports another peak does not replace this until that read lands.
 pub const HDR_PEAK_NITS: f64 = 1000.0;
-/// scRGB code 1.0 is 80 nits.
+/// scRGB code 1.0 is 80 nits. Graphics white is `203/80 = 2.5375`, written 2.54.
 pub const SCRGB_NITS_PER_CODE: f64 = 80.0;
 /// Scene mid grey that the `AgX` curve keeps fixed.
 pub const MID_GREY: f64 = 0.18;
