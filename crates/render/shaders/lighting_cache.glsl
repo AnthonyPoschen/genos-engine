@@ -613,6 +613,10 @@ const float LIGHTING_SC_HIT = 0.25;
 // ADR 0039 stage 2: the SH-L1 cells are the ray-hit cells (one knob for both;
 // a low-spec preset changes LIGHTING_SC_HIT, never a literal).
 const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
+// A ray hit takes the bilinear SH read only when its normal is slanted (largest
+// |n| below this); axis-aligned hits tilt the hit cell (= its mean, master's
+// read). 99.97 % of the SH lookups were axis-aligned ray hits (simplify-s2 step 7).
+const float LIGHTING_SH_HIT_SLANT = 0.999;
 // Sets a texel inside a change, or under a light that is changing, averages over
 // (a short running mean on one fixed set: quick, and no flicker).
 const float LIGHTING_SC_MOVING = 2.0;
@@ -2429,7 +2433,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         // across the 25 cm cells there (a coarser hit cell: its own, tilted).
         // Mover-frame cells keep the per-axis read.
         if (lighting_sh_on() && lighting_obj_salt < 0.5) {
-            if (hsize < 1.2 * LIGHTING_SH_CELL) {
+            vec3 an = abs(n);
+            bool slanted = max(an.x, max(an.y, an.z)) < LIGHTING_SH_HIT_SLANT;
+            if ((lighting_sc_display || slanted) && hsize < 1.2 * LIGHTING_SH_CELL) {
                 vec4 b = lighting_sh_read(pos, n, false);
                 if (b.w > 0.5) {
                     return b.rgb * keep;
