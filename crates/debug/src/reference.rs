@@ -288,6 +288,55 @@ fn path_from(
     sum
 }
 
+/// Bounce irradiance arriving at `point` on a surface facing `normal`: the light
+/// every other surface sends there (their direct light and all later bounces, up
+/// to `max_bounces` hops), not the lamps' own direct light at `point`. This is
+/// what a surface-cache cell stores. `samples` cosine directions on a jittered
+/// grid; the sky counts where a ray leaves the scene. Deterministic for `seed`.
+pub fn bounce_irradiance(
+    scene: &Scene,
+    point: [f32; 3],
+    normal: [f32; 3],
+    samples: u32,
+    max_bounces: u32,
+    seed: u64,
+) -> [f32; 3] {
+    let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
+    let n = normalize(normal);
+    let from = add(point, scale(n, 0.02));
+    // ceil(sqrt(samples)) by integer search — no f64→u32 cast.
+    let side = {
+        let n = u64::from(samples.max(1));
+        let mut s = 1u64;
+        while s.saturating_mul(s) < n {
+            s += 1;
+        }
+        u32::try_from(s).unwrap_or(u32::MAX)
+    };
+    let mut rng = Rng::new(seed ^ 0xB0_0CE);
+    let mut sum = [0.0f32; 3];
+    for k in 0..samples.max(1) {
+        let cell = k % (side * side);
+        let u = ((cell % side) as f32 + rng.next()) / side as f32;
+        let v = ((cell / side) as f32 + rng.next()) / side as f32;
+        let dir = cosine(n, u, v);
+        let l = match scene.first_hit(from, dir, REACH) {
+            None => sky,
+            Some(hit) => {
+                let rest = (rng.next(), rng.next());
+                let emitted = ShadeSample::paint(hit.albedo).emissive;
+                add(
+                    emitted,
+                    path_from(scene, scene, &hit, 0.0, max_bounces.saturating_sub(1), rest, &mut rng),
+                )
+            }
+        };
+        sum = add(sum, l);
+    }
+    // A cosine sample estimates the cosine-weighted mean radiance; irradiance is π times it.
+    scale(sum, PI / samples.max(1) as f32)
+}
+
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
