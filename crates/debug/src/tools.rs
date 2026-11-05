@@ -164,6 +164,11 @@ struct ObjectEdit {
     spun: f32,
     frozen: Option<(Vec3, f32)>,
     path: Option<Path>,
+    /// Material override, 0 to 1. Only the reference tracer reads these today:
+    /// solids have no roughness or metallic in the live renderer until the
+    /// specular pass (ADR 0024) lands, so the picture ignores them.
+    roughness: Option<f32>,
+    metallic: Option<f32>,
 }
 
 /// A picture a job wants this frame.
@@ -228,6 +233,14 @@ enum Job {
     },
 }
 
+/// The layers a reference writes: `full` the picture alone, `specular` also
+/// the primary specular lobe alone (`<prefix>-reference-spec.png`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Aov {
+    Full,
+    Specular,
+}
+
 struct RefJob {
     /// Where traces are kept for reuse (None: always trace).
     cache: Option<PathBuf>,
@@ -239,6 +252,8 @@ struct RefJob {
     max_bounces: u32,
     /// Trace the scene's triangles instead of its analytic shapes.
     triangles: bool,
+    /// `aov`: which layers to write besides the full picture.
+    aov: Aov,
     size: (u32, u32),
     worker: Option<std::thread::JoinHandle<Reference>>,
     reference: Option<Reference>,
@@ -435,6 +450,7 @@ impl Tools {
         self.poll_scene_loads(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
+        let materials = self.materials(ctx.host.scene().solids.len());
         for running in &mut self.jobs {
             if let Job::Reference(job) = &mut running.job {
                 if job.worker.is_none() && job.reference.is_none() {
@@ -444,6 +460,8 @@ impl Tools {
                         max_spp: job.max_spp.max(job.spp),
                         noise_target: job.noise_target,
                         seconds: job.seconds,
+                        specular: job.aov == Aov::Specular,
+                        materials: materials.clone(),
                         ..RefSetup::from_camera(
                             ctx.host.scene(),
                             ctx.camera,
@@ -704,6 +722,31 @@ impl Tools {
         }
     }
 
+    /// The `object` roughness and metallic overrides, per solid index. A solid
+    /// with only one of the two set keeps paint's value for the other
+    /// (roughness 1, metallic 0). Empty when no solid has one.
+    fn materials(&self, solids: usize) -> Vec<Option<reference::SolidMaterial>> {
+        let mut out = vec![None; solids];
+        let mut any = false;
+        for (index, edit) in &self.objects {
+            if edit.roughness.is_none() && edit.metallic.is_none() {
+                continue;
+            }
+            if let Some(slot) = out.get_mut(*index) {
+                *slot = Some(reference::SolidMaterial {
+                    roughness: edit.roughness.unwrap_or(1.0),
+                    metallic: edit.metallic.unwrap_or(0.0),
+                });
+                any = true;
+            }
+        }
+        if any {
+            out
+        } else {
+            Vec::new()
+        }
+    }
+
     fn apply_camera_path(&mut self, camera: &mut Camera) {
         let Some((path, turns)) = &self.camera_path else {
             return;
@@ -898,6 +941,22 @@ impl Tools {
                     .collect(),
             )),
             "object" => {
+                args.only(
+                    "object",
+                    &[
+                        "index",
+                        "reset",
+                        "position",
+                        "path",
+                        "frames",
+                        "loop",
+                        "yaw",
+                        "spin",
+                        "freeze",
+                        "roughness",
+                        "metallic",
+                    ],
+                )?;
                 let index = args.u32("index")?.ok_or("object needs index")? as usize;
                 let solid = ctx
                     .host
@@ -935,14 +994,27 @@ impl Tools {
                     Some(false) => edit.frozen = None,
                     None => {}
                 }
-                reply(obj(vec![
+                if let Some(r) = args.f32("roughness")? {
+                    edit.roughness = Some(unit("roughness", r)?);
+                }
+                if let Some(m) = args.f32("metallic")? {
+                    edit.metallic = Some(unit("metallic", m)?);
+                }
+                let mut fields = vec![
                     ("index", num(index as f64)),
                     (
                         "position",
                         vec3([solid.position.x, solid.position.y, solid.position.z]),
                     ),
                     ("yaw", num(solid.yaw as f64)),
-                ]))
+                ];
+                if let Some(r) = edit.roughness {
+                    fields.push(("roughness", num(r as f64)));
+                }
+                if let Some(m) = edit.metallic {
+                    fields.push(("metallic", num(m as f64)));
+                }
+                reply(obj(fields))
             }
             "camera" => {
                 let cam = &mut *ctx.camera;
@@ -1178,6 +1250,11 @@ impl Tools {
                         return Err(format!("geometry must be shapes or triangles, not {other}"))
                     }
                 };
+                let aov = match args.str("aov")?.as_deref() {
+                    None | Some("full") => Aov::Full,
+                    Some("specular") => Aov::Specular,
+                    Some(other) => return Err(format!("aov must be full or specular, not {other}")),
+                };
                 let grid = args
                     .floats("grid", 2)?
                     .map_or((3, 3), |g| (g[0].max(1.0) as u32, g[1].max(1.0) as u32));
@@ -1199,6 +1276,7 @@ impl Tools {
                     block: args.u32("block")?.unwrap_or(2).max(1),
                     max_bounces,
                     triangles,
+                    aov,
                     size: (width, height),
                     worker: None,
                     reference: None,
@@ -1628,6 +1706,15 @@ fn camera_value(c: &Camera) -> Value {
     ])
 }
 
+/// A material value must lie in 0..=1.
+fn unit(key: &str, v: f32) -> Result<f32, String> {
+    if (0.0..=1.0).contains(&v) {
+        Ok(v)
+    } else {
+        Err(format!("{key} is 0 to 1, not {v}"))
+    }
+}
+
 fn finish_reference(
     job: &mut RefJob,
     out_dir: &std::path::Path,
@@ -1658,6 +1745,16 @@ fn finish_reference(
             num(r.hit.iter().filter(|h| **h).count() as f64 / r.hit.len().max(1) as f64),
         ),
     ];
+    if job.aov == Aov::Specular {
+        let spec = r
+            .specular_image()
+            .ok_or("aov specular asked, but the trace kept no specular layer")?;
+        spec.save(&path("reference-spec"))?;
+        fields.push((
+            "reference_spec",
+            text(path("reference-spec").display().to_string()),
+        ));
+    }
     if let Some(live) = &job.live {
         let (c, heat, grade) = if let Some(scene) = &job.scene {
             let (c, heat) = reference::compare_linear(scene, &r, job.region, job.grid, job.block);

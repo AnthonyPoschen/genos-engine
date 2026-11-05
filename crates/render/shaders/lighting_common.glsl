@@ -53,10 +53,7 @@
 #include "mesh_field.glsl"
 #include "lighting_pack.glsl"
 
-layout(std430, set = 0, binding = 6) buffer GBuffer {
-    uvec4 header;
-    uvec4 px[];
-} gbuf;
+#include "gbuffer_layout.glsl"
 
 layout(std430, set = 0, binding = 7) buffer Work {
     vec4 v[];
@@ -229,7 +226,8 @@ vec3 lighting_eye_dir(uvec2 p) {
 
 // G-buffer surface at pixel p: false where the pixel shows nothing.
 bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bool two_sided) {
-    uvec4 g = gbuf.px[p.y * pc.dims.x + p.x];
+    uint pixel = p.y * pc.dims.x + p.x;
+    uvec4 g = gbuf_load4(pixel);
     float dist = uintBitsToFloat(g.x);
     pos = vec3(0.0);
     n = vec3(0.0, 1.0, 0.0);
@@ -243,6 +241,10 @@ bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bo
     vec4 a = unpackUnorm4x8(g.z);
     albedo = a.rgb;
     two_sided = (uint(a.a * 255.0 + 0.5) & 1u) != 0u;
+    vec4 mr = unpackUnorm4x8(gbuf_word(pixel, 4u));
+    if ((uint(mr.a * GBUF_UNORM_BYTE + GBUF_UNORM_ROUND) & 1u) != 0u) {
+        albedo *= (1.0 - mr.g);
+    }
     return true;
 }
 
@@ -275,6 +277,13 @@ uint lighting_hash(uint v) {
     v *= 0x846ca68bu;
     v ^= v >> 16u;
     return v;
+}
+
+// The one key for an integer cell (S86): each coordinate goes through the hash
+// in turn, then the salt. Never XOR per-axis products (x * p1 ^ y * p2 ^ ...):
+// sign-mirrored cells share that key exactly (scripts/lint-shader-hashes.py).
+uint hash_cell3(ivec3 c, uint salt) {
+    return lighting_hash(uint(c.x) ^ lighting_hash(uint(c.y) ^ lighting_hash(uint(c.z) ^ lighting_hash(salt))));
 }
 
 float lighting_unit(uint v) {
@@ -325,7 +334,7 @@ uint lighting_cell_hash(vec3 pos, vec3 n) {
     // (any camera motion) turned at random, and kept strata traced with one turn
     // landed unevenly in the cells of the other (blotches that crawl with a turn).
     ivec3 cell = ivec3(floor(pos / 0.25 - 0.5 * n));
-    return lighting_hash(uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u);
+    return hash_cell3(cell, 0u);
 }
 uint lighting_grid() {
     return max(uint(sqrt(float(lighting_rays())) + 0.5), 1u);
@@ -389,7 +398,7 @@ bool lighting_stratum_held(uint probe) {
     return LIGHTING_HOLD_STRATA && work.v[lighting_stratum_at(probe, lighting_stratum())].w > 1.5;
 }
 uint lighting_hold_check_k(uint probe) {
-    return lighting_hash(probe * 0x9e3779b9u ^ pc.params.w * 0x85ebca6bu) % lighting_rays();
+    return lighting_hash(probe ^ lighting_hash(pc.params.w)) % lighting_rays();
 }
 float lighting_seg_dist2c(vec3 a, vec3 b, vec3 c) {
     vec3 ab = b - a;
@@ -495,6 +504,10 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = p + n * 0.02;
     uint q = lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
     uint rk = lighting_sc_ray_key(slot, key);
+    if (lighting_wrc_lone(slot)) {
+        dir = lighting_dir(rk, n, r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS);
+        return true;
+    }
     dir = lighting_dir(rk, n, lighting_sc_stratum(rk, q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
     return true;
 }

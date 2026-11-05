@@ -7,6 +7,7 @@
 //! Exposure curves are [`tonemap`]. The proposed bloom chain is [`bloom`].
 
 pub mod bloom;
+pub mod brdf;
 mod mat;
 mod media;
 pub mod optics;

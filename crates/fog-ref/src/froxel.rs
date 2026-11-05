@@ -1,11 +1,26 @@
-//! CPU froxel model for stage F1 of ADR 0026.
+//! CPU froxel model for stages F1 and F2 of ADR 0026.
 //!
 //! The same grid the GPU will run (layout and resolution per preset), computed
-//! on the CPU so it can be graded against the F0 path tracer before any shader
-//! exists. Every frame is built from scratch: analytic density, direct
-//! in-scatter from per-froxel light picks with 1-2 shadow rays, front-to-back
-//! integration with the closed-form slice integral (Hillaire 2015), and an
-//! upsampled read at each pixel. No state survives between frames.
+//! on the CPU so it can be graded against the F0 ray march before any shader
+//! exists. F1 picks lights and casts the shadow rays. F2 is the volumetric
+//! integration reference, in Hillaire 2015 order:
+//!
+//! 1. Inject extinction and the in-scattering source into the froxel grid.
+//! 2. Temporal reprojection of that scattering. Disabled: the stage is the
+//!    identity (ADR 0026 decision 5). Hillaire blends a reprojected sample.
+//! 3. Front-to-back integration, the energy-conserving slice integral.
+//!
+//! Departures from Hillaire 2015, named here and in
+//! `docs/systems/rendering/fog/plan.md`:
+//!
+//! - Extinction is the closed-form optical depth of the slice, not a density
+//!   sample at the cell centre (ADR 0018 departure 6).
+//! - In-scattering is single-scatter direct light. Probe indirect is stage F4.
+//! - Shadows are rays against the boxes, not shadow maps (ADR 0018 departure 5).
+//! - Compose stays the F1 trilinear read of the integrated column. This stage
+//!   does not march the picture.
+//!
+//! No state survives between frames.
 
 use crate::{hg, Ray, Scene, V3};
 
@@ -185,6 +200,53 @@ const REUSE: [(isize, isize); 8] = [
     (1, 1),
 ];
 
+/// Extinction and in-scattering injected into one froxel grid.
+///
+/// This is the volume Hillaire integrates. It has no history slot: fog history
+/// stays off, so a previous frame is not stored here.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Injected {
+    grid: Grid,
+    camera: Camera,
+    /// In-scattering source per metre, after spatial reuse of the light picks.
+    /// Phase, albedo, and shadow are already in this value.
+    pub scattering: Vec<f64>,
+    /// Closed-form optical depth of each froxel. Mean extinction per metre is
+    /// [`Injected::mean_extinction`].
+    pub optical_depth: Vec<f64>,
+    /// Froxel length along the view ray, in metres.
+    pub length: Vec<f64>,
+    /// Shadow rays cast while injecting this volume.
+    pub shadow_rays: u64,
+}
+
+impl Injected {
+    /// Mean extinction per metre, `optical_depth / length`.
+    ///
+    /// `None` when `index` is outside the grid. Zero when the froxel has no length.
+    #[must_use]
+    pub fn mean_extinction(&self, index: usize) -> Option<f64> {
+        let length = self.length.get(index)?;
+        let tau = self.optical_depth.get(index)?;
+        Some(if *length > 0.0 { tau / length } else { 0.0 })
+    }
+}
+
+/// Output of the temporal stage.
+///
+/// `history_accepts` and `history_rejects` are the probe for fog history. Both
+/// stay 0 while reprojection is disabled.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Temporal {
+    /// Volume handed to the front-to-back integral.
+    pub volume: Injected,
+    /// Froxels that blended a reprojected sample. Always 0 in this reference.
+    pub history_accepts: u64,
+    /// Froxels whose history sample was tested and rejected. Always 0: the
+    /// previous volume is not sampled.
+    pub history_rejects: u64,
+}
+
 /// One integrated fog frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Frame {
@@ -234,20 +296,21 @@ impl Scene {
         0.0
     }
 
-    /// Builds a fog frame from scratch for `camera` on `grid`: density and
-    /// direct in-scatter per froxel, spatial reuse within each slice, then
-    /// front-to-back integration per column.
+    /// Injects extinction and direct in-scattering into the froxel grid.
+    ///
+    /// Extinction is the closed-form optical depth of the slice. Scattering is
+    /// the F1 light pick: stratified shadow rays, then the 4-neighbour reuse
+    /// inside the slice. Nothing is read from a previous frame.
     #[must_use]
-    pub fn froxel_frame(&self, grid: Grid, camera: Camera) -> Frame {
+    pub fn inject_froxels(&self, grid: Grid, camera: Camera) -> Injected {
         let (gw, gh, gd) = (ix(grid.w), ix(grid.h), ix(grid.d));
         let at = |col: usize, row: usize, slice: usize| (slice * gh + row) * gw + col;
-        let mut len = vec![0.0; gw * gh * gd];
-        let mut tau = vec![0.0; gw * gh * gd];
+        let mut length = vec![0.0; gw * gh * gd];
+        let mut optical_depth = vec![0.0; gw * gh * gd];
         let mut lit = vec![0.0; gw * gh * gd];
         let mut rays = 0_u64;
         let albedo = self.medium.albedo();
         let rays_per = f64::from(grid.shadow_rays);
-        // Passes 1-2: analytic density and direct in-scatter per froxel.
         for row in 0..grid.h {
             for col in 0..grid.w {
                 let dir = camera.dir(
@@ -258,15 +321,15 @@ impl Scene {
                 for slice in 0..grid.d {
                     let i = at(ix(col), ix(row), ix(slice));
                     let t0 = camera.boundary(slice, grid.d) / cos;
-                    let l = (camera.boundary(slice + 1, grid.d) / cos - t0).max(0.0);
+                    let froxel_len = (camera.boundary(slice + 1, grid.d) / cos - t0).max(0.0);
                     let o0 = camera.pos + dir * t0;
-                    len[i] = l;
-                    tau[i] = self.medium.optical_depth(o0, dir, l);
+                    length[i] = froxel_len;
+                    optical_depth[i] = self.medium.optical_depth(o0, dir, froxel_len);
                     // Stratified jittered points along the froxel, one shadow ray each.
                     let mut sum = 0.0;
                     for r in 0..grid.shadow_rays {
                         let f = (f64::from(r) + jitter(col, row, slice, 2 * r)) / rays_per;
-                        let p = o0 + dir * (l * f);
+                        let p = o0 + dir * (froxel_len * f);
                         sum += albedo
                             * self.medium.sigma_t(p)
                             * self.froxel_direct(
@@ -280,9 +343,8 @@ impl Scene {
                 }
             }
         }
-        // Spatial reuse: each froxel also takes the shaded picks of its 4
-        // neighbours in the same slice (no temporal reuse).
-        let mut reused = vec![0.0; gw * gh * gd];
+        // Spatial reuse stays inside the slice. It is not a temporal blend.
+        let mut scattering = vec![0.0; gw * gh * gd];
         for slice in 0..gd {
             for row in 0..gh {
                 for col in 0..gw {
@@ -295,39 +357,86 @@ impl Scene {
                             n += 1.0;
                         }
                     }
-                    reused[at(col, row, slice)] = acc / n;
+                    scattering[at(col, row, slice)] = acc / n;
                 }
             }
         }
-        // Pass 4: front-to-back integration, closed form per slice.
-        let stride = gd + 1;
-        let mut scatter = vec![0.0; gw * gh * stride];
-        let mut trans = vec![1.0; gw * gh * stride];
-        for row in 0..gh {
-            for col in 0..gw {
-                let base = (row * gw + col) * stride;
-                let (mut s_acc, mut t_acc) = (0.0, 1.0);
-                for slice in 0..gd {
-                    let i = at(col, row, slice);
-                    let piece = if tau[i] > 1e-9 {
-                        reused[i] * len[i] * (1.0 - (-tau[i]).exp()) / tau[i]
-                    } else {
-                        reused[i] * len[i]
-                    };
-                    s_acc += t_acc * piece;
-                    t_acc *= (-tau[i]).exp();
-                    scatter[base + slice + 1] = s_acc;
-                    trans[base + slice + 1] = t_acc;
-                }
-            }
-        }
-        Frame {
+        Injected {
             grid,
             camera,
-            scatter,
-            trans,
+            scattering,
+            optical_depth,
+            length,
             shadow_rays: rays,
         }
+    }
+
+    /// Builds one fog frame: inject, skip temporal reprojection, integrate.
+    #[must_use]
+    pub fn froxel_frame(&self, grid: Grid, camera: Camera) -> Frame {
+        let injected = self.inject_froxels(grid, camera);
+        let temporal = reproject(injected, None);
+        integrate_front_to_back(&temporal.volume)
+    }
+}
+
+/// Temporal reprojection of the scattering volume.
+///
+/// Hillaire 2015 projects each froxel into the previous view and blends that
+/// sample into the current scattering. ADR 0026 decision 5 leaves fog history
+/// off, so this returns `current` and does not read `previous`. Accepts and
+/// rejects stay 0, which is the probe that the blend did not run.
+#[must_use]
+pub fn reproject(current: Injected, previous: Option<&Injected>) -> Temporal {
+    let _ = previous;
+    Temporal {
+        volume: current,
+        history_accepts: 0,
+        history_rejects: 0,
+    }
+}
+
+/// Front-to-back integration of an injected volume.
+///
+/// Per slice, with transmittance `T` starting at 1 (Hillaire 2015):
+/// `L += T * (S / σ) * (1 - exp(-σ Δs))` and `T *= exp(-σ Δs)`.
+/// `σ Δs` is the stored optical depth, so a height-fog slice keeps the
+/// closed form. The `σ → 0` limit is `L += T * S * Δs`.
+#[must_use]
+pub fn integrate_front_to_back(volume: &Injected) -> Frame {
+    let g = volume.grid;
+    let (gw, gh, gd) = (ix(g.w), ix(g.h), ix(g.d));
+    let at = |col: usize, row: usize, slice: usize| (slice * gh + row) * gw + col;
+    let stride = gd + 1;
+    let mut scatter = vec![0.0; gw * gh * stride];
+    let mut trans = vec![1.0; gw * gh * stride];
+    for row in 0..gh {
+        for col in 0..gw {
+            let base = (row * gw + col) * stride;
+            let (mut s_acc, mut t_acc) = (0.0, 1.0);
+            for slice in 0..gd {
+                let i = at(col, row, slice);
+                let tau = volume.optical_depth[i];
+                let source = volume.scattering[i];
+                let froxel_len = volume.length[i];
+                let piece = if tau > 1e-9 {
+                    source * froxel_len * (1.0 - (-tau).exp()) / tau
+                } else {
+                    source * froxel_len
+                };
+                s_acc += t_acc * piece;
+                t_acc *= (-tau).exp();
+                scatter[base + slice + 1] = s_acc;
+                trans[base + slice + 1] = t_acc;
+            }
+        }
+    }
+    Frame {
+        grid: g,
+        camera: volume.camera,
+        scatter,
+        trans,
+        shadow_rays: volume.shadow_rays,
     }
 }
 
@@ -366,5 +475,108 @@ impl Frame {
             acc
         };
         background * read(&self.trans) + read(&self.scatter)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{integrate_front_to_back, reproject, Camera, Grid, Injected};
+    use crate::{Light, Medium, Scene, V3};
+
+    fn camera() -> Camera {
+        Camera {
+            pos: V3::new(0.0, 1.0, 0.0),
+            forward: V3::new(1.0, 0.0, 0.0),
+            fov_y: 60_f64.to_radians(),
+            aspect: 1.0,
+            near: 0.1,
+            far: 8.0,
+        }
+    }
+
+    fn one_cell(sigma: f64, source: f64, len: f64) -> Injected {
+        Injected {
+            grid: Grid {
+                w: 1,
+                h: 1,
+                d: 1,
+                shadow_rays: 0,
+                reuse_taps: 0,
+            },
+            camera: camera(),
+            scattering: vec![source],
+            optical_depth: vec![sigma * len],
+            length: vec![len],
+            shadow_rays: 0,
+        }
+    }
+
+    fn sun_scene() -> Scene {
+        Scene {
+            medium: Medium::Homogeneous {
+                sigma_t: 0.2,
+                albedo: 0.8,
+                top: 5.0,
+            },
+            g: 0.0,
+            lights: vec![Light::Sun {
+                to_light: V3::new(0.0, 1.0, 0.0),
+                irradiance: 3.0,
+            }],
+            occluders: vec![],
+            background: 0.5,
+        }
+    }
+
+    #[test]
+    fn one_slice_matches_the_energy_conserving_integral() {
+        let frame = integrate_front_to_back(&one_cell(0.2, 0.05, 4.0));
+        let tau = 0.8_f64;
+        let want = 0.05 / 0.2 * (1.0 - (-tau).exp());
+        assert!((frame.scatter[1] - want).abs() < 1e-12);
+        assert!((frame.trans[1] - (-tau).exp()).abs() < 1e-12);
+        assert!(frame.scatter[0].abs() < 1e-15);
+        assert!((frame.trans[0] - 1.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn zero_extinction_slice_is_the_linear_limit() {
+        let frame = integrate_front_to_back(&one_cell(0.0, 0.05, 4.0));
+        assert!((frame.scatter[1] - 0.2).abs() < 1e-12);
+        assert!((frame.trans[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn injection_extinction_matches_sigma_and_history_is_ignored() {
+        let scene = sun_scene();
+        let grid = Grid {
+            w: 4,
+            h: 4,
+            d: 8,
+            shadow_rays: 2,
+            reuse_taps: 4,
+        };
+        let cam = camera();
+        let injected = scene.inject_froxels(grid, cam);
+        let (gw, gh, col, row) = (4_usize, 4_usize, 2_usize, 2_usize);
+        for slice in 0..8_usize {
+            let index = (slice * gh + row) * gw + col;
+            let mean = injected.mean_extinction(index).unwrap_or(-1.0);
+            assert!(
+                (mean - 0.2).abs() < 1e-9,
+                "slice {slice} mean extinction {mean}"
+            );
+            assert!(injected.scattering[index] > 0.0);
+        }
+        let staged = integrate_front_to_back(&reproject(injected.clone(), None).volume);
+        assert_eq!(staged, scene.froxel_frame(grid, cam));
+
+        let mut poisoned = injected.clone();
+        poisoned.scattering.fill(9.0);
+        poisoned.optical_depth.fill(4.0);
+        let temporal = reproject(injected.clone(), Some(&poisoned));
+        assert_eq!(temporal.history_accepts, 0);
+        assert_eq!(temporal.history_rejects, 0);
+        assert_eq!(temporal.volume, injected);
     }
 }

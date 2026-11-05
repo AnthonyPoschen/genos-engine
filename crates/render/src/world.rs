@@ -1,10 +1,3 @@
-#![cfg_attr(
-    test,
-    expect(
-        clippy::items_after_test_module,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
 #![expect(
     clippy::must_use_candidate,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
@@ -83,8 +76,14 @@ pub struct MaterialAtlas {
     pub width: u32,
     pub height: u32,
     /// Row-major RGBA8, length `width * height * 4`. Top to bottom.
+    /// Empty when [`Self::block_format`] is a block format.
     pub rgba: Vec<u8>,
     pub key: u64,
+    /// `VkFormat`. 0 is RGBA8 in `rgba`. 146 is BC7 sRGB, 141 is BC5.
+    pub block_format: u32,
+    /// Prebuilt mips, finest first. Block bytes, not RGBA. The streamer copies
+    /// these and does not filter them (ADR 0035).
+    pub block_mips: Vec<crate::material_stream::MipLevel>,
 }
 
 impl MaterialAtlas {
@@ -98,26 +97,46 @@ impl MaterialAtlas {
             height,
             rgba,
             key: 0,
+            block_format: 0,
+            block_mips: Vec::new(),
         };
         atlas.rehash();
         atlas
     }
 
-    fn rehash(&mut self) {
+    pub(crate) fn rehash(&mut self) {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        if self.width == 0 || self.height == 0 || self.rgba.is_empty() {
+        if self.width == 0
+            || self.height == 0
+            || (self.rgba.is_empty() && self.block_mips.is_empty())
+        {
             self.key = 0;
             return;
         }
         let mut hasher = DefaultHasher::new();
         self.width.hash(&mut hasher);
         self.height.hash(&mut hasher);
+        self.block_format.hash(&mut hasher);
         self.rgba.hash(&mut hasher);
+        for mip in &self.block_mips {
+            mip.width.hash(&mut hasher);
+            mip.height.hash(&mut hasher);
+            mip.rgba.hash(&mut hasher);
+        }
         let key = hasher.finish();
         self.key = if key == 0 { 1 } else { key };
     }
 }
+
+/// G-buffer material flag: rgb is base colour, readers apply `(1 − metallic)`.
+pub const MAT_BASE: u32 = 1;
+/// Colour-atlas alpha is metallic (opaque materials with a metallic-roughness map).
+pub const MAT_ALPHA_METAL: u32 = 2;
+/// Normal-atlas alpha is roughness.
+pub const MAT_NORMAL_ROUGH: u32 = 4;
+/// Normal atlas is a flat normal plus roughness. Do not perturb.
+pub const MAT_FLAT_NORMAL: u32 = 8;
 
 /// A rectangle in a [`MaterialAtlas`], in texels. `w == 0` means no texture.
 #[derive(Clone, Copy, Debug, Default)]
@@ -127,6 +146,12 @@ pub struct Surface {
     /// Discard below this alpha. 0 keeps the whole surface.
     pub cutoff: f32,
     pub two_sided: bool,
+    /// Roughness factor used when the normal atlas does not carry roughness.
+    pub roughness: f32,
+    /// Metallic factor used when the colour atlas alpha is not metallic.
+    pub metallic: f32,
+    /// [`MAT_BASE`], [`MAT_ALPHA_METAL`], [`MAT_NORMAL_ROUGH`], [`MAT_FLAT_NORMAL`].
+    pub material_flags: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -299,6 +324,64 @@ pub struct ShadePlane {
     pub color: [f32; 3],
 }
 
+/// Which scene a `Scene` is, from its fixed layout: the floor, walls and
+/// ceiling in full, and each solid's shape and size but not its place, turn or
+/// colour (solids move). Lights, sky and settings are left out: the renderer
+/// follows those incrementally. Two builds of the same scene agree, so
+/// rebuilding a world does not drop the surface cache. Never 0, so a renderer
+/// that has drawn nothing yet is told apart.
+fn scene_identity(scene: &Scene) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let f = |values: &[f32], h: &mut std::collections::hash_map::DefaultHasher| {
+        for v in values {
+            v.to_bits().hash(h);
+        }
+    };
+    let fl = &scene.floor;
+    f(
+        &[
+            fl.position.x,
+            fl.position.y,
+            fl.position.z,
+            fl.half_x,
+            fl.half_z,
+        ],
+        &mut h,
+    );
+    f(&fl.color, &mut h);
+    scene.walls.len().hash(&mut h);
+    for w in &scene.walls {
+        f(
+            &[
+                w.position.x,
+                w.position.y,
+                w.position.z,
+                w.half_x,
+                w.half_z,
+                w.height,
+                w.base,
+            ],
+            &mut h,
+        );
+        f(&w.color, &mut h);
+    }
+    scene.solids.len().hash(&mut h);
+    for s in &scene.solids {
+        format!("{:?}", s.shape).hash(&mut h);
+        f(&[s.size, s.height], &mut h);
+    }
+    match &scene.ceiling {
+        Some(c) => {
+            1u8.hash(&mut h);
+            f(&[c.height], &mut h);
+            f(&c.color, &mut h);
+        }
+        None => 0u8.hash(&mut h),
+    }
+    h.finish().max(1)
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     pub scene: Scene,
@@ -322,6 +405,11 @@ pub struct World {
     /// More mip chains the frame streams, after the colour and normal atlases.
     /// Each names the object that supplies its distance and derivatives.
     pub stream_textures: Vec<StreamedTexture>,
+    /// Which scene this is, from its fixed layout (see `scene_identity`). The
+    /// same scene built twice gets the same value. The renderer drops the surface cache when the
+    /// value changes. The light key cannot do that: it changes every frame with
+    /// the fire and the puffs.
+    identity: u64,
 }
 
 /// A mip chain the frame registers, viewed through one object.
@@ -333,6 +421,7 @@ pub struct StreamedTexture {
 
 impl World {
     pub fn from_scene(scene: Scene) -> Self {
+        let identity = scene_identity(&scene);
         let mut parts = vec![FixedPart::Floor];
         if scene.ceiling.is_some() {
             parts.push(FixedPart::Ceiling);
@@ -363,7 +452,13 @@ impl World {
             color_atlas: MaterialAtlas::empty(),
             normal_atlas: MaterialAtlas::empty(),
             stream_textures: Vec::new(),
+            identity,
         }
+    }
+
+    /// See the `identity` field.
+    pub fn identity(&self) -> u64 {
+        self.identity
     }
 
     /// Scene the lighting traces. Hidden and off-screen objects stay in it.
@@ -475,7 +570,7 @@ mod tests {
     use super::*;
     use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
 
-    fn red_scene() -> Scene {
+    pub(super) fn red_scene() -> Scene {
         Scene {
             floor: Floor {
                 position: Vec3::new(0.0, 0.0, 0.0),
@@ -570,4 +665,37 @@ pub fn transform_pose(pose: &[f32; 16], point: [f32; 3]) -> [f32; 3] {
         pose[1] * point[0] + pose[5] * point[1] + pose[9] * point[2] + pose[13],
         pose[2] * point[0] + pose[6] * point[1] + pose[10] * point[2] + pose[14],
     ]
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_scene_built_twice_is_one_world() {
+        let a = World::from_scene(super::tests::red_scene());
+        let b = World::from_scene(super::tests::red_scene());
+        assert_eq!(a.identity(), b.identity());
+        assert_ne!(a.identity(), 0);
+    }
+
+    #[test]
+    fn a_moved_lamp_or_solid_keeps_the_world_but_a_new_floor_does_not() {
+        let base = super::tests::red_scene();
+        let mut lamp = base.clone();
+        if let Some(l) = lamp.lights.first_mut() {
+            l.position.x += 1.5;
+        }
+        lamp.lights.clear();
+        let mut solid = base.clone();
+        if let Some(s) = solid.solids.first_mut() {
+            s.position.x += 0.5;
+        }
+        let mut floor = base.clone();
+        floor.floor.half_x += 1.0;
+        let id = World::from_scene(base).identity();
+        assert_eq!(World::from_scene(lamp).identity(), id);
+        assert_eq!(World::from_scene(solid).identity(), id);
+        assert_ne!(World::from_scene(floor).identity(), id);
+    }
 }

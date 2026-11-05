@@ -222,16 +222,18 @@ fn the_presented_frame_shows_embers_a_trail_and_emitted_floor_light() {
     let opened = (|| {
         let mut window = Window::open_proof(1280, 720)?;
         let frame = window.pump();
-        let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-        Ok::<_, String>((window, renderer))
+        let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+        Ok::<_, String>(genos_window::Lifecycle::new(window, renderer, permit))
     })();
-    let (mut window, mut renderer) = match opened {
-        Ok(pair) => pair,
+    let mut owner = match opened {
+        Ok(owner) => owner,
         Err(err) => {
             cpu_fallback(&err);
             return;
         }
     };
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let camera = Camera::opening();
@@ -245,17 +247,17 @@ fn the_presented_frame_shows_embers_a_trail_and_emitted_floor_light() {
 
     let (mut first, sim) = cold();
     let (second, _) = cold();
-    let on = draw(&mut window, &mut renderer, &first);
-    let on_again = draw(&mut window, &mut renderer, &second);
+    let on = draw(window, renderer, &first);
+    let on_again = draw(window, renderer, &second);
     let mut bare = first.clone();
     bare.objects
         .retain(|object| !matches!(object.kind, DrawKind::Particles { .. }));
-    let background = draw(&mut window, &mut renderer, &bare);
+    let background = draw(window, renderer, &bare);
     sim.apply(&mut first, false, true);
-    let no_emit = draw(&mut window, &mut renderer, &first);
+    let no_emit = draw(window, renderer, &first);
     sim.apply(&mut first, true, true);
     first.scene.lights.clear();
-    let dark = draw(&mut window, &mut renderer, &first);
+    let dark = draw(window, renderer, &first);
 
     assert_picture(
         "cold-1",

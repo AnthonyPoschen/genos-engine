@@ -16,13 +16,13 @@ use genos_render::{Renderer, World};
 use genos_scene::{Camera, Floor, Light, Scene, Vec3};
 use genos_window::Window;
 
-fn open() -> (Window, Renderer) {
+fn open() -> genos_window::Lifecycle<Renderer> {
     std::env::set_var("GENOS_GPU_TIMES", "30");
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (window, renderer)
+    genos_window::Lifecycle::new(window, renderer, permit)
 }
 
 fn room() -> World {
@@ -64,7 +64,9 @@ fn text_of(value: &Value) -> String {
 
 #[test]
 fn lighting_settings_round_trip_over_mcp() {
-    let (mut window, mut renderer) = open();
+    let mut owner = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut world = room();
     let mut camera = Camera::opening();
     let mut tools = Tools::new();
@@ -84,7 +86,7 @@ fn lighting_settings_round_trip_over_mcp() {
     while !worker.is_finished() {
         assert!(started.elapsed() < Duration::from_secs(180), "mcp round trip timed out");
         tools.before_draw(&mut Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut world.scene,
         });

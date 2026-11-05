@@ -202,8 +202,8 @@ bool screen_list_add(uint slot) {
         return false;
     }
     uint at = screen_appending
-        ? screen_list_base() + atomicAdd(gstats.diag[41], 1u)
-        : atomicAdd(gstats.diag[40], 1u);
+        ? screen_list_base() + atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_LIST_FINE], 1u)
+        : atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_LIST_COARSE], 1u);
     if (at < screen_pixels()) {
         outc.px[screen_at(1u, at)] = slot;
     }
@@ -235,8 +235,8 @@ void screen_list_from(uint slot) {
 }
 
 void screen_publish() {
-    uint fine = gstats.diag[62];
-    uint changed = gstats.diag[61];
+    uint fine = gstats.diag[LIGHTING_DIAG_SCREEN_FINE];
+    uint changed = gstats.diag[LIGHTING_DIAG_SCREEN_CHANGED];
     uint frac = 0u;
     if (fine > 0u) {
         frac = uint(min(1000000.0, 1000000.0 * float(changed) / float(fine)));
@@ -249,9 +249,9 @@ void screen_publish() {
 
 uint screen_list_n() {
     if (screen_list_reuse()) {
-        return screen_list_base() + gstats.diag[41];
+        return screen_list_base() + gstats.diag[LIGHTING_DIAG_SCREEN_LIST_FINE];
     }
-    return gstats.diag[40];
+    return gstats.diag[LIGHTING_DIAG_SCREEN_LIST_COARSE];
 }
 
 // Writes this frame's count word. Readers of the list length use the other
@@ -283,13 +283,13 @@ void main() {
         uint changed = screen_wg_sum(bits.z);
         if (gl_LocalInvocationIndex == 0u) {
             if (fine != 0u) {
-                atomicAdd(gstats.diag[62], fine);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_FINE], fine);
             }
             if (coarse != 0u) {
-                atomicAdd(gstats.diag[63], coarse);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_COARSE], coarse);
             }
             if (changed != 0u) {
-                atomicAdd(gstats.diag[61], changed);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_CHANGED], changed);
             }
         }
         // The workgroup sums above are the barrier. The list walk is after it.

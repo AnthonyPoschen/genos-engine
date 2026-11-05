@@ -3,7 +3,7 @@
 //!
 //! CPU only and seeded, so it runs headless anywhere. Each scene prints
 //! `fog_ref_err_near` (worst relative error against the closed form) and the
-//! renderer row stays `NOT-IMPLEMENTED` until stage F2.
+//! renderer row stays `NOT-IMPLEMENTED` until the GPU half of stage F2.
 
 use std::f64::consts::PI;
 

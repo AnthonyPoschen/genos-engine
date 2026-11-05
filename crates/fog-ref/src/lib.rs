@@ -1,4 +1,6 @@
-//! CPU fog reference for stage F0 of ADR 0026.
+//! CPU fog reference for ADR 0026: the F0 path tracer, the F1 froxel light
+//! picks, and the F2 volumetric integration (injection, front-to-back, no
+//! temporal reprojection).
 //!
 //! A single-scattering path tracer for participating media (homogeneous slab and
 //! exponential height fog, Henyey-Greenstein phase, sun and point lamps, box
