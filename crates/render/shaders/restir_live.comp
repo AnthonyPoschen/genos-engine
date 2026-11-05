@@ -22,7 +22,10 @@ layout(std430, set = 0, binding = 19) buffer RestirWords {
 const uint LAMP_EMPTY = 0xffffffffu;
 const uint PROPOSAL_TARGET = 1u;
 const float M_HI = 65536.0;
-const float RESTIR_DEPTH_REL = 0.02;
+// Temporal/spatial similarity (Bitterli 2020 sec. 6: 10% depth, 25 degree normal;
+// RTXDI's default depth threshold is also 0.1). 2% rejected oblique walls and
+// floors on a camera turn, where a half-pixel shift moves the depth more.
+const float RESTIR_DEPTH_REL = 0.1;
 const float RESTIR_DEPTH_ABS = 0.05;
 const float RESTIR_NORMAL_MIN = 0.9;
 const float RESTIR_ORIGIN_LIFT = 0.02;
@@ -30,6 +33,8 @@ const vec3 RESTIR_LUMA = vec3(0.2126, 0.7152, 0.0722);
 const float RESTIR_FWD_MIN = 0.5;
 const float RESTIR_Z_MIN = 1.0e-3;
 const float RESTIR_NDC_HALF = 0.5;
+const uint RESTIR_TEMPORAL_TRIES = 5u;
+const ivec2 RESTIR_TEMPORAL_OFFSETS[5] = ivec2[5](ivec2(0, 0), ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
 
 uint64_t g_state;
 uint64_t g_inc;
@@ -271,17 +276,38 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     if (px.x < 0.0 || px.y < 0.0 || px.x >= float(width) || px.y >= float(height)) {
         return false;
     }
-    hist_pixel = uint(floor(px.y)) * width + uint(floor(px.x));
     uint stride = restir_hdr(19u);
     uint prev = restir_hdr(20u) == 0u ? restir_hdr(4u) : restir_hdr(5u);
-    uint geo = prev + hist_pixel * stride;
-    float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
-    vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
-    vec2 centre = floor(px) + RESTIR_NDC_HALF;
-    vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(width)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(height)));
-    hist_pos = eye + z_prev * (fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up);
-    hist_n = n_prev;
-    return restir_depth_normal(z, z_prev, nrm, n_prev);
+    // The reprojected pixel first, then its 4-neighbours (RTXDI temporal
+    // search): a camera turn lands the surface between pixel centres, and an
+    // edge pixel whose nearest history is the other side of a silhouette can
+    // still find its own surface one pixel over. Only a true disocclusion
+    // (no candidate passes depth and normal) drops the history.
+    ivec2 base = ivec2(floor(px));
+    for (uint i = 0u; i < RESTIR_TEMPORAL_TRIES; i++) {
+        ivec2 q = base + RESTIR_TEMPORAL_OFFSETS[i];
+        if (q.x < 0 || q.y < 0 || q.x >= int(width) || q.y >= int(height)) {
+            continue;
+        }
+        uint cand = uint(q.y) * width + uint(q.x);
+        uint geo = prev + cand * stride;
+        float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
+        vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
+        vec2 centre = vec2(q) + RESTIR_NDC_HALF;
+        vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(width)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(height)));
+        vec3 dir_h = fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up;
+        // Compare at the candidate's own ray: this frame's surface plane
+        // (pos, nrm) hit along the history pixel's ray, against the stored depth.
+        float denom = dot(dir_h, nrm);
+        float z_cmp = abs(denom) > RESTIR_Z_MIN ? dot(pos - eye, nrm) / denom : z;
+        if (restir_depth_normal(z_cmp, z_prev, nrm, n_prev)) {
+            hist_pixel = cand;
+            hist_pos = eye + z_prev * dir_h;
+            hist_n = n_prev;
+            return true;
+        }
+    }
+    return false;
 }
 
 void restir_initial(uint pixel) {
