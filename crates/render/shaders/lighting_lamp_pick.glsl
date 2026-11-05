@@ -218,6 +218,71 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
     return true;
 }
 
+// ReSTIR's shaded running mean on a camera move: the same motion vector as
+// lamp_pick_reproject, but reservoir-style similarity (10% depth, as
+// restir_reproject and Bitterli 2020) compared on each tap's own ray, and the
+// reprojected pixel then its 4-neighbours. 2% at the nearest pixel dropped
+// the mean on oblique floors and walls during a turn, which put raw
+// one-sample noise on screen. Only a tap holding a mean (`geo_tag`) counts.
+const float RESTIR_MEAN_DEPTH_REL = 0.1;
+bool restir_mean_reproject(vec3 pos, vec3 nrm, uint geo_tag, out uint hist_pixel) {
+    hist_pixel = 0u;
+    if (!lighting_gi_on()) {
+        return false;
+    }
+    vec4 eye = work.v[lighting_change_at() + 1u];
+    if (eye.w < 0.5) {
+        return false;
+    }
+    vec3 right = work.v[lighting_change_at() + 2u].xyz;
+    float t = work.v[lighting_change_at() + 2u].w;
+    vec3 up = work.v[lighting_change_at() + 3u].xyz;
+    vec3 fwd = work.v[lighting_change_at() + 4u].xyz;
+    float aspect = work.v[lighting_change_at() + 4u].w;
+    if (dot(fwd, fwd) < 0.5 || t == 0.0) {
+        return false;
+    }
+    vec3 rel = pos - eye.xyz;
+    float z = dot(rel, fwd);
+    if (z <= 1.0e-3) {
+        return false;
+    }
+    vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
+    vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+    if (px.x < 0.0 || px.y < 0.0 || px.x >= float(pc.dims.x) || px.y >= float(pc.dims.y)) {
+        return false;
+    }
+    const ivec2 taps[5] = ivec2[5](ivec2(0, 0), ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+    ivec2 base = ivec2(floor(px));
+    for (uint i = 0u; i < 5u; i++) {
+        ivec2 q = base + taps[i];
+        if (q.x < 0 || q.y < 0 || q.x >= int(pc.dims.x) || q.y >= int(pc.dims.y)) {
+            continue;
+        }
+        uint cand = uint(q.y) * pc.dims.x + uint(q.x);
+        uvec4 geo = lamp_geo_load(cand, lamp_res_slot_prev());
+        float z_prev = uintBitsToFloat(geo.x);
+        if (geo.z != geo_tag || !(z_prev > 0.0)) {
+            continue;
+        }
+        vec2 c = vec2(q) + 0.5;
+        vec2 ndc_h = vec2(c.x / (0.5 * float(pc.dims.x)) - 1.0, 1.0 - c.y / (0.5 * float(pc.dims.y)));
+        vec3 dir_h = fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up;
+        float denom = dot(dir_h, nrm);
+        float z_cmp = abs(denom) > 1.0e-3 ? dot(rel, nrm) / denom : z;
+        float gap = abs(z_cmp - z_prev);
+        if (!(z_cmp > 0.0) || (gap / z_cmp > RESTIR_MEAN_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS)) {
+            continue;
+        }
+        if (dot(lighting_unpack_normal(geo.y), nrm) < LAMP_PICK_NORMAL_MIN) {
+            continue;
+        }
+        hist_pixel = cand;
+        return true;
+    }
+    return false;
+}
+
 uint lamp_pick_find(LampList list, uint count, uint lamp) {
     if (lamp == LAMP_ALL) {
         return ~0u;
