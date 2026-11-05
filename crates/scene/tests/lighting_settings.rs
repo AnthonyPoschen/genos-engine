@@ -21,7 +21,7 @@ use genos_scene::{
     LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
     LAMP_PICK_SPATIAL_RADIUS,
     SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_DEFAULT_SC_FLAGS,
-    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
+    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
 };
 
 fn room() -> &'static str {
@@ -52,6 +52,29 @@ fn surface_cache_attach_movers_round_trips() {
     assert!(settings
         .set_key("surface_cache.attach_movers", "maybe")
         .is_err());
+}
+
+#[test]
+fn surface_cache_sh_cells_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(!settings.surface_cache.sh_cells);
+    settings.set_key("surface_cache.sh_cells", "on").unwrap();
+    assert!(settings.surface_cache.sh_cells);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_cells);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings.set_key("surface_cache.sh_cells", "off").unwrap();
+    assert!(!settings.surface_cache.sh_cells);
+    assert!(settings.set_key("surface_cache.sh_cells", "maybe").is_err());
+}
+
+#[test]
+fn cells_only_toggle_parses() {
+    let mut settings = LightingSettings::default();
+    settings.set_key("toggles", "cells_only").unwrap();
+    assert_eq!(settings.experiments.toggles, LIGHTING_TOGGLE_CELLS_ONLY);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.experiments.toggles, LIGHTING_TOGGLE_CELLS_ONLY);
 }
 
 #[test]

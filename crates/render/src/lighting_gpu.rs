@@ -1133,8 +1133,10 @@ impl Gpu {
                     Memory::Device,
                     &share,
                 )?;
+                // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1 (1.5 vec4:
+                // LIGHTING_SH_AT, LIGHTING_SH_B_AT in lighting_cache.glsl).
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * 368,
+                    LIGHTING_CACHE_SLOTS * 392,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -2839,7 +2841,7 @@ impl Gpu {
         // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
         // 16777216 and up turned every lower flag on instead).
         // S78S debug isolate toggles (`experiments.toggles`): direct only rides on
-        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
+        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-16.
         let toggles = self.lighting.settings.experiments.toggles;
         // Bit 20 is the estimator. Bit 30 selects the older hold path.
         // `surface_cache.blend` forces both, so `experiments.sc_flags` cannot
@@ -2856,6 +2858,12 @@ impl Gpu {
         match self.lighting.settings.surface_cache.blend {
             genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
             genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+        }
+        // ADR 0039 stage 2: `surface_cache.sh_cells` sets bit 23 (SH-L1 world
+        // cells read at the true normal); `experiments.sc_flags` can set it too.
+        const SH_CELLS: u32 = 1 << 23;
+        if self.lighting.settings.surface_cache.sh_cells {
+            flags_all |= SH_CELLS;
         }
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
@@ -2928,7 +2936,7 @@ impl Gpu {
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
         let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
+        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {

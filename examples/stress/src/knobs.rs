@@ -427,6 +427,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "Attach movers",
             lighting.surface_cache.attach_movers,
         ),
+        Knob::switch(
+            "lighting_surface_cache_sh_cells",
+            "SH cells (ADR 0039)",
+            lighting.surface_cache.sh_cells,
+        ),
         Knob::choice(
             "lighting_surface_cache_blend",
             "Surface cache blend",
@@ -640,6 +645,7 @@ pub fn apply_lighting_knob(
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
         "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
+        "lighting_surface_cache_sh_cells" => ("surface_cache.sh_cells", on_off(v)),
         "lighting_surface_cache_blend" => (
             "surface_cache.blend",
             if v >= 0.5 { "hold" } else { "msme" }.to_string(),
@@ -859,6 +865,7 @@ mod tests {
         "lighting_gi_refresh",
         "lighting_budget_shift",
         "lighting_surface_cache_attach_movers",
+        "lighting_surface_cache_sh_cells",
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",
