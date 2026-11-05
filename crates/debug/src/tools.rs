@@ -2547,7 +2547,7 @@ mod tests {
     fn drive(job: &mut RefJob) -> (u8, u32) {
         let mut draws = 0u32;
         while job.live.is_none() || job.reference.is_none() {
-            let img = Image { width: 1, height: 1, rgb: vec![draws as u8; 3] };
+            let img = Image { width: 1, height: 1, rgb: vec![u8::try_from(draws).unwrap_or(u8::MAX); 3] };
             job.on_draw(Some(&img));
             draws += 1;
             if job.reference.is_none() {
