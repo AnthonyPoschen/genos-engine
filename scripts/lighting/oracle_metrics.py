@@ -288,6 +288,7 @@ def score(out):
         per = []
         blots = []
         mids = []
+        energy = []
         for lv in sorted(glob.glob(os.path.join(out, "oracle", n, "f*-live.png"))):
             stem = lv[:-len("-live.png")]
             ref = stem + "-reference.png"
@@ -299,10 +300,13 @@ def score(out):
             per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
             if ll.shape == rl.shape:
                 blots.append(blotch(ll, rl))
+                energy.append(float(ll.sum()) / max(float(rl.sum()), 1e-9))
                 if n.startswith("slant"):
                     mids.append(mid_err(ll, rl))
         if blots:
             s.update(blotch_mean=round(float(np.mean(blots)), 4), blotch_worst=round(max(blots), 4))
+        if energy:
+            s.update(energy_mean=round(float(np.mean(energy)), 4), energy_min=round(min(energy), 4))
         if mids:
             s.update(slant_mid_err_mean=round(float(np.mean(mids)), 4), slant_mid_err_worst=round(max(mids), 4))
         refs = {int(re.search(r"f(\d+)-reference", p).group(1)): grid_metric.load(p)

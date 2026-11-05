@@ -92,6 +92,9 @@ number is unchanged and `grid_worst` stays reported.
   arm against arm at one size; the gi-check room numbers are 320x180 of a
   640x360 run. With `GENOS_LIGHTING_TOGGLES=cells_only` it scores the 25 cm
   cells alone (ADR 0039's cache-only blotch gate).
+* `energy_mean`, `energy_min`: the live picture's summed linear luminance over
+  the reference's, per traced frame (1.0 is no light lost or gained). Direct
+  light is in both, so it moves less than a bounce-only ratio.
 * `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`, the unweighted
   error over the middle half of the picture, where the turned box is.
 * `lighting_ms_p50_lavapipe`: lavapipe timing, only useful run against run on
