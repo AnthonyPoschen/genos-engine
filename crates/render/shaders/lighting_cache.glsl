@@ -2427,11 +2427,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
         // ADR 0039 stage 2: the cells read at the hit's true normal, blended
         // across the 25 cm cells there (a coarser hit cell: its own, tilted).
-        // Mover-frame cells keep the per-axis read. Ray hits (not
-        // lighting_sc_display) read only the hit cell, tilted: no extra lookups
-        // (the bilinear read's 12 cost the turn scene 3.5x lighting time).
+        // Mover-frame cells keep the per-axis read.
         if (lighting_sh_on() && lighting_obj_salt < 0.5) {
-            if (lighting_sc_display && hsize < 1.2 * LIGHTING_SH_CELL) {
+            if (hsize < 1.2 * LIGHTING_SH_CELL) {
                 vec4 b = lighting_sh_read(pos, n, false);
                 if (b.w > 0.5) {
                     return b.rgb * keep;
