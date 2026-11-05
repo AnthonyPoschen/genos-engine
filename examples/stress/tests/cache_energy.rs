@@ -304,7 +304,10 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
         for (tag, img) in [("live_direct", direct.clone()), ("live_bounce", bounce.clone()), ("ref_b0", ref_l(&b0)), ("ref_b64", ref_l(&b64))] {
             let mut out = format!("P2\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
             for v in img {
-                out.extend(format!("{} ", v.map_or(255, |v| (v.clamp(0.0, 1.0).sqrt() * 254.0) as u32)).bytes());
+                out.extend(format!("{} ", v.map_or(255, |v| {
+                    let t = v.clamp(0.0, 1.0).sqrt() * 254.0;
+                    (0u32..=254).rev().find(|&b| f64::from(b) <= t).unwrap_or(0)
+                })).bytes());
             }
             std::fs::write(format!("{dir}/{name}_{tag}.pgm"), out).expect("pgm");
         }

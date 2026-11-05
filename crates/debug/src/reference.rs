@@ -304,7 +304,15 @@ pub fn bounce_irradiance(
     let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let n = normalize(normal);
     let from = add(point, scale(n, 0.02));
-    let side = (f64::from(samples.max(1))).sqrt().ceil() as u32;
+    // ceil(sqrt(samples)) by integer search — no f64→u32 cast.
+    let side = {
+        let n = u64::from(samples.max(1));
+        let mut s = 1u64;
+        while s.saturating_mul(s) < n {
+            s += 1;
+        }
+        u32::try_from(s).unwrap_or(u32::MAX)
+    };
     let mut rng = Rng::new(seed ^ 0xB0_0CE);
     let mut sum = [0.0f32; 3];
     for k in 0..samples.max(1) {
