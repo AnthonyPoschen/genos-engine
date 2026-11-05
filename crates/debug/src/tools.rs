@@ -270,9 +270,7 @@ struct RefJob {
     scene: Option<SceneRead>,
     /// The live picture used the legacy shoulder, so a missing scene image may undo it.
     legacy_display: bool,
-    /// `measure: true`: the live picture is the frame drawn at the request (after
-    /// `frames`), and the trace is waited for before another frame is drawn, so the
-    /// trace's wall time adds no lighting updates to the picture or to later frames.
+    /// `measure: true` ([`RefTiming::Measure`]): see there.
     timing: RefTiming,
 }
 
@@ -281,8 +279,21 @@ struct RefJob {
 enum RefTiming {
     /// The frame after the trace (and `frames`); frames draw while it traces.
     Interactive,
-    /// The frame at the request (after `frames`); the frame thread waits for the trace.
+    /// Scripted and headless measurement. Exactly one frame is drawn, so the
+    /// lighting updates once per measurement: the draw after the request. It is the
+    /// live picture for `compare`, after `frames`. `reference` has no live picture,
+    /// so `frames` is ignored. The frame thread then joins the CPU trace, and window
+    /// events are not handled until the trace ends.
     Measure,
+}
+
+/// The `measure` argument of `reference` and `compare` (default interactive).
+fn ref_timing(args: &Args) -> Result<RefTiming, String> {
+    Ok(if args.bool("measure")? == Some(true) {
+        RefTiming::Measure
+    } else {
+        RefTiming::Interactive
+    })
 }
 
 impl RefJob {
@@ -1324,11 +1335,7 @@ impl Tools {
                     paused: self.paused,
                     scene: None,
                     legacy_display: true,
-                    timing: if args.bool("measure")? == Some(true) {
-                        RefTiming::Measure
-                    } else {
-                        RefTiming::Interactive
-                    },
+                    timing: ref_timing(args)?,
                 };
                 // Reuse a stored reference instead of tracing again.
                 if let Some(stored) = args.str("reference")? {
@@ -2578,6 +2585,20 @@ mod tests {
             job.shot = None;
             assert_eq!(drive_trace(&mut job), 1, "trace delay {delay_ms} ms");
         }
+    }
+
+    #[test]
+    fn the_measure_argument_selects_measure_mode() {
+        use genos_mcp::json::{object, Value};
+        assert_eq!(ref_timing(&Args(&object([]))), Ok(RefTiming::Interactive));
+        assert_eq!(
+            ref_timing(&Args(&object([("measure", Value::Bool(true))]))),
+            Ok(RefTiming::Measure)
+        );
+        assert_eq!(
+            ref_timing(&Args(&object([("measure", Value::Bool(false))]))),
+            Ok(RefTiming::Interactive)
+        );
     }
 
     #[test]
