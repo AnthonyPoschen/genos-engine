@@ -2981,6 +2981,9 @@ impl Gpu {
                 let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
                 let ray_budget = self.lighting.settings.surface_cache.ray_budget;
                 let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                // Drain check noise test (ADR 0039 stage 1), word 14. A zero
+                // word is sigma 0, the 1 % gap alone.
+                let drain_sigma = self.lighting.settings.surface_cache.drain_sigma.to_bits();
                 self.write_device(
                     cmd,
                     keys,
@@ -2998,6 +3001,12 @@ impl Gpu {
                     keys,
                     (LIGHTING_ARGS_AT + 13) * 4,
                     &firefly_sigma.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 14) * 4,
+                    &drain_sigma.to_ne_bytes(),
                 )?;
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);

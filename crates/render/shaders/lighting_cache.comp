@@ -209,6 +209,8 @@ void main() {
         atomicAdd(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT], su);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_HELD_AT], hu);
         atomicAdd(ckeys.key[LIGHTING_DRAIN_CELLS_AT], 1u);
+        uint du = su > hu ? su - hu : hu - su;
+        atomicAdd(ckeys.key[LIGHTING_DRAIN_SQ_AT], min((min(du, 65535u) * min(du, 65535u)) >> 8u, LIGHTING_DRAIN_SQ_MAX));
         atomicAdd(gstats.wrc_sample_sum, su);
         atomicAdd(gstats.wrc_held_sum, hu);
     }
