@@ -2169,7 +2169,7 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     float ws = 0.0;
     uint looks = 0u;
     [[dont_unroll]] for (uint ax = 0u; ax < 3u; ax++) {
-        if (abs(n[ax]) < LIGHTING_SH_AXIS_MIN) {
+        if (abs(n[ax]) < 1.0) {
             continue;
         }
         float wa = n[ax] * n[ax];
