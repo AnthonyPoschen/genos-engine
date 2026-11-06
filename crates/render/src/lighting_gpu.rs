@@ -37,6 +37,11 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
+/// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
+/// or fp32 (48 B). lighting_cache_slots.glsl `LIGHTING_SH_HALF` has the same value.
+const LIGHTING_SH_HALF: bool = true;
+/// Cache bytes a slot: 23 vec4 regions plus the SH-L1 (1.5 vec4 at fp16, 3 at fp32).
+const LIGHTING_CACHE_SLOT_BYTES: u64 = 368 + if LIGHTING_SH_HALF { 24 } else { 48 };
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
@@ -1148,8 +1153,10 @@ impl Gpu {
                     Memory::Device,
                     &share,
                 )?;
+                // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1
+                // (LIGHTING_SH_AT.. in lighting_cache.glsl, LIGHTING_SH_HALF).
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * 368,
+                    LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_SLOT_BYTES,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -2862,7 +2869,7 @@ impl Gpu {
         // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
         // 16777216 and up turned every lower flag on instead).
         // S78S debug isolate toggles (`experiments.toggles`): direct only rides on
-        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
+        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-16.
         let toggles = self.lighting.settings.experiments.toggles;
         // Bit 20 is the estimator. Bit 30 selects the older hold path.
         // `surface_cache.blend` forces both, so `experiments.sc_flags` cannot
@@ -2879,6 +2886,12 @@ impl Gpu {
         match self.lighting.settings.surface_cache.blend {
             genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
             genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+        }
+        // ADR 0039 stage 2: `surface_cache.sh_cells` sets bit 23 (SH-L1 world
+        // cells read at the true normal); `experiments.sc_flags` can set it too.
+        const SH_CELLS: u32 = 1 << 23;
+        if self.lighting.settings.surface_cache.sh_cells {
+            flags_all |= SH_CELLS;
         }
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
@@ -2951,7 +2964,7 @@ impl Gpu {
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
         let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
+        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12)) as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
@@ -4603,3 +4616,27 @@ mod sun_step {
 }
 
 include!("lighting_dispatch.rs");
+
+#[cfg(test)]
+mod sh_knob_tests {
+    use super::*;
+
+    /// The low-spec SH storage knob is one value in two places: the shader's
+    /// layout and the buffer Rust allocates for it must agree.
+    #[test]
+    fn sh_storage_knob_matches_the_shader_and_sizes_the_cache() {
+        let glsl = include_str!("../shaders/lighting_cache_slots.glsl");
+        let line = glsl
+            .lines()
+            .find(|l| l.starts_with("const bool LIGHTING_SH_HALF"))
+            .expect("LIGHTING_SH_HALF in lighting_cache_slots.glsl");
+        assert_eq!(line.contains("true"), LIGHTING_SH_HALF, "{line}");
+        let sh_bytes = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
+        assert_eq!(sh_bytes, if LIGHTING_SH_HALF { 24 } else { 48 });
+        let rays = glsl
+            .lines()
+            .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
+            .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
+        assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
+    }
+}

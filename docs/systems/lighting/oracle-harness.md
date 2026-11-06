@@ -24,6 +24,7 @@ JSON, one object per scenario) plus the pictures it scored.
 | `spin` | The box nearest the hall spinning at 2 rad/s, lamps on, at night | 240 |
 | `switch` | Dark room at midnight (lamps off for 10 s first), every lamp turns on in one frame | 8 dark + 120 |
 | `turn` | Camera turns 90 degrees in one second, then holds | 90 |
+| `slant`, `slant-day` | The box nearest the hall turned 0.6 rad (34 degrees) and held, seen close, lamps on at 22:00 (`slant`) or sky at 12:00 (`slant-day`). Traced 30, 120 and 300 frames after the turn (ADR 0039 stage 2: slanted surfaces) | 120 |
 | `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
 | `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
 
@@ -84,6 +85,18 @@ number is unchanged and `grid_worst` stays reported.
   per-texel count.
 * `switch` only: `frames_to_ref`, the first frame after the switch within
   1.1x of the settled error.
+* `blotch_mean`, `blotch_worst`: the gi-check still-frame blotch
+  (`gi_check/metrics.rs` `blotch`) on each traced frame: the error band blurred
+  s px minus blurred 6 s px, relative to the reference blurred s px plus 5% of
+  its mean. s is 4 px per 320 px of width (2 px at 160x90). It compares only
+  arm against arm at one size; the gi-check room numbers are 320x180 of a
+  640x360 run. With `GENOS_LIGHTING_TOGGLES=cells_only` it scores the 25 cm
+  cells alone (ADR 0039's cache-only blotch gate).
+* `energy_mean`, `energy_min`: the live picture's summed linear luminance over
+  the reference's, per traced frame (1.0 is no light lost or gained). Direct
+  light is in both, so it moves less than a bounce-only ratio.
+* `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`, the unweighted
+  error over the middle half of the picture, where the turned box is.
 * `lighting_ms_p50_lavapipe`: lavapipe timing, only useful run against run on
   the same machine.
 
