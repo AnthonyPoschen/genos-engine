@@ -507,10 +507,12 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
-    /// same rays, no new ones). A slanted hit tilts the owning cell from its
-    /// axis mean to the true normal. An axis-aligned seed keeps that mean, so
-    /// the texel's first sample is the energy the cell measured. Off is today's
-    /// per-axis read. Forces `sc_flags` bit 23.
+    /// same rays, no new ones). An axis-aligned ray hit, including the value
+    /// stored as a display seed, tilts the one owning cell. At the axis that
+    /// tilt is the cell's mean, and the hit does not blend its neighbours. A
+    /// slanted screen pixel's lattice read is empty, because an axis is used
+    /// only when its component has magnitude 1, and compose then keeps the
+    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
