@@ -3791,8 +3791,22 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
-                c.pixels, c.kept, c.fills, c.cache, c.spatial
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
+                 hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
+                 hit_near_tests={} px_lamps={} hit_lamps={}",
+                c.pixels,
+                c.kept,
+                c.fills,
+                c.cache,
+                c.spatial,
+                c.kept_live,
+                c.kept_due,
+                c.kept_shade,
+                c.fill_live,
+                c.fill_shade,
+                c.near_tests,
+                c.px_lamps,
+                c.hit_lamps
             )
         } else {
             String::new()

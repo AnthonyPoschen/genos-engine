@@ -8,7 +8,6 @@
 #![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
@@ -271,6 +270,68 @@ struct RefJob {
     scene: Option<SceneRead>,
     /// The live picture used the legacy shoulder, so a missing scene image may undo it.
     legacy_display: bool,
+    /// `measure: true` ([`RefTiming::Measure`]): see there.
+    timing: RefTiming,
+}
+
+/// When a reference job takes its live picture and its trace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RefTiming {
+    /// The frame after the trace (and `frames`); frames draw while it traces.
+    Interactive,
+    /// Scripted and headless measurement. Exactly one frame is drawn, so the
+    /// lighting updates once per measurement: the draw after the request. It is the
+    /// live picture for `compare`, after `frames`. `reference` has no live picture,
+    /// so `frames` is ignored. The frame thread then joins the CPU trace, and window
+    /// events are not handled until the trace ends.
+    Measure,
+}
+
+/// The `measure` argument of `reference` and `compare` (default interactive).
+fn ref_timing(args: &Args) -> Result<RefTiming, String> {
+    Ok(if args.bool("measure")? == Some(true) {
+        RefTiming::Measure
+    } else {
+        RefTiming::Interactive
+    })
+}
+
+impl RefJob {
+    /// Whether this draw's picture is the live one.
+    fn live_due(&self) -> bool {
+        self.shot.is_some()
+            && self.live.is_none()
+            && self.frames_left == 0
+            && (self.timing == RefTiming::Measure || self.reference.is_some())
+    }
+
+    /// One drawn frame: counts down `frames`, takes the trace once it is done
+    /// (blocking in measure mode once the live picture is held), and holds `image`
+    /// as the live picture when it is due. True when `image` was taken.
+    fn on_draw(&mut self, image: Option<&Image>) -> bool {
+        self.frames_left = self.frames_left.saturating_sub(1);
+        let mut took = false;
+        if self.live_due() {
+            if let Some(img) = image {
+                self.live = Some(img.clone());
+                took = true;
+            }
+        }
+        let wait = self.timing == RefTiming::Measure && (self.live.is_some() || self.shot.is_none());
+        if self.worker.as_ref().is_some_and(|w| wait || w.is_finished()) {
+            self.reference = self.worker.take().and_then(|w| w.join().ok());
+            if self.reference.is_none() {
+                self.shot = None;
+            }
+        }
+        if !took && self.live_due() {
+            if let Some(img) = image {
+                self.live = Some(img.clone());
+                took = true;
+            }
+        }
+        took
+    }
 }
 
 struct Running {
@@ -487,8 +548,7 @@ impl Tools {
         self.reading = self.jobs.iter().find_map(|r| match &r.job {
             Job::Shots { shots, got, .. } => shots.get(got.len()).copied(),
             Job::Flicker { shot, .. } => Some(*shot),
-            Job::Reference(job)
-                if job.reference.is_some() && job.frames_left == 0 && job.live.is_none() =>
+            Job::Reference(job) if job.live_due() =>
             {
                 job.shot
             }
@@ -562,28 +622,13 @@ impl Tools {
                         .then(|| finish_shots(shots, got, then, &mut self.captures))
                 }
                 Job::Reference(job) => {
-                    job.frames_left = job.frames_left.saturating_sub(1);
-                    if job.worker.as_ref().is_some_and(|w| w.is_finished()) {
-                        job.reference = job.worker.take().and_then(|w| w.join().ok());
-                        if job.reference.is_none() {
-                            job.shot = None;
-                        }
-                    }
-                    if !image_used
-                        && job.reference.is_some()
-                        && job.frames_left == 0
-                        && job.live.is_none()
-                        && job.shot.is_some()
-                    {
-                        if let Some(img) = &image {
-                            job.live = Some(img.clone());
-                            job.scene = renderer
-                                .read_scene()
-                                .ok()
-                                .filter(|read| !read.rgb.is_empty());
-                            job.legacy_display = renderer.hdr_legacy_display();
-                            image_used = true;
-                        }
+                    if job.on_draw(if image_used { None } else { image.as_ref() }) {
+                        job.scene = renderer
+                            .read_scene()
+                            .ok()
+                            .filter(|read| !read.rgb.is_empty());
+                        job.legacy_display = renderer.hdr_legacy_display();
+                        image_used = true;
                     }
                     let ready =
                         job.reference.is_some() && (job.shot.is_none() || job.live.is_some());
@@ -1290,6 +1335,7 @@ impl Tools {
                     paused: self.paused,
                     scene: None,
                     legacy_display: true,
+                    timing: ref_timing(args)?,
                 };
                 // Reuse a stored reference instead of tracing again.
                 if let Some(stored) = args.str("reference")? {
@@ -2442,6 +2488,125 @@ fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Blocks this thread for ms (a receive that nothing sends to).
+    fn wait_ms(ms: u64) {
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let _ = rx.recv_timeout(std::time::Duration::from_millis(ms));
+    }
+
+    fn stub_reference() -> Reference {
+        Reference {
+            image: Image { width: 1, height: 1, rgb: vec![0, 0, 0] },
+            linear: vec![[0.0; 3]],
+            hit: vec![true],
+            spp: 1,
+            seconds: 0.0,
+            noise: 0.0,
+            specular: None,
+        }
+    }
+
+    fn stub_job(measure: bool, delay_ms: u64) -> RefJob {
+        RefJob {
+            cache: None,
+            spp: 1,
+            max_spp: 1,
+            noise_target: 0.0,
+            seconds: 0.0,
+            block: 1,
+            max_bounces: 1,
+            triangles: false,
+            aov: Aov::Full,
+            size: (1, 1),
+            worker: Some(std::thread::spawn(move || {
+                wait_ms(delay_ms);
+                stub_reference()
+            })),
+            reference: None,
+            frames_left: 0,
+            shot: Some(Shot { look: Look::parse("full").unwrap(), ui: false }),
+            live: None,
+            name: "reference".into(),
+            prefix: None,
+            grid: (1, 1),
+            region: Region([0.0, 0.0, 1.0, 1.0]),
+            paused: true,
+            scene: None,
+            legacy_display: true,
+            timing: if measure {
+                RefTiming::Measure
+            } else {
+                RefTiming::Interactive
+            },
+        }
+    }
+
+    /// Draws frames (draw i's picture is the byte i) until the job holds its
+    /// live picture and its trace. Returns the live byte and the frames drawn.
+    fn drive(job: &mut RefJob) -> (u8, u32) {
+        let mut draws = 0u32;
+        while job.live.is_none() || job.reference.is_none() {
+            let img = Image { width: 1, height: 1, rgb: vec![u8::try_from(draws).unwrap_or(u8::MAX); 3] };
+            job.on_draw(Some(&img));
+            draws += 1;
+            if job.reference.is_none() {
+                wait_ms(5);
+            }
+            assert!(draws < 1000, "the reference job never finished");
+        }
+        (job.live.as_ref().unwrap().rgb[0], draws)
+    }
+
+    #[test]
+    fn a_measured_reference_holds_the_requested_frame_whatever_the_trace_takes() {
+        for delay_ms in [0, 40, 160] {
+            let mut job = stub_job(true, delay_ms);
+            assert_eq!(drive(&mut job), (0, 1), "trace delay {delay_ms} ms");
+        }
+    }
+
+    /// Draws until the trace is held; the number of frames drawn.
+    fn drive_trace(job: &mut RefJob) -> u32 {
+        let mut draws = 0u32;
+        while job.reference.is_none() {
+            job.on_draw(None);
+            draws += 1;
+            wait_ms(5);
+            assert!(draws < 1000, "the trace never finished");
+        }
+        draws
+    }
+
+    #[test]
+    fn a_measured_trace_draws_one_frame_whatever_the_trace_takes() {
+        for delay_ms in [0, 40, 160] {
+            let mut job = stub_job(true, delay_ms);
+            job.shot = None;
+            assert_eq!(drive_trace(&mut job), 1, "trace delay {delay_ms} ms");
+        }
+    }
+
+    #[test]
+    fn the_measure_argument_selects_measure_mode() {
+        use genos_mcp::json::{object, Value};
+        assert_eq!(ref_timing(&Args(&object([]))), Ok(RefTiming::Interactive));
+        assert_eq!(
+            ref_timing(&Args(&object([("measure", Value::Bool(true))]))),
+            Ok(RefTiming::Measure)
+        );
+        assert_eq!(
+            ref_timing(&Args(&object([("measure", Value::Bool(false))]))),
+            Ok(RefTiming::Interactive)
+        );
+    }
+
+    #[test]
+    fn an_interactive_reference_still_shows_the_frame_after_the_trace() {
+        let mut job = stub_job(false, 160);
+        let (live, draws) = drive(&mut job);
+        assert!(draws > 1 && u32::from(live) == draws - 1, "live {live} after {draws} draws");
+    }
 
     #[test]
     fn pause_holds_the_clock_until_a_step_is_requested() {
