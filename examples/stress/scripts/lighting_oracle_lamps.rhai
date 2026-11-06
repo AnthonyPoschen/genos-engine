@@ -25,7 +25,7 @@ fn measure(dir, f) {
     capture(#{ path: `oracle/${dir}/f${pad(f)}-live.png` });
     capture(#{ path: `oracle/${dir}/f${pad(f)}-depth.png`, mode: "depth" });
     let r = reference(#{ prefix: `oracle/${dir}/f${pad(f)}`, spp: 16, max_spp: 256,
-                         noise: 0.05, seconds: 30, bounces: 3 });
+                         noise: 0.05, seconds: 60, bounces: 64 });
     log(`ORACLE ${dir} f=${f} spp=${r.spp} noise=${r.noise} s=${r.trace_seconds}`);
     time(#{ pause: false });
 }
