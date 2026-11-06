@@ -1,0 +1,61 @@
+# Proposal, not a confirmed rule. The label baseline-growth-approved is not
+# created here and is not a standing permission. Anthony confirms the name
+# and the owner-line contract before this is treated as policy.
+#
+# pull_request_target runs the workflow from the default branch. This job
+# checks out that base SHA and reads head baseline files as text. It does not
+# check out the head and it does not run the pull request's scripts.
+# labeled, unlabeled, and edited run the job again, so a label change or a
+# body edit retriggers it. Re-run the job from the Actions tab to repeat it
+# by hand. An API or fetch error fails the job closed.
+
+name: baseline-growth
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  baseline-growth:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: fetch the pull request head without checking it out
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
+          fetched=$(git rev-parse FETCH_HEAD)
+          if [ "$fetched" != "$HEAD_SHA" ]; then
+            echo "baseline-growth: fetched pull/${PR_NUMBER}/head is ${fetched}, event head is ${HEAD_SHA}. Fail closed." >&2
+            exit 2
+          fi
+
+      - name: proposed baseline-growth gate
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          python3 scripts/lint-baseline-growth.py --self-test
+          python3 scripts/lint-baseline-growth.py \
+            --base-sha "$BASE_SHA" \
+            --head-sha "$HEAD_SHA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pull "$PR_NUMBER" \
+            --label baseline-growth-approved

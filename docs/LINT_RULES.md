@@ -247,6 +247,23 @@ float shade(float x) {
 
 Move each literal onto a `const` or `#define` and lower that file's count. A new shader with a bare fraction fails immediately. Start outside `lighting_cache.glsl`.
 
+## Baseline growth (proposal)
+
+Status: a proposal for Anthony to confirm through Skills before anyone treats it as a rule. It is not a standing permission to raise a ceiling. The repository labels today are the GitHub defaults. There is no owner-approval label. This change does not create one, and it does not edit `lint/lossy-cast-baseline.txt` or `lint/shader-magic-baseline.txt`.
+
+`scripts/lint-baseline-growth.py` compares those two files, and any other `lint/*baseline*.txt`, at the pull request head with the same paths at the merge-base of the event's `pull_request.base.sha` and `pull_request.head.sha`. The base SHA is the pull request's base, including a base that is not `master`. An added entry is a path whose last-wins count went up. That includes a new path that replaces a renamed one, and a git rename of the baseline file itself (`git diff -M20%`). A rewrite below that similarity is a new file, so every entry on it is an addition. A lower count, a deleted path, a reorder, or a duplicate line that does not change the last-wins count passes with no label. A new path whose count is `0` does not raise the ceiling the linters enforce (`missing` is already `0`), so it is not an addition.
+
+When an entry is added, the proposed gate requires both of these:
+
+1. The pull request carries the label `baseline-growth-approved`. That is the default of `--label`. `GENOS_BASELINE_GROWTH_LABEL` is the environment mirror and applies only when `--label` is omitted. The argument wins when both are set. The label is not on the repository. Confirm the exact name before depending on it.
+2. The line immediately above that entry is `# owner: <who> — <why>`. `<who>` and `<why>` are non-empty. The dash is U+2014 EM DASH. One comment covers the one entry on the next line. A blank line, a second entry, or a hyphen does not count. The check requires the why to be non-empty. It does not grade the sentence.
+
+The workflow `.github/workflows/baseline-growth.yml` reads labels with `GET /repos/{owner}/{repo}/pulls/{n}` using `contents: read` and `pull-requests: read`. It checks out the base SHA and reads the head files with `git show`. It does not check out the head and it does not run the pull request's code. `opened`, `synchronize`, `reopened`, `labeled`, `unlabeled`, and `edited` run the job, so a label change or a body edit retriggers it. Re-running the job from the Actions tab is the manual trigger. The script does not read the pull request body as the why. An API error, a missing token, a bad SHA, or unrelated histories fail the job closed.
+
+`scripts/lint-clippy.py` and `scripts/lint-shader-constants.py` skip blank lines and lines that start with `#`, then take the last word as the count. The owner line is a `#` comment, so those ceilings stay the same. A note on the entry's own line breaks that parse. This gate rejects that shape.
+
+`./scripts/lint.sh` runs `--self-test` only. The label check runs in the workflow, where the pull request metadata exists. The workflow file is active once it is on the default branch. This draft does not change branch protection, so GitHub will not require the check until that is a separate decision.
+
 ## cargo-deny
 
 `deny.toml`, added 2026-10-14. `cargo deny check` covers advisories, bans, licenses, and sources.
