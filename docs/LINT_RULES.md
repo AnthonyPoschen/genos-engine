@@ -264,6 +264,8 @@ The workflow `.github/workflows/baseline-growth.yml` reads labels with `GET /rep
 
 `./scripts/lint.sh` runs `--self-test` only. The label check runs in the workflow, where the pull request metadata exists. The workflow file is active once it is on the default branch. This draft does not change branch protection, so GitHub will not require the check until that is a separate decision.
 
+`scripts/install-git-hooks.sh` installs a pre-push hook that runs `scripts/lint.sh`. Run it again and it stays as it was. An existing pre-push keeps its other commands. The installer does not replace a symlink or a non-text hook. A local hook is not enforcement: `git push --no-verify` skips it, and a new clone does not run it until the installer has. CI remains the authority.
+
 ## cargo-deny
 
 `deny.toml`, added 2026-10-14. `cargo deny check` covers advisories, bans, licenses, and sources.
