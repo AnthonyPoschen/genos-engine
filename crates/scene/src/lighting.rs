@@ -507,10 +507,10 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
-    /// same rays, no new ones), and reads take it at the surface's true
-    /// normal, blended across the cells at that point. Ray hits, slanted
-    /// pixels and texel seeds read it. Off is today's per-axis read. Forces
-    /// `sc_flags` bit 23.
+    /// same rays, no new ones). A slanted hit tilts the owning cell from its
+    /// axis mean to the true normal. An axis-aligned seed keeps that mean, so
+    /// the texel's first sample is the energy the cell measured. Off is today's
+    /// per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///

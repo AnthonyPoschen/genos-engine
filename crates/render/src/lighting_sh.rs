@@ -13,6 +13,10 @@
 //! exact axis mean plus the harmonics' change from the axis normal to the
 //! true normal ([`ShL1::tilt`]). At the axis normal it is the mean exactly,
 //! and on a slanted surface it follows the light's direction.
+//!
+//! An axis-aligned texel seed keeps that mean ([`axis_aligned_floor_seed`]).
+//! The picture shows the seed until the texel's own rays replace it, so a
+//! blend of the neighbour cell is a different energy in that history.
 
 use std::f32::consts::PI;
 
@@ -249,11 +253,108 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     a.map(|v| v / l)
 }
 
+/// Sets in the texel's handover (`LIGHTING_SC_HANDOVER` in `lighting_cache.glsl`).
+pub const TEXEL_HANDOVER_SETS: f32 = 16.0;
+/// Prior weight in that handover (`LIGHTING_SC_HANDOVER_K`).
+pub const TEXEL_HANDOVER_K: f32 = 2.0;
+/// Confidence of the hit-cell seed (`lighting_sc_set_seed` of the first fill).
+pub const TEXEL_SEED_CONFIDENCE: f32 = 0.25;
+
+/// One 25 cm floor cell. `u` and `v` are the tangent centres the cache key owns.
+#[derive(Clone, Copy, Debug)]
+pub struct FloorCell {
+    pub u: f32,
+    pub v: f32,
+    pub irradiance: [f32; 3],
+}
+
+/// Bounce stored as the first sample of an axis-aligned floor texel at `(u, v)`.
+///
+/// The cell that owns the point measured this. Compose seeds a new texel from
+/// that cell, and [`texel_history_shown`] is the seed until the texel's own
+/// rays replace it. A bilinear of the neighbour is a different energy.
+#[must_use]
+pub fn axis_aligned_floor_seed(u: f32, v: f32, cell: f32, cells: &[FloorCell]) -> [f32; 3] {
+    owning_floor_cell(u, v, cell, cells)
+}
+
+/// Picture bounce while a texel has `own_sets` of its own samples.
+///
+/// `own_sets == 0` is the seed alone (`lighting_sc_shown`: the mix weight is
+/// 0 until the texel has a sample of its own). Later sets take the shader's
+/// handover `n / (n + K * confidence * fade)`.
+#[must_use]
+pub fn texel_history_shown(
+    seed: [f32; 3],
+    own: [f32; 3],
+    own_sets: f32,
+    seed_confidence: f32,
+) -> [f32; 3] {
+    let fade = (1.0 - own_sets / TEXEL_HANDOVER_SETS).clamp(0.0, 1.0);
+    let k = TEXEL_HANDOVER_K * seed_confidence.min(1.0) * fade;
+    let a = if own_sets > 0.5 {
+        own_sets / (own_sets + k).max(1.0e-4)
+    } else {
+        0.0
+    };
+    std::array::from_fn(|ch| seed[ch] + (own[ch] - seed[ch]) * a)
+}
+
+fn owning_floor_cell(u: f32, v: f32, cell: f32, cells: &[FloorCell]) -> [f32; 3] {
+    let cu = ((u / cell).floor() + 0.5) * cell;
+    let cv = ((v / cell).floor() + 0.5) * cell;
+    cells
+        .iter()
+        .find(|c| (c.u - cu).abs() <= 1.0e-4 && (c.v - cv).abs() <= 1.0e-4)
+        .map_or([0.0; 3], |c| c.irradiance)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
+
+    /// The display bilinear the seed used to store: four lattice cells,
+    /// weights renormalised over the lit ones.
+    fn display_neighbour_blend(u: f32, v: f32, cell: f32, cells: &[FloorCell]) -> [f32; 3] {
+        let mut sum = [0.0; 3];
+        let mut ws = 0.0;
+        let (g_u, f_u) = lattice_frac(u, cell);
+        let (g_v, f_v) = lattice_frac(v, cell);
+        for k in 0..4u32 {
+            let cu = g_u + if k & 1 == 0 { 0.0 } else { 1.0 };
+            let cv = g_v + if k >> 1 == 0 { 0.0 } else { 1.0 };
+            let bil = (if k & 1 == 1 { f_u } else { 1.0 - f_u })
+                * (if k >> 1 == 1 { f_v } else { 1.0 - f_v });
+            if bil <= 0.0 {
+                continue;
+            }
+            let qu = (cu + 0.5) * cell;
+            let qv = (cv + 0.5) * cell;
+            let Some(hit) = cells
+                .iter()
+                .find(|c| (c.u - qu).abs() <= 1.0e-4 && (c.v - qv).abs() <= 1.0e-4)
+            else {
+                continue;
+            };
+            for (ch, out) in sum.iter_mut().enumerate() {
+                *out += bil * hit.irradiance[ch];
+            }
+            ws += bil;
+        }
+        if ws > 0.0 {
+            sum.map(|v| v / ws)
+        } else {
+            [0.0; 3]
+        }
+    }
+
+    fn lattice_frac(p: f32, cell: f32) -> (f32, f32) {
+        let x = p / cell - 0.5;
+        let g = x.floor();
+        (g, x - g)
+    }
 
     fn tilted(deg: f32) -> [f32; 3] {
         let a = deg.to_radians();
@@ -400,6 +501,65 @@ mod tests {
         let (x, y) = (sh.tilt(e, UP, n), back.tilt(e, UP, n));
         for ch in 0..3 {
             assert!(close(y[ch], x[ch], 2.0e-3));
+        }
+    }
+
+    #[test]
+    fn an_axis_aligned_floor_seed_keeps_the_measured_energy_in_its_history() {
+        // A 12.5 cm texel centre inside a 25 cm floor cell, beside a darker
+        // coplanar neighbour (the cell across a contact or a shadow edge).
+        // The owning cell measured `bright`. Compose stores the world-cell
+        // read as the texel's seed, and with no samples of its own the
+        // picture is that seed. One own set still carries the seed
+        // (handover confidence 0.25).
+        let cell = 0.25;
+        let at_u = 0.1875;
+        let at_v = 0.125;
+        let bright = [2.0, 1.0, 0.4];
+        let cells = [
+            FloorCell {
+                u: 0.125,
+                v: 0.125,
+                irradiance: bright,
+            },
+            FloorCell {
+                u: 0.375,
+                v: 0.125,
+                irradiance: [0.2, 0.2, 0.2],
+            },
+        ];
+        let measured = owning_floor_cell(at_u, at_v, cell, &cells);
+        for ch in 0..3 {
+            assert!(
+                (measured[ch] - bright[ch]).abs() <= 1.0e-5,
+                "the point must sit in the bright cell, got {measured:?}"
+            );
+        }
+        let seed = axis_aligned_floor_seed(at_u, at_v, cell, &cells);
+        let blend = display_neighbour_blend(at_u, at_v, cell, &cells);
+        let own = measured;
+        for sets in [0.0, 1.0] {
+            let shown = texel_history_shown(seed, own, sets, TEXEL_SEED_CONFIDENCE);
+            let leaked = texel_history_shown(blend, own, sets, TEXEL_SEED_CONFIDENCE);
+            let mut worst_leak: f32 = 0.0;
+            for ch in 0..3 {
+                let err = (shown[ch] - bright[ch]).abs();
+                let leak = (leaked[ch] - bright[ch]).abs();
+                worst_leak = worst_leak.max(leak);
+                assert!(
+                    err <= 1.0e-5,
+                    "history at {sets} own sets shows {shown:?}, the cell measured {bright:?}"
+                );
+                assert!(
+                    err < leak,
+                    "seed {seed:?} is no closer than the neighbour blend"
+                );
+            }
+            let floor = if sets == 0.0 { 0.2 } else { 0.1 };
+            assert!(
+                worst_leak > floor,
+                "fixture at {sets} own sets must move energy, leak {worst_leak} blend {blend:?}"
+            );
         }
     }
 }
