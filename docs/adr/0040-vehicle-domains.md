@@ -1,6 +1,6 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). Anthony Poschen reviews this before any vehicle code. This file does not accept itself. `step` is unchanged.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, is in the step as a trial. Aircraft forces, space forces, the landing stage, and sea are not in that trial.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
@@ -114,11 +114,11 @@ That field is not part of `Vehicle` under this proposal.
 
 ## Stages and fixtures
 
-Each stage is one later commit, after this ADR is accepted. This proposal implements none of them. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
+G1 is in the tree as a trial. This ADR stays proposed. A1, S1, and T1 are not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
 
 | Stage | Payload | Waits on | Fixture |
 | --- | --- | --- | --- |
-| G1 | `Wheeled` only | acceptance | `a_chassis_rests_on_four_springs`, `a_parked_chassis_sleeps_and_stops_casting` |
+| G1 | `Wheeled` only | in the step as a trial | `a_chassis_rests_on_four_springs`, `a_parked_chassis_sleeps_and_stops_casting` |
 | A1 | `Aircraft` only | acceptance | `a_trimmed_aircraft_holds_altitude_and_speed` |
 | S1 | `SpaceCraft` only | acceptance | `a_thruster_in_zero_gravity_matches_force_and_torque` |
 | T1 | aircraft and wheeled ground | G1 and A1 | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
