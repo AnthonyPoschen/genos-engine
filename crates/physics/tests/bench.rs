@@ -91,4 +91,32 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         direction.x + matrix.cols[0] + world.bodies[0].position.y
     );
     assert_eq!(allocs, 0, "timed math and physics allocated {allocs} times");
+
+    let mut aircraft = genos_physics::aero_trim_world();
+    step(&mut aircraft, 1.0 / 60.0);
+    let before_aircraft = ALLOCS.load(Ordering::Relaxed);
+    step(&mut aircraft, 1.0 / 60.0);
+    let aircraft_allocs = ALLOCS.load(Ordering::Relaxed) - before_aircraft;
+    println!("aircraft_allocs={aircraft_allocs}");
+    assert_eq!(
+        aircraft_allocs, 0,
+        "trimmed aircraft step allocated {aircraft_allocs} times"
+    );
+
+    let mut sleeper = genos_physics::aero_trim_world();
+    sleeper.bodies[0].sleeping = true;
+    sleeper.bodies[0].velocity = Vec3::ZERO;
+    step(&mut sleeper, 1.0 / 60.0);
+    let before_wake = ALLOCS.load(Ordering::Relaxed);
+    step(&mut sleeper, 1.0 / 60.0);
+    let wake_allocs = ALLOCS.load(Ordering::Relaxed) - before_wake;
+    println!("aircraft_wake_allocs={wake_allocs}");
+    assert!(
+        !sleeper.bodies[0].sleeping,
+        "the allocation sleeper stayed asleep"
+    );
+    assert_eq!(
+        wake_allocs, 0,
+        "aircraft wake step allocated {wake_allocs} times"
+    );
 }
