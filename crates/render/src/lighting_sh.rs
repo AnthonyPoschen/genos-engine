@@ -370,12 +370,15 @@ mod tests {
         assert_eq!(sh.tilt(e, UP, UP), e);
     }
 
-    /// Default-flag world-cell relight (`lighting_cache.comp`): dark fill while
-    /// the cell is under half the cap, the change floor while the light is not
-    /// quiet, and a whole replacement while a lamp change is settling. The
-    /// mean and the harmonics take that one weight. A sun/sky rescale hits
-    /// both before the blend. A mover's local alpha is not this path.
-    fn production_relight(
+    /// Model of the default-flag world-cell weight in `lighting_cache.comp`.
+    ///
+    /// Dark fill while the cell is under half the cap, the change floor while
+    /// the light is not quiet, and a whole replacement while a lamp change is
+    /// settling. The mean and the harmonics take that one weight. A sun/sky
+    /// rescale hits both before the blend. A mover's local alpha is not this
+    /// path. This is a transcription of that weight. It is not the ADR 0039
+    /// picture gate and it does not grade the production cache.
+    fn model_wrc_weight(
         cell: &Held,
         sample: [f32; 3],
         sample_sh: &ShL1,
@@ -437,12 +440,11 @@ mod tests {
     }
 
     #[test]
-    fn stage2_cell_energy_holds_and_a_lamp_clears_within_120_frames() {
-        // ADR 0039 stage 2 keeps stage 1's gates on the production cell.
-        // The axis read is the stored mean, so its energy is that mean.
-        // A slanted read is the same blend, so it follows the same timeline.
-        // Settling (`wa = 1`) is what clears a lamp inside 120 frames. The
-        // capped mean, left alone, still holds about two fifths of it.
+    fn model_only_wrc_weight_holds_a_constant_and_settling_replaces_it() {
+        // Not the stage-2 gate. The picture and the dumped cells are graded
+        // in `examples/stress/tests/cache_energy.rs`. This only checks the
+        // transcribed weight: the axis read is the stored mean, settling
+        // (`wa = 1`) replaces a sample, and the capped mean left alone does not.
         let lit_rad = |_: [f32; 3]| [1.0, 0.85, 0.7];
         let (lit, sh_lit) = relight(UP, 64, 11, lit_rad);
         let (dark, sh_dark) = relight(UP, 64, 12, |_| [0.0; 3]);
@@ -452,7 +454,7 @@ mod tests {
             sets: 0.0,
         };
         for _ in 0..128 {
-            cell = production_relight(&cell, lit, &sh_lit, false, true, 1.0);
+            cell = model_wrc_weight(&cell, lit, &sh_lit, false, true, 1.0);
         }
         let energy = luma(cell.sh.tilt(cell.mean, UP, UP)) / luma(lit);
         assert!(energy >= 0.9, "axis energy {energy}");
@@ -463,14 +465,14 @@ mod tests {
         let lit_luma = luma(cell.mean);
         let mut cleared = cell;
         for _ in 0..120 {
-            cleared = production_relight(&cleared, dark, &sh_dark, true, false, 1.0);
+            cleared = model_wrc_weight(&cleared, dark, &sh_dark, true, false, 1.0);
         }
         let linger = luma(cleared.sh.tilt(cleared.mean, UP, face)) / lit_luma;
         assert!(linger <= 0.05, "lamp still present at frame 120 ({linger})");
 
         let mut stuck = cell;
         for _ in 0..120 {
-            stuck = production_relight(&stuck, dark, &sh_dark, false, true, 1.0);
+            stuck = model_wrc_weight(&stuck, dark, &sh_dark, false, true, 1.0);
         }
         let remain = luma(stuck.mean) / lit_luma;
         assert!(
@@ -487,12 +489,12 @@ mod tests {
         };
         for frame in 1..=300 {
             let (sample, sh) = if frame < 40 { (dark, &sh_dark) } else { (lit, &sh_lit) };
-            filling = production_relight(&filling, sample, sh, frame <= 120, frame > 120, 1.0);
+            filling = model_wrc_weight(&filling, sample, sh, frame <= 120, frame > 120, 1.0);
         }
         let lag = luma(filling.sh.tilt(filling.mean, UP, UP)) / luma(lit);
         assert!(lag >= 0.9, "lag {lag}");
 
-        let gained = production_relight(&cell, lit, &sh_lit, false, true, 2.0);
+        let gained = model_wrc_weight(&cell, lit, &sh_lit, false, true, 2.0);
         assert_eq!(gained.sh.tilt(gained.mean, UP, UP), gained.mean);
         assert!(luma(gained.mean) > 1.5 * lit_luma, "sun rescale {}", luma(gained.mean));
     }

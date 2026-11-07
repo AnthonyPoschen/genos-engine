@@ -593,11 +593,13 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     );
 }
 
-/// The production cell writes the mean and the harmonics with one weight.
+/// Source-text model of one weight for the mean and the harmonics.
+///
 /// A lamp change sets that weight to 1 before either store, and a sun rescale
-/// multiplies the held harmonics by the same gain as the held mean.
+/// multiplies the held harmonics by the same gain as the held mean. Matching
+/// this text is not the ADR 0039 picture gate.
 #[test]
-fn a_settling_lamp_replaces_the_mean_and_the_harmonics_together() {
+fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
     let relight = shader("lighting_cache.comp");
     let settle = relight.find("if (lighting_lamp_settling())").expect("lamp settle");
     let put = relight[settle..].find("lighting_sh_put").expect("harmonics store");
