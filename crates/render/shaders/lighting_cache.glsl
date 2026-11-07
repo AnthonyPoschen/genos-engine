@@ -3386,6 +3386,17 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot)) {
             lighting_sc_clear_seed(slot);
         }
+        // The resample below stores a bilinear of other sizes, and
+        // lighting_sc_shown returns that seed at weight 1, so the owning cell
+        // has to be stored first. A miss leaves the slot empty and the
+        // resample still runs. Off, a mover, or a texel that already has its
+        // own samples does not enter.
+        if (LIGHTING_SC_WRITES && split && lighting_sh_texel_seed_on() && !obj && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W && !lighting_sc_has_seed(slot)) {
+            vec4 shs = lighting_sh_owning_texel_seed(q, n);
+            if (shs.w > LIGHTING_CACHE_HAS_W) {
+                lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);
+            }
+        }
         if (LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
@@ -3408,16 +3419,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         if (v.w < 0.5 && mode == 3u) {
-            // ADR 0039 stage 3: the owning cell's tilt, one way. A miss keeps
-            // the parent and probe seeds below. Movers stay on that path.
-            if (split && lighting_sh_texel_seed_on() && !obj) {
-                vec4 shs = lighting_sh_owning_texel_seed(q, n);
-                if (shs.w > LIGHTING_CACHE_HAS_W) {
-                    lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);
-                    v = vec4(shs.rgb, 1.0);
-                }
-            }
-            if (v.w < LIGHTING_CACHE_HAS_W && split) {
+            // The owning-cell seed was stored above, before the resample. A
+            // miss falls through to the parent and the probe seeds.
+            if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
                 v = lighting_sc_parent_bilerp(q, n, size);

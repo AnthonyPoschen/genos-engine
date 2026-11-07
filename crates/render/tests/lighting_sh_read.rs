@@ -629,7 +629,24 @@ fn a_texel_seed_reads_one_cell_and_does_not_write_it() {
     );
     assert!(screen.contains("if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot))"));
     assert!(screen.contains("lighting_sc_clear_seed(slot);"));
-    assert!(screen.contains("vec4 shs = lighting_sh_owning_texel_seed(q, n);"));
+    let seed_at = screen
+        .find("vec4 shs = lighting_sh_owning_texel_seed(q, n);")
+        .expect("owning seed call");
+    let resample_at = screen
+        .find("vec4 rs = lighting_sc_resample(q, n, size, slot);")
+        .expect("resample call");
+    let shown_at = screen
+        .find("vec4 v = mode == 3u ? lighting_sc_shown(slot)")
+        .expect("shown call");
+    assert!(
+        seed_at < resample_at && resample_at < shown_at,
+        "the owning seed must be stored before the resample and before shown"
+    );
+    assert_eq!(
+        screen.matches("lighting_sh_owning_texel_seed").count(),
+        1,
+        "one owning-seed call, so the later shown bypass cannot replace it"
+    );
     assert!(screen.contains(
         "lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);"
     ));
