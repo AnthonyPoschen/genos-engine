@@ -29,8 +29,9 @@
 //! contact run in that call. Contact tests the pairs the static tree and the
 //! dynamic tree report. A static body is not in the dynamic tree, and two
 //! statics are not a pair.
-//! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
-//! a box, a plane, and a mesh reduced to a few convex pieces.
+//! Gravity is along -Y. A body has no air drag unless an aircraft payload is
+//! set. Shapes are a sphere, a capsule, a box, a plane, and a mesh reduced to
+//! a few convex pieces.
 //! A vehicle is optional state on one chassis body. An empty vehicle list
 //! leaves this step unchanged.
 
@@ -44,8 +45,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel,
-    WheeledGround,
+    aero_trim_world, chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle,
+    Wheel, WheeledGround,
 };
 
 pub use destruction::{
@@ -711,6 +712,7 @@ fn close_step(world: &mut World, hits: u32, dt: f32) {
     world.islands.store_pairs(world.pairs.pair_list());
     world.islands.assign_and_sleep(
         &mut world.bodies,
+        &world.vehicles,
         dt,
         world.sleep_linear,
         world.sleep_angular,

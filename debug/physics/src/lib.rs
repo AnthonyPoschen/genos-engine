@@ -412,6 +412,28 @@ mod tests {
     }
 
     #[test]
+    fn aero_trim_holds_altitude_and_casts_no_rays() {
+        let scene = find("aero_trim").unwrap_or(&SCENES[0]);
+        let mut session = Session::load(scene);
+        assert_eq!(session.scene.name, "aero_trim");
+        let record = session.step();
+        assert_eq!(record.wheel_rays, 0);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("aero_trim");
+        assert!(line.contains("\"wheel_rays\":0"));
+        assert!(line.contains("\"vehicle_count\":1"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        session.run(119);
+        let body = session.world.bodies[0];
+        assert_eq!(body.position.y.to_bits(), 100.0_f32.to_bits());
+        assert_eq!(body.velocity.x.to_bits(), 50.0_f32.to_bits());
+        assert_eq!(body.velocity.y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(body.angular_velocity, genos_math::Vec3::ZERO);
+        assert_eq!(session.world.step_stats.wheel_rays, 0);
+        assert!(replay(scene, 120).is_ok());
+    }
+
+    #[test]
     fn json_line_names_the_scene_and_hash() {
         let mut session = Session::load(&SCENES[0]);
         let line = session.step().json("ship_lanes");
