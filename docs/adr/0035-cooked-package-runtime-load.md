@@ -40,9 +40,9 @@ ADR 0020 says the runtime loads cooked records with no transcode, and the asset-
 - A block atlas is copied mip-to-mip. `vkCmdBlitImage` does not accept BC formats, so a coarser resident mip is fetched with `texelFetch` at that lod instead of being scaled into mip 0.
 - `debug/lighting --cooked` passes `bc = true`. `genos-stress --cooked` reads `Renderer::bc_textures`.
 
-## Amendment A (Proposed): a valid package does not import the source
+## Amendment A: a valid package does not import the source
 
-Status: **Proposed**. This section is not part of the accepted decision. `World::add_cooked` is unchanged and still calls `load_gltf_file`.
+Status: **Accepted**. When a manifest line carries `mat=`, `World::add_cooked` loads that asset through `load_covered` and does not call `load_gltf_file`. `World::add_covered` is the same load from the asset id, so the source file can be absent. A line without `mat=` stays the package the decision above already accepts, and decision 6 still applies to that line. A line with `mat=` takes factors and the shade from the record. That is the departure from decision 6.
 
 ### Why the accepted decision still imports
 
@@ -54,13 +54,13 @@ Skipping that call drops the factors, the texture slots, and the instance mean. 
 
 1. The cook writes `DIR/cooked/<asset>.gmat` beside `.gcook`. The magic is `GMT1`, the version is 1, and a SHA-256 trailer covers the body. The manifest gains ` mat=<sha256>` after `gtex=` when both are present. A line without `mat=` stays the package this ADR already accepts.
 2. The record stores the `PbrMaterial` list (factors, alpha, double sided, texture slots), each image's width and height and no pixels, and one mean and emission per primitive in mesh order. Those two vectors are what `surface_mean` returns. The cook computes them. The renderer does not sample source texels for them.
-3. `load_covered(dir, asset_id)` checks the `cook=`, `gtex=` and `mat=` hashes, then returns meshes, instances, materials and cooked image blocks. It does not call `load_gltf`, `import_bytes` or `decode_gltf`, and it does not read the source file. `Package::verify` stays the check that also hashes the cached source objects. It does not read `mat=` until the commit that accepts this amendment.
-4. A missing `mat=`, a hash mismatch, or a decode error logs `assets fallback <source> <reason>` and that asset loads from source, which does call the importer. A fallback does not fail the frame. This is decision 2.
-5. `World::add_cooked` calls `load_covered` only in the commit that accepts this amendment. That commit also uses the stored shade when one entry exists per primitive, and it teaches `Package::verify` to check `mat=` when the token is present. A line without the token keeps today's path.
+3. `load_covered(dir, asset_id)` checks the `cook=`, `gtex=` and `mat=` hashes, then returns meshes, instances, materials and cooked image blocks. It does not call `load_gltf`, `import_bytes` or `decode_gltf`, and it does not read the source file. `Package::verify` is still the check that also hashes the cached source objects. It checks `mat=` when the token is present. A line without the token does not look for a `.gmat`. `Package::verify` is `genos-cook --verify`. The frame load does not call it.
+4. A hash mismatch or a decode error on a line that has `mat=` logs `assets fallback <source> <reason>` and that asset loads from source, which does call the importer. A missing source file cannot take that path: `add_cooked` has no id to look up, and `add_covered` adds no objects. A fallback does not fail the frame. This is decision 2. A line with no `mat=` token is not an error.
+5. `World::add_cooked` calls `load_covered` when the line has `mat=`. It uses the stored shade when one entry exists per primitive. A different count logs `assets fallback <source> no stored shade` and loads from source. The shade index is the primitive's place in mesh order. A second instance of a mesh uses that mesh's entries again. `add_cooked` still reads the source bytes to find the asset id. The call that does not open the source file is `World::add_covered`.
 
 ### Prototype in this draft
 
-`encode_materials`, `decode_materials`, `load_covered` and `load_covered_or_source` in `crates/load/src/cooked_material.rs` implement items 1 and 3. `genos-cook` does not write `.gmat`. `World::add_cooked` does not call `load_covered`. `importer_entries` counts entries to `decode_gltf_phased` on the calling thread.
+`genos-cook` writes `.gmat` and `mat=`. `Package::verify` in `genos-load` and `genos-cook` checks that token. `World::add_cooked` calls `load_covered` when the token is present, and `World::add_covered` loads by id. `importer_entries` counts entries to `decode_gltf_phased` on the calling thread. Cook computes the shade with `primitive_shades`. The draw function `surface_mean` is unchanged, so the lossy-cast ceiling stays where it was.
 
 | Test | What it checks |
 |---|---|
@@ -68,7 +68,7 @@ Skipping that call drops the factors, the texture slots, and the instance mean. 
 | `a_damaged_material_record_does_not_decode` | A flipped magic or trailer does not decode. |
 | `covered_package_matches_the_import_with_the_source_removed` | Source file and cached source objects removed. Importer count stays 0. Meshes, instances, materials and image sizes match the import. Cooked image sizes match. |
 | `a_cooked_image_size_that_differs_is_corrupt` | A matching `mat=` hash whose stored width disagrees with the cooked image is corrupt. |
-| `corrupt_material_record_falls_back_to_the_source` | A bad `mat=` hash. `Package::verify` still passes. Fallback line names the hash. The importer runs once against the source file, not the stomped object cache. Materials, meshes and instances match. |
+| `corrupt_material_record_falls_back_to_the_source` | A bad `mat=` hash. `Package::verify` fails with the material hash. `load_covered_or_source` still falls back to the source file, not the stomped object cache. Materials, meshes and instances match. |
 | `stored_shade_is_the_renderer_mean` | Each stored mean and emission equals `surface_mean` for `tri.gltf`. |
 | `covered_load_time_against_the_gltf_import` | Same-process medians. Printed. Not a pass threshold. |
 
@@ -78,9 +78,9 @@ Skipping that call drops the factors, the texture slots, and the instance mean. 
 - Pointing `World::add_cooked` at the prototype before the shade is stored. The instance colour would change.
 - Decoding blocks at load to feed `surface_mean`.
 
-### Next verifiable stage
+### Not in this acceptance
 
-Accept this amendment, then one commit: `genos-cook` writes `.gmat` and `mat=`, `Package::verify` checks that token, and `World::add_cooked` uses `load_covered` when the token is present, taking the instance mean from the stored shade. The lavapipe picture test in `crates/render/tests/cooked_package.rs` is the parity check for that commit. This draft does not claim that picture.
+The lavapipe picture test in `crates/render/tests/cooked_package.rs` still builds its package with `package`, which writes no `mat=`. It is not the check for this amendment, and this acceptance does not claim that picture. `debug/assets` is not in the tree. The probe for a bad record is `genos-cook --verify` and the `assets fallback` line on `CookedReport`.
 
 - Replicated state: none. The material record is a local file.
 - Authority: the machine that has the file.

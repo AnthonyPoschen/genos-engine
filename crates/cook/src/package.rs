@@ -10,13 +10,18 @@ use genos_load::{hex, object_path, sha256};
 use crate::{cooked_path, encode, textures_path, CookError, Cooked};
 
 /// Line `genos-package 1`, then `<asset> cook=<record sha256> inputs=<sha256>,...`,
-/// and ` gtex=<sha256>` when the asset has a cooked texture record.
+/// ` gtex=<sha256>` when the asset has a cooked texture record, and
+/// ` mat=<sha256>` when it has a `.gmat`. `mat=` follows `gtex=` when both are
+/// present. A line without `mat=` is the package from before that record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
     pub lines: Vec<String>,
 }
 
 const HEADER: &str = "genos-package 1";
+
+/// One cooked record, the optional `.gtex` hash, and the optional `.gmat` hash.
+pub type PackageEntry<'a> = (&'a Cooked, Option<[u8; 32]>, Option<[u8; 32]>);
 
 /// Build the manifest for a set of cooked records with no textures.
 #[must_use]
@@ -26,22 +31,36 @@ pub fn manifest(cooked: &[Cooked]) -> Manifest {
 }
 
 /// Build the manifest for cooked records, each with the SHA-256 of its `.gtex`
-/// file when it has one.
+/// file when it has one. No `mat=` token. [`package_with`] adds that token.
 #[must_use]
 pub fn package(entries: &[(&Cooked, Option<[u8; 32]>)]) -> Manifest {
+    let with_mat: Vec<PackageEntry<'_>> = entries
+        .iter()
+        .map(|(cooked, gtex)| (*cooked, *gtex, None))
+        .collect();
+    package_with(&with_mat)
+}
+
+/// [`package`] plus the SHA-256 of each `.gmat`, when the cook wrote one.
+#[must_use]
+pub fn package_with(entries: &[PackageEntry<'_>]) -> Manifest {
     let mut lines: Vec<String> = entries
         .iter()
-        .map(|(c, gtex)| {
-            let inputs: Vec<String> = c.inputs.iter().map(|i| hex(&i.hash)).collect();
+        .map(|(cooked, gtex, mat)| {
+            let inputs: Vec<String> = cooked.inputs.iter().map(|input| hex(&input.hash)).collect();
             let mut line = format!(
                 "{} cook={} inputs={}",
-                hex(&c.asset_id),
-                hex(&sha256(&encode(c))),
+                hex(&cooked.asset_id),
+                hex(&sha256(&encode(cooked))),
                 inputs.join(",")
             );
-            if let Some(g) = gtex {
+            if let Some(hash) = gtex {
                 line.push_str(" gtex=");
-                line.push_str(&hex(g));
+                line.push_str(&hex(hash));
+            }
+            if let Some(hash) = mat {
+                line.push_str(" mat=");
+                line.push_str(&hex(hash));
             }
             line
         })
@@ -79,8 +98,9 @@ impl Manifest {
         })
     }
 
-    /// The load-time check: every record, texture record and source object
-    /// under `out` is present and hashes to the value the manifest names.
+    /// The load-time check: every record, texture record, material record and
+    /// source object under `out` is present and hashes to the value the
+    /// manifest names. A line without `mat=` does not look for a `.gmat`.
     ///
     /// # Errors
     ///
@@ -101,12 +121,28 @@ impl Manifest {
             if hex(&sha256(&std::fs::read(cooked_path(out, &id))?)) != cook {
                 return Err(CookError::Corrupt("record hash differs from the manifest"));
             }
-            if let Some(gtex) = parts.next() {
-                let gtex = gtex
-                    .strip_prefix("gtex=")
-                    .ok_or(CookError::Corrupt("manifest line"))?;
+            let mut gtex = None;
+            let mut mat = None;
+            for part in parts {
+                if let Some(value) = part.strip_prefix("gtex=") {
+                    gtex = Some(value);
+                } else if let Some(value) = part.strip_prefix("mat=") {
+                    mat = Some(value);
+                } else {
+                    return Err(CookError::Corrupt("manifest line"));
+                }
+            }
+            if let Some(gtex) = gtex {
                 if hex(&sha256(&std::fs::read(textures_path(out, &id))?)) != gtex {
                     return Err(CookError::Corrupt("texture hash differs from the manifest"));
+                }
+            }
+            if let Some(mat) = mat {
+                let path = genos_load::materials_path(out, &id);
+                if hex(&sha256(&std::fs::read(path)?)) != mat {
+                    return Err(CookError::Corrupt(
+                        "material hash differs from the manifest",
+                    ));
                 }
             }
             for input in inputs.split(',') {

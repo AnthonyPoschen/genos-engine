@@ -1,12 +1,10 @@
-//! Proposed `.gmat` record (ADR 0035 amendment A).
+//! `.gmat` record (ADR 0035 amendment A).
 //!
 //! `GMT1`, version, asset id, image widths and heights (no pixels), the
 //! `PbrMaterial` list, and one mean and emission per primitive. A SHA-256
-//! trailer covers every byte before it. [`load_covered`] reads that record
-//! with `.gcook` and `.gtex` and does not enter the glTF decoder.
-//!
-//! `genos-cook` does not write this file. The renderer does not read it.
-//! The draw path stays the accepted one until the amendment is accepted.
+//! trailer covers every byte before it. `genos-cook` writes this file.
+//! [`load_covered`] reads it with `.gcook` and `.gtex` and does not enter the
+//! glTF decoder. `World::add_covered` is the load that does not open the source.
 
 use std::path::{Path, PathBuf};
 

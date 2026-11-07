@@ -1,8 +1,10 @@
 //! Cook glTF files into `.gcook` records and a package manifest, and check a package.
 //!
 //! `genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] FILE.gltf|FILE.glb ...`
-//! cooks each file into `DIR/cooked/<asset>.gcook` (default `target/cook`), stores
-//! the source objects under `DIR/objects/`, and writes `DIR/package.manifest`.
+//! cooks each file into `DIR/cooked/<asset>.gcook` and `DIR/cooked/<asset>.gmat`
+//! (default `target/cook`), stores the source objects under `DIR/objects/`, and
+//! writes `DIR/package.manifest`. The manifest line gains ` mat=<sha256>` after
+//! `gtex=` when that record was written.
 //! An input whose record already matches every input hash and the settings is
 //! reported `up to date` and not rebuilt.
 //!
@@ -13,8 +15,8 @@
 //! for normals, full mips), with the same up-to-date rule. Off by default.
 //!
 //! `genos-cook --verify DIR` is the load-time check: it hashes every record,
-//! texture record and object the manifest names, decodes each record, and
-//! prints the timings.
+//! texture record, material record and object the manifest names, decodes each
+//! record, and prints the timings. A line without `mat=` does not require a `.gmat`.
 //!
 //! `genos-cook --compare FILE` cooks one file in memory and compares the loaded
 //! record with a direct `load_gltf_file`, printing both times. Exit 1 on a difference.
@@ -25,7 +27,7 @@ use std::time::Instant;
 use genos_bake::{BakeMode, BakeSettings};
 use genos_cook::{
     cook, cook_asset, cooked_path, decode, encode, load_cooked, load_textures, map_by_cost,
-    package, textures_path, AssetCook, Manifest, Outcome, Threads,
+    package_with, textures_path, AssetCook, Manifest, Outcome, Threads,
 };
 
 fn main() -> std::process::ExitCode {
@@ -71,7 +73,7 @@ fn run() -> Result<(), String> {
                 );
             }
             "-h" | "--help" => {
-                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] [--threads N] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
+                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] [--threads N] FILE ...\n  writes DIR/cooked/<asset>.gcook, DIR/cooked/<asset>.gmat, and mat= on the manifest\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
                 return Ok(());
             }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
@@ -123,7 +125,14 @@ fn cook_all(
     );
     let mut records = Vec::new();
     for (file, result) in files.iter().zip(cooked) {
-        let (AssetCook { record, textures }, cook_ms) = result?;
+        let (
+            AssetCook {
+                record,
+                textures,
+                materials,
+            },
+            cook_ms,
+        ) = result?;
         let (outcome, path) = record;
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         println!(
@@ -135,10 +144,16 @@ fn cook_all(
         let gtex = textures
             .map(|(outcome, path)| report_textures(file, outcome, &path))
             .transpose()?;
-        records.push((load_cooked(&path).map_err(|e| e.to_string())?, gtex));
+        let (mat_outcome, mat_path) = materials;
+        let mat = report_materials(file, mat_outcome, &mat_path)?;
+        records.push((
+            load_cooked(&path).map_err(|e| e.to_string())?,
+            gtex,
+            Some(mat),
+        ));
     }
-    let entries: Vec<_> = records.iter().map(|(c, g)| (c, *g)).collect();
-    let text = package(&entries).text();
+    let entries: Vec<_> = records.iter().map(|(c, g, m)| (c, *g, *m)).collect();
+    let text = package_with(&entries).text();
     genos_load::write_atomic(&out.join("package.manifest"), text.as_bytes())
         .map_err(|e| e.to_string())?;
     println!(
@@ -172,6 +187,22 @@ fn report_textures(file: &Path, outcome: Outcome, path: &Path) -> Result<[u8; 32
     Ok(genos_load::sha256(&bytes))
 }
 
+/// Print a material record's size and return its file hash.
+fn report_materials(file: &Path, outcome: Outcome, path: &Path) -> Result<[u8; 32], String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let record = genos_load::decode_materials(&bytes).map_err(|e| e.to_string())?;
+    println!(
+        "{}: materials {} {} ({} materials, {} shades, {} bytes)",
+        file.display(),
+        what(outcome),
+        path.display(),
+        record.materials.len(),
+        record.primitive_shade.len(),
+        bytes.len()
+    );
+    Ok(genos_load::sha256(&bytes))
+}
+
 fn verify(dir: &Path) -> Result<(), String> {
     let start = Instant::now();
     let text = std::fs::read_to_string(dir.join("package.manifest")).map_err(|e| e.to_string())?;
@@ -181,26 +212,36 @@ fn verify(dir: &Path) -> Result<(), String> {
     let load = Instant::now();
     let mut triangles = 0;
     let mut images = 0;
+    let mut materials = 0;
     for line in &m.lines {
         let id = line.split(' ').next().unwrap_or_default();
         let path = cooked_path(dir, &unhex(id)?);
         let c = load_cooked(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        if line.contains(" gtex=") {
+        if line.split(' ').any(|part| part.starts_with("gtex=")) {
             let tex = textures_path(dir, &unhex(id)?);
             images += load_textures(&tex)
                 .map_err(|e| format!("{}: {e}", tex.display()))?
                 .textures
                 .len();
         }
+        if line.split(' ').any(|part| part.starts_with("mat=")) {
+            let mat = genos_load::materials_path(dir, &unhex(id)?);
+            materials += genos_load::decode_materials(
+                &std::fs::read(&mat).map_err(|e| format!("{}: {e}", mat.display()))?,
+            )
+            .map_err(|e| format!("{}: {e}", mat.display()))?
+            .materials
+            .len();
+        }
         triangles += c
             .meshes
             .iter()
-            .flat_map(|m| &m.mesh.primitives)
+            .flat_map(|mesh| &mesh.mesh.primitives)
             .map(|p| p.indices.len() / 3)
             .sum::<usize>();
     }
     println!(
-        "verify: {n} assets ok, {triangles} triangles, {images} cooked images, hash check {checked:.2} ms, decode {:.2} ms",
+        "verify: {n} assets ok, {triangles} triangles, {images} cooked images, {materials} materials, hash check {checked:.2} ms, decode {:.2} ms",
         ms(load)
     );
     Ok(())
