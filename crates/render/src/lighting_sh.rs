@@ -247,6 +247,140 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     a.map(|v| v / l)
 }
 
+/// S72N first-fill confidence (`lighting_sc_set_seed` of a parent, a hit, or this seed).
+pub const TEXEL_SEED_CONFIDENCE: f32 = 0.25;
+/// `lighting_sc_set_seed` clamps confidence to this minimum.
+pub const TEXEL_SEED_MIN: f32 = 0.05;
+/// Own-sample count the must-fail seed-as-samples control writes.
+pub const TEXEL_SEED_FAULT_SETS: f32 = 8.0;
+/// Output region of `texel_seed_check.comp`: four records of eight floats.
+pub const TEXEL_SEED_CHECK_OUT: usize = 32;
+pub const TEXEL_SEED_CHECK_STRIDE: usize = 8;
+
+/// One detail texel. The seed is not an own sample unless `as_samples` is set,
+/// and that flag is the must-fail control, not the production path.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TexelSeedState {
+    pub own_mean: [f32; 3],
+    pub own_samples: f32,
+    pub seed: [f32; 3],
+    pub confidence: f32,
+}
+
+impl TexelSeedState {
+    /// Store `value` beside the own mean. `as_samples` writes it into the own
+    /// mean instead, which is the fault a lamp-change clear must not hide.
+    pub fn apply_seed(
+        &mut self,
+        value: [f32; 3],
+        confidence: f32,
+        as_samples: bool,
+        seed_sets: f32,
+    ) {
+        if as_samples {
+            self.own_mean = value;
+            self.own_samples = seed_sets;
+            self.seed = [0.0; 3];
+            self.confidence = 0.0;
+        } else {
+            self.seed = value.map(|v| v.max(0.0));
+            self.confidence = confidence.clamp(TEXEL_SEED_MIN, 1.0);
+        }
+    }
+
+    /// Drop the seed. Own samples stay.
+    pub fn clear_seed(&mut self) {
+        self.seed = [0.0; 3];
+        self.confidence = 0.0;
+    }
+
+    /// Default fine texel: an own sample shows itself, and none shows the seed.
+    #[must_use]
+    pub fn shown(&self) -> [f32; 3] {
+        if self.own_samples > 0.5 {
+            return self.own_mean;
+        }
+        if self.confidence > 0.0 {
+            return self.seed;
+        }
+        [0.0; 3]
+    }
+
+    /// Seed from the one owning cell. `cell` is borrowed, so the call cannot
+    /// write the cell. Neighbour cells are not an argument.
+    pub fn seed_from_owning_cell(
+        &mut self,
+        cell: &ShL1,
+        e_axis: [f32; 3],
+        axis: [f32; 3],
+        normal: [f32; 3],
+    ) {
+        let value = cell.tilt(e_axis, axis, normal);
+        self.apply_seed(value, TEXEL_SEED_CONFIDENCE, false, 0.0);
+    }
+}
+
+/// The four `texel_seed_check.comp` records for one cell and one own colour.
+/// Record 0 keeps the seed. Records 1 and 2 clear it. Record 3 is the fault.
+#[must_use]
+pub fn texel_seed_check_expected(
+    cell: &ShL1,
+    e_axis: [f32; 3],
+    axis: [f32; 3],
+    normal: [f32; 3],
+    own: [f32; 3],
+) -> [f32; 32] {
+    let tilt = cell.tilt(e_axis, axis, normal);
+    let mut out = [0.0; 32];
+    let cases = [
+        (0.0, false, false),
+        (0.0, true, false),
+        (1.0, true, false),
+        (0.0, true, true),
+    ];
+    for (id, (samples, clear, fault)) in cases.into_iter().enumerate() {
+        let mut state = TexelSeedState {
+            own_mean: own,
+            own_samples: samples,
+            ..TexelSeedState::default()
+        };
+        state.apply_seed(tilt, TEXEL_SEED_CONFIDENCE, fault, TEXEL_SEED_FAULT_SETS);
+        if clear {
+            state.clear_seed();
+        }
+        let shown = state.shown();
+        let at = id * TEXEL_SEED_CHECK_STRIDE;
+        out[at] = shown[0];
+        out[at + 1] = shown[1];
+        out[at + 2] = shown[2];
+        out[at + 3] = state.confidence;
+        out[at + 4] = state.own_samples;
+        out[at + 5] = 0.0;
+    }
+    out
+}
+
+/// Host words for `texel_seed_check.comp`. Floats 22 onward are a decoy the
+/// shader must not read.
+#[must_use]
+pub fn texel_seed_check_words(
+    e_axis: [f32; 3],
+    axis: [f32; 3],
+    normal: [f32; 3],
+    cell: &ShL1,
+    own: [f32; 3],
+) -> [f32; 64] {
+    let mut words = [100.0; 64];
+    words[0..3].copy_from_slice(&e_axis);
+    words[3..6].copy_from_slice(&axis);
+    words[6..9].copy_from_slice(&normal);
+    words[9..12].copy_from_slice(&cell.c[1]);
+    words[12..15].copy_from_slice(&cell.c[2]);
+    words[15..18].copy_from_slice(&cell.c[3]);
+    words[18..21].copy_from_slice(&own);
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +533,80 @@ mod tests {
         for ch in 0..3 {
             assert!(close(y[ch], x[ch], 2.0e-3));
         }
+    }
+
+    #[test]
+    fn a_seed_is_not_an_own_sample_and_a_clear_drops_it() {
+        let mut texel = TexelSeedState::default();
+        texel.apply_seed([0.75, 0.25, 0.1], 1.0, false, TEXEL_SEED_FAULT_SETS);
+        assert_eq!(texel.own_samples, 0.0);
+        assert!(close(texel.shown()[0], 0.75, 1.0e-6));
+        texel.clear_seed();
+        assert_eq!(texel.shown(), [0.0; 3]);
+        assert_eq!(texel.own_samples, 0.0);
+        assert_eq!(texel.confidence, 0.0);
+    }
+
+    #[test]
+    fn seed_as_samples_survives_the_clear() {
+        let mut good = TexelSeedState::default();
+        good.apply_seed([0.75, 0.0, 0.0], 1.0, false, TEXEL_SEED_FAULT_SETS);
+        good.clear_seed();
+        assert_eq!(good.shown(), [0.0; 3]);
+
+        let mut broken = TexelSeedState::default();
+        broken.apply_seed([0.75, 0.0, 0.0], 1.0, true, TEXEL_SEED_FAULT_SETS);
+        broken.clear_seed();
+        assert_eq!(broken.own_samples, TEXEL_SEED_FAULT_SETS);
+        assert!(
+            broken.shown()[0] > 0.05,
+            "fault did not retain the stale seed"
+        );
+    }
+
+    #[test]
+    fn an_own_sample_replaces_the_seed_and_a_clear_keeps_the_sample() {
+        let own = [8.0, 0.25, 3.0];
+        let mut texel = TexelSeedState {
+            own_mean: own,
+            own_samples: 1.0,
+            ..TexelSeedState::default()
+        };
+        texel.apply_seed([0.2, 0.2, 0.2], TEXEL_SEED_CONFIDENCE, false, 0.0);
+        assert_eq!(texel.shown(), own);
+        texel.clear_seed();
+        assert_eq!(texel.own_samples, 1.0);
+        assert_eq!(texel.shown(), own);
+    }
+
+    #[test]
+    fn the_owning_cell_seeds_the_texel_and_the_cell_is_unchanged() {
+        let (e, cell) = relight(UP, 64, 3, |d| [d[0].max(0.0), 0.2, 0.4]);
+        let before = cell;
+        let normal = tilted(25.0);
+        let mut texel = TexelSeedState::default();
+        texel.seed_from_owning_cell(&cell, e, UP, normal);
+        assert_eq!(cell, before);
+        assert_eq!(texel.own_samples, 0.0);
+        assert!(close(texel.confidence, TEXEL_SEED_CONFIDENCE, 1.0e-6));
+        let want = cell.tilt(e, UP, normal);
+        assert_eq!(texel.shown(), want);
+
+        let (e2, other) = relight(UP, 64, 9, |d| [0.0, d[1].max(0.0), 1.0]);
+        let blend: [f32; 3] = std::array::from_fn(|ch| {
+            f32::midpoint(cell.tilt(e, UP, normal)[ch], other.tilt(e2, UP, normal)[ch])
+        });
+        assert!(
+            (texel.shown()[0] - blend[0]).abs() > 1.0e-3,
+            "the seed blended a neighbour"
+        );
+    }
+
+    #[test]
+    fn confidence_below_the_minimum_clamps_and_does_not_become_a_sample() {
+        let mut texel = TexelSeedState::default();
+        texel.apply_seed([1.0, 0.0, 0.0], 0.01, false, TEXEL_SEED_FAULT_SETS);
+        assert!(close(texel.confidence, TEXEL_SEED_MIN, 1.0e-6));
+        assert_eq!(texel.own_samples, 0.0);
     }
 }

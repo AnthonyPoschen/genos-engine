@@ -2964,7 +2964,14 @@ impl Gpu {
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
         let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12)) as f32;
+        // ADR 0039 stage 3: head 3.w bit 17. Bits 0-16 stay the high flags,
+        // the budget shift, and the isolate toggles.
+        const SH_TEXEL_SEED: u32 = 1 << 17;
+        let mut head_w = ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
+        if self.lighting.settings.surface_cache.sh_texel_seed {
+            head_w |= SH_TEXEL_SEED;
+        }
+        block[4 * 3 + 3] = head_w as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
