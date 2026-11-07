@@ -900,8 +900,15 @@ mod covered_world {
         flip_material(&out, &id);
         reset_importer_entries();
         let mut broken = bare_world();
+        let before_objects = broken.objects.len();
+        let before_atlas = broken.color_atlas.rgba.len() + broken.normal_atlas.rgba.len();
         let bad = broken.add_covered(&out, &id, &identity_pose(), false, true);
         assert_eq!(bad.objects.len(), 0);
+        assert_eq!(broken.objects.len(), before_objects);
+        assert_eq!(
+            broken.color_atlas.rgba.len() + broken.normal_atlas.rgba.len(),
+            before_atlas
+        );
         assert!(
             bad.fallback
                 .iter()
@@ -923,9 +930,63 @@ mod covered_world {
         remove_source(&source, &out);
         reset_importer_entries();
         let mut world = bare_world();
+        let before_objects = world.objects.len();
+        let before_atlas = world.color_atlas.rgba.len() + world.normal_atlas.rgba.len();
         let report = world.add_covered(&out, &id, &identity_pose(), false, true);
         assert_eq!(report.objects.len(), 0);
+        assert_eq!(world.objects.len(), before_objects);
+        assert_eq!(
+            world.color_atlas.rgba.len() + world.normal_atlas.rgba.len(),
+            before_atlas
+        );
         assert_ne!(report.fallback.len(), 0);
+        assert_eq!(importer_entries(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_shade_metadata_inserts_nothing() {
+        let dir = temp("bad-shade");
+        let source = write_two_mesh(&dir);
+        let out = dir.join("cook");
+        let id = cooks(&source, &out);
+        let mat_path = genos_load::materials_path(&out, &id);
+        let mut record = genos_load::decode_materials(&std::fs::read(&mat_path).unwrap()).unwrap();
+        record.primitive_shade.pop();
+        let bytes = genos_load::encode_materials(&record).unwrap();
+        std::fs::write(&mat_path, &bytes).unwrap();
+        let hash = genos_load::hex(&sha256(&bytes));
+        let manifest_path = out.join("package.manifest");
+        let text = std::fs::read_to_string(&manifest_path).unwrap();
+        let old = text
+            .split_whitespace()
+            .find(|part| part.starts_with("mat="))
+            .unwrap();
+        write_atomic(
+            &manifest_path,
+            text.replace(old, &format!("mat={hash}")).as_bytes(),
+        )
+        .unwrap();
+        remove_source(&source, &out);
+        reset_importer_entries();
+        let mut world = bare_world();
+        let before_objects = world.objects.len();
+        let before_atlas = world.color_atlas.rgba.len() + world.normal_atlas.rgba.len();
+        let report = world.add_covered(&out, &id, &identity_pose(), false, true);
+        assert_eq!(report.objects.len(), 0);
+        assert_eq!(world.objects.len(), before_objects);
+        assert_eq!(
+            world.color_atlas.rgba.len() + world.normal_atlas.rgba.len(),
+            before_atlas
+        );
+        assert!(
+            report
+                .fallback
+                .iter()
+                .any(|line| line.contains("primitive shade count")),
+            "{:?}",
+            report.fallback
+        );
         assert_eq!(importer_entries(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
