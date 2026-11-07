@@ -70,6 +70,8 @@ struct MediaModules {
     check: PathBuf,
     inject: PathBuf,
     integrate: PathBuf,
+    texel_seed: PathBuf,
+    texel_prod: PathBuf,
 }
 
 /// Media and froxel modules, and the two compile-only checks that sit with them.
@@ -91,6 +93,14 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         integrate: compile(
             "shaders/froxel_integrate.comp",
             &out.join("froxel_integrate.comp.spv"),
+        ),
+        texel_seed: compile(
+            "shaders/texel_seed_check.comp",
+            &out.join("texel_seed_check.comp.spv"),
+        ),
+        texel_prod: compile(
+            "shaders/texel_seed_prod.comp",
+            &out.join("texel_seed_prod.comp.spv"),
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
@@ -192,7 +202,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_SEED_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_SEED_PROD_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -202,7 +212,9 @@ fn write_shader_glue(
             raster.fxaa.display(),
             media.check.display(),
             media.inject.display(),
-            media.integrate.display()
+            media.integrate.display(),
+            media.texel_seed.display(),
+            media.texel_prod.display()
         ),
     )
     .unwrap();
@@ -258,6 +270,9 @@ fn rerun_shader_pieces() {
         "lighting_common.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
+        "lighting_texel_seed.glsl",
+        "texel_seed_check.comp",
+        "texel_seed_prod.comp",
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
