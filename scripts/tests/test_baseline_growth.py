@@ -4,6 +4,12 @@
 The label name and the owner line are a proposal. These tests lock that
 contract. They do not create a GitHub label and they do not edit the
 repository baselines.
+
+The default suite is hermetic. It does not fetch GitHub. Set
+GENOS_BASELINE_GROWTH_LIVE_STACK=1 to add
+test_actual_stack_175_base_lacks_the_script_and_still_gates_growth, which
+fetches pull request 175. scripts/lint.sh and --self-test do not set that
+variable.
 """
 
 from __future__ import annotations
@@ -726,7 +732,57 @@ class GitGuardTest(unittest.TestCase):
         self.assertIn("trusted checkout has no gate script", ci)
         self.assertIn('PYTHONDONTWRITEBYTECODE: "1"', gate)
 
-    def test_actual_stack_175_base_lacks_the_script_and_still_gates_growth(self) -> None:
+    def test_old_base_without_the_gate_script_still_gates_growth(self) -> None:
+        files = {LOSSY: "crates/a.rs 1\n", SHADER: "crates/render/shaders/a.comp 1\n"}
+        base = self.commit("base without the gate", files)
+        missing = subprocess.run(
+            ["git", "cat-file", "-e", f"{base}:scripts/lint-baseline-growth.py"],
+            cwd=self.repo,
+            check=False,
+            capture_output=True,
+            env=git_env(),
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        head = self.commit("same ceilings", {**files, "notes.txt": "no baseline growth\n"})
+        also_missing = subprocess.run(
+            ["git", "cat-file", "-e", f"{head}:scripts/lint-baseline-growth.py"],
+            cwd=self.repo,
+            check=False,
+            capture_output=True,
+            env=git_env(),
+        )
+        self.assertNotEqual(also_missing.returncode, 0)
+        quiet = self._run(["--base-sha", base, "--head-sha", head, "--labels", ""], env={})
+        self.assertEqual(quiet.returncode, 0, quiet.stderr)
+        self.assertIn("no added entries", quiet.stdout)
+        grown = self.commit(
+            "grow",
+            {LOSSY: "crates/a.rs 1\ncrates/b.rs 4\n", SHADER: files[SHADER]},
+        )
+        denied = self._run(["--base-sha", base, "--head-sha", grown, "--labels", ""], env={})
+        self.assertEqual(denied.returncode, 1, denied.stderr)
+        self.assertIn("baseline-growth-approved", denied.stderr)
+        self.assertIn("# owner:", denied.stderr)
+        self.assertIn("crates/b.rs", denied.stderr)
+        owned = self.commit(
+            "owned",
+            {LOSSY: f"crates/a.rs 1\n{OWNER}\ncrates/b.rs 4\n", SHADER: files[SHADER]},
+        )
+        allowed = self._run(
+            [
+                "--base-sha",
+                base,
+                "--head-sha",
+                owned,
+                "--labels",
+                "baseline-growth-approved",
+            ],
+            env={},
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn("owner lines present", allowed.stdout)
+
+    def _live_stack_175(self) -> None:
         fetched = self._fetch_stack()
         missing = subprocess.run(
             ["git", "cat-file", "-e", f"{STACK_BASE}:scripts/lint-baseline-growth.py"],
@@ -1180,6 +1236,12 @@ class GitGuardTest(unittest.TestCase):
     @staticmethod
     def _boom() -> set[str]:
         raise AssertionError("metadata fetch is not used for this decision")
+
+
+if os.environ.get("GENOS_BASELINE_GROWTH_LIVE_STACK") == "1":
+    GitGuardTest.test_actual_stack_175_base_lacks_the_script_and_still_gates_growth = (
+        GitGuardTest._live_stack_175
+    )
 
 
 if __name__ == "__main__":
