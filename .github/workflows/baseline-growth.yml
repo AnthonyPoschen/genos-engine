@@ -2,9 +2,13 @@
 # created here and is not a standing permission. Anthony confirms the name
 # and the owner-line contract before this is treated as policy.
 #
-# pull_request_target runs the workflow from the default branch. This job
-# checks out that base SHA and reads head baseline files as text. It does not
-# check out the head and it does not run the pull request's scripts.
+# pull_request_target runs this file from the default branch. github.sha is
+# that commit. The job checks out github.sha and keeps the worktree there.
+# It fetches the event base SHA, the base branch, and refs/pull/<n>/head
+# from origin as objects. It does not check out the head, it does not fetch
+# a URL from the event, and it does not run the pull request's scripts. A
+# missing gate script, a bad ref, or a fetch that does not match the event
+# head fails the job closed. It does not skip the gate.
 # labeled, unlabeled, and edited run the job again, so a label change or a
 # body edit retriggers it. Re-run the job from the Actions tab to repeat it
 # by hand. An API or fetch error fails the job closed.
@@ -26,27 +30,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # Default-branch commit for pull_request_target. Not the PR base.
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          # The read token stays in this checkout's git config so `git fetch
+          # origin` can see the base and the pull ref. The token expression
+          # is exported only on the gate step. Nothing fetches an
+          # event-supplied URL.
           persist-credentials: true
 
-      - name: fetch the pull request head without checking it out
+      - name: fetch the base and the pull head without checking them out
         env:
           GIT_LFS_SKIP_SMUDGE: "1"
+          GIT_TERMINAL_PROMPT: "0"
+          PYTHONDONTWRITEBYTECODE: "1"
+          TRUSTED_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "pull/${PR_NUMBER}/head"
-          fetched=$(git rev-parse FETCH_HEAD)
-          if [ "$fetched" != "$HEAD_SHA" ]; then
-            echo "baseline-growth: fetched pull/${PR_NUMBER}/head is ${fetched}, event head is ${HEAD_SHA}. Fail closed." >&2
-            exit 2
-          fi
+        run: bash scripts/lint-baseline-growth-ci.sh fetch
 
       - name: proposed baseline-growth gate
         env:
           GIT_LFS_SKIP_SMUDGE: "1"
+          GIT_TERMINAL_PROMPT: "0"
+          PYTHONDONTWRITEBYTECODE: "1"
+          TRUSTED_SHA: ${{ github.sha }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -54,6 +64,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          bash scripts/lint-baseline-growth-ci.sh guard
           python3 scripts/lint-baseline-growth.py --self-test
           python3 scripts/lint-baseline-growth.py \
             --base-sha "$BASE_SHA" \
