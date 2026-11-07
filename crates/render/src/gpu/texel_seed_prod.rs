@@ -124,11 +124,13 @@ impl Gpu {
                 samplers: std::ptr::null(),
             })
             .collect();
+        let binding_count = u32::try_from(bindings.len())
+            .map_err(|err| format!("texel seed production binding count: {err}"))?;
         let set_info = SetInfo {
             s_type: 32,
             next: std::ptr::null(),
             flags: 0,
-            count: bindings.len() as u32,
+            count: binding_count,
             bindings: bindings.as_ptr(),
         };
         let mut desc_layout = std::ptr::null_mut();
@@ -253,7 +255,7 @@ impl Gpu {
         }
         let size = Size {
             kind: 7,
-            count: bindings.len() as u32,
+            count: binding_count,
         };
         let pool_info = PoolInfo {
             s_type: 33,
@@ -416,10 +418,12 @@ impl Gpu {
                 texel: std::ptr::null(),
             })
             .collect();
+        let write_count = u32::try_from(writes.len())
+            .map_err(|err| format!("texel seed production descriptor writes: {err}"))?;
         unsafe {
             (self.fns.update_desc)(
                 self.device,
-                writes.len() as u32,
+                write_count,
                 writes.as_ptr().cast(),
                 0,
                 std::ptr::null(),
