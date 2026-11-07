@@ -83,6 +83,56 @@ fn a_gear_on_the_plane_shares_the_weight() {
 }
 
 #[test]
+fn a_lifting_wing_holds_the_gear_above_the_wing_off_chassis() {
+    let mut wing = genos_physics::gear_plane_world();
+    let mut off = wing_off_plane();
+    let Some(off_aircraft) = off.vehicles[0].aircraft else {
+        assert!(off.vehicles[0].aircraft.is_some());
+        return;
+    };
+    assert_eq!(off_aircraft.cl.to_bits(), 0.0_f32.to_bits());
+    let lift = lift_at_twenty();
+    let with_lift = damper_rest(lift);
+    let without = damper_rest(0.0);
+    for _ in 0..SHARE_STEPS {
+        step(&mut wing, DT);
+        step(&mut off, DT);
+        assert_eq!(wing.step_stats.wheel_rays, 4);
+        assert_eq!(off.step_stats.wheel_rays, 4);
+    }
+    let lifted = chassis(&wing);
+    let dropped = chassis(&off);
+    assert_eq!(
+        dropped.position.y.to_bits(),
+        without.to_bits(),
+        "wing-off centre {} left the damper rest {without}",
+        dropped.position.y
+    );
+    assert_eq!(
+        lifted.position.y.to_bits(),
+        with_lift.to_bits(),
+        "lifting centre {} left the damper rest {with_lift}",
+        lifted.position.y
+    );
+    let rise = lifted.position.y - dropped.position.y;
+    let expected = with_lift - without;
+    assert_eq!(
+        rise.to_bits(),
+        expected.to_bits(),
+        "lift raised the gear {rise} m, the damper unload is {expected}"
+    );
+    assert!(
+        (lifted.velocity.x - 20.0).abs() < 0.05 && (dropped.velocity.x - 20.0).abs() < 0.05,
+        "the pair left the 20 m/s sample at {} and {}",
+        lifted.velocity.x,
+        dropped.velocity.x
+    );
+    assert!(!lifted.motor);
+    assert!(lifted.spring.is_none());
+    assert!(!dropped.motor);
+}
+
+#[test]
 fn a_ground_push_does_not_change_the_airspeed_sample() {
     let mut clear = compressed_aircraft(false);
     let mut sprung = compressed_aircraft(true);
@@ -255,6 +305,44 @@ fn a_parked_gear_with_a_closed_throttle_stops_casting() {
         "parked gear y {} is {height_error} m from 0.384469",
         world.bodies[index].position.y
     );
+}
+
+/// Same landing chassis with `cl` cleared and thrust matched to the remaining drag.
+fn wing_off_plane() -> World {
+    let mut world = genos_physics::gear_plane_world();
+    if let Some(aircraft) = world.vehicles[0].aircraft.as_mut() {
+        aircraft.cl = 0.0;
+        let speed = 20.0_f32;
+        let q = 0.5 * aircraft.air_density * (speed * speed);
+        aircraft.thrust_max = (q * aircraft.wing_area) * aircraft.cd0;
+    }
+    world
+}
+
+/// A1 lift at 20 m/s. `cl` is the trim that carries this mass at 50 m/s.
+fn lift_at_twenty() -> f32 {
+    let mass = 1_000.0_f32;
+    let area = 10.0_f32;
+    let density = 1.225_f32;
+    let weight = mass * -GRAVITY.y;
+    let cl = weight / (0.5 * density * (50.0 * 50.0) * area);
+    let q = 0.5 * density * (20.0 * 20.0);
+    cl * q * area
+}
+
+/// Centre height where the spring-damper holds a 1 000 kg chassis.
+///
+/// The ray samples velocity after gravity and after lift have already been
+/// added. A chassis that begins the step at rest still presents
+/// `(gravity.y + lift / mass) * dt` to the damper, so the held height is not
+/// the static `0.4 - (weight - lift) / (4k)`. `lift` is that wing force in newtons.
+fn damper_rest(lift: f32) -> f32 {
+    let mass = 1_000.0_f32;
+    let omega = 2.0 * std::f32::consts::PI * 4.0;
+    let zeta = 0.7_f32;
+    let vy = (GRAVITY.y + lift / mass) * DT;
+    let compression = -vy * (1.0 - 2.0 * zeta * omega * DT) / (omega * omega * DT);
+    0.4 - compression
 }
 
 fn trim_aircraft(mass: f32, gravity: Vec3) -> Aircraft {

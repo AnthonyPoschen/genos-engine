@@ -121,7 +121,7 @@ G1, A1, and T1 are in the tree as a trial. This ADR stays proposed. S1 is not in
 | G1 | `Wheeled` only | in the step as a trial | `a_chassis_rests_on_four_springs`, `a_parked_chassis_sleeps_and_stops_casting` |
 | A1 | `Aircraft` only | in the step as a trial | `a_trimmed_aircraft_holds_altitude_and_speed` |
 | S1 | `SpaceCraft` only | acceptance | `a_thruster_in_zero_gravity_matches_force_and_torque` |
-| T1 | aircraft and wheeled ground | in the step as a trial | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
+| T1 | aircraft and wheeled ground | in the step as a trial | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight`, `a_lifting_wing_holds_the_gear_above_the_wing_off_chassis` |
 | S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 | Sea | none | a later ADR | none |
 
@@ -176,7 +176,7 @@ Box inertia is `Ixx = m/3 (hy² + hz²)`. Here `I = 2000/3` kg·m² on each axis
 
 `a_gear_that_misses_matches_the_aircraft`. The A1 aircraft, plus four wheels with `max_length = 0.5` and the G1 spring numbers. No plane. Centre `y` is 100, so every ray misses. After 120 steps the chassis pose and velocity match the A1 twin bit for bit, and `wheel_rays == 4`. `debug/physics --scene gear_miss` runs those 120 steps.
 
-`a_gear_on_the_plane_shares_the_weight`. Mass 1 000 kg, so suspended mass is 250 kg and `k = 157913.670` N/m. The same wheels as G1. The plane from G1. Forward speed 20 m/s. `cl` stays the A1 constant. `q = 0.5 * 1.225 * 400 = 245`. Lift is 1 569.6 N. The springs carry `9810 - 1569.6 = 8240.4` N. Compression per wheel is 0.013046 m. Settled centre height is 0.386954 m. `thrust_max` is the drag at 20 m/s from the A1 `cd` formula, `throttle = 1`. After 180 steps, with `sleep_time = 10`: centre `y` within 0.02 m of 0.386954, `|velocity.y| < 0.05`, `|velocity.x - 20| < 0.05`, body up within 0.01 rad of world up. A second run matches bits. `debug/physics --scene gear_plane` runs those 180 steps.
+`a_gear_on_the_plane_shares_the_weight`. Mass 1 000 kg, so suspended mass is 250 kg and `k = 157913.670` N/m. The same wheels as G1. The plane from G1. Forward speed 20 m/s. `cl` stays the A1 constant. `q = 0.5 * 1.225 * 400 = 245`. Lift is 1 569.6 N. The springs carry `9810 - 1569.6 = 8240.4` N. Compression per wheel is 0.013046 m. Settled centre height is 0.386954 m. `thrust_max` is the drag at 20 m/s from the A1 `cd` formula, `throttle = 1`. After 180 steps, with `sleep_time = 10`: centre `y` within 0.02 m of 0.386954, `|velocity.y| < 0.05`, `|velocity.x - 20| < 0.05`, body up within 0.01 rad of world up. A second run matches bits. `debug/physics --scene gear_plane` runs those 180 steps. That 0.02 m window also contains the wing-off chassis: the same gear with `cl = 0` and thrust matched to the remaining drag rests at 0.393577, and the static full-weight height 0.384469 is inside the window too. The damper samples velocity after gravity and lift, so the held heights are not those static compressions. `a_lifting_wing_holds_the_gear_above_the_wing_off_chassis` matches each chassis to its own damper rest. It does not replace the 0.02 m check.
 
 ## Sea
 
