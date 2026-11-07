@@ -410,6 +410,11 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 - **Reference:** Lumen is checked visually against the path tracer; we gate numerically.
 - **Fill run (S71D/S71G, time to fill; Anthony 2026-10-12: pop-in is fine when the screen fills near-immediately, smoothing would be lag, so S71E's display ramp was reverted):** `fill.rhai`, the turn pose settled, then a cut to the unseen side held 120 frames (reveal/) and settled (reveal_end/), then a sun move 12:00 -> 15:00 held 120 frames (light/) and settled (light_end/). Score: frames until mean |L - settled| (linear luminance, 320 x 180) stays under 0.005, target 30 (provisional, MISS not FAIL); the note gives the gap at frames 0/10/30/60 and the share of pixel-frames stepping more than 0.01 from their 9-frame average (pop-in, not graded). With turns (turn run) and night->day (dnout frames to 2 %), time to good is the main lighting score. Older builds: run `fill.rhai` with their binary and score with `gi-check --score-only --only fill`.
 - **Open:** the still shimmer row (frame to frame, 60 frames) reads 0 for every build; the drift Anthony sees is slower than 60 frames at 8-bit, so a longer-window row (first vs last of ~600 still frames) is next.
+- **ADR 0039 stage 2 cell energy and lamp timeline:** cell energy is the summed 25 cm irradiance over the CPU bounce irradiance, and the bounce picture over the bounce reference, at least 0.9. Linger is that bounce 120 frames after the lamps go out, at most 0.05 of the lit bounce. Lag is the same ratio 300 frames after the lamps come on, at least 0.9. The harness is `examples/stress/tests/cache_energy.rs`. Stage 2 sets `CACHE_ENERGY_SH=1` so `surface_cache.sh_cells` is on. The axis read is the cell mean, and a lamp change replaces the mean and the harmonics together, so the same sums grade the production path. The oracle's `energy_mean` sums the full picture, direct light included, and stays a separate report (`docs/systems/lighting/oracle-harness.md`).
+
+```sh
+CACHE_ENERGY_SH=1 cargo test --release -p genos-stress --test cache_energy -- --ignored --nocapture --test-threads=1
+```
 
 ## Reference check
 

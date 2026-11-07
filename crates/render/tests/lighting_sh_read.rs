@@ -592,3 +592,21 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
         "more relights of a rising trace are brighter: early {early} kept {kept}"
     );
 }
+
+/// The production cell writes the mean and the harmonics with one weight.
+/// A lamp change sets that weight to 1 before either store, and a sun rescale
+/// multiplies the held harmonics by the same gain as the held mean.
+#[test]
+fn a_settling_lamp_replaces_the_mean_and_the_harmonics_together() {
+    let relight = shader("lighting_cache.comp");
+    let settle = relight.find("if (lighting_lamp_settling())").expect("lamp settle");
+    let put = relight[settle..].find("lighting_sh_put").expect("harmonics store");
+    let window = &relight[settle..settle + put];
+    assert!(window.contains("wa = 1.0;"), "settling must replace the sample");
+    assert!(window.contains("lighting_tex_put"), "the mean is stored in that arm");
+    assert!(window.contains("o0 * sh_ls"), "held harmonics take the mean's sun gain");
+    let gain = relight.find("float sh_ls = 1.0;").expect("sun gain");
+    let mean_scale = relight[gain..].find("old.rgb *= ls").expect("mean rescale");
+    let sh_scale = relight[gain..].find("o0 * sh_ls").expect("harmonic rescale");
+    assert!(mean_scale < sh_scale, "the mean is rescaled before the harmonics blend");
+}
