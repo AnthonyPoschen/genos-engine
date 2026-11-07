@@ -24,7 +24,7 @@ JSON, one object per scenario) plus the pictures it scored.
 | `spin` | The box nearest the hall spinning at 2 rad/s, lamps on, at night | 240 |
 | `switch` | Dark room at midnight (lamps off for 10 s first), every lamp turns on in one frame | 8 dark + 120 |
 | `turn` | Camera turns 90 degrees in one second, then holds | 90 |
-| `slant`, `slant-day` | The box nearest the hall turned 0.6 rad (34 degrees) and held, seen close, lamps on at 22:00 (`slant`) or sky at 12:00 (`slant-day`). Traced 30, 120 and 300 frames after the turn (ADR 0039 stage 2: slanted surfaces). The scored middle half is mostly the floor around the box | 120 |
+| `slant`, `slant-day` | The box nearest the hall turned 0.6 rad (34 degrees) and held, seen close, lamps on at 22:00 (`slant`) or sky at 12:00 (`slant-day`). Traced 30, 120 and 300 frames after the turn (ADR 0039 stage 2: slanted surfaces). The scored middle half has more ground-plane pixels than turned faces; that count is not the share of the error | 120 |
 | `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
 | `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
 
@@ -95,10 +95,18 @@ number is unchanged and `grid_worst` stays reported.
 * `energy_mean`, `energy_min`: the live picture's summed linear luminance over
   the reference's, per traced frame (1.0 is no light lost or gained). Direct
   light is in both, so it moves less than a bounce-only ratio.
-* `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`, the unweighted
-  error over the middle half of the picture. At the slant pose that half is
-  mostly the axis-aligned floor; `scripts/lighting/slant_mid_split.py` splits
-  a saved run into floor, turned faces, and the box top.
+* `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`. For each traced
+  frame, crop the middle half, average 2×2 blocks, and take
+  `sum(|live - ref|) / (sum(ref) + 1e-6)` on sRGB-decoded Rec.709 luma of
+  `f*-live.png` and `f*-reference.png`. The mean of those frames, rounded to
+  4 decimals, is the gate. `proxy_abs_mean` in
+  `scripts/lighting/slant_mid_split.py` is the mean absolute luma.
+  `compare_linear` grades the path tracer's float radiance and is a separate
+  grade. Most pixels in that half are the ground plane around the box. That
+  figure is a pixel count. The split script recomputes the gate and attributes
+  its numerator. With the saved depth PNG, a wall is `other`. The pose
+  projection is the fallback when depth is missing, and a downward miss there
+  is class `floor`.
 * `lighting_ms_p50_lavapipe`: lavapipe timing, only useful run against run on
   the same machine.
 
