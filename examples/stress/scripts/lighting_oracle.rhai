@@ -184,10 +184,9 @@ fn turn(pass, hist, every) {
 // 0.6 rad (34 degrees) and held, so its side faces are off every axis. Seen
 // close, at night under the hall lamps ("slant") and at noon under the sky
 // ("slant-day"). Measured 30, 120 and 300 frames after the turn.
-// slant_mid_err is the middle half of that picture: sum(|live-ref|)/sum(ref)
-// on 2x2 blocks (scripts/lighting/oracle_metrics.py). Most of those pixels
-// are the ground plane. That count is not the share of the error.
-// scripts/lighting/slant_mid_split.py attributes the scored numerator.
+// slant_mid_err is the middle half of that picture. At this pose the half is
+// mostly the axis-aligned floor around the box; the turned faces are the
+// smaller part (scripts/lighting/slant_mid_split.py).
 fn slant(pass, dir, hour) {
     knob("time_of_day", hour);
     knob("sun", "freeze");
