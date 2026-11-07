@@ -643,6 +643,31 @@ class GitGuardTest(unittest.TestCase):
         self.assertIn("--label", text)
         self.assertNotIn("pull_request_target", (ROOT / ".github" / "workflows" / "lint.yml").read_text(encoding="utf-8"))
 
+    def test_production_workflow_wires_github_token_to_the_gate_step(self) -> None:
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\n    steps:\n", text)
+        body = text.split("\n    steps:\n", 1)[1]
+        steps = body.split("\n      - ")
+        gate = [
+            step
+            for step in steps
+            if "lint-baseline-growth.py" in step and "--base-sha" in step and "--pull" in step
+        ]
+        self.assertEqual(len(gate), 1)
+        self.assertRegex(
+            gate[0],
+            r"(?m)^[ ]+GITHUB_TOKEN:\s*\$\{\{\s*github\.token\s*\}\}\s*$",
+        )
+        for step in steps:
+            if step == gate[0]:
+                continue
+            self.assertNotIn("github.token", step)
+            self.assertNotIn("secrets.GITHUB_TOKEN", step)
+            self.assertNotIn("GH_TOKEN", step)
+        self.assertNotIn("--labels", text)
+        self.assertNotIn("github.event.pull_request.labels", text)
+        self.assertNotRegex(text, r"(?i)(contents|pull-requests):\s*write")
+
     def _serve(self, payload: dict, status: int, raw: bytes | None = None) -> str:
         body = raw if raw is not None else json.dumps(payload).encode()
 

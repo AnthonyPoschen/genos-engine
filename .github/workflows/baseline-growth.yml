@@ -50,6 +50,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          # Read-only pulls API. This step only. The event payload is not a label shortcut.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 scripts/lint-baseline-growth.py --self-test
