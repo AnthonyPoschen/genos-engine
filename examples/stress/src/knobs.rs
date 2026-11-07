@@ -432,6 +432,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "SH cells (ADR 0039)",
             lighting.surface_cache.sh_cells,
         ),
+        Knob::switch(
+            "lighting_surface_cache_sh_texel_seed",
+            "SH texel seed (ADR 0039)",
+            lighting.surface_cache.sh_texel_seed,
+        ),
         Knob::choice(
             "lighting_surface_cache_blend",
             "Surface cache blend",
@@ -646,6 +651,7 @@ pub fn apply_lighting_knob(
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
         "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
         "lighting_surface_cache_sh_cells" => ("surface_cache.sh_cells", on_off(v)),
+        "lighting_surface_cache_sh_texel_seed" => ("surface_cache.sh_texel_seed", on_off(v)),
         "lighting_surface_cache_blend" => (
             "surface_cache.blend",
             if v >= 0.5 { "hold" } else { "msme" }.to_string(),
@@ -866,6 +872,7 @@ mod tests {
         "lighting_budget_shift",
         "lighting_surface_cache_attach_movers",
         "lighting_surface_cache_sh_cells",
+        "lighting_surface_cache_sh_texel_seed",
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",

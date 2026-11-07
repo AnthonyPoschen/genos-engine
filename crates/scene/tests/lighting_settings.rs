@@ -69,6 +69,20 @@ fn surface_cache_sh_cells_round_trips() {
 }
 
 #[test]
+fn surface_cache_sh_texel_seed_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(!settings.surface_cache.sh_texel_seed);
+    settings.set_key("surface_cache.sh_texel_seed", "on").unwrap();
+    assert!(settings.surface_cache.sh_texel_seed);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_seed);
+    assert!(!parsed.surface_cache.sh_cells);
+    settings.set_key("surface_cache.sh_texel_seed", "off").unwrap();
+    assert!(!settings.surface_cache.sh_texel_seed);
+    assert!(settings.set_key("surface_cache.sh_texel_seed", "maybe").is_err());
+}
+
+#[test]
 fn cells_only_toggle_parses() {
     let mut settings = LightingSettings::default();
     settings.set_key("toggles", "cells_only").unwrap();

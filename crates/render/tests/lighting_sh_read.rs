@@ -592,3 +592,67 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
         "more relights of a rising trace are brighter: early {early} kept {kept}"
     );
 }
+
+#[test]
+fn a_texel_seed_reads_one_cell_and_does_not_write_it() {
+    let text = cache_shader();
+    assert!(text.contains("#include \"lighting_texel_seed.glsl\""));
+    let tilt = function_body(
+        &text,
+        "vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n)",
+    );
+    assert!(
+        tilt.contains("return lighting_texel_seed_tilt(e, axis, n, cx, cy, cz);"),
+        "the production tilt must be the function the lavapipe check runs"
+    );
+    let seed = function_body(&text, "vec4 lighting_sh_owning_texel_seed(vec3 p, vec3 n)");
+    assert!(seed.contains("lighting_cache_find_sized(p, n, false, LIGHTING_SH_CELL, p)"));
+    assert!(
+        !seed.contains("lighting_sh_read("),
+        "a texel seed must not blend the lattice"
+    );
+    assert!(
+        !seed.contains("lighting_sh_put("),
+        "a texel seed must not write harmonics"
+    );
+    assert!(
+        !seed.contains("uintBitsToFloat(lighting_frame())"),
+        "a texel seed must not stamp the cell read"
+    );
+    assert!(
+        !seed.contains("cache.v[3u * s + 2u] ="),
+        "a texel seed must not write the cell mean"
+    );
+    let screen = function_body(
+        &text,
+        "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
+    );
+    assert!(screen.contains("if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot))"));
+    assert!(screen.contains("lighting_sc_clear_seed(slot);"));
+    assert!(screen.contains("vec4 shs = lighting_sh_owning_texel_seed(q, n);"));
+    assert!(screen.contains(
+        "lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);"
+    ));
+    assert!(
+        screen.contains("lighting_sc_set_seed(slot, hc, 0.25,"),
+        "the stage 2 hit seed stays when the cell seed misses"
+    );
+    let gate = "if (lighting_sc_slanted(n))";
+    let at = screen.find(gate).expect("slanted screen gate");
+    let after = &screen[at + gate.len()..];
+    let open = after.find('{').expect("screen gate brace");
+    let arm = block_body(&after[open + 1..]);
+    assert!(!arm.contains("lighting_sh_owning_texel_seed"));
+    assert!(arm.contains("return lighting_sh_read(pos, n, true);"));
+    let clear = function_body(&text, "void lighting_sc_clear_seed(uint slot)");
+    assert!(clear.contains("cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;"));
+    assert!(!clear.contains("3u * slot + 2u"));
+    let relight = shader("lighting_cache.comp");
+    assert!(relight.contains("if (lighting_sh_texel_seed_on() && lighting_sc_lamp_touched(slot))"));
+    let irradiance = function_body(&text, "vec3 lighting_cache_irradiance(vec3 pos, vec3 n)");
+    let owner = "return lighting_sh_tilt(slot, e.rgb, cache.v[3u * slot + 1u].xyz, n) * lighting_sc_sun_gain(slot) * keep;";
+    assert!(
+        irradiance.contains(owner),
+        "the stage 2 owner fix stays the ray-hit fallback"
+    );
+}

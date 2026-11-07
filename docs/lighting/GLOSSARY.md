@@ -154,6 +154,9 @@ Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid 
 **SH cells**: (ADR 0039 stage 2, `surface_cache.sh_cells`) a 25 cm WRC cell also keeps colour SH-L1 (four RGB coefficients, fp16, 24 B) built from the relight rays it already traces. At the cell's axis the tilt read is that cell's mean. An axis-aligned ray hit, including the value stored as a display seed, tilts the one owning cell and does not blend its neighbours. A slanted screen pixel's lattice read is empty, because an axis is used only when its component has magnitude 1, and compose then keeps the probes.
 Role: STORE · Literature: Lumen WRC (SH per probe); DDGI irradiance (octahedral, not SH) · More detail: ADR 0039 (PR #165), `crates/render/src/lighting_sh.rs`
 
+**SH texel seed**: (ADR 0039 stage 3, `surface_cache.sh_texel_seed`, default off) an empty world texel takes its first fill from the one owning SH cell's tilt at the texel's normal. The value is a low-confidence seed beside the texel's own samples. A lamp change drops it. The cell is not claimed, stamped, or written, and neighbour cells are not blended. The shader also requires `surface_cache.sh_cells`. A mover texel and a slanted screen pixel stay on the stage 2 paths.
+Role: TEMPORAL · Literature: Lumen surface-cache cards seeded from the world cache · More detail: ADR 0039, `crates/render/shaders/lighting_texel_seed.glsl`
+
 **Acceleration grid** (proposed, not built): a spatial lookup that finds entries near a point in a big world.
 Role: STORE · Literature: GIBS trapezoid grid (§1.7) · More detail: [GIBS.md §1.7](research/GIBS.md)
 

@@ -182,6 +182,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 mod fog;
 mod media_check;
 mod stage;
+mod texel_seed_check;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -1096,6 +1097,17 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
+    /// Four seed records from `texel_seed_check.comp`. The parity test compares
+    /// them with `lighting_sh::texel_seed_check_expected`. This does not present
+    /// a picture. Lavapipe timings are not a 4070 measurement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_seed_check(&mut self, words: &[f32; 64]) -> Result<[f32; 64], String> {
+        self.gpu.texel_seed_check(words)
+    }
+
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
     /// The fog budget scales this span. Lavapipe is the cloud device.
     pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
@@ -1609,6 +1621,8 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Lazy `texel_seed_check.comp` dispatch. Absent until the parity test asks.
+    texel_seed_check: Option<texel_seed_check::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -2492,6 +2506,7 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                texel_seed_check: None,
                 media_ms: None,
                 media_groups: 1,
                 froxel: None,
@@ -3367,6 +3382,8 @@ impl Gpu {
         {
             return Some(5);
         }
+        // The seed check records its own buffer and does not stage uploads.
+        // The stage table has six slots (0-5). A seventh index would panic.
         None
     }
 
@@ -8848,6 +8865,7 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_texel_seed_check();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());

@@ -1,0 +1,47 @@
+#version 450
+// Lavapipe parity for `lighting_texel_seed.glsl`. Four invocations, one cell.
+// Output floats start at 32, eight floats each. A cell write is always 0.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 4) in;
+
+layout(std430, set = 0, binding = 0) buffer Buf {
+    float v[];
+} buf;
+
+const float LIGHTING_SH_Y0 = 0.2820948;
+const float LIGHTING_SH_Y1 = 0.4886025;
+const float LIGHTING_SH_A1 = 2.0943951;
+const float LIGHTING_SC_SEED_CONF = 0.25;
+const float LIGHTING_TEXEL_FAULT_SETS = 8.0;
+
+#include "lighting_texel_seed.glsl"
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    vec3 e = vec3(buf.v[0], buf.v[1], buf.v[2]);
+    vec3 axis = vec3(buf.v[3], buf.v[4], buf.v[5]);
+    vec3 n = vec3(buf.v[6], buf.v[7], buf.v[8]);
+    vec3 cx = vec3(buf.v[9], buf.v[10], buf.v[11]);
+    vec3 cy = vec3(buf.v[12], buf.v[13], buf.v[14]);
+    vec3 cz = vec3(buf.v[15], buf.v[16], buf.v[17]);
+    vec3 own = vec3(buf.v[18], buf.v[19], buf.v[20]);
+    vec3 tilt = lighting_texel_seed_tilt(e, axis, n, cx, cy, cz);
+    LightingTexelSeed s;
+    s.own = own;
+    s.own_samples = id == 2u ? 1.0 : 0.0;
+    s.seed = vec3(0.0);
+    s.confidence = 0.0;
+    bool fault = id == 3u;
+    s = lighting_texel_seed_apply(s, tilt, LIGHTING_SC_SEED_CONF, fault, LIGHTING_TEXEL_FAULT_SETS);
+    if (id != 0u) {
+        s = lighting_texel_seed_clear(s);
+    }
+    vec3 shown = lighting_texel_seed_shown(s);
+    uint at = 32u + id * 8u;
+    buf.v[at] = shown.r;
+    buf.v[at + 1u] = shown.g;
+    buf.v[at + 2u] = shown.b;
+    buf.v[at + 3u] = s.confidence;
+    buf.v[at + 4u] = s.own_samples;
+    buf.v[at + 5u] = 0.0;
+}

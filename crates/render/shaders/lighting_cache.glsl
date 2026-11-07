@@ -1932,6 +1932,9 @@ const float LIGHTING_SC_SPARSE_OWN = 4.0;
 // S72K handover: interpolation fades out over this many own sets (weight K).
 const float LIGHTING_SC_HANDOVER = 16.0;
 const float LIGHTING_SC_HANDOVER_K = 2.0;
+// S72N first-fill confidence, and the ADR 0039 stage 3 cell seed. A low preset
+// changes `LIGHTING_SH_CELL` (`LIGHTING_SC_HIT`), not this weight.
+const float LIGHTING_SC_SEED_CONF = 0.25;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -2022,6 +2025,12 @@ bool lighting_sc_seed_split() {
 bool lighting_sc_has_seed(uint slot) {
     return cache.v[LIGHTING_SC_SPARSE_AT + slot].z > 0.0;
 }
+void lighting_sc_clear_seed(uint slot) {
+    if (!LIGHTING_SC_WRITES) {
+        return;
+    }
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
+}
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2091,6 +2100,11 @@ const float LIGHTING_SH_A1 = 2.0943951;
 bool lighting_sh_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u;
 }
+// ADR 0039 stage 3. Head 3.w bit 17 (bits 0-8 are flags 23-31, 9-11 the budget
+// shift, 12-16 the isolate toggles). Off unless SH cells are on too.
+bool lighting_sh_texel_seed_on() {
+    return lighting_sh_on() && (uint(work.v[lighting_change_at() + 3u].w) & 131072u) != 0u;
+}
 uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
 }
@@ -2141,15 +2155,36 @@ void lighting_sh_get(uint slot, out vec3 c0, out vec3 cx, out vec3 cy, out vec3 
 // n. Exactly the mean at n == axis, so a surface facing along the cell's
 // normal reads what the per-axis path reads; plain L1 would read a narrow
 // lamp at 0.75 of its light there. Linear in the harmonics, so the shared
-// blend alpha keeps it consistent. Clamped at 0.
+// blend alpha keeps it consistent. Clamped at 0. The arithmetic is
+// `lighting_texel_seed_tilt`, which the lavapipe check runs.
+#include "lighting_texel_seed.glsl"
 vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
     vec3 c0;
     vec3 cx;
     vec3 cy;
     vec3 cz;
     lighting_sh_get(slot, c0, cx, cy, cz);
-    vec3 d = n - axis;
-    return max(e + (LIGHTING_SH_A1 * LIGHTING_SH_Y1) * (cx * d.x + cy * d.y + cz * d.z), vec3(0.0));
+    return lighting_texel_seed_tilt(e, axis, n, cx, cy, cz);
+}
+// Sun fraction of the last owning-cell seed. The seed's w is 1 when a cell
+// had light, so a zero sun share is not "no seed".
+float lighting_texel_seed_sunfrac = 0.0;
+// ADR 0039 stage 3. The empty texel's seed is this one cell's tilt. The lookup
+// does not claim, and it does not stamp or write the cell. An axis-aligned
+// texel does not blend neighbours (the stage 2 owner fix).
+vec4 lighting_sh_owning_texel_seed(vec3 p, vec3 n) {
+    lighting_texel_seed_sunfrac = 0.0;
+    uint s = lighting_cache_find_sized(p, n, false, LIGHTING_SH_CELL, p);
+    if (s == ~0u) {
+        return vec4(0.0);
+    }
+    vec4 e = cache.v[3u * s + 2u];
+    if (e.w < LIGHTING_CACHE_HAS_W) {
+        return vec4(0.0);
+    }
+    lighting_texel_seed_sunfrac = lighting_sc_sunfrac_now(s);
+    vec3 rgb = lighting_sh_tilt(s, e.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
+    return vec4(rgb, 1.0);
 }
 // The 25 cm cells' light at p facing n, read at the true normal: for each
 // axis n leans along (weight n_a^2), the four cells around p on that axis's
@@ -3346,6 +3381,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         }
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
+        // ADR 0039 stage 3: a lamp change drops the seed. Own samples stay.
+        // Off leaves the stage 2 seed where it was.
+        if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot)) {
+            lighting_sc_clear_seed(slot);
+        }
         if (LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
@@ -3368,14 +3408,23 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         if (v.w < 0.5 && mode == 3u) {
-            if (split) {
+            // ADR 0039 stage 3: the owning cell's tilt, one way. A miss keeps
+            // the parent and probe seeds below. Movers stay on that path.
+            if (split && lighting_sh_texel_seed_on() && !obj) {
+                vec4 shs = lighting_sh_owning_texel_seed(q, n);
+                if (shs.w > LIGHTING_CACHE_HAS_W) {
+                    lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);
+                    v = vec4(shs.rgb, 1.0);
+                }
+            }
+            if (v.w < LIGHTING_CACHE_HAS_W && split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
                 v = lighting_sc_parent_bilerp(q, n, size);
                 if (v.w > 0.5) {
                     lighting_sc_set_seed(slot, v.rgb, 0.25, lighting_bilerp_sunfrac);
                 }
-            } else {
+            } else if (v.w < LIGHTING_CACHE_HAS_W) {
                 v = lighting_sc_parent(q, n, size);
             }
         }

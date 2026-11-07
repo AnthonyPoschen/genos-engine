@@ -516,6 +516,13 @@ pub struct SurfaceCacheSettings {
     /// mark the cell read and keep it on the relight list before any ray hit
     /// it. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
+    /// Key `surface_cache.sh_texel_seed` (ADR 0039 stage 3, default off).
+    /// An empty world texel takes its first fill from the one owning 25 cm
+    /// cell's colour SH-L1, stored as a low-confidence seed beside its own
+    /// samples. The cell is not claimed or written. A lamp change drops the
+    /// seed. Off keeps the stage 2 parent, hit, and probe seeds. The shader
+    /// also requires `sh_cells`. Head 3.w bit 17.
+    pub sh_texel_seed: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -791,6 +798,7 @@ impl LightingSettings {
                 ray_budget: 0,
                 dormant_rays: 0,
                 sh_cells: false,
+                sh_texel_seed: false,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
@@ -1198,6 +1206,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.sh_texel_seed={}",
+            bit(self.surface_cache.sh_texel_seed)
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
@@ -1382,6 +1395,7 @@ impl LightingSettings {
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
+            "surface_cache.sh_texel_seed" => self.surface_cache.sh_texel_seed = on(value)?,
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1616,6 +1630,10 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS",
                 "surface_cache.sh_cells",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_SEED",
+                "surface_cache.sh_texel_seed",
             ),
         ];
         for (var, key) in keys {
