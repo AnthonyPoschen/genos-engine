@@ -80,7 +80,7 @@ Skipping that call drops the factors, the texture slots, and the instance mean. 
 
 ### Not in this acceptance
 
-The lavapipe picture test in `crates/render/tests/cooked_package.rs` still builds its package with `package`, which writes no `mat=`. It is not the check for this amendment, and this acceptance does not claim that picture. `debug/assets` is not in the tree. The probe for a bad record is `genos-cook --verify` and the `assets fallback` line on `CookedReport`.
+`cooked_picture_matches_gltf_within_the_bc_bound_and_load_times_are_printed` still builds its package with `package`, which writes no `mat=`. That is the path from before this amendment. `covered_picture_matches_gltf_after_the_source_is_gone` cooks the GMT1 record and compares `add_cooked` and `World::add_covered` (source file removed) to the glTF picture. The bound is unchanged: mean absolute channel error ≤ 3/255, 99th percentile ≤ 16/255. `debug/assets` is not in the tree. The probe for a bad record is `genos-cook --verify` and the `assets fallback` line on `CookedReport`. An invalid shade list adds no objects.
 
 - Replicated state: none. The material record is a local file.
 - Authority: the machine that has the file.
