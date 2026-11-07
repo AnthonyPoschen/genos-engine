@@ -31,7 +31,7 @@ const vec3 PROD_BLUE = vec3(0.0, 0.0, 7.0);
 const vec3 PROD_OWN = vec3(4.0, 2.0, 0.0);
 const vec3 PROD_SLANT = vec3(0.6, 0.8, 0.2);
 const uint PROD_HEAD = 4u;
-const uint PROD_STRIDE = 20u;
+const uint PROD_STRIDE = 24u;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -138,9 +138,11 @@ void prod_store(uint id, vec4 shown, uint cell, vec4 mean_before, uint stamp_bef
     uint texel = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SC_TEXEL, q);
     float conf = 0.0;
     float own = 0.0;
+    vec3 seed_rgb = vec3(0.0);
     if (texel != ~0u) {
         conf = cache.v[LIGHTING_SC_SPARSE_AT + texel].z;
         own = cache.v[3u * texel + 2u].w;
+        seed_rgb = lighting_sc_seed(texel).rgb;
     }
     prod_f(at, shown.r);
     prod_f(at + 1u, shown.g);
@@ -162,6 +164,10 @@ void prod_store(uint id, vec4 shown, uint cell, vec4 mean_before, uint stamp_bef
     prod_f(at + 17u, own);
     prod_f(at + 18u, seed_on ? 1.0 : 0.0);
     prod_u(at + 19u, lighting_sc_flags());
+    prod_f(at + 20u, seed_rgb.r);
+    prod_f(at + 21u, seed_rgb.g);
+    prod_f(at + 22u, seed_rgb.b);
+    prod_f(at + 23u, (gstats.ctrl_bits & PROD_DENOISE) != 0u ? 1.0 : 0.0);
 }
 
 void main() {
@@ -175,9 +181,14 @@ void main() {
     prod_lamp(prod_pos(0u));
     // One call site. The body is lighting_world_irradiance_in, which is what
     // lighting_world_irradiance calls when the point is not inside a mover.
-    for (uint id = 0u; id < 8u; id++) {
-        bool seed_on = id != 2u;
+    // 0..7 keep denoise on (the high preset). 8 is the same red owner with
+    // denoise cleared. 9 clears denoise and the stage 3 bit.
+    for (uint id = 0u; id < 10u; id++) {
+        bool seed_on = id != 2u && id != 9u;
         prod_head(seed_on);
+        if (id >= 8u) {
+            gstats.ctrl_bits = 0u;
+        }
         vec3 pos = prod_pos(id);
         vec3 n = id == 6u ? normalize(PROD_SLANT) : PROD_UP;
         vec3 q = prod_texel(pos, PROD_UP);

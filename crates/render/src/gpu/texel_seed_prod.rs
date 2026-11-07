@@ -12,7 +12,7 @@ use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 8) * 16;
-const OUT_FLOATS: usize = 4 + 8 * 20;
+const OUT_FLOATS: usize = 4 + 10 * 24;
 const PC_BYTES: u32 = 48;
 
 pub(super) struct Pipe {

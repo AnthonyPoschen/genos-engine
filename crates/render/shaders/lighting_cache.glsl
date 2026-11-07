@@ -3391,10 +3391,15 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // has to be stored first. A miss leaves the slot empty and the
         // resample still runs. Off, a mover, or a texel that already has its
         // own samples does not enter.
+        // kept is set only when this call stored the owning cell. A miss,
+        // the setting off, a mover, and an own sample leave it clear, so
+        // their later seeds stay the stage 2 ones.
+        bool kept = false;
         if (LIGHTING_SC_WRITES && split && lighting_sh_texel_seed_on() && !obj && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W && !lighting_sc_has_seed(slot)) {
             vec4 shs = lighting_sh_owning_texel_seed(q, n);
             if (shs.w > LIGHTING_CACHE_HAS_W) {
                 lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);
+                kept = true;
             }
         }
         if (LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
@@ -3419,13 +3424,15 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         if (v.w < 0.5 && mode == 3u) {
-            // The owning-cell seed was stored above, before the resample. A
-            // miss falls through to the parent and the probe seeds.
+            // Denoise off makes lighting_sc_shown return empty, so this walk
+            // still feeds the pixel. It must not replace an owning-cell seed
+            // stored above. A miss leaves kept clear, so the parent seed
+            // still replaces that resample.
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
                 v = lighting_sc_parent_bilerp(q, n, size);
-                if (v.w > 0.5) {
+                if (v.w > 0.5 && !kept) {
                     lighting_sc_set_seed(slot, v.rgb, 0.25, lighting_bilerp_sunfrac);
                 }
             } else if (v.w < LIGHTING_CACHE_HAS_W) {
@@ -3438,10 +3445,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec3 hc = lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
-                if (split) {
+                if (split && !kept) {
                     lighting_sc_set_seed(slot, hc, 0.25, lighting_hit_sunfrac);
                 }
-            } else if (split && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
+            } else if (split && !kept && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72N: the S72M probe seed, as a seed (not an own set).
                 lighting_sc_set_seed(slot, lighting_px_probes, 0.25, 0.0);
                 v = vec4(lighting_px_probes, 1.0);
