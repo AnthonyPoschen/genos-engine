@@ -17,6 +17,7 @@ members = [
     "crates/render",
     "crates/ui",
     "crates/lighting-ref",
+    "crates/cache-ref",
     "crates/load",
     "crates/load-check",
     "crates/cook",
