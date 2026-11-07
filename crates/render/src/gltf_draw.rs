@@ -98,7 +98,7 @@ impl World {
         place: &[f32; 16],
         affects_light: bool,
     ) -> Vec<usize> {
-        self.add_gltf_parts(scene, place, affects_light, None)
+        self.add_gltf_parts(scene, place, affects_light, None, None)
             .into_iter()
             .map(|p| p.object)
             .collect()
@@ -113,7 +113,7 @@ impl World {
         place: &[f32; 16],
         settings: &genos_bake::BakeSettings,
     ) -> Result<Vec<usize>, genos_bake::BakeError> {
-        let parts = self.add_gltf_parts(scene, place, false, None);
+        let parts = self.add_gltf_parts(scene, place, false, None, None);
         let mut sdfs: Vec<Option<std::sync::Arc<genos_bake::MeshSdf>>> =
             vec![None; scene.meshes.len()];
         let mut instance_at = usize::MAX;
@@ -168,12 +168,31 @@ impl World {
         &mut self,
         scene: &GltfScene,
         images: &[genos_load::CookedImage],
+        shades: &[genos_load::PrimitiveShade],
         place: &[f32; 16],
         affects_light: bool,
     ) -> Vec<usize> {
-        self.add_gltf_parts(scene, place, affects_light, Some(images))
+        self.add_gltf_parts(scene, place, affects_light, Some(images), Some(shades))
             .into_iter()
             .map(|p| p.object)
+            .collect()
+    }
+
+    /// Place `scene` using stored shades and the source-image atlas.
+    ///
+    /// `shades` is one entry per primitive in mesh order. When that count
+    /// matches, those values replace [`surface_mean`]. A mesh instanced twice
+    /// uses the same entries both times.
+    pub(crate) fn add_gltf_shaded(
+        &mut self,
+        scene: &GltfScene,
+        shades: &[genos_load::PrimitiveShade],
+        place: &[f32; 16],
+        affects_light: bool,
+    ) -> Vec<usize> {
+        self.add_gltf_parts(scene, place, affects_light, None, Some(shades))
+            .into_iter()
+            .map(|part| part.object)
             .collect()
     }
 
@@ -183,7 +202,16 @@ impl World {
         place: &[f32; 16],
         affects_light: bool,
         cooked: Option<&[genos_load::CookedImage]>,
+        shades: Option<&[genos_load::PrimitiveShade]>,
     ) -> Vec<GltfPart> {
+        let prim_total: usize = scene.meshes.iter().map(|mesh| mesh.primitives.len()).sum();
+        let shades = shades.filter(|list| list.len() == prim_total);
+        let mut mesh_base = Vec::with_capacity(scene.meshes.len());
+        let mut cursor = 0usize;
+        for mesh in &scene.meshes {
+            mesh_base.push(cursor);
+            cursor += mesh.primitives.len();
+        }
         let mut color_shelf = Shelf::from_atlas(&self.color_atlas);
         let mut normal_shelf = Shelf::from_atlas(&self.normal_atlas);
         let mut block_color = None;
@@ -198,14 +226,22 @@ impl World {
             let Some(mesh) = scene.meshes.get(instance.mesh) else {
                 continue;
             };
-            for primitive in &mesh.primitives {
+            for (prim_index, primitive) in mesh.primitives.iter().enumerate() {
                 let (vertices, normals, texcoords) = expand(primitive);
                 if vertices.is_empty() {
                     continue;
                 }
                 let material = primitive.material.and_then(|m| scene.materials.get(m));
-                let (mean, glow) = material.map_or(([1.0; 3], [0.0; 3]), |m| {
-                    surface_mean(m, &scene.images, primitive)
+                let stored = mesh_base.get(instance.mesh).and_then(|base| {
+                    shades.and_then(|list| {
+                        list.get(base + prim_index)
+                            .map(|shade| (shade.mean, shade.emission))
+                    })
+                });
+                let (mean, glow) = stored.unwrap_or_else(|| {
+                    material.map_or(([1.0; 3], [0.0; 3]), |m| {
+                        surface_mean(m, &scene.images, primitive)
+                    })
                 });
                 let surface = primitive.material.and_then(|index| {
                     *ready.entry(index).or_insert_with(|| {

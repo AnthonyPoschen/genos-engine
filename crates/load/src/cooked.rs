@@ -104,8 +104,9 @@ impl Package {
         Self::parse(&text)
     }
 
-    /// Every named record, texture record, and source object is present and
-    /// hashes to the manifest. Returns the asset count.
+    /// Every named record, texture record, material record, and source object
+    /// is present and hashes to the manifest. A line without `mat=` does not
+    /// look for a `.gmat`. Returns the asset count.
     ///
     /// # Errors
     ///
@@ -128,13 +129,29 @@ impl Package {
                     "record hash differs from the manifest",
                 ));
             }
-            if let Some(gtex) = parts.next() {
-                let gtex = gtex
-                    .strip_prefix("gtex=")
-                    .ok_or(CookedError::Corrupt("manifest line"))?;
+            let mut gtex = None;
+            let mut mat = None;
+            for part in parts {
+                if let Some(value) = part.strip_prefix("gtex=") {
+                    gtex = Some(value);
+                } else if let Some(value) = part.strip_prefix("mat=") {
+                    mat = Some(value);
+                } else {
+                    return Err(CookedError::Corrupt("manifest line"));
+                }
+            }
+            if let Some(gtex) = gtex {
                 if hex(&sha256(&std::fs::read(textures_path(dir, &id))?)) != gtex {
                     return Err(CookedError::Corrupt(
                         "texture hash differs from the manifest",
+                    ));
+                }
+            }
+            if let Some(mat) = mat {
+                let path = crate::materials_path(dir, &id);
+                if hex(&sha256(&std::fs::read(path)?)) != mat {
+                    return Err(CookedError::Corrupt(
+                        "material hash differs from the manifest",
                     ));
                 }
             }
