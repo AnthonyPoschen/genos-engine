@@ -820,6 +820,19 @@ mod covered_world {
         manifest.replace(&format!(" mat={token}"), "")
     }
 
+    fn drop_mr_source(source: &Path, out: &Path) {
+        let src = source.parent().unwrap();
+        for name in ["mr.gltf", "mesh.bin", "quad.png", "color.png"] {
+            std::fs::remove_file(src.join(name)).unwrap();
+        }
+        let objects = out.join("objects");
+        if objects.is_dir() {
+            for entry in std::fs::read_dir(&objects).unwrap() {
+                std::fs::write(entry.unwrap().path(), b"not-a-gltf").unwrap();
+            }
+        }
+    }
+
     fn remove_source(source: &Path, out: &Path) {
         for name in ["meshes.gltf", "mesh.bin", "quad.png"] {
             std::fs::remove_file(source.parent().unwrap().join(name)).unwrap();
@@ -989,6 +1002,305 @@ mod covered_world {
         );
         assert_eq!(importer_entries(), 0);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One mesh, two primitives. The first samples `color.png` as base colour.
+    /// The second samples `quad.png` as metallic-roughness only. Cooked with
+    /// textures off, the `.gmat` still names those sizes and stores no pixels.
+    fn write_mr_mesh(dir: &Path) -> PathBuf {
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let quad = Path::new(env!("CARGO_MANIFEST_DIR")).join("../load/fixtures/quad.png");
+        std::fs::copy(&quad, src.join("quad.png")).unwrap();
+        std::fs::copy(&quad, src.join("color.png")).unwrap();
+        let mut bin = Vec::new();
+        for p in [[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            for v in p {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let idx0 = bin.len();
+        for i in [0_u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let pos1 = bin.len();
+        for p in [[2.0_f32, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]] {
+            for v in p {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let uv = bin.len();
+        for p in [[0.0_f32, 0.0], [1.0, 0.0], [0.0, 1.0]] {
+            for v in p {
+                bin.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let idx1 = bin.len();
+        for i in [0_u16, 1, 2] {
+            bin.extend_from_slice(&i.to_le_bytes());
+        }
+        std::fs::write(src.join("mesh.bin"), &bin).unwrap();
+        let gltf = format!(
+            r#"{{
+  "asset": {{"version": "2.0"}},
+  "scene": 0,
+  "scenes": [{{"nodes": [0]}}],
+  "nodes": [{{"mesh": 0}}],
+  "meshes": [{{"primitives": [
+    {{"attributes": {{"POSITION": 0}}, "indices": 1, "material": 0}},
+    {{"attributes": {{"POSITION": 2, "TEXCOORD_0": 3}}, "indices": 4, "material": 1}}
+  ]}}],
+  "materials": [
+    {{"pbrMetallicRoughness": {{"baseColorFactor": [1, 0, 0, 1], "metallicFactor": 0, "roughnessFactor": 1, "baseColorTexture": {{"index": 0}}}}}},
+    {{"pbrMetallicRoughness": {{"baseColorFactor": [0, 1, 0, 1], "metallicFactor": 0, "roughnessFactor": 0.4, "metallicRoughnessTexture": {{"index": 1}}}}}}
+  ],
+  "textures": [{{"source": 0}}, {{"source": 1}}],
+  "images": [{{"uri": "color.png"}}, {{"uri": "quad.png"}}],
+  "buffers": [{{"uri": "mesh.bin", "byteLength": {len}}}],
+  "bufferViews": [
+    {{"buffer": 0, "byteOffset": 0, "byteLength": 36}},
+    {{"buffer": 0, "byteOffset": {idx0}, "byteLength": 6}},
+    {{"buffer": 0, "byteOffset": {pos1}, "byteLength": 36}},
+    {{"buffer": 0, "byteOffset": {uv}, "byteLength": 24}},
+    {{"buffer": 0, "byteOffset": {idx1}, "byteLength": 6}}
+  ],
+  "accessors": [
+    {{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3"}},
+    {{"bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR"}},
+    {{"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC3"}},
+    {{"bufferView": 3, "componentType": 5126, "count": 3, "type": "VEC2"}},
+    {{"bufferView": 4, "componentType": 5123, "count": 3, "type": "SCALAR"}}
+  ]
+}}"#,
+            len = bin.len(),
+        );
+        let path = src.join("mr.gltf");
+        std::fs::write(&path, gltf).unwrap();
+        path
+    }
+
+    fn cook_mr(source: &Path, out: &Path, textures: bool) -> [u8; 32] {
+        let settings = BakeSettings {
+            mode: BakeMode::OnLoad,
+            cache_dir: out.join("bake"),
+            ..BakeSettings::default()
+        };
+        let asset = cook_asset(source, out, &settings, textures, Threads::ONE).unwrap();
+        let record = load_cooked(&asset.record.1).unwrap();
+        let gtex = asset
+            .textures
+            .as_ref()
+            .map(|(_, path)| sha256(&std::fs::read(path).unwrap()));
+        let mat_bytes = std::fs::read(&asset.materials.1).unwrap();
+        assert!(mat_bytes.starts_with(b"GMT1"));
+        let mat = sha256(&mat_bytes);
+        let text = package_with(&[(&record, gtex, Some(mat))]).text();
+        assert!(text.contains(" mat="));
+        if textures {
+            assert!(text.contains(" gtex="), "{text}");
+        } else {
+            assert!(!text.contains("gtex="), "{text}");
+        }
+        write_atomic(&out.join("package.manifest"), text.as_bytes()).unwrap();
+        record.asset_id
+    }
+
+    struct AtlasStamp {
+        objects: usize,
+        rgba: usize,
+        blocks: usize,
+    }
+
+    fn stamp(world: &World) -> AtlasStamp {
+        let blocks = world
+            .color_atlas
+            .block_mips
+            .iter()
+            .map(|mip| mip.rgba.len())
+            .sum::<usize>()
+            + world
+                .normal_atlas
+                .block_mips
+                .iter()
+                .map(|mip| mip.rgba.len())
+                .sum::<usize>();
+        AtlasStamp {
+            objects: world.objects.len(),
+            rgba: world.color_atlas.rgba.len() + world.normal_atlas.rgba.len(),
+            blocks,
+        }
+    }
+
+    fn expect_same_atlases(before: &AtlasStamp, world: &World) {
+        let after = stamp(world);
+        assert_eq!(after.objects, before.objects);
+        assert_eq!(after.rgba, before.rgba);
+        assert_eq!(after.blocks, before.blocks);
+    }
+
+    /// `textures=false` still writes `.gmat`. The size-only image must not be
+    /// sampled. The same is true when blocks exist and `bc` is false.
+    #[test]
+    fn metallic_roughness_without_texels_places_every_primitive() {
+        for textures in [false, true] {
+            for bc in [false, true] {
+                for by_id in [false, true] {
+                    place_mr(textures, bc, by_id);
+                }
+            }
+        }
+    }
+
+    fn place_mr(textures: bool, bc: bool, by_id: bool) {
+        let name = format!("mr-{textures}-{bc}-{by_id}");
+        let dir = temp(&name);
+        let source = write_mr_mesh(&dir);
+        let out = dir.join("cook");
+        let id = cook_mr(&source, &out, textures);
+        if by_id {
+            drop_mr_source(&source, &out);
+        }
+        reset_importer_entries();
+        let mut world = bare_world();
+        let before = world.objects.len();
+        let report = if by_id {
+            world.add_covered(&out, &id, &identity_pose(), false, bc)
+        } else {
+            world.add_cooked(&out, &source, &identity_pose(), false, bc)
+        };
+        assert_eq!(importer_entries(), 0, "{textures} bc={bc} by_id={by_id}");
+        assert_eq!(report.objects.len(), 2, "{textures} bc={bc} by_id={by_id}");
+        assert_eq!(world.objects.len(), before + 2);
+        let shades = genos_load::decode_materials(
+            &std::fs::read(genos_load::materials_path(&out, &id)).unwrap(),
+        )
+        .unwrap()
+        .primitive_shade;
+        assert_eq!(shades.len(), 2);
+        assert_ne!(shades[0].mean, shades[1].mean);
+        let first = paint(&world, report.objects[0]).unwrap();
+        let second = paint(&world, report.objects[1]).unwrap();
+        let blocks = textures && bc;
+        if blocks {
+            assert!(report.texture_bytes > 0, "{textures} bc={bc} by_id={by_id}");
+            assert_ne!(world.color_atlas.block_mips.len(), 0);
+        } else {
+            assert_eq!(report.texture_bytes, 0);
+            assert_eq!(world.color_atlas.block_mips.len(), 0);
+            assert_eq!(world.normal_atlas.block_mips.len(), 0);
+        }
+        assert_eq!(first.0, shades[0].mean);
+        assert_eq!(second.0, shades[1].mean);
+        if !textures {
+            assert!(
+                report.fallback.iter().any(|line| line.contains("no gtex")),
+                "{:?}",
+                report.fallback
+            );
+        } else if !bc {
+            assert!(
+                report
+                    .fallback
+                    .iter()
+                    .any(|line| line.contains("textures no-bc")),
+                "{:?}",
+                report.fallback
+            );
+        } else {
+            assert_eq!(report.fallback.len(), 0, "{:?}", report.fallback);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rejected_record_keeps_rgba_and_block_mips() {
+        let dir = temp("atomic");
+        let source = write_mr_mesh(&dir);
+        let out = dir.join("cook");
+        let id = cook_mr(&source, &out, true);
+        let mut rgba_world = bare_world();
+        rgba_world.add_gltf(&load_gltf_file(&source).unwrap(), &identity_pose(), false);
+        assert_ne!(rgba_world.color_atlas.rgba.len(), 0);
+        let rgba_stamp = stamp(&rgba_world);
+        damage_shade(&out, &id);
+        let rejected = rgba_world.add_covered(&out, &id, &identity_pose(), false, true);
+        assert_eq!(rejected.objects.len(), 0);
+        expect_same_atlases(&rgba_stamp, &rgba_world);
+        let decoded = genos_load::decode_materials(
+            &std::fs::read(genos_load::materials_path(&out, &id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded.primitive_shade.len(), 1);
+        assert_eq!(
+            genos_load::Package::open(&out).unwrap().verify(&out).unwrap(),
+            1,
+            "verify hashes and does not apply the shade-count rule"
+        );
+        assert!(genos_load::load_covered(&out, &id)
+            .unwrap_err()
+            .to_string()
+            .contains("primitive shade count"));
+
+        let _ = std::fs::remove_dir_all(&out);
+        let id = cook_mr(&source, &out, true);
+        reset_importer_entries();
+        let mut blocks = bare_world();
+        let placed = blocks.add_covered(&out, &id, &identity_pose(), false, true);
+        assert_eq!(placed.objects.len(), 2);
+        assert_ne!(blocks.color_atlas.block_mips.len(), 0);
+        let block_stamp = stamp(&blocks);
+        damage_image_size(&out, &id);
+        let again = blocks.add_covered(&out, &id, &identity_pose(), false, true);
+        assert_eq!(again.objects.len(), 0);
+        expect_same_atlases(&block_stamp, &blocks);
+        assert!(genos_load::decode_materials(
+            &std::fs::read(genos_load::materials_path(&out, &id)).unwrap(),
+        )
+        .is_ok());
+        assert_eq!(
+            genos_load::Package::open(&out).unwrap().verify(&out).unwrap(),
+            1,
+            "verify hashes and does not apply the image-size rule"
+        );
+        assert!(genos_load::load_covered(&out, &id)
+            .unwrap_err()
+            .to_string()
+            .contains("image size differs"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn damage_shade(out: &Path, id: &[u8; 32]) {
+        let mat_path = genos_load::materials_path(out, id);
+        let mut record = genos_load::decode_materials(&std::fs::read(&mat_path).unwrap()).unwrap();
+        record.primitive_shade.pop();
+        publish_materials(out, &mat_path, &record);
+    }
+
+    fn damage_image_size(out: &Path, id: &[u8; 32]) {
+        let mat_path = genos_load::materials_path(out, id);
+        let mut record = genos_load::decode_materials(&std::fs::read(&mat_path).unwrap()).unwrap();
+        record.image_size[0][0] += 1;
+        publish_materials(out, &mat_path, &record);
+    }
+
+    fn publish_materials(out: &Path, mat_path: &Path, record: &genos_load::CookedMaterials) {
+        let bytes = genos_load::encode_materials(record).unwrap();
+        std::fs::write(mat_path, &bytes).unwrap();
+        let hash = genos_load::hex(&sha256(&bytes));
+        let manifest_path = out.join("package.manifest");
+        let text = std::fs::read_to_string(&manifest_path).unwrap();
+        let old = text
+            .split_whitespace()
+            .find(|part| part.starts_with("mat="))
+            .unwrap();
+        write_atomic(
+            &manifest_path,
+            text.replace(old, &format!("mat={hash}")).as_bytes(),
+        )
+        .unwrap();
     }
 
     fn flip_material(out: &Path, id: &[u8; 32]) {

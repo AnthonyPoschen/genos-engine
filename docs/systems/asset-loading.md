@@ -37,7 +37,7 @@ Three stages, each a pure function of its inputs plus a settings header, so each
 - Authority: the machine that has the file. No server authority over the cook directory.
 - Prediction / rollback: none. The load is not a predicted simulation step.
 - Determinism: the same package bytes decode to the same meshes, instances, materials, shades and block rects on every machine.
-- Headless server: geometry and materials may load from the package. Textures are not uploaded. A missing BC feature on a line with `mat=` keeps the stored shade and skips the block atlas. A line without `mat=` keeps `.gcook` geometry and reads materials and images from the source.
+- Headless server: geometry and materials may load from the package. Textures are not uploaded. A missing BC feature on a line with `mat=` keeps the stored shade and skips the block atlas. A `mat=` line with no `gtex=` does the same. Those loads do not sample the size-only images. A line without `mat=` keeps `.gcook` geometry and reads materials and images from the source.
 
 Dev loop: a `.glb` passed straight to the runtime is imported and cooked on demand into `~/.cache/genos/cook/` (or `--cook-cache`), keyed by hash, then loaded the same way. Shipping uses `Prebuilt` packages only. Hot reload: a changed source hash recooks and swaps the handle's generation; it emits ADR 0013 change records (material edit ≠ geometry rebuild).
 
