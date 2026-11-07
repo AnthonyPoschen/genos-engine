@@ -602,7 +602,7 @@ Each step is one commit. The `Deviation:` line says where the step leaves a sour
 
 ### Vehicles (P27–P32) wait on ADR 0040
 
-P27–P32 are the wheeled-car and thruster sketches in this plan. They are not a reviewed vehicle decision. [ADR 0040](../../adr/0040-vehicle-domains.md) is **Proposed**. It keeps ground, aircraft, and space as separate payloads on one chassis body, and it leaves sea as uncommitted buoyancy and quadratic drag. Do not implement P27, or any later vehicle box, until that ADR is accepted. The boxes below stay so the original fixtures remain written down. G1 in the ADR is the suspension fixture from P27, with the departures the ADR names (no P10 soft step, no `BodyId`, ray against a plane or a box). A1 and S1 do not wait on the wheel boxes.
+P27–P32 are the wheeled-car and thruster sketches in this plan. They are not a reviewed vehicle decision. [ADR 0040](../../adr/0040-vehicle-domains.md) is **Proposed**. It keeps ground, aircraft, and space as separate payloads on one chassis body, and it leaves sea as uncommitted buoyancy and quadratic drag. G1 is in the step as a trial: four wheel rays and an explicit spring-damper, a `usize` chassis index, and a ray against a plane or a box. P27 stays unchecked because that box still asks for `BodyId`, a P10 soft step, and a cylinder cast. P28–P32 stay unchecked. A1, S1, and sea are not in the G1 trial. The boxes below stay so the original fixtures remain written down.
 
 ### P27. Wheel suspension
 
