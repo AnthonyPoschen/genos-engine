@@ -461,3 +461,134 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     let (_rgb, ck) = coarse_key(0, [1.0, 0.0, 0.0, 1.0001], [0.0; 4]).expect("tiny key");
     assert!((ck - 1.0e-3).abs() <= 1.0e-8, "confidence floor, got {ck}");
 }
+
+/// The lattice accepts an axis only when that component has magnitude 1.
+/// `lighting_sh_read` claims only inside that arm, so this is the claim gate.
+fn lattice_accepts(n: [f32; 3]) -> bool {
+    n.iter().any(|c| c.abs() >= 1.0)
+}
+
+/// `growing_wrc` in `lighting_compact.comp`: a cell under the cap stays on the
+/// relight list when something has read it since its last update, or within
+/// `LIGHTING_SC_READ_SLACK` frames.
+fn growing_wrc(samples: f32, last: i32, updated: i32, frame: i32) -> bool {
+    samples < 128.0 - 0.5 && (last - updated > 0 || frame - last <= 2)
+}
+
+/// Dark-fill blend (`lighting_cache.comp`): while `t` is under half the cap,
+/// sample k's share is `1 - (t / (t + add))^3`. The first sample is the mean.
+/// Later samples of a rising trace pull the mean up.
+fn dark_fill(samples: &[f32]) -> f32 {
+    let mut mean = samples[0];
+    let mut t = 1.0_f32;
+    for &sample in &samples[1..] {
+        let add = 1.0_f32;
+        let wa = if t < 64.0 {
+            1.0 - (t / (t + add)).powi(3)
+        } else {
+            add / (t + add)
+        };
+        mean += (sample - mean) * wa.min(1.0);
+        t = (t + add).min(128.0);
+    }
+    mean
+}
+
+#[test]
+fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim() {
+    // r14, depth-classified, both repeats: floor +0.0035 and box_slant +0.0015
+    // of the +0.0051 gate rise (0.2532 to 0.2583). Mixed blocks are +0.0001.
+    // The axis display seed cannot be that turned-face share. A ray hit calls
+    // lighting_cache_irradiance_at, which loads the cell mean (the own-sample
+    // slot) and never the seed. The seed lives in LIGHTING_SC_SPARSE_AT.
+    // A flat face stores its own normal, so the tilt is the mean and matches
+    // the per-axis read. What a slanted screen pixel does change is the claim
+    // at the top of lighting_sh_read: the lattice then skips every axis and
+    // returns w 0, but the claim has already allocated the cell and stamped
+    // it read. growing_wrc keeps a recently read cell on the relight list,
+    // and dark fill makes a longer run of a rising trace brighter. Compose
+    // still shows the probes, which read those cells.
+    let text = cache_shader();
+    let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    precedes(
+        read,
+        "if (abs(n[ax]) < 1.0)",
+        "lighting_cache_find_sized(p, n, true, cs, p)",
+    );
+    let at = function_body(
+        &text,
+        "vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t)",
+    );
+    assert!(
+        !at.contains("lighting_sc_seed"),
+        "a ray hit must not load the display seed"
+    );
+    assert!(
+        !at.contains("LIGHTING_SC_SPARSE_AT"),
+        "a ray hit must not load the seed store"
+    );
+    assert!(at.contains("!lighting_sc_slanted(n)"));
+    assert!(at.contains("return lighting_cache_irradiance(pos, n);"));
+    let seed_store = function_body(
+        &text,
+        "void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac)",
+    );
+    assert!(seed_store.contains("LIGHTING_SC_SPARSE_AT"));
+    assert!(
+        seed_store.contains("cache.v[3u * slot + 2u].w < 0.5"),
+        "the seed may look at the own-sample count"
+    );
+    assert!(
+        !seed_store.contains("cache.v[3u * slot + 2u] ="),
+        "the seed must not write the own-mean slot a ray reads"
+    );
+    let direct = shader("lighting_direct.comp");
+    assert!(direct.contains("lighting_cache_irradiance_at(pos, n, hit_t)"));
+    assert!(
+        !direct.contains("lighting_sc_seed"),
+        "probe and cache rays reach the cache through the ray-hit read"
+    );
+    let compact = shader("lighting_compact.comp");
+    assert!(compact.contains(
+        "bool growing_wrc = t < LIGHTING_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK));"
+    ));
+    let relight = shader("lighting_cache.comp");
+    assert!(relight.contains("wa = 1.0 - pow(t / (t + add), 3.0);"));
+
+    let yaw = 0.6_f32;
+    let face = [yaw.cos(), 0.0, yaw.sin()];
+    assert!(
+        !lattice_accepts(face),
+        "the yaw-0.6 box face accepts no lattice axis, so the read must not claim"
+    );
+    assert!(
+        lattice_accepts([0.0, 1.0, 0.0]),
+        "an axis normal still claims"
+    );
+    let mean = [1.2_f32, 0.4, 0.3];
+    let sh = genos_render::lighting_sh::ShL1::default();
+    let hit = sh.tilt(mean, face, face);
+    assert_eq!(hit, mean, "a flat face tilts to its own mean");
+    let seed_owner = [0.2_f32, 0.2, 0.2];
+    let seed_bilinear = [3.5_f32, 1.0, 0.0];
+    assert_ne!(seed_owner, seed_bilinear);
+    assert_ne!(hit, seed_owner);
+    assert_ne!(hit, seed_bilinear);
+
+    let frame = 300;
+    assert!(
+        growing_wrc(20.0, frame, 280, frame),
+        "a stamp this frame keeps the cell on the relight list"
+    );
+    assert!(
+        !growing_wrc(20.0, 280, 280, frame),
+        "a cell not read since its relight, and quiet for more than the slack, leaves that list"
+    );
+    let rising = [0.2_f32, 0.4, 0.6, 0.8, 1.0];
+    let early = dark_fill(&rising[..2]);
+    let kept = dark_fill(&rising);
+    assert!(
+        kept - early > 0.3,
+        "more relights of a rising trace are brighter: early {early} kept {kept}"
+    );
+}

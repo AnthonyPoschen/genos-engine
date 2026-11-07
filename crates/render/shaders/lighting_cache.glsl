@@ -2156,23 +2156,27 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
 // lattice (moved onto the plane through p facing n), bilinear, each read by
 // lighting_sh_tilt. A cell whose point is off the plane by more than half a
 // cell is on another surface (the far side of a thin wall, a corner) and is
-// left out. w 1 when any cell had light. `claim` (writing compiles only)
-// claims the cell under p on its main axis, so a surface no ray hits still
-// gets one.
+// left out. w 1 when any cell had light. `claim` (writing compiles only,
+// the compose maintenance pass) claims the cell under p when the lattice
+// accepts an axis, a component of magnitude 1. A slanted normal accepts
+// none, so the read stays empty and does not allocate or stamp a cell.
+// Stamping it would mark the cell read (growing_wrc) before any ray hit it.
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     const float cs = LIGHTING_SH_CELL;
-    if (claim && LIGHTING_SC_WRITES) {
-        uint c = lighting_cache_find_sized(p, n, true, cs, p);
-        if (c != ~0u) {
-            cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-        }
-    }
     vec3 sum = vec3(0.0);
     float ws = 0.0;
     uint looks = 0u;
+    bool did_claim = false;
     [[dont_unroll]] for (uint ax = 0u; ax < 3u; ax++) {
         if (abs(n[ax]) < 1.0) {
             continue;
+        }
+        if (claim && !did_claim && LIGHTING_SC_WRITES) {
+            uint claimed = lighting_cache_find_sized(p, n, true, cs, p);
+            if (claimed != ~0u) {
+                cache.v[3u * claimed].w = uintBitsToFloat(lighting_frame());
+            }
+            did_claim = true;
         }
         float wa = n[ax] * n[ax];
         vec3 an = vec3(0.0);
