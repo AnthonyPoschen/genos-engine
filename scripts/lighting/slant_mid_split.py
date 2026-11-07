@@ -33,13 +33,15 @@ other than ``floor`` holding part of the +0.0051 above the 0.0002 repeat noise
 keeps the premise dead. The premise would be alive only if that delta sat on
 ``floor`` alone after depth classification.
 
-No new binary. The r14 trees already have ``f*-depth.png``. If ``other`` or
-``edge`` is a large share, the follow-up is an unscored second run that also
-writes ``f*-normal.png`` (``capture`` mode ``normal``) while the frame is
-still paused, after the scored reference for that frame is saved. Do not
-compare that run's ``slant_mid_err_mean`` with 0.2532. Compose stores the
-normal as ``n * 0.5 + 0.5`` through ``pack_rgb``, before the shoulder. This
-script does not read that file yet.
+Result on the saved r14 trees, depth classification, both repeats: slant
+prints 0.2532 and 0.2583. Mean ``contrib_minus_master`` is floor +0.0035,
+box_slant +0.0015 (each repeat above the 0.0002 noise), box_top +0.0002,
+edge about 0, other about 0. Mixed blocks are +0.0001. The floor-only
+premise is dead. Do not rerun this split to decide the next edit. The axis
+display seed is not the turned-face path: a ray hit reads the cell mean, and
+a slanted screen pixel shows the probes. The claim inside ``lighting_sh_read``
+is the coupling that read does have, and ``lighting_sh_read.rs`` locks that a
+slanted read does not claim.
 
 Hits come from the depth PNG the harness already writes (``1 - byte/255`` times
 50 m, the same channel ``oracle_metrics.distance`` reads). A point near the
@@ -353,6 +355,10 @@ def _guard_sources():
         raise SystemExit("the slanted lattice gate moved")
     if "lighting_sh_on() && lighting_obj_salt < 0.5" not in shader:
         raise SystemExit("the mover salt no longer skips the SH read")
+    axis_skip = shader.find("if (abs(n[ax]) < 1.0)")
+    screen_claim = shader.find("lighting_cache_find_sized(p, n, true, cs, p)")
+    if axis_skip < 0 or screen_claim < 0 or screen_claim < axis_skip:
+        raise SystemExit("a slanted lighting_sh_read claims before it accepts an axis")
     metrics = _source("scripts/lighting/oracle_metrics.py")
     if "mids.append(mid_err(ll, rl))" not in metrics:
         raise SystemExit("slant_mid_err_mean is no longer the mean of mid_err")

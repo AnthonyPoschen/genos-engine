@@ -512,7 +512,9 @@ pub struct SurfaceCacheSettings {
     /// tilt is the cell's mean, and the hit does not blend its neighbours. A
     /// slanted screen pixel's lattice read is empty, because an axis is used
     /// only when its component has magnitude 1, and compose then keeps the
-    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    /// probes. That empty read does not claim or stamp a cell: a stamp would
+    /// mark the cell read and keep it on the relight list before any ray hit
+    /// it. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
