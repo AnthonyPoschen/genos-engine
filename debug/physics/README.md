@@ -55,6 +55,9 @@ A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
 `chassis_rest` is the G1 trial and `aero_trim` is the A1 trial from
-[ADR 0040](../../docs/adr/0040-vehicle-domains.md). The ADR stays proposed.
+[ADR 0040](../../docs/adr/0040-vehicle-domains.md). `aero_trim` starts awake.
+A chassis that begins that scene asleep, with the trim throttle already open
+and its velocity cleared, wakes on the first step and takes that step's
+gravity. The ADR stays proposed.
 S1 would add `thruster` on this same headless path. That scene is not here.
 Sea has no scene.

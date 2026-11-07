@@ -173,6 +173,34 @@ fn trim_aircraft(mass: f32, gravity: Vec3) -> Aircraft {
     }
 }
 
+/// Wake a sleeping chassis, and the rest of its island, when aircraft thrust
+/// would write a finite non-zero force.
+///
+/// Runs before gravity and before that force, so the ignition step integrates
+/// both. A closed, zero, negative, or non-finite throttle does not wake. A
+/// non-finite coefficient, including `induced`, does not wake. This does not
+/// set `Body.motor`.
+pub(crate) fn wake_sleeping_aircraft(world: &mut World) {
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(aircraft) = vehicle.aircraft else {
+            continue;
+        };
+        let armed = world.bodies.get(vehicle.chassis).is_some_and(|body| {
+            body.presence == Presence::Live
+                && body.inverse_mass != 0.0
+                && body.sleeping
+                && aircraft_can_thrust(&aircraft, body)
+        });
+        if armed {
+            world.wake(vehicle.chassis);
+        }
+    }
+}
+
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
 /// Order is aircraft, then ground. Thrusters stay unapplied so a later stage
@@ -190,14 +218,32 @@ pub(crate) fn apply(world: &mut World, dt: f32) {
 
 /// True when this chassis must stay awake the way a motor does.
 ///
-/// A1 holds for aircraft `throttle > 0`. A thruster throttle is a later stage.
-pub(crate) fn holds_awake(vehicles: &[Vehicle], chassis: usize) -> bool {
+/// A1 holds for a finite positive throttle whose thrust is a finite non-zero
+/// force. The same check is what [`wake_sleeping_aircraft`] uses. A thruster
+/// throttle is a later stage. This does not set `Body.motor`.
+pub(crate) fn holds_awake(vehicles: &[Vehicle], body: &Body, chassis: usize) -> bool {
     vehicles.iter().any(|vehicle| {
         vehicle.chassis == chassis
             && vehicle
                 .aircraft
-                .is_some_and(|aircraft| aircraft.throttle > 0.0)
+                .is_some_and(|aircraft| aircraft_can_thrust(&aircraft, body))
     })
+}
+
+/// Finite aircraft fields and a positive throttle with a finite non-zero thrust.
+///
+/// Negative throttle is reverse thrust. The force still applies when the
+/// chassis is already awake. It does not wake and it does not hold.
+fn aircraft_can_thrust(aircraft: &Aircraft, body: &Body) -> bool {
+    if !finite_aircraft(aircraft) || !(aircraft.throttle > 0.0) {
+        return false;
+    }
+    let thrust = aircraft.throttle * aircraft.thrust_max;
+    if !thrust.is_finite() || thrust == 0.0 {
+        return false;
+    }
+    let force = body.orientation.rotate(Vec3::X) * thrust;
+    finite_vec(force) && force.length_squared() > 0.0
 }
 
 fn apply_aircraft(world: &mut World, index: usize, dt: f32) {

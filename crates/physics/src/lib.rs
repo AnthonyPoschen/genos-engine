@@ -618,6 +618,9 @@ pub fn step(world: &mut World, dt: f32) {
     }
     world.change_records.clear();
     world.islands.bind(world.broadphase.dynamic_ids());
+    if !world.vehicles.is_empty() {
+        vehicle::wake_sleeping_aircraft(world);
+    }
     let gravity = world.gravity;
     let dynamic_count = world.broadphase.dynamic_count();
     for slot in 0..dynamic_count {

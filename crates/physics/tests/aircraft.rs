@@ -286,21 +286,238 @@ fn a_zero_aircraft_on_the_ground_fixture_matches_ground_alone() {
 
 #[test]
 fn throttle_above_zero_holds_the_chassis_awake() {
-    let mut driven = still_aircraft(1.0);
-    let mut quiet = still_aircraft(0.0);
+    let mut driven = still_aircraft(1.0, 1.0);
+    let mut quiet = still_aircraft(0.0, 1.0);
+    let mut dead = still_aircraft(1.0, 0.0);
     for _ in 0..45 {
         step(&mut driven, DT);
         step(&mut quiet, DT);
+        step(&mut dead, DT);
     }
     assert!(
         !chassis(&driven).sleeping,
-        "throttle held the chassis asleep"
+        "a 1 N thrust under the sleep gate fell asleep"
     );
+    assert!(
+        chassis(&driven).velocity.length() < driven.sleep_linear,
+        "1 N on 1 000 kg left the sleep gate at {}",
+        chassis(&driven).velocity.length()
+    );
+    assert!(chassis(&driven).velocity.length() < 0.25);
     assert!(chassis(&quiet).sleeping, "a closed throttle did not sleep");
+    assert!(
+        chassis(&dead).sleeping,
+        "throttle 1 with zero thrust held the chassis awake"
+    );
+    assert_eq!(chassis(&dead).velocity, Vec3::ZERO);
     assert!(!chassis(&driven).motor);
     assert!(chassis(&driven).spring.is_none());
-    assert_eq!(chassis(&driven).velocity, Vec3::ZERO);
-    assert_eq!(chassis(&quiet).velocity, Vec3::ZERO);
+}
+
+#[test]
+fn an_asleep_aircraft_ignites_at_one_newton_and_at_one_meganewton() {
+    let low = ignite_from_sleep(1.0, 180);
+    let high = ignite_from_sleep(1.0e6, 5);
+    assert!(
+        low.speed < low.sleep_linear && low.speed < 0.25,
+        "1 N reached the speed wake at {}",
+        low.speed
+    );
+    assert!(!low.sleeping, "1 N created asleep stayed asleep");
+    assert_eq!(low.velocity.to_bits(), low.expected_speed.to_bits());
+    assert_eq!(low.position.to_bits(), low.expected_position.to_bits());
+    assert!(!low.motor);
+    assert!(low.spring_none);
+    assert!(!high.sleeping, "1e6 N created asleep stayed asleep");
+    assert_eq!(high.velocity.to_bits(), high.expected_speed.to_bits());
+    assert_eq!(high.position.to_bits(), high.expected_position.to_bits());
+    assert!(!high.motor);
+}
+
+#[test]
+fn a_parked_aircraft_ignites_when_the_throttle_opens() {
+    let mut world = parked_aircraft(1.0e6);
+    for _ in 0..45 {
+        step(&mut world, DT);
+    }
+    assert!(chassis(&world).sleeping, "a closed throttle did not park");
+    assert_eq!(chassis(&world).velocity, Vec3::ZERO);
+    assert!(
+        world.vehicles[0].aircraft.is_some(),
+        "parked aircraft missing"
+    );
+    if let Some(aircraft) = world.vehicles[0].aircraft.as_mut() {
+        aircraft.throttle = 1.0;
+    }
+    for _ in 0..5 {
+        step(&mut world, DT);
+    }
+    let body = chassis(&world);
+    let (position, speed) = coast(1.0e6, body.inverse_mass, 5);
+    assert!(
+        !body.sleeping,
+        "opening the throttle left the chassis asleep"
+    );
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        speed.to_bits(),
+        "speed {}",
+        body.velocity.x
+    );
+    assert_eq!(body.position.x.to_bits(), position.to_bits());
+    assert_eq!(body.velocity.y.to_bits(), 0.0_f32.to_bits());
+    assert!(!body.motor);
+    assert!(body.spring.is_none());
+}
+
+#[test]
+fn an_ignition_in_gravity_includes_the_first_fall() {
+    let mut world = ignition_world(GRAVITY, 250.0, 1.0);
+    world.bodies[0].sleeping = true;
+    world.bodies[0].velocity = Vec3::ZERO;
+    let inverse_mass = chassis(&world).inverse_mass;
+    step(&mut world, DT);
+    let body = chassis(&world);
+    let thrust = 250.0_f32;
+    assert!(!body.sleeping, "the first gravity step stayed asleep");
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        ((thrust * inverse_mass) * DT).to_bits(),
+        "thrust {}",
+        body.velocity.x
+    );
+    assert_eq!(
+        body.velocity.y.to_bits(),
+        (GRAVITY.y * DT).to_bits(),
+        "fall {}",
+        body.velocity.y
+    );
+    assert_eq!(body.velocity.z.to_bits(), 0.0_f32.to_bits());
+    assert!(!body.motor);
+}
+
+#[test]
+fn a_parked_ground_chassis_casts_again_when_aircraft_thrust_opens() {
+    let mut world = genos_physics::chassis_rest_world(0.5);
+    for _ in 0..180 {
+        step(&mut world, DT);
+    }
+    let chassis_index = world.vehicles[0].chassis;
+    assert!(
+        world.bodies[chassis_index].sleeping,
+        "the ground chassis did not park"
+    );
+    assert_eq!(world.step_stats.wheel_rays, 0);
+    step(&mut world, DT);
+    assert!(
+        world.bodies[chassis_index].sleeping,
+        "a parked ground chassis woke with no aircraft thrust"
+    );
+    assert_eq!(world.step_stats.wheel_rays, 0);
+    world.vehicles[0].aircraft = Some(ignition_aircraft(1.0, 1.0));
+    step(&mut world, DT);
+    assert!(
+        !world.bodies[chassis_index].sleeping,
+        "opening aircraft thrust left the ground chassis asleep"
+    );
+    assert_eq!(world.step_stats.wheel_rays, 4);
+    assert!(!world.bodies[chassis_index].motor);
+    assert!(world.bodies[chassis_index].spring.is_none());
+}
+
+#[test]
+fn an_ignition_wakes_its_island_and_leaves_another_asleep() {
+    let mut world = ignition_world(Vec3::ZERO, 1_000.0, 1.0);
+    world.sleep_time = 0.5;
+    let neighbor = world.insert(cube_at(Vec3::new(10.0, 100.0, 0.0)));
+    let far = world.insert(cube_at(Vec3::new(40.0, 100.0, 0.0)));
+    world.bodies[0].sleeping = true;
+    world.bodies[0].island = 7;
+    world.bodies[neighbor].sleeping = true;
+    world.bodies[neighbor].island = 7;
+    world.bodies[neighbor].sleep_time = 0.49;
+    world.bodies[far].sleeping = true;
+    world.bodies[far].island = 9;
+    world.bodies[far].sleep_time = 0.49;
+    for _ in 0..5 {
+        step(&mut world, DT);
+    }
+    assert!(!world.bodies[0].sleeping, "the chassis stayed asleep");
+    assert!(
+        !world.bodies[neighbor].sleeping,
+        "the island neighbour stayed asleep"
+    );
+    assert_eq!(
+        world.bodies[neighbor].sleep_time.to_bits(),
+        (5.0 * DT).to_bits()
+    );
+    assert!(world.bodies[far].sleeping, "another island woke");
+    assert_eq!(world.bodies[far].sleep_time.to_bits(), 0.49_f32.to_bits());
+    assert_eq!(world.bodies[far].velocity, Vec3::ZERO);
+    assert!(!world.bodies[0].motor);
+}
+
+#[test]
+fn a_non_finite_or_zero_actuation_does_not_wake_or_hold() {
+    for aircraft in [
+        ignition_aircraft(1.0, 0.0),
+        ignition_aircraft(1.0, -1.0),
+        poisoned(|aircraft| aircraft.induced = f32::NAN),
+        poisoned(|aircraft| aircraft.throttle = f32::INFINITY),
+        poisoned(|aircraft| aircraft.thrust_max = f32::NAN),
+        poisoned(|aircraft| aircraft.cd0 = f32::INFINITY),
+    ] {
+        let mut asleep = ignition_world(Vec3::ZERO, 1.0, 1.0);
+        asleep.vehicles[0].aircraft = Some(aircraft);
+        asleep.bodies[0].sleeping = true;
+        asleep.bodies[0].sleep_time = 0.4;
+        asleep.sleep_time = 0.5;
+        step(&mut asleep, DT);
+        assert!(
+            chassis(&asleep).sleeping,
+            "invalid actuation woke a sleeper: {aircraft:?}"
+        );
+        assert_eq!(chassis(&asleep).velocity, Vec3::ZERO);
+        assert_eq!(chassis(&asleep).sleep_time.to_bits(), 0.4_f32.to_bits());
+
+        let mut awake = ignition_world(Vec3::ZERO, 1.0, 1.0);
+        awake.vehicles[0].aircraft = Some(aircraft);
+        awake.sleep_time = 0.5;
+        for _ in 0..45 {
+            step(&mut awake, DT);
+        }
+        assert!(
+            chassis(&awake).sleeping,
+            "invalid actuation held the chassis awake: {aircraft:?}"
+        );
+        assert!(!chassis(&awake).motor);
+    }
+
+    let mut bare = flying(Vec3::ZERO, Vec3::ZERO, Quat::IDENTITY, None);
+    bare.bodies[0].sleeping = true;
+    bare.bodies[0].sleep_time = 0.4;
+    let mut stored = flying(Vec3::ZERO, Vec3::ZERO, Quat::IDENTITY, None);
+    stored.vehicles.push(Vehicle {
+        chassis: 0,
+        ground: None,
+        aircraft: None,
+        space: None,
+    });
+    stored.bodies[0].sleeping = true;
+    stored.bodies[0].sleep_time = 0.4;
+    for _ in 0..5 {
+        step(&mut bare, DT);
+        step(&mut stored, DT);
+    }
+    assert!(chassis(&bare).sleeping, "no vehicle woke a sleeper");
+    assert!(
+        chassis(&stored).sleeping,
+        "an empty aircraft payload woke a sleeper"
+    );
+    assert_eq!(chassis(&bare).velocity, Vec3::ZERO);
+    assert_eq!(chassis(&stored).velocity, Vec3::ZERO);
+    assert_eq!(chassis(&bare).sleep_time.to_bits(), 0.4_f32.to_bits());
+    assert_eq!(stored.step_stats.wheel_rays, 0);
 }
 
 fn trim_world() -> World {
@@ -357,23 +574,97 @@ fn oriented_spin(spin: Vec3, aircraft: Option<Aircraft>) -> World {
     world
 }
 
-fn still_aircraft(throttle: f32) -> World {
-    let mut world = flying(
-        Vec3::ZERO,
-        Vec3::ZERO,
-        Quat::IDENTITY,
-        Some(Aircraft {
-            wing_area: 10.0,
-            cl: 0.0,
-            cd0: 0.0,
-            induced: 0.0,
-            thrust_max: 0.0,
-            throttle,
-            air_density: 1.225,
-        }),
-    );
+fn still_aircraft(throttle: f32, thrust_max: f32) -> World {
+    let mut world = ignition_world(Vec3::ZERO, thrust_max, throttle);
     world.sleep_time = 0.5;
     world
+}
+
+fn ignition_aircraft(thrust_max: f32, throttle: f32) -> Aircraft {
+    Aircraft {
+        wing_area: 10.0,
+        cl: 0.0,
+        cd0: 0.0,
+        induced: 0.0,
+        thrust_max,
+        throttle,
+        air_density: 1.225,
+    }
+}
+
+fn poisoned(edit: impl FnOnce(&mut Aircraft)) -> Aircraft {
+    let mut aircraft = ignition_aircraft(1.0, 1.0);
+    edit(&mut aircraft);
+    aircraft
+}
+
+fn ignition_world(gravity: Vec3, thrust_max: f32, throttle: f32) -> World {
+    flying(
+        gravity,
+        Vec3::ZERO,
+        Quat::IDENTITY,
+        Some(ignition_aircraft(thrust_max, throttle)),
+    )
+}
+
+fn parked_aircraft(thrust_max: f32) -> World {
+    let mut world = ignition_world(Vec3::ZERO, thrust_max, 0.0);
+    world.sleep_time = 0.5;
+    world
+}
+
+struct Ignition {
+    sleeping: bool,
+    velocity: f32,
+    position: f32,
+    expected_speed: f32,
+    expected_position: f32,
+    speed: f32,
+    sleep_linear: f32,
+    motor: bool,
+    spring_none: bool,
+}
+
+fn ignite_from_sleep(thrust_max: f32, steps: u32) -> Ignition {
+    let mut world = ignition_world(Vec3::ZERO, thrust_max, 1.0);
+    world.sleep_time = 0.5;
+    world.bodies[0].sleeping = true;
+    world.bodies[0].sleep_time = 0.5;
+    world.bodies[0].velocity = Vec3::ZERO;
+    let inverse_mass = world.bodies[0].inverse_mass;
+    for _ in 0..steps {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[0];
+    let (expected_position, expected_speed) = coast(thrust_max, inverse_mass, steps);
+    Ignition {
+        sleeping: body.sleeping,
+        velocity: body.velocity.x,
+        position: body.position.x,
+        expected_speed,
+        expected_position,
+        speed: body.velocity.length(),
+        sleep_linear: world.sleep_linear,
+        motor: body.motor,
+        spring_none: body.spring.is_none(),
+    }
+}
+
+fn cube_at(position: Vec3) -> Body {
+    let mut body = Body::cuboid(position, MASS, Vec3::new(1.0, 0.2, 3.0));
+    body.motion = MotionQuality::Discrete;
+    body
+}
+
+/// `v += (thrust * inverse_mass) * dt`, then `x += v * dt`. Gravity is zero.
+fn coast(thrust: f32, inverse_mass: f32, steps: u32) -> (f32, f32) {
+    let mut velocity = 0.0_f32;
+    let mut position = 0.0_f32;
+    for _ in 0..steps {
+        velocity += (thrust * inverse_mass) * DT;
+        position += velocity * DT;
+    }
+    (position, velocity)
 }
 
 fn stepped(velocity: Vec3, orientation: Quat, aircraft: Aircraft) -> Vec3 {
