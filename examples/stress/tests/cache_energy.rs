@@ -42,10 +42,13 @@
 //! is refused here: those are measurement changes, and a research trace is
 //! labeled non-acceptance and written outside the acceptance cache. The CPU
 //! weight model in `lighting_sh` is not this gate. A path trace that misses
-//! 0.02 noise, hits the 600 s or 4096 spp cap, or is nonfinite or missing is
-//! blocked. A reconstructed linger from a rejected run is not a pass. The
-//! oracle's `energy_mean` is the full picture, direct light included, and is
-//! a separate report.
+//! 0.02 noise, or is nonfinite or missing, is blocked. A trace that reaches
+//! the 600 s or 4096 spp cap still passes when the noise is already at or
+//! under 0.02. A reconstructed linger from a rejected run is not a pass. The
+//! offline precompute in `docs/systems/lighting/cache-energy-precompute.md`
+//! can trace the same setup for longer and only then copy a converged file
+//! into the acceptance cache. The oracle's `energy_mean` is the full picture,
+//! direct light included, and is a separate report.
 //!
 //! Per scene the test also reports blotch (mean relative error of 8x8 block
 //! means of the indirect) and the still cost: cache batch entries per frame
@@ -67,24 +70,38 @@ use genos_window::Window;
 
 /// Acceptance path trace: noise, spp cap, wall-clock cap. Not lowered for a run.
 const NOISE_TARGET: f32 = 0.02;
+
 const MAX_SPP: u32 = 4096;
+
 const TRACE_SECONDS: f32 = 600.0;
+
+const PRECOMPUTE_SECONDS_CAP: f32 = 2400.0;
+
 const RESEARCH_SECONDS_CAP: f32 = 1200.0;
+
 const DIRECT_LOW: f64 = 0.95;
+
 const DIRECT_HIGH: f64 = 1.05;
 
 const WIDTH: u32 = 160;
+
 const HEIGHT: u32 = 90;
+
 /// 22:00 on the stage clock (0 is 06:00).
 const NIGHT: f32 = 16.0 / 24.0;
+
 /// Still frames before grading: three times the old 300-frame freeze.
 const FRAMES: usize = 900;
+
 const LOW: f64 = 0.9;
+
 /// Linger gate: bounce left at 120 frames after the lamps go out, as a share
 /// of the lit bounce (ADR 0039 stage 1, still required at stage 2).
 const LINGER: f64 = 0.05;
+
 /// The highest picture byte read back: 0.745 on the shoulder, linear 3.9.
 const SHOULDER_TOP: u8 = 190;
+
 const HIGH: f64 = 1.1;
 
 fn luma(c: [f64; 3]) -> f64 {
@@ -162,11 +179,12 @@ fn hall_stage(power: f32) -> (Stage, Camera) {
     (stage, camera)
 }
 
-
 const CELL_SAMPLES: usize = 384;
+
 /// A slot whose reference is under this share of the mean is dim: its few
 /// bounce paths make its value noise, which is blotch, not missing energy.
 const LIT: f64 = 0.5;
+
 const CELL_RAYS: u32 = 1024;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -194,11 +212,77 @@ fn abort_kept(detail: &str) -> ! {
     panic!("{detail}");
 }
 
+fn plain_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn json_value(rest: &str) -> Option<(String, &str)> {
+    let bytes = rest.as_bytes();
+    if bytes.first() == Some(&b'"') {
+        let mut index = 1;
+        while index < bytes.len() {
+            if bytes[index] == b'\\' {
+                index += 2;
+                continue;
+            }
+            if bytes[index] == b'"' {
+                index += 1;
+                return Some((rest[..index].to_string(), &rest[index..]));
+            }
+            index += 1;
+        }
+        return None;
+    }
+    if bytes.first() == Some(&b'[') {
+        let end = rest.find(']')?;
+        return Some((rest[..=end].to_string(), &rest[end + 1..]));
+    }
+    let end = rest.find([',', '\n', '}']).unwrap_or(rest.len());
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some((value.to_string(), &rest[end..]))
+    }
+}
+
+fn json_fields(body: &str) -> Vec<(String, String)> {
+    let mut fields = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('"') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find('"') else { break };
+        let key = rest[..end].to_string();
+        rest = &rest[end + 1..];
+        let Some(colon) = rest.find(':') else { break };
+        if rest[..colon].chars().any(|c| !c.is_whitespace()) {
+            continue;
+        }
+        rest = rest[colon + 1..].trim_start();
+        let Some((value, next)) = json_value(rest) else {
+            break;
+        };
+        if plain_key(&key) {
+            fields.push((key, value));
+        }
+        rest = next;
+    }
+    fields
+}
+
 fn keep_fail(dir: &Path, detail: &str) -> ! {
-    keep(
-        dir,
-        &format!("{{\n  \"verdict\": \"fail\",\n  \"detail\": \"{}\"\n}}\n", escape(detail)),
-    );
+    let prior = std::fs::read_to_string(dir.join("result.json")).unwrap_or_default();
+    let mut rows = vec![
+        "  \"verdict\": \"fail\"".to_string(),
+        format!("  \"detail\": \"{}\"", escape(detail)),
+    ];
+    for (key, value) in json_fields(&prior) {
+        if key == "verdict" || key == "detail" {
+            continue;
+        }
+        rows.push(format!("  \"{key}\": {value}"));
+    }
+    keep(dir, &format!("{{\n{}\n}}\n", rows.join(",\n")));
     abort_kept(detail);
 }
 
@@ -427,12 +511,378 @@ fn research_continue(
     Ok(reference)
 }
 
-fn trace_acceptance(scene: &Scene, camera: &Camera, bounces: u32) -> Result<genos_debug::Reference, String> {
+fn acceptance_setup(
+    scene: &Scene,
+    camera: &Camera,
+    bounces: u32,
+) -> genos_debug::reference::RefSetup {
     let mut setup = genos_debug::reference::RefSetup::from_camera(scene, camera, WIDTH, HEIGHT, 32);
     setup.max_bounces = bounces;
     setup.noise_target = NOISE_TARGET;
     setup.max_spp = MAX_SPP;
     setup.seconds = TRACE_SECONDS;
+    setup
+}
+
+/// Same trace as [`acceptance_setup`] with a longer bound. Seconds are the only
+/// field that changes, and they stay in `(0, 2400]`.
+fn precompute_setup(
+    scene: &Scene,
+    camera: &Camera,
+    bounces: u32,
+    seconds: f32,
+) -> Result<genos_debug::reference::RefSetup, String> {
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > PRECOMPUTE_SECONDS_CAP {
+        return Err(format!(
+            "precompute seconds must be finite and in (0, {PRECOMPUTE_SECONDS_CAP}]"
+        ));
+    }
+    let mut setup = acceptance_setup(scene, camera, bounces);
+    setup.seconds = seconds;
+    if setup.triangles || setup.specular || !setup.materials.is_empty() {
+        return Err("precompute keeps the CPU analytic picture".into());
+    }
+    Ok(setup)
+}
+
+fn shares_acceptance_trace(
+    acceptance: &genos_debug::reference::RefSetup,
+    produced: &genos_debug::reference::RefSetup,
+) -> Result<(), String> {
+    if acceptance.scene != produced.scene {
+        return Err("scene differs".into());
+    }
+    if acceptance.eye.map(f32::to_bits) != produced.eye.map(f32::to_bits) {
+        return Err("eye differs".into());
+    }
+    if acceptance.yaw.to_bits() != produced.yaw.to_bits() {
+        return Err("yaw differs".into());
+    }
+    if acceptance.pitch.to_bits() != produced.pitch.to_bits() {
+        return Err("pitch differs".into());
+    }
+    if acceptance.width != produced.width || acceptance.height != produced.height {
+        return Err("size differs".into());
+    }
+    if acceptance.spp != produced.spp
+        || acceptance.max_spp != produced.max_spp
+        || acceptance.noise_target.to_bits() != produced.noise_target.to_bits()
+        || acceptance.max_bounces != produced.max_bounces
+    {
+        return Err("estimator differs".into());
+    }
+    if acceptance.triangles != produced.triangles
+        || acceptance.specular != produced.specular
+        || acceptance.materials != produced.materials
+    {
+        return Err("shape or lobe differs".into());
+    }
+    Ok(())
+}
+
+struct Promotion<'a> {
+    reference: &'a genos_debug::Reference,
+    produced: &'a genos_debug::reference::RefSetup,
+    acceptance: &'a genos_debug::reference::RefSetup,
+    commit: &'a str,
+    expected_commit: &'a str,
+    isolated: &'a Path,
+    acceptance_dir: &'a Path,
+}
+
+fn reference_acceptable(
+    reference: &genos_debug::Reference,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    if reference.image.width != width || reference.image.height != height {
+        return Err(format!(
+            "blocked: reference is {}x{}, acceptance is {width}x{height}",
+            reference.image.width, reference.image.height
+        ));
+    }
+    if reference.specular.is_some() {
+        return Err("blocked: a specular layer is not the cached picture".into());
+    }
+    if !reference.noise.is_finite()
+        || reference
+            .linear
+            .iter()
+            .flatten()
+            .any(|channel| !channel.is_finite())
+    {
+        return Err(format!(
+            "blocked: reference is nonfinite (noise {})",
+            reference.noise
+        ));
+    }
+    if reference.linear.is_empty() || reference.hit.iter().all(|hit| !hit) {
+        return Err("blocked: reference has no hits".into());
+    }
+    if reference.spp == 0 || reference.spp > MAX_SPP {
+        return Err(format!(
+            "blocked: spp {} is outside 1..={MAX_SPP}",
+            reference.spp
+        ));
+    }
+    if reference.noise > NOISE_TARGET {
+        let why = if reference.spp >= MAX_SPP {
+            "capped"
+        } else {
+            "above the noise target"
+        };
+        return Err(format!(
+            "blocked: reference noise {:.6} > {:.3} ({why}, spp {})",
+            reference.noise, NOISE_TARGET, reference.spp
+        ));
+    }
+    Ok(())
+}
+
+fn pictures_match(left: &genos_debug::Reference, right: &genos_debug::Reference) -> bool {
+    left.noise.to_bits() == right.noise.to_bits()
+        && left.spp == right.spp
+        && left.hit == right.hit
+        && left.linear.len() == right.linear.len()
+        && left
+            .linear
+            .iter()
+            .zip(&right.linear)
+            .all(|(a, b)| a.map(f32::to_bits) == b.map(f32::to_bits))
+}
+
+fn promotion_note(
+    commit: &str,
+    key: u64,
+    produced: &genos_debug::reference::RefSetup,
+    reference: &genos_debug::Reference,
+    promoted: bool,
+) -> String {
+    format!(
+        "{{\n  \"source_commit\": \"{commit}\",\n  \"cache_key\": \"{key:016x}\",\n  \"seconds\": {},\n  \"acceptance_seconds\": {TRACE_SECONDS},\n  \"noise\": {},\n  \"spp\": {},\n  \"noise_target\": {},\n  \"max_spp\": {},\n  \"spp_batch\": {},\n  \"bounces\": {},\n  \"width\": {},\n  \"height\": {},\n  \"yaw_bits\": {},\n  \"pitch_bits\": {},\n  \"eye_bits\": [{}, {}, {}],\n  \"triangles\": {},\n  \"specular\": {},\n  \"materials\": {},\n  \"estimator\": \"cpu-analytic\",\n  \"scene\": \"hall\",\n  \"power\": 1.0,\n  \"promoted\": {promoted}\n}}\n",
+        produced.seconds,
+        reference.noise,
+        reference.spp,
+        produced.noise_target,
+        produced.max_spp,
+        produced.spp,
+        produced.max_bounces,
+        produced.width,
+        produced.height,
+        produced.yaw.to_bits(),
+        produced.pitch.to_bits(),
+        produced.eye[0].to_bits(),
+        produced.eye[1].to_bits(),
+        produced.eye[2].to_bits(),
+        produced.triangles,
+        produced.specular,
+        produced.materials.len()
+    )
+}
+
+/// Copy a converged isolated trace into the acceptance cache. A miss deletes nothing
+/// and writes nothing there.
+fn promote_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> {
+    let commit = promotion.commit;
+    if commit.len() != 40
+        || !commit.chars().all(|c| c.is_ascii_hexdigit())
+        || commit != promotion.expected_commit
+    {
+        return Err(format!("source commit {commit} is not this precompute"));
+    }
+    if promotion.acceptance.seconds.to_bits() != TRACE_SECONDS.to_bits() {
+        return Err("acceptance seconds are not 600".into());
+    }
+    let seconds = promotion.produced.seconds;
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > PRECOMPUTE_SECONDS_CAP {
+        return Err(format!(
+            "precompute seconds {seconds} are outside (0, {PRECOMPUTE_SECONDS_CAP}]"
+        ));
+    }
+    shares_acceptance_trace(promotion.acceptance, promotion.produced)?;
+    if promotion.produced.triangles
+        || promotion.produced.specular
+        || !promotion.produced.materials.is_empty()
+    {
+        return Err("precompute keeps CPU analytic shapes and the full picture".into());
+    }
+    if genos_debug::reference::gpu_wanted() {
+        return Err("precompute refuses GENOS_REFERENCE_GPU".into());
+    }
+    let key = genos_debug::reference::cache_key(promotion.acceptance);
+    if key != genos_debug::reference::cache_key(promotion.produced) {
+        return Err("seconds leaked into the cache key".into());
+    }
+    reference_acceptable(
+        promotion.reference,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )?;
+    let loaded = genos_debug::reference::read_cached(
+        promotion.isolated,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )
+    .ok_or_else(|| {
+        format!(
+            "isolated reference {} is missing, empty, or the wrong picture",
+            promotion.isolated.display()
+        )
+    })?;
+    reference_acceptable(
+        &loaded,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )?;
+    if !pictures_match(&loaded, promotion.reference) {
+        return Err("isolated file does not match the trace".into());
+    }
+    std::fs::create_dir_all(promotion.acceptance_dir).map_err(|err| err.to_string())?;
+    let dest = promotion.acceptance_dir.join(format!("{key:016x}.ref"));
+    let note_path = promotion
+        .acceptance_dir
+        .join(format!("{key:016x}.provenance.json"));
+    let note = promotion_note(commit, key, promotion.produced, promotion.reference, true);
+    std::fs::write(&note_path, note).map_err(|err| err.to_string())?;
+    if let Err(err) = std::fs::copy(promotion.isolated, &dest) {
+        let _ = std::fs::remove_file(&note_path);
+        return Err(err.to_string());
+    }
+    Ok(dest)
+}
+
+fn precompute_seconds_from_env() -> Result<f32, String> {
+    let value = std::env::var("CACHE_ENERGY_PRECOMPUTE_SECONDS").map_err(|_| {
+        "CACHE_ENERGY_PRECOMPUTE_SECONDS is required and must be finite and in (0, 2400]"
+            .to_string()
+    })?;
+    let seconds: f32 = value
+        .parse()
+        .map_err(|_| format!("CACHE_ENERGY_PRECOMPUTE_SECONDS {value} is not a number"))?;
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > PRECOMPUTE_SECONDS_CAP {
+        return Err(format!(
+            "CACHE_ENERGY_PRECOMPUTE_SECONDS {value} must be finite and in (0, {PRECOMPUTE_SECONDS_CAP}]"
+        ));
+    }
+    Ok(seconds)
+}
+
+fn isolated_trust(
+    path: &Path,
+    note: &str,
+    commit: &str,
+    produced: &genos_debug::reference::RefSetup,
+    key: u64,
+) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let trusted = note.contains(&format!("\"source_commit\": \"{commit}\""))
+        && note.contains(&format!("\"cache_key\": \"{key:016x}\""))
+        && note.contains(&format!("\"yaw_bits\": {}", produced.yaw.to_bits()))
+        && note.contains(&format!("\"pitch_bits\": {}", produced.pitch.to_bits()))
+        && note.contains(&format!("\"bounces\": {}", produced.max_bounces))
+        && note.contains(&format!("\"spp_batch\": {}", produced.spp))
+        && note.contains("\"estimator\": \"cpu-analytic\"")
+        && note.contains("\"triangles\": false")
+        && note.contains("\"specular\": false");
+    if trusted {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing untrusted isolated reference {}",
+            path.display()
+        ))
+    }
+}
+
+fn precompute_hall_lit64_offline(seconds: f32) -> Result<String, String> {
+    if genos_debug::reference::gpu_wanted() {
+        return Err(
+            "precompute refuses GENOS_REFERENCE_GPU; acceptance is the CPU analytic trace".into(),
+        );
+    }
+    let (commit, clean) = source_commit(&repo_root())?;
+    if !clean {
+        return Err(format!("precompute refuses a dirty worktree at {commit}"));
+    }
+    let (scene, camera) = hall();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let produced = precompute_setup(&scene, &camera, 64, seconds)?;
+    shares_acceptance_trace(&acceptance, &produced)?;
+    if acceptance.seconds.to_bits() != TRACE_SECONDS.to_bits() {
+        return Err("acceptance seconds changed".into());
+    }
+    let key = genos_debug::reference::cache_key(&acceptance);
+    if key != genos_debug::reference::cache_key(&produced) {
+        return Err("seconds leaked into the cache key".into());
+    }
+    let isolated_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/cache-energy/precompute-isolated")
+        .join(&commit)
+        .join(format!("{key:016x}"));
+    let isolated = isolated_dir.join(format!("{key:016x}.ref"));
+    let note_path = isolated_dir.join("provenance.json");
+    let existing = if isolated.exists() {
+        std::fs::read_to_string(&note_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    isolated_trust(&isolated, &existing, &commit, &produced, key)?;
+    if isolated.exists() {
+        eprintln!(
+            "precompute: isolated file has provenance for {commit} key {key:016x}; render_cached reuses it only when noise is at or under {NOISE_TARGET}"
+        );
+    }
+    eprintln!(
+        "precompute identity\ncommit {commit}\nscene hall\nlit power 1\nbounces 64\nkey {key:016x}\neye {:?} yaw {} bits {} pitch {} bits {}\nsize {}x{}\nspp_batch {} noise_target {} max_spp {} seconds {}\ntriangles {} specular {} materials {}\nacceptance_seconds {}\nisolated {}\nacceptance_cache {}",
+        produced.eye,
+        produced.yaw,
+        produced.yaw.to_bits(),
+        produced.pitch,
+        produced.pitch.to_bits(),
+        produced.width,
+        produced.height,
+        produced.spp,
+        produced.noise_target,
+        produced.max_spp,
+        produced.seconds,
+        produced.triangles,
+        produced.specular,
+        produced.materials.len(),
+        acceptance.seconds,
+        isolated.display(),
+        acceptance_cache().display()
+    );
+    let reference = genos_debug::reference::render_cached(&produced, &isolated_dir);
+    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
+    let note = promotion_note(&commit, key, &produced, &reference, false);
+    std::fs::write(&note_path, &note).map_err(|err| err.to_string())?;
+    let dest = promote_isolated(&Promotion {
+        reference: &reference,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit: &commit,
+        expected_commit: &commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_cache(),
+    })?;
+    eprintln!(
+        "precompute promoted {} noise {} spp {} seconds {}",
+        dest.display(),
+        reference.noise,
+        reference.spp,
+        reference.seconds
+    );
+    Ok(format!("{key:016x}"))
+}
+
+fn trace_acceptance(
+    scene: &Scene,
+    camera: &Camera,
+    bounces: u32,
+) -> Result<genos_debug::Reference, String> {
+    let setup = acceptance_setup(scene, camera, bounces);
     let reference = genos_debug::reference::render_cached(&setup, &acceptance_cache());
     reference_verdict(&facts_of(&reference, TRACE_SECONDS))?;
     Ok(reference)
@@ -1178,13 +1628,78 @@ fn schedule_json(schedule: &LampSchedule) -> String {
     )
 }
 
-fn measured_json(name: &str, schedule: &LampSchedule, detail: &str, verdict: &str) -> String {
+fn measured_json(
+    name: &str,
+    schedule: &LampSchedule,
+    detail: &str,
+    verdict: &str,
+    provenance: &str,
+) -> String {
+    let schedule = if provenance.is_empty() {
+        format!("{},", schedule_json(schedule))
+    } else {
+        format!("{},\n  {provenance},", schedule_json(schedule))
+    };
     format!(
-        "{{\n  \"verdict\": \"{verdict}\",\n  \"name\": \"{name}\",\n  \"detail\": \"{}\",\n  {},\n  \"files\": \"{}\"\n}}\n",
+        "{{\n  \"verdict\": \"{verdict}\",\n  \"name\": \"{name}\",\n  \"detail\": \"{}\",\n  {schedule}\n  \"files\": \"{}\"\n}}\n",
         escape(detail),
-        schedule_json(schedule),
         escape(&dir_list(&artifact_dir(name)))
     )
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn source_commit(repo: &Path) -> Result<(String, bool), String> {
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !head.status.success() {
+        return Err(String::from_utf8_lossy(&head.stderr).trim().to_string());
+    }
+    let commit = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("git HEAD is not a commit: {commit}"));
+    }
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !status.status.success() {
+        return Err(String::from_utf8_lossy(&status.stderr).trim().to_string());
+    }
+    Ok((commit, status.stdout.iter().all(u8::is_ascii_whitespace)))
+}
+
+fn trace_provenance(camera: &Camera, graded: &Scene, lit: Option<&Scene>) -> String {
+    let (commit, clean) = match source_commit(&repo_root()) {
+        Ok(pair) => pair,
+        Err(err) => (err, false),
+    };
+    let b0 = genos_debug::reference::cache_key(&acceptance_setup(graded, camera, 0));
+    let b64 = genos_debug::reference::cache_key(&acceptance_setup(graded, camera, 64));
+    let mut rows = vec![
+        format!("\"source_commit\": \"{}\"", escape(&commit)),
+        format!("\"worktree_clean\": {clean}"),
+        format!("\"cache_key_b0\": \"{b0:016x}\""),
+        format!("\"cache_key_b64\": \"{b64:016x}\""),
+        "\"estimator\": \"cpu-analytic\"".to_string(),
+        format!("\"acceptance_seconds\": {TRACE_SECONDS}"),
+        format!("\"noise_target\": {NOISE_TARGET}"),
+        format!("\"max_spp\": {MAX_SPP}"),
+        "\"spp_batch\": 32".to_string(),
+    ];
+    if let Some(scene) = lit {
+        let key = genos_debug::reference::cache_key(&acceptance_setup(scene, camera, 64));
+        rows.push(format!("\"lit_cache_key_b64\": \"{key:016x}\""));
+    }
+    rows.join(", ")
 }
 
 struct TracePair {
@@ -1199,9 +1714,13 @@ fn load_traces(
     camera: &Camera,
     graded_scene: &Scene,
     lit_scene: Option<&Scene>,
+    provenance: &str,
 ) -> (TracePair, genos_debug::Reference) {
     let blocked = |err: String| -> ! {
-        keep(artifacts, &measured_json(name, schedule, &err, "fail"));
+        keep(
+            artifacts,
+            &measured_json(name, schedule, &err, "fail", provenance),
+        );
         abort_kept(&err);
     };
     let graded_b0 = match trace_acceptance(graded_scene, camera, 0) {
@@ -1228,6 +1747,36 @@ fn load_traces(
     }
 }
 
+fn apply_gate(measure: &Measure, drawn: &Drawn, picture: &PictureSums, cells: &CellGrade, artifacts: &Path) {
+    match *measure {
+        Measure::Linger { .. } => {
+            if !drawn.warm_captured {
+                keep_fail(artifacts, "linger finished without a warm picture");
+            }
+            if let Err(err) = linger_holds(picture, &cells.coarse) {
+                keep_fail(artifacts, &err);
+            }
+        }
+        Measure::Energy { .. } => {
+            if let Err(err) = energy_holds(picture, &cells.coarse) {
+                keep_fail(artifacts, &err);
+            }
+            if drawn.settled_at.is_none() {
+                let cost = drawn.entries.iter().sum::<f64>() / drawn.entries.len().max(1) as f64;
+                keep_fail(
+                    artifacts,
+                    &format!("a still scene never settled ({cost:.0} entries a frame, draining {})", drawn.draining),
+                );
+            }
+        }
+        Measure::Lag { .. } => {
+            if let Err(err) = energy_holds(picture, &cells.coarse) {
+                keep_fail(artifacts, &err);
+            }
+        }
+    }
+}
+
 fn run_case(
     name: &str,
     measure: Measure,
@@ -1243,8 +1792,20 @@ fn run_case(
         keep_fail(&artifacts, &err);
     }
     let schedule = schedule_of(&measure);
-    keep(&artifacts, &measured_json(name, &schedule, "tracing", "running"));
-    let (bounce, direct_reference) = load_traces(name, &schedule, &artifacts, camera, graded_scene, lit_scene);
+    let provenance = trace_provenance(camera, graded_scene, lit_scene);
+    keep(
+        &artifacts,
+        &measured_json(name, &schedule, "tracing", "running", &provenance),
+    );
+    let (bounce, direct_reference) = load_traces(
+        name,
+        &schedule,
+        &artifacts,
+        camera,
+        graded_scene,
+        lit_scene,
+        &provenance,
+    );
     eprintln!(
         "cache_energy {name}: b0 spp {} noise {:.4} seconds {:.1}, b64 spp {} noise {:.4} seconds {:.1}",
         bounce.b0.spp, bounce.b0.noise, bounce.b0.seconds, bounce.b64.spp, bounce.b64.noise, bounce.b64.seconds
@@ -1255,18 +1816,28 @@ fn run_case(
         Err(err) => keep_fail(&artifacts, &format!("proof window: {err}")),
     };
     let size = window.pump();
-    let (renderer, permit) = match Renderer::open(window.display, window.surface, size.width, size.height) {
-        Ok(open) => open,
-        Err(err) => keep_fail(&artifacts, &format!("renderer: {err}")),
-    };
+    let (renderer, permit) =
+        match Renderer::open(window.display, window.surface, size.width, size.height) {
+            Ok(open) => open,
+            Err(err) => keep_fail(&artifacts, &format!("renderer: {err}")),
+        };
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(LightingPreset::High);
     settings.surface_cache.sh_cells = true;
     renderer.set_lighting_settings(settings);
-    let mut host = FrameHost { window, renderer, camera, artifacts: &artifacts };
-    let warm = WarmGate { scene: lit_scene, b0: Some(&bounce.b0), b64: Some(&bounce.b64) };
+    let mut host = FrameHost {
+        window,
+        renderer,
+        camera,
+        artifacts: &artifacts,
+    };
+    let warm = WarmGate {
+        scene: lit_scene,
+        b0: Some(&bounce.b0),
+        b64: Some(&bounce.b64),
+    };
     let drawn = execute(&schedule, prefix_world, graded_world, &mut host, &warm);
     let picture = match picture_sums(
         &drawn.graded_bounce,
@@ -1284,7 +1855,9 @@ fn run_case(
         Err(err) => keep_fail(&artifacts, &err),
     };
     let fine = slot_share(&cells.fine).map_or_else(|err| err, |ratio| format!("{ratio:.3}"));
-    let blotch = picture.blotch.map_or_else(|| "none".to_string(), |value| format!("{value:.3}"));
+    let blotch = picture
+        .blotch
+        .map_or_else(|| "none".to_string(), |value| format!("{value:.3}"));
     let detail = format!(
         "lit bounce denominator {} direct {:?} bounce n {} direct n {} cells live {} cells ref {} median {} median_lit {} fine {fine} blotch {blotch}",
         picture.ref_bounce,
@@ -1296,36 +1869,16 @@ fn run_case(
         cells.coarse.median,
         cells.coarse.median_lit
     );
-    keep(&artifacts, &measured_json(name, &schedule, &detail, "measured"));
+    keep(
+        &artifacts,
+        &measured_json(name, &schedule, &detail, "measured", &provenance),
+    );
     eprintln!("cache_energy {name}: {detail}");
-    match measure {
-        Measure::Linger { .. } => {
-            if !drawn.warm_captured {
-                keep_fail(&artifacts, "linger finished without a warm picture");
-            }
-            if let Err(err) = linger_holds(&picture, &cells.coarse) {
-                keep_fail(&artifacts, &err);
-            }
-        }
-        Measure::Energy { .. } => {
-            if let Err(err) = energy_holds(&picture, &cells.coarse) {
-                keep_fail(&artifacts, &err);
-            }
-            if drawn.settled_at.is_none() {
-                let cost = drawn.entries.iter().sum::<f64>() / drawn.entries.len().max(1) as f64;
-                keep_fail(
-                    &artifacts,
-                    &format!("a still scene never settled ({cost:.0} entries a frame, draining {})", drawn.draining),
-                );
-            }
-        }
-        Measure::Lag { .. } => {
-            if let Err(err) = energy_holds(&picture, &cells.coarse) {
-                keep_fail(&artifacts, &err);
-            }
-        }
-    }
-    keep(&artifacts, &measured_json(name, &schedule, &detail, "pass"));
+    apply_gate(&measure, &drawn, &picture, &cells, &artifacts);
+    keep(
+        &artifacts,
+        &measured_json(name, &schedule, &detail, "pass", &provenance),
+    );
 }
 
 fn run_energy(name: &str, scene: &Scene, camera: &Camera) {
@@ -1573,3 +2126,389 @@ fn a_preset_env_clears_a_struct_sh_flag_and_acceptance_refuses_it() {
     assert!(settings.surface_cache.sh_cells, "the SH key overlays the preset when it is set");
     assert!(acceptance_refusal(&[("GENOS_LIGHTING_PRESET", "high")]).is_err());
 }
+
+#[test]
+fn keep_fail_keeps_schedule_and_provenance() {
+    let dir = std::env::temp_dir().join(format!("cache-energy-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("artifact dir");
+    let prior = "{\n  \"verdict\": \"running\",\n  \"name\": \"hall\",\n  \"detail\": \"tracing\",\n  \"warm_picture_frame\": 300, \"warm_dump_ready\": 305, \"graded_picture_frame\": 420, \"graded_picture_index\": 120, \"graded_direct_frame\": 422, \"graded_dump_ready\": 425, \"lamp_off_frame\": 301,\n  \"source_commit\": \"d8142c375dc515d73a041d485c37cb44bc2fe628\",\n  \"cache_key\": \"0123456789abcdef\",\n  \"yaw_bits\": 3196059648,\n  \"eye_bits\": [1095183565, 1070386381, 1101643776],\n  \"files\": \"f420_layout.json\"\n}\n";
+    std::fs::write(dir.join("result.json"), prior).expect("prior result");
+    let caught = std::panic::catch_unwind(|| keep_fail(&dir, "draw failed: device lost"));
+    assert!(
+        caught.is_err(),
+        "keep_fail aborts after writing the failure"
+    );
+    let body = std::fs::read_to_string(dir.join("result.json")).expect("result.json");
+    assert!(body.contains("\"verdict\": \"fail\""), "{body}");
+    assert!(body.contains("draw failed: device lost"), "{body}");
+    assert!(!body.contains("\"detail\": \"tracing\""), "{body}");
+    for field in [
+        "\"name\": \"hall\"",
+        "\"warm_picture_frame\": 300",
+        "\"warm_dump_ready\": 305",
+        "\"graded_picture_frame\": 420",
+        "\"graded_picture_index\": 120",
+        "\"graded_direct_frame\": 422",
+        "\"graded_dump_ready\": 425",
+        "\"lamp_off_frame\": 301",
+        "\"source_commit\": \"d8142c375dc515d73a041d485c37cb44bc2fe628\"",
+        "\"cache_key\": \"0123456789abcdef\"",
+        "\"yaw_bits\": 3196059648",
+        "\"eye_bits\": [1095183565, 1070386381, 1101643776]",
+        "\"files\": \"f420_layout.json\"",
+    ] {
+        assert!(body.contains(field), "lost {field} in {body}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_later_failure_keeps_the_schedule_the_harness_writes() {
+    let dir = std::env::temp_dir().join(format!("cache-energy-sched-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("artifact dir");
+    let schedule = acceptance_linger(300, 120);
+    std::fs::write(
+        dir.join("result.json"),
+        measured_json("hall_linger", &schedule, "tracing", "running", ""),
+    )
+    .expect("prior result");
+    let caught = std::panic::catch_unwind(|| keep_fail(&dir, "renderer: device lost"));
+    assert!(caught.is_err(), "keep_fail aborts");
+    let body = std::fs::read_to_string(dir.join("result.json")).expect("result.json");
+    assert!(body.contains("\"verdict\": \"fail\""), "{body}");
+    assert!(body.contains("renderer: device lost"), "{body}");
+    assert!(body.contains("\"name\": \"hall_linger\""), "{body}");
+    assert!(body.contains("\"warm_picture_frame\": 300"), "{body}");
+    assert!(body.contains("\"warm_dump_ready\": 305"), "{body}");
+    assert!(body.contains("\"graded_picture_frame\": 420"), "{body}");
+    assert!(body.contains("\"graded_picture_index\": 120"), "{body}");
+    assert!(body.contains("\"graded_direct_frame\": 422"), "{body}");
+    assert!(body.contains("\"graded_dump_ready\": 425"), "{body}");
+    assert!(body.contains("\"lamp_off_frame\": 301"), "{body}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn precompute_matches_acceptance_setup_except_seconds() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _seconds = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", Some("2400"));
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = hall();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
+    assert_eq!(acceptance.yaw.to_bits(), (-0.3554f32).to_bits());
+    assert_eq!(acceptance.pitch.to_bits(), 0.08f32.to_bits());
+    assert_eq!(
+        acceptance.eye.map(f32::to_bits),
+        [14.5f32, 1.7, 23.5].map(f32::to_bits)
+    );
+    let cli_yaw = genos_stress::building::View::Hall.pose().2;
+    assert_ne!(
+        acceptance.yaw.to_bits(),
+        cli_yaw.to_bits(),
+        "harness yaw is not --view hall"
+    );
+    assert_eq!(acceptance.width, WIDTH);
+    assert_eq!(acceptance.height, HEIGHT);
+    assert_eq!(acceptance.spp, 32);
+    assert_eq!(acceptance.max_spp, MAX_SPP);
+    assert_eq!(acceptance.noise_target.to_bits(), NOISE_TARGET.to_bits());
+    assert_eq!(acceptance.max_bounces, 64);
+    assert!(!acceptance.triangles);
+    assert!(!acceptance.specular);
+    assert_eq!(acceptance.materials.len(), 0);
+    assert!(acceptance_refusal(&[("CACHE_ENERGY_SH", "0")]).is_err());
+    assert!(acceptance_refusal(&[("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "0")]).is_err());
+    let produced =
+        precompute_setup(&scene, &camera, 64, PRECOMPUTE_SECONDS_CAP).expect("precompute setup");
+    assert_eq!(produced.seconds.to_bits(), PRECOMPUTE_SECONDS_CAP.to_bits());
+    shares_acceptance_trace(&acceptance, &produced).expect("setup drifted");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    assert_eq!(key, genos_debug::reference::cache_key(&produced), "seconds leaked into the cache key");
+    eprintln!(
+        "hall lit64 key {key:016x} yaw_bits {} pitch_bits {} eye_bits {:?}",
+        acceptance.yaw.to_bits(),
+        acceptance.pitch.to_bits(),
+        acceptance.eye.map(f32::to_bits)
+    );
+    let at_cap = precompute_setup(&scene, &camera, 64, 2400.0).expect("2400");
+    assert_eq!(at_cap.seconds.to_bits(), 2400.0f32.to_bits());
+    assert!(
+        precompute_setup(&scene, &camera, 64, 2400.1).is_err(),
+        "above 2400"
+    );
+    assert!(precompute_setup(&scene, &camera, 64, f32::INFINITY).is_err());
+    assert!(precompute_setup(&scene, &camera, 64, f32::NAN).is_err());
+    assert!(precompute_setup(&scene, &camera, 64, 0.0).is_err());
+    assert!(precompute_setup(&scene, &camera, 64, -5.0).is_err());
+}
+
+fn ref_names(dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let ext = Path::new(&name).extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            if ext.eq_ignore_ascii_case("ref") || name.contains(".provenance.") {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+fn fixture_reference(noise: f32, spp: u32, hit: bool, finite: bool) -> genos_debug::Reference {
+    let n = (WIDTH * HEIGHT) as usize;
+    let pixel = if finite {
+        [0.2_f32, 0.1, 0.05]
+    } else {
+        [f32::NAN, 0.0, 0.0]
+    };
+    genos_debug::Reference {
+        image: genos_debug::Image {
+            width: WIDTH,
+            height: HEIGHT,
+            rgb: vec![0; n * 3],
+        },
+        linear: vec![pixel; n],
+        hit: vec![hit; n],
+        spp,
+        seconds: 12.0,
+        noise,
+        specular: None,
+    }
+}
+
+fn write_fixture(path: &Path, reference: &genos_debug::Reference) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("isolated dir");
+    }
+    genos_debug::reference::write_cached(path, reference).expect("fixture ref");
+}
+
+#[test]
+fn a_bad_precompute_cannot_enter_the_acceptance_cache() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = hall();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut long = acceptance.clone();
+    long.seconds = PRECOMPUTE_SECONDS_CAP;
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let root = std::env::temp_dir().join(format!("cache-energy-promote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let mut case_index = 0u32;
+    let mut reject = |reference: &genos_debug::Reference,
+                      produced: &genos_debug::reference::RefSetup,
+                      commit: &str,
+                      bytes: Option<&[u8]>| {
+        case_index += 1;
+        let dir = root.join(case_index.to_string());
+        let isolated = dir.join("isolated.ref");
+        std::fs::create_dir_all(&dir).expect("case dir");
+        match bytes {
+            Some(bytes) => std::fs::write(&isolated, bytes).expect("bad file"),
+            None => write_fixture(&isolated, reference),
+        }
+        let acceptance_dir = dir.join("acceptance");
+        let result = promote_isolated(&Promotion {
+            reference,
+            produced,
+            acceptance: &acceptance,
+            commit,
+            expected_commit: "d8142c375dc515d73a041d485c37cb44bc2fe628",
+            isolated: &isolated,
+            acceptance_dir: &acceptance_dir,
+        });
+        assert!(result.is_err(), "case {case_index} promoted: {result:?}");
+        assert!(
+            ref_names(&acceptance_dir).is_empty(),
+            "case {case_index} wrote {:?}",
+            ref_names(&acceptance_dir)
+        );
+    };
+    let noisy = fixture_reference(0.032_146, 672, true, true);
+    reject(&noisy, &long, commit, None);
+    let capped = fixture_reference(0.03, 4096, true, true);
+    reject(&capped, &long, commit, None);
+    let nan_noise = fixture_reference(f32::NAN, 128, true, true);
+    reject(&nan_noise, &long, commit, None);
+    let nan_pixel = fixture_reference(0.01, 128, true, false);
+    reject(&nan_pixel, &long, commit, None);
+    let empty = fixture_reference(0.01, 128, false, true);
+    reject(&empty, &long, commit, None);
+    let good = fixture_reference(0.01, 128, true, true);
+    reject(&good, &long, commit, Some(&[]));
+    let mut yaw = long.clone();
+    yaw.yaw = -0.2;
+    reject(&good, &yaw, commit, None);
+    reject(
+        &good,
+        &long,
+        "0000000000000000000000000000000000000000",
+        None,
+    );
+    let mut over = long.clone();
+    over.seconds = 2400.1;
+    reject(&good, &over, commit, None);
+    let mut triangles = long.clone();
+    triangles.triangles = true;
+    reject(&good, &triangles, commit, None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_converged_precompute_promotes_the_same_key() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = hall();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.seconds = PRECOMPUTE_SECONDS_CAP;
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let good = fixture_reference(0.02, 4096, true, true);
+    let root = std::env::temp_dir().join(format!("cache-energy-promote-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &good);
+    let acceptance_dir = root.join("acceptance");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let dest = promote_isolated(&Promotion {
+        reference: &good,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_dir,
+    })
+    .expect("converged final pass promotes");
+    let expected = acceptance_dir.join(format!("{key:016x}.ref"));
+    assert_eq!(dest, expected);
+    let loaded = genos_debug::reference::read_cached(&dest, WIDTH, HEIGHT).expect("promoted file");
+    assert_eq!(loaded.noise.to_bits(), good.noise.to_bits());
+    assert_eq!(loaded.spp, 4096);
+    assert!(loaded.hit.iter().any(|hit| *hit));
+    let note = std::fs::read_to_string(acceptance_dir.join(format!("{key:016x}.provenance.json")))
+        .expect("provenance");
+    assert!(note.contains(commit), "{note}");
+    assert!(note.contains(&format!("{key:016x}")), "{note}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn precompute_seconds_are_bounded_and_an_untrusted_file_is_refused() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _clear = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", None);
+    assert!(
+        precompute_seconds_from_env().is_err(),
+        "a missing bound must not trace"
+    );
+    let _over = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", Some("2401"));
+    assert!(
+        precompute_seconds_from_env().is_err(),
+        "2401 is above the bound"
+    );
+    let _at_cap = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", Some("2400"));
+    assert_eq!(
+        precompute_seconds_from_env().expect("2400").to_bits(),
+        2400.0f32.to_bits()
+    );
+    let (scene, camera) = closed_box();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
+    let mut produced = acceptance.clone();
+    produced.seconds = 2400.0;
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let picture = fixture_reference(0.01, 32, true, true);
+    let dir = std::env::temp_dir().join(format!("cache-energy-trust-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("cached.ref");
+    std::fs::write(&path, b"old").expect("old file");
+    let missing_note =
+        isolated_trust(&path, "", commit, &produced, key).expect_err("no provenance");
+    assert!(missing_note.contains("untrusted"), "{missing_note}");
+    let other = promotion_note(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        key,
+        &produced,
+        &picture,
+        false,
+    );
+    let wrong_commit =
+        isolated_trust(&path, &other, commit, &produced, key).expect_err("other commit");
+    assert!(wrong_commit.contains("untrusted"), "{wrong_commit}");
+    let note = promotion_note(commit, key, &produced, &picture, false);
+    isolated_trust(&path, &note, commit, &produced, key).expect("same commit and pose");
+    isolated_trust(&dir.join("absent.ref"), "", commit, &produced, key).expect("nothing to trust");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[ignore = "CPU path trace of the lit hall, up to 2400s, not acceptance"]
+fn precompute_hall_lit64() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let seconds = precompute_seconds_from_env().expect("CACHE_ENERGY_PRECOMPUTE_SECONDS");
+    precompute_hall_lit64_offline(seconds).expect("precompute");
+}
+
+#[test]
+#[ignore = "lavapipe draw, about 10 frames, no path trace"]
+fn a_dump_file_is_visible_on_draw_n_plus_5_and_names_frame_n() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let dump_n = 4u64;
+    let dir = std::env::temp_dir().join(format!("cache-energy-dump-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dump dir");
+    let dump_dir = dir.to_str().expect("utf8 dump dir");
+    let _dump = EnvSet::set("GENOS_LIGHTING_DUMP", Some(&dump_n.to_string()));
+    let _dump_dir = EnvSet::set("GENOS_LIGHTING_DUMP_DIR", Some(dump_dir));
+    let _preset = EnvSet::set("GENOS_LIGHTING_PRESET", None);
+    let _sh = EnvSet::set("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", None);
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = closed_box();
+    let world = World::from_scene(scene);
+    let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
+    let size = window.pump();
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, size.width, size.height).expect("renderer");
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.surface_cache.sh_cells = true;
+    renderer.set_lighting_settings(settings);
+    let layout = dir.join(format!("f{dump_n}_layout.json"));
+    for draw in 1..=dump_n + 4 {
+        let _ = window.pump();
+        let pixels = renderer
+            .draw(&world, &camera, true)
+            .expect("draw")
+            .expect("pixels");
+        assert!(!pixels.is_empty(), "draw {draw}");
+        assert!(
+            !layout.exists(),
+            "f{dump_n} was visible on draw {draw}, before N+5"
+        );
+    }
+    let _ = window.pump();
+    let pixels = renderer
+        .draw(&world, &camera, true)
+        .expect("draw")
+        .expect("pixels");
+    assert!(!pixels.is_empty(), "draw {}", dump_n + 5);
+    let text = std::fs::read_to_string(&layout)
+        .unwrap_or_else(|_| format!("missing at draw {} ({})", dump_n + 5, dir_list(&dir)));
+    assert!(text.contains(&format!("\"frame\": {dump_n}")), "{text}");
+    assert!(
+        dir.join(format!("f{dump_n}_keys.bin")).is_file(),
+        "{}",
+        dir_list(&dir)
+    );
+}
+

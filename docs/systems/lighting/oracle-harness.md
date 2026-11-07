@@ -103,7 +103,8 @@ number is unchanged and `grid_worst` stays reported.
   is the same ratio on the 300th draw after the lamps come on, at least 0.9.
   The picture and the cell dump are that draw. The test sets
   `surface_cache.sh_cells` and checks it after `apply_env`. A trace above
-  0.02 noise, or one stopped by the 600 s or 4096 spp cap, is blocked.
+  0.02 noise is blocked. A trace stopped by the 600 s or 4096 spp cap is a
+  pass when the noise is already at or under 0.02.
 * `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`. For each traced
   frame, crop the middle half, average 2×2 blocks, and take
   `sum(|live - ref|) / (sum(ref) + 1e-6)` on sRGB-decoded Rec.709 luma of
