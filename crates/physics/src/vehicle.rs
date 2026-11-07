@@ -165,6 +165,33 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
     }
 }
 
+/// Wake a sleeping chassis, and the rest of its island, when a live thruster
+/// would write a finite non-zero force.
+///
+/// Runs before gravity and before the wrench, so the ignition step integrates
+/// both. A closed, zero, or non-finite thruster does not wake. This does not
+/// set `Body.motor`.
+pub(crate) fn wake_sleeping_thrusters(world: &mut World) {
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(craft) = vehicle.space else {
+            continue;
+        };
+        let armed = world.bodies.get(vehicle.chassis).is_some_and(|body| {
+            body.presence == Presence::Live
+                && body.inverse_mass != 0.0
+                && body.sleeping
+                && space_has_live_thrust(body, &craft)
+        });
+        if armed {
+            world.wake(vehicle.chassis);
+        }
+    }
+}
+
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
 /// Order is aircraft, then space, then ground. Aircraft is not applied in
@@ -182,8 +209,9 @@ pub(crate) fn apply(world: &mut World, dt: f32) {
 
 /// A thruster with `throttle > 0` holds the chassis awake the way `Body.motor` does.
 ///
-/// Aircraft throttle joins this check in its stage. The function does not set
-/// `Body.motor`.
+/// This does not wake a sleeper. `wake_sleeping_thrusters` does that, and only
+/// for a finite non-zero force. Aircraft throttle joins this check in its
+/// stage. The function does not set `Body.motor`.
 pub(crate) fn actuator_holds_awake(vehicles: &[Vehicle], chassis: usize) -> bool {
     vehicles
         .iter()
@@ -225,6 +253,16 @@ fn apply_space(world: &mut World, index: usize, dt: f32) {
         stored.velocity = body.velocity;
         stored.angular_velocity = body.angular_velocity;
     }
+}
+
+/// An open thruster that would write a finite non-zero force.
+fn space_has_live_thrust(body: &Body, craft: &SpaceCraft) -> bool {
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    craft
+        .thrusters
+        .iter()
+        .take(live)
+        .any(|thruster| thruster.throttle > 0.0 && thruster_wrench(body, thruster).is_some())
 }
 
 /// World force and the chassis-frame arm, or nothing when the inputs are not finite.

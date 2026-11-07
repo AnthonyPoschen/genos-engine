@@ -48,7 +48,7 @@ For a bullet whose gap at the start of the step is inside the margin, set `motio
 
 For a wheeled chassis, insert one dynamic body and push a `Vehicle` whose `chassis` is that index. Set `ground` to `GroundContact::Wheeled` with four `Wheel` rays. `direction` is in the chassis frame. `step` casts each ray against a plane or a box, excluding the chassis, and pushes a spring-damper along the ray. It does not set `Body.spring` or `Body.motor`. `step_stats.wheel_rays` is the cast count. A sleeping chassis casts 0. `chassis_rest_world` is the 1 200 kg fixture. Aircraft can be stored. This step does not apply it.
 
-For a spacecraft, set `space` to a `SpaceCraft` with `count` live `Thruster`s. Force is `throttle * max_force` along the chassis-frame direction, rotated into the world. Torque is `r × F` at the chassis origin. The chassis integrates that wrench, then the existing gyroscopic step runs. Gravity stays `World.gravity`. The S1 fixture sets gravity to zero. A thruster with `throttle > 0` keeps the chassis awake the way a motor does, and it does not set `Body.motor`. `thruster_world` is the 1 000 kg offset fixture. There is no orbit and no wide position.
+For a spacecraft, set `space` to a `SpaceCraft` with `count` live `Thruster`s. Force is `throttle * max_force` along the chassis-frame direction, rotated into the world. Torque is `r × F` at the chassis origin. The chassis integrates that wrench, then the existing gyroscopic step runs. Gravity stays `World.gravity`. The S1 fixture sets gravity to zero. A thruster with `throttle > 0` keeps the chassis awake the way a motor does, and it does not set `Body.motor`. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. The wake runs before gravity and before the wrench, so that step integrates both. A closed, zero, or non-finite thruster leaves the sleeper asleep. `thruster_world` is the 1 000 kg offset fixture. There is no orbit and no wide position.
 
 For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, `debris_asleep`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
 
@@ -94,6 +94,9 @@ The camera calls this step from the scene crate. Lights have no collider.
 | Two runs diverge | wheel index order | the second world in `a_chassis_rests_on_four_springs` |
 | A thruster misses force or torque | `max_force`, local position | `a_thruster_in_zero_gravity_matches_force_and_torque`, `debug/physics --scene thruster` |
 | Open throttles fall asleep | `throttle > 0` | `cancelling_thrusters_stay_awake` |
+| A sleeping thruster never ignites | finite `throttle > 0` and non-zero force | `an_asleep_chassis_with_an_open_thruster_wakes_and_moves`, `a_parked_spacecraft_wakes_when_the_throttle_opens`, `an_ignition_in_gravity_keeps_the_fall` |
+| A sub-threshold thrust stays asleep | 0.25 m/s speed wake, `sleep_linear` 0.12 | `a_thrust_under_the_speed_wake_still_wakes` |
+| A closed thruster wakes a sleeper | `throttle`, `max_force` | `a_thruster_that_cannot_push_leaves_the_sleeper_asleep` |
 | Space clears gravity | `World.gravity` | `space_thrust_keeps_world_gravity` |
 
 ## Plan

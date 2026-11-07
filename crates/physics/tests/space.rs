@@ -4,7 +4,7 @@
 //! Gravity stays `World.gravity`. This fixture sets it to zero.
 
 use genos_math::{Quat, Vec3};
-use genos_physics::{step, Body, MotionQuality, SpaceCraft, Thruster, Vehicle, World};
+use genos_physics::{step, Body, MotionQuality, Presence, SpaceCraft, Thruster, Vehicle, World};
 
 const DT: f32 = 1.0 / 60.0;
 const STEPS: u32 = 60;
@@ -298,6 +298,287 @@ fn a_zero_throttle_space_payload_matches_the_ground_chassis() {
 }
 
 #[test]
+fn an_asleep_chassis_with_an_open_thruster_wakes_and_moves() {
+    let mut world = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)]),
+    );
+    world.sleep_time = 0.5;
+    world.bodies[0].sleeping = true;
+    world.bodies[0].sleep_time = 0.5;
+    for _ in 0..5 {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[0];
+    let (position, speed) = coast(1_000.0, 0.001, 5);
+    assert!(
+        !body.sleeping,
+        "created asleep with throttle 1 stayed asleep"
+    );
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        speed.to_bits(),
+        "speed {}",
+        body.velocity.x
+    );
+    assert_eq!(body.position.x.to_bits(), position.to_bits());
+    assert!(
+        body.velocity.length() < 0.25,
+        "five steps already passed the speed wake"
+    );
+    assert!(!body.motor);
+    assert!(body.spring.is_none());
+    assert_eq!(body.sleep_time.to_bits(), 0.0_f32.to_bits());
+}
+
+#[test]
+fn a_parked_spacecraft_wakes_when_the_throttle_opens() {
+    let mut world = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 0.0)]),
+    );
+    world.sleep_time = 0.5;
+    for _ in 0..180 {
+        step(&mut world, DT);
+    }
+    assert!(world.bodies[0].sleeping, "closed throttle did not park");
+    assert_eq!(world.bodies[0].velocity.x.to_bits(), 0.0_f32.to_bits());
+    if let Some(space) = world.vehicles[0].space.as_mut() {
+        space.thrusters[0].throttle = 1.0;
+    }
+    for _ in 0..5 {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[0];
+    let (position, speed) = coast(1_000.0, 0.001, 5);
+    assert!(
+        !body.sleeping,
+        "opening the throttle left the chassis asleep"
+    );
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        speed.to_bits(),
+        "speed {}",
+        body.velocity.x
+    );
+    assert_eq!(body.position.x.to_bits(), position.to_bits());
+    assert!(body.velocity.length() < 0.25);
+    assert!(!body.motor);
+}
+
+#[test]
+fn an_ignition_in_gravity_keeps_the_fall() {
+    let mut world = space_world(
+        genos_physics::GRAVITY,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)]),
+    );
+    world.bodies[0].sleeping = true;
+    step(&mut world, DT);
+    let body = world.bodies[0];
+    let along = 1_000.0 * (0.001 * DT);
+    assert!(!body.sleeping, "gravity ignition stayed asleep");
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        along.to_bits(),
+        "thrust {}",
+        body.velocity.x
+    );
+    assert_eq!(
+        body.velocity.y.to_bits(),
+        (genos_physics::GRAVITY.y * DT).to_bits(),
+        "fall {}",
+        body.velocity.y
+    );
+    assert_eq!(body.velocity.z.to_bits(), 0.0_f32.to_bits());
+    assert!(!body.motor);
+}
+
+#[test]
+fn a_thrust_under_the_speed_wake_still_wakes() {
+    // 1 N on 1 000 kg stays under 0.25 m/s and under the 0.12 m/s sleep gate.
+    let mut world = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1.0, 1.0)]),
+    );
+    world.sleep_time = 0.5;
+    world.bodies[0].sleeping = true;
+    for _ in 0..180 {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[0];
+    let (position, speed) = coast(1.0, 0.001, 180);
+    assert!(
+        speed < world.sleep_linear,
+        "speed {speed} crossed the sleep gate {}",
+        world.sleep_linear
+    );
+    assert!(
+        world.sleep_linear < 0.25,
+        "sleep gate {} is not under the 0.25 m/s speed wake",
+        world.sleep_linear
+    );
+    assert!(!body.sleeping, "sub-threshold thrust stayed asleep");
+    assert_eq!(
+        body.velocity.x.to_bits(),
+        speed.to_bits(),
+        "speed {}",
+        body.velocity.x
+    );
+    assert_eq!(body.position.x.to_bits(), position.to_bits());
+    assert_eq!(body.angular_velocity.length().to_bits(), 0.0_f32.to_bits());
+    assert!(!body.motor);
+}
+
+#[test]
+fn cancelling_thrusters_wake_a_sleeping_chassis() {
+    let cancel = craft(&[
+        thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0),
+        thruster(Vec3::ZERO, Vec3::new(-1.0, 0.0, 0.0), 1_000.0, 1.0),
+    ]);
+    let mut world = space_world(Vec3::ZERO, &cancel);
+    world.sleep_time = 0.5;
+    world.bodies[0].sleeping = true;
+    world.bodies[0].sleep_time = 0.5;
+    for _ in 0..180 {
+        step(&mut world, DT);
+    }
+    let body = world.bodies[0];
+    assert!(!body.sleeping, "cancelling thrust left the chassis asleep");
+    assert_eq!(body.velocity.x.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(body.velocity.y.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(body.velocity.z.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(body.position.x.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(body.angular_velocity.length().to_bits(), 0.0_f32.to_bits());
+    assert!(!body.motor);
+}
+
+#[test]
+fn an_ignition_wakes_the_island_and_leaves_another_asleep() {
+    let mut world = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)]),
+    );
+    world.sleep_time = 0.5;
+    let neighbor = world.insert(cube());
+    let far = world.insert(cube_at(Vec3::new(30.0, 0.0, 0.0)));
+    world.bodies[0].sleeping = true;
+    world.bodies[0].island = 7;
+    world.bodies[neighbor].position = Vec3::new(10.0, 0.0, 0.0);
+    world.bodies[neighbor].sleeping = true;
+    world.bodies[neighbor].island = 7;
+    world.bodies[neighbor].sleep_time = 0.49;
+    world.bodies[far].sleeping = true;
+    world.bodies[far].island = 9;
+    world.bodies[far].sleep_time = 0.49;
+    for _ in 0..5 {
+        step(&mut world, DT);
+    }
+    assert!(!world.bodies[0].sleeping, "chassis stayed asleep");
+    assert!(
+        !world.bodies[neighbor].sleeping,
+        "island neighbour stayed asleep"
+    );
+    assert_eq!(
+        world.bodies[neighbor].sleep_time.to_bits(),
+        (5.0 * DT).to_bits()
+    );
+    assert!(world.bodies[far].sleeping, "the other island woke");
+    assert_eq!(world.bodies[far].sleep_time.to_bits(), 0.49_f32.to_bits());
+}
+
+#[test]
+fn a_thruster_that_cannot_push_leaves_the_sleeper_asleep() {
+    let idle = [
+        craft(&[]),
+        listed(
+            0,
+            &[thruster(Vec3::new(0.0, 2.0, 0.0), Vec3::X, 1_000.0, 1.0)],
+        ),
+        craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 0.0)]),
+        craft(&[thruster(Vec3::ZERO, Vec3::X, 0.0, 1.0)]),
+        craft(&[thruster(Vec3::ZERO, Vec3::ZERO, 1_000.0, 1.0)]),
+        craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, f32::NAN)]),
+        craft(&[thruster(Vec3::ZERO, Vec3::X, f32::INFINITY, 1.0)]),
+        craft(&[thruster(Vec3::ZERO, Vec3::X, f32::NEG_INFINITY, 1.0)]),
+        craft(&[thruster(
+            Vec3::ZERO,
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            1_000.0,
+            1.0,
+        )]),
+        craft(&[thruster(
+            Vec3::new(f32::NAN, 0.0, 0.0),
+            Vec3::X,
+            1_000.0,
+            1.0,
+        )]),
+    ];
+    for craft in idle {
+        let mut world = space_world(Vec3::ZERO, &craft);
+        world.sleep_time = 0.5;
+        world.bodies[0].sleeping = true;
+        world.bodies[0].sleep_time = 0.4;
+        for _ in 0..5 {
+            step(&mut world, DT);
+        }
+        let body = world.bodies[0];
+        assert!(body.sleeping, "a dead thruster woke the chassis: {body:?}");
+        assert_eq!(body.velocity.x.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(body.position.x.to_bits(), 0.0_f32.to_bits());
+        assert!(finite_body(&body));
+        assert_eq!(body.sleep_time.to_bits(), 0.4_f32.to_bits());
+    }
+
+    let mut parked = genos_physics::chassis_rest_world(0.5);
+    for _ in 0..180 {
+        step(&mut parked, DT);
+    }
+    assert!(parked.bodies[1].sleeping, "ground rest woke");
+    assert_eq!(parked.step_stats.wheel_rays, 0);
+
+    let mut missing = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)]),
+    );
+    missing.vehicles[0].chassis = 9;
+    missing.bodies[0].sleeping = true;
+    missing.bodies[0].sleep_time = 0.4;
+    let mut removed = space_world(
+        Vec3::ZERO,
+        &craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)]),
+    );
+    removed.bodies[0].presence = Presence::Culled;
+    removed.bodies[0].sleeping = true;
+    let mut frozen = World::new(Vec3::ZERO);
+    let mut block = cube();
+    block.inverse_mass = 0.0;
+    block.sleeping = true;
+    let index = frozen.insert(block);
+    frozen.vehicles.push(Vehicle {
+        chassis: index,
+        ground: None,
+        aircraft: None,
+        space: Some(craft(&[thruster(Vec3::ZERO, Vec3::X, 1_000.0, 1.0)])),
+    });
+    for _ in 0..5 {
+        step(&mut missing, DT);
+        step(&mut removed, DT);
+        step(&mut frozen, DT);
+    }
+    assert!(
+        missing.bodies[0].sleeping,
+        "a missing chassis woke another body"
+    );
+    assert_eq!(missing.bodies[0].velocity.x.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(missing.bodies[0].sleep_time.to_bits(), 0.4_f32.to_bits());
+    assert!(removed.bodies[0].sleeping, "a culled chassis woke");
+    assert_eq!(removed.bodies[0].velocity.x.to_bits(), 0.0_f32.to_bits());
+    assert!(frozen.bodies[0].sleeping, "a static chassis woke");
+    assert_eq!(frozen.bodies[0].velocity.x.to_bits(), 0.0_f32.to_bits());
+    assert_eq!(frozen.bodies[0].position.x.to_bits(), 0.0_f32.to_bits());
+}
+
+#[test]
 fn two_space_runs_match_at_a_fixed_step() {
     let offset = craft(&[thruster(Vec3::new(0.0, 2.0, 0.0), Vec3::X, 1_000.0, 1.0)]);
     let mut first = space_world(Vec3::ZERO, &offset);
@@ -339,11 +620,26 @@ fn listed(count: usize, thrusters: &[Thruster]) -> SpaceCraft {
 }
 
 fn cube() -> Body {
-    let mut body = Body::cuboid(Vec3::ZERO, 1_000.0, Vec3::new(1.0, 1.0, 1.0));
+    cube_at(Vec3::ZERO)
+}
+
+fn cube_at(position: Vec3) -> Body {
+    let mut body = Body::cuboid(position, 1_000.0, Vec3::new(1.0, 1.0, 1.0));
     body.motion = MotionQuality::Discrete;
     body.friction = 0.0;
     body.restitution = 0.0;
     body
+}
+
+/// Same update as the wrench: `v += force * (inverse_mass * dt)`, then `x += v * dt`.
+fn coast(force: f32, inverse_mass: f32, steps: u32) -> (f32, f32) {
+    let mut velocity = 0.0_f32;
+    let mut position = 0.0_f32;
+    for _ in 0..steps {
+        velocity += force * (inverse_mass * DT);
+        position += velocity * DT;
+    }
+    (position, velocity)
 }
 
 fn space_world(gravity: Vec3, craft: &SpaceCraft) -> World {
