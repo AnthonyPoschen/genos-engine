@@ -553,23 +553,15 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image], store_metal: bool) -> Option<
     Some((img.width, img.height, out))
 }
 
-/// Normal atlas plus roughness in alpha when a metallic-roughness texture exists.
+/// Normal atlas plus roughness in alpha when a metallic-roughness image has texels.
 /// `flat` is a generated normal (rgb 0.5, 0.5, 1) used only to carry roughness.
+/// A stored width and height with an empty pixel buffer is not a sampleable image.
 fn bake_normal_rough(m: &PbrMaterial, images: &[Image]) -> (Option<(u32, u32, Vec<u8>)>, bool, bool) {
-    let rough = m.metallic_roughness_texture.is_some();
+    let rough = roughness_texels(m, images);
     let Some((w, h, mut rgba)) = copy_normal(m, images) else {
-        if !rough {
-            return (None, false, false);
-        }
-        let Some(slot) = m.metallic_roughness_texture else {
+        let Some(img) = rough else {
             return (None, false, false);
         };
-        let Some(img) = images.get(slot.image) else {
-            return (None, false, false);
-        };
-        if img.width == 0 || img.height == 0 {
-            return (None, false, false);
-        }
         let mut rgba = vec![0u8; (img.width as usize) * (img.height as usize) * 4];
         fill_roughness(m, images, img.width, img.height, &mut rgba);
         for px in rgba.chunks_exact_mut(4) {
@@ -579,10 +571,24 @@ fn bake_normal_rough(m: &PbrMaterial, images: &[Image]) -> (Option<(u32, u32, Ve
         }
         return (Some((img.width, img.height, rgba)), true, true);
     };
-    if rough {
+    if rough.is_some() {
         fill_roughness(m, images, w, h, &mut rgba);
     }
-    (Some((w, h, rgba)), false, rough)
+    (Some((w, h, rgba)), false, rough.is_some())
+}
+
+/// The metallic-roughness image, only when its pixel buffer covers `width * height`.
+fn roughness_texels<'a>(m: &PbrMaterial, images: &'a [Image]) -> Option<&'a Image> {
+    let slot = m.metallic_roughness_texture?;
+    let img = images.get(slot.image)?;
+    let width = usize::try_from(img.width).ok()?;
+    let height = usize::try_from(img.height).ok()?;
+    let pixels = width.saturating_mul(height).saturating_mul(4);
+    if width == 0 || height == 0 || img.pixels.len() < pixels {
+        None
+    } else {
+        Some(img)
+    }
 }
 
 fn fill_roughness(m: &PbrMaterial, images: &[Image], w: u32, h: u32, rgba: &mut [u8]) {
