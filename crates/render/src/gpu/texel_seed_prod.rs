@@ -433,13 +433,15 @@ impl Gpu {
     }
 
     fn zero_memory(&self, memory: Handle, size: u64) -> Result<(), String> {
+        let bytes = usize::try_from(size)
+            .map_err(|err| format!("texel seed production buffer size: {err}"))?;
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
                 (self.fns.map_mem)(self.device, memory, 0, size, 0, &mut mapped),
                 "map texel seed production buffer",
             )?;
-            std::ptr::write_bytes(mapped.cast::<u8>(), 0, size as usize);
+            std::ptr::write_bytes(mapped.cast::<u8>(), 0, bytes);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(())
