@@ -613,9 +613,11 @@ const float LIGHTING_SC_HIT = 0.25;
 // ADR 0039 stage 2: the SH-L1 cells are the ray-hit cells (one knob for both;
 // a low-spec preset changes LIGHTING_SC_HIT, never a literal).
 const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
-// A ray hit takes the bilinear SH read only when its normal is slanted (largest
-// |n| below this); axis-aligned hits tilt the hit cell (= its mean, master's
-// read). 99.97 % of the SH lookups were axis-aligned ray hits (simplify-s2 step 7).
+// A slanted ray hit (largest |n| below this) may take the lattice read.
+// An axis-aligned hit, including the display seed of one, tilts the owning
+// cell only. At the axis that tilt is the cell's mean, master's read. A
+// neighbour blend would be the seed's history through a turn. 99.97 % of the
+// SH lookups were axis-aligned ray hits (simplify-s2 step 7).
 const float LIGHTING_SH_HIT_SLANT = 0.999;
 // fp16 pack clamp (half max is ~65504; stay under so packHalf2x16 stays finite).
 const float LIGHTING_SH_HALF_CLAMP = 65000.0;
@@ -2451,13 +2453,17 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
-        // ADR 0039 stage 2: the cells read at the hit's true normal, blended
-        // across the 25 cm cells there (a coarser hit cell: its own, tilted).
-        // Mover-frame cells keep the per-axis read.
+        // ADR 0039 stage 2. A slanted hit may read the lattice, then the
+        // owning cell tilted from its axis mean to the true normal. An
+        // axis-aligned hit keeps that cell. Compose leaves lighting_sc_display
+        // set while it seeds a new texel, and that seed is the texel's history
+        // until its own rays replace it, so a display bilinear of the
+        // neighbour would move the energy the cell measured (axis_aligned_floor_seed
+        // in lighting_sh.rs). Mover-frame cells keep the per-axis read.
         if (lighting_sh_on() && lighting_obj_salt < 0.5) {
             vec3 an = abs(n);
             bool slanted = max(an.x, max(an.y, an.z)) < LIGHTING_SH_HIT_SLANT;
-            if ((lighting_sc_display || slanted) && hsize < LIGHTING_SH_HIT_SPAN * LIGHTING_SH_CELL) {
+            if (slanted && hsize < LIGHTING_SH_HIT_SPAN * LIGHTING_SH_CELL) {
                 vec4 b = lighting_sh_read(pos, n, false);
                 if (b.w > LIGHTING_CACHE_HAS_W) {
                     return b.rgb * keep;

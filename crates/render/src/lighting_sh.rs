@@ -12,7 +12,9 @@
 //! loses a quarter of it at the normal. The cell's read is therefore the
 //! exact axis mean plus the harmonics' change from the axis normal to the
 //! true normal ([`ShL1::tilt`]). At the axis normal it is the mean exactly,
-//! and on a slanted surface it follows the light's direction.
+//! and on a slanted surface it follows the light's direction. What a texel
+//! shows after that read is `lighting_sc_shown` in `lighting_cache.glsl`.
+//! The guards for that function live in `tests/lighting_sh_read.rs`.
 
 use std::f32::consts::PI;
 
@@ -221,11 +223,7 @@ fn f16_to_f32(h: u32) -> f32 {
     match exp {
         0 => {
             let mag = small_f32(man) * f32::from_bits(0x3380_0000);
-            if sign == 0 {
-                mag
-            } else {
-                -mag
-            }
+            if sign == 0 { mag } else { -mag }
         }
         0x1f => f32::from_bits(sign | 0x7f80_0000 | (man << 13)),
         _ => f32::from_bits(sign | ((exp + 112) << 23) | (man << 13)),

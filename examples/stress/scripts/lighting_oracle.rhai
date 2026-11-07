@@ -182,11 +182,11 @@ fn turn(pass, hist, every) {
 
 // Slanted surfaces (ADR 0039 stage 2): the box nearest the lit hall, turned
 // 0.6 rad (34 degrees) and held, so its side faces are off every axis. Seen
-// close (the box fills the middle of the picture) at night under the hall
-// lamps ("slant") and at noon under the sky ("slant-day"). Measured as the
-// light settles on the turned box: 30, 120 and 300 frames after the turn.
-// oracle_metrics.py adds slant_mid_err, the error over the middle of the
-// picture (the box), beside the whole-picture error.
+// close, at night under the hall lamps ("slant") and at noon under the sky
+// ("slant-day"). Measured 30, 120 and 300 frames after the turn.
+// slant_mid_err is the middle half of that picture. At this pose the half is
+// mostly the axis-aligned floor around the box; the turned faces are the
+// smaller part (scripts/lighting/slant_mid_split.py).
 fn slant(pass, dir, hour) {
     knob("time_of_day", hour);
     knob("sun", "freeze");
