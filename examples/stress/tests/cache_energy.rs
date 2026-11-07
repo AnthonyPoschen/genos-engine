@@ -31,9 +31,16 @@
 //! a lighting dump against the CPU bounce irradiance at each cell's point and
 //! normal (`genos_debug::reference::bounce_irradiance`). Their sum and their
 //! median lit cell must hold at least 0.9 of it, and a still scene must settle.
-//! A fourth case starts the hall dark and grades it 300 lit frames later (lag).
-//! The picture ratio is the energy metric of `crates/cache-ref` (summed cache
-//! over summed reference on the pixels the reference hits).
+//! A fourth case starts the hall dark and grades it 300 lit frames later (lag:
+//! at least 0.9). A fifth draws the lit hall, then grades 120 frames after the
+//! lamps go out (linger: at most 0.05 of the lit bounce). The picture ratio is
+//! summed cache over summed reference on the pixels the reference hits.
+//!
+//! `CACHE_ENERGY_SH=1` turns on `surface_cache.sh_cells` for the run. That is
+//! the ADR 0039 stage 2 acceptance of these gates: the axis read is the cell
+//! mean, so the same sums grade the production path. The oracle's
+//! `energy_mean` is the full picture, direct light included, and is a
+//! separate report.
 //!
 //! Per scene the test also reports blotch (mean relative error of 8x8 block
 //! means of the indirect) and the still cost: cache batch entries per frame
@@ -57,6 +64,9 @@ const NIGHT: f32 = 16.0 / 24.0;
 /// Still frames before grading: three times the old 300-frame freeze.
 const FRAMES: usize = 900;
 const LOW: f64 = 0.9;
+/// Linger gate: bounce left at 120 frames after the lamps go out, as a share
+/// of the lit bounce (ADR 0039 stage 1, still required at stage 2).
+const LINGER: f64 = 0.05;
 /// The highest picture byte read back: 0.745 on the shoulder, linear 3.9.
 const SHOULDER_TOP: u8 = 190;
 const HIGH: f64 = 1.1;
@@ -233,13 +243,34 @@ fn grade(live_bounce: &[Option<f64>], live_direct: &[Option<f64>], b0: &genos_de
 }
 
 fn run(name: &str, scene: Scene, camera: &Camera) {
-    run_from(name, None, scene, camera, FRAMES);
+    run_from(name, None, scene, camera, FRAMES, &BounceGate::Energy);
+}
+
+/// How the bounce picture and the 25 cm cells are judged at the end.
+enum BounceGate {
+    /// At least 0.9 of this scene's reference bounce.
+    Energy,
+    /// At most 0.05 of `lit`'s reference bounce. The direct picture is still
+    /// judged against the scene being drawn (the dark hall).
+    Linger { lit: Box<Scene> },
 }
 
 /// `dark`: a world drawn first for that many frames (the lamps off), so the
 /// graded frames measure the cache filling from black (the lag gate).
 #[expect(clippy::too_many_lines, reason = "one linear harness run: draw, grade, report, assert")]
-fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Camera, default_frames: usize) {
+fn run_from(
+    name: &str,
+    dark: Option<(&World, usize)>,
+    scene: Scene,
+    camera: &Camera,
+    default_frames: usize,
+    gate: &BounceGate,
+) {
+    let lit_ref = if let BounceGate::Linger { lit } = gate {
+        Some((reference(lit, camera, 0), reference(lit, camera, 64)))
+    } else {
+        None
+    };
     let b0 = reference(&scene, camera, 0);
     let b64 = reference(&scene, camera, 64);
     eprintln!(
@@ -248,6 +279,9 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
     );
     let frames_env = std::env::var("CACHE_ENERGY_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(default_frames);
     let dark_frames = dark.as_ref().map_or(0, |d| d.1);
+    // A linger run reads the lit picture at the end of the prefix, which is
+    // four extra draws. The dump stays eight frames before the planned end,
+    // so those draws land it a few frames earlier in the dark run.
     let dump_at = (dark_frames + frames_env) as u64 - 8;
     let dump_dir = std::env::temp_dir().join(format!("cache-energy-dump-{name}-{}", std::process::id()));
     std::env::set_var("GENOS_LIGHTING_DUMP", dump_at.to_string());
@@ -260,11 +294,21 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    renderer.set_lighting_settings(LightingSettings::preset(LightingPreset::High));
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    if std::env::var_os("CACHE_ENERGY_SH").is_some() {
+        settings.surface_cache.sh_cells = true;
+    }
+    renderer.set_lighting_settings(settings);
+    let mut warm_indirect = None;
     if let Some((dark, n)) = dark {
-        for _ in 0..n {
+        for i in 1..=n {
             let _ = window.pump();
             renderer.draw(dark, camera, true).expect("draw");
+            if let (true, Some((lb0, lb64))) = (i == n, &lit_ref) {
+                let bounce = read(window, renderer, dark, camera, ViewMode::Bounce);
+                let direct = read(window, renderer, dark, camera, ViewMode::Direct);
+                warm_indirect = Some(grade(&bounce, &direct, lb0, lb64).indirect);
+            }
         }
     }
     let world = World::from_scene(scene);
@@ -313,7 +357,8 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
         }
     }
     let cost = entries.iter().sum::<f64>() / entries.len().max(1) as f64;
-    let cells = cell_grade(&cell_scene, &dump_dir, dump_at, name);
+    let cell_scene = if let BounceGate::Linger { lit } = gate { lit.as_ref() } else { &cell_scene };
+    let cells = cell_grade(cell_scene, &dump_dir, dump_at, name);
     eprintln!(
         "cache_energy {name}: cells/ref {:.3} (n {}, median {:.3}, lit median {:.3}, under 0.9: {:.2}) texels/ref {:.3} (n {}, median {:.3}) | picture indirect/ref {:.3} direct/ref {:.3} blotch {:.3} settled at {settled_at:?} still entries/frame {cost:.0} ({:.0} rays) draining {draining}/120 trail [{}]",
         cells.coarse.ratio,
@@ -335,34 +380,55 @@ fn run_from(name: &str, dark: Option<(&World, usize)>, scene: Scene, camera: &Ca
         "{name}: direct/ref {:.3}: the harness does not match the reference (oracle)",
         g.direct
     );
-    assert!(
-        cells.coarse.n >= 32 && cells.coarse.ratio >= LOW,
-        "{name}: 25 cm cells hold {:.3} of the reference bounce light (n {}), under {LOW}",
-        cells.coarse.ratio,
-        cells.coarse.n
-    );
-    // The sum can pass while single cells are a few rays' noise (dark ones and
-    // bright ones cancel): the median lit cell holds the reference too. Dim
-    // cells (under LIT of the mean) are reported, not graded: their median is
-    // ray noise, the blotch gate's job.
-    assert!(
-        cells.coarse.median_lit >= LOW,
-        "{name}: the median lit 25 cm cell holds {:.3} of its reference bounce, under {LOW} (all cells {:.3}, {:.2} under)",
-        cells.coarse.median_lit,
-        cells.coarse.median,
-        cells.coarse.under
-    );
-    if dark.is_none() {
+    if let BounceGate::Linger { .. } = gate {
+        let warm = warm_indirect.expect("linger grades the lit picture before the lamps go out");
         assert!(
-            settled_at.is_some(),
-            "{name}: a still scene never settled in {frames} frames ({cost:.0} entries a frame, draining {draining}/120)"
+            warm >= LOW,
+            "{name}: the lit hall held {warm:.3} of its bounce before the lamps went out, under {LOW}"
+        );
+        let (lb0, lb64) = lit_ref.expect("linger reference");
+        let linger = grade(&bounce, &direct, &lb0, &lb64).indirect;
+        assert!(
+            linger <= LINGER,
+            "{name}: bounce linger {linger:.3} at 120 dark frames, above {LINGER}"
+        );
+        assert!(
+            cells.coarse.n >= 32 && cells.coarse.ratio <= LINGER,
+            "{name}: 25 cm cells still hold {:.3} of the lit bounce (n {}), above {LINGER}",
+            cells.coarse.ratio,
+            cells.coarse.n
         );
     }
-    assert!(
-        (LOW..=HIGH).contains(&g.indirect),
-        "{name}: indirect/ref {:.3} outside [{LOW}, {HIGH}]",
-        g.indirect
-    );
+    if matches!(gate, BounceGate::Energy) {
+        assert!(
+            cells.coarse.n >= 32 && cells.coarse.ratio >= LOW,
+            "{name}: 25 cm cells hold {:.3} of the reference bounce light (n {}), under {LOW}",
+            cells.coarse.ratio,
+            cells.coarse.n
+        );
+        // The sum can pass while single cells are a few rays' noise (dark ones and
+        // bright ones cancel): the median lit cell holds the reference too. Dim
+        // cells (under LIT of the mean) are reported, not graded: their median is
+        // ray noise, the blotch gate's job.
+        assert!(
+            cells.coarse.median_lit >= LOW,
+            "{name}: the median lit 25 cm cell holds {:.3} of its reference bounce, under {LOW} (all cells {:.3}, {:.2} under)",
+            cells.coarse.median_lit,
+            cells.coarse.median,
+            cells.coarse.under
+        );
+        if dark.is_none() {
+            assert!(
+                settled_at.is_some(),
+                "{name}: a still scene never settled in {frames} frames ({cost:.0} entries a frame, draining {draining}/120)"
+            );
+        }
+        assert!(
+            (LOW..=HIGH).contains(&g.indirect),
+            "{name}: indirect/ref {:.3} outside [{LOW}, {HIGH}]",
+            g.indirect
+        );
+    }
 }
 
 /// One size class of cache slots against the CPU bounce irradiance at each
@@ -526,5 +592,27 @@ fn the_night_hall_reaches_the_reference_bounce() {
 fn the_night_hall_fills_from_dark_in_300_frames() {
     let (dark, _) = hall_stage(0.0);
     let (scene, camera) = hall();
-    run_from("hall_lag", Some((&dark.world, 300)), scene, &camera, 300);
+    run_from("hall_lag", Some((&dark.world, 300)), scene, &camera, 300, &BounceGate::Energy);
+}
+
+/// The linger gate: the lit hall, then lamps out; 120 frames later the bounce
+/// picture and the 25 cm cells hold at most 0.05 of the lit bounce. The lit
+/// picture is graded first, so a cold cache cannot pass by having nothing to
+/// drop. `CACHE_ENERGY_WARM` is the lit prefix (default 300, the lag window).
+#[test]
+#[ignore = "lavapipe and a CPU path trace, minutes"]
+fn the_night_hall_drops_the_old_lamp_within_120_frames() {
+    let (lit, camera) = hall();
+    let lit_world = World::from_scene(lit.clone());
+    let (dark, _) = hall_stage(0.0);
+    let warm = std::env::var("CACHE_ENERGY_WARM").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+    let gate = BounceGate::Linger { lit: Box::new(lit) };
+    run_from(
+        "hall_linger",
+        Some((&lit_world, warm)),
+        dark.world.scene.clone(),
+        &camera,
+        120,
+        &gate,
+    );
 }

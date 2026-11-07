@@ -252,6 +252,9 @@ mod tests {
     use super::*;
 
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    /// `LIGHTING_WRC_CAP` and the quiet-light floor `LIGHTING_WRC_CHANGE_ALPHA`.
+    const WRC_CAP: f32 = 128.0;
+    const CHANGE_ALPHA: f32 = 1.0 / 32.0;
 
     fn tilted(deg: f32) -> [f32; 3] {
         let a = deg.to_radians();
@@ -365,6 +368,133 @@ mod tests {
         let ratio = sh.irradiance(UP)[0] / e[0];
         assert!((ratio - 0.75).abs() < 0.02, "{ratio}");
         assert_eq!(sh.tilt(e, UP, UP), e);
+    }
+
+    /// Default-flag world-cell relight (`lighting_cache.comp`): dark fill while
+    /// the cell is under half the cap, the change floor while the light is not
+    /// quiet, and a whole replacement while a lamp change is settling. The
+    /// mean and the harmonics take that one weight. A sun/sky rescale hits
+    /// both before the blend. A mover's local alpha is not this path.
+    fn production_relight(
+        cell: &Held,
+        sample: [f32; 3],
+        sample_sh: &ShL1,
+        settling: bool,
+        quiet: bool,
+        sun_gain: f32,
+    ) -> Held {
+        let fresh = cell.sets < 0.5;
+        let t = if fresh { 0.0 } else { cell.sets };
+        let add = 1.0;
+        let mut wa = add / (t + add);
+        if t < 0.5 * WRC_CAP {
+            wa = 1.0 - (t / (t + add)).powi(3);
+        }
+        if !settling && !quiet {
+            wa = wa.max(CHANGE_ALPHA * add);
+        }
+        if settling {
+            wa = 1.0;
+        }
+        let a = wa.min(1.0);
+        let (mut mean, mut sh) = (cell.mean, cell.sh);
+        if !fresh && (sun_gain - 1.0).abs() > 1.0e-3 {
+            mean = mean.map(|v| v * sun_gain);
+            for row in &mut sh.c {
+                for v in row {
+                    *v *= sun_gain;
+                }
+            }
+        }
+        let mean = if fresh {
+            sample
+        } else {
+            std::array::from_fn(|i| mean[i] + (sample[i] - mean[i]) * a)
+        };
+        let sh = if fresh {
+            *sample_sh
+        } else {
+            let mut blended = sh;
+            blended.blend(sample_sh, a);
+            blended
+        };
+        Held {
+            mean,
+            sh,
+            sets: (t + add).min(WRC_CAP),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Held {
+        mean: [f32; 3],
+        sh: ShL1,
+        sets: f32,
+    }
+
+    fn luma(c: [f32; 3]) -> f32 {
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+
+    #[test]
+    fn stage2_cell_energy_holds_and_a_lamp_clears_within_120_frames() {
+        // ADR 0039 stage 2 keeps stage 1's gates on the production cell.
+        // The axis read is the stored mean, so its energy is that mean.
+        // A slanted read is the same blend, so it follows the same timeline.
+        // Settling (`wa = 1`) is what clears a lamp inside 120 frames. The
+        // capped mean, left alone, still holds about two fifths of it.
+        let lit_rad = |_: [f32; 3]| [1.0, 0.85, 0.7];
+        let (lit, sh_lit) = relight(UP, 64, 11, lit_rad);
+        let (dark, sh_dark) = relight(UP, 64, 12, |_| [0.0; 3]);
+        let mut cell = Held {
+            mean: [0.0; 3],
+            sh: ShL1::default(),
+            sets: 0.0,
+        };
+        for _ in 0..128 {
+            cell = production_relight(&cell, lit, &sh_lit, false, true, 1.0);
+        }
+        let energy = luma(cell.sh.tilt(cell.mean, UP, UP)) / luma(lit);
+        assert!(energy >= 0.9, "axis energy {energy}");
+        let face = tilted(35.0);
+        let face_energy = luma(cell.sh.tilt(cell.mean, UP, face)) / luma(sh_lit.tilt(lit, UP, face));
+        assert!(face_energy >= 0.9, "slanted energy {face_energy}");
+
+        let lit_luma = luma(cell.mean);
+        let mut cleared = cell;
+        for _ in 0..120 {
+            cleared = production_relight(&cleared, dark, &sh_dark, true, false, 1.0);
+        }
+        let linger = luma(cleared.sh.tilt(cleared.mean, UP, face)) / lit_luma;
+        assert!(linger <= 0.05, "lamp still present at frame 120 ({linger})");
+
+        let mut stuck = cell;
+        for _ in 0..120 {
+            stuck = production_relight(&stuck, dark, &sh_dark, false, true, 1.0);
+        }
+        let remain = luma(stuck.mean) / lit_luma;
+        assert!(
+            remain > 0.05,
+            "the capped mean would already pass the lamp gate ({remain})"
+        );
+
+        // Lag: lamps on, the first rounds still dark, then the reference.
+        // Settling holds the latest sample, so frame 300 is that reference.
+        let mut filling = Held {
+            mean: [0.0; 3],
+            sh: ShL1::default(),
+            sets: 0.0,
+        };
+        for frame in 1..=300 {
+            let (sample, sh) = if frame < 40 { (dark, &sh_dark) } else { (lit, &sh_lit) };
+            filling = production_relight(&filling, sample, sh, frame <= 120, frame > 120, 1.0);
+        }
+        let lag = luma(filling.sh.tilt(filling.mean, UP, UP)) / luma(lit);
+        assert!(lag >= 0.9, "lag {lag}");
+
+        let gained = production_relight(&cell, lit, &sh_lit, false, true, 2.0);
+        assert_eq!(gained.sh.tilt(gained.mean, UP, UP), gained.mean);
+        assert!(luma(gained.mean) > 1.5 * lit_luma, "sun rescale {}", luma(gained.mean));
     }
 
     #[test]

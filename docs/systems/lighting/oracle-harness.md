@@ -94,7 +94,15 @@ number is unchanged and `grid_worst` stays reported.
   cells alone (ADR 0039's cache-only blotch gate).
 * `energy_mean`, `energy_min`: the live picture's summed linear luminance over
   the reference's, per traced frame (1.0 is no light lost or gained). Direct
-  light is in both, so it moves less than a bounce-only ratio.
+  light is in both, so it moves less than a bounce-only ratio. This is a
+  separate report from ADR 0039's cell-energy gate. That gate, and the lamp
+  timeline, are `examples/stress/tests/cache_energy.rs`: cell energy is the
+  summed 25 cm irradiance over the CPU bounce irradiance, and the bounce
+  picture over the bounce reference, at least 0.9. Linger is that bounce 120
+  frames after the lamps go out, at most 0.05 of the lit bounce. Lag is the
+  same ratio 300 frames after the lamps come on, at least 0.9. Stage 2 runs
+  the file with `CACHE_ENERGY_SH=1`, which turns on `surface_cache.sh_cells`.
+  The axis read is the cell mean, so those sums grade the production path.
 * `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`. For each traced
   frame, crop the middle half, average 2×2 blocks, and take
   `sum(|live - ref|) / (sum(ref) + 1e-6)` on sRGB-decoded Rec.709 luma of
