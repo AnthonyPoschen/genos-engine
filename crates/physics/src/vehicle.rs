@@ -1,8 +1,10 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper. Aircraft lift and
-//! thruster force are later stages and are not applied here. Sea is not a field.
+//! This stage applies the wheeled ground spring-damper and the space thrusters.
+//! Aircraft lift is a later stage and is not applied here. Sea is not a field.
+//! A thruster writes force and torque through [`integrate_wrench`]. The existing
+//! gyroscopic step then consumes that angular velocity. There is no second integrator.
 
 use genos_math::{Quat, Vec3};
 
@@ -59,7 +61,7 @@ pub struct Aircraft {
     pub air_density: f32,
 }
 
-/// One space thruster. Stored for a later stage. This stage does not apply it.
+/// One space thruster. Force is `throttle * max_force` along the chassis-frame direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Thruster {
     pub local_position: Vec3,
@@ -97,6 +99,45 @@ pub fn chassis_rest_world(sleep_time: f32) -> World {
     world
 }
 
+/// The S1 fixture: one offset thruster on a 1 000 kg cube, gravity zero.
+///
+/// Local position `(0, 2, 0)`, direction local +X, `max_force` 1 000, throttle 1.
+/// `sleep_time` of 10 keeps the cube awake for the 60-step check.
+#[must_use]
+pub fn thruster_world() -> World {
+    let mut world = World::new(Vec3::ZERO);
+    world.sleep_time = 10.0;
+    let mut body = Body::cuboid(Vec3::ZERO, 1_000.0, Vec3::new(1.0, 1.0, 1.0));
+    body.friction = 0.0;
+    body.restitution = 0.0;
+    body.motion = MotionQuality::Discrete;
+    let index = world.insert(body);
+    let mut thrusters = [Thruster {
+        local_position: Vec3::ZERO,
+        local_direction: Vec3::X,
+        max_force: 0.0,
+        throttle: 0.0,
+    }; 8];
+    if let Some(slot) = thrusters.first_mut() {
+        *slot = Thruster {
+            local_position: Vec3::new(0.0, 2.0, 0.0),
+            local_direction: Vec3::X,
+            max_force: 1_000.0,
+            throttle: 1.0,
+        };
+    }
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: None,
+        aircraft: None,
+        space: Some(SpaceCraft {
+            thrusters,
+            count: 1,
+        }),
+    });
+    world
+}
+
 fn g1_vehicle(chassis: usize) -> Vehicle {
     let wheel = |local_position: Vec3| Wheel {
         local_position,
@@ -124,15 +165,111 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
     }
 }
 
-/// Ground forces, after gravity and before the chassis is integrated.
+/// Domain forces, after gravity and before the chassis is integrated.
+///
+/// Order is aircraft, then space, then ground. Aircraft is not applied in
+/// this stage. [`integrate_wrench`] is the one velocity update those stages share.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
     let count = world.vehicles.len();
     for index in 0..count {
+        apply_space(world, index, dt);
         rays = rays.saturating_add(apply_ground(world, index, dt));
     }
     world.step_stats.wheel_rays = rays;
+}
+
+/// A thruster with `throttle > 0` holds the chassis awake the way `Body.motor` does.
+///
+/// Aircraft throttle joins this check in its stage. The function does not set
+/// `Body.motor`.
+pub(crate) fn actuator_holds_awake(vehicles: &[Vehicle], chassis: usize) -> bool {
+    vehicles
+        .iter()
+        .any(|vehicle| vehicle.chassis == chassis && space_throttle_open(vehicle.space))
+}
+
+fn space_throttle_open(space: Option<SpaceCraft>) -> bool {
+    let Some(craft) = space else {
+        return false;
+    };
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    craft
+        .thrusters
+        .iter()
+        .take(live)
+        .any(|thruster| thruster.throttle.is_finite() && thruster.throttle > 0.0)
+}
+
+fn apply_space(world: &mut World, index: usize, dt: f32) {
+    let Some(vehicle) = world.vehicles.get(index).copied() else {
+        return;
+    };
+    let Some(craft) = vehicle.space else {
+        return;
+    };
+    let Some(mut body) = world.bodies.get(vehicle.chassis).copied() else {
+        return;
+    };
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
+        return;
+    }
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    for thruster in craft.thrusters.iter().take(live) {
+        if let Some((force, arm)) = thruster_wrench(&body, thruster) {
+            integrate_wrench(&mut body, force, arm, dt);
+        }
+    }
+    if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
+        stored.velocity = body.velocity;
+        stored.angular_velocity = body.angular_velocity;
+    }
+}
+
+/// World force and the chassis-frame arm, or nothing when the inputs are not finite.
+fn thruster_wrench(body: &Body, thruster: &Thruster) -> Option<(Vec3, Vec3)> {
+    if !thruster.throttle.is_finite() || !thruster.max_force.is_finite() {
+        return None;
+    }
+    let magnitude = thruster.throttle * thruster.max_force;
+    if !magnitude.is_finite() || magnitude == 0.0 {
+        return None;
+    }
+    if !finite_vec(thruster.local_direction) || !finite_vec(thruster.local_position) {
+        return None;
+    }
+    let direction = body
+        .orientation
+        .rotate(thruster.local_direction)
+        .normalize();
+    if !finite_vec(direction) || direction.length_squared() == 0.0 {
+        return None;
+    }
+    let force = direction * magnitude;
+    let arm = body.orientation.rotate(thruster.local_position);
+    if !finite_vec(force) || !finite_vec(arm) {
+        return None;
+    }
+    Some((force, arm))
+}
+
+/// Semi-implicit wrench on the chassis. `integrate_body` runs the gyroscopic step after this.
+///
+/// A non-finite result is left unwritten. Ground keeps its own copy of the same
+/// update so a later aircraft stage can call this function without editing the ray path.
+fn integrate_wrench(body: &mut Body, force: Vec3, arm: Vec3, dt: f32) {
+    let velocity = body.velocity + force * (body.inverse_mass * dt);
+    let angular = body.angular_velocity + world_inverse_inertia(body, arm.cross(force)) * dt;
+    if !finite_vec(velocity) || !finite_vec(angular) {
+        return;
+    }
+    body.velocity = velocity;
+    body.angular_velocity = angular;
+}
+
+fn finite_vec(value: Vec3) -> bool {
+    value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
 }
 
 fn apply_ground(world: &mut World, index: usize, dt: f32) -> u32 {

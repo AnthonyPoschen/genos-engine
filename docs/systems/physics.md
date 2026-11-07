@@ -27,7 +27,7 @@ A capsule is a segment along local Y plus a radius. `half_height` is the segment
 The crate is `crates/physics`, package `genos-physics`.
 
 - `Body`, `World`, `Spring`, `Shape`, `MotionQuality`, `Presence`, and `step` are in `src/lib.rs`.
-- A vehicle is in `src/vehicle.rs`: `Vehicle`, `GroundContact`, `Wheel`, `WheeledGround`. `Aircraft` and `SpaceCraft` are stored and are not forced. `chassis_rest_world` builds the G1 fixture.
+- A vehicle is in `src/vehicle.rs`: `Vehicle`, `GroundContact`, `Wheel`, `WheeledGround`, `Thruster`, `SpaceCraft`. `Aircraft` is stored and is not forced. `chassis_rest_world` builds the G1 fixture. `thruster_world` builds the S1 fixture.
 - Contact is in `src/contact.rs`. The pair list comes from `src/broadphase.rs`. Debris-debris pairs are dropped by the layer table.
 - Islands and sleep are in `src/island.rs`.
 - Speculative contacts, the GJK gap, and swept time of impact are in `src/ccd.rs`.
@@ -46,7 +46,9 @@ For a character, set `motor` and write the desired horizontal velocity in `wish`
 
 For a bullet whose gap at the start of the step is inside the margin, set `motion` to `MotionQuality::Speculative`. `World.speculative_margin` is the cap, 0.25 m unless a caller changes it. For a ship, set `motion` to `MotionQuality::Swept`. `World.swept_pair_cap` is the pair cap, 8 unless a caller changes it. `step_stats.ccd_applied` is true when any body is speculative or swept. `step_stats.toi_failed`, `toi_deferred`, `pair_slices`, and `dynamic_pair_impulses` are the counters for that step.
 
-For a wheeled chassis, insert one dynamic body and push a `Vehicle` whose `chassis` is that index. Set `ground` to `GroundContact::Wheeled` with four `Wheel` rays. `direction` is in the chassis frame. `step` casts each ray against a plane or a box, excluding the chassis, and pushes a spring-damper along the ray. It does not set `Body.spring` or `Body.motor`. `step_stats.wheel_rays` is the cast count. A sleeping chassis casts 0. `chassis_rest_world` is the 1 200 kg fixture. Aircraft and space payloads can be stored. This step does not apply them.
+For a wheeled chassis, insert one dynamic body and push a `Vehicle` whose `chassis` is that index. Set `ground` to `GroundContact::Wheeled` with four `Wheel` rays. `direction` is in the chassis frame. `step` casts each ray against a plane or a box, excluding the chassis, and pushes a spring-damper along the ray. It does not set `Body.spring` or `Body.motor`. `step_stats.wheel_rays` is the cast count. A sleeping chassis casts 0. `chassis_rest_world` is the 1 200 kg fixture. Aircraft can be stored. This step does not apply it.
+
+For a spacecraft, set `space` to a `SpaceCraft` with `count` live `Thruster`s. Force is `throttle * max_force` along the chassis-frame direction, rotated into the world. Torque is `r × F` at the chassis origin. The chassis integrates that wrench, then the existing gyroscopic step runs. Gravity stays `World.gravity`. The S1 fixture sets gravity to zero. A thruster with `throttle > 0` keeps the chassis awake the way a motor does, and it does not set `Body.motor`. `thruster_world` is the 1 000 kg offset fixture. There is no orbit and no wide position.
 
 For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, `debris_asleep`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
 
@@ -54,7 +56,7 @@ After `step`, `change_records` holds this tick's chunk records in `(breakable, c
 
 ## Limits
 
-There is no island solver and no air drag. G1 is the wheeled ground payload from [ADR 0040](../adr/0040-vehicle-domains.md): four rays and an explicit spring-damper on one chassis. The ADR stays proposed. Aircraft forces, space forces, the landing stage, tyre slip, gearbox, steering, and sea buoyancy are not in this step. A mesh or a hull is a miss for a wheel ray. A miss stores `max_length` and applies no force. An empty vehicle list does no vehicle work and does not allocate. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
+There is no island solver and no air drag. G1 is the wheeled ground payload from [ADR 0040](../adr/0040-vehicle-domains.md): four rays and an explicit spring-damper on one chassis. S1 is the space payload on that same chassis: at most eight thrusters, force and torque, and no orbit. The ADR stays proposed. Aircraft forces, the landing stage, wide positions, tyre slip, gearbox, steering, and sea buoyancy are not in this step. A mesh or a hull is a miss for a wheel ray. A miss stores `max_length` and applies no force. An empty vehicle list does no vehicle work and does not allocate. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision. `--fixture spin` is one step of a long thin box, half extents `(0.02, 1.5, 0.02)` m, spinning a quarter turn about Z beside a block. `tunnel_count` is 1 when that block is still at rest. The closing bound's `|ω| r` term is what strikes it. `--fixture wide` is the same swept ships with centres 40 m apart, one step and no gravity. The 36 m gap needs more than one radius slice, so a time-of-impact cap of 1 counts in `tunnel_count`. `--fixture rotor` flies a 3 kg cube, half extents 1 m, at 2 rad/s about Z with no gravity. `rotational_energy_j` is `1/2 Izz ωz²` from that size and mass, 4 J.
 
@@ -62,7 +64,7 @@ A mesh collider is a few convex pieces, not the source triangles. Two concave me
 
 The camera calls this step from the scene crate. Lights have no collider.
 
-`debug/physics` (`genos-physics`) is the debug binary: headless, stats only, with the ship lanes, hull edge contacts, resting pile, 10k static grid, and `chassis_rest` scenes, per-step JSON stats, bitwise replay, checkpoint restore, and the `physics_*` MCP commands. See [debug/physics/README.md](../../debug/physics/README.md). The destruction metrics probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
+`debug/physics` (`genos-physics`) is the debug binary: headless, stats only, with the ship lanes, hull edge contacts, resting pile, 10k static grid, `chassis_rest`, and `thruster` scenes, per-step JSON stats, bitwise replay, checkpoint restore, and the `physics_*` MCP commands. See [debug/physics/README.md](../../debug/physics/README.md). The destruction metrics probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
 
 | Failure | Tunable | Probe |
 |---|---|---|
@@ -90,10 +92,13 @@ The camera calls this step from the scene crate. Lights have no collider.
 | A wheel ray is treated as swept collision | `MotionQuality::Discrete` | `ccd_applied`, `toi_failed`, `pair_slices` on the G1 fixture |
 | A miss or a mesh still pushes | `max_length`, shape | `a_ray_that_misses_matches_free_fall`, `a_mesh_under_the_wheels_is_a_miss` |
 | Two runs diverge | wheel index order | the second world in `a_chassis_rests_on_four_springs` |
+| A thruster misses force or torque | `max_force`, local position | `a_thruster_in_zero_gravity_matches_force_and_torque`, `debug/physics --scene thruster` |
+| Open throttles fall asleep | `throttle > 0` | `cancelling_thrusters_stay_awake` |
+| Space clears gravity | `World.gravity` | `space_thrust_keeps_world_gravity` |
 
 ## Plan
 
-The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. G1 is the wheeled trial in this step. Later vehicle boxes in that plan still wait. [ADR 0040](../adr/0040-vehicle-domains.md) stays proposed.
+The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. G1 is the wheeled trial in this step. S1 thruster force is in this step. The orbit box still waits. [ADR 0040](../adr/0040-vehicle-domains.md) stays proposed.
 
 Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is accepted. Speculative contacts, swept time of impact, and the fracture hot-swap are in this step. `slice_chunk` is not.
 
@@ -120,5 +125,5 @@ Vehicle contract, copied from ADR 0040. The codec is not in this step. Gameplay 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps this step in the repository. There is no physics middleware crate.
 - [ADR 0033](../adr/0033-physics-scale-broadphase-and-sleep.md) is the layered broadphase and island sleep. Departures from the AABB-tree paper and from Box2D's rotations are in that ADR.
 - [ADR 0034](../adr/0034-rotational-contact-solver.md) is the rotational contact solver. Joints, rolling friction, and a full island solver stay out of that decision. It does not define a vehicle.
-- [ADR 0040](../adr/0040-vehicle-domains.md) is the vehicle proposal: ground, aircraft, and space payloads on one chassis body. Status is proposed. G1, the wheeled ground payload, is in this step as a trial. Aircraft forces, space forces, and sea buoyancy are not.
+- [ADR 0040](../adr/0040-vehicle-domains.md) is the vehicle proposal: ground, aircraft, and space payloads on one chassis body. Status is proposed. G1, the wheeled ground payload, and S1, the thruster force, are in this step as trials. Aircraft forces, the orbit, and sea buoyancy are not.
 - [ADR 0016](../adr/0016-physics-ccd-destruction.md) is the continuous-collision and destruction decision. The departures from that design's papers are named in [the design](physics-ccd-destruction-design.md). This step adds these: supported chunks stay in the intact static body, culled debris are tombstoned, the intact contact impulse hits the largest seam, and a world bond's health is `health_per_area * 10`.

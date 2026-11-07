@@ -44,8 +44,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel,
-    WheeledGround,
+    chassis_rest_world, thruster_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle,
+    Wheel, WheeledGround,
 };
 
 pub use destruction::{
@@ -711,6 +711,7 @@ fn close_step(world: &mut World, hits: u32, dt: f32) {
     world.islands.store_pairs(world.pairs.pair_list());
     world.islands.assign_and_sleep(
         &mut world.bodies,
+        &world.vehicles,
         dt,
         world.sleep_linear,
         world.sleep_angular,

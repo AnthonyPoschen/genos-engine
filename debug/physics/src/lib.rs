@@ -390,6 +390,26 @@ mod tests {
     }
 
     #[test]
+    fn thruster_scene_spins_and_replays() {
+        let scene = find("thruster").unwrap_or(&SCENES[0]);
+        assert_eq!(scene.name, "thruster");
+        assert_eq!(scene.steps, 60);
+        let mut session = Session::load(scene);
+        session.run(60);
+        assert_eq!(session.steps, 60);
+        let record = session.records[59];
+        assert_eq!(record.wheel_rays, 0);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("thruster");
+        assert!(line.contains("\"wheel_rays\":0"));
+        assert!(line.contains("\"vehicle_count\":1"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        let spin = session.world.bodies[0].angular_velocity.z;
+        assert!((spin + 3.0).abs() / 3.0 <= 0.01, "offset spin {spin}");
+        assert!(replay(scene, 60).is_ok(), "thruster replay diverged");
+    }
+
+    #[test]
     fn chassis_rest_casts_four_rays_and_the_hash_covers_lengths() {
         let mut session = Session::load(find("chassis_rest").unwrap_or(&SCENES[0]));
         assert_eq!(session.scene.name, "chassis_rest");
