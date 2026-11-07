@@ -30,4 +30,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install stable --profile minimal
 rustup default stable
 
+# Local pre-push runs scripts/lint.sh. CI remains the authority.
+bash scripts/install-git-hooks.sh
+
 cargo build --workspace --release --tests
