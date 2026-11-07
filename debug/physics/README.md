@@ -49,3 +49,7 @@ bit for bit. Equal hashes at a step mean equal state.
 
 A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
+
+Vehicle scenes are not in this binary. [ADR 0040](../../docs/adr/0040-vehicle-domains.md)
+is proposed. After it is accepted, G1 adds `chassis_rest`, A1 adds `aero_trim`,
+and S1 adds `thruster`, on this same headless path. Sea has no scene.
