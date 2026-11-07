@@ -51,7 +51,7 @@ After `step`, `change_records` holds this tick's chunk records in `(breakable, c
 
 ## Limits
 
-There is no island solver and no air drag. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
+There is no island solver and no air drag. A vehicle is not in this step. [ADR 0040](../adr/0040-vehicle-domains.md) proposes ground, aircraft, and space payloads on one chassis body, and leaves sea as uncommitted buoyancy. It does not change this step. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision. `--fixture spin` is one step of a long thin box, half extents `(0.02, 1.5, 0.02)` m, spinning a quarter turn about Z beside a block. `tunnel_count` is 1 when that block is still at rest. The closing bound's `|ω| r` term is what strikes it. `--fixture wide` is the same swept ships with centres 40 m apart, one step and no gravity. The 36 m gap needs more than one radius slice, so a time-of-impact cap of 1 counts in `tunnel_count`. `--fixture rotor` flies a 3 kg cube, half extents 1 m, at 2 rad/s about Z with no gravity. `rotational_energy_j` is `1/2 Izz ωz²` from that size and mass, 4 J.
 
@@ -85,7 +85,7 @@ The camera calls this step from the scene crate. Lights have no collider.
 
 ## Plan
 
-The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step.
+The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. It does not change this step. Vehicle stages in that plan wait on [ADR 0040](../adr/0040-vehicle-domains.md), which is proposed.
 
 Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is accepted. Speculative contacts, swept time of impact, and the fracture hot-swap are in this step. `slice_chunk` is not.
 
@@ -103,4 +103,6 @@ The step does not replicate. Gameplay networking waits ([Architecture](../archit
 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps this step in the repository. There is no physics middleware crate.
 - [ADR 0033](../adr/0033-physics-scale-broadphase-and-sleep.md) is the layered broadphase and island sleep. Departures from the AABB-tree paper and from Box2D's rotations are in that ADR.
+- [ADR 0034](../adr/0034-rotational-contact-solver.md) is the rotational contact solver. Joints, rolling friction, and a full island solver stay out of that decision. It does not define a vehicle.
+- [ADR 0040](../adr/0040-vehicle-domains.md) is the vehicle proposal: ground, aircraft, and space payloads on one chassis body. Status is proposed. Sea buoyancy is described there and is not accepted. The step has no vehicle.
 - [ADR 0016](../adr/0016-physics-ccd-destruction.md) is the continuous-collision and destruction decision. The departures from that design's papers are named in [the design](physics-ccd-destruction-design.md). This step adds these: supported chunks stay in the intact static body, culled debris are tombstoned, the intact contact impulse hits the largest seam, and a world bond's health is `health_per_area * 10`.
