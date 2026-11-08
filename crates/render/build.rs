@@ -94,15 +94,23 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             "shaders/froxel_integrate.comp",
             &out.join("froxel_integrate.comp.spv"),
         ),
-        texel_detail: compile(
+        texel_detail: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod.comp.spv"),
+            &[],
+            true,
         ),
         // Same production function, compose's read-only specialization.
-        texel_detail_ro: compile_glslc_define(
+        // PROD_READONLY drops the writing rows from this module. DontInline
+        // stays off. On a 16 GiB lavapipe cgroup the dispatch of this module,
+        // and of the unstripped module with DontInline on large functions,
+        // was killed (about 14.7 GiB anonymous). The writing specialization's
+        // dispatch completes.
+        texel_detail_ro: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
-            "LIGHTING_SC_WRITES=false",
+            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
+            false,
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
@@ -359,6 +367,54 @@ fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
 fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
     let flag = format!("-D{define}");
     compile_args(src, dest, &[&flag])
+}
+
+/// The lavapipe fixture only. Inlining the compose function at every mover
+/// shade makes the compiler heap exceed a 16 GB software-test budget. The
+/// production compose module is not marked. `DontInline` does not change the
+/// `GLSL` those functions run.
+fn compile_texel_detail(
+    src: &str,
+    dest: &std::path::Path,
+    extra: &[&str],
+    dont_inline: bool,
+) -> PathBuf {
+    let path = compile_args(src, dest, extra);
+    if !dont_inline {
+        return path;
+    }
+    let mut bytes = std::fs::read(&path).expect("texel detail spirv");
+    let mut i = 5usize;
+    let n = bytes.len() / 4;
+    let mut fn_ctrl: Option<usize> = None;
+    let mut fn_start = 0usize;
+    while i < n {
+        let word = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("spirv word"));
+        let count = usize::try_from(word >> 16).expect("spirv word count");
+        let op = word & 0xffff;
+        if count == 0 || i + count > n {
+            panic!("texel detail spirv is truncated");
+        }
+        if op == 54 && count >= 4 {
+            fn_ctrl = Some(i + 3);
+            fn_start = i;
+        } else if op == 56 {
+            // Only the large functions. Marking every helper DontInline keeps a
+            // separate copy of each and the compiler heap does not fit.
+            if let Some(ctrl_i) = fn_ctrl {
+                if i - fn_start > 1000 {
+                    let at = ctrl_i * 4;
+                    let ctrl = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
+                    let ctrl = (ctrl & !1) | 2;
+                    bytes[at..at + 4].copy_from_slice(&ctrl.to_le_bytes());
+                }
+            }
+            fn_ctrl = None;
+        }
+        i += count;
+    }
+    std::fs::write(&path, &bytes).expect("write texel detail spirv");
+    path
 }
 
 fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {

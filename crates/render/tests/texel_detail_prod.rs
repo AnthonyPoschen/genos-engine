@@ -13,12 +13,16 @@
     reason = "one lavapipe dispatch asserts every row of the neighbour-read contract"
 )]
 
-use genos_render::{lighting_change_head, GpuKind, LightingPreset, LightingSettings, Renderer};
-use genos_window::Window;
+use genos_render::{
+    lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset, LightingSettings,
+    Renderer,
+};
+use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
-const ROWS: usize = 23;
-const READ_ROWS: usize = 6;
+const ROWS: usize = 34;
+const TRAILER: usize = 36;
+const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
 
@@ -54,12 +58,29 @@ fn row(words: &[f32], id: usize) -> Row {
     }
 }
 
-fn slant_colour() -> [f32; 3] {
+fn slant_normal() -> [f32; 3] {
+    let len = (0.36_f32 + 0.64 + 0.04).sqrt();
+    [0.6 / len, 0.8 / len, 0.2 / len]
+}
+
+fn tilt_colour(mean: [f32; 3]) -> [f32; 3] {
     let mut sh = genos_render::lighting_sh::ShL1::default();
     sh.c[2] = [4.0, 0.0, 0.0];
-    let len = (0.36_f32 + 0.64 + 0.04).sqrt();
-    let normal = [0.6 / len, 0.8 / len, 0.2 / len];
-    sh.tilt([8.0, 0.0, 0.0], [0.0, 1.0, 0.0], normal)
+    sh.tilt(mean, [0.0, 1.0, 0.0], slant_normal())
+}
+
+fn slant_colour() -> [f32; 3] {
+    tilt_colour([8.0, 0.0, 0.0])
+}
+
+fn motion_slant() -> [f32; 3] {
+    let mut sh = genos_render::lighting_sh::ShL1::default();
+    sh.c[2] = [-4.0, 0.0, 0.0];
+    sh.tilt([0.0, 0.0, 7.0], [0.0, 1.0, 0.0], slant_normal())
+}
+
+fn words_len() -> usize {
+    8 + ROWS * STRIDE + TRAILER
 }
 
 #[expect(
@@ -129,7 +150,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let words = renderer
         .texel_detail_prod()
         .expect("production compose indirect");
-    assert_eq!(words.len(), 8 + ROWS * STRIDE);
+    assert_eq!(words.len(), words_len());
     let rows: Vec<Row> = (0..ROWS).map(|id| row(&words, id)).collect();
 
     let on = lighting_change_head(&settings(true, false));
@@ -279,18 +300,19 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
 
     let mover = &rows[6];
     assert!(
-        near(mover.shown, probe),
-        "a mover showed {:?}, wanted the probe, not the cell",
+        near(mover.shown, red),
+        "a mover on a lit cell showed {:?}, wanted the cell, not the probe {probe:?} and not the world-texel seed {green:?}",
         mover.shown
     );
-    assert!(mover.reads >= 1.0);
-    assert!(mover.skipped.abs() <= ABS);
+    assert!(mover.reads.abs() <= ABS, "covered mover probe reads {}", mover.reads);
+    assert!((mover.skipped - 1.0).abs() <= ABS);
     assert!(
-        mover.conf.abs() <= ABS,
-        "a mover stored the cell seed, conf {} seed {:?}",
-        mover.conf,
+        near(mover.seed, green),
+        "the world texel kept {:?}, wanted the planted green seed. The mover must not copy the cell into it",
         mover.seed
     );
+    assert!((mover.conf - 0.25).abs() <= ABS, "conf {}", mover.conf);
+    assert!(mover.mark.abs() <= ABS, "the planted seed is not a detail mark");
     assert!(near(mover.cell, red), "mover cell {:?}", mover.cell);
     assert!((mover.cell_same - 1.0).abs() <= ABS);
 
@@ -555,26 +577,230 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
     assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
 
+    let detail_off_mover = &rows[23];
+    assert_eq!(detail_off_mover.head_hi, off.head_hi);
+    assert!(
+        near(detail_off_mover.shown, probe),
+        "detail off mover showed {:?}, wanted the probe",
+        detail_off_mover.shown
+    );
+    assert!(detail_off_mover.reads >= 1.0);
+    assert!(detail_off_mover.skipped.abs() <= ABS);
+    assert!(detail_off_mover.conf.abs() <= ABS, "detail off stored a seed");
+    assert!(near(detail_off_mover.cell, red));
+    assert!((detail_off_mover.cell_same - 1.0).abs() <= ABS);
+
+    let low_mover = &rows[24];
+    assert_eq!(low_mover.head_hi, low.head_hi);
+    assert!(
+        near(low_mover.shown, probe),
+        "Low mover showed {:?}, wanted the probe",
+        low_mover.shown
+    );
+    assert!(low_mover.reads >= 1.0);
+    assert!(low_mover.skipped.abs() <= ABS);
+    assert!((low_mover.cell_same - 1.0).abs() <= ABS);
+
+    let empty_mover = &rows[25];
+    assert!(
+        near(empty_mover.shown, probe),
+        "a mover with no cell showed {:?}, wanted the probe",
+        empty_mover.shown
+    );
+    assert!(empty_mover.reads >= 1.0);
+    assert!(empty_mover.skipped.abs() <= ABS);
+    assert!(
+        (empty_mover.cell_same - 1.0).abs() <= ABS,
+        "the empty mover allocated a texel or a cell"
+    );
+
+    let stale_mover = &rows[26];
+    assert!(
+        near(stale_mover.shown, probe),
+        "a stale cell under a mover showed {:?}, wanted the probe",
+        stale_mover.shown
+    );
+    assert!(near(stale_mover.cell, red), "stale mover cell {:?}", stale_mover.cell);
+    assert!(stale_mover.reads >= 1.0);
+    assert!(stale_mover.skipped.abs() <= ABS);
+    assert!((stale_mover.cell_same - 1.0).abs() <= ABS);
+
+    let lamp_mover = &rows[27];
+    assert!(
+        near(lamp_mover.shown, [0.0; 3]),
+        "lamp off under a mover showed {:?}, wanted black from the sun gain, not {red:?} and not {probe:?}",
+        lamp_mover.shown
+    );
+    assert!(
+        (lamp_mover.shown[0] - red[0]).abs() > 1.0,
+        "lamp off stayed on the stored mean {:?}",
+        lamp_mover.shown
+    );
+    assert!(lamp_mover.reads.abs() <= ABS, "lamp-off reads {}", lamp_mover.reads);
+    assert!((lamp_mover.skipped - 1.0).abs() <= ABS);
+    assert!(near(lamp_mover.cell, red), "lamp off rewrote the cell {:?}", lamp_mover.cell);
+    assert!(lamp_mover.conf.abs() <= ABS, "lamp off stored a seed {:?}", lamp_mover.seed);
+    assert!((lamp_mover.cell_same - 1.0).abs() <= ABS);
+
+    let mover_mix = &rows[28];
+    assert!(
+        near(mover_mix.shown, blend),
+        "a mover between red and blue showed {:?}, wanted {blend:?}",
+        mover_mix.shown
+    );
+    assert!(mover_mix.reads.abs() <= ABS);
+    assert!((mover_mix.skipped - 1.0).abs() <= ABS);
+    assert!((mover_mix.cell_same - 1.0).abs() <= ABS);
+
+    let mover_miss = &rows[29];
+    assert!(
+        near(mover_miss.shown, red),
+        "a mover with a missing corner showed {:?}, wanted red, not a darkened half",
+        mover_miss.shown
+    );
+    assert!((mover_miss.shown[0] - 4.5).abs() > 0.5);
+    assert!(mover_miss.reads.abs() <= ABS);
+    assert!((mover_miss.skipped - 1.0).abs() <= ABS);
+    assert!((mover_miss.cell_same - 1.0).abs() <= ABS);
+
+    let mover_black = &rows[30];
+    assert!(
+        near(mover_black.shown, [6.0, 0.0, 0.0]),
+        "a mover with a valid black corner showed {:?}, wanted 0.75 of red",
+        mover_black.shown
+    );
+    assert!(mover_black.reads.abs() <= ABS);
+    assert!((mover_black.skipped - 1.0).abs() <= ABS);
+    assert!((mover_black.cell_same - 1.0).abs() <= ABS);
+
+    let mover_face = &rows[31];
+    assert!(
+        near(mover_face.shown, red),
+        "a mover on the near side showed {:?}, wanted red, not the leak {leak:?}",
+        mover_face.shown
+    );
+    assert!(!near(mover_face.shown, leak));
+    assert!(mover_face.reads.abs() <= ABS);
+    assert!((mover_face.skipped - 1.0).abs() <= ABS);
+    assert!((mover_face.cell_same - 1.0).abs() <= ABS);
+
+    let mover_plane = &rows[32];
+    assert!(
+        near(mover_plane.shown, red),
+        "a mover rejected the off-plane corner, showed {:?}, wanted red, not {leak:?}",
+        mover_plane.shown
+    );
+    assert!(!near(mover_plane.shown, leak));
+    assert!(mover_plane.reads.abs() <= ABS);
+    assert!((mover_plane.skipped - 1.0).abs() <= ABS);
+    assert!((mover_plane.cell_same - 1.0).abs() <= ABS);
+
+    let motion = &rows[33];
+    assert!(near(motion.shown, red), "pose A {:?}", motion.shown);
+    assert!(
+        near(motion.seed, own),
+        "the object-local decoy changed to {:?}, wanted {own:?}",
+        motion.seed
+    );
+    assert!((motion.cell_same - 1.0).abs() <= ABS);
+    assert!((motion.mark - 1.0).abs() <= ABS, "decoy same {}", motion.mark);
+    let trail = &words[8 + ROWS * STRIDE..];
+    assert_eq!(trail.len(), TRAILER);
+    let orange = [9.0, 1.0, 0.0];
+    let blue_tilt = motion_slant();
+    assert!(near([trail[0], trail[1], trail[2]], red), "pose A {:?}", &trail[0..3]);
+    assert!(trail[3].abs() <= ABS, "pose A reads {}", trail[3]);
+    assert!((trail[4] - 1.0).abs() <= ABS, "pose A skip {}", trail[4]);
+    assert!((trail[5] - 1.0).abs() <= ABS, "pose A allocated a world texel");
+    assert!((trail[6] - 1.0).abs() <= ABS, "pose A mutated the cell");
+    assert!(near([trail[7], trail[8], trail[9]], blue), "pose B {:?}", &trail[7..10]);
+    assert!(trail[10].abs() <= ABS, "pose B reads {}", trail[10]);
+    assert!((trail[11] - 1.0).abs() <= ABS);
+    assert!((trail[12] - 1.0).abs() <= ABS, "pose B allocated a world texel");
+    assert!((trail[13] - 1.0).abs() <= ABS, "leaving A mutated a cell");
+    assert!(
+        near([trail[14], trail[15], trail[16]], blue_tilt),
+        "rotated normal showed {:?}, wanted the tilt {blue_tilt:?}, not the axis mean {blue:?}",
+        &trail[14..17]
+    );
+    assert!(
+        (blue_tilt[0] - blue[0]).abs() > 0.5,
+        "tilt stayed on the mean {blue_tilt:?}"
+    );
+    assert!(!near([trail[14], trail[15], trail[16]], blue));
+    assert!(trail[17].abs() <= ABS);
+    assert!((trail[18] - 1.0).abs() <= ABS);
+    assert!(near([trail[19], trail[20], trail[21]], orange), "+X {:?}", &trail[19..22]);
+    assert!(trail[22].abs() <= ABS);
+    assert!((trail[23] - 1.0).abs() <= ABS);
+    assert!(near([trail[24], trail[25], trail[26]], green), "yawed -Z {:?}", &trail[24..27]);
+    assert!(!near([trail[24], trail[25], trail[26]], orange), "yaw kept the old axis");
+    assert!(trail[27].abs() <= ABS);
+    assert!((trail[28] - 1.0).abs() <= ABS);
+    assert!((trail[29] - 1.0).abs() <= ABS, "the object-local decoy was written");
+    assert!(
+        near([trail[30], trail[31], trail[32]], red),
+        "the vacated surface showed {:?}, wanted its own red cell",
+        &trail[30..33]
+    );
+    assert!((trail[33] - 1.0).abs() <= ABS, "vacated cells changed");
+    assert!((trail[34] - 1.0).abs() <= ABS, "+X cell changed");
+    assert!((trail[35] - 1.0).abs() <= ABS, "-Z cell changed");
+
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
     assert_eq!(
-        skip, 11,
-        "owner rows, the slant, the blend rows, and the seeding compose skip"
+        ShutdownDevice::frames_presented(renderer),
+        0,
+        "this dispatch presents nothing"
     );
-    assert_eq!(eval, 13, "the other recorded rows still evaluate probe indirect");
-    assert_eq!(reads, 12, "the detail-off hit row has no probe; every other evaluated row reads one");
+    assert_eq!(
+        skip, 23,
+        "covered static rows, covered mover rows, and the five covered motion poses"
+    );
+    assert_eq!(
+        eval, 17,
+        "misses, detail off, Low, empty, stale, the hit row, and the vacated static shade"
+    );
+    assert_eq!(
+        reads, 16,
+        "the detail-off hit row has no probe; every other evaluated row reads one"
+    );
 }
 
 #[test]
 fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
+    // Default High compose is this specialization (COMPOSE_SC_WRITES false).
+    // On a 16 GiB lavapipe cgroup the reader dispatch was killed. The
+    // resident set was sampled around 9.8 GiB and the cgroup killer reported
+    // about 14.7 GiB anonymous. Two-row chunks, a stripped module, and the
+    // unstripped module with DontInline did not finish. A larger machine can
+    // still run these assertions. This note is not a pass.
+    // The writer and the reader are separate devices. One process that keeps
+    // both lavapipe compiler heaps exhausts the software-test budget.
+    let plant = {
+        let mut owner = open().expect("lavapipe device");
+        let renderer = &mut *owner.device;
+        assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+        let plant = renderer
+            .texel_detail_prod_plant()
+            .expect("writing compile plants the read-only scene");
+        assert_eq!(
+            ShutdownDevice::frames_presented(renderer),
+            0,
+            "the plant presents nothing"
+        );
+        plant
+    };
+    release_software_compiler_heap();
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
     assert_eq!(renderer.gpu_kind(), GpuKind::Software);
     let words = renderer
-        .texel_detail_prod_readonly()
+        .texel_detail_prod_readonly(plant)
         .expect("read-only production compose indirect");
-    assert_eq!(words.len(), 8 + ROWS * STRIDE);
+    assert_eq!(words.len(), words_len());
     let rows: Vec<Row> = (0..READ_ROWS).map(|id| row(&words, id)).collect();
 
     let red = [8.0, 0.0, 0.0];
@@ -676,11 +902,93 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         alias.cell
     );
 
-    assert_eq!(words[2].to_bits(), 1, "only the covered owner skips");
-    assert_eq!(words[3].to_bits(), 5, "the other read-only rows evaluate");
+    let ro_mover = &rows[6];
+    assert!(
+        near(ro_mover.shown, red),
+        "read-only mover showed {:?}, wanted the cell, not the planted green seed and not {probe:?}",
+        ro_mover.shown
+    );
+    assert!(
+        near(ro_mover.seed, green),
+        "read-only mover rewrote the world texel seed {:?}",
+        ro_mover.seed
+    );
+    assert!((ro_mover.mark - 1.0).abs() <= ABS, "mark {}", ro_mover.mark);
+    assert!((ro_mover.conf - 0.25).abs() <= ABS);
+    assert!(ro_mover.reads.abs() <= ABS, "reads {}", ro_mover.reads);
+    assert!((ro_mover.skipped - 1.0).abs() <= ABS);
+    assert!(near(ro_mover.cell, red));
+    assert!((ro_mover.cell_same - 1.0).abs() <= ABS);
+
+    let moved = &rows[7];
+    assert!(
+        near(moved.shown, [0.0, 0.0, 7.0]),
+        "read-only mover on the blue cell showed {:?}",
+        moved.shown
+    );
+    assert!(moved.reads.abs() <= ABS);
+    assert!((moved.skipped - 1.0).abs() <= ABS);
+    assert!(moved.own.abs() <= ABS, "a world texel appeared, own {}", moved.own);
+    assert!(moved.conf.abs() <= ABS);
+    assert!((moved.cell_same - 1.0).abs() <= ABS);
+
+    let turned = &rows[8];
+    let turned_rgb = slant_colour();
+    assert!(
+        near(turned.shown, turned_rgb),
+        "read-only rotated normal showed {:?}, wanted {turned_rgb:?}",
+        turned.shown
+    );
+    assert!((turned.shown[0] - red[0]).abs() > 0.5);
+    assert!(turned.reads.abs() <= ABS);
+    assert!((turned.skipped - 1.0).abs() <= ABS);
+    assert!((turned.cell_same - 1.0).abs() <= ABS);
+
+    let ro_stale = &rows[9];
+    assert!(
+        near(ro_stale.shown, probe),
+        "read-only stale mover showed {:?}, wanted the probe",
+        ro_stale.shown
+    );
+    assert!(near(ro_stale.cell, red));
+    assert!(ro_stale.reads >= 1.0);
+    assert!(ro_stale.skipped.abs() <= ABS);
+    assert!((ro_stale.cell_same - 1.0).abs() <= ABS);
+
+    let ro_empty = &rows[10];
+    assert!(
+        near(ro_empty.shown, probe),
+        "read-only mover with no cell showed {:?}",
+        ro_empty.shown
+    );
+    assert!(ro_empty.reads >= 1.0);
+    assert!(ro_empty.skipped.abs() <= ABS);
+
+    let bare = &rows[11];
+    assert!(
+        near(bare.shown, probe),
+        "read-only static pixel with no texel showed {:?}, wanted the probe, not the blue cell the mover showed",
+        bare.shown
+    );
+    assert!(bare.reads >= 1.0);
+    assert!(bare.skipped.abs() <= ABS);
+    assert!(
+        near(bare.cell, [0.0, 0.0, 7.0]),
+        "the blue cell changed {:?}",
+        bare.cell
+    );
+    assert!((bare.cell_same - 1.0).abs() <= ABS);
+
+    assert_eq!(
+        ShutdownDevice::frames_presented(renderer),
+        0,
+        "this dispatch presents nothing"
+    );
+    assert_eq!(words[2].to_bits(), 4, "covered owner plus three covered mover poses");
+    assert_eq!(words[3].to_bits(), 8, "the other read-only rows evaluate");
     assert_eq!(
         words[4].to_bits(),
-        5,
+        8,
         "one probe irradiance read on each evaluated row"
     );
 }

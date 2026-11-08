@@ -3311,12 +3311,23 @@ const uint LIGHTING_DIAG_PROBE_READS = 2u;
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
-    // Object-local texels (GENOS_LIGHTING_SC_LOCAL=1, GIBS): a pixel on a mover's
-    // surface reads texels keyed in the mover's frame, which move and turn with
-    // it and keep their light (relit fast while it moves, as near any change).
-    // #142: one call site, so the lookup body is inlined once (two sites
-    // doubled the compose compile).
+    // Detail off (GENOS_LIGHTING_SC_LOCAL=1): a mover still reads object-local
+    // texels, trust 0, and is not a detail candidate. Detail on returns above
+    // that, before the local transform, through lighting_sh_read with claim
+    // false. That call does not enter the object-local texel loop.
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
+    // Detail on: a mover shows the world-cell read at this world position and
+    // true normal. It does not enter the object-local texel loop, does not
+    // seed, and does not stamp (claim stays false). An empty read has w = 0,
+    // so compose keeps the probes. Detail off still uses the object frame below.
+    if (om != ~0u && lighting_sh_texel_detail_on()) {
+        lighting_obj_salt = 0.0;
+        vec4 sh = lighting_sh_read(pos, n, false);
+        if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
+            return vec4(sh.rgb, 1.0);
+        }
+        return sh;
+    }
     vec3 lpos = pos;
     vec3 ln = n;
     if (om != ~0u) {

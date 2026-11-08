@@ -5,6 +5,13 @@
 //! is the writing specialization. The other defines `LIGHTING_SC_WRITES` false,
 //! which is the read-only compose specialization. The buffers are the
 //! production cache, key table, and work block at the production slot count.
+//!
+//! Lavapipe keeps the compiler heap for a compiled pipeline, and destroying
+//! that pipeline does not return it. Both specializations on one device
+//! exhaust a 16 GB software-test budget. The writing dispatch plants the
+//! slots. The caller drops that device, returns the heap, and compiles the
+//! reader on a new device with the planted cache and key table uploaded.
+//! The production function is unchanged.
 
 use std::ffi::c_void;
 
@@ -15,7 +22,7 @@ const CACHE_BYTES: u64 = SLOTS * 392;
 // One screen probe shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
-const OUT_FLOATS: usize = 8 + 23 * 17;
+const OUT_FLOATS: usize = 8 + 34 * 17 + 36;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
@@ -39,6 +46,40 @@ pub(super) struct Pipe {
     fence: Handle,
 }
 
+pub(super) fn release_compiler_heap() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    // Lavapipe's compiler scratch is not the pipeline. Return it before the
+    // dispatch, or the two together pass the software-test budget. A product
+    // frame does not call this.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+/// Cache and key table left by the writing plant, stored on disk so the
+/// read-only compile does not keep that copy in anonymous memory. The reader
+/// uploads the files and deletes them before it dispatches.
+pub struct TexelDetailPlant {
+    cache: std::path::PathBuf,
+    keys: std::path::PathBuf,
+}
+
+impl Drop for TexelDetailPlant {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.cache);
+        let _ = std::fs::remove_file(&self.keys);
+    }
+}
+
+fn plant_file(kind: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "genos-texel-{kind}-{}.bin",
+        std::process::id()
+    ))
+}
+
 fn ckeys_bytes() -> u64 {
     let compose_at = 2 * SLOTS
         + 2
@@ -57,19 +98,75 @@ fn ckeys_bytes() -> u64 {
 
 impl Gpu {
     pub(super) fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
-        self.texel_detail_dispatch(false)
+        self.texel_detail_dispatch()
     }
 
-    /// Read-only compose specialization of the same production function.
-    pub(super) fn texel_detail_prod_readonly(&mut self) -> Result<Vec<f32>, String> {
-        self.texel_detail_dispatch(true)
+    /// Writing specialization, `lamp.x = 1`. Copies the cache and the key table
+    /// and destroys the pipeline. The caller drops the device before compiling
+    /// the reader.
+    pub(super) fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.ensure_texel_writer()?;
+        self.zero_texel_buffers()?;
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
+        self.submit_texel(false, 1, 0, 0)?;
+        let plant = self.snapshot_texel_plant()?;
+        self.destroy_texel_detail();
+        release_compiler_heap();
+        Ok(plant)
     }
 
-    fn texel_detail_dispatch(&mut self, readonly: bool) -> Result<Vec<f32>, String> {
+    /// Read-only compose specialization. `plant` is the writing device's cache
+    /// and key table. This compiles only the reader, then drops the host copy
+    /// before the dispatch.
+    pub(super) fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        release_compiler_heap();
+        if self.texel_detail.is_some() {
+            self.destroy_texel_detail();
+        }
+        self.texel_detail = Some(self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_RO_SPV)?);
+        self.zero_texel_buffers()?;
+        self.upload_texel_plant(&plant)?;
+        drop(plant);
+        release_compiler_heap();
+        // A few rows at a time. Counts accumulate in the output and in gstats.
+        // On a 16 GiB lavapipe cgroup the first chunk was still killed, at
+        // about 14.7 GiB anonymous. Splitting the rows did not make that
+        // dispatch a pass.
+        for begin in (0u32..12).step_by(2) {
+            self.submit_texel(false, 0, begin, 2)?;
+            release_compiler_heap();
+        }
+        self.read_texel_out()
+    }
+
+    fn ensure_texel_writer(&mut self) -> Result<(), String> {
         if self.texel_detail.is_none() {
             self.texel_detail = Some(self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_SPV)?);
         }
-        self.dispatch_texel_detail(readonly)
+        Ok(())
+    }
+
+    fn texel_detail_dispatch(&mut self) -> Result<Vec<f32>, String> {
+        self.ensure_texel_writer()?;
+        self.zero_texel_buffers()?;
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
+        self.submit_texel(false, 0, 0, 0)?;
+        self.read_texel_out()
     }
 
     pub(super) fn destroy_texel_detail(&mut self) {
@@ -211,88 +308,10 @@ impl Gpu {
                 "texel detail pipeline layout",
             )?;
         }
-        let module = self.shader(code)?;
-        #[repr(C)]
-        struct Stage {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            stage: u32,
-            module: Handle,
-            name: *const i8,
-            spec: *const c_void,
-        }
-        #[repr(C)]
-        struct PipeInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            stage: Stage,
-            layout: Handle,
-            base: Handle,
-            base_index: i32,
-        }
-        let info = PipeInfo {
-            s_type: 29,
-            next: std::ptr::null(),
-            flags: 0,
-            stage: Stage {
-                s_type: 18,
-                next: std::ptr::null(),
-                flags: 0,
-                stage: 0x20,
-                module,
-                name: b"main\0".as_ptr().cast(),
-                spec: std::ptr::null(),
-            },
-            layout,
-            base: std::ptr::null_mut(),
-            base_index: -1,
-        };
-        let mut pipe = std::ptr::null_mut();
-        unsafe {
-            let result = (self.fns.create_compute)(
-                self.device,
-                std::ptr::null_mut(),
-                1,
-                &info as *const PipeInfo as *const u8,
-                std::ptr::null(),
-                &mut pipe,
-            );
-            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
-            check(result, "texel detail pipeline")?;
-        }
-        let module_ro = self.shader(super::TEXEL_DETAIL_PROD_RO_SPV)?;
-        let info_ro = PipeInfo {
-            s_type: 29,
-            next: std::ptr::null(),
-            flags: 0,
-            stage: Stage {
-                s_type: 18,
-                next: std::ptr::null(),
-                flags: 0,
-                stage: 0x20,
-                module: module_ro,
-                name: b"main\0".as_ptr().cast(),
-                spec: std::ptr::null(),
-            },
-            layout,
-            base: std::ptr::null_mut(),
-            base_index: -1,
-        };
-        let mut pipe_ro = std::ptr::null_mut();
-        unsafe {
-            let result = (self.fns.create_compute)(
-                self.device,
-                std::ptr::null_mut(),
-                1,
-                &info_ro as *const PipeInfo as *const u8,
-                std::ptr::null(),
-                &mut pipe_ro,
-            );
-            (self.fns.destroy_shader)(self.device, module_ro, std::ptr::null());
-            check(result, "texel detail read-only pipeline")?;
-        }
+        let pipe = self.texel_compute(code, layout, "texel detail pipeline")?;
+        // One specialization per device. The other compile happens after this
+        // device is gone.
+        let pipe_ro = std::ptr::null_mut();
         #[repr(C)]
         struct Size {
             kind: u32,
@@ -544,54 +563,185 @@ impl Gpu {
         Ok(())
     }
 
-    fn dispatch_texel_detail(&mut self, readonly: bool) -> Result<Vec<f32>, String> {
-        let (out_mem, pipe, pipe_ro, layout, set, cmd, fence, zeros) = {
+    fn texel_compute(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
+        let module = self.shader(code)?;
+        #[repr(C)]
+        struct Stage {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: u32,
+            module: Handle,
+            name: *const i8,
+            spec: *const c_void,
+        }
+        #[repr(C)]
+        struct PipeInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            stage: Stage,
+            layout: Handle,
+            base: Handle,
+            base_index: i32,
+        }
+        let info = PipeInfo {
+            s_type: 29,
+            next: std::ptr::null(),
+            flags: 0,
+            stage: Stage {
+                s_type: 18,
+                next: std::ptr::null(),
+                flags: 0,
+                stage: 0x20,
+                module,
+                name: b"main\0".as_ptr().cast(),
+                spec: std::ptr::null(),
+            },
+            layout,
+            base: std::ptr::null_mut(),
+            base_index: -1,
+        };
+        let mut pipe = std::ptr::null_mut();
+        unsafe {
+            let result = (self.fns.create_compute)(
+                self.device,
+                std::ptr::null_mut(),
+                1,
+                &info as *const PipeInfo as *const u8,
+                std::ptr::null(),
+                &mut pipe,
+            );
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+            check(result, what)?;
+        }
+        // The compiler's scratch is not the pipeline. Return it before the
+        // dispatch, or the two together pass the software-test budget.
+        release_compiler_heap();
+        Ok(pipe)
+    }
+
+    fn zero_texel_buffers(&mut self) -> Result<(), String> {
+        let zeros = {
             let Some(state) = self.texel_detail.as_ref() else {
                 return Err("texel detail production check is not created".into());
             };
-            let zeros = [
-                state.scene.memory,
-                state.mesh.memory,
-                state.gbuffer.memory,
-                state.work.memory,
-                state.out.memory,
-                state.keys.memory,
-                state.cache.memory,
-                state.stats.memory,
+            [
+                (state.scene.memory, state.scene.size),
+                (state.mesh.memory, state.mesh.size),
+                (state.gbuffer.memory, state.gbuffer.size),
+                (state.work.memory, state.work.size),
+                (state.out.memory, state.out.size),
+                (state.keys.memory, state.keys.size),
+                (state.cache.memory, state.cache.size),
+                (state.stats.memory, state.stats.size),
             ]
-            .into_iter()
-            .zip([
-                state.scene.size,
-                state.mesh.size,
-                state.gbuffer.size,
-                state.work.size,
-                state.out.size,
-                state.keys.size,
-                state.cache.size,
-                state.stats.size,
-            ])
-            .collect::<Vec<_>>();
-            (
-                state.out.memory,
-                state.pipe,
-                state.pipe_ro,
-                state.layout,
-                state.set,
-                state.cmd,
-                state.fence,
-                zeros,
-            )
         };
         for (memory, size) in zeros {
             self.zero_memory(memory, size)?;
         }
-        let keys = self
+        Ok(())
+    }
+
+    fn snapshot_texel_plant(&self) -> Result<TexelDetailPlant, String> {
+        let Some(state) = self.texel_detail.as_ref() else {
+            return Err("texel detail production check is not created".into());
+        };
+        let cache = plant_file("cache");
+        let keys = plant_file("keys");
+        self.write_mapped_file(state.cache.memory, state.cache.size, &cache)?;
+        self.write_mapped_file(state.keys.memory, state.keys.size, &keys)?;
+        Ok(TexelDetailPlant { cache, keys })
+    }
+
+    fn upload_texel_plant(&self, plant: &TexelDetailPlant) -> Result<(), String> {
+        let Some(state) = self.texel_detail.as_ref() else {
+            return Err("texel detail production check is not created".into());
+        };
+        self.read_mapped_file(state.cache.memory, state.cache.size, &plant.cache)?;
+        self.read_mapped_file(state.keys.memory, state.keys.size, &plant.keys)?;
+        Ok(())
+    }
+
+    fn write_mapped_file(
+        &self,
+        memory: Handle,
+        size: u64,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, 0, size, 0, &mut mapped),
+                "map texel detail buffer",
+            )?;
+            let slice = std::slice::from_raw_parts(mapped.cast::<u8>(), bytes);
+            let result = std::fs::write(path, slice);
+            (self.fns.unmap_mem)(self.device, memory);
+            result.map_err(|err| format!("write {}: {err}", path.display()))
+        }
+    }
+
+    fn read_mapped_file(
+        &self,
+        memory: Handle,
+        size: u64,
+        path: &std::path::Path,
+    ) -> Result<(), String> {
+        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let mut file = std::fs::File::open(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("stat {}: {err}", path.display()))?
+            .len();
+        if file_len != size {
+            return Err(format!(
+                "{} is {file_len} bytes, the buffer is {size}",
+                path.display()
+            ));
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, 0, size, 0, &mut mapped),
+                "map texel detail buffer",
+            )?;
+            let dest = std::slice::from_raw_parts_mut(mapped.cast::<u8>(), bytes);
+            let result = std::io::Read::read_exact(&mut file, dest);
+            (self.fns.unmap_mem)(self.device, memory);
+            result.map_err(|err| format!("read {}: {err}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn read_texel_out(&self) -> Result<Vec<f32>, String> {
+        let out_mem = self
             .texel_detail
             .as_ref()
             .ok_or("texel detail production check is not created")?
-            .keys
+            .out
             .memory;
-        self.write_texel_detail_heads(keys)?;
+        read_f32s(
+            self.fns.map_mem,
+            self.fns.unmap_mem,
+            self.device,
+            out_mem,
+            OUT_FLOATS,
+        )
+    }
+
+    fn submit_texel(&mut self, reader: bool, lamp_x: u32, row: u32, rows: u32) -> Result<(), String> {
+        let (pipe, layout, set, cmd, fence) = {
+            let Some(state) = self.texel_detail.as_ref() else {
+                return Err("texel detail production check is not created".into());
+            };
+            let pipe = if reader { state.pipe_ro } else { state.pipe };
+            if pipe.is_null() {
+                return Err("texel detail pipeline is not created".into());
+            }
+            (pipe, state.layout, state.set, state.cmd, state.fence)
+        };
         self.wait_fence(fence, "texel detail wait")?;
         let fences = [fence];
         unsafe {
@@ -634,47 +784,11 @@ impl Gpu {
                 params: [u32; 4],
                 lamp: [u32; 4],
             }
-            let mut pc = Pc {
+            let pc = Pc {
                 dims: [1, 1, 1, 1],
                 params: [0, 1, 0, 10],
-                lamp: [0; 4],
+                lamp: [lamp_x, row, rows, 0],
             };
-            if readonly {
-                // Writing compile plants the slots. It does not call compose.
-                pc.lamp[0] = 1;
-                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
-                (self.fns.cmd_push)(
-                    cmd,
-                    layout,
-                    0x20,
-                    0,
-                    PC_BYTES,
-                    std::ptr::from_ref(&pc).cast(),
-                );
-                (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
-                let between = MemBar {
-                    s_type: 46,
-                    next: std::ptr::null(),
-                    src_access: 0x40,
-                    dst_access: 0x60,
-                };
-                (self.fns.cmd_barrier)(
-                    cmd,
-                    0x800,
-                    0x800,
-                    0,
-                    1,
-                    &between as *const MemBar as *const c_void,
-                    0,
-                    std::ptr::null(),
-                    0,
-                    std::ptr::null(),
-                );
-                pc.lamp[0] = 0;
-                (self.fns.cmd_bind_pipe)(cmd, 1, pipe_ro);
-            } else {
-                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
-            }
             (self.fns.cmd_push)(
                 cmd,
                 layout,
@@ -737,13 +851,6 @@ impl Gpu {
                 "texel detail submit",
             )?;
         }
-        self.wait_fence(fence, "texel detail done")?;
-        read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            out_mem,
-            OUT_FLOATS,
-        )
+        self.wait_fence(fence, "texel detail done")
     }
 }

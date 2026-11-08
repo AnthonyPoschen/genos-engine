@@ -527,9 +527,12 @@ pub struct SurfaceCacheSettings {
     /// nothing. The probe seed still runs for that miss. Those two stay when
     /// the texel is not a detail candidate, including SH cells on with this
     /// setting off. The parent walk is off for every texel while this setting
-    /// is on, including a mover. A mover's trust is 0, so it shows the probes
-    /// without that walk. A mover is not seeded. A slanted pixel shows the same read
-    /// and does not run those writers. A pixel whose displayed indirect is
+    /// is on. A mover is not seeded. With this setting on, a mover shows the
+    /// world-cell read at its current world position and true normal, claim
+    /// false, and skips the probe irradiance read when that read accepts a
+    /// corner. Detail off still has mover trust 0 and shows the probes. A slanted
+    /// pixel shows the same read and does not run those writers. A pixel whose
+    /// displayed indirect is
     /// this read does not read screen-probe irradiance. Requires `sh_cells`;
     /// on without it does nothing. Head 3.w bit 17.
     pub sh_texel_detail: bool,
