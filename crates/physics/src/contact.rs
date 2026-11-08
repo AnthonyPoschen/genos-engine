@@ -285,8 +285,9 @@ fn append_mesh(
     } else {
         (owner_index, other_index, owner, other, hit.normal)
     };
-    // The edge point is the crossing. Face clipping measures face vertices
-    // and drops a thin edge overlap, so the solver then sees depth 0.
+    // Face clipping still returns a polygon when every sample penetration
+    // clamps to 0. The anchor refresh would store that 0 over the
+    // separating-axis depth. The edge point keeps the crossing and the depth.
     if let Some(point) = hit.edge_point {
         let Some(normal) = usable_normal(normal, hit.depth) else {
             return;
@@ -431,6 +432,11 @@ fn keep_deeper(best: Option<NarrowHit>, hit: NarrowHit) -> Option<NarrowHit> {
 }
 
 fn piece_pair(a: &Body, piece_a: Piece, b: &Body, piece_b: Piece) -> Option<NarrowHit> {
+    let without_edge = |normal: Vec3, depth: f32| NarrowHit {
+        normal,
+        depth,
+        edge_point: None,
+    };
     match (piece_a, piece_b) {
         (Piece::Hull(left), Piece::Hull(right)) => {
             let hit = hull_hull_contact(a, &left, b, &right)?;
@@ -440,11 +446,42 @@ fn piece_pair(a: &Body, piece_a: Piece, b: &Body, piece_b: Piece) -> Option<Narr
                 edge_point: hit.edge.then_some(hit.point),
             })
         }
-        _ => piece_piece(a, piece_a, b, piece_b).map(|(normal, depth)| NarrowHit {
-            normal,
-            depth,
-            edge_point: None,
-        }),
+        (
+            Piece::Cuboid {
+                center: ca,
+                half: ha,
+            },
+            Piece::Cuboid {
+                center: cb,
+                half: hb,
+            },
+        ) => {
+            let (pa, oa) = pose(a, ca);
+            let (pb, ob) = pose(b, cb);
+            box_box(pa, oa, ha, pb, ob, hb).map(|(normal, depth)| without_edge(normal, depth))
+        }
+        (Piece::Cuboid { center, half }, Piece::Hull(hull)) => {
+            let (position, orientation) = pose(a, center);
+            let probe = Body {
+                position,
+                orientation,
+                shape: Shape::Box { half_extents: half },
+                ..*a
+            };
+            hull_body(b, &hull, &probe)
+                .map(|(normal, depth)| (-normal, depth))
+                .map(|(normal, depth)| without_edge(normal, depth))
+        }
+        (Piece::Hull(hull), Piece::Cuboid { center, half }) => {
+            let (position, orientation) = pose(b, center);
+            let probe = Body {
+                position,
+                orientation,
+                shape: Shape::Box { half_extents: half },
+                ..*b
+            };
+            hull_body(a, &hull, &probe).map(|(normal, depth)| without_edge(normal, depth))
+        }
     }
 }
 
@@ -462,46 +499,6 @@ fn piece_body(owner: &Body, piece: Piece, other: &Body) -> Option<(Vec3, f32)> {
             cuboid_body(position, orientation, half, other).map(|(normal, depth)| (-normal, depth))
         }
         Piece::Hull(hull) => hull_body(owner, &hull, other),
-    }
-}
-
-fn piece_piece(a: &Body, piece_a: Piece, b: &Body, piece_b: Piece) -> Option<(Vec3, f32)> {
-    match (piece_a, piece_b) {
-        (
-            Piece::Cuboid {
-                center: ca,
-                half: ha,
-            },
-            Piece::Cuboid {
-                center: cb,
-                half: hb,
-            },
-        ) => {
-            let (pa, oa) = pose(a, ca);
-            let (pb, ob) = pose(b, cb);
-            box_box(pa, oa, ha, pb, ob, hb)
-        }
-        (Piece::Cuboid { center, half }, Piece::Hull(hull)) => {
-            let (position, orientation) = pose(a, center);
-            let probe = Body {
-                position,
-                orientation,
-                shape: Shape::Box { half_extents: half },
-                ..*a
-            };
-            hull_body(b, &hull, &probe).map(|(normal, depth)| (-normal, depth))
-        }
-        (Piece::Hull(hull), Piece::Cuboid { center, half }) => {
-            let (position, orientation) = pose(b, center);
-            let probe = Body {
-                position,
-                orientation,
-                shape: Shape::Box { half_extents: half },
-                ..*b
-            };
-            hull_body(a, &hull, &probe)
-        }
-        (Piece::Hull(left), Piece::Hull(right)) => hull_hull(a, &left, b, &right),
     }
 }
 
@@ -794,15 +791,6 @@ fn hull_body(owner: &Body, hull: &Hull, other: &Body) -> Option<(Vec3, f32)> {
     }
 }
 
-/// Separating-axis test on both hulls' face normals and on the cross product
-/// of every pair of feature-edge directions. The axis with the least overlap
-/// is the contact normal, pointing from `b` toward `a`. Face-only SAT misses
-/// the edge-edge axis, so crossed edges read as touching when apart and as
-/// deep face overlap when they barely cross.
-fn hull_hull(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<(Vec3, f32)> {
-    hull_hull_contact(a, left, b, right).map(|hit| (hit.normal, hit.depth))
-}
-
 /// One hull-hull hit: normal from `b` toward `a`, depth, and a world point
 /// midway between the two surfaces.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -821,6 +809,11 @@ const EDGE_AXIS_BIAS: f32 = 1.0e-3;
 /// `|ea x eb|` below this (unit edges) is treated as parallel and skipped.
 const PARALLEL_SINE: f32 = 1.0e-3;
 
+/// Separating-axis test on both hulls' face normals and on the cross product
+/// of every pair of feature-edge directions. The axis with the least overlap
+/// is the contact normal, pointing from `b` toward `a`. Face-only SAT misses
+/// the edge-edge axis, so crossed edges read as touching when apart and as
+/// deep face overlap when they barely cross.
 pub(crate) fn hull_hull_contact(a: &Body, left: &Hull, b: &Body, right: &Hull) -> Option<HullHit> {
     if left.vert_count == 0 || right.vert_count == 0 {
         return None;
