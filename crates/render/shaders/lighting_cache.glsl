@@ -2107,6 +2107,9 @@ bool lighting_sh_on() {
 // Bits 0-8 are sc_flags 23-31, 9-11 the budget shift, 12-16 the isolate toggles.
 const uint LIGHTING_SH_DETAIL_BIT = 131072u;
 const uint LIGHTING_SH_RAY_CUT_BIT = 262144u;
+// ADR 0039 stage 5 slice (`surface_cache.sh_probe_retire`). Head 3.w bit 19.
+// Not an sc_flags bit: lighting_sc_flags uses only the low 9 bits of this word.
+const uint LIGHTING_SH_PROBE_RETIRE_BIT = 524288u;
 // Same low confidence as the parent seed. A const, so it is not a new magic number.
 const float LIGHTING_SH_DETAIL_CONF = 0.25;
 bool lighting_sh_texel_detail_on() {
@@ -2115,6 +2118,12 @@ bool lighting_sh_texel_detail_on() {
 // Stage 4 is off unless the detail seed is on. The bit alone does not cut rays.
 bool lighting_sh_texel_ray_cut_on() {
     return lighting_sh_texel_detail_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_RAY_CUT_BIT) != 0u;
+}
+// Stage 5 is off unless texel detail is on. Low is not world mode 3, so the
+// bit alone does not retire a probe. The ray-cut bit is a different test.
+bool lighting_sh_probe_retire_on() {
+    return lighting_sh_texel_detail_on()
+        && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_PROBE_RETIRE_BIT) != 0u;
 }
 uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
@@ -3408,6 +3417,177 @@ void lighting_world_add(vec3 pos, vec3 n, vec3 e, bool changed) {
 // the surface cache and relights it; no method swap to the probes, whose
 // difference from the texels was the bright contact strip of the spin check).
 const bool LIGHTING_SC_KEEP_NEAR = true;
+// True when the displayed indirect is the neighbour read and nothing else.
+// An axis pixel needs every weighted fine-texel corner to be an empty world
+// texel whose neighbour read has a corner. A slant has no fine texel: flag
+// 2048 returns that same read, and the skip is that read having a corner.
+// Own samples, a parent, a resample, a miss, and a trust gate that hands the
+// pixel back to the probes are not this. Trust is not the test. A mover is
+// this when the world-cell read at its current position and true normal
+// accepts a corner: that read is what the pixel shows, and it does not seed.
+// cells_only is not this test. The toggle is applied later, inside
+// lighting_world_irradiance_in, so a cells_only pixel can still count as a
+// skip here and then show lighting_sh_read rather than the texel seed.
+// This is not the ray-cut hold. A corner split past LIGHTING_SC_SPARSE_RATIO
+// can still be covered. The hold is luminance agreement of one texel.
+bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
+    if (lighting_world_mode() != 3u) {
+        return false;
+    }
+    if (obj) {
+        // The mover arm shows lighting_sh_read and does not seed a world texel.
+        // Detail off and Low stay on the probes. Claim stays false.
+        float salt = lighting_obj_salt;
+        lighting_obj_salt = 0.0;
+        bool hit = lighting_sh_texel_detail_on()
+            && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+        lighting_obj_salt = salt;
+        return hit;
+    }
+    if (lighting_sc_slanted(n)) {
+        // The screen arm shows this read with or without the texel-detail bit.
+        // Low is not world mode 3.
+        return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+    }
+    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
+        return false;
+    }
+    // The same gates lighting_world_irradiance_in uses to drop trust to 0, or
+    // to share an empty texel with the probes. Skipping the probe read is only
+    // valid when the cell value is what the pixel shows.
+    if ((lighting_sc_flags() & (32u | 512u)) != 0u) {
+        return false;
+    }
+    if (!lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u) {
+        return false;
+    }
+    if (!LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) {
+        return false;
+    }
+    float size = lighting_cell_size(wpos);
+    if (size > 0.2) {
+        return false;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    bool any = false;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (bil <= 0.0) {
+            continue;
+        }
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint slot = lighting_cache_find_sized(q, n, false, size, pos);
+        if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
+            return false;
+        }
+        if (lighting_sh_read(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
+// The live set is the probe record place writes. Trace, gather, and filter
+// read that record. This slice does not write diag[8], diag[38], or diag[39].
+// On the parent follow-up those words are held visits and the lamp counts.
+bool lighting_probe_record_live(uint probe) {
+    return probe < lighting_probes() && work.v[lighting_probe_at(probe)].w > LIGHTING_CACHE_HAS_W;
+}
+// The same bilinear the compose indirect uses: probe (col, row) is one of the
+// four probes of pixel p when floor(g) is that column or the one before it.
+bool lighting_probe_pixel_samples(uint probe, uvec2 p) {
+    uint tile = max(pc.params.y, 1u);
+    uint cols = pc.dims.z;
+    if (cols == 0u || probe >= lighting_probes()) {
+        return false;
+    }
+    uint col = probe % cols;
+    uint row = probe / cols;
+    float g = (float(p.x) + LIGHTING_CELL_HALF) / float(tile) - LIGHTING_CELL_HALF;
+    float h = (float(p.y) + LIGHTING_CELL_HALF) / float(tile) - LIGHTING_CELL_HALF;
+    int gx = int(floor(g));
+    int gy = int(floor(h));
+    bool sx = gx == int(col) || gx + 1 == int(col);
+    bool sy = gy == int(row) || gy + 1 == int(row);
+    return sx && sy;
+}
+// True when any surface pixel that bilinear-samples this probe is not covered.
+// The window is wider than that bilinear range. The predicate drops the rest.
+// A pixel with no surface does not keep the probe. Claim stays false.
+bool lighting_probe_footprint_uncovered(uint probe) {
+    uint tile = max(pc.params.y, 1u);
+    uint cols = pc.dims.z;
+    if (cols == 0u || probe >= lighting_probes()) {
+        return false;
+    }
+    uint col = probe % cols;
+    uint row = probe / cols;
+    int span = int(tile);
+    int x0 = int(col) * span - 2 * span;
+    int x1 = int(col) * span + 3 * span;
+    int y0 = int(row) * span - 2 * span;
+    int y1 = int(row) * span + 3 * span;
+    x0 = max(x0, 0);
+    y0 = max(y0, 0);
+    x1 = min(x1, int(pc.dims.x));
+    y1 = min(y1, int(pc.dims.y));
+    [[dont_unroll]] for (int y = y0; y < y1; y++) {
+        [[dont_unroll]] for (int x = x0; x < x1; x++) {
+            uvec2 p = uvec2(uint(x), uint(y));
+            if (!lighting_probe_pixel_samples(probe, p)) {
+                continue;
+            }
+            vec3 pos;
+            vec3 nrm;
+            vec3 albedo;
+            bool two_sided;
+            if (!lighting_surface(p, pos, nrm, albedo, two_sided)) {
+                continue;
+            }
+            if (two_sided && dot(nrm, scene.eye.xyz - pos) < 0.0) {
+                nrm = -nrm;
+            }
+            bool mover = lighting_mover_on(pos, nrm) != ~0u;
+            if (!lighting_sh_texel_detail_covers(pos, nrm, pos, mover)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+// Place skips the 5-point search when the setting is on and no footprint
+// surface is uncovered. Off, detail off, and Low return false and place runs.
+bool lighting_probe_retire_skip(uint probe) {
+    if (!lighting_sh_probe_retire_on()) {
+        return false;
+    }
+    return !lighting_probe_footprint_uncovered(probe);
+}
+void lighting_probe_retire_clear(uint probe) {
+    uint at = lighting_probe_at(probe);
+    work.v[at] = vec4(0.0);
+    work.v[at + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
+    uint s = lighting_stratum_at(probe, lighting_stratum());
+    work.v[s] = vec4(0.0);
+    work.v[s + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
+}
+// Trace returns before the hit write and before trace_ray. Cache rays, kept
+// hits, and fills are not probe rays and are not this skip.
+bool lighting_probe_trace_skip(uint ray) {
+    if (!lighting_sh_probe_retire_on() || ray >= lighting_probe_rays()) {
+        return false;
+    }
+    uint rays = max(lighting_rays(), 1u);
+    return work.v[lighting_probe_at(ray / rays)].w <= LIGHTING_CACHE_HAS_W;
+}
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);

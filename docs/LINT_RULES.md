@@ -97,6 +97,7 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` | `crates/scene/src/lighting.rs` | `surface_cache.sh_cells` (stress knob) |
 | `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_detail` (stress knob) |
 | `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_ray_cut` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE` | `crates/scene/src/lighting.rs` | `surface_cache.sh_probe_retire` (stress knob) |
 | `GENOS_LIGHTING_DIRECT_SPECULAR` | `crates/scene/src/lighting.rs` | `--lighting-direct-specular` |
 
 | Variable | Where | CLI today |

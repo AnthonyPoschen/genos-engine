@@ -36,7 +36,7 @@ void main() {
     vec4 pp = work.v[lighting_probe_at(probe)];
     bool fhold = LIGHTING_FILTER_HOLD && LIGHTING_GATHER_HOLD && lighting_world_mode() != 2u;
     uint gdb = lighting_gdirty_at() + 2u * probe;
-    if (pp.w < 0.5) {
+    if (!lighting_probe_record_live(probe)) {
         if (fhold && last) {
             work.v[gdb + 1u].w = -1.0;
         }

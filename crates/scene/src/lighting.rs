@@ -547,6 +547,15 @@ pub struct SurfaceCacheSettings {
     /// The read does not write the cell. Requires `sh_texel_detail`; on without
     /// it does nothing. Head 3.w bit 18.
     pub sh_texel_ray_cut: bool,
+    /// Key `surface_cache.sh_probe_retire` (ADR 0039 stage 5 slice, default off).
+    /// A screen probe whose bilinear footprint has no uncovered surface does not
+    /// run place's surface search, does not trace, does not finish a gather bin,
+    /// and does not run the filter body. The footprint is recomputed every place
+    /// from the current G-buffer and the same `lighting_sh_texel_detail_covers`
+    /// test compose uses. A missing, stale, empty, own-sample, or rejected corner
+    /// keeps the probes that pixel samples. Low and detail off ignore the bit.
+    /// The CPU group list stays the full grid. Head 3.w bit 19.
+    pub sh_probe_retire: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -824,6 +833,7 @@ impl LightingSettings {
                 sh_cells: false,
                 sh_texel_detail: false,
                 sh_texel_ray_cut: false,
+                sh_probe_retire: false,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
@@ -1241,6 +1251,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.sh_probe_retire={}",
+            bit(self.surface_cache.sh_probe_retire)
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
@@ -1427,6 +1442,7 @@ impl LightingSettings {
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
             "surface_cache.sh_texel_ray_cut" => self.surface_cache.sh_texel_ray_cut = on(value)?,
+            "surface_cache.sh_probe_retire" => self.surface_cache.sh_probe_retire = on(value)?,
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1669,6 +1685,10 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT",
                 "surface_cache.sh_texel_ray_cut",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
+                "surface_cache.sh_probe_retire",
             ),
         ];
         for (var, key) in keys {

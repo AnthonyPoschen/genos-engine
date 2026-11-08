@@ -11,6 +11,10 @@ void main() {
     if (i >= lighting_probes()) {
         return;
     }
+    if (lighting_probe_retire_skip(i)) {
+        lighting_probe_retire_clear(i);
+        return;
+    }
     uint tile = pc.params.y;
     uvec2 origin = uvec2(i % pc.dims.z, i / pc.dims.z) * tile;
     vec4 pos_out = vec4(0.0);

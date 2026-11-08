@@ -13,78 +13,15 @@
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
 // skip here and then show lighting_sh_read rather than the texel seed.
-// Defined after lighting_probe_irradiance: the cache include is earlier.
-bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
-    if (lighting_world_mode() != 3u) {
-        return false;
-    }
-    if (obj) {
-        // The mover arm shows lighting_sh_read and does not seed a world texel.
-        // Detail off and Low stay on the probes. Claim stays false.
-        float salt = lighting_obj_salt;
-        lighting_obj_salt = 0.0;
-        bool hit = lighting_sh_texel_detail_on()
-            && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
-        lighting_obj_salt = salt;
-        return hit;
-    }
-    if (lighting_sc_slanted(n)) {
-        // The screen arm shows this read with or without the texel-detail bit.
-        // Low is not world mode 3.
-        return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
-    }
-    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
-        return false;
-    }
-    // The same gates lighting_world_irradiance_in uses to drop trust to 0, or
-    // to share an empty texel with the probes. Skipping the probe read is only
-    // valid when the cell value is what the pixel shows.
-    if ((lighting_sc_flags() & (32u | 512u)) != 0u) {
-        return false;
-    }
-    if (!lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u) {
-        return false;
-    }
-    if (!LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) {
-        return false;
-    }
-    float size = lighting_cell_size(wpos);
-    if (size > 0.2) {
-        return false;
-    }
-    uint ax = lighting_axis(n) >> 1u;
-    vec3 ta = vec3(0.0);
-    vec3 tb = vec3(0.0);
-    ta[(ax + 1u) % 3u] = 1.0;
-    tb[(ax + 2u) % 3u] = 1.0;
-    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
-    vec2 g0 = floor(uv);
-    vec2 f = uv - g0;
-    bool any = false;
-    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
-        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
-        if (bil <= 0.0) {
-            continue;
-        }
-        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
-        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
-        uint slot = lighting_cache_find_sized(q, n, false, size, pos);
-        if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
-            return false;
-        }
-        if (lighting_sh_read(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
-            return false;
-        }
-        any = true;
-    }
-    return any;
-}
+// lighting_sh_texel_detail_covers lives in lighting_cache.glsl so place can
+// call it. This file is the compose read only.
 
 // Compose's screen-probe indirect. A covered pixel does not read probe SH:
 // the neighbour read is the displayed indirect, so the probe read cannot
 // change it. A miss, a mover whose world-cell read rejects, Low, and a slant
 // whose read is empty still read the probes. Place, trace, gather, and
-// filter stay.
+// filter still run unless surface_cache.sh_probe_retire is on and that
+// probe's bilinear footprint has no uncovered surface.
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;

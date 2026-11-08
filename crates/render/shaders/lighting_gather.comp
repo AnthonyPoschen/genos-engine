@@ -63,6 +63,11 @@ void gather_bin() {
     vec4 pp = work.v[lighting_probe_at(probe)];
     vec3 n = work.v[lighting_probe_at(probe) + 1u].xyz;
     bool live = probe < lighting_probes() && pp.w > 0.5;
+    // Retired probes are not live. Every thread in the workgroup shares the
+    // probe id, so this return does not split a barrier. Off keeps the loop.
+    if (lighting_sh_probe_retire_on() && !live) {
+        return;
+    }
     uint samples = 0u;
     vec3 from = pp.xyz + n * 0.02;
     // S78Q held probe: its own strata only (no fills, no neighbour's), the same
@@ -195,7 +200,7 @@ void main() {
             src[s] = lighting_pick(probe, s);
         }
     }
-    if (pick && pp.w > 0.5) {
+    if (pick && lighting_probe_record_live(probe)) {
         src[now] = probe + 1u;
         // Where this place stood on last frame's screen: its tile there.
         vec4 eye = work.v[lighting_change_at() + 1u];

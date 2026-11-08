@@ -124,6 +124,9 @@ void main() {
         at = lighting_kept_at(h);
         probe_ray = true;
     } else {
+        if (lighting_probe_trace_skip(ray)) {
+            return;
+        }
         at = lighting_hit_at(ray);
         if (!lighting_ray(ray, origin, dir, n)) {
             work.v[at] = LIGHTING_NO_RAY;
