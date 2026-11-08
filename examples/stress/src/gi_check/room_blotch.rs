@@ -1111,8 +1111,32 @@ fn log_lines(text: &str) -> Vec<String> {
 
 fn field_after(line: &str, key: &str) -> Option<String> {
     let token = format!("{key}=");
-    let rest = line.split(&token).nth(1)?;
-    Some(rest.split_whitespace().next().unwrap_or(rest).to_string())
+    let bytes = line.as_bytes();
+    let mut from = 0;
+    while from < bytes.len() {
+        let rest = &line[from..];
+        let at = rest.find(&token)?;
+        let start = from + at;
+        let boundary = start == 0 || {
+            let prev = bytes[start - 1];
+            !prev.is_ascii_alphanumeric() && prev != b'_'
+        };
+        if boundary {
+            let value = &line[start + token.len()..];
+            return Some(value.split_whitespace().next().unwrap_or(value).to_string());
+        }
+        from = start + token.len();
+    }
+    None
+}
+
+/// `key=value` as its own token. `sc_settle=300` is not `sc_settle=0`.
+fn setting_is(text: &str, key: &str, value: &str) -> bool {
+    let want = format!("{key}={value}");
+    text.split(['\n', ';'])
+        .flat_map(|part| part.split(" || "))
+        .map(str::trim)
+        .any(|line| line == want)
 }
 
 fn pose_value_ok(logged: &str, expected: f32) -> bool {
@@ -1184,50 +1208,137 @@ fn judge_capture(text: &str) -> Vec<Issue> {
             .split_once(&marker)
             .map(|(_, rest)| rest)
             .unwrap_or("");
+        if !setting_is(flat, "sc_settle", "0") {
+            issues.push(issue(
+                Class::WrongFlags,
+                format!("{} resolved settings omit sc_settle=0", pose.name),
+            ));
+            continue;
+        }
         let settings = flat.trim().trim_end_matches(" ||").replace(" || ", "\n");
         if let Err(flag) = flags_of(&settings) {
             issues.push(flag);
             continue;
         }
-        let before = lines.iter().find_map(|line| {
-            (line.starts_with("schedule ")
-                && field_after(line, "pose").as_deref() == Some(pose.name)
-                && line.contains(" before="))
-            .then(|| field_after(line, "before"))
-            .flatten()
+        let schedule = lines.iter().find(|line| {
+            line.starts_with("schedule ") && field_after(line, "pose").as_deref() == Some(pose.name)
         });
-        let after = lines.iter().find_map(|line| {
-            (line.starts_with("schedule ")
-                && field_after(line, "pose").as_deref() == Some(pose.name)
-                && line.contains(" after="))
-            .then(|| field_after(line, "after"))
-            .flatten()
-        });
-        let (Some(before), Some(after)) = (before, after) else {
+        let Some(schedule) = schedule else {
             issues.push(issue(
                 Class::CaptureSchedule,
                 format!("{} is missing the fixed wait", pose.name),
             ));
             continue;
         };
-        let (Ok(before), Ok(after)) = (before.parse::<u32>(), after.parse::<u32>()) else {
+        if schedule.contains(" before=") || schedule.contains(" after=") {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!(
+                    "{pose_name} logged a status bracket; the settle present and the saved present are the schedule",
+                    pose_name = pose.name
+                ),
+            ));
+            continue;
+        }
+        let settled_frame = field_after(schedule, "settled_frame");
+        let saved = field_after(schedule, "frame");
+        let (Some(settled_frame), Some(saved)) = (settled_frame, saved) else {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!(
+                    "{} is missing the settle present or the saved present",
+                    pose.name
+                ),
+            ));
+            continue;
+        };
+        let (Ok(settled_frame), Ok(saved)) = (settled_frame.parse::<u32>(), saved.parse::<u32>())
+        else {
             issues.push(issue(
                 Class::CaptureSchedule,
                 format!("{} wait is not a frame count", pose.name),
             ));
             continue;
         };
-        if after != before.saturating_add(CAPTURE_WAIT) {
+        if saved != settled_frame.saturating_add(CAPTURE_WAIT) {
             issues.push(issue(
                 Class::CaptureSchedule,
                 format!(
-                    "{} waited from {before} to {after}, want {CAPTURE_WAIT} frames",
+                    "{} saved present {saved} is not settle present {settled_frame} plus {CAPTURE_WAIT}",
+                    pose.name
+                ),
+            ));
+            continue;
+        }
+        let present = lines.iter().find(|line| {
+            line.starts_with("present ") && field_after(line, "pose").as_deref() == Some(pose.name)
+        });
+        let Some(present) = present else {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!("{} is missing the saved present id", pose.name),
+            ));
+            continue;
+        };
+        if field_after(present, "captured").as_deref() != Some("true") {
+            issues.push(issue(
+                Class::MissingCapture,
+                format!("{} did not save the scheduled present", pose.name),
+            ));
+            continue;
+        }
+        let Some(present_frame) = field_after(present, "frame") else {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!("{} present has no frame", pose.name),
+            ));
+            continue;
+        };
+        let Ok(present_frame) = present_frame.parse::<u32>() else {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!("{} present frame is not a count", pose.name),
+            ));
+            continue;
+        };
+        if present_frame != saved {
+            issues.push(issue(
+                Class::CaptureSchedule,
+                format!(
+                    "{} pixels are present {present_frame}, scheduled present is {saved}",
                     pose.name
                 ),
             ));
         }
     }
     issues
+}
+
+fn judge_resolved_file(dir: &Path, pose: &Pose) -> Vec<Issue> {
+    let path = dir.join(format!("resolved-{}.txt", pose.name));
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) => {
+            return vec![issue(
+                Class::WrongFlags,
+                format!(
+                    "{} resolved settings were not retained ({}): {err}",
+                    pose.name,
+                    path.display()
+                ),
+            )];
+        }
+    };
+    if !setting_is(&text, "sc_settle", "0") {
+        return vec![issue(
+            Class::WrongFlags,
+            format!("{} resolved file omits sc_settle=0", pose.name),
+        )];
+    }
+    match flags_of(&text) {
+        Ok(()) => Vec::new(),
+        Err(flag) => vec![flag],
+    }
 }
 
 fn live_png(capture: &Path, pose: &Pose) -> PathBuf {
@@ -1329,6 +1440,13 @@ fn grade_dirs(
             ));
         } else {
             issues.extend(judge_capture(&report));
+            for pose in poses() {
+                issues.extend(judge_resolved_file(dir, &pose));
+                let resolved = dir.join(format!("resolved-{}.txt", pose.name));
+                if resolved.is_file() {
+                    copy_file(&resolved, &out.join(format!("resolved-{}.txt", pose.name)))?;
+                }
+            }
             copy_file(&dir.join("report.md"), &out.join("report.md"))?;
         }
         let result = dir.join("result.json");
@@ -1380,7 +1498,7 @@ fn grade_dirs(
 }
 
 fn protocol_note() -> &'static str {
-    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, sc_settle 0, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture waits 2 frames after settled and does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict. Sidecar seconds_bits is the writer's reported duration. The .ref format has no seconds field, so read_cached stores 0. That report is provenance. A zero report is not a budget mismatch, and a positive report is not a file clock. seconds_budget_bits is the requested stop for this run, 900 when --seconds is omitted and 2400 when that is the request. The other stop is a budget mismatch and is not rewritten."
+    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, sc_settle 0, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture draws exactly 2 presents after the settle present and saves that present. settled_frame and frame name those presents. A status read and a later wait are not that pair. It does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict. Sidecar seconds_bits is the writer's reported duration. The .ref format has no seconds field, so read_cached stores 0. That report is provenance. A zero report is not a budget mismatch, and a positive report is not a file clock. seconds_budget_bits is the requested stop for this run, 900 when --seconds is omitted and 2400 when that is the request. The other stop is a budget mismatch and is not rewritten."
 }
 
 fn json_escape(text: &str) -> String {
@@ -2216,6 +2334,39 @@ mod tests {
         assert_eq!(flags_of(&coarse).unwrap_err().class, Class::WrongFlags);
         let noon = settings_text(|settings| settings.time_of_day = 12.0);
         assert_eq!(flags_of(&noon).unwrap_err().class, Class::SunNotFrozen);
+        let omitted = settings_text(|_| {})
+            .lines()
+            .filter(|line| !line.starts_with("sc_settle="))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            flags_of(&omitted).is_ok(),
+            "a missing sc_settle line still parses as the default 0"
+        );
+        assert!(!setting_is(&omitted, "sc_settle", "0"));
+        let log = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {}\n",
+            eye[0],
+            eye[1],
+            eye[2],
+            poses()[0].yaw,
+            pitch(),
+            omitted.replace('\n', " || ")
+        );
+        let issues = judge_capture(&log);
+        assert_eq!(issues[0].class, Class::WrongFlags);
+        assert!(
+            issues[0].detail.contains("sc_settle=0"),
+            "{}",
+            issues[0].detail
+        );
+        let empty = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a \n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch()
+        );
+        let empty_issues = judge_capture(&empty);
+        assert_eq!(empty_issues[0].class, Class::WrongFlags);
+        assert!(empty_issues[0].detail.contains("sc_settle=0"));
     }
 
     #[test]
@@ -2232,7 +2383,7 @@ mod tests {
         );
         let flags = settings_text(|_| {}).replace('\n', " || ");
         let good = format!(
-            "{header}settle pose=room-a settled=true frames={SETTLE_TIMEOUT} still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a before=10\nschedule pose=room-a after=12\npose room-b x={} y={} z={} yaw={} pitch={}\nsettle pose=room-b settled=true frames=20 still_frames=300 wall_ms=1\nresolved pose=room-b {flags}\nschedule pose=room-b before=40\nschedule pose=room-b after=42\n",
+            "{header}settle pose=room-a settled=true frames={SETTLE_TIMEOUT} still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a settled_frame=10 frame=12\npresent pose=room-a frame=12 captured=true\npose room-b x={} y={} z={} yaw={} pitch={}\nsettle pose=room-b settled=true frames=20 still_frames=300 wall_ms=1\nresolved pose=room-b {flags}\nschedule pose=room-b settled_frame=40 frame=42\npresent pose=room-b frame=42 captured=true\n",
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         assert!(
@@ -2255,18 +2406,51 @@ mod tests {
         let eye = eye();
         let flags = settings_text(|_| {}).replace('\n', " || ");
         let swapped = format!(
-            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a before=1\nschedule pose=room-a after=3\n",
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a settled_frame=1 frame=3\npresent pose=room-a frame=3 captured=true\n",
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         assert_eq!(judge_capture(&swapped)[0].class, Class::PoseMismatch);
         let short = format!(
-            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a before=1\nschedule pose=room-a after=9\npose room-b x={} y={} z={} yaw={} pitch={}\nsettle pose=room-b settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-b {flags}\nschedule pose=room-b before=1\nschedule pose=room-b after=3\n",
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a settled_frame=1 frame=9\npresent pose=room-a frame=9 captured=true\npose room-b x={} y={} z={} yaw={} pitch={}\nsettle pose=room-b settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-b {flags}\nschedule pose=room-b settled_frame=1 frame=3\npresent pose=room-b frame=3 captured=true\n",
             eye[0], eye[1], eye[2], poses()[0].yaw, pitch(),
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         assert!(judge_capture(&short)
             .iter()
             .any(|item| item.class == Class::CaptureSchedule));
+        let bracket = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=303 still_frames=303 wall_ms=332\nresolved pose=room-a {flags}\nschedule pose=room-a before=309\nschedule pose=room-a after=312\n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch()
+        );
+        let bracket_issues = judge_capture(&bracket);
+        assert_eq!(bracket_issues[0].class, Class::CaptureSchedule);
+        assert!(
+            bracket_issues[0].detail.contains("status bracket"),
+            "{}",
+            bracket_issues[0].detail
+        );
+        let ahead = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a settled_frame=4 frame=6\npresent pose=room-a frame=7 captured=true\n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch()
+        );
+        let ahead_issues = judge_capture(&ahead);
+        assert!(
+            ahead_issues
+                .iter()
+                .any(|item| item.class == Class::CaptureSchedule
+                    && item.detail.contains("pixels are present 7")),
+            "{ahead_issues:?}"
+        );
+        let missing = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\nschedule pose=room-a settled_frame=4 frame=6\npresent pose=room-a frame=6 captured=false\n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch()
+        );
+        assert!(judge_capture(&missing)
+            .iter()
+            .any(|item| item.class == Class::MissingCapture));
+        let line = "schedule pose=room-a settled_frame=307 frame=309";
+        assert_eq!(field_after(line, "settled_frame").as_deref(), Some("307"));
+        assert_eq!(field_after(line, "frame").as_deref(), Some("309"));
     }
 
     #[test]
@@ -2371,11 +2555,13 @@ mod tests {
         let eye = eye();
         let flags = settings_text(|_| {}).replace('\n', " || ");
         let report = format!(
-            "# script — PASS\n\n## Log\n\n- pose room-a x={} y={} z={} yaw={} pitch={}\n- settle pose=room-a settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-a {flags}\n- schedule pose=room-a before=4\n- schedule pose=room-a after=6\n- pose room-b x={} y={} z={} yaw={} pitch={}\n- settle pose=room-b settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-b {flags}\n- schedule pose=room-b before=8\n- schedule pose=room-b after=10\n",
+            "# script — PASS\n\n## Log\n\n- pose room-a x={} y={} z={} yaw={} pitch={}\n- settle pose=room-a settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-a {flags}\n- schedule pose=room-a settled_frame=4 frame=6\n- present pose=room-a frame=6 captured=true\n- pose room-b x={} y={} z={} yaw={} pitch={}\n- settle pose=room-b settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-b {flags}\n- schedule pose=room-b settled_frame=8 frame=10\n- present pose=room-b frame=10 captured=true\n",
             eye[0], eye[1], eye[2], poses()[0].yaw, pitch(),
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         std::fs::write(capture.join("report.md"), report).unwrap();
+        std::fs::write(capture.join("resolved-room-a.txt"), settings_text(|_| {})).unwrap();
+        std::fs::write(capture.join("resolved-room-b.txt"), settings_text(|_| {})).unwrap();
         let before = std::fs::read(refs.join("room-a.ref")).unwrap();
         let verdict = grade_dirs(&refs, Some(&capture), &out, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(verdict.class, Class::AdrPass, "{}", verdict.detail);
@@ -2412,12 +2598,16 @@ mod tests {
         assert!(!SCRIPT.contains("room-c"));
         assert!(!SCRIPT.contains("close-0"));
         assert!(!SCRIPT.contains("4194304"));
-        assert_eq!(SCRIPT.matches("wait(2)").count(), 2);
-        assert_eq!(SCRIPT.matches("timeout_frames: 900").count(), 2);
+        assert!(!SCRIPT.contains("wait(2)"));
+        assert!(!SCRIPT.contains("settings.text.replace"));
+        assert_eq!(SCRIPT.matches("then_frames: 2").count(), 1);
+        assert_eq!(SCRIPT.matches("timeout_frames: 900").count(), 1);
+        assert!(SCRIPT.contains("shoot(\"room-a\", -0.679)"));
+        assert!(SCRIPT.contains("shoot(\"room-b\", -36.0 * 0.0174533)"));
+        assert_eq!(SCRIPT.matches("save_text(").count(), 1);
+        assert!(SCRIPT.contains("sc_settle=0"));
         assert!(SCRIPT.contains("width: 320"));
         assert!(SCRIPT.contains("height: 180"));
-        assert!(SCRIPT.contains("yaw: -0.679"));
-        assert!(SCRIPT.contains("-36.0 * 0.0174533"));
     }
 
     #[test]
@@ -2649,11 +2839,13 @@ mod tests {
         let eye = eye();
         let flags = settings_text(|_| {}).replace('\n', " || ");
         let report = format!(
-            "# script — PASS\n\n## Log\n\n- pose room-a x={} y={} z={} yaw={} pitch={}\n- settle pose=room-a settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-a {flags}\n- schedule pose=room-a before=4\n- schedule pose=room-a after=6\n- pose room-b x={} y={} z={} yaw={} pitch={}\n- settle pose=room-b settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-b {flags}\n- schedule pose=room-b before=8\n- schedule pose=room-b after=10\n",
+            "# script — PASS\n\n## Log\n\n- pose room-a x={} y={} z={} yaw={} pitch={}\n- settle pose=room-a settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-a {flags}\n- schedule pose=room-a settled_frame=4 frame=6\n- present pose=room-a frame=6 captured=true\n- pose room-b x={} y={} z={} yaw={} pitch={}\n- settle pose=room-b settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-b {flags}\n- schedule pose=room-b settled_frame=8 frame=10\n- present pose=room-b frame=10 captured=true\n",
             eye[0], eye[1], eye[2], poses()[0].yaw, pitch(),
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         std::fs::write(capture.join("report.md"), &report).unwrap();
+        std::fs::write(capture.join("resolved-room-a.txt"), settings_text(|_| {})).unwrap();
+        std::fs::write(capture.join("resolved-room-b.txt"), settings_text(|_| {})).unwrap();
         let verdict_zero =
             grade_dirs(&refs, Some(&capture), &out_zero, DEFAULT_TRACE_SECONDS).unwrap();
         std::fs::write(refs.join("room-a.json"), &twelve).unwrap();

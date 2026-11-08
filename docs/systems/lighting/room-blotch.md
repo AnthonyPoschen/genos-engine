@@ -16,7 +16,7 @@ The stage 2 gate is a cache-only blotch mean of at most 0.014 on the room, with 
 
 `scripts/gi_check/room.rhai` also calls compare for room-c and the close-up. A cache miss traces during the capture, so a hit (2 frames after settle) and a miss (the whole trace) are not the same picture. `wait_settled` returning settled false at 900 frames is not an error there, and the script continues. The host scene's `lighting.time_of_day` advances during those frames. The CPU tracer ignores that clock, but `cache_key` hashes the scene Debug text, so the key moves. The key also omits the toggles, `sh_cells`, `cache_async`, the noise target, the seconds, and the spp cap.
 
-This command does not call compare and does not path-trace during the grade. A missing reference stays missing. The capture is: `wait_settled` must report settled true (the existing quiet-frame check), then `wait(2)`, then `capture` at 320×180. That schedule does not depend on a reference worker.
+This command does not call compare and does not path-trace during the grade. A missing reference stays missing. `wait_settled` must report settled true (the existing quiet-frame check). The same job then draws exactly two more presents and saves the last one at 320×180. `settled_frame` is the settle present. `frame` is the saved present, and the pixels are that present. The settle `frames` count does not include those two. A `status` read and a later `wait` are not that pair: `status` returns while the next present is already open, so the next command is taken one present later. The schedule does not depend on a reference worker.
 
 ## Identity
 
@@ -47,7 +47,7 @@ These are not a physical fail. The first one is the verdict. The json lists all 
 | sun-not-frozen | the resolved hour is not the frozen start hour |
 | missing-capture | no capture log |
 | missing-live | a 320×180 live PNG is absent |
-| capture-schedule | the wait was not exactly 2 frames, or the live PNG is another size |
+| capture-schedule | the saved present is not the settle present plus 2, the present id is not that saved present, or the live PNG is another size |
 
 A settled true at frame 900 is a real settle on the last frame.
 
@@ -68,7 +68,7 @@ The trace is one CPU analytic pass: 64 bounces, 320×180 shapes, noise 0.01, max
 
 ## Output
 
-`verdict.json` holds the class, the mean, the legacy word, the scene sha256, and every guard. The grade also writes the derived reference PNGs, copies of the `.ref` and `.json`, and the capture report when a capture was given. `lifecycle_frames_presented=` in the child log is the present count when the window prints it.
+`verdict.json` holds the class, the mean, the legacy word, the scene sha256, and every guard. The grade also writes the derived reference PNGs, copies of the `.ref` and `.json`, and the capture report when a capture was given. The capture directory keeps `resolved-room-a.txt` and `resolved-room-b.txt`, the full lighting settings text of each pose, including the line `sc_settle=0`. The report log repeats that text on one line. `lifecycle_frames_presented=` in the child log is the present count when the window prints it.
 
 ## Networking
 

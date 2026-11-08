@@ -269,6 +269,18 @@ the picture still blended toward it; frame counts from before that commit
 (light_settle, room_switch, reference_views settle frames) read lower and are not
 comparable with later ones. `temporal_flicker` measured that blend tail as flicker.
 
+`status` and `wait` do not share a present. The frame thread takes the queue
+once, at the start of a present. A command that replies then returns to the
+script while that present is still open, and the next command is taken on a
+later present. `wait`'s `accepted` is the count when it was taken. `frame` is
+`accepted` plus the requested count. A `status` from the previous command reads
+one present lower than `accepted`. `wait_settled` with `then_frames` keeps the
+tail inside that job, so the saved present is the settle present plus
+`then_frames`, and the pixels written on that present carry that same id. A
+`capture` with `frame` saves that present or rejects it. A present already
+drawn is rejected. The targeted present with no pixels is rejected and is not
+replaced by a later one.
+
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`

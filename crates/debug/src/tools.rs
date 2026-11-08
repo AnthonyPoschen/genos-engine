@@ -197,22 +197,55 @@ enum Then {
     },
 }
 
+/// A picture saved from one known present.
+///
+/// `path` is already resolved against the shot directory. `size` resamples
+/// that present; it does not draw another one.
+#[derive(Clone)]
+struct FrameCapture {
+    path: Option<PathBuf>,
+    size: Option<(u32, u32)>,
+    look: Look,
+    ui: bool,
+}
+
+/// Presents still owed after the settle present, and the ids frozen there.
+struct SettleHold {
+    /// Tail presents not yet drawn, including the one that saves.
+    left: u32,
+    /// Tail presents requested. The saved present is `settled_frame + total`.
+    total: u32,
+    settled_frame: u64,
+    settled_still: u32,
+    settled_frames: u32,
+    settled_wall_ms: f64,
+    capture: Option<FrameCapture>,
+}
+
 enum Job {
     Frames {
         left: u32,
+        /// Present count when the job was taken, before any of its presents.
+        accepted: u64,
     },
     Settle {
         left: u32,
         quiet: u32,
         need: u32,
         frames: u32,
-        /// Wall milliseconds the wait took.
+        /// Wall milliseconds until settle. The tail does not add to this.
         wall_ms: f64,
+        /// Presents to draw after the settle present. None replies on that present.
+        then_frames: Option<u32>,
+        capture: Option<FrameCapture>,
+        hold: Option<SettleHold>,
     },
     Shots {
         shots: Vec<Shot>,
         got: Vec<Image>,
         then: Then,
+        /// Present index these pixels must come from. None takes the next present.
+        at: Option<u64>,
     },
     /// Trace a ground-truth reference off the frame thread, then (optionally)
     /// compare a live picture with it.
@@ -545,15 +578,10 @@ impl Tools {
                 }
             }
         }
-        self.reading = self.jobs.iter().find_map(|r| match &r.job {
-            Job::Shots { shots, got, .. } => shots.get(got.len()).copied(),
-            Job::Flicker { shot, .. } => Some(*shot),
-            Job::Reference(job) if job.live_due() =>
-            {
-                job.shot
-            }
-            _ => None,
-        });
+        self.reading = self
+            .jobs
+            .iter()
+            .find_map(|running| read_this_draw(self.frame, &running.job));
         let look = self.reading.map_or(self.look, |s| s.look);
         ctx.renderer.set_debug_view(look.view);
         self.overlay.clear();
@@ -585,41 +613,49 @@ impl Tools {
         let mut done = Vec::new();
         for (index, running) in self.jobs.iter_mut().enumerate() {
             let finished: Option<Result<Value, String>> = match &mut running.job {
-                Job::Frames { left } => {
-                    *left = left.saturating_sub(1);
-                    (*left == 0).then(|| Ok(obj(vec![("frame", num(self.frame as f64))])))
-                }
+                Job::Frames { left, accepted } => frames_reply(self.frame, left, *accepted).map(Ok),
                 Job::Settle {
                     left,
                     quiet,
                     need,
                     frames,
                     wall_ms,
+                    then_frames,
+                    capture,
+                    hold,
+                } => settle_on_present(
+                    self.frame,
+                    image.as_ref(),
+                    settled_now,
+                    stats.still_frames,
+                    frame_wall_ms,
+                    left,
+                    quiet,
+                    *need,
+                    frames,
+                    wall_ms,
+                    *then_frames,
+                    capture,
+                    hold,
+                    &mut self.captures,
+                ),
+                Job::Shots {
+                    shots,
+                    got,
+                    then,
+                    at,
                 } => {
-                    *frames += 1;
-                    *wall_ms += frame_wall_ms;
-                    *quiet = if settled_now { *quiet + 1 } else { 0 };
-                    *left = left.saturating_sub(1);
-                    if *quiet >= *need || *left == 0 {
-                        Some(Ok(obj(vec![
-                            ("settled", Value::Bool(*quiet >= *need)),
-                            ("frames", num(*frames as f64)),
-                            ("wall_ms", num((*wall_ms * 10.0).round() / 10.0)),
-                            ("still_frames", num(stats.still_frames as f64)),
-                        ])))
-                    } else {
-                        None
-                    }
-                }
-                Job::Shots { shots, got, then } => {
-                    if !image_used && got.len() < shots.len() {
-                        if let Some(img) = &image {
-                            got.push(img.clone());
-                            image_used = true;
-                        }
-                    }
-                    (got.len() == shots.len())
-                        .then(|| finish_shots(shots, got, then, &mut self.captures))
+                    let finished = shots_on_present(
+                        self.frame,
+                        image.as_ref(),
+                        &mut image_used,
+                        shots,
+                        got,
+                        then,
+                        *at,
+                        &mut self.captures,
+                    );
+                    finished
                 }
                 Job::Reference(job) => {
                     if job.on_draw(if image_used { None } else { image.as_ref() }) {
@@ -1134,18 +1170,50 @@ impl Tools {
             "step" => {
                 let n = args.u32("frames")?.unwrap_or(1).max(1);
                 self.steps_left += n;
-                Ok(Step::Job(Job::Frames { left: n }))
+                Ok(Step::Job(Job::Frames {
+                    left: n,
+                    accepted: self.frame,
+                }))
             }
             "wait" => Ok(Step::Job(Job::Frames {
                 left: args.u32("frames")?.unwrap_or(1).max(1),
+                accepted: self.frame,
             })),
-            "wait_settled" => Ok(Step::Job(Job::Settle {
-                left: args.u32("timeout_frames")?.unwrap_or(600).max(1),
-                quiet: 0,
-                need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
-                frames: 0,
-                wall_ms: 0.0,
-            })),
+            "wait_settled" => {
+                let then_frames = args.u32("then_frames")?;
+                let path = self.path_arg(args, "path", None)?;
+                let size = match (args.u32("width")?, args.u32("height")?) {
+                    (None, None) => None,
+                    (Some(w), Some(h)) => Some((w.max(1), h.max(1))),
+                    _ => return Err("wait_settled capture size needs width and height".into()),
+                };
+                if path.is_none() && (then_frames.unwrap_or(0) > 0 || size.is_some()) {
+                    return Err("wait_settled capture needs a path".into());
+                }
+                if path.is_some() && then_frames.unwrap_or(0) == 0 {
+                    return Err("wait_settled capture needs then_frames of at least 1".into());
+                }
+                let capture = if path.is_some() {
+                    Some(FrameCapture {
+                        path,
+                        size,
+                        look: self.look,
+                        ui: Self::shot_ui(args, ui_default)?,
+                    })
+                } else {
+                    None
+                };
+                Ok(Step::Job(Job::Settle {
+                    left: args.u32("timeout_frames")?.unwrap_or(600).max(1),
+                    quiet: 0,
+                    need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
+                    frames: 0,
+                    wall_ms: 0.0,
+                    then_frames,
+                    capture,
+                    hold: None,
+                }))
+            }
             "view" => {
                 if let Some(m) = args.str("mode")? {
                     self.look = Look::parse(&m)?;
@@ -1175,6 +1243,7 @@ impl Tools {
                     }
                     _ => None,
                 };
+                let at = capture_at(self.frame, args.u32("frame")?)?;
                 Ok(Step::Job(Job::Shots {
                     shots: vec![shot],
                     got: Vec::new(),
@@ -1184,6 +1253,7 @@ impl Tools {
                         size,
                         region: region_arg(args)?,
                     },
+                    at,
                 }))
             }
             "captures" => {
@@ -1222,6 +1292,7 @@ impl Tools {
                         size,
                         region: region_arg(args)?,
                     },
+                    at: None,
                 }))
             }
             "luminance" => {
@@ -1235,6 +1306,7 @@ impl Tools {
                         size: None,
                         region: region_arg(args)?,
                     },
+                    at: None,
                 }))
             }
             "diff" => {
@@ -1264,6 +1336,7 @@ impl Tools {
                         gain,
                         region,
                     },
+                    at: None,
                 }))
             }
             "reference" | "compare" => {
@@ -1843,6 +1916,284 @@ fn finish_reference(
     Ok(obj(fields))
 }
 
+/// The picture this draw should read, if any.
+///
+/// `completed` is the present count before this draw. The draw itself will be
+/// numbered `completed + 1`.
+fn frames_reply(frame: u64, left: &mut u32, accepted: u64) -> Option<Value> {
+    *left = left.saturating_sub(1);
+    (*left == 0).then(|| {
+        obj(vec![
+            ("frame", num(frame as f64)),
+            ("accepted", num(accepted as f64)),
+        ])
+    })
+}
+
+fn read_this_draw(completed: u64, job: &Job) -> Option<Shot> {
+    let next = completed.saturating_add(1);
+    match job {
+        Job::Shots { shots, got, at, .. } => {
+            let take = match at {
+                Some(target) => *target == next && got.is_empty(),
+                None => got.len() < shots.len(),
+            };
+            take.then(|| shots.get(got.len()).copied()).flatten()
+        }
+        Job::Settle {
+            hold: Some(hold), ..
+        } => (hold.left == 1)
+            .then(|| {
+                hold.capture.as_ref().map(|cap| Shot {
+                    look: cap.look,
+                    ui: cap.ui,
+                })
+            })
+            .flatten(),
+        Job::Flicker { shot, .. } => Some(*shot),
+        Job::Reference(job) if job.live_due() => job.shot,
+        _ => None,
+    }
+}
+
+/// `requested` is the capture `frame` argument. A present that has already
+/// been drawn cannot be saved later.
+fn capture_at(now: u64, requested: Option<u32>) -> Result<Option<u64>, String> {
+    let Some(target) = requested else {
+        return Ok(None);
+    };
+    let target = u64::from(target);
+    if target <= now {
+        Err(format!("capture frame {target} already presented at {now}"))
+    } else {
+        Ok(Some(target))
+    }
+}
+
+fn stamp_frame(result: Result<Value, String>, frame: u64) -> Result<Value, String> {
+    let mut value = result?;
+    if let Value::Object(pairs) = &mut value {
+        pairs.push(("frame".to_string(), num(frame as f64)));
+    }
+    Ok(value)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settle reply's fields stay in one place. docs/LINT_RULES.md"
+)]
+fn settle_reply(
+    settled: bool,
+    frames: u32,
+    wall_ms: f64,
+    still: u32,
+    settled_frame: Option<u64>,
+    saved: u64,
+    captured: bool,
+    picture: Option<Value>,
+) -> Value {
+    let mut pairs = vec![
+        ("settled".to_string(), Value::Bool(settled)),
+        ("frames".to_string(), num(f64::from(frames))),
+        ("wall_ms".to_string(), num((wall_ms * 10.0).round() / 10.0)),
+        ("still_frames".to_string(), num(f64::from(still))),
+        ("frame".to_string(), num(saved as f64)),
+        (
+            "settled_frame".to_string(),
+            settled_frame.map_or(Value::Null, |frame| num(frame as f64)),
+        ),
+        ("captured".to_string(), Value::Bool(captured)),
+    ];
+    if let Some(Value::Object(extra)) = picture {
+        for (key, value) in extra {
+            if key != "frame" {
+                pairs.push((key, value));
+            }
+        }
+    }
+    Value::Object(pairs)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the settle job's fields stay in one place. docs/LINT_RULES.md"
+)]
+fn settle_on_present(
+    frame: u64,
+    image: Option<&Image>,
+    settled_now: bool,
+    still_frames: u32,
+    frame_wall_ms: f64,
+    left: &mut u32,
+    quiet: &mut u32,
+    need: u32,
+    frames: &mut u32,
+    wall_ms: &mut f64,
+    then_frames: Option<u32>,
+    capture: &mut Option<FrameCapture>,
+    hold: &mut Option<SettleHold>,
+    captures: &mut HashMap<String, Image>,
+) -> Option<Result<Value, String>> {
+    if let Some(hold) = hold {
+        hold.left = hold.left.saturating_sub(1);
+        if hold.left > 0 {
+            return None;
+        }
+        let expected = hold.settled_frame.saturating_add(u64::from(hold.total));
+        if frame != expected {
+            return Some(Err(format!(
+                "capture frame {frame} is not settled frame {} plus {}",
+                hold.settled_frame, hold.total
+            )));
+        }
+        let Some(cap) = hold.capture.clone() else {
+            return Some(Ok(settle_reply(
+                true,
+                hold.settled_frames,
+                hold.settled_wall_ms,
+                hold.settled_still,
+                Some(hold.settled_frame),
+                frame,
+                false,
+                None,
+            )));
+        };
+        let Some(image) = image else {
+            return Some(Err(format!("missing capture at frame {frame}")));
+        };
+        let saved = save_frame(image, &cap, captures);
+        return Some(saved.map(|picture| {
+            settle_reply(
+                true,
+                hold.settled_frames,
+                hold.settled_wall_ms,
+                hold.settled_still,
+                Some(hold.settled_frame),
+                frame,
+                true,
+                Some(picture),
+            )
+        }));
+    }
+    *frames = frames.saturating_add(1);
+    *wall_ms += frame_wall_ms;
+    *quiet = if settled_now {
+        quiet.saturating_add(1)
+    } else {
+        0
+    };
+    *left = left.saturating_sub(1);
+    let settled = *quiet >= need;
+    if settled {
+        let tail = then_frames.unwrap_or(0);
+        if tail == 0 {
+            return Some(Ok(settle_reply(
+                true,
+                *frames,
+                *wall_ms,
+                still_frames,
+                Some(frame),
+                frame,
+                false,
+                None,
+            )));
+        }
+        *hold = Some(SettleHold {
+            left: tail,
+            total: tail,
+            settled_frame: frame,
+            settled_still: still_frames,
+            settled_frames: *frames,
+            settled_wall_ms: *wall_ms,
+            capture: capture.take(),
+        });
+        None
+    } else if *left == 0 {
+        Some(Ok(settle_reply(
+            false,
+            *frames,
+            *wall_ms,
+            still_frames,
+            None,
+            frame,
+            false,
+            None,
+        )))
+    } else {
+        None
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the capture job's fields stay in one place. docs/LINT_RULES.md"
+)]
+fn shots_on_present(
+    frame: u64,
+    image: Option<&Image>,
+    image_used: &mut bool,
+    shots: &[Shot],
+    got: &mut Vec<Image>,
+    then: &Then,
+    at: Option<u64>,
+    captures: &mut HashMap<String, Image>,
+) -> Option<Result<Value, String>> {
+    if let Some(target) = at {
+        if frame < target {
+            return None;
+        }
+        if frame > target {
+            return Some(Err(format!(
+                "capture frame {frame} is not scheduled frame {target}"
+            )));
+        }
+        if got.len() >= shots.len() {
+            return Some(stamp_frame(finish_shots(shots, got, then, captures), frame));
+        }
+        let Some(image) = image.filter(|_| !*image_used) else {
+            return Some(Err(format!("missing capture at frame {frame}")));
+        };
+        got.push(image.clone());
+        *image_used = true;
+        if got.len() == shots.len() {
+            Some(stamp_frame(finish_shots(shots, got, then, captures), frame))
+        } else {
+            Some(Err(format!("missing capture at frame {frame}")))
+        }
+    } else {
+        if !*image_used && got.len() < shots.len() {
+            if let Some(image) = image {
+                got.push(image.clone());
+                *image_used = true;
+            }
+        }
+        (got.len() == shots.len())
+            .then(|| stamp_frame(finish_shots(shots, got, then, captures), frame))
+    }
+}
+
+fn save_frame(
+    image: &Image,
+    cap: &FrameCapture,
+    captures: &mut HashMap<String, Image>,
+) -> Result<Value, String> {
+    let pictures = [image.clone()];
+    finish_shots(
+        &[Shot {
+            look: cap.look,
+            ui: cap.ui,
+        }],
+        &pictures,
+        &Then::Save {
+            paths: vec![cap.path.clone()],
+            names: vec![None],
+            size: cap.size,
+            region: Region::default(),
+        },
+        captures,
+    )
+}
+
 fn finish_shots(
     shots: &[Shot],
     got: &[Image],
@@ -2183,6 +2534,7 @@ fn apply_hdr_update(settings: &mut HdrSettings, args: &Value) -> Result<(), Stri
 }
 
 
+
 fn fog_settings_value(settings: &FogSettings) -> Value {
     obj(vec![
         ("text", text(settings.to_text())),
@@ -2487,6 +2839,10 @@ fn apply_lighting_update(settings: &mut LightingSettings, args: &Value) -> Resul
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use genos_mcp::json::Value;
+
     use super::*;
 
     /// Blocks this thread for ms (a receive that nothing sends to).
@@ -2710,5 +3066,308 @@ mod tests {
         assert!(!Tools::light_solo_off_is_complete(&Args(&indexed)).expect("index"));
         let added = genos_mcp::json::parse(r#"{"solo_off":true,"add":true}"#).expect("json");
         assert!(!Tools::light_solo_off_is_complete(&Args(&added)).expect("add"));
+    }
+
+    /// One present of the frame thread. `open` is the count `status` would
+    /// read at the start of the present, before this present completes.
+    fn present_wait(open: u64, left: &mut u32, accepted: u64) -> (u64, Option<Value>) {
+        let frame = open + 1;
+        (frame, frames_reply(frame, left, accepted))
+    }
+
+    #[test]
+    fn a_status_bracket_counts_the_present_already_in_flight() {
+        // The 4070 capture: status read 309, wait(2) replied 312, the next
+        // status read 312. The old require `after == before + 2` is false.
+        let before = 309_u64;
+        let mut open = before;
+        open += 1;
+        let accepted = open;
+        let mut left = 2_u32;
+        let (frame, reply) = present_wait(open, &mut left, accepted);
+        assert!(reply.is_none());
+        open = frame;
+        let (frame, reply) = present_wait(open, &mut left, accepted);
+        let reply = reply.expect("wait finished");
+        assert_eq!(reply.get("accepted").and_then(Value::as_u64), Some(310));
+        assert_eq!(reply.get("frame").and_then(Value::as_u64), Some(312));
+        assert_eq!(frame, 312);
+        assert_ne!(frame, before + 2);
+        assert_eq!(frame, accepted + 2);
+    }
+
+    #[test]
+    fn an_extra_present_before_wait_is_accepted_widens_the_status_bracket() {
+        let before = 309_u64;
+        let mut open = before + 2;
+        let accepted = open;
+        let mut left = 2_u32;
+        let (frame, reply) = present_wait(open, &mut left, accepted);
+        assert!(reply.is_none());
+        open = frame;
+        let (frame, reply) = present_wait(open, &mut left, accepted);
+        let reply = reply.expect("wait finished");
+        assert_eq!(reply.get("frame").and_then(Value::as_u64), Some(before + 4));
+        assert_eq!(
+            reply.get("frame").and_then(Value::as_u64),
+            reply.get("accepted").and_then(Value::as_u64).map(|n| n + 2)
+        );
+        assert_eq!(frame, before + 4);
+    }
+
+    fn pixel(frame: u64) -> Image {
+        Image {
+            width: 1,
+            height: 1,
+            rgb: vec![u8::try_from(frame).unwrap_or(255), 0, 0],
+        }
+    }
+
+    fn full_look() -> Look {
+        Look::parse("full").unwrap()
+    }
+
+    #[test]
+    fn the_settle_tail_saves_the_present_two_after_settle() {
+        let dir = std::env::temp_dir().join(format!("genos-settle-tail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("room-a-live.png");
+        let mut left = 900_u32;
+        let mut quiet = 0_u32;
+        let mut frames = 0_u32;
+        let mut wall = 0.0_f64;
+        let mut capture = Some(FrameCapture {
+            path: Some(path.clone()),
+            size: None,
+            look: full_look(),
+            ui: false,
+        });
+        let mut hold = None;
+        let mut captures = HashMap::new();
+        let mut frame = 20_u64;
+        let mut saved = None;
+        for step in 0..8 {
+            let settled_now = step >= 2;
+            let still = if settled_now { step - 1 } else { 0usize };
+            let due = hold
+                .as_ref()
+                .is_some_and(|hold: &SettleHold| hold.left == 1);
+            frame += 1;
+            let image = due.then(|| pixel(frame));
+            let reply = settle_on_present(
+                frame,
+                image.as_ref(),
+                settled_now,
+                u32::try_from(still).unwrap_or(0),
+                1.0,
+                &mut left,
+                &mut quiet,
+                3,
+                &mut frames,
+                &mut wall,
+                Some(2),
+                &mut capture,
+                &mut hold,
+                &mut captures,
+            );
+            if let Some(reply) = reply {
+                saved = Some((frame, reply.expect("tail")));
+                break;
+            }
+        }
+        let (saved_frame, reply) = saved.expect("the tail replies");
+        assert_eq!(reply.get("settled").and_then(Value::as_bool), Some(true));
+        assert_eq!(reply.get("frames").and_then(Value::as_u64), Some(5));
+        assert_eq!(reply.get("settled_frame").and_then(Value::as_u64), Some(25));
+        assert_eq!(reply.get("frame").and_then(Value::as_u64), Some(27));
+        assert_eq!(saved_frame, 27);
+        assert_eq!(reply.get("captured").and_then(Value::as_bool), Some(true));
+        assert_eq!(reply.get("still_frames").and_then(Value::as_u64), Some(3));
+        let loaded = Image::load(&path).expect("png");
+        let byte = u8::try_from(saved_frame).unwrap();
+        assert_eq!(loaded.rgb, vec![byte, 0, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_tail_pixel_is_not_replaced_by_the_next_present() {
+        let mut left = 900_u32;
+        let mut quiet = 0_u32;
+        let mut frames = 0_u32;
+        let mut wall = 0.0_f64;
+        let mut capture = Some(FrameCapture {
+            path: Some(std::path::PathBuf::from("missing.png")),
+            size: None,
+            look: full_look(),
+            ui: false,
+        });
+        let mut hold = None;
+        let mut captures = HashMap::new();
+        let mut frame = 0_u64;
+        let mut saw_missing = false;
+        for _step in 0..6 {
+            frame += 1;
+            let due = hold
+                .as_ref()
+                .is_some_and(|hold: &SettleHold| hold.left == 1);
+            let image = (!due).then(|| pixel(frame));
+            let reply = settle_on_present(
+                frame,
+                image.as_ref(),
+                true,
+                3,
+                1.0,
+                &mut left,
+                &mut quiet,
+                1,
+                &mut frames,
+                &mut wall,
+                Some(2),
+                &mut capture,
+                &mut hold,
+                &mut captures,
+            );
+            if let Some(reply) = reply {
+                let err = reply.expect_err("missing pixels");
+                assert!(err.contains("missing capture"), "{err}");
+                assert!(err.contains(&frame.to_string()), "{err}");
+                saw_missing = true;
+                break;
+            }
+        }
+        assert!(saw_missing);
+        assert!(!std::path::Path::new("missing.png").exists());
+        frame += 1;
+        let late = pixel(frame);
+        let reply = settle_on_present(
+            frame,
+            Some(&late),
+            true,
+            3,
+            1.0,
+            &mut left,
+            &mut quiet,
+            1,
+            &mut frames,
+            &mut wall,
+            Some(2),
+            &mut capture,
+            &mut hold,
+            &mut captures,
+        );
+        let err = reply.expect("job still held").expect_err("no later save");
+        assert!(err.contains("is not settled frame"), "{err}");
+        assert!(!std::path::Path::new("missing.png").exists());
+    }
+
+    #[test]
+    fn a_capture_rejects_a_past_present_and_a_later_stand_in() {
+        assert!(capture_at(10, Some(10))
+            .unwrap_err()
+            .contains("already presented"));
+        assert!(capture_at(10, Some(9))
+            .unwrap_err()
+            .contains("already presented"));
+        assert_eq!(capture_at(10, Some(12)).unwrap(), Some(12));
+        assert_eq!(capture_at(10, None).unwrap(), None);
+
+        let dir = std::env::temp_dir().join(format!("genos-capture-at-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("shot.png");
+        let shot = Shot {
+            look: full_look(),
+            ui: false,
+        };
+        let mut got = Vec::new();
+        let then = Then::Save {
+            paths: vec![Some(path.clone())],
+            names: vec![None],
+            size: None,
+            region: Region::default(),
+        };
+        let mut captures = HashMap::new();
+        let mut used = false;
+        let early = pixel(11);
+        assert!(shots_on_present(
+            11,
+            Some(&early),
+            &mut used,
+            &[shot],
+            &mut got,
+            &then,
+            Some(12),
+            &mut captures,
+        )
+        .is_none());
+        assert!(!path.exists());
+        used = false;
+        let due = read_this_draw(
+            11,
+            &Job::Shots {
+                shots: vec![shot],
+                got: Vec::new(),
+                then: Then::Save {
+                    paths: vec![Some(path.clone())],
+                    names: vec![None],
+                    size: None,
+                    region: Region::default(),
+                },
+                at: Some(12),
+            },
+        );
+        assert!(due.is_some());
+        let exact = pixel(12);
+        let saved = shots_on_present(
+            12,
+            Some(&exact),
+            &mut used,
+            &[shot],
+            &mut got,
+            &then,
+            Some(12),
+            &mut captures,
+        )
+        .expect("target present")
+        .expect("saved");
+        assert_eq!(saved.get("frame").and_then(Value::as_u64), Some(12));
+        let loaded = Image::load(&path).unwrap();
+        assert_eq!(loaded.rgb, vec![12, 0, 0]);
+
+        let mut got = Vec::new();
+        let mut used = false;
+        let missing = shots_on_present(
+            14,
+            None,
+            &mut used,
+            &[shot],
+            &mut got,
+            &then,
+            Some(14),
+            &mut captures,
+        )
+        .expect("missing")
+        .expect_err("no pixels");
+        assert!(missing.contains("missing capture at frame 14"), "{missing}");
+        let mut got = Vec::new();
+        let mut used = false;
+        let later = pixel(15);
+        let wrong = shots_on_present(
+            15,
+            Some(&later),
+            &mut used,
+            &[shot],
+            &mut got,
+            &then,
+            Some(14),
+            &mut captures,
+        )
+        .expect("past the target")
+        .expect_err("not the scheduled present");
+        assert!(wrong.contains("is not scheduled frame 14"), "{wrong}");
+        let loaded = Image::load(&path).unwrap();
+        assert_eq!(loaded.rgb, vec![12, 0, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
