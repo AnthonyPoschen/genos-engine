@@ -9,7 +9,7 @@ layout(local_size_x = 1) in;
 #include "lighting_screen_probe.glsl"
 
 const uint PROD_HEAD_WORDS = 8u;
-const uint PROD_ROWS = 12u;
+const uint PROD_ROWS = 23u;
 const uint PROD_STRIDE = 17u;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -34,13 +34,51 @@ const vec3 PROD_SLANT = vec3(0.6, 0.8, 0.2);
 const vec3 PROD_PROBE = vec3(1.0, 2.0, 3.0);
 // A parent/resample/probe seed. Not the screen-probe colour and not the stale detail seed.
 const vec3 PROD_PARENT = vec3(5.0, 1.0, 4.0);
-// Detail-seed mark in the sun word's z. 0 is every other seed.
+// Detail-seed mark: 1 stores a negative confidence. 0 stores a positive one.
+// Sun word z is not this mark.
 const float PROD_MARK = 1.0;
+const float PROD_SCRATCH = 40.0;
+const vec3 PROD_BLACK = vec3(0.0, 0.0, 0.0);
+const float PROD_BAND = 4.0;
 // Pixel 0.25 of a texel past a centre, so two corners have weight 0.75 and 0.25.
 const float PROD_MIX_X = 160.09375;
 const float PROD_MIX_NEAR = 160.0625;
 const float PROD_MIX_FAR = 160.1875;
 const float PROD_MIX_Z = 0.0625;
+// Fine-texel centres. A 25 cm cell centre is an even multiple of 6.25 cm, so
+// these points are not cell centres. The neighbour read still finds the cell
+// that contains the point, and missing corners do not darken it.
+const vec3 PROD_SLANT_POS = vec3(40.1875, 0.0, 4.1875);
+const vec3 PROD_BLEND_POS = vec3(100.1875, 0.0, 4.1875);
+const vec3 PROD_BLEND_A = vec3(100.125, 0.0, 4.125);
+const vec3 PROD_BLEND_B = vec3(100.375, 0.0, 4.125);
+const vec3 PROD_MISS_POS = vec3(108.1875, 0.0, 4.1875);
+const vec3 PROD_MISS_A = vec3(108.125, 0.0, 4.125);
+const vec3 PROD_BLACK_POS = vec3(116.1875, 0.0, 4.1875);
+const vec3 PROD_BLACK_A = vec3(116.125, 0.0, 4.125);
+const vec3 PROD_BLACK_B = vec3(116.375, 0.0, 4.125);
+const vec3 PROD_FACE_POS = vec3(124.1875, 0.0, 4.1875);
+const vec3 PROD_FACE_A = vec3(124.125, 0.0, 4.125);
+const vec3 PROD_FACE_B = vec3(124.375, 0.0, 4.125);
+const vec3 PROD_PLANE_POS = vec3(56.1875, 0.0625, 4.1875);
+const vec3 PROD_PLANE_NEAR = vec3(56.125, 0.0, 4.125);
+const vec3 PROD_PLANE_FAR = vec3(56.125, 0.25, 4.125);
+const vec3 PROD_PART_POS = vec3(140.09375, 0.0, 4.0625);
+const vec3 PROD_PART_NEAR = vec3(140.0625, 0.0, 4.0625);
+const vec3 PROD_PART_FAR = vec3(140.1875, 0.0, 4.0625);
+const vec3 PROD_STALE_POS = vec3(132.1875, 0.0, 4.1875);
+const vec3 PROD_DOWN = vec3(0.0, -1.0, 0.0);
+const vec3 PROD_SIDE_POS = vec3(148.1875, -0.04, 4.1875);
+const vec3 PROD_SIDE_OTHER = vec3(148.1875, 0.0, 4.1875);
+const vec3 PROD_ALIAS_POS = vec3(200.0625, 0.0, 8.0625);
+// Detail off. 16.5 samples: the fractional part is 0.5, so the parent and
+// resample bilinear (they require fract(samples) < 0.1) leave this cell out.
+// lighting_cache_irradiance does not. It returns nothing below bounce 2
+// (lighting_bounce_ok), so this row and the stale row raise ctrl_bounce.
+// No probe is planted for this row. The stale row has one: a hit read that
+// ignores the detail-candidate gate would put that cell back instead.
+const vec3 PROD_HIT_POS = vec3(220.1875, 0.0, 4.1875);
+const float PROD_HIT_N = 16.5;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -74,9 +112,10 @@ void prod_plant_seed(uint texel, vec3 rgb, float conf, float mark) {
     if (texel == ~0u) {
         return;
     }
-    cache.v[LIGHTING_SC_SUN_AT + texel] = vec4(0.0, 0.0, mark, 0.0);
+    // Sun word z stays 0. A later row may write a quarter scratch over it.
+    cache.v[LIGHTING_SC_SUN_AT + texel] = vec4(0.0);
     cache.v[LIGHTING_SC_SPARSE_AT + texel].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
-    cache.v[LIGHTING_SC_SPARSE_AT + texel].z = conf;
+    cache.v[LIGHTING_SC_SPARSE_AT + texel].z = mark > 0.0 ? -conf : conf;
 }
 
 void prod_lamp_clear() {
@@ -121,25 +160,29 @@ vec3 prod_texel(vec3 pos, vec3 n) {
     return pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
 }
 
-void prod_paint(vec3 q, vec3 n, vec3 rgb, float samples) {
-    uint ax = lighting_axis(n) >> 1u;
-    vec3 ta = vec3(0.0);
-    vec3 tb = vec3(0.0);
-    ta[(ax + 1u) % 3u] = 1.0;
-    tb[(ax + 2u) % 3u] = 1.0;
-    float size = LIGHTING_SH_CELL;
-    vec2 uv = vec2(dot(q, ta), dot(q, tb)) / size - PROD_HALF;
-    vec2 g0 = floor(uv);
-    for (uint k = 0u; k < 4u; k++) {
-        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + vec2(PROD_HALF);
-        vec3 p = q + ta * (c.x * size - dot(q, ta)) + tb * (c.y * size - dot(q, tb));
-        uint s = lighting_cache_find_sized(p, n, true, size, p);
-        if (s == ~0u) {
-            continue;
-        }
-        cache.v[3u * s + 2u] = vec4(rgb, samples);
-        lighting_sh_put(s, rgb, vec3(0.0), vec3(0.0), vec3(0.0));
-        cache.v[3u * s].w = uintBitsToFloat(PROD_STAMP);
+void prod_empty_texel(vec3 q, vec3 n) {
+    uint texel = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    if (texel != ~0u) {
+        cache.v[3u * texel + 2u] = vec4(0.0);
+    }
+}
+
+void prod_face(uint s, vec3 n) {
+    if (s != ~0u) {
+        cache.v[3u * s + 1u].xyz = n;
+    }
+}
+
+void prod_band(uint s, vec3 rgb) {
+    if (s != ~0u) {
+        lighting_sh_put(s, rgb, vec3(0.0), vec3(PROD_BAND, 0.0, 0.0), vec3(0.0));
+    }
+}
+
+void prod_mark_stale(uint cell) {
+    ckeys.key[LIGHTING_LS_RISE_AT] = PROD_FRAME;
+    if (cell != ~0u) {
+        cache.v[LIGHTING_SC_OBJ_AT + cell] = vec4(0.0, uintBitsToFloat(PROD_FRAME), 0.0, 0.0);
     }
 }
 
@@ -163,6 +206,115 @@ void prod_probe(vec3 pos, vec3 n) {
 
 const float PROD_MOVER_WORD = 300000.0;
 const float PROD_MOVER_RADIUS = 2.0;
+
+void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, out uint extra) {
+    n = PROD_UP;
+    pos = prod_pos(id);
+    cell = ~0u;
+    extra = ~0u;
+    if (id == 5u) {
+        n = normalize(PROD_SLANT);
+        pos = PROD_SLANT_POS;
+    } else if (id == 14u) {
+        pos = PROD_BLEND_POS;
+    } else if (id == 15u) {
+        pos = PROD_MISS_POS;
+    } else if (id == 16u) {
+        pos = PROD_BLACK_POS;
+    } else if (id == 17u) {
+        pos = PROD_FACE_POS;
+    } else if (id == 18u) {
+        pos = PROD_PLANE_POS;
+    } else if (id == 19u) {
+        pos = PROD_PART_POS;
+    } else if (id == 20u) {
+        pos = PROD_STALE_POS;
+    } else if (id == 21u) {
+        n = PROD_DOWN;
+        pos = PROD_SIDE_POS;
+    } else if (id == 22u) {
+        pos = PROD_HIT_POS;
+    }
+    q = id == 19u ? PROD_PART_NEAR : prod_texel(pos, n);
+    bool cover = id == 0u || id == 4u || id == 6u || id == 7u || id == 9u
+        || id == 13u || id == 14u || id == 15u || id == 16u || id == 17u
+        || id == 18u || id == 19u || id == 20u || id == 21u || id == 22u;
+    if (cover) {
+        prod_empty_texel(q, n);
+    }
+    if (id == 0u || id == 6u || id == 7u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+    } else if (id == 3u) {
+        cell = prod_owner(q, PROD_UP, vec3(0.0), 0.0);
+    } else if (id == 4u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+        uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+        if (texel != ~0u) {
+            cache.v[3u * texel + 2u] = vec4(PROD_OWN, PROD_OWN_N);
+        }
+    } else if (id == 5u) {
+        cell = prod_owner(pos, PROD_UP, PROD_RED, PROD_CELL_N);
+        prod_band(cell, PROD_RED);
+    } else if (id == 9u) {
+        cell = prod_owner(q, PROD_UP, PROD_BLUE, PROD_CELL_N);
+    } else if (id == 13u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+        // The writer stores a marked seed while the owner is lit. Clearing the
+        // sun scratch afterwards must not unmark it: the mark is the confidence
+        // sign. The recorded compose then sees an empty owner.
+        prod_probe(pos, n);
+        lighting_compose_px = uvec2(0u);
+        lighting_screen_probe_indirect(uvec2(0u), pos, n);
+        cache.v[3u * cell + 2u] = vec4(0.0);
+        uint texel = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SC_TEXEL, q);
+        if (texel != ~0u) {
+            cache.v[LIGHTING_SC_SUN_AT + texel].z = 0.0;
+            cache.v[LIGHTING_SC_SUN_AT + texel].w = 0.0;
+        }
+    } else if (id == 14u) {
+        cell = prod_owner(PROD_BLEND_A, PROD_UP, PROD_RED, PROD_CELL_N);
+        extra = prod_owner(PROD_BLEND_B, PROD_UP, PROD_BLUE, PROD_CELL_N);
+    } else if (id == 15u) {
+        cell = prod_owner(PROD_MISS_A, PROD_UP, PROD_RED, PROD_CELL_N);
+    } else if (id == 16u) {
+        cell = prod_owner(PROD_BLACK_A, PROD_UP, PROD_RED, PROD_CELL_N);
+        extra = prod_owner(PROD_BLACK_B, PROD_UP, PROD_BLACK, PROD_CELL_N);
+    } else if (id == 17u) {
+        cell = prod_owner(PROD_FACE_A, PROD_UP, PROD_RED, PROD_CELL_N);
+        extra = prod_owner(PROD_FACE_B, PROD_UP, PROD_GREEN, PROD_CELL_N);
+        prod_face(extra, PROD_DOWN);
+    } else if (id == 18u) {
+        cell = prod_owner(PROD_PLANE_NEAR, PROD_UP, PROD_RED, PROD_CELL_N);
+        extra = prod_owner(PROD_PLANE_FAR, PROD_UP, PROD_GREEN, PROD_CELL_N);
+    } else if (id == 19u) {
+        cell = prod_owner(PROD_PART_NEAR, PROD_UP, PROD_RED, PROD_CELL_N);
+        uint far = lighting_cache_find_sized(PROD_PART_FAR, PROD_UP, true, LIGHTING_SC_TEXEL, PROD_PART_FAR);
+        if (far != ~0u) {
+            cache.v[3u * far + 2u] = vec4(PROD_OWN, PROD_OWN_N);
+        }
+    } else if (id == 20u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+        prod_mark_stale(cell);
+    } else if (id == 21u) {
+        cell = prod_owner(pos, PROD_DOWN, PROD_GREEN, PROD_CELL_N);
+        extra = prod_owner(PROD_SIDE_OTHER, PROD_UP, PROD_RED, PROD_CELL_N);
+    } else if (id == 22u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_HIT_N);
+    }
+    if (id == 3u || id == 9u) {
+        uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+        lighting_sc_set_seed(texel, PROD_GREEN, PROD_CONF, 0.0);
+        prod_lamp(pos);
+    }
+    if (id == 10u || id == 11u || id == 12u) {
+        uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+        cell = prod_owner(q, PROD_UP, vec3(0.0), 0.0);
+        prod_plant_seed(texel, id == 11u || id == 12u ? PROD_PARENT : PROD_GREEN, PROD_CONF, id == 10u ? PROD_MARK : 0.0);
+        if (id == 12u && texel != ~0u) {
+            cache.v[LIGHTING_SC_SUN_AT + texel].z = PROD_SCRATCH;
+        }
+    }
+}
 
 void prod_mover(vec3 pos) {
     uint at = lighting_change_at();
@@ -192,10 +344,10 @@ void prod_read_row(uint id, vec3 pos, vec3 n, vec3 q, uint cell) {
     vec3 seed_rgb = vec3(0.0);
     if (texel != ~0u) {
         vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + texel];
-        conf = sp.z;
+        conf = abs(sp.z);
         own = cache.v[3u * texel + 2u].w;
-        mark = cache.v[LIGHTING_SC_SUN_AT + texel].z;
-        if (sp.z > 0.0) {
+        mark = sp.z < 0.0 ? 1.0 : 0.0;
+        if (abs(sp.z) > 0.0) {
             seed_rgb = lighting_unpack_rgb9e5(floatBitsToUint(sp.y));
         }
     }
@@ -257,6 +409,14 @@ void prod_plant_scene() {
     prod_owner(far_q, PROD_UP, vec3(0.0), 0.0);
     prod_plant_seed(near_t, PROD_PARENT, PROD_CONF, 0.0);
     prod_plant_seed(far_t, PROD_GREEN, PROD_CONF, PROD_MARK);
+    pos = PROD_ALIAS_POS;
+    q = prod_texel(pos, PROD_UP);
+    prod_owner(q, PROD_UP, vec3(0.0), 0.0);
+    texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+    prod_plant_seed(texel, PROD_PARENT, PROD_CONF, 0.0);
+    if (texel != ~0u) {
+        cache.v[LIGHTING_SC_SUN_AT + texel].z = PROD_SCRATCH;
+    }
 }
 
 // LIGHTING_SC_WRITES false. No lamp, so the write-path clear cannot run.
@@ -283,6 +443,10 @@ void prod_readonly() {
     prod_read_row(3u, pos, PROD_UP, q, cell);
     pos = vec3(PROD_MIX_X, 0.0, PROD_MIX_Z);
     prod_read_row(4u, pos, PROD_UP, vec3(PROD_MIX_NEAR, 0.0, PROD_MIX_Z), ~0u);
+    pos = PROD_ALIAS_POS;
+    q = prod_texel(pos, PROD_UP);
+    cell = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SH_CELL, q);
+    prod_read_row(5u, pos, PROD_UP, q, cell);
 }
 
 void main() {
@@ -306,7 +470,7 @@ void main() {
     if (LIGHTING_SC_WRITES) {
     for (uint id = 0u; id < PROD_ROWS; id++) {
         uint variant = 0u;
-        if (id == 2u) {
+        if (id == 2u || id == 22u) {
             variant = 1u;
         } else if (id == 8u) {
             variant = 2u;
@@ -314,67 +478,53 @@ void main() {
         prod_head(variant);
         prod_lamp_clear();
         gstats.ctrl_bits = id == 7u ? 0u : PROD_DENOISE;
-        vec3 n = id == 5u ? normalize(PROD_SLANT) : PROD_UP;
-        vec3 pos = prod_pos(id);
-        vec3 q = prod_texel(pos, PROD_UP);
+        vec3 n;
+        vec3 pos;
+        vec3 q;
+        uint cell;
+        uint extra;
+        prod_prepare(id, pos, n, q, cell, extra);
         if (id == 6u) {
             prod_mover(pos);
-        }
-        uint cell = ~0u;
-        bool paint = id == 0u || id == 4u || id == 5u || id == 6u || id == 7u || id == 9u;
-        if (paint) {
-            prod_paint(q, PROD_UP, PROD_GREEN, PROD_CELL_N);
-            // The fine texel exists and is empty. Coverage is decided before
-            // compose claims a missing slot, which is how a later frame reads it.
-            uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
-            if (texel != ~0u) {
-                cache.v[3u * texel + 2u] = vec4(0.0);
-            }
-        }
-        if (id == 0u || id == 4u || id == 5u || id == 6u || id == 7u) {
-            cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
-        } else if (id == 3u) {
-            cell = prod_owner(q, PROD_UP, vec3(0.0), 0.0);
-        } else if (id == 9u) {
-            cell = prod_owner(q, PROD_UP, PROD_BLUE, PROD_CELL_N);
-        }
-        if (id == 3u || id == 9u) {
-            uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
-            lighting_sc_set_seed(texel, PROD_GREEN, PROD_CONF, 0.0);
-            prod_lamp(pos);
-        }
-        // No lamp ring. A marked green seed is the detail seed a previous frame
-        // stored. An unmarked parent colour is a miss seed and must stay.
-        if (id == 10u || id == 11u) {
-            uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
-            cell = prod_owner(q, PROD_UP, vec3(0.0), 0.0);
-            prod_plant_seed(texel, id == 10u ? PROD_GREEN : PROD_PARENT, PROD_CONF, id == 10u ? PROD_MARK : 0.0);
-        }
-        if (id == 4u) {
-            uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
-            cache.v[3u * texel + 2u] = vec4(PROD_OWN, PROD_OWN_N);
         }
         vec4 mean_before = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
         uint stamp_before = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
         uint hash_before = cell == ~0u ? 0u : prod_sh_hash(cell);
-        prod_probe(pos, n);
+        vec4 extra_before = extra == ~0u ? vec4(0.0) : cache.v[3u * extra + 2u];
+        uint extra_stamp = extra == ~0u ? 0u : floatBitsToUint(cache.v[3u * extra].w);
+        uint extra_hash = extra == ~0u ? 0u : prod_sh_hash(extra);
+        if (id == 22u) {
+            work.v[lighting_probe_at(0u)] = vec4(0.0);
+            work.v[lighting_probe_at(0u) + 1u] = vec4(0.0);
+        } else {
+            prod_probe(pos, n);
+        }
+        // Bounce 2 lets lighting_cache_irradiance answer. Below that it
+        // returns black before it loads a cell, so neither row would show
+        // whether the hit fill kept or dropped the cell.
+        gstats.ctrl_bounce = (id == 20u || id == 22u) ? 2u : 0u;
         lighting_compose_px = uvec2(0u);
         vec3 shown = lighting_screen_probe_indirect(uvec2(0u), pos, n);
         vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
         uint stamp_after = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
         uint hash_after = cell == ~0u ? 0u : prod_sh_hash(cell);
         bool same = all(equal(mean_before, mean_after)) && stamp_before == stamp_after && hash_before == hash_after;
-        uint texel = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SC_TEXEL, q);
+        if (extra != ~0u) {
+            same = same && all(equal(extra_before, cache.v[3u * extra + 2u]))
+                && extra_stamp == floatBitsToUint(cache.v[3u * extra].w)
+                && extra_hash == prod_sh_hash(extra);
+        }
+        uint texel = lighting_cache_find_sized(q, n, false, LIGHTING_SC_TEXEL, q);
         float conf = 0.0;
         float own = 0.0;
         vec3 seed_rgb = vec3(0.0);
         if (texel != ~0u) {
-            conf = cache.v[LIGHTING_SC_SPARSE_AT + texel].z;
+            vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + texel];
+            conf = abs(sp.z);
             own = cache.v[3u * texel + 2u].w;
             // The store, not lighting_sc_seed: a rejected detail seed stays in
             // memory on the read-only compile and must still be visible here.
-            vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + texel];
-            if (sp.z > 0.0) {
+            if (abs(sp.z) > 0.0) {
                 seed_rgb = lighting_unpack_rgb9e5(floatBitsToUint(sp.y));
             }
         }
@@ -395,7 +545,7 @@ void main() {
         prod_f(at + 13u, mean_after.r);
         prod_f(at + 14u, mean_after.g);
         prod_f(at + 15u, mean_after.b);
-        prod_f(at + 16u, texel == ~0u ? 0.0 : cache.v[LIGHTING_SC_SUN_AT + texel].z);
+        prod_f(at + 16u, texel == ~0u ? 0.0 : (cache.v[LIGHTING_SC_SPARSE_AT + texel].z < 0.0 ? 1.0 : 0.0));
     }
     } else {
         prod_readonly();

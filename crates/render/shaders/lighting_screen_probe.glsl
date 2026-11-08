@@ -2,21 +2,26 @@
 // the lavapipe fixture. It is not in lighting_common.glsl: that file is in
 // every lighting shader, and this walk is the compose pixel loop.
 // A caller includes lighting_common.glsl first.
-// True when every weighted fine-texel corner of this pixel is an empty world
-// texel whose displayed light is the one owning SH cell, and the compose mix
-// would use that light alone. Own samples, a parent, a resample, a miss, a
-// mover, a slant, and a trust gate that hands the pixel back to the probes are
-// not this. Trust is not the test: those other estimators also return trust 1.
-// The owner read is one cell, not the ADR's trilinear neighbour blend.
+// True when the displayed indirect is the neighbour read and nothing else.
+// An axis pixel needs every weighted fine-texel corner to be an empty world
+// texel whose neighbour read has a corner. A slant has no fine texel: flag
+// 2048 returns that same read, and the skip is that read having a corner.
+// Own samples, a parent, a resample, a miss, a mover, and a trust gate that
+// hands the pixel back to the probes are not this. Trust is not the test.
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
 // skip here and then show lighting_sh_read rather than the texel seed.
 // Defined after lighting_probe_irradiance: the cache include is earlier.
 bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
-    if (!lighting_sh_texel_detail_on() || obj || lighting_world_mode() != 3u) {
+    if (obj || lighting_world_mode() != 3u) {
         return false;
     }
-    if (lighting_sc_slanted(n) || !lighting_sc_seed_split()) {
+    if (lighting_sc_slanted(n)) {
+        // The screen arm shows this read with or without the texel-detail bit.
+        // A mover already returned above. Low is not world mode 3.
+        return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+    }
+    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
         return false;
     }
     // The same gates lighting_world_irradiance_in uses to drop trust to 0, or
@@ -55,7 +60,7 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
             return false;
         }
-        if (lighting_sh_owning_detail(q, n).w <= LIGHTING_CACHE_HAS_W) {
+        if (lighting_sh_read(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
             return false;
         }
         any = true;
@@ -64,9 +69,9 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
 }
 
 // Compose's screen-probe indirect. A covered pixel does not read probe SH:
-// the owning cell is the displayed indirect, so the read cannot change it.
-// Uncovered pixels, slants, movers, and mode 0 still read the probes. Place,
-// trace, gather, and filter stay, because those pixels still need them.
+// the neighbour read is the displayed indirect, so the probe read cannot
+// change it. A miss, a mover, Low, and a slant whose read is empty still
+// read the probes. Place, trace, gather, and filter stay.
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;
@@ -122,7 +127,9 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     }
     const float CACHE_WEIGHT = 0.05;
     lighting_sc_display = true;
-    if (!covered && wsum < CACHE_WEIGHT) {
+    // The hit read does not apply the neighbour gates. With SH cells on, a
+    // weak probe must not be filled with a cell the neighbour read rejected.
+    if (!covered && wsum < CACHE_WEIGHT && !lighting_sh_on()) {
         float w = CACHE_WEIGHT - wsum;
         sum += w * lighting_cache_irradiance(pos, n);
         wsum += w;

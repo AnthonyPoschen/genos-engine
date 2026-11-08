@@ -621,8 +621,6 @@ const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
 const float LIGHTING_SH_HIT_SLANT = 0.999;
 // fp16 pack clamp (half max is ~65504; stay under so packHalf2x16 stays finite).
 const float LIGHTING_SH_HALF_CLAMP = 65000.0;
-// Skip a lattice axis when |n_a| is below this (weight would be tiny).
-const float LIGHTING_SH_AXIS_MIN = 0.35;
 // SH tilt read only when the hit cell is under this many LIGHTING_SH_CELL.
 const float LIGHTING_SH_HIT_SPAN = 1.2;
 // Cell/texel w threshold: has light (shared with the mean path's 0.5).
@@ -2020,15 +2018,16 @@ bool lighting_sc_seed_split() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 134217728u) == 0u;
 }
 bool lighting_sc_has_seed(uint slot) {
-    return cache.v[LIGHTING_SC_SPARSE_AT + slot].z > 0.0;
+    return abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z) > 0.0;
 }
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
     }
     if (cache.v[3u * slot + 2u].w < 0.5) {
-        // z stays 0. A detail seed sets it after this call. Parent, resample,
-        // hit, and probe seeds stay unmarked, so an empty owner does not drop them.
+        // Sun word z is the in-progress quarter's sun luminance, not a seed
+        // mark. A fresh seed clears that scratch. The detail mark is the sign
+        // of the confidence, written by the detail caller after this store.
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
@@ -2037,16 +2036,18 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
-    if (!(sp.z > 0.0)) {
+    float stored = sp.z;
+    if (!(abs(stored) > 0.0)) {
         return vec4(0.0);
     }
     // Every caller of this read, including the default High denoise return,
-    // drops a detail seed whose owner is empty. The store itself stays: a
-    // read-only compose cannot clear it, and has_seed still sees the confidence.
+    // drops a detail seed whose neighbour read is empty. The store itself
+    // stays: a read-only compose cannot clear it, and has_seed still sees
+    // the confidence. The sign is the detail mark. Sun word z is not.
     if (lighting_sh_detail_seed_rejected(slot)) {
         return vec4(0.0);
     }
-    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), sp.z);
+    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), abs(stored));
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
@@ -2168,112 +2169,93 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
     vec3 d = n - axis;
     return max(e + (LIGHTING_SH_A1 * LIGHTING_SH_Y1) * (cx * d.x + cy * d.y + cz * d.z), vec3(0.0));
 }
-// The 25 cm cells' light at p facing n, read at the true normal: for each
-// axis n leans along (weight n_a^2), the four cells around p on that axis's
-// lattice (moved onto the plane through p facing n), bilinear, each read by
-// lighting_sh_tilt. A cell whose point is off the plane by more than half a
-// cell is on another surface (the far side of a thin wall, a corner) and is
-// left out. w 1 when any cell had light. `claim` (writing compiles only,
-// the compose maintenance pass) claims the cell under p when the lattice
-// accepts an axis, a component of magnitude 1. A slanted normal accepts
-// none, so the read stays empty and does not allocate or stamp a cell.
-// Stamping it would mark the cell read (growing_wrc) before any ray hit it.
+// The 25 cm cells around p, eight corners, trilinear, evaluated at the true
+// normal. The lookup axis is the dominant axis: that is the key the cell was
+// stored under. The tilt uses n, not that axis. A corner is left out when it
+// is missing, has no samples, is stale, faces away (dot <= 0, the other side
+// of a thin wall), or its stored point is more than half a cell off the query
+// plane. Left-out corners add no weight, so they do not darken the blend. A
+// black mean with samples is light and does. w is 1 when any corner remains.
+// `claim` stamps a corner this read accepted. It does not allocate. The seed
+// and the coverage test pass false, so a one-way read does not write the cell.
+// An empty read stamps nothing.
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
-    const float cs = LIGHTING_SH_CELL;
-    vec3 sum = vec3(0.0);
-    float ws = 0.0;
-    uint looks = 0u;
-    bool did_claim = false;
-    [[dont_unroll]] for (uint ax = 0u; ax < 3u; ax++) {
-        if (abs(n[ax]) < 1.0) {
-            continue;
-        }
-        if (claim && !did_claim && LIGHTING_SC_WRITES) {
-            uint claimed = lighting_cache_find_sized(p, n, true, cs, p);
-            if (claimed != ~0u) {
-                cache.v[3u * claimed].w = uintBitsToFloat(lighting_frame());
-            }
-            did_claim = true;
-        }
-        float wa = n[ax] * n[ax];
-        vec3 an = vec3(0.0);
-        an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
-        uint ua = (ax + 1u) % 3u;
-        uint ub = (ax + 2u) % 3u;
-        vec2 uv = vec2(p[ua], p[ub]) / cs - LIGHTING_CELL_HALF;
-        vec2 g0 = floor(uv);
-        vec2 fr = uv - g0;
-        [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
-            vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
-            float bil = ((k & 1u) == 1u ? fr.x : 1.0 - fr.x) * ((k >> 1u) == 1u ? fr.y : 1.0 - fr.y);
-            if (bil <= 0.0) {
-                continue;
-            }
-            vec3 q = p;
-            q[ua] = (c.x + LIGHTING_CELL_HALF) * cs;
-            q[ub] = (c.y + LIGHTING_CELL_HALF) * cs;
-            q[ax] = p[ax] - ((q[ua] - p[ua]) * n[ua] + (q[ub] - p[ub]) * n[ub]) / n[ax];
-            looks += 1u;
-            uint s = lighting_cache_find_sized(q, an, false, cs, p);
-            if (s == ~0u || abs(dot(cache.v[3u * s].xyz - p, n)) > LIGHTING_CELL_HALF * cs) {
-                continue;
-            }
-            vec4 v = cache.v[3u * s + 2u];
-            if (v.w < LIGHTING_CACHE_HAS_W) {
-                continue;
-            }
-            if (LIGHTING_SC_WRITES) {
-                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
-            }
-            sum += wa * bil * lighting_sh_tilt(s, v.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
-            ws += wa * bil;
-        }
-    }
-    lighting_chg(CHG_SH_LOOKUPS, looks);
-    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
-}
-// The one 25 cm cell that owns p, tilted to n. w is 1 when that cell has light.
-// Claim stays off, and this read does not stamp or write the cell. Neighbours
-// are not blended. A point more than half a cell off the stored plane is another
-// surface (the far side of a thin wall) and is left out.
-vec4 lighting_sh_owning_detail(vec3 p, vec3 n) {
     const float cs = LIGHTING_SH_CELL;
     uint ax = lighting_axis(n) >> 1u;
     vec3 an = vec3(0.0);
     an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
-    uint s = lighting_cache_find_sized(p, an, false, cs, p);
-    if (s == ~0u) {
-        return vec4(0.0);
+    vec3 inset = LIGHTING_CELL_HALF * lighting_axis_vec(lighting_axis(n));
+    vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
+    vec3 g0 = floor(uv);
+    vec3 fr = uv - g0;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    uint looks = 0u;
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint dx = k & 1u;
+        uint dy = (k >> 1u) & 1u;
+        uint dz = k >> 2u;
+        float tx = dx == 1u ? fr.x : 1.0 - fr.x;
+        float ty = dy == 1u ? fr.y : 1.0 - fr.y;
+        float tz = dz == 1u ? fr.z : 1.0 - fr.z;
+        float tri = tx * ty * tz;
+        if (tri <= 0.0) {
+            continue;
+        }
+        vec3 idx = g0 + vec3(float(dx), float(dy), float(dz));
+        vec3 centre = (idx + vec3(LIGHTING_CELL_HALF) + inset) * cs;
+        looks += 1u;
+        uint s = lighting_cache_find_sized(centre, an, false, cs, p);
+        if (s == ~0u) {
+            continue;
+        }
+        vec3 cn = cache.v[3u * s + 1u].xyz;
+        float facing = dot(cn, n);
+        if (facing <= 0.0) {
+            continue;
+        }
+        float plane = abs(dot(cache.v[3u * s].xyz - p, n));
+        if (plane > LIGHTING_CELL_HALF * cs) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s + 2u];
+        if (v.w < LIGHTING_CACHE_HAS_W) {
+            continue;
+        }
+        if (lighting_sc_stale(s)) {
+            continue;
+        }
+        if (claim && LIGHTING_SC_WRITES) {
+            cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+        }
+        float w = tri * facing;
+        sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        ws += w;
     }
-    if (abs(dot(cache.v[3u * s].xyz - p, n)) > LIGHTING_CELL_HALF * cs) {
-        return vec4(0.0);
-    }
-    vec4 v = cache.v[3u * s + 2u];
-    if (v.w < LIGHTING_CACHE_HAS_W) {
-        return vec4(0.0);
-    }
-    vec3 tilted = lighting_sh_tilt(s, v.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
-    return vec4(tilted, 1.0);
+    lighting_chg(CHG_SH_LOOKUPS, looks);
+    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
 }
-// The stored detail seed is the cell's light only while that cell still has
-// light. A lamp change that leaves the owner empty must not keep showing the
-// old seed: compose is read-only, so it cannot rely on the write-path clear.
+// The stored detail seed stays while the neighbour read still has a corner.
+// A lamp change that leaves every corner empty must not keep showing the old
+// seed: compose is read-only, so it cannot rely on the write-path clear.
 bool lighting_sh_detail_owner_lit(uint slot) {
     vec3 p;
     vec3 n;
     if (!lighting_sc_texel_world(slot, p, n)) {
         return false;
     }
-    return lighting_sh_owning_detail(p, n).w > LIGHTING_CACHE_HAS_W;
+    return lighting_sh_read(p, n, false).w > LIGHTING_CACHE_HAS_W;
 }
-// Sun word z above the empty-sample line marks a detail seed. lighting_sc_set_seed
-// writes 0 there, and the detail writer sets it after that. An empty owner
-// rejects the marked seed on every lighting_sc_seed return. Unmarked seeds stay.
+// A negative confidence is a detail seed. Parent, resample, hit, and probe
+// seeds stay positive. Sun word z is the quarter sun scratch and is not read
+// here: an in-progress quarter overwrites it and must not change this mark.
+// An empty neighbour read rejects the marked seed on every lighting_sc_seed
+// return. Unmarked seeds stay.
 bool lighting_sh_detail_seed_rejected(uint slot) {
     if (!lighting_sh_texel_detail_on()) {
         return false;
     }
-    if (!(cache.v[LIGHTING_SC_SUN_AT + slot].z > LIGHTING_CACHE_HAS_W)) {
+    if (!(cache.v[LIGHTING_SC_SPARSE_AT + slot].z < 0.0)) {
         return false;
     }
     return !lighting_sh_detail_owner_lit(slot);
@@ -2345,7 +2327,7 @@ vec4 lighting_sc_shown(uint slot) {
             if (have) {
                 return vec4(field, 1.0);
             }
-            // The four-cell world read is the neighbour blend stage 2 left.
+            // Detail off: the per-axis world read, not the neighbour blend.
             // With texel detail on, a texel that has its own samples shows those
             // samples. The cell seed already covered the empty texel above.
             if (!fresh && own.w > 0.5 && !lighting_sh_texel_detail_on()) {
@@ -2540,9 +2522,8 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
-        // ADR 0039 stage 2. A slanted hit may read the lattice, then the
-        // owning cell tilted from its axis mean to the true normal. An
-        // axis-aligned hit keeps that cell. Compose leaves lighting_sc_display
+        // ADR 0039 stage 2. A slanted hit reads the neighbour blend, then an
+        // axis-aligned hit keeps the one owning cell. Compose leaves lighting_sc_display
         // set while it seeds a new texel, and that seed is the texel's history
         // until its own rays replace it, so a display bilinear of the
         // neighbour would move the energy the cell measured (axis_aligned_floor_seed
@@ -3395,7 +3376,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal
         // instead of the probes (a mover's stay on the probes).
         if (lighting_sh_on() && !obj) {
-            return lighting_sh_read(pos, n, true);
+            // Claim stays off. A slant that accepts cells must not allocate,
+            // and an empty read must not stamp.
+            return lighting_sh_read(pos, n, false);
         }
         return vec4(0.0);
     }
@@ -3441,30 +3424,38 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
         // ADR 0039 stage 3. An empty fine world texel, not a mover, takes the
-        // one owning SH cell. That value is what the pixel returns, whether or
-        // not this compile may write. A lamp change drops a stored seed before
-        // the cell is copied again, so the seed cannot outlive the cell.
-        // The resample, parent, hit patch, and probe seed do not run for that
-        // texel: they are the estimators this seed replaces. A miss keeps them.
+        // trilinear neighbour read at its normal. That value is what the pixel
+        // returns, whether or not this compile may write. Claim stays false.
+        // A lamp change drops a stored seed before the cells are copied again.
+        // Resample and the hit patch are the estimators this read replaces.
+        // They do not run for that texel, including when the read rejects
+        // every corner: resample would copy a stale or far-side cell back in
+        // as a seed. A texel that is not a detail candidate (detail off, a
+        // mover, its own samples, a coarse size) keeps those two. The parent
+        // walk is off for every texel while texel detail is on, including a
+        // mover. A mover's trust is 0, so it shows the probes without that
+        // walk. An empty read falls through to the probe seed.
+        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
-        if (lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W) {
+        if (detail_candidate) {
             if (LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
-            vec4 detail = lighting_sh_owning_detail(q, n);
+            vec4 detail = lighting_sh_read(q, n, false);
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 if (LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
-                    // The mark is what a later read-only compose uses to drop this
-                    // seed once the owner is empty. set_seed leaves it at 0.
-                    cache.v[LIGHTING_SC_SUN_AT + slot].z = 1.0;
+                    // The mark is the sign of the confidence. set_seed stores a
+                    // positive confidence and clears sun word z, which is the
+                    // quarter scratch and not this mark.
+                    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = -abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z);
                 }
                 detail_rgb = detail.rgb;
                 detail_kept = true;
             }
         }
-        if (!detail_kept && LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
+        if (!detail_kept && !detail_candidate && LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
                 // S72N: a seed beside the texel's own (empty) mean, confidence
@@ -3488,7 +3479,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (mode == 3u && lighting_sc_stale(slot)) {
             continue;
         }
-        if (!detail_kept && v.w < 0.5 && mode == 3u) {
+        // Texel detail on skips this walk for every texel, including a mover.
+        // A mover's trust is 0, so the pixel shows the probes without it.
+        if (!detail_kept && v.w < 0.5 && mode == 3u && !lighting_sh_texel_detail_on()) {
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
@@ -3503,7 +3496,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
-            vec3 hc = lighting_cache_irradiance(q, n);
+            // A detail candidate already took the neighbour read. That read
+            // left out a stale, back-facing, or off-plane cell, and this hit
+            // read does not apply those gates, so that miss must not put the
+            // cell back. SH cells on with texel detail off is not that miss.
+            vec3 hc = detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
                 if (split) {

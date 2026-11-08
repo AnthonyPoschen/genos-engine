@@ -8,13 +8,17 @@
 //! device-local, so a presented frame is not how this fixture reads the head.
 
 #![expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
+#![expect(
+    clippy::too_many_lines,
+    reason = "one lavapipe dispatch asserts every row of the neighbour-read contract"
+)]
 
 use genos_render::{lighting_change_head, GpuKind, LightingPreset, LightingSettings, Renderer};
 use genos_window::Window;
 
 const STRIDE: usize = 17;
-const ROWS: usize = 12;
-const READ_ROWS: usize = 5;
+const ROWS: usize = 23;
+const READ_ROWS: usize = 6;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
 
@@ -48,6 +52,26 @@ fn row(words: &[f32], id: usize) -> Row {
         cell: [w[13], w[14], w[15]],
         mark: w[16],
     }
+}
+
+fn slant_colour() -> [f32; 3] {
+    let mut sh = genos_render::lighting_sh::ShL1::default();
+    sh.c[2] = [4.0, 0.0, 0.0];
+    let len = (0.36_f32 + 0.64 + 0.04).sqrt();
+    let normal = [0.6 / len, 0.8 / len, 0.2 / len];
+    sh.tilt([8.0, 0.0, 0.0], [0.0, 1.0, 0.0], normal)
+}
+
+#[expect(
+    clippy::as_conversions,
+    reason = "the shader stores the packed head word as a float"
+)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the shader stores the packed head word as a float"
+)]
+fn head_float_bits(word: u32) -> u32 {
+    (word as f32).to_bits()
 }
 
 fn near(got: [f32; 3], want: [f32; 3]) -> bool {
@@ -116,8 +140,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         on.head_hi,
         "the shader read a head it did not pack"
     );
-    assert_eq!(words[6].to_bits(), (on.head_hi as f32).to_bits());
-    assert_eq!(words[7].to_bits(), (off.head_hi as f32).to_bits());
+    assert_eq!(words[6].to_bits(), head_float_bits(on.head_hi));
+    assert_eq!(words[7].to_bits(), head_float_bits(off.head_hi));
 
     let red = [8.0, 0.0, 0.0];
     let blue = [0.0, 0.0, 7.0];
@@ -129,7 +153,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(covered.head_hi, on.head_hi);
     assert!(
         near(covered.shown, red),
-        "covered pixel {:?} wanted the owning cell, not the probe {probe:?} or the green corners",
+        "covered pixel {:?} wanted the neighbour read of the owning cell, not the probe {probe:?}",
         covered.shown
     );
     assert!(
@@ -227,15 +251,25 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((sampled.own - 1.0).abs() <= ABS);
     assert!((sampled.cell_same - 1.0).abs() <= ABS);
 
+    let slant_rgb = slant_colour();
     let slant = &rows[5];
     assert!(
-        near(slant.shown, probe),
-        "a slanted pixel showed {:?}, wanted the probe. The axis SH read is empty and compose keeps the probes",
+        near(slant.shown, slant_rgb),
+        "a slanted pixel showed {:?}, wanted the true-normal tilt {slant_rgb:?}, not the axis mean {red:?} or the probe {probe:?}",
         slant.shown
     );
-    assert!(slant.world_w.abs() <= ABS, "slant trust {}", slant.world_w);
-    assert!(slant.reads >= 1.0);
-    assert!(slant.skipped.abs() <= ABS);
+    assert!(
+        (slant.shown[0] - red[0]).abs() > 0.5,
+        "the slant stayed on the axis mean {:?}",
+        slant.shown
+    );
+    assert!(
+        (slant.world_w - 1.0).abs() <= ABS,
+        "slant trust {}",
+        slant.world_w
+    );
+    assert!(slant.reads.abs() <= ABS, "a lit slant still read probes");
+    assert!((slant.skipped - 1.0).abs() <= ABS);
     assert!(
         slant.conf.abs() <= ABS,
         "a slant stored a texel seed, conf {}",
@@ -348,12 +382,188 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         covered.mark
     );
 
+    let scratch = &rows[12];
+    assert!(
+        near(scratch.shown, parent_rgb),
+        "an unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}. Sun word z is not the detail mark",
+        scratch.shown
+    );
+    assert!(near(scratch.seed, parent_rgb), "scratch seed {:?}", scratch.seed);
+    assert!(scratch.mark.abs() <= ABS, "scratch mark {}", scratch.mark);
+    assert!(scratch.reads >= 1.0);
+    assert!(scratch.skipped.abs() <= ABS);
+
+    let cleared = &rows[13];
+    assert!(
+        near(cleared.shown, probe),
+        "after the writer, clearing sun word z and emptying the owner showed {:?}, wanted the probe, not the stored cell",
+        cleared.shown
+    );
+    assert!(
+        !near(cleared.shown, red),
+        "the stored cell colour survived a cleared sun scratch"
+    );
+    assert!(
+        near(cleared.cell, [0.0; 3]),
+        "the emptied cell was refilled {:?}",
+        cleared.cell
+    );
+    assert!(cleared.reads >= 1.0);
+    assert!(cleared.skipped.abs() <= ABS);
+    assert!(
+        cleared.mark.abs() <= ABS,
+        "the probe fallback must clear the detail mark, mark {}",
+        cleared.mark
+    );
+
+    let blend = [6.0, 0.0, 1.75];
+    let mixed = &rows[14];
+    assert!(
+        near(mixed.shown, blend),
+        "red and blue corners showed {:?}, wanted {blend:?}",
+        mixed.shown
+    );
+    assert!(mixed.reads.abs() <= ABS, "the blend still read probes");
+    assert!((mixed.skipped - 1.0).abs() <= ABS);
+    assert!((mixed.cell_same - 1.0).abs() <= ABS, "a corner cell was written");
+    assert!(near(mixed.cell, red), "primary corner {:?}", mixed.cell);
+    assert!((mixed.mark - 1.0).abs() <= ABS, "blend mark {}", mixed.mark);
+
+    let missing = &rows[15];
+    assert!(
+        near(missing.shown, red),
+        "a missing corner showed {:?}, wanted the remaining red, not a darkened half",
+        missing.shown
+    );
+    assert!(
+        (missing.shown[0] - 4.5).abs() > 0.5,
+        "the missing corner was averaged as black {:?}",
+        missing.shown
+    );
+    assert!(missing.reads.abs() <= ABS);
+    assert!((missing.skipped - 1.0).abs() <= ABS);
+    assert!((missing.cell_same - 1.0).abs() <= ABS);
+
+    let black = &rows[16];
+    assert!(
+        near(black.shown, [6.0, 0.0, 0.0]),
+        "a valid black corner showed {:?}, wanted 0.75 of red",
+        black.shown
+    );
+    assert!(black.reads.abs() <= ABS);
+    assert!((black.skipped - 1.0).abs() <= ABS);
+    assert!((black.cell_same - 1.0).abs() <= ABS);
+
+    let leak = [6.0, 1.5, 0.0];
+    let facing = &rows[17];
+    assert!(
+        near(facing.shown, red),
+        "the far side of a thin wall showed {:?}, wanted the near red, not the leak {leak:?}",
+        facing.shown
+    );
+    assert!(!near(facing.shown, leak), "thin-wall leak {:?}", facing.shown);
+    assert!(facing.reads.abs() <= ABS);
+    assert!((facing.skipped - 1.0).abs() <= ABS);
+    assert!((facing.cell_same - 1.0).abs() <= ABS);
+
+    let plane = &rows[18];
+    assert!(
+        near(plane.shown, red),
+        "a cell past half a cell off the plane showed {:?}, wanted the near red, not {leak:?}",
+        plane.shown
+    );
+    assert!(!near(plane.shown, leak), "plane leak {:?}", plane.shown);
+    assert!(plane.reads.abs() <= ABS);
+    assert!((plane.skipped - 1.0).abs() <= ABS);
+    assert!((plane.cell_same - 1.0).abs() <= ABS);
+
+    let partial_rgb = [7.0, 0.5, 0.0];
+    let partial = &rows[19];
+    assert!(
+        near(partial.shown, partial_rgb),
+        "one covered corner and one sampled corner showed {:?}, wanted {partial_rgb:?}",
+        partial.shown
+    );
+    assert!(
+        partial.reads >= 1.0,
+        "partial coverage must keep the probe read, reads {}",
+        partial.reads
+    );
+    assert!(partial.skipped.abs() <= ABS);
+
+    let stale = &rows[20];
+    assert!(
+        near(stale.shown, probe),
+        "a stale red cell showed {:?}, wanted the probe. seed {:?} reads {} skipped {} trust {} same {} conf {} mark {}",
+        stale.shown,
+        stale.seed,
+        stale.reads,
+        stale.skipped,
+        stale.world_w,
+        stale.cell_same,
+        stale.conf,
+        stale.mark
+    );
+    assert!(
+        near(stale.cell, red),
+        "the stale cell was changed {:?}",
+        stale.cell
+    );
+    assert!(stale.reads >= 1.0);
+    assert!(stale.skipped.abs() <= ABS);
+
+    let side = &rows[21];
+    assert!(
+        near(side.shown, green),
+        "the back of a thin wall showed {:?}, wanted green, not the front red",
+        side.shown
+    );
+    assert!(!near(side.shown, red), "the opposite side read the front cell");
+    assert!(side.reads.abs() <= ABS);
+    assert!((side.skipped - 1.0).abs() <= ABS);
+    assert!(near(side.cell, green), "back cell {:?}", side.cell);
+    assert!((side.cell_same - 1.0).abs() <= ABS);
+
+    let hit = &rows[22];
+    assert_eq!(hit.head_hi, off.head_hi, "detail off, SH cells on");
+    assert_eq!(off.mode_cap / 1000, 3, "world mode 3");
+    assert_eq!(off.flags & 32, 0, "flag 32 is clear");
+    assert_eq!(off.flags & 256, 256, "flag 256 keeps the hit patch at 25 cm");
+    assert_eq!(off.flags & 33_554_432, 0, "flag 33554432 is clear");
+    assert!(
+        near(hit.shown, red),
+        "detail off, no probe, parent and resample empty: showed {:?}, wanted the hit cell {red:?}, not the probe {probe:?}. seed {:?} conf {} trust {} reads {} cell {:?}",
+        hit.shown,
+        hit.seed,
+        hit.conf,
+        hit.world_w,
+        hit.reads,
+        hit.cell
+    );
+    assert!(
+        near(hit.seed, red),
+        "the hit fill must store the cell, seed {:?}",
+        hit.seed
+    );
+    assert!(
+        (hit.conf - 0.25).abs() <= ABS,
+        "hit-seed confidence {}, not a resample or probe seed",
+        hit.conf
+    );
+    assert!(hit.reads.abs() <= ABS, "no probe was valid, reads {}", hit.reads);
+    assert!(hit.skipped.abs() <= ABS);
+    assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
+    assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
+
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
-    assert_eq!(skip, 3, "covered, denoise-off, and the blue owner skip");
-    assert_eq!(eval, 9, "the other rows still evaluate probe indirect");
-    assert_eq!(reads, 9, "one probe irradiance read on each evaluated row");
+    assert_eq!(
+        skip, 11,
+        "owner rows, the slant, the blend rows, and the seeding compose skip"
+    );
+    assert_eq!(eval, 13, "the other recorded rows still evaluate probe indirect");
+    assert_eq!(reads, 12, "the detail-off hit row has no probe; every other evaluated row reads one");
 }
 
 #[test]
@@ -450,11 +660,27 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     assert!(mixed.reads >= 1.0);
     assert!(mixed.skipped.abs() <= ABS);
 
+    let alias = &rows[5];
+    assert!(
+        near(alias.shown, parent_rgb),
+        "read-only unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}, not the probe",
+        alias.shown
+    );
+    assert!(near(alias.seed, parent_rgb), "stored parent {:?}", alias.seed);
+    assert!(alias.mark.abs() <= ABS, "sun scratch is not a detail mark");
+    assert!(alias.reads >= 1.0);
+    assert!(alias.skipped.abs() <= ABS);
+    assert!(
+        near(alias.cell, [0.0; 3]),
+        "the empty owner was filled {:?}",
+        alias.cell
+    );
+
     assert_eq!(words[2].to_bits(), 1, "only the covered owner skips");
-    assert_eq!(words[3].to_bits(), 4, "the other read-only rows evaluate");
+    assert_eq!(words[3].to_bits(), 5, "the other read-only rows evaluate");
     assert_eq!(
         words[4].to_bits(),
-        4,
+        5,
         "one probe irradiance read on each evaluated row"
     );
 }
