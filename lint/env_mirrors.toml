@@ -613,6 +613,11 @@ kind = "mirror"
 detail = "surface_cache.sh_cells (stress knob lighting_surface_cache_sh_cells); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL"
+kind = "mirror"
+detail = "surface_cache.sh_texel_detail (stress knob); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_SC_SETTLE"
 kind = "mirror"
 detail = "--lighting-sc-settle (stress), LightingSettings key; MCP set_lighting_settings"

@@ -107,19 +107,6 @@ fn near(got: [f32; 3], want: [f32; 3]) -> bool {
     got.iter().zip(want).all(|(a, b)| (a - b).abs() <= 1.0e-5)
 }
 
-/// Axes the lattice read keeps. The shader skips `abs(n[ax]) < 1.0`, so a
-/// slanted normal (every component below 1) contributes nothing. This is
-/// that gate, not an execution of `lighting_sh_read`.
-fn lattice_axis_weight(n: [f32; 3]) -> f32 {
-    let mut ws = 0.0;
-    for component in n {
-        if component.abs() < 1.0 {
-            continue;
-        }
-        ws += component * component;
-    }
-    ws
-}
 
 /// `lighting_sc_shown` while the default preset's SVGF arm is showing a fine
 /// texel and the stale-field world-cell read missed. Sun gain is 1. A fresh
@@ -243,22 +230,34 @@ fn an_axis_aligned_hit_falls_through_to_the_owning_cells_tilt() {
 }
 
 #[test]
-fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
-    // The axis-aligned change is the fallback inside lighting_cache_irradiance.
-    // This screen return is a different function. The lattice gate rejects
-    // every axis whose component is below 1, so a slanted normal gets w 0,
-    // and compose's mix by that w keeps the probes. Nothing here claims the
-    // irradiance fallback changed this path.
+fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_probes() {
+    // The axis-aligned hit fallback inside lighting_cache_irradiance stays the
+    // owning cell. The screen return is this neighbour read. It accepts a
+    // slant: the lookup axis is the dominant component, and the tilt uses the
+    // true normal. An empty read is w 0, and compose's mix by that w keeps
+    // the probes. The call does not claim.
     let text = cache_shader();
     let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
     assert!(
-        read.contains("if (abs(n[ax]) < 1.0)"),
-        "the lattice read must skip an axis whose component is below 1"
+        !read.contains("if (abs(n[ax]) < 1.0)"),
+        "the neighbour read must not skip a slanted normal"
     );
     assert!(
-        read.contains("return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);"),
-        "no accepted axis is an empty read, w 0"
+        read.contains("lighting_cache_find_sized(centre, an, false, cs, p)"),
+        "the read looks up corners and does not allocate"
     );
+    assert!(
+        !read.contains(", true, cs, p)"),
+        "the neighbour read must not claim a slot"
+    );
+    assert!(read.contains("if (facing <= 0.0)"));
+    assert!(read.contains("if (plane > LIGHTING_CELL_HALF * cs)"));
+    assert!(read.contains("if (lighting_sc_stale(s))"));
+    assert!(
+        read.contains("return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);"),
+        "no accepted corner is an empty read, w 0"
+    );
+    precedes(read, "if (plane > LIGHTING_CELL_HALF * cs)", "if (claim && LIGHTING_SC_WRITES)");
     let screen = function_body(
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
@@ -268,11 +267,15 @@ fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
     let after = &screen[at + gate.len()..];
     let open = after.find('{').expect("screen gate brace");
     let arm = block_body(&after[open + 1..]);
-    assert!(arm.contains("return lighting_sh_read(pos, n, true);"));
+    assert!(arm.contains("return lighting_sh_read(pos, n, false);"));
+    assert!(
+        !arm.contains("return lighting_sh_read(pos, n, true);"),
+        "the screen arm must not claim"
+    );
     assert!(arm.contains("return vec4(0.0);"));
     assert!(
         !arm.contains("lighting_sh_tilt"),
-        "the screen arm does not take the owning-cell tilt"
+        "the screen arm does not take a separate owning-cell tilt"
     );
     let compose = shader("lighting_compose.comp");
     let sun = shader("lighting_sun_compose.comp");
@@ -291,13 +294,6 @@ fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
     );
     assert!(indirect.contains("return world.rgb;"));
 
-    let slanted = [0.0_f32, 0.8, 0.6];
-    assert!(
-        lattice_axis_weight(slanted).abs() <= f32::EPSILON,
-        "a slanted normal accepts no lattice axis"
-    );
-    let axis = [0.0_f32, 1.0, 0.0];
-    assert!((lattice_axis_weight(axis) - 1.0).abs() <= 1.0e-6);
     let probes = [0.3_f32, 0.4, 0.5];
     let empty = [9.0_f32, 9.0, 9.0];
     let shown = mix(probes, empty, 0.0_f32.clamp(0.0, 1.0));
@@ -476,11 +472,6 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     assert!((ck - 1.0e-3).abs() <= 1.0e-8, "confidence floor, got {ck}");
 }
 
-/// The lattice accepts an axis only when that component has magnitude 1.
-/// `lighting_sh_read` claims only inside that arm, so this is the claim gate.
-fn lattice_accepts(n: [f32; 3]) -> bool {
-    n.iter().any(|c| c.abs() >= 1.0)
-}
 
 /// `growing_wrc` in `lighting_compact.comp`: a cell under the cap stays on the
 /// relight list when something has read it since its last update, or within
@@ -524,10 +515,14 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     // still shows the probes, which read those cells.
     let text = cache_shader();
     let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    assert!(
+        !read.contains("lighting_cache_find_sized(p, n, true, cs, p)"),
+        "an empty neighbour read must not allocate the cell under p"
+    );
     precedes(
         read,
-        "if (abs(n[ax]) < 1.0)",
-        "lighting_cache_find_sized(p, n, true, cs, p)",
+        "if (facing <= 0.0)",
+        "if (claim && LIGHTING_SC_WRITES)",
     );
     let at = function_body(
         &text,
@@ -572,12 +567,8 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     let yaw = 0.6_f32;
     let face = [yaw.cos(), 0.0, yaw.sin()];
     assert!(
-        !lattice_accepts(face),
-        "the yaw-0.6 box face accepts no lattice axis, so the read must not claim"
-    );
-    assert!(
-        lattice_accepts([0.0, 1.0, 0.0]),
-        "an axis normal still claims"
+        face.iter().all(|c| c.abs() < 1.0),
+        "the yaw-0.6 face is not axis aligned, and the read still must not allocate"
     );
     let mean = [1.2_f32, 0.4, 0.3];
     let sh = genos_render::lighting_sh::ShL1::default();
@@ -646,24 +637,38 @@ fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
 }
 
 #[test]
-fn the_owning_cell_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
+fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
     let text = cache_shader();
-    let detail = function_body(&text, "vec4 lighting_sh_owning_detail(vec3 p, vec3 n)");
-    assert!(detail.contains("lighting_cache_find_sized(p, an, false, cs, p)"));
+    let detail = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    assert!(detail.contains("lighting_cache_find_sized(centre, an, false, cs, p)"));
     assert!(!detail.contains("lighting_sh_put"));
     assert!(!detail.contains("lighting_sc_set_seed"));
-    assert!(
-        !detail.contains(".w ="),
-        "the owning read must not stamp the cell"
-    );
     let screen = function_body(
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
     );
     precedes(
         screen,
-        "lighting_sh_owning_detail(q, n)",
+        "lighting_sh_read(q, n, false)",
         "lighting_sc_resample",
+    );
+    assert!(
+        screen.contains("!detail_candidate"),
+        "resample must not copy a cell the neighbour read rejected"
+    );
+    assert!(
+        screen.contains("-abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z)"),
+        "the detail mark is the sign of the confidence"
+    );
+    assert!(
+        !screen.contains("LIGHTING_SC_SUN_AT + slot].z = 1.0"),
+        "sun word z is the quarter scratch, not the detail mark"
+    );
+    let rejected = function_body(&text, "bool lighting_sh_detail_seed_rejected(uint slot)");
+    assert!(rejected.contains("LIGHTING_SC_SPARSE_AT + slot].z < 0.0"));
+    assert!(
+        !rejected.contains("LIGHTING_SC_SUN_AT"),
+        "the rejection must not read the quarter scratch"
     );
     assert!(screen.contains(
         "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"

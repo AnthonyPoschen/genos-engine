@@ -507,28 +507,27 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
-    /// same rays, no new ones). An axis-aligned ray hit, including the value
-    /// stored as a display seed, tilts the one owning cell. At the axis that
-    /// tilt is the cell's mean, and the hit does not blend its neighbours. A
-    /// slanted screen pixel's lattice read is empty, because an axis is used
-    /// only when its component has magnitude 1, and compose then keeps the
-    /// probes. That empty read does not claim or stamp a cell: a stamp would
-    /// mark the cell read and keep it on the relight list before any ray hit
-    /// it. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    /// same rays, no new ones). Cells stay keyed by the dominant axis. The
+    /// screen and seed read blends the eight corners at the true normal. A
+    /// corner on the far side of a thin wall, or more than half a cell off the
+    /// query plane, is left out. An axis-aligned ray hit still tilts the one
+    /// owning cell. The read does not allocate. An empty slant keeps the
+    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
     /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3, default off).
-    /// An empty fine world texel takes its first light from the one owning
-    /// 25 cm SH cell, tilted to the texel's normal. The value is a
-    /// low-confidence seed, not an own sample. A lamp change drops it, and an
-    /// owner left empty does not keep the old seed on screen. The cell is not
-    /// written, and neighbour cells are not blended. That is the stage 2 owner
-    /// read. The ADR's trilinear neighbour read is not this setting. While the
-    /// cell has light, the resample, parent, hit-patch, and probe seeds do
-    /// not write that texel. A miss keeps those writers. A mover is not
-    /// seeded. A slanted pixel misses the axis-only SH read and compose keeps
-    /// the screen probes. A pixel whose displayed indirect is this cell does
-    /// not read screen-probe irradiance. Requires `sh_cells`; on without it
-    /// does nothing. Head 3.w bit 17.
+    /// An empty fine world texel takes its first light from the trilinear
+    /// neighbour read, at the texel's true normal. The value is a
+    /// low-confidence seed, not an own sample. The detail mark is a negative
+    /// confidence. Sun word z is not that mark. A lamp change drops the seed,
+    /// and an empty neighbour read does not keep a marked seed on screen. The
+    /// cell is not written. An empty fine texel this setting covers does not
+    /// take resample, the parent walk, or the hit patch, even when the
+    /// neighbour read accepts nothing. The probe seed still runs for that
+    /// miss. Those older writers stay for a texel this read does not cover.
+    /// A mover is not seeded. A slanted pixel shows the same read
+    /// and does not run those writers. A pixel whose displayed indirect is
+    /// this read does not read screen-probe irradiance. Requires `sh_cells`;
+    /// on without it does nothing. Head 3.w bit 17.
     pub sh_texel_detail: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///

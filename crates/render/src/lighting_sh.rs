@@ -156,6 +156,65 @@ pub fn relight(
     (irr, sh)
 }
 
+/// One corner of the trilinear neighbour read (ADR 0039).
+///
+/// `lighting_sh_read` accepts a corner only when it is present, has samples,
+/// is not stale, faces the query (`dot > 0`), and sits within half a cell of
+/// the query plane. A rejected or missing corner adds no weight, so it does
+/// not darken the blend. A corner with samples and a black mean is light.
+#[derive(Clone, Copy, Debug)]
+pub struct NeighbourCorner {
+    pub weight: f32,
+    pub present: bool,
+    pub samples: f32,
+    pub stale: bool,
+    pub rgb: [f32; 3],
+    pub axis: [f32; 3],
+    pub normal: [f32; 3],
+    /// Absolute distance of the stored point from the query plane, in metres.
+    pub plane: f32,
+    pub sh: ShL1,
+}
+
+/// Weight of one corner. Zero when the corner is left out of the blend.
+#[must_use]
+pub fn neighbour_corner_weight(normal: [f32; 3], cell: f32, corner: &NeighbourCorner) -> f32 {
+    if corner.weight <= 0.0 || !corner.present || corner.samples < 0.5 || corner.stale {
+        return 0.0;
+    }
+    let facing = dot(corner.normal, normal);
+    if facing <= 0.0 {
+        return 0.0;
+    }
+    if corner.plane > 0.5 * cell {
+        return 0.0;
+    }
+    corner.weight * facing
+}
+
+/// Trilinear blend at the true normal. `None` when every corner is left out.
+#[must_use]
+pub fn neighbour_read(normal: [f32; 3], cell: f32, corners: &[NeighbourCorner]) -> Option<[f32; 3]> {
+    let mut sum = [0.0_f32; 3];
+    let mut weight_sum = 0.0_f32;
+    for corner in corners {
+        let weight = neighbour_corner_weight(normal, cell, corner);
+        if weight <= 0.0 {
+            continue;
+        }
+        let tilted = corner.sh.tilt(corner.rgb, corner.axis, normal);
+        for (channel, sample) in sum.iter_mut().zip(tilted) {
+            *channel += weight * sample;
+        }
+        weight_sum += weight;
+    }
+    if weight_sum > 0.0 {
+        Some(sum.map(|channel| channel / weight_sum))
+    } else {
+        None
+    }
+}
+
 /// GLSL `packHalf2x16`: round to nearest even, subnormals kept.
 #[must_use]
 pub fn pack_half_2x16(a: f32, b: f32) -> u32 {
@@ -248,6 +307,10 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a neighbour read that drops every corner is a failed contract"
+)]
 mod tests {
     use super::*;
 
@@ -530,6 +593,85 @@ mod tests {
         let (x, y) = (sh.tilt(e, UP, n), back.tilt(e, UP, n));
         for ch in 0..3 {
             assert!(close(y[ch], x[ch], 2.0e-3));
+        }
+    }
+
+    fn corner(
+        weight: f32,
+        rgb: [f32; 3],
+        normal: [f32; 3],
+        plane: f32,
+        sh: ShL1,
+    ) -> super::NeighbourCorner {
+        super::NeighbourCorner {
+            weight,
+            present: true,
+            samples: 16.0,
+            stale: false,
+            rgb,
+            axis: normal,
+            normal,
+            plane,
+            sh,
+        }
+    }
+
+    #[test]
+    fn a_missing_corner_does_not_darken_and_a_black_corner_does() {
+        let cell = 0.25;
+        let red = [8.0, 0.0, 0.0];
+        let blue = [0.0, 0.0, 7.0];
+        let up = [0.0, 1.0, 0.0];
+        let lit = corner(0.75, red, up, 0.0, ShL1::default());
+        let mut absent = corner(0.25, blue, up, 0.0, ShL1::default());
+        absent.present = false;
+        let blended = super::neighbour_read(up, cell, &[lit, absent]).expect("the lit corner");
+        assert_eq!(blended, red, "a missing corner is left out, not averaged as black");
+        let mut black = corner(0.25, [0.0; 3], up, 0.0, ShL1::default());
+        black.samples = 16.0;
+        let darkened = super::neighbour_read(up, cell, &[lit, black]).expect("black is light");
+        assert!(
+            close(darkened[0], 6.0, 1.0e-5),
+            "0.75 of red and 0.25 of valid black is 6, got {darkened:?}"
+        );
+    }
+
+    #[test]
+    fn an_opposite_normal_and_a_far_plane_are_left_out() {
+        let cell = 0.25;
+        let up = [0.0, 1.0, 0.0];
+        let down = [0.0, -1.0, 0.0];
+        let red = [8.0, 0.0, 0.0];
+        let green = [0.0, 6.0, 0.0];
+        let near = corner(0.75, red, up, 0.0, ShL1::default());
+        let opposite = corner(0.25, green, down, 0.0, ShL1::default());
+        let kept = super::neighbour_read(up, cell, &[near, opposite]).expect("near side");
+        assert_eq!(kept, red);
+        let far = corner(0.25, green, up, 0.1875, ShL1::default());
+        let plane = super::neighbour_read(up, cell, &[near, far]).expect("near plane");
+        assert_eq!(plane, red);
+        let mut stale = corner(1.0, red, up, 0.0, ShL1::default());
+        stale.stale = true;
+        assert!(super::neighbour_read(up, cell, &[stale]).is_none());
+    }
+
+    #[test]
+    fn the_blend_is_the_true_normal_not_the_axis_mean() {
+        let up = [0.0, 1.0, 0.0];
+        let mut sh = ShL1::default();
+        sh.c[2] = [4.0, 0.0, 0.0];
+        let mean = [8.0, 0.0, 0.0];
+        let n = {
+            let len = (0.36_f32 + 0.64 + 0.04).sqrt();
+            [0.6 / len, 0.8 / len, 0.2 / len]
+        };
+        let mut sample = corner(1.0, mean, up, 0.0, sh);
+        sample.axis = up;
+        let got = super::neighbour_read(n, 0.25, &[sample]).expect("slant");
+        let want = sh.tilt(mean, up, n);
+        assert!(got[0] < mean[0] - 0.5, "tilt {got:?} stayed on the axis mean");
+        for ch in 0..3 {
+            assert!(close(got[ch], want[ch], 1.0e-5));
         }
     }
 }
