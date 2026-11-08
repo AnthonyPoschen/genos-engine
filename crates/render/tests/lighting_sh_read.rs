@@ -612,3 +612,28 @@ fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
     let sh_scale = relight[gain..].find("o0 * sh_ls").expect("harmonic rescale");
     assert!(mean_scale < sh_scale, "the mean is rescaled before the harmonics blend");
 }
+
+#[test]
+fn the_owning_cell_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
+    let text = cache_shader();
+    let detail = function_body(&text, "vec4 lighting_sh_owning_detail(vec3 p, vec3 n)");
+    assert!(detail.contains("lighting_cache_find_sized(p, an, false, cs, p)"));
+    assert!(!detail.contains("lighting_sh_put"));
+    assert!(!detail.contains("lighting_sc_set_seed"));
+    assert!(
+        !detail.contains(".w ="),
+        "the owning read must not stamp the cell"
+    );
+    let screen = function_body(
+        &text,
+        "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
+    );
+    precedes(screen, "lighting_sh_owning_detail(q, n)", "lighting_sc_resample");
+    assert!(screen.contains(
+        "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
+    ));
+    assert!(screen.contains("if (detail_kept)"));
+    let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
+    assert!(shown.contains("lighting_sh_texel_detail_on()"));
+    assert!(shown.contains("!lighting_sh_texel_detail_on()"));
+}

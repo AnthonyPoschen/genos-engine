@@ -2893,6 +2893,9 @@ impl Gpu {
         if self.lighting.settings.surface_cache.sh_cells {
             flags_all |= SH_CELLS;
         }
+        // ADR 0039 stage 3. Head 3.w bit 17, beside the high flags, the budget
+        // shift, and the isolate toggles. The shader also requires SH cells.
+        const SH_TEXEL_DETAIL: u32 = 1 << 17;
         let flags = flags_all & ((1 << 23) - 1);
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
         block[3] = (world * 1000 + cap) as f32;
@@ -2964,7 +2967,12 @@ impl Gpu {
         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
         let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12)) as f32;
+        let mut head_hi =
+            ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
+        if self.lighting.settings.surface_cache.sh_texel_detail {
+            head_hi |= SH_TEXEL_DETAIL;
+        }
+        block[4 * 3 + 3] = head_hi as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {

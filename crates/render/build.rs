@@ -70,6 +70,7 @@ struct MediaModules {
     check: PathBuf,
     inject: PathBuf,
     integrate: PathBuf,
+    texel_detail: PathBuf,
 }
 
 /// Media and froxel modules, and the two compile-only checks that sit with them.
@@ -91,6 +92,10 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         integrate: compile(
             "shaders/froxel_integrate.comp",
             &out.join("froxel_integrate.comp.spv"),
+        ),
+        texel_detail: compile(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod.comp.spv"),
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
@@ -192,7 +197,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -202,7 +207,8 @@ fn write_shader_glue(
             raster.fxaa.display(),
             media.check.display(),
             media.inject.display(),
-            media.integrate.display()
+            media.integrate.display(),
+            media.texel_detail.display()
         ),
     )
     .unwrap();
@@ -267,6 +273,7 @@ fn rerun_shader_pieces() {
         "froxel_common.glsl",
         "froxel_inject.comp",
         "froxel_integrate.comp",
+        "texel_detail_prod.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
         "scene.vert",

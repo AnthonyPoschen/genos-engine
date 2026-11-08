@@ -2091,6 +2091,14 @@ const float LIGHTING_SH_A1 = 2.0943951;
 bool lighting_sh_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u;
 }
+// ADR 0039 stage 3 (`surface_cache.sh_texel_detail`). Head 3.w bit 17.
+// Bits 0-8 are sc_flags 23-31, 9-11 the budget shift, 12-16 the isolate toggles.
+const uint LIGHTING_SH_DETAIL_BIT = 131072u;
+// Same low confidence as the parent seed. A const, so it is not a new magic number.
+const float LIGHTING_SH_DETAIL_CONF = 0.25;
+bool lighting_sh_texel_detail_on() {
+    return lighting_sh_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_DETAIL_BIT) != 0u;
+}
 uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
 }
@@ -2215,6 +2223,29 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     lighting_chg(CHG_SH_LOOKUPS, looks);
     return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
 }
+// The one 25 cm cell that owns p, tilted to n. w is 1 when that cell has light.
+// Claim stays off, and this read does not stamp or write the cell. Neighbours
+// are not blended. A point more than half a cell off the stored plane is another
+// surface (the far side of a thin wall) and is left out.
+vec4 lighting_sh_owning_detail(vec3 p, vec3 n) {
+    const float cs = LIGHTING_SH_CELL;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 an = vec3(0.0);
+    an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
+    uint s = lighting_cache_find_sized(p, an, false, cs, p);
+    if (s == ~0u) {
+        return vec4(0.0);
+    }
+    if (abs(dot(cache.v[3u * s].xyz - p, n)) > LIGHTING_CELL_HALF * cs) {
+        return vec4(0.0);
+    }
+    vec4 v = cache.v[3u * s + 2u];
+    if (v.w < LIGHTING_CACHE_HAS_W) {
+        return vec4(0.0);
+    }
+    vec3 tilted = lighting_sh_tilt(s, v.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
+    return vec4(tilted, 1.0);
+}
 vec4 lighting_sc_shown(uint slot) {
     // S72D coarse to fine: a texel shows the interpolation of the next level up
     // (level 0 from the 2-apart keys, else the 4-apart ones) until its own sets
@@ -2235,6 +2266,15 @@ vec4 lighting_sc_shown(uint slot) {
         if (own.w > 0.5) {
             return vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0);
         }
+        // The denoiser-off shortcut used to drop every seed and walk the parent.
+        // A cell detail seed is the texel's light until it has its own samples,
+        // with the denoiser on or off.
+        if (lighting_sh_texel_detail_on()) {
+            vec4 detail = lighting_sc_seed(slot);
+            if (detail.w > 0.0) {
+                return vec4(detail.rgb, 1.0);
+            }
+        }
         return vec4(0.0);
     }
     float n = floor(max(own.w, 0.0));
@@ -2247,6 +2287,14 @@ vec4 lighting_sc_shown(uint slot) {
         float ls = lighting_sc_sun_gain(slot);
         vec4 sd = lighting_sc_seed_split() ? lighting_sc_seed(slot) : vec4(0.0);
         if (lighting_sc_svgf()) {
+            // No own samples yet: the owning-cell seed is what shows, including
+            // over a field the push wrote from the old estimators.
+            if (lighting_sh_texel_detail_on() && own.w < LIGHTING_CACHE_HAS_W) {
+                vec4 detail = lighting_sc_seed(slot);
+                if (detail.w > 0.0) {
+                    return vec4(detail.rgb, 1.0);
+                }
+            }
             // S72V: the pushed SVGF field covers what it reaches; the seed only
             // where nothing reached yet.
             // The field is light as of now (S72V7), no gain.
@@ -2265,7 +2313,10 @@ vec4 lighting_sc_shown(uint slot) {
             if (have) {
                 return vec4(field, 1.0);
             }
-            if (!fresh && own.w > 0.5) {
+            // The four-cell world read is the neighbour blend stage 2 left.
+            // With texel detail on, a texel that has its own samples shows those
+            // samples. The cell seed already covered the empty texel above.
+            if (!fresh && own.w > 0.5 && !lighting_sh_texel_detail_on()) {
                 vec4 nbs = cache.v[3u * slot + 1u];
                 vec4 pb = lighting_sc_wrc_now(cache.v[3u * slot].xyz, nbs.xyz);
                 if (pb.w > 0.5) {
@@ -3346,7 +3397,28 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         }
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
-        if (LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
+        // ADR 0039 stage 3. An empty fine world texel, not a mover, takes the
+        // one owning SH cell. That value is what the pixel returns, whether or
+        // not this compile may write. A lamp change drops a stored seed before
+        // the cell is copied again, so the seed cannot outlive the cell.
+        // The resample, parent, hit patch, and probe seed do not run for that
+        // texel: they are the estimators this seed replaces. A miss keeps them.
+        bool detail_kept = false;
+        vec3 detail_rgb = vec3(0.0);
+        if (lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W) {
+            if (LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
+                cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
+            }
+            vec4 detail = lighting_sh_owning_detail(q, n);
+            if (detail.w > LIGHTING_CACHE_HAS_W) {
+                if (LIGHTING_SC_WRITES) {
+                    lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
+                }
+                detail_rgb = detail.rgb;
+                detail_kept = true;
+            }
+        }
+        if (!detail_kept && LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
                 // S72N: a seed beside the texel's own (empty) mean, confidence
@@ -3364,10 +3436,13 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
         }
         vec4 v = mode == 3u ? lighting_sc_shown(slot) : (mode != 2u ? cache.v[3u * slot + 2u] : cache.v[LIGHTING_WORLD_AT + slot]);
+        if (detail_kept) {
+            v = vec4(detail_rgb, 1.0);
+        }
         if (mode == 3u && lighting_sc_stale(slot)) {
             continue;
         }
-        if (v.w < 0.5 && mode == 3u) {
+        if (!detail_kept && v.w < 0.5 && mode == 3u) {
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
@@ -3379,7 +3454,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 v = lighting_sc_parent(q, n, size);
             }
         }
-        if (v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
+        if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
             vec3 hc = lighting_cache_irradiance(q, n);
