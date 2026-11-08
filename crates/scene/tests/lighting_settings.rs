@@ -55,6 +55,29 @@ fn surface_cache_attach_movers_round_trips() {
 }
 
 #[test]
+fn surface_cache_sh_texel_ray_cut_round_trips() {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_texel_ray_cut);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_ray_cut);
+    assert!(
+        !parsed.surface_cache.sh_texel_detail,
+        "the ray cut does not turn the detail seed on"
+    );
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    assert!(settings
+        .set_key("surface_cache.sh_texel_ray_cut", "maybe")
+        .is_err());
+}
+
+#[test]
 fn surface_cache_sh_texel_detail_round_trips() {
     let mut settings = LightingSettings::default();
     assert!(!settings.surface_cache.sh_texel_detail);

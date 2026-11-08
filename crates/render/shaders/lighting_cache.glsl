@@ -1940,6 +1940,7 @@ bool lighting_sc_promoted(uint slot) {
 // Light from the keys `step` cells apart around a texel, sun/sky gain applied: w 1
 // when interpolated, 0 when a key is not lit yet, -1 when one is missing or off
 // the plane, -2 when they differ by more than LIGHTING_SC_SPARSE_RATIO (an edge).
+bool lighting_sh_lum_disagrees(float hi, float lo);
 vec4 lighting_sc_sparse(uint slot, float step) {
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     vec3 p = cache.v[3u * slot].xyz;
@@ -1994,7 +1995,7 @@ vec4 lighting_sc_sparse(uint slot, float step) {
     if (result < 0.5 || ws <= 0.0) {
         return vec4(0.0);
     }
-    if (hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * lo) {
+    if (lighting_sh_lum_disagrees(hi, lo)) {
         // S72K: an edge; the blend still comes back (w -2 - confidence).
         return vec4(sum / ws, -2.0 - cs / ws);
     }
@@ -2102,12 +2103,18 @@ bool lighting_sh_on() {
     return lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u;
 }
 // ADR 0039 stage 3 (`surface_cache.sh_texel_detail`). Head 3.w bit 17.
+// ADR 0039 stage 4 (`surface_cache.sh_texel_ray_cut`). Head 3.w bit 18.
 // Bits 0-8 are sc_flags 23-31, 9-11 the budget shift, 12-16 the isolate toggles.
 const uint LIGHTING_SH_DETAIL_BIT = 131072u;
+const uint LIGHTING_SH_RAY_CUT_BIT = 262144u;
 // Same low confidence as the parent seed. A const, so it is not a new magic number.
 const float LIGHTING_SH_DETAIL_CONF = 0.25;
 bool lighting_sh_texel_detail_on() {
     return lighting_sh_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_DETAIL_BIT) != 0u;
+}
+// Stage 4 is off unless the detail seed is on. The bit alone does not cut rays.
+bool lighting_sh_texel_ray_cut_on() {
+    return lighting_sh_texel_detail_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_RAY_CUT_BIT) != 0u;
 }
 uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
@@ -2169,6 +2176,18 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
     vec3 d = n - axis;
     return max(e + (LIGHTING_SH_A1 * LIGHTING_SH_Y1) * (cx * d.x + cy * d.y + cz * d.z), vec3(0.0));
 }
+// The neighbour read plus whether every looked-up corner was accepted and
+// whether those corners agree. `lo` and `hi` are the Rec.709 luminance of the
+// accepted corners' tilted light, the same weights `lighting_sc_sparse` uses
+// for an edge. A corner that was not looked up (trilinear weight 0) is not
+// in `looked`. The value is the existing blend: w is 1 when any corner remains.
+struct LightingShField {
+    vec4 value;
+    float lo;
+    float hi;
+    uint looked;
+    uint accepted;
+};
 // The 25 cm cells around p, eight corners, trilinear, evaluated at the true
 // normal. The lookup axis is the dominant axis: that is the key the cell was
 // stored under. The tilt uses n, not that axis. A corner is left out when it
@@ -2179,8 +2198,9 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
 // `claim` stamps a corner this read accepted. It does not allocate. The seed
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
-vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
+LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     const float cs = LIGHTING_SH_CELL;
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     uint ax = lighting_axis(n) >> 1u;
     vec3 an = vec3(0.0);
     an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
@@ -2191,6 +2211,10 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     vec3 sum = vec3(0.0);
     float ws = 0.0;
     uint looks = 0u;
+    uint accepted = 0u;
+    float y_lo = 0.0;
+    float y_hi = 0.0;
+    bool y_set = false;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
         uint dx = k & 1u;
         uint dy = (k >> 1u) & 1u;
@@ -2229,11 +2253,31 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
         }
         float w = tri * facing;
-        sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        vec3 lit = lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        float y = dot(max(lit, vec3(0.0)), lw);
+        if (!y_set) {
+            y_lo = y;
+            y_hi = y;
+            y_set = true;
+        } else {
+            y_lo = min(y_lo, y);
+            y_hi = max(y_hi, y);
+        }
+        accepted += 1u;
+        sum += w * lit;
         ws += w;
     }
     lighting_chg(CHG_SH_LOOKUPS, looks);
-    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
+    LightingShField built;
+    built.value = ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
+    built.lo = y_lo;
+    built.hi = y_hi;
+    built.looked = looks;
+    built.accepted = accepted;
+    return built;
+}
+vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
+    return lighting_sh_gather(p, n, claim).value;
 }
 // The stored detail seed stays while the neighbour read still has a corner.
 // A lamp change that leaves every corner empty must not keep showing the old
@@ -3143,6 +3187,76 @@ bool lighting_lamp_settling_raw() {
         }
     }
     return false;
+}
+// Fine-texel rays this compact visit did not list, and the visits that held them.
+// Displaying-compose uses diag[0..2]. These two are the scheduler, and they
+// count with the diagnostic compile off. 40, 41, and 61..63 stay the screen
+// pass's working words.
+const uint LIGHTING_DIAG_TEXEL_HELD = 38u;
+const uint LIGHTING_DIAG_TEXEL_CUT = 39u;
+// Rec.709 luminance, the same split `lighting_sc_sparse` uses when keys disagree
+// by more than LIGHTING_SC_SPARSE_RATIO. That ratio is the existing edge test.
+// It is not a new picture threshold.
+bool lighting_sh_lum_disagrees(float hi, float lo) {
+    return hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * max(lo, 0.0);
+}
+// ADR 0039 stage 4. A fine world texel does not take its own rays when the live
+// 25 cm field is a complete, agreeing read. The comparison is that live read.
+// The stored seed is not an operand: it was copied from the cell, so matching
+// it would freeze the texel on its own copy. No own samples means the cell is
+// the estimate and the texel does not start a second one. Own samples that
+// sit past LIGHTING_SC_SPARSE_RATIO from the live read keep their rays, so a
+// later cell change is not frozen. A missing, empty, stale, back-facing, or
+// off-plane corner is not agreement. Corners that disagree by the sparse ratio
+// are a contact or a corner, and the texel keeps its rays. A stale texel, a
+// lamp that is settling, a lamp that reaches this texel, a nearby move, and an
+// object-local texel do not hold. A 25 cm cell does not hold: the world cache
+// is the source this read does not write. Claim stays false. The seed, the
+// cell mean, and the harmonics are not stored.
+bool lighting_compact_hold_texel_rays(uint slot) {
+    if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    vec4 nb = cache.v[3u * slot + 1u];
+    if (!(nb.w > 0.0) || nb.w > LIGHTING_WRC_CELL_SIZE) {
+        return false;
+    }
+    if (!lighting_sh_texel_ray_cut_on()) {
+        return false;
+    }
+    // id + 1. A world texel is below the same mark `lighting_sc_texel_world` uses.
+    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > LIGHTING_CACHE_HAS_W) {
+        return false;
+    }
+    if (lighting_sc_stale(slot) || lighting_lamp_settling() || lighting_sc_lamp_touched(slot)) {
+        return false;
+    }
+    bool mover;
+    if (lighting_sc_local_change(slot, mover)) {
+        return false;
+    }
+    LightingShField field = lighting_sh_gather(cache.v[3u * slot].xyz, nb.xyz, false);
+    if (field.looked == 0u || field.accepted != field.looked || field.value.w <= LIGHTING_CACHE_HAS_W) {
+        return false;
+    }
+    if (lighting_sh_lum_disagrees(field.hi, field.lo)) {
+        return false;
+    }
+    vec4 own = cache.v[3u * slot + 2u];
+    if (own.w >= LIGHTING_CACHE_HAS_W) {
+        const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+        vec3 mine = own.rgb * lighting_sc_sun_gain(slot);
+        float y_own = dot(max(mine, vec3(0.0)), lw);
+        float y_field = dot(max(field.value.rgb, vec3(0.0)), lw);
+        if (lighting_sh_lum_disagrees(max(y_own, y_field), min(y_own, y_field))) {
+            return false;
+        }
+    }
+    uint rays = lighting_sc_entries(slot, true) * LIGHTING_CACHE_RAYS;
+    atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_HELD], 1u);
+    atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_CUT], rays);
+    atomicAdd(gstats.waiting, 1u);
+    return true;
 }
 // S65C: how much the lamps that moved since frame `updated` changed the
 // unshadowed light at p (sum over moved lamps of brightest channel times

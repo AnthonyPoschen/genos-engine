@@ -237,7 +237,10 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     // true normal. An empty read is w 0, and compose's mix by that w keeps
     // the probes. The call does not claim.
     let text = cache_shader();
-    let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    let read = function_body(
+        &text,
+        "LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim)",
+    );
     assert!(
         !read.contains("if (abs(n[ax]) < 1.0)"),
         "the neighbour read must not skip a slanted normal"
@@ -254,8 +257,13 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     assert!(read.contains("if (plane > LIGHTING_CELL_HALF * cs)"));
     assert!(read.contains("if (lighting_sc_stale(s))"));
     assert!(
-        read.contains("return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);"),
+        read.contains("ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0)"),
         "no accepted corner is an empty read, w 0"
+    );
+    let wrapper = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    assert!(
+        wrapper.contains("return lighting_sh_gather(p, n, claim).value;"),
+        "the screen read is the gather's value, including an empty read"
     );
     precedes(read, "if (plane > LIGHTING_CELL_HALF * cs)", "if (claim && LIGHTING_SC_WRITES)");
     let screen = function_body(
@@ -508,13 +516,16 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     // slot) and never the seed. The seed lives in LIGHTING_SC_SPARSE_AT.
     // A flat face stores its own normal, so the tilt is the mean and matches
     // the per-axis read. What a slanted screen pixel does change is the claim
-    // at the top of lighting_sh_read: the lattice then skips every axis and
+    // inside lighting_sh_gather, which lighting_sh_read returns: the lattice then skips every axis and
     // returns w 0, but the claim has already allocated the cell and stamped
     // it read. growing_wrc keeps a recently read cell on the relight list,
     // and dark fill makes a longer run of a rising trace brighter. Compose
     // still shows the probes, which read those cells.
     let text = cache_shader();
-    let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    let read = function_body(
+        &text,
+        "LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim)",
+    );
     assert!(
         !read.contains("lighting_cache_find_sized(p, n, true, cs, p)"),
         "an empty neighbour read must not allocate the cell under p"
@@ -639,7 +650,10 @@ fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
 #[test]
 fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
     let text = cache_shader();
-    let detail = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    let detail = function_body(
+        &text,
+        "LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim)",
+    );
     assert!(detail.contains("lighting_cache_find_sized(centre, an, false, cs, p)"));
     assert!(!detail.contains("lighting_sh_put"));
     assert!(!detail.contains("lighting_sc_set_seed"));

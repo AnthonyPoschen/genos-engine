@@ -536,6 +536,17 @@ pub struct SurfaceCacheSettings {
     /// this read does not read screen-probe irradiance. Requires `sh_cells`;
     /// on without it does nothing. Head 3.w bit 17.
     pub sh_texel_detail: bool,
+    /// Key `surface_cache.sh_texel_ray_cut` (ADR 0039 stage 4, default off).
+    /// A fine world texel skips its own rays when the live 25 cm neighbour read
+    /// is complete and the accepted corners agree within the existing sparse
+    /// luminance ratio. The texel's own samples, not its seed, are what is
+    /// compared with that read. No own samples means the cell is the estimate.
+    /// A missing, empty, stale, back-facing, or off-plane corner, a corner
+    /// split past that ratio, a stale texel, a settling lamp, a nearby move,
+    /// and an object-local texel keep their rays. A 25 cm cell is never skipped.
+    /// The read does not write the cell. Requires `sh_texel_detail`; on without
+    /// it does nothing. Head 3.w bit 18.
+    pub sh_texel_ray_cut: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -812,6 +823,7 @@ impl LightingSettings {
                 dormant_rays: 0,
                 sh_cells: false,
                 sh_texel_detail: false,
+                sh_texel_ray_cut: false,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
@@ -1224,6 +1236,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.sh_texel_ray_cut={}",
+            bit(self.surface_cache.sh_texel_ray_cut)
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
@@ -1409,6 +1426,7 @@ impl LightingSettings {
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
+            "surface_cache.sh_texel_ray_cut" => self.surface_cache.sh_texel_ray_cut = on(value)?,
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1647,6 +1665,10 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL",
                 "surface_cache.sh_texel_detail",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT",
+                "surface_cache.sh_texel_ray_cut",
             ),
         ];
         for (var, key) in keys {

@@ -209,6 +209,19 @@ void main() {
                 return;
             }
         }
+        // ADR 0039 stage 4. After the world-cell lists, so a 25 cm cell is never
+        // held here. A fine texel whose live cell read agrees drops its own
+        // rays. The cell lists above are the update. An expired unread texel
+        // still frees. The hold does not write the cell or the seed.
+        if (lighting_compact_hold_texel_rays(slot)) {
+            if (lighting_sc_expired(last, shown)) {
+                atomicAdd(gstats.freed, 1u);
+                ckeys.key[slot] = 0u;
+                cache.v[3u * slot + 1u] = vec4(0.0);
+                cache.v[3u * slot + 2u] = vec4(0.0);
+            }
+            return;
+        }
         // S72D sparse fill, coarse to fine: every texel is relit, but a young one
         // (short of LIGHTING_DN_MIN_SETS sets) weighs by its level (4-apart keys 4x,
         // 2-apart 2x), so under a backlog the coarse grid fills first and spreads

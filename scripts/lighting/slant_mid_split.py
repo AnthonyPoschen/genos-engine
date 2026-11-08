@@ -357,12 +357,21 @@ def _guard_sources():
         raise SystemExit("the mover salt no longer skips the SH read")
     # The screen and seed read is the eight-corner blend at the true normal.
     # A corner is found with claim false, then accepted, and only then stamped.
-    # The old axis-only skip is not this read.
-    start = shader.find("vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)")
-    end = shader.find("bool lighting_sh_detail_owner_lit", start if start >= 0 else 0)
-    if start < 0 or end < 0:
+    # The old axis-only skip is not this read. The loop lives in
+    # lighting_sh_gather; lighting_sh_read returns that field's value.
+    read_at = shader.find("vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)")
+    owner_at = shader.find("bool lighting_sh_detail_owner_lit", read_at if read_at >= 0 else 0)
+    if read_at < 0 or owner_at < 0:
         raise SystemExit("lighting_sh_read moved")
-    body = shader[start:end]
+    wrapper = shader[read_at:owner_at]
+    if "return lighting_sh_gather(p, n, claim).value;" not in wrapper:
+        raise SystemExit("lighting_sh_read no longer returns the gather value")
+    if "lighting_cache_find_sized" in wrapper:
+        raise SystemExit("lighting_sh_read claims a slot itself")
+    start = shader.find("LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim)")
+    if start < 0 or start > read_at:
+        raise SystemExit("lighting_sh_gather moved")
+    body = shader[start:read_at]
     if "if (abs(n[ax]) < 1.0)" in body:
         raise SystemExit("lighting_sh_read still drops a non-axis normal")
     if "lighting_cache_find_sized(p, n, true, cs, p)" in body:
