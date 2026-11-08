@@ -1,21 +1,19 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::uninlined_format_args, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
 //! A held camera must publish a 25 cm world cell whose stored light changed.
 //!
 //! The grade is the toward view of the shipped hall: eye (0.2, 1.7, 3.2), yaw 0,
 //! pitch -0.45, 1280×720, 5×5 window centred on pixel (506, 420). `cells_only`
-//! reads those cells. Compose reuse stays on. After the picture has held, two
-//! draws with `compose_reuse` off and `freeze_cache` on read the same stored
-//! cells and must match that picture. Dither is a function of the pixel, so the
-//! same radiance is the same code.
+//! reads those cells. Compose reuse stays on. The loop draws at most 48 frames.
+//! It leaves early only after the 5×5 mean has matched for three frames and
+//! sixteen further frames have passed. The lavapipe run of this grade reached
+//! the 48-frame cap, so the centre code on that last frame is the comparison,
+//! not a settled grade and not a CPU reference. Two draws with `compose_reuse`
+//! off and `freeze_cache` on read the same stored cells and must match that
+//! frame. Dither is a function of the pixel, so the same radiance is the same
+//! code.
+
+use std::fmt::Write as _;
 
 use genos_render::{LightingSunStats, Renderer, World};
 use genos_scene::{
@@ -25,12 +23,12 @@ use genos_window::Window;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 720;
-const GRADE_X: i32 = 506;
-const GRADE_Y: i32 = 420;
+const GRADE_X: u32 = 506;
+const GRADE_Y: u32 = 420;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
+    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
     let (renderer, permit) =
@@ -68,9 +66,18 @@ fn cells_only(sh_cells: bool) -> LightingSettings {
     settings
 }
 
-fn red_at(pixels: &[u8], x: i32, y: i32) -> f32 {
-    let i = ((y as u32 * WIDTH + x as u32) * 4) as usize;
-    pixels[i + 2] as f32
+fn shifted(origin: u32, delta: i32) -> u32 {
+    let base = i32::try_from(origin).expect("grade origin");
+    u32::try_from(base + delta).expect("grade pixel")
+}
+
+fn byte_index(x: u32, y: u32) -> usize {
+    let offset = u64::from(y) * u64::from(WIDTH) + u64::from(x);
+    usize::try_from(offset * 4).expect("pixel index")
+}
+
+fn red_at(pixels: &[u8], x: u32, y: u32) -> f32 {
+    f32::from(pixels[byte_index(x, y) + 2])
 }
 
 /// Mean red of the 5×5 and the centre pixel. Red is byte 2 of the BGRA readback.
@@ -79,7 +86,7 @@ fn grade(pixels: &[u8]) -> (f32, f32) {
     let mut count = 0.0_f32;
     for dy in -2..=2 {
         for dx in -2..=2 {
-            sum += red_at(pixels, GRADE_X + dx, GRADE_Y + dy);
+            sum += red_at(pixels, shifted(GRADE_X, dx), shifted(GRADE_Y, dy));
             count += 1.0;
         }
     }
@@ -87,7 +94,7 @@ fn grade(pixels: &[u8]) -> (f32, f32) {
 }
 
 fn centre_bytes(pixels: &[u8]) -> [u8; 4] {
-    let i = ((GRADE_Y as u32 * WIDTH + GRADE_X as u32) * 4) as usize;
+    let i = byte_index(GRADE_X, GRADE_Y);
     [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
 }
 
@@ -104,8 +111,9 @@ struct Held {
     trace: String,
 }
 
-/// Draw until the grade has been still, then keep drawing so a live cell can move
-/// while a stale compose would keep the old codes.
+/// Draw at most 48 frames. Three matching means start a sixteen-frame tail.
+/// If that match never holds, the loop stops at the cap and the last frame is
+/// what the frozen reread is compared with.
 fn hold_picture(
     window: &mut Window,
     renderer: &mut Renderer,
@@ -136,10 +144,13 @@ fn hold_picture(
         let (mean, centre) = grade(&last_pixels);
         last_stats = renderer.lighting_sun_stats();
         peak_blocks = peak_blocks.max(last_stats.blocks);
-        trace.push_str(&format!(
-            "f{frame} mean {mean:.2} centre {centre:.0} compose {} dispatches {} blocks {}\n",
-            last_stats.compose, last_stats.dispatches, last_stats.blocks
-        ));
+        let _ = writeln!(
+            trace,
+            "f{frame} mean {mean:.2} centre {centre:.0} compose {compose} dispatches {dispatches} blocks {blocks}",
+            compose = last_stats.compose,
+            dispatches = last_stats.dispatches,
+            blocks = last_stats.blocks,
+        );
         if (mean - previous).abs() < 0.51 && frame > 1 {
             stable += 1;
             if stable == 3 && held_from == 0 {
@@ -157,7 +168,7 @@ fn hold_picture(
     let (mean, centre) = grade(&last_pixels);
     (
         Held {
-            frame: trace.lines().count() as u32,
+            frame: u32::try_from(trace.lines().count()).expect("frame count"),
             mean,
             centre,
             compose: last_stats,
