@@ -6,17 +6,28 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
+// Same cut the rest of the cache uses (`size > 0.2`): a texel is at most
+// 0.125, and a world cell is the 25 cm hit patch.
+const float LIGHTING_HIT_PATCH = 0.2;
 // S78S: a texel's value write, counted by its change (lighting_chg).
 void lighting_tex_put(uint slot, vec4 v) {
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
         return;
     }
+    vec4 o = cache.v[3u * slot + 2u];
     if (gstats.chg[31] != 0u) {
-        vec4 o = cache.v[3u * slot + 2u];
         lighting_chg(CHG_TEX_WRITE, 1u);
         lighting_chg(CHG_TEX_D0 + lighting_chg_bin(o.rgb, v.rgb), 1u);
     }
     cache.v[3u * slot + 2u] = v;
+    // A 25 cm world cell never reaches the SVGF push (that push returns when
+    // size > 0.2), and a direct light that stays zero never marks the pixel.
+    // Compose already recorded the blocks that read this slot. Mark those
+    // when the packed irradiance the picture shows has changed.
+    if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
+        && lighting_pack_rgb9e5(o.rgb) != lighting_pack_rgb9e5(v.rgb)) {
+        lighting_compose_mark_slot(slot);
+    }
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
