@@ -343,7 +343,9 @@ under their own key. The CPU proof runs at nice and half the cores
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
 are targets GI is working towards (the room's 48 px swim and light structure):
-a miss prints MISS and fails nothing.
+a miss prints MISS and fails nothing. The room row's blotch PASS stays 0.023.
+The ADR 0039 cache-only mean of 0.014 is a separate command, `genos-stress room-blotch`
+([room blotch](lighting/room-blotch.md)). A PASS from gi-check is not that gate.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
   640x360, clock paused, each compared with a 320x180 reference
