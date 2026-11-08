@@ -55,6 +55,29 @@ fn surface_cache_attach_movers_round_trips() {
 }
 
 #[test]
+fn surface_cache_sh_texel_detail_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(!settings.surface_cache.sh_texel_detail);
+    settings
+        .set_key("surface_cache.sh_texel_detail", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_texel_detail);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_detail);
+    assert!(
+        !parsed.surface_cache.sh_cells,
+        "texel detail does not turn the cell store on"
+    );
+    settings
+        .set_key("surface_cache.sh_texel_detail", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_texel_detail);
+    assert!(settings
+        .set_key("surface_cache.sh_texel_detail", "maybe")
+        .is_err());
+}
+
+#[test]
 fn surface_cache_sh_cells_round_trips() {
     let mut settings = LightingSettings::default();
     assert!(!settings.surface_cache.sh_cells);

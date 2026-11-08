@@ -60,6 +60,7 @@ The surface light cache and the world cache are one cache ([glossary](../../ligh
 - Mover cache entries store an object-local position and normal (`surface_cache.attach_movers`). A cache entry is one hashed surface patch. GIBS attaches every surfel. Static geometry and world probes stay on the world lattice.
 - `surface_cache.ray_budget` 0 keeps the fixed ray lists. A total already under the budget is unchanged. Over the budget, the dispatch lists are scaled down and the floor's leftover entries are given back. A list that had work stays non-empty when the ceiling can hold one 16-ray entry per non-empty list. `surface_cache.dormant_rays` is a whole number of fresh rays per frame, 0 through 16. 0 keeps one sweep in eight. 1 through 16 trace one new 16-ray entry every `ceil(16 / rays)` frames.
 - Pixels read surface-cache texels directly (Lumen reads the cache only at ray hits).
+- ADR 0039 stage 3 (`surface_cache.sh_texel_detail`, default off) seeds an empty fine world texel from the one owning 25 cm SH cell, tilted to the texel's normal. The ADR's seed is a trilinear blend of neighbour cells. That blend is not this seed: stage 2 already reads one cell, and the four-cell blend is the read that stage left. Wright et al., Lumen, SIGGRAPH 2022, seed a card from the world radiance cache; this seed is that one cell, and it does not feed back into the cell.
 - Running-mean / MSME texels to a cap instead of Lumen's 4-frame accumulation.
 - IC placement as a trace rate on a power-of-two grid, not records in space; no R_geo; grad E from the filtered field; constants inferred (S72V).
 - A-SVGF lambda drives ray counts (A-SVGF has no ray-count rule); checks are measurement only (S74A, S76).
@@ -417,6 +418,8 @@ cargo test --release -p genos-stress --test cache_energy -- --ignored --nocaptur
 ```
 
 - **ADR 0039 stage 2 cache-only blotch:** the 0.014 mean is `genos-stress room-blotch`, recorded in [room-blotch.md](room-blotch.md). The gi-check room row still passes at 0.023. The grade does not path-trace, and it does not reuse an open-floor reference.
+- **ADR 0039 stage 3 SH texel detail:** `surface_cache.sh_texel_detail` (default off) makes an empty fine world texel show the one owning 25 cm SH cell, tilted to the texel's normal. Compose reads that value through `lighting_world_irradiance`, including when the denoiser is off. The cell is not written. Neighbour cells are not blended: that is the stage 2 owner read, and it departs from ADR 0039's trilinear seed. While the cell has light, the resample, parent, hit-patch, and probe seeds do not write that texel. A miss, a mover, and a slanted pixel keep those writers. A lamp change drops a stored seed before the cell is copied again. The setting does nothing unless `surface_cache.sh_cells` is on. The lavapipe proof is `cargo test -p genos-render --test texel_detail_prod`. It is not an accuracy gate and not a 4070 time. What is still open is [adr-0039-remaining.md](adr-0039-remaining.md).
+- **Networking for SH texel detail:** replicated state: none (the seed is GPU cache on the client that draws). Authority: that client. Prediction / rollback: none. Determinism: the dispatch is deterministic for the same cache contents and the same settings; pictures are not cross-device deterministic. Headless server: does not run the lighting pass.
 
 ## Reference check
 

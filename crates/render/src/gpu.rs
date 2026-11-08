@@ -182,6 +182,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 mod fog;
 mod media_check;
 mod stage;
+mod texel_detail;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -1096,6 +1097,16 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
+    /// One lavapipe dispatch of `lighting_world_irradiance_in` with the
+    /// production cache. The rows are the stage 3 covered and uncovered cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod()
+    }
+
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
     /// The fog budget scales this span. Lavapipe is the cloud device.
     pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
@@ -1609,6 +1620,8 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Lazy ADR 0039 stage 3 production dispatch. Absent until that test asks.
+    texel_detail: Option<texel_detail::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -2492,6 +2505,7 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                texel_detail: None,
                 media_ms: None,
                 media_groups: 1,
                 froxel: None,
@@ -8848,6 +8862,7 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_texel_detail();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
