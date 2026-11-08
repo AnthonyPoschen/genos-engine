@@ -7,7 +7,7 @@
 layout(local_size_x = 1) in;
 #include "lighting_common.glsl"
 
-const uint RAY_ROWS = 22u;
+const uint RAY_ROWS = 26u;
 const uint RAY_STRIDE = 8u;
 const uint RAY_HEAD = 8u;
 const uint RAY_HEAD_WORDS = 8u;
@@ -55,6 +55,29 @@ const uint RAY_CUT_OFF = 18u;
 const uint RAY_LOW = 19u;
 const uint RAY_COARSE = 20u;
 const uint RAY_MOVER = 21u;
+const uint RAY_HUE = 22u;
+const uint RAY_CHROMA = 23u;
+const uint RAY_LOBE_FLAT = 24u;
+const uint RAY_LOBE_SLANT = 25u;
+// Equal Rec.709 luminance to RAY_RED, all of it in green. 8 * 0.2126 / 0.7152.
+const vec3 RAY_HUE_RGB = vec3(0.0, 1.7008 / 0.7152, 0.0);
+const vec3 RAY_SLANT = vec3(0.0, 0.6, 0.8);
+const vec3 RAY_LOBE = vec3(40.0, 0.0, 0.0);
+const float RAY_LAMP_RANGE = 4.0;
+const float RAY_YOUNG = 2.0;
+const float RAY_WARM = 8.0;
+const uint RAY_DUE = 300u;
+const uint RAY_WAIT = 10u;
+const uint RAY_CMP_N = 7u;
+const uint RAY_CMP_FULL = 0u;
+const uint RAY_CMP_QUARTER = 1u;
+const uint RAY_CMP_IDLE = 2u;
+const uint RAY_CMP_DISAGREE = 3u;
+const uint RAY_CMP_STALE = 4u;
+const uint RAY_CMP_HUE = 5u;
+const uint RAY_CMP_CELL = 6u;
+const uint RAY_LIST_BASE = 16u;
+const uint RAY_LISTS = 6u;
 
 void ray_u(uint i, uint v) {
     outc.px[i] = v;
@@ -107,6 +130,21 @@ vec3 ray_pos(uint id) {
     return vec3(float(id) * RAY_GAP + RAY_X0, RAY_Y, RAY_Z);
 }
 
+vec3 ray_corner(vec3 p, vec3 n, uint k) {
+    const float cs = LIGHTING_SH_CELL;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 an = vec3(0.0);
+    an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
+    vec3 inset = LIGHTING_CELL_HALF * lighting_axis_vec(lighting_axis(n));
+    vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
+    vec3 g0 = floor(uv);
+    uint dx = k & 1u;
+    uint dy = (k >> 1u) & 1u;
+    uint dz = k >> 2u;
+    vec3 idx = g0 + vec3(float(dx), float(dy), float(dz));
+    return (idx + vec3(LIGHTING_CELL_HALF) + inset) * cs;
+}
+
 vec3 ray_rgb(uint mode, uint k) {
     if (mode == RAY_BLACK) {
         return vec3(0.0);
@@ -125,6 +163,9 @@ vec3 ray_rgb(uint mode, uint k) {
     }
     if (mode == RAY_CONTACT) {
         return (k & 1u) == 0u ? RAY_RED : vec3(0.0);
+    }
+    if (mode == RAY_HUE || mode == RAY_CHROMA) {
+        return (mode == RAY_CHROMA && (k & 1u) == 0u) ? RAY_RED : RAY_HUE_RGB;
     }
     return RAY_RED;
 }
@@ -156,10 +197,198 @@ void ray_seed(uint texel, vec3 rgb) {
     cache.v[LIGHTING_SC_SPARSE_AT + texel].z = -LIGHTING_SH_DETAIL_CONF;
 }
 
+void ray_ring(uint i, vec3 p, uint frame) {
+    uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+    ckeys.key[at] = floatBitsToUint(p.x);
+    ckeys.key[at + 1u] = floatBitsToUint(p.y);
+    ckeys.key[at + 2u] = floatBitsToUint(p.z);
+    ckeys.key[at + 3u] = floatBitsToUint(p.x);
+    ckeys.key[at + 4u] = floatBitsToUint(p.y);
+    ckeys.key[at + 5u] = floatBitsToUint(p.z);
+    ckeys.key[at + 6u] = floatBitsToUint(RAY_LAMP_RANGE);
+    ckeys.key[at + 7u] = floatBitsToUint(1.0);
+    ckeys.key[at + 8u] = frame;
+    ckeys.key[at + 9u] = floatBitsToUint(1.0);
+}
+
+void ray_lamps() {
+    ray_stash();
+    ray_head(0u);
+    gstats.diag[LIGHTING_DIAG_TEXEL_HELD] = 0u;
+    // Not quiet. Streak at the settle cap, so a fresh ring is a reaching lamp
+    // and not the global settling window. Frame is the push constant.
+    // ray_head clears ring 0's frame, so the entries are written after it.
+    ckeys.key[LIGHTING_SETTLE_STREAK_AT] = LIGHTING_SETTLE_ROUNDS;
+    uint fresh = lighting_frame() - 1u;
+    uint stale = 1u;
+    ray_ring(0u, ray_pos(0u), fresh);
+    ray_ring(1u, ray_pos(2u), stale);
+    for (uint id = 0u; id < 3u; id++) {
+        vec3 p = ray_pos(id);
+        vec3 n = RAY_UP;
+        uint slots[8];
+        uint ncell = 0u;
+        bool planted = true;
+        for (uint k = 0u; k < 8u; k++) {
+            uint s = ray_claim(ray_corner(p, n, k), n, LIGHTING_SH_CELL, RAY_RED, RAY_N);
+            if (s == ~0u) {
+                planted = false;
+                break;
+            }
+            slots[ncell] = s;
+            ncell += 1u;
+        }
+        uint texel = planted ? ray_claim(p, n, LIGHTING_SC_TEXEL, vec3(0.0), 0.0) : ~0u;
+        if (texel == ~0u) {
+            planted = false;
+        }
+        uint held0 = gstats.diag[LIGHTING_DIAG_TEXEL_HELD];
+        if (planted) {
+            lighting_compact_hold_texel_rays(texel);
+        }
+        uint held = gstats.diag[LIGHTING_DIAG_TEXEL_HELD] - held0;
+        uint looked = 0u;
+        uint accepted = 0u;
+        if (planted) {
+            LightingShField field = lighting_sh_gather(cache.v[3u * texel].xyz, cache.v[3u * texel + 1u].xyz, false);
+            looked = field.looked;
+            accepted = field.accepted;
+        }
+        uint at = RAY_HEAD + id * RAY_STRIDE;
+        ray_u(at, held);
+        ray_u(at + 1u, 0u);
+        ray_u(at + 2u, looked);
+        ray_u(at + 3u, accepted);
+        ray_u(at + 4u, 1u);
+        ray_u(at + 5u, 1u);
+        ray_u(at + 6u, 1u);
+        ray_u(at + 7u, planted ? 1u : 0u);
+    }
+}
+
+uint ray_list_hits(uint slot, uint n, uint base, int step) {
+    uint hits = 0u;
+    uint lim = min(n, 8192u);
+    for (uint i = 0u; i < lim; i++) {
+        uint at = uint(int(base) + step * int(i));
+        if (ckeys.key[at] == slot) {
+            hits += 1u;
+        }
+    }
+    return hits;
+}
+
+uint ray_one_field(uint id, vec3 cell_rgb, vec3 own_rgb, float samples) {
+    vec3 p = ray_pos(40u + id);
+    vec3 n = RAY_UP;
+    for (uint k = 0u; k < 8u; k++) {
+        ray_claim(ray_corner(p, n, k), n, LIGHTING_SH_CELL, cell_rgb, RAY_N);
+    }
+    uint texel = ray_claim(p, n, LIGHTING_SC_TEXEL, own_rgb, samples);
+    ray_u(id, texel);
+    if (texel == ~0u) {
+        ray_u(RAY_CMP_N, 0u);
+        return texel;
+    }
+    cache.v[3u * texel].w = uintBitsToFloat(lighting_frame());
+    return texel;
+}
+
+void ray_plant() {
+    ray_stash();
+    ray_head(1u);
+    uint full = ray_one_field(RAY_CMP_FULL, RAY_RED, RAY_RED, RAY_YOUNG);
+    cache.v[LIGHTING_SC_OBJ_AT + full].y = uintBitsToFloat(lighting_frame() - 1u);
+
+    uint quarter = ray_one_field(RAY_CMP_QUARTER, RAY_RED, RAY_RED, RAY_WARM);
+    cache.v[LIGHTING_SC_OBJ_AT + quarter].y = uintBitsToFloat(lighting_frame() - RAY_DUE);
+    cache.v[LIGHTING_SC_EST_AT + 2u * quarter + 1u] = vec4(1.0, 0.0, 0.0, 1.0);
+
+    uint idle = ray_one_field(RAY_CMP_IDLE, RAY_RED, RAY_RED, RAY_WARM);
+    cache.v[LIGHTING_SC_OBJ_AT + idle].y = uintBitsToFloat(lighting_frame() - RAY_WAIT);
+    cache.v[LIGHTING_SC_EST_AT + 2u * idle + 1u] = vec4(1.0, 0.0, 0.0, 1.0);
+
+    uint disagree = ray_one_field(RAY_CMP_DISAGREE, RAY_RED, RAY_NEW, RAY_N);
+    cache.v[LIGHTING_SC_OBJ_AT + disagree].y = uintBitsToFloat(lighting_frame() - 1u);
+
+    uint stale = ray_one_field(RAY_CMP_STALE, RAY_RED, RAY_RED, RAY_YOUNG);
+    cache.v[LIGHTING_SC_OBJ_AT + stale].y = uintBitsToFloat(lighting_frame());
+    ckeys.key[LIGHTING_LS_RISE_AT] = lighting_frame();
+
+    uint hue = ray_one_field(RAY_CMP_HUE, RAY_HUE_RGB, RAY_RED, RAY_N);
+    cache.v[LIGHTING_SC_OBJ_AT + hue].y = uintBitsToFloat(lighting_frame() - 1u);
+
+    vec3 cell_p = ray_pos(40u + RAY_CMP_CELL);
+    uint cell = ray_claim(cell_p, RAY_UP, LIGHTING_SH_CELL, RAY_RED, RAY_YOUNG);
+    ray_u(RAY_CMP_CELL, cell);
+    if (cell != ~0u) {
+        cache.v[3u * cell].w = uintBitsToFloat(lighting_frame());
+        cache.v[LIGHTING_SC_OBJ_AT + cell].y = uintBitsToFloat(lighting_frame() - 1u);
+    }
+    bool planted_ok = full != ~0u && quarter != ~0u && idle != ~0u && disagree != ~0u
+        && stale != ~0u && hue != ~0u && cell != ~0u;
+    ray_u(RAY_CMP_N, planted_ok ? 1u : 0u);
+}
+
+void ray_lists() {
+    uint pass = pc.lamp.y;
+    uint base = RAY_LIST_BASE + pass * (RAY_CMP_N * RAY_LISTS + 4u);
+    for (uint id = 0u; id < RAY_CMP_N; id++) {
+        uint slot = outc.px[id];
+        uint at = base + id * RAY_LISTS;
+        ray_u(at, ray_list_hits(slot, ckeys.key[LIGHTING_CACHE_SLOTS], LIGHTING_CACHE_SLOTS + 1u, 1));
+        ray_u(at + 1u, ray_list_hits(slot, ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], 2u * LIGHTING_CACHE_SLOTS, -1));
+        ray_u(at + 2u, ray_list_hits(slot, ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE_AT, 1));
+        ray_u(at + 3u, ray_list_hits(slot, ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_BG_AT, 1));
+        ray_u(at + 4u, ray_list_hits(slot, ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_CHG_AT, 1));
+        ray_u(at + 5u, ray_list_hits(slot, ckeys.key[LIGHTING_GRAD_COUNT_AT], LIGHTING_GRAD_LIST_AT, 1));
+    }
+    uint tail = base + RAY_CMP_N * RAY_LISTS;
+    ray_u(tail, gstats.waiting);
+    ray_u(tail + 1u, gstats.diag[LIGHTING_DIAG_TEXEL_HELD]);
+    ray_u(tail + 2u, ckeys.key[LIGHTING_CACHE_SLOTS]);
+    ray_u(tail + 3u, ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u]);
+}
+
+void ray_clear() {
+    uint at = lighting_change_at() + 3u;
+    uint hi = uint(work.v[at].w);
+    hi |= LIGHTING_SH_RAY_CUT_BIT;
+    work.v[at].w = float(hi);
+    ckeys.key[LIGHTING_CACHE_SLOTS] = 0u;
+    ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u] = 0u;
+    ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT] = 0u;
+    ckeys.key[LIGHTING_WRC_BG_COUNT_AT] = 0u;
+    ckeys.key[LIGHTING_WRC_CHG_COUNT_AT] = 0u;
+    ckeys.key[LIGHTING_GRAD_COUNT_AT] = 0u;
+    gstats.due = 0u;
+    gstats.waiting = 0u;
+    gstats.freed = 0u;
+    gstats.diag[LIGHTING_DIAG_TEXEL_HELD] = 0u;
+}
+
 void main() {
+    if (pc.lamp.x == 1u) {
+        ray_lamps();
+        return;
+    }
+    if (pc.lamp.x == 2u) {
+        ray_plant();
+        return;
+    }
+    if (pc.lamp.x == 3u) {
+        ray_lists();
+        return;
+    }
+    if (pc.lamp.x == 4u) {
+        ray_clear();
+        return;
+    }
     ray_stash();
     gstats.diag[LIGHTING_DIAG_TEXEL_HELD] = 0u;
-    gstats.diag[LIGHTING_DIAG_TEXEL_CUT] = 0u;
+    uint shown_r = 0u;
+    uint shown_g = 0u;
+    uint shown_b = 0u;
     for (uint id = 0u; id < RAY_ROWS; id++) {
         uint mode = id;
         ray_head(ray_variant(mode));
@@ -203,6 +432,12 @@ void main() {
                 cache.v[LIGHTING_SC_OBJ_AT + s].y = uintBitsToFloat(lighting_frame());
                 ckeys.key[LIGHTING_LS_RISE_AT] = lighting_frame();
             }
+            if (mode == RAY_LOBE_FLAT || mode == RAY_LOBE_SLANT) {
+                if (mode == RAY_LOBE_SLANT) {
+                    cache.v[3u * s + 1u].xyz = RAY_SLANT;
+                }
+                lighting_sh_put(s, vec3(0.0), vec3(0.0), RAY_LOBE, vec3(0.0));
+            }
             slots[ncell] = s;
             ncell += 1u;
         }
@@ -215,7 +450,8 @@ void main() {
             if (mode == RAY_OWN_DISAGREE) {
                 cache.v[3u * texel + 2u] = vec4(RAY_NEW, RAY_N);
             }
-            if (mode == RAY_OWN_AGREE || mode == RAY_FUTURE) {
+            if (mode == RAY_OWN_AGREE || mode == RAY_FUTURE || mode == RAY_HUE
+                || mode == RAY_LOBE_FLAT || mode == RAY_LOBE_SLANT) {
                 cache.v[3u * texel + 2u] = vec4(RAY_RED, RAY_N);
             }
             vec3 seed = RAY_RED;
@@ -254,13 +490,20 @@ void main() {
             seed_fp = floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + texel].y)
                 ^ floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + texel].z);
         }
-        uint cut0 = gstats.diag[LIGHTING_DIAG_TEXEL_CUT];
         uint held0 = gstats.diag[LIGHTING_DIAG_TEXEL_HELD];
         if (planted) {
             lighting_compact_hold_texel_rays(texel);
         }
-        uint rays = gstats.diag[LIGHTING_DIAG_TEXEL_CUT] - cut0;
         uint held = gstats.diag[LIGHTING_DIAG_TEXEL_HELD] - held0;
+        if (planted && mode == RAY_HUE) {
+            uint saved = gstats.ctrl_bits;
+            gstats.ctrl_bits = saved | 64u;
+            vec4 shown = lighting_sc_shown(texel);
+            gstats.ctrl_bits = saved;
+            shown_r = floatBitsToUint(shown.r);
+            shown_g = floatBitsToUint(shown.g);
+            shown_b = floatBitsToUint(shown.b);
+        }
         uint looked = 0u;
         uint accepted = 0u;
         if (planted) {
@@ -288,7 +531,7 @@ void main() {
         }
         uint at = RAY_HEAD + id * RAY_STRIDE;
         ray_u(at, held);
-        ray_u(at + 1u, rays);
+        ray_u(at + 1u, 0u);
         ray_u(at + 2u, looked);
         ray_u(at + 3u, accepted);
         ray_u(at + 4u, cell_same);
@@ -296,10 +539,22 @@ void main() {
         ray_u(at + 6u, mean_same);
         ray_u(at + 7u, planted ? 1u : 0u);
     }
-    ray_u(0u, gstats.diag[LIGHTING_DIAG_TEXEL_HELD]);
-    ray_u(1u, gstats.diag[LIGHTING_DIAG_TEXEL_CUT]);
+    uint held_rows = gstats.diag[LIGHTING_DIAG_TEXEL_HELD];
+    ray_u(0u, held_rows);
+    ray_u(1u, 0u);
     ray_u(2u, ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u]);
     ray_u(3u, ckeys.key[LIGHTING_WRC_CHG_COUNT_AT]);
+    atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_PX], 3u);
+    atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_HIT], 5u);
+    atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_HELD], 7u);
+    uint tail = RAY_HEAD + RAY_ROWS * RAY_STRIDE;
+    ray_u(tail, gstats.diag[LIGHTING_DIAG_LAMP_PX]);
+    ray_u(tail + 1u, gstats.diag[LIGHTING_DIAG_LAMP_HIT]);
+    ray_u(tail + 2u, gstats.diag[LIGHTING_DIAG_TEXEL_HELD]);
+    ray_u(tail + 3u, held_rows);
+    ray_u(tail + 4u, shown_r);
+    ray_u(tail + 5u, shown_g);
+    ray_u(tail + 6u, shown_b);
     for (uint v = 0u; v < RAY_VARIANTS; v++) {
         ray_u(4u + v, uint(work.v[v * 2u + 1u].w));
     }

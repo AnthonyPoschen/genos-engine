@@ -214,20 +214,20 @@ void main() {
     // Kept/fill gate counters (GENOS_LIGHTING_LAMP_PICK_DIAG): how many of the
     // 2 x kept hit threads get past each gate. Words in lighting_gpu.rs.
     if (lamp_pick_diag() && probe_hit) {
-        atomicAdd(gstats.diag[fill_hit ? 56u : 53u], 1u);
+        atomicAdd(gstats.diag[fill_hit ? LIGHTING_DIAG_LAMP_FILL_LIVE : LIGHTING_DIAG_LAMP_KEPT_LIVE], 1u);
     }
     if (LIGHTING_KEPT_RELIGHT && probe_hit && !fill_hit) {
         uint s = (h / lighting_rays()) % LIGHTING_STRATA;
         uint cur = lighting_stratum();
         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
         if (lamp_pick_diag() && urgent && s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA) {
-            atomicAdd(gstats.diag[34u], 1u);
+            atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_NEAR], 1u);
         }
         if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
             return;
         }
         if (lamp_pick_diag()) {
-            atomicAdd(gstats.diag[54u], 1u);
+            atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_KEPT_DUE], 1u);
         }
         // S78D: the halfway relight only where the light should have moved: a
         // lamp that moved reaches the hit since its trace, or the sun / sky
@@ -377,10 +377,10 @@ void main() {
     // Diag: hits past every early return (a held texel walks no lamps), and
     // the lamp-list entries the shade below walks.
     if (lamp_pick_diag() && probe_hit) {
-        atomicAdd(gstats.diag[fill_hit ? 60u : 55u], 1u);
+        atomicAdd(gstats.diag[fill_hit ? LIGHTING_DIAG_LAMP_FILL_SHADE : LIGHTING_DIAG_LAMP_KEPT_SHADE], 1u);
     }
     if (lamp_pick_diag() && (probe_hit || idx < pixels)) {
-        atomicAdd(gstats.diag[probe_hit ? 39u : 38u], count);
+        atomicAdd(gstats.diag[probe_hit ? LIGHTING_DIAG_LAMP_HIT : LIGHTING_DIAG_LAMP_PX], count);
     }
     // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
     // lamps picked systematically in proportion to their unshadowed light, each
@@ -633,7 +633,7 @@ void main() {
                                             float plane = 0.05 + 0.02 * dist;
                                             if (dot(nn, n) > 0.9 && abs(dot(npos - pos, n)) < plane) {
                                                 if (lamp_pick_diag()) {
-                                                    atomicAdd(gstats.diag[52u], 1u);
+                                                    atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_SPATIAL], 1u);
                                                 }
                                                 LampReservoir spatial = lamp_res_load(npi, prev_slot);
                                                 vec3 norigin = npos + nn * 0.02;
@@ -835,13 +835,13 @@ void main() {
                 // Counts a real shadow ray. A shadow-cell hit does not. Off
                 // unless GENOS_LIGHTING_LAMP_PICK_DIAG set the push bit.
                 if (lamp_pick_diag()) {
-                    uint slot_d = 48u;
+                    uint slot_d = LIGHTING_DIAG_LAMP_PIXELS;
                     if (fill_hit) {
-                        slot_d = 50u;
+                        slot_d = LIGHTING_DIAG_LAMP_FILLS;
                     } else if (probe_hit) {
-                        slot_d = 49u;
+                        slot_d = LIGHTING_DIAG_LAMP_KEPT;
                     } else if (idx >= pixels) {
-                        slot_d = 51u;
+                        slot_d = LIGHTING_DIAG_LAMP_CACHE;
                     }
                     atomicAdd(gstats.diag[slot_d], 1u);
                 }
@@ -975,7 +975,7 @@ void main() {
             lamp_res_store(idx, slot, cur);
             lamp_geo_store(idx, slot, geo);
             if (lamp_pick_diag()) {
-                atomicAdd(gstats.diag[58u], 1u);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_EXACT], 1u);
             }
         } else if (copied) {
             uvec4 geo = lamp_geo_load(idx, slot);
@@ -983,7 +983,7 @@ void main() {
             geo.z = LAMP_GEO_COPY;
             lamp_geo_store(idx, slot, geo);
             if (lamp_pick_diag()) {
-                atomicAdd(gstats.diag[57u], 1u);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_COPIED], 1u);
             }
         } else if (chosen_n > 0u) {
             LampReservoir cur = lamp_res_load(idx, slot);
@@ -1005,7 +1005,7 @@ void main() {
                 lamp_res_store(idx, slot, cur);
                 lamp_geo_store(idx, slot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR, color_word));
                 if (lamp_pick_diag()) {
-                    atomicAdd(gstats.diag[59u], 1u);
+                    atomicAdd(gstats.diag[LIGHTING_DIAG_LAMP_RESTIR], 1u);
                 }
             }
         }

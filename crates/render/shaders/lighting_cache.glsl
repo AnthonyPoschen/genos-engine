@@ -244,6 +244,27 @@ const uint LIGHTING_DIAG_SCREEN_LIST_FINE = 41u;
 const uint LIGHTING_DIAG_SCREEN_CHANGED = 61u;
 const uint LIGHTING_DIAG_SCREEN_FINE = 62u;
 const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
+// Lamp-pick counters. Live when GENOS_LIGHTING_LAMP_PICK_DIAG is set. The
+// default stats buffer is shared, so nothing else may add into these words.
+const uint LIGHTING_DIAG_LAMP_NEAR = 34u;
+const uint LIGHTING_DIAG_LAMP_PX = 38u;
+const uint LIGHTING_DIAG_LAMP_HIT = 39u;
+const uint LIGHTING_DIAG_LAMP_PIXELS = 48u;
+const uint LIGHTING_DIAG_LAMP_KEPT = 49u;
+const uint LIGHTING_DIAG_LAMP_FILLS = 50u;
+const uint LIGHTING_DIAG_LAMP_CACHE = 51u;
+const uint LIGHTING_DIAG_LAMP_SPATIAL = 52u;
+const uint LIGHTING_DIAG_LAMP_KEPT_LIVE = 53u;
+const uint LIGHTING_DIAG_LAMP_KEPT_DUE = 54u;
+const uint LIGHTING_DIAG_LAMP_KEPT_SHADE = 55u;
+const uint LIGHTING_DIAG_LAMP_FILL_LIVE = 56u;
+const uint LIGHTING_DIAG_LAMP_COPIED = 57u;
+const uint LIGHTING_DIAG_LAMP_EXACT = 58u;
+const uint LIGHTING_DIAG_LAMP_RESTIR = 59u;
+const uint LIGHTING_DIAG_LAMP_FILL_SHADE = 60u;
+// Visits that held a fine texel off the ray lists. Word 8 is not a lamp
+// counter and not a screen working word. It is a visit count, not a ray count.
+const uint LIGHTING_DIAG_TEXEL_HELD = 8u;
 bool lighting_diag_reserved(uint i) {
     return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
         || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
@@ -2105,6 +2126,7 @@ bool lighting_sh_on() {
 // ADR 0039 stage 3 (`surface_cache.sh_texel_detail`). Head 3.w bit 17.
 // ADR 0039 stage 4 (`surface_cache.sh_texel_ray_cut`). Head 3.w bit 18.
 // Bits 0-8 are sc_flags 23-31, 9-11 the budget shift, 12-16 the isolate toggles.
+// The two settings write their own bits. Setting one does not clear the other.
 const uint LIGHTING_SH_DETAIL_BIT = 131072u;
 const uint LIGHTING_SH_RAY_CUT_BIT = 262144u;
 // Same low confidence as the parent seed. A const, so it is not a new magic number.
@@ -2179,12 +2201,17 @@ vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
 // The neighbour read plus whether every looked-up corner was accepted and
 // whether those corners agree. `lo` and `hi` are the Rec.709 luminance of the
 // accepted corners' tilted light, the same weights `lighting_sc_sparse` uses
-// for an edge. A corner that was not looked up (trilinear weight 0) is not
-// in `looked`. The value is the existing blend: w is 1 when any corner remains.
+// for an edge. `lo_rgb` and `hi_rgb` are that same tilt, per channel, at this
+// query normal. The tilt is the stored mean when the query normal equals the
+// stored axis, so this one normal is not agreement over the sphere. A corner
+// that was not looked up (trilinear weight 0) is not in `looked`. The value
+// is the existing blend: w is 1 when any corner remains.
 struct LightingShField {
     vec4 value;
     float lo;
     float hi;
+    vec3 lo_rgb;
+    vec3 hi_rgb;
     uint looked;
     uint accepted;
 };
@@ -2214,6 +2241,8 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     uint accepted = 0u;
     float y_lo = 0.0;
     float y_hi = 0.0;
+    vec3 rgb_lo = vec3(0.0);
+    vec3 rgb_hi = vec3(0.0);
     bool y_set = false;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
         uint dx = k & 1u;
@@ -2258,10 +2287,14 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         if (!y_set) {
             y_lo = y;
             y_hi = y;
+            rgb_lo = lit;
+            rgb_hi = lit;
             y_set = true;
         } else {
             y_lo = min(y_lo, y);
             y_hi = max(y_hi, y);
+            rgb_lo = min(rgb_lo, lit);
+            rgb_hi = max(rgb_hi, lit);
         }
         accepted += 1u;
         sum += w * lit;
@@ -2272,6 +2305,8 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     built.value = ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
     built.lo = y_lo;
     built.hi = y_hi;
+    built.lo_rgb = rgb_lo;
+    built.hi_rgb = rgb_hi;
     built.looked = looks;
     built.accepted = accepted;
     return built;
@@ -3188,17 +3223,19 @@ bool lighting_lamp_settling_raw() {
     }
     return false;
 }
-// Fine-texel rays this compact visit did not list, and the visits that held them.
-// Displaying-compose uses diag[0..2]. These two are the scheduler, and they
-// count with the diagnostic compile off. 40, 41, and 61..63 stay the screen
-// pass's working words.
-const uint LIGHTING_DIAG_TEXEL_HELD = 38u;
-const uint LIGHTING_DIAG_TEXEL_CUT = 39u;
 // Rec.709 luminance, the same split `lighting_sc_sparse` uses when keys disagree
 // by more than LIGHTING_SC_SPARSE_RATIO. That ratio is the existing edge test.
-// It is not a new picture threshold.
+// It is not a new picture threshold. The channel test below uses this function
+// on each channel, so an equal luminance of a different hue is disagreement.
 bool lighting_sh_lum_disagrees(float hi, float lo) {
     return hi > 1.0e-3 && hi > LIGHTING_SC_SPARSE_RATIO * max(lo, 0.0);
+}
+bool lighting_sh_channels_disagree(vec3 a, vec3 b) {
+    a = max(a, vec3(0.0));
+    b = max(b, vec3(0.0));
+    return lighting_sh_lum_disagrees(max(a.r, b.r), min(a.r, b.r))
+        || lighting_sh_lum_disagrees(max(a.g, b.g), min(a.g, b.g))
+        || lighting_sh_lum_disagrees(max(a.b, b.b), min(a.b, b.b));
 }
 // ADR 0039 stage 4. A fine world texel does not take its own rays when the live
 // 25 cm field is a complete, agreeing read. The comparison is that live read.
@@ -3206,13 +3243,20 @@ bool lighting_sh_lum_disagrees(float hi, float lo) {
 // it would freeze the texel on its own copy. No own samples means the cell is
 // the estimate and the texel does not start a second one. Own samples that
 // sit past LIGHTING_SC_SPARSE_RATIO from the live read keep their rays, so a
-// later cell change is not frozen. A missing, empty, stale, back-facing, or
-// off-plane corner is not agreement. Corners that disagree by the sparse ratio
-// are a contact or a corner, and the texel keeps its rays. A stale texel, a
-// lamp that is settling, a lamp that reaches this texel, a nearby move, and an
-// object-local texel do not hold. A 25 cm cell does not hold: the world cache
-// is the source this read does not write. Claim stays false. The seed, the
-// cell mean, and the harmonics are not stored.
+// later cell change is not frozen. The ratio is applied to Rec.709 luminance
+// and to each channel of the tilted colour at this query normal. Equal
+// luminance of a different hue is not agreement: the pixel shows the texel's
+// own mean until a trace replaces it, and holding that mean would keep the
+// old hue. The tilt equals the stored mean when the query normal equals the
+// stored axis, so this decision is not agreement over the sphere. A missing,
+// empty, stale, back-facing, or off-plane corner is not agreement. Corners
+// that disagree by the sparse ratio are a contact or a corner, and the texel
+// keeps its rays. A stale texel, a lamp that is settling, a lamp that reaches
+// this texel, a nearby move, and an object-local texel do not hold. A 25 cm
+// cell does not hold: the world cache is the source this read does not write.
+// Claim stays false. The seed, the cell mean, and the harmonics are not stored.
+// The counter is the visit. The lists are the record of what was not appended.
+// gstats.waiting belongs to the rate scheduler, not to this gate.
 bool lighting_compact_hold_texel_rays(uint slot) {
     if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
@@ -3242,20 +3286,24 @@ bool lighting_compact_hold_texel_rays(uint slot) {
     if (lighting_sh_lum_disagrees(field.hi, field.lo)) {
         return false;
     }
+    if (lighting_sh_channels_disagree(field.hi_rgb, field.lo_rgb)) {
+        return false;
+    }
     vec4 own = cache.v[3u * slot + 2u];
     if (own.w >= LIGHTING_CACHE_HAS_W) {
         const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-        vec3 mine = own.rgb * lighting_sc_sun_gain(slot);
-        float y_own = dot(max(mine, vec3(0.0)), lw);
-        float y_field = dot(max(field.value.rgb, vec3(0.0)), lw);
+        vec3 mine = max(own.rgb * lighting_sc_sun_gain(slot), vec3(0.0));
+        vec3 live = max(field.value.rgb, vec3(0.0));
+        if (lighting_sh_channels_disagree(mine, live)) {
+            return false;
+        }
+        float y_own = dot(mine, lw);
+        float y_field = dot(live, lw);
         if (lighting_sh_lum_disagrees(max(y_own, y_field), min(y_own, y_field))) {
             return false;
         }
     }
-    uint rays = lighting_sc_entries(slot, true) * LIGHTING_CACHE_RAYS;
     atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_HELD], 1u);
-    atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_CUT], rays);
-    atomicAdd(gstats.waiting, 1u);
     return true;
 }
 // S65C: how much the lamps that moved since frame `updated` changed the

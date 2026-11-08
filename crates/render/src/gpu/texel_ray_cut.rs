@@ -12,7 +12,19 @@ use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
-const OUT_FLOATS: usize = 8 + 22 * 8;
+const ROWS: usize = 26;
+const STRIDE: usize = 8;
+const HEAD: usize = 8;
+const TAIL: usize = 8;
+const AGREE_FLOATS: usize = HEAD + ROWS * STRIDE + TAIL;
+const LAMP_ROWS: usize = 3;
+const LAMP_FLOATS: usize = HEAD + LAMP_ROWS * STRIDE;
+const CMP_N: usize = 7;
+const CMP_LISTS: usize = 6;
+const CMP_BASE: usize = 16;
+const CMP_BLOCK: usize = CMP_N * CMP_LISTS + 4;
+const CMP_FLOATS: usize = CMP_BASE + 2 * CMP_BLOCK;
+const OUT_FLOATS: usize = AGREE_FLOATS;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 4;
@@ -20,6 +32,13 @@ const HEAD_VARIANTS: usize = 4;
 /// change sphere. Quiet keeps a lamp ring from counting as a lamp touch.
 const PARAMS_Z: u32 = (1 << 5) | (1 << 10);
 const FRAME: u32 = 100;
+/// Reaching-lamp rows. Bit 10 stays clear. The streak is the settle cap.
+const LAMP_Z: u32 = 1 << 5;
+const LAMP_FRAME: u32 = 200;
+/// Production compact. Quiet so a settled interval is the slow rate.
+const COMPACT_Z: u32 = 1 << 10;
+const COMPACT_FRAME: u32 = 1000;
+const COMPACT_GROUPS: u32 = 1_048_576 / 64;
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -35,6 +54,7 @@ pub(super) struct Pipe {
     set: Handle,
     layout: Handle,
     pipe: Handle,
+    compact: Handle,
     cmd: Handle,
     fence: Handle,
 }
@@ -62,16 +82,96 @@ impl Gpu {
             self.texel_ray_cut = Some(self.create_texel_ray_cut_pipe()?);
         }
         super::texel_detail::release_compiler_heap();
+        let mut out = Vec::with_capacity(AGREE_FLOATS + LAMP_FLOATS + CMP_FLOATS);
         self.zero_texel_ray_cut()?;
+        self.write_texel_ray_cut_heads_now()?;
+        self.submit_texel_ray_cut(&[Step {
+            compact: false,
+            groups: 1,
+            params_z: PARAMS_Z,
+            frame: FRAME,
+            lamp_x: 0,
+            lamp_y: 0,
+        }])?;
+        let agree = self.read_texel_ray_cut()?;
+        out.extend_from_slice(&agree[..AGREE_FLOATS]);
+        self.zero_texel_ray_cut()?;
+        self.write_texel_ray_cut_heads_now()?;
+        self.submit_texel_ray_cut(&[Step {
+            compact: false,
+            groups: 1,
+            params_z: LAMP_Z,
+            frame: LAMP_FRAME,
+            lamp_x: 1,
+            lamp_y: 0,
+        }])?;
+        let lamp = self.read_texel_ray_cut()?;
+        out.extend_from_slice(&lamp[..LAMP_FLOATS]);
+        self.zero_texel_ray_cut()?;
+        self.write_texel_ray_cut_heads_now()?;
+        self.submit_texel_ray_cut(&[
+            Step {
+                compact: false,
+                groups: 1,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 2,
+                lamp_y: 0,
+            },
+            Step {
+                compact: true,
+                groups: COMPACT_GROUPS,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 0,
+                lamp_y: 0,
+            },
+            Step {
+                compact: false,
+                groups: 1,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 3,
+                lamp_y: 0,
+            },
+            Step {
+                compact: false,
+                groups: 1,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 4,
+                lamp_y: 0,
+            },
+            Step {
+                compact: true,
+                groups: COMPACT_GROUPS,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 0,
+                lamp_y: 0,
+            },
+            Step {
+                compact: false,
+                groups: 1,
+                params_z: COMPACT_Z,
+                frame: COMPACT_FRAME,
+                lamp_x: 3,
+                lamp_y: 1,
+            },
+        ])?;
+        let compact = self.read_texel_ray_cut()?;
+        out.extend_from_slice(&compact[..CMP_FLOATS]);
+        Ok(out)
+    }
+
+    fn write_texel_ray_cut_heads_now(&self) -> Result<(), String> {
         let keys = self
             .texel_ray_cut
             .as_ref()
             .ok_or("texel ray cut check is not created")?
             .keys
             .memory;
-        self.write_texel_ray_cut_heads(keys)?;
-        self.submit_texel_ray_cut()?;
-        self.read_texel_ray_cut()
+        self.write_texel_ray_cut_heads(keys)
     }
 
     pub(super) fn destroy_texel_ray_cut(&mut self) {
@@ -87,6 +187,9 @@ impl Gpu {
             }
             if !pipe.pipe.is_null() {
                 (self.fns.destroy_pipeline)(self.device, pipe.pipe, std::ptr::null());
+            }
+            if !pipe.compact.is_null() {
+                (self.fns.destroy_pipeline)(self.device, pipe.compact, std::ptr::null());
             }
             if !pipe.layout.is_null() {
                 (self.fns.destroy_layout)(self.device, pipe.layout, std::ptr::null());
@@ -210,7 +313,9 @@ impl Gpu {
                 "texel ray cut pipeline layout",
             )?;
         }
-        let code_pipe = self.texel_ray_cut_compute(layout)?;
+        let code_pipe = self.texel_ray_cut_compute(layout, super::TEXEL_RAY_CUT_SPV, "texel ray cut")?;
+        let compact_pipe =
+            self.texel_ray_cut_compute(layout, super::LIGHTING_COMPACT_SPV, "lighting compact")?;
         #[repr(C)]
         struct Size {
             kind: u32,
@@ -328,6 +433,7 @@ impl Gpu {
             set,
             layout,
             pipe: code_pipe,
+            compact: compact_pipe,
             cmd,
             fence,
         };
@@ -335,8 +441,13 @@ impl Gpu {
         Ok(built)
     }
 
-    fn texel_ray_cut_compute(&self, layout: Handle) -> Result<Handle, String> {
-        let module = self.shader(super::TEXEL_RAY_CUT_SPV)?;
+    fn texel_ray_cut_compute(
+        &self,
+        layout: Handle,
+        code: &[u8],
+        what: &str,
+    ) -> Result<Handle, String> {
+        let module = self.shader(code)?;
         #[repr(C)]
         struct Stage {
             s_type: i32,
@@ -384,7 +495,7 @@ impl Gpu {
                 std::ptr::null(),
                 &mut pipe,
             );
-            check(result, "texel ray cut pipeline")?;
+            check(result, what)?;
             (self.fns.destroy_shader)(self.device, module, std::ptr::null());
         }
         Ok(pipe)
@@ -540,12 +651,19 @@ impl Gpu {
         )
     }
 
-    fn submit_texel_ray_cut(&mut self) -> Result<(), String> {
-        let (pipe, layout, set, cmd, fence) = {
+    fn submit_texel_ray_cut(&mut self, steps: &[Step]) -> Result<(), String> {
+        let (pipe, compact, layout, set, cmd, fence) = {
             let Some(state) = self.texel_ray_cut.as_ref() else {
                 return Err("texel ray cut check is not created".into());
             };
-            (state.pipe, state.layout, state.set, state.cmd, state.fence)
+            (
+                state.pipe,
+                state.compact,
+                state.layout,
+                state.set,
+                state.cmd,
+                state.fence,
+            )
         };
         self.wait_fence(fence, "texel ray cut wait")?;
         let fences = [fence];
@@ -581,7 +699,6 @@ impl Gpu {
                 0,
                 std::ptr::null(),
             );
-            (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
             (self.fns.cmd_bind_set)(cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
             #[repr(C)]
             struct Pc {
@@ -589,20 +706,44 @@ impl Gpu {
                 params: [u32; 4],
                 lamp: [u32; 4],
             }
-            let pc = Pc {
-                dims: [1, 1, 1, 1],
-                params: [0, 1, PARAMS_Z, FRAME],
-                lamp: [0, 0, 0, 0],
-            };
-            (self.fns.cmd_push)(
-                cmd,
-                layout,
-                0x20,
-                0,
-                PC_BYTES,
-                std::ptr::from_ref(&pc).cast(),
-            );
-            (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
+            for (i, step) in steps.iter().enumerate() {
+                if i > 0 {
+                    let pass = MemBar {
+                        s_type: 46,
+                        next: std::ptr::null(),
+                        src_access: 0x40,
+                        dst_access: 0x60,
+                    };
+                    (self.fns.cmd_barrier)(
+                        cmd,
+                        0x800,
+                        0x800,
+                        0,
+                        1,
+                        &pass as *const MemBar as *const c_void,
+                        0,
+                        std::ptr::null(),
+                        0,
+                        std::ptr::null(),
+                    );
+                }
+                let which = if step.compact { compact } else { pipe };
+                (self.fns.cmd_bind_pipe)(cmd, 1, which);
+                let pc = Pc {
+                    dims: [1, 1, 1, 1],
+                    params: [0, 1, step.params_z, step.frame],
+                    lamp: [step.lamp_x, step.lamp_y, 0, 0],
+                };
+                (self.fns.cmd_push)(
+                    cmd,
+                    layout,
+                    0x20,
+                    0,
+                    PC_BYTES,
+                    std::ptr::from_ref(&pc).cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, step.groups, 1, 1);
+            }
             let back = MemBar {
                 s_type: 46,
                 next: std::ptr::null(),
@@ -658,6 +799,15 @@ impl Gpu {
         }
         self.wait_fence(fence, "texel ray cut done")
     }
+}
+
+struct Step {
+    compact: bool,
+    groups: u32,
+    params_z: u32,
+    frame: u32,
+    lamp_x: u32,
+    lamp_y: u32,
 }
 
 fn ray_cut_heads() -> [genos_scene::LightingSettings; HEAD_VARIANTS] {

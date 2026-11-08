@@ -386,9 +386,11 @@ pub struct LightingAtrousStats {
 /// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
 /// `fill_shade`). `near_tests` is non-due kept hits that ran the near-change
 /// walk, `px_lamps` / `hit_lamps` the lamp-list entries at shaded pixels and
-/// shaded hits (`diag[34]`, `diag[38]`, `diag[39]`). A `LIGHTING_DIAG` shader
-/// build also writes these words from the surface-cache trace, so read them
-/// from a default build.
+/// shaded hits (`LIGHTING_DIAG_LAMP_NEAR` 34, `LIGHTING_DIAG_LAMP_PX` 38,
+/// `LIGHTING_DIAG_LAMP_HIT` 39). Those words are the lamp counters. The ray
+/// cut's held-visit count is `LIGHTING_DIAG_TEXEL_HELD` (8) and does not add
+/// here. A `LIGHTING_DIAG` shader build also writes some of these words from
+/// the surface-cache trace, so read them from a default build.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,

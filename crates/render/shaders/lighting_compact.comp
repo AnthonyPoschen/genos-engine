@@ -213,6 +213,8 @@ void main() {
         // held here. A fine texel whose live cell read agrees drops its own
         // rays. The cell lists above are the update. An expired unread texel
         // still frees. The hold does not write the cell or the seed.
+        // One invocation owns this slot. The free below is that slot's record
+        // in this round, not another thread's slot and not a second round.
         if (lighting_compact_hold_texel_rays(slot)) {
             if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
