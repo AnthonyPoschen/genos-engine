@@ -20,7 +20,7 @@ fn flatten(text) {
     flat
 }
 
-fn shoot(name, yaw) {
+fn shoot(name, yaw, eye, pitch) {
     let cam = camera(#{ position: eye, yaw: yaw, pitch: pitch });
     log(`pose ${name} x=${cam.position[0]} y=${cam.position[1]} z=${cam.position[2]} yaw=${cam.yaw} pitch=${cam.pitch}`);
     let settled = wait_settled(#{
@@ -48,5 +48,5 @@ fn shoot(name, yaw) {
     require(settings.text.contains("sc_settle=0"), `wrong-flags sc_settle ${name}`);
 }
 
-shoot("room-a", -0.679);
-shoot("room-b", -36.0 * 0.0174533);
+shoot("room-a", -0.679, eye, pitch);
+shoot("room-b", -36.0 * 0.0174533, eye, pitch);

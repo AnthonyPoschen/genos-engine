@@ -3479,10 +3479,21 @@ mod tests {
         tools.apply_present(offered, settled_now, still, 1.0, None, None);
     }
 
+    /// The command queue is process-wide. Tests that take it hold this for
+    /// the whole run so one does not answer the other's call.
+    fn script_queue() -> std::sync::MutexGuard<'static, ()> {
+        static QUEUE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        match QUEUE.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        }
+    }
+
     /// The byte is the present the boundary is drawing. It is a synthetic
     /// fixture, not a photographed room and not a physical grade.
     #[test]
     fn the_present_boundary_pairs_the_read_back_with_the_saved_frame() {
+        let _queue = script_queue();
         let mut tools = Tools::new();
         tools.frame = 309;
         let (open_tx, open_rx) = std::sync::mpsc::channel();
@@ -3582,5 +3593,238 @@ mod tests {
     fn draw_taken(tools: &mut Tools, settled_now: bool, still: u32, device_read_back: bool) {
         tools.accept_commands(None);
         draw(tools, settled_now, still, device_read_back);
+    }
+
+    /// Settings text the capture catalogue resolves. This is `LightingSettings`
+    /// text, not a string written to satisfy the script's `contains` checks.
+    fn capture_settings_text() -> String {
+        let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        settings.surface_cache.sh_cells = true;
+        settings.experiments.toggles = genos_scene::LIGHTING_TOGGLE_CELLS_ONLY;
+        settings.experiments.cache_async = false;
+        settings.to_text()
+    }
+
+    /// `wait_settled` was taken at the start of this present. Draw that present,
+    /// then later ones, until the real settle job replies. The offered byte is
+    /// the present being drawn. It is a synthetic fixture, not a room photograph.
+    fn drive_taken_settle(tools: &mut Tools) {
+        let mut opening = true;
+        for _ in 0..16 {
+            if !opening {
+                tools.accept_commands(None);
+            }
+            opening = false;
+            let upcoming = tools.frame + 1;
+            tools.arm_readback();
+            tools.apply_present(Some(pixel(upcoming)), true, 7, 1.0, None, None);
+            if tools.jobs.is_empty() {
+                return;
+            }
+        }
+        if let Some(running) = tools.jobs.pop() {
+            genos_mcp::command::reply(
+                running.id,
+                Err("headless settle fixture ran out of presents".into()),
+            );
+        }
+    }
+
+    /// Headless answers for the commands this script sends. `wait_settled` is
+    /// the production job. `camera` uses the production argument parser and
+    /// `camera_value`. There is no renderer, so `status` and the lighting
+    /// pass counters are fixture values. The settings body is not.
+    fn serve_room_script(
+        tools: &mut Tools,
+        camera: &mut genos_scene::Camera,
+        settings_text: &str,
+        cmd: &genos_mcp::command::Pending,
+    ) {
+        let args = crate::value::Args(&cmd.args);
+        let reply = match cmd.name.as_str() {
+            "status" => Ok(crate::value::obj(vec![(
+                "frame",
+                crate::value::num(tools.frame as f64),
+            )])),
+            "time" => match (args.f64("fixed_dt"), args.bool("pause"), args.bool("real_time")) {
+                (Ok(dt), Ok(_), Ok(_)) => Ok(crate::value::obj(vec![
+                    ("paused", Value::Bool(tools.paused)),
+                    ("fixed_dt", dt.map_or(Value::Null, crate::value::num)),
+                    ("frame", crate::value::num(tools.frame as f64)),
+                ])),
+                (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => Err(err),
+            },
+            "view" => match args.str("mode") {
+                Ok(Some(mode)) => match Look::parse(&mode) {
+                    Ok(look) => {
+                        tools.look = look;
+                        Ok(crate::value::obj(vec![(
+                            "view",
+                            crate::value::text(tools.look.name()),
+                        )]))
+                    }
+                    Err(err) => Err(err),
+                },
+                Ok(None) => Ok(crate::value::obj(vec![(
+                    "view",
+                    crate::value::text(tools.look.name()),
+                )])),
+                Err(err) => Err(err),
+            },
+            "camera" => match (args.vec3("position"), args.f32("yaw"), args.f32("pitch")) {
+                (Ok(position), Ok(yaw), Ok(pitch)) => {
+                    let pos = position.unwrap_or(camera.position);
+                    let yaw = yaw.unwrap_or(camera.yaw);
+                    let pitch = pitch.unwrap_or(camera.pitch);
+                    camera.set_pose(
+                        pos,
+                        yaw,
+                        pitch.clamp(-genos_scene::PITCH_LIMIT, genos_scene::PITCH_LIMIT),
+                    );
+                    Ok(camera_value(camera))
+                }
+                (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => Err(err),
+            },
+            "get_lighting_settings" => Ok(crate::value::obj(vec![
+                ("text", crate::value::text(settings_text)),
+                ("passes", crate::value::list(Vec::new())),
+                ("post_ms_device", crate::value::num(0.0)),
+                ("post_vram_device", crate::value::num(0.0)),
+            ])),
+            "wait" | "step" | "wait_settled" => match tools.frame_job(&cmd.name, &args, false) {
+                Ok(Some(Step::Job(job))) => {
+                    tools.jobs.push(Running { id: cmd.id, job });
+                    drive_taken_settle(tools);
+                    return;
+                }
+                Ok(Some(Step::Reply(value))) => Ok(value),
+                Ok(None) => Err(format!("{} is not a frame job", cmd.name)),
+                Err(err) => Err(err),
+            },
+            other => Err(format!(
+                "headless room-script fixture has no {other}"
+            )),
+        };
+        genos_mcp::command::reply(cmd.id, reply);
+    }
+
+    /// The checked-in room script, through `run_script`'s engine. Earlier
+    /// harness tests read that file as text or drove a Rust helper, so a
+    /// name the function cannot see stayed green. Rhai functions do not
+    /// close over an outer `let` or a bare `const`.
+    #[test]
+    fn the_checked_in_room_script_runs_both_poses_through_the_host() {
+        let _queue = script_queue();
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/stress/scripts/room_blotch.rhai");
+        let script = script.canonicalize().unwrap();
+        assert!(
+            script.ends_with("examples/stress/scripts/room_blotch.rhai"),
+            "{}",
+            script.display()
+        );
+        let dir = std::env::temp_dir().join(format!(
+            "genos-room-script-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings_text = capture_settings_text();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fixture_seen = std::sync::Arc::clone(&seen);
+        let fixture_stop = std::sync::Arc::clone(&stop);
+        let fixture_text = settings_text.clone();
+        let fixture_dir = dir.clone();
+        let fixture = std::thread::spawn(move || {
+            let mut tools = Tools::new();
+            tools.out_dir = fixture_dir;
+            let mut camera = genos_scene::Camera::new(0.0, 0.0, 0.0);
+            while !fixture_stop.load(std::sync::atomic::Ordering::SeqCst) {
+                for cmd in genos_mcp::command::take_wait(std::time::Duration::from_millis(20))
+                {
+                    match fixture_seen.lock() {
+                        Ok(mut seen) => seen.push((cmd.name.clone(), cmd.args.clone())),
+                        Err(poison) => poison
+                            .into_inner()
+                            .push((cmd.name.clone(), cmd.args.clone())),
+                    }
+                    serve_room_script(&mut tools, &mut camera, &fixture_text, &cmd);
+                }
+            }
+        });
+        let ok = crate::script::run_script(&crate::script::ScriptRun {
+            script,
+            report_dir: dir.clone(),
+            trace: false,
+        });
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        fixture.join().unwrap();
+        let result = std::fs::read_to_string(dir.join("result.json")).unwrap();
+        assert!(ok, "{result}");
+        let seen = match seen.lock() {
+            Ok(seen) => seen.clone(),
+            Err(poison) => poison.into_inner().clone(),
+        };
+        let names: Vec<&str> = seen.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "status",
+                "time",
+                "view",
+                "camera",
+                "wait_settled",
+                "get_lighting_settings",
+                "camera",
+                "wait_settled",
+                "get_lighting_settings",
+            ]
+        );
+        let cameras: Vec<&Value> = seen
+            .iter()
+            .filter(|(name, _)| name == "camera")
+            .map(|(_, args)| args)
+            .collect();
+        let eyes = [0.664_f64, 1.699, 9.629];
+        let yaws = [-0.679_f64, -36.0 * 0.017_453_3];
+        for (args, yaw) in cameras.iter().zip(yaws) {
+            let position = args.get("position").and_then(Value::as_array).unwrap();
+            for (got, want) in position.iter().zip(eyes) {
+                let got = got.as_f64().unwrap();
+                assert!((got - want).abs() < 1.0e-9, "eye {got} {want}");
+            }
+            let got_yaw = args.get("yaw").and_then(Value::as_f64).unwrap();
+            let got_pitch = args.get("pitch").and_then(Value::as_f64).unwrap();
+            assert!((got_yaw - yaw).abs() < 1.0e-9, "yaw {got_yaw} {yaw}");
+            assert!((got_pitch - -0.12).abs() < 1.0e-9, "pitch {got_pitch}");
+        }
+        for (name, args) in seen
+            .iter()
+            .filter(|(name, _)| name == "wait_settled")
+        {
+            let _ = name;
+            assert_eq!(args.get("timeout_frames").and_then(Value::as_i64), Some(900));
+            assert_eq!(args.get("then_frames").and_then(Value::as_i64), Some(2));
+            assert_eq!(args.get("width").and_then(Value::as_i64), Some(320));
+            assert_eq!(args.get("height").and_then(Value::as_i64), Some(180));
+        }
+        let paths: Vec<&str> = seen
+            .iter()
+            .filter(|(name, _)| name == "wait_settled")
+            .filter_map(|(_, args)| args.get("path").and_then(Value::as_str))
+            .collect();
+        assert_eq!(paths, ["room-a-live.png", "room-b-live.png"]);
+        for name in ["room-a", "room-b"] {
+            let resolved = std::fs::read_to_string(dir.join(format!("resolved-{name}.txt"))).unwrap();
+            assert_eq!(resolved, settings_text);
+            assert!(resolved.contains("sc_settle=0"));
+            assert!(dir.join(format!("{name}-live.png")).is_file());
+        }
+        let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
+        assert!(report.contains("schedule pose=room-a"));
+        assert!(report.contains("schedule pose=room-b"));
+        assert!(report.contains("captured=true"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

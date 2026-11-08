@@ -2603,8 +2603,8 @@ mod tests {
         assert!(!SCRIPT.contains("settings.text.replace"));
         assert_eq!(SCRIPT.matches("then_frames: 2").count(), 1);
         assert_eq!(SCRIPT.matches("timeout_frames: 900").count(), 1);
-        assert!(SCRIPT.contains("shoot(\"room-a\", -0.679)"));
-        assert!(SCRIPT.contains("shoot(\"room-b\", -36.0 * 0.0174533)"));
+        assert!(SCRIPT.contains("shoot(\"room-a\", -0.679, eye, pitch)"));
+        assert!(SCRIPT.contains("shoot(\"room-b\", -36.0 * 0.0174533, eye, pitch)"));
         assert_eq!(SCRIPT.matches("save_text(").count(), 1);
         assert!(SCRIPT.contains("sc_settle=0"));
         assert!(SCRIPT.contains("width: 320"));
