@@ -275,6 +275,19 @@ fn json_fields(body: &str) -> Vec<(String, String)> {
     fields
 }
 
+/// One integer field. Repeated fields and non-integers are refused.
+fn json_u32_field(note: &str, field: &str) -> Option<u32> {
+    let mut values = json_fields(note)
+        .into_iter()
+        .filter(|(key, _)| key == field)
+        .map(|(_, value)| value);
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.parse().ok()
+}
+
 fn keep_fail(dir: &Path, detail: &str) -> ! {
     let prior = std::fs::read_to_string(dir.join("result.json")).unwrap_or_default();
     let mut rows = vec![
@@ -387,11 +400,16 @@ fn reference_verdict(facts: &ReferenceFacts) -> Result<(), String> {
     if facts.hit_count == 0 {
         return Err("blocked: reference has no hits".into());
     }
-    if facts.noise > facts.noise_target {
-        let capped = facts.seconds >= facts.seconds_budget || facts.spp >= facts.max_spp;
-        let why = if capped { "capped" } else { "above the noise target" };
+    if facts.noise < 0.0 || facts.noise > facts.noise_target {
+        let why = if facts.noise < 0.0 {
+            "below 0"
+        } else if facts.seconds >= facts.seconds_budget || facts.spp >= facts.max_spp {
+            "capped"
+        } else {
+            "above the noise target"
+        };
         return Err(format!(
-            "blocked: reference noise {:.6} > {:.3} ({why}, spp {}, seconds {:.3})",
+            "blocked: reference noise {:.6} is outside 0..={:.3} ({why}, spp {}, seconds {:.3})",
             facts.noise, facts.noise_target, facts.spp, facts.seconds
         ));
     }
@@ -685,18 +703,7 @@ fn reference_acceptable(
             reference.spp
         ));
     }
-    if reference.noise > NOISE_TARGET {
-        let why = if reference.spp >= MAX_SPP {
-            "capped"
-        } else {
-            "above the noise target"
-        };
-        return Err(format!(
-            "blocked: reference noise {:.6} > {:.3} ({why}, spp {})",
-            reference.noise, NOISE_TARGET, reference.spp
-        ));
-    }
-    Ok(())
+    reject_noise(reference.noise, reference.spp, MAX_SPP)
 }
 
 fn reference_within_offline_cap(
@@ -717,18 +724,23 @@ fn reference_within_offline_cap(
             reference.spp
         ));
     }
-    if reference.noise > NOISE_TARGET {
-        let why = if reference.spp >= spp_cap {
-            "capped"
-        } else {
-            "above the noise target"
-        };
-        return Err(format!(
-            "blocked: reference noise {:.6} > {:.3} ({why}, spp {})",
-            reference.noise, NOISE_TARGET, reference.spp
-        ));
+    reject_noise(reference.noise, reference.spp, spp_cap)
+}
+
+fn reject_noise(noise: f32, spp: u32, spp_cap: u32) -> Result<(), String> {
+    if (0.0..=NOISE_TARGET).contains(&noise) {
+        return Ok(());
     }
-    Ok(())
+    let why = if noise < 0.0 {
+        "below 0"
+    } else if spp >= spp_cap {
+        "capped"
+    } else {
+        "above the noise target"
+    };
+    Err(format!(
+        "blocked: reference noise {noise:.6} is outside 0..={NOISE_TARGET:.3} ({why}, spp {spp})"
+    ))
 }
 
 fn pictures_match(left: &genos_debug::Reference, right: &genos_debug::Reference) -> bool {
@@ -835,12 +847,88 @@ fn promote_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> {
         .acceptance_dir
         .join(format!("{key:016x}.provenance.json"));
     let note = promotion_note(commit, key, promotion.produced, promotion.reference, true);
-    std::fs::write(&note_path, note).map_err(|err| err.to_string())?;
-    if let Err(err) = std::fs::copy(promotion.isolated, &dest) {
-        let _ = std::fs::remove_file(&note_path);
-        return Err(err.to_string());
-    }
+    publish_cached_pair(
+        promotion.isolated,
+        &dest,
+        &note_path,
+        &note,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )?;
     Ok(dest)
+}
+
+/// Stage the reference and its sidecar in the destination directory, then
+/// rename each into place. A failure before the first rename leaves the
+/// existing pair. The two renames are not one transaction: a failure between
+/// them leaves the new reference beside the previous sidecar, and a later
+/// read still refuses a sidecar that does not match.
+fn publish_cached_pair(
+    isolated: &Path,
+    dest: &Path,
+    note_path: &Path,
+    note: &str,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    let parent = dest
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let token = publish_token();
+    let ref_tmp = parent.join(format!(".{token}.ref.partial"));
+    let note_tmp = parent.join(format!(".{token}.provenance.partial"));
+    let cleanup = || {
+        let _ = std::fs::remove_file(&ref_tmp);
+        let _ = std::fs::remove_file(&note_tmp);
+    };
+    if let Err(err) = std::fs::copy(isolated, &ref_tmp) {
+        cleanup();
+        return Err(format!("staged reference copy failed: {err}"));
+    }
+    let staged = match std::fs::read(&ref_tmp) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            cleanup();
+            return Err(format!("staged reference read failed: {err}"));
+        }
+    };
+    let source = match std::fs::read(isolated) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            cleanup();
+            return Err(format!("isolated reference read failed: {err}"));
+        }
+    };
+    if staged != source || genos_debug::reference::read_cached(&ref_tmp, width, height).is_none() {
+        cleanup();
+        return Err("staged reference does not match the isolated file".into());
+    }
+    if let Err(err) = std::fs::write(&note_tmp, note) {
+        cleanup();
+        return Err(format!("staged provenance write failed: {err}"));
+    }
+    if let Err(err) = std::fs::rename(&ref_tmp, dest) {
+        cleanup();
+        return Err(format!("reference replace failed: {err}"));
+    }
+    if let Err(err) = std::fs::rename(&note_tmp, note_path) {
+        let _ = std::fs::remove_file(&note_tmp);
+        return Err(format!(
+            "provenance replace failed after the reference replace: {err}"
+        ));
+    }
+    Ok(())
+}
+
+fn publish_token() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TOKEN: AtomicU64 = AtomicU64::new(1);
+    TOKEN.fetch_add(1, Ordering::Relaxed)
+}
+
+fn finite_clock(seconds: f32) -> Option<f32> {
+    seconds.is_finite().then_some(seconds)
 }
 
 /// Sidecar for one floor trace. This is a record of the budget and the
@@ -851,10 +939,14 @@ fn floor_promotion_note(
     produced: &genos_debug::reference::RefSetup,
     reference: &genos_debug::Reference,
     promoted: bool,
+    elapsed: Option<f32>,
 ) -> String {
+    let seconds = match elapsed {
+        Some(seconds) => seconds.to_string(),
+        None => "null".to_string(),
+    };
     format!(
-        "{{\n  \"source_commit\": \"{commit}\",\n  \"cache_key\": \"{key:016x}\",\n  \"scene\": \"floor\",\n  \"seconds\": {},\n  \"seconds_budget\": {},\n  \"acceptance_seconds\": {TRACE_SECONDS},\n  \"noise\": {},\n  \"spp\": {},\n  \"acceptance_max_spp\": {MAX_SPP},\n  \"offline_max_spp\": {},\n  \"offline_spp_ceiling\": {OFFLINE_MAX_SPP},\n  \"noise_target\": {},\n  \"spp_batch\": {},\n  \"bounces\": {},\n  \"width\": {},\n  \"height\": {},\n  \"yaw_bits\": {},\n  \"pitch_bits\": {},\n  \"eye_bits\": [{}, {}, {}],\n  \"triangles\": {},\n  \"specular\": {},\n  \"materials\": {},\n  \"estimator\": \"cpu-analytic\",\n  \"promoted\": {promoted}\n}}\n",
-        reference.seconds,
+        "{{\n  \"source_commit\": \"{commit}\",\n  \"cache_key\": \"{key:016x}\",\n  \"scene\": \"floor\",\n  \"seconds\": {seconds},\n  \"seconds_budget\": {},\n  \"acceptance_seconds\": {TRACE_SECONDS},\n  \"noise\": {},\n  \"spp\": {},\n  \"acceptance_max_spp\": {MAX_SPP},\n  \"offline_max_spp\": {},\n  \"offline_spp_ceiling\": {OFFLINE_MAX_SPP},\n  \"noise_target\": {},\n  \"spp_batch\": {},\n  \"bounces\": {},\n  \"width\": {},\n  \"height\": {},\n  \"yaw_bits\": {},\n  \"pitch_bits\": {},\n  \"eye_bits\": [{}, {}, {}],\n  \"triangles\": {},\n  \"specular\": {},\n  \"materials\": {},\n  \"estimator\": \"cpu-analytic\",\n  \"promoted\": {promoted}\n}}\n",
         produced.seconds,
         reference.noise,
         reference.spp,
@@ -875,6 +967,53 @@ fn floor_promotion_note(
     )
 }
 
+/// Trace clock recorded beside an isolated floor file.
+///
+/// A loaded `.ref` reports seconds 0 because the file has no clock. That 0 is
+/// not a measurement. A missing sidecar clock stays absent.
+fn recorded_trace_seconds(reused: bool, traced: f32, prior_note: &str) -> Option<f32> {
+    if reused && traced.to_bits() == 0.0f32.to_bits() {
+        let seconds = json_fields(prior_note)
+            .into_iter()
+            .find(|(key, _)| key == "seconds")
+            .and_then(|(_, value)| value.parse::<f32>().ok());
+        return seconds.filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+    }
+    traced.is_finite().then_some(traced)
+}
+
+fn cached_reuse_line(label: &str, commit: &str, key: u64) -> String {
+    format!(
+        "{label}: isolated file has provenance for {commit} key {key:016x}; render_cached reuses the saved file when its noise is at or under {NOISE_TARGET} or its spp is already at the setup cap, including a capped noisy file that is not traced again"
+    )
+}
+
+fn write_floor_isolated_sidecar(
+    note_path: &Path,
+    commit: &str,
+    key: u64,
+    produced: &genos_debug::reference::RefSetup,
+    reference: &genos_debug::Reference,
+    promoted: bool,
+    elapsed: Option<f32>,
+) -> Result<(), String> {
+    let note = floor_promotion_note(commit, key, produced, reference, promoted, elapsed);
+    if let Some(parent) = note_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    std::fs::write(note_path, note).map_err(|err| err.to_string())
+}
+
+fn hall_isolated_note(
+    commit: &str,
+    key: u64,
+    produced: &genos_debug::reference::RefSetup,
+    reference: &genos_debug::Reference,
+    promote_succeeded: bool,
+) -> String {
+    promotion_note(commit, key, produced, reference, promote_succeeded)
+}
+
 fn floor_isolated_trust(
     path: &Path,
     note: &str,
@@ -889,7 +1028,7 @@ fn floor_isolated_trust(
         && note.contains(&format!("\"cache_key\": \"{key:016x}\""))
         && note.contains("\"scene\": \"floor\"")
         && note.contains(&format!("\"acceptance_max_spp\": {MAX_SPP}"))
-        && note.contains(&format!("\"offline_max_spp\": {}", produced.max_spp))
+        && json_u32_field(note, "offline_max_spp") == Some(produced.max_spp)
         && note.contains(&format!("\"offline_spp_ceiling\": {OFFLINE_MAX_SPP}"))
         && note.contains(&format!("\"acceptance_seconds\": {TRACE_SECONDS}"))
         && note.contains(&format!("\"yaw_bits\": {}", produced.yaw.to_bits()))
@@ -977,12 +1116,22 @@ fn promote_floor_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> 
     let note_path = promotion
         .acceptance_dir
         .join(format!("{key:016x}.provenance.json"));
-    let note = floor_promotion_note(commit, key, promotion.produced, promotion.reference, true);
-    std::fs::write(&note_path, note).map_err(|err| err.to_string())?;
-    if let Err(err) = std::fs::copy(promotion.isolated, &dest) {
-        let _ = std::fs::remove_file(&note_path);
-        return Err(err.to_string());
-    }
+    let note = floor_promotion_note(
+        commit,
+        key,
+        promotion.produced,
+        promotion.reference,
+        true,
+        finite_clock(promotion.reference.seconds),
+    );
+    publish_cached_pair(
+        promotion.isolated,
+        &dest,
+        &note_path,
+        &note,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )?;
     Ok(dest)
 }
 
@@ -1106,9 +1255,7 @@ fn precompute_hall_lit64_offline(seconds: f32) -> Result<String, String> {
     };
     isolated_trust(&isolated, &existing, &commit, &produced, key)?;
     if isolated.exists() {
-        eprintln!(
-            "precompute: isolated file has provenance for {commit} key {key:016x}; render_cached reuses it only when noise is at or under {NOISE_TARGET}"
-        );
+        eprintln!("{}", cached_reuse_line("precompute", &commit, key));
     }
     eprintln!(
         "precompute identity\ncommit {commit}\nscene hall\nlit power 1\nbounces 64\nkey {key:016x}\neye {:?} yaw {} bits {} pitch {} bits {}\nsize {}x{}\nspp_batch {} noise_target {} max_spp {} seconds {}\ntriangles {} specular {} materials {}\nacceptance_seconds {}\nisolated {}\nacceptance_cache {}",
@@ -1131,10 +1278,7 @@ fn precompute_hall_lit64_offline(seconds: f32) -> Result<String, String> {
         acceptance_cache().display()
     );
     let reference = genos_debug::reference::render_cached(&produced, &isolated_dir);
-    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
-    let note = promotion_note(&commit, key, &produced, &reference, false);
-    std::fs::write(&note_path, &note).map_err(|err| err.to_string())?;
-    let dest = promote_isolated(&Promotion {
+    let promote_result = promote_isolated(&Promotion {
         reference: &reference,
         produced: &produced,
         acceptance: &acceptance,
@@ -1142,7 +1286,11 @@ fn precompute_hall_lit64_offline(seconds: f32) -> Result<String, String> {
         expected_commit: &commit,
         isolated: &isolated,
         acceptance_dir: &acceptance_cache(),
-    })?;
+    });
+    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
+    let note = hall_isolated_note(&commit, key, &produced, &reference, promote_result.is_ok());
+    std::fs::write(&note_path, note).map_err(|err| err.to_string())?;
+    let dest = promote_result?;
     eprintln!(
         "precompute promoted {} noise {} spp {} seconds {}",
         dest.display(),
@@ -1190,10 +1338,9 @@ fn precompute_floor_b64_offline(max_spp: u32, seconds: f32) -> Result<String, St
         String::new()
     };
     floor_isolated_trust(&isolated, &existing, &commit, &produced, key)?;
-    if isolated.exists() {
-        eprintln!(
-            "floor precompute: isolated file has provenance for {commit} key {key:016x}; render_cached reuses it only when noise is at or under {NOISE_TARGET}"
-        );
+    let reused = isolated.exists();
+    if reused {
+        eprintln!("{}", cached_reuse_line("floor precompute", &commit, key));
     }
     eprintln!(
         "floor precompute identity\ncommit {commit}\nscene floor\nbounces 64\nkey {key:016x}\neye {:?} yaw {} bits {} pitch {} bits {}\nsize {}x{}\nspp_batch {} noise_target {} acceptance_max_spp {} offline_max_spp {} offline_spp_ceiling {OFFLINE_MAX_SPP}\nseconds_budget {} acceptance_seconds {}\ntriangles {} specular {} materials {}\nisolated {}\nacceptance_cache {}",
@@ -1216,11 +1363,17 @@ fn precompute_floor_b64_offline(max_spp: u32, seconds: f32) -> Result<String, St
         isolated.display(),
         acceptance_cache().display()
     );
-    let reference = genos_debug::reference::render_cached(&produced, &isolated_dir);
-    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
-    let note = floor_promotion_note(&commit, key, &produced, &reference, false);
-    std::fs::write(&note_path, &note).map_err(|err| err.to_string())?;
-    let dest = promote_floor_isolated(&Promotion {
+    let traced = genos_debug::reference::render_cached(&produced, &isolated_dir);
+    let elapsed = recorded_trace_seconds(reused, traced.seconds, &existing);
+    let mut reference = traced;
+    // The saved file has no clock, so a reload reports 0. NaN is only the
+    // in-memory mark that the sidecar clock was missing; the note writes null.
+    reference.seconds = match elapsed {
+        Some(seconds) => seconds,
+        None if reused => f32::NAN,
+        None => reference.seconds,
+    };
+    let promote_result = promote_floor_isolated(&Promotion {
         reference: &reference,
         produced: &produced,
         acceptance: &acceptance,
@@ -1228,13 +1381,25 @@ fn precompute_floor_b64_offline(max_spp: u32, seconds: f32) -> Result<String, St
         expected_commit: &commit,
         isolated: &isolated,
         acceptance_dir: &acceptance_cache(),
-    })?;
+    });
+    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
+    write_floor_isolated_sidecar(
+        &note_path,
+        &commit,
+        key,
+        &produced,
+        &reference,
+        promote_result.is_ok(),
+        elapsed,
+    )?;
+    let dest = promote_result?;
+    let clock = elapsed.map_or_else(|| "null".to_string(), |seconds| seconds.to_string());
     eprintln!(
         "floor precompute promoted {} noise {} spp {} seconds {}",
         dest.display(),
         reference.noise,
         reference.spp,
-        reference.seconds
+        clock
     );
     Ok(format!("{key:016x}"))
 }
@@ -3263,10 +3428,11 @@ fn floor_provenance_is_metadata_and_an_untrusted_file_is_refused() {
         &produced,
         &picture,
         false,
+        Some(picture.seconds),
     );
     let wrong = floor_isolated_trust(&path, &other, commit, &produced, key).expect_err("commit");
     assert!(wrong.contains("untrusted"), "{wrong}");
-    let note = floor_promotion_note(commit, key, &produced, &picture, false);
+    let note = floor_promotion_note(commit, key, &produced, &picture, false, Some(picture.seconds));
     floor_isolated_trust(&path, &note, commit, &produced, key).expect("matching metadata");
     let mut other_budget = produced.clone();
     other_budget.max_spp = 8_192;
@@ -3365,6 +3531,344 @@ fn ordinary_acceptance_stays_at_4096_and_accepts_a_converged_higher_spp() {
     };
     assert!(reference_verdict(&noisy_cap).expect_err("noisy 16384").contains("blocked"));
     assert!(acceptance_refusal(&[("CACHE_ENERGY_SH", "1")]).is_err());
+}
+
+#[test]
+fn a_decimal_prefix_of_16384_is_refused_and_the_isolated_pair_stays() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut stored = acceptance.clone();
+    stored.max_spp = OFFLINE_MAX_SPP;
+    stored.seconds = 24.9;
+    let commit = "5a22737fc92f6b177083fb77995410f65281bedc";
+    let picture = fixture_reference(0.026_066_182, OFFLINE_MAX_SPP, true, true);
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let root = std::env::temp_dir().join(format!(
+        "cache-energy-floor-prefix-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("dir");
+    let path = root.join(format!("{key:016x}.ref"));
+    write_fixture(&path, &picture);
+    let note_path = root.join("provenance.json");
+    let note = floor_promotion_note(commit, key, &stored, &picture, false, Some(picture.seconds));
+    std::fs::write(&note_path, &note).expect("note");
+    let before_ref = std::fs::read(&path).expect("ref bytes");
+    let before_note = std::fs::read(&note_path).expect("note bytes");
+    for cap in [1_u32, 16, 163, 1638] {
+        let mut requested = stored.clone();
+        requested.max_spp = cap;
+        let err = floor_isolated_trust(&path, &note, commit, &requested, key)
+            .expect_err("a decimal prefix of 16384 is a different budget");
+        assert!(err.contains("untrusted"), "cap {cap}: {err}");
+        assert_eq!(std::fs::read(&path).expect("ref"), before_ref, "cap {cap}");
+        assert_eq!(
+            std::fs::read(&note_path).expect("note"),
+            before_note,
+            "cap {cap} rewrote the sidecar"
+        );
+    }
+    floor_isolated_trust(&path, &note, commit, &stored, key).expect("16384 matches 16384");
+    assert_eq!(std::fs::read(&path).expect("ref"), before_ref);
+    assert_eq!(std::fs::read(&note_path).expect("note"), before_note);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn negative_noise_is_outside_the_band_for_hall_and_floor() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let root = std::env::temp_dir().join(format!(
+        "cache-energy-negative-noise-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let negative = fixture_reference(-0.01, 128, true, true);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = 8_192;
+    produced.seconds = 30.0;
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &negative);
+    let acceptance_dir = root.join("floor-cache");
+    std::fs::create_dir_all(&acceptance_dir).expect("cache");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    std::fs::write(acceptance_dir.join(format!("{key:016x}.ref")), b"kept-ref").expect("seed");
+    std::fs::write(
+        acceptance_dir.join(format!("{key:016x}.provenance.json")),
+        b"kept-note",
+    )
+    .expect("seed");
+    let before = dir_files(&acceptance_dir);
+    let err = promote_floor_isolated(&Promotion {
+        reference: &negative,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_dir,
+    })
+    .expect_err("negative floor noise");
+    assert!(err.contains("blocked"), "{err}");
+    assert_eq!(dir_files(&acceptance_dir), before, "{err}");
+    let zero = fixture_reference(0.0, 128, true, true);
+    let zero_path = root.join("zero.ref");
+    write_fixture(&zero_path, &zero);
+    promote_floor_isolated(&Promotion {
+        reference: &zero,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &zero_path,
+        acceptance_dir: &root.join("zero-cache"),
+    })
+    .expect("noise 0 stays inside 0..=0.02");
+    let (hall_scene, hall_camera) = hall();
+    let hall_acceptance = acceptance_setup(&hall_scene, &hall_camera, 64);
+    let mut hall_produced = hall_acceptance.clone();
+    hall_produced.seconds = 30.0;
+    let hall_dir = root.join("hall-cache");
+    std::fs::create_dir_all(&hall_dir).expect("hall");
+    let hall_key = genos_debug::reference::cache_key(&hall_acceptance);
+    std::fs::write(hall_dir.join(format!("{hall_key:016x}.ref")), b"hall-ref").expect("seed");
+    std::fs::write(
+        hall_dir.join(format!("{hall_key:016x}.provenance.json")),
+        b"hall-note",
+    )
+    .expect("seed");
+    let hall_before = dir_files(&hall_dir);
+    let hall_isolated = root.join("hall.ref");
+    write_fixture(&hall_isolated, &negative);
+    let hall_err = promote_isolated(&Promotion {
+        reference: &negative,
+        produced: &hall_produced,
+        acceptance: &hall_acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &hall_isolated,
+        acceptance_dir: &hall_dir,
+    })
+    .expect_err("negative hall noise");
+    assert!(hall_err.contains("blocked"), "{hall_err}");
+    assert_eq!(dir_files(&hall_dir), hall_before, "{hall_err}");
+    let facts = facts_of(&negative, TRACE_SECONDS);
+    assert!(reference_verdict(&facts)
+        .expect_err("acceptance rejects negative noise")
+        .contains("blocked"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_pre_publication_failure_preserves_the_acceptance_pair() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let root = std::env::temp_dir().join(format!("cache-energy-stage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let good = fixture_reference(0.01, 128, true, true);
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &good);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = 8_192;
+    produced.seconds = 30.0;
+    let floor_dir = root.join("floor");
+    seed_pair(&floor_dir, genos_debug::reference::cache_key(&acceptance));
+    let floor_before = dir_files(&floor_dir);
+    let floor_mode = DirMode::readonly(&floor_dir);
+    let err = promote_floor_isolated(&Promotion {
+        reference: &good,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &floor_dir,
+    })
+    .expect_err("floor staging must fail before replace");
+    assert!(!err.contains("blocked"), "{err}");
+    assert_eq!(dir_files(&floor_dir), floor_before, "{err}");
+    let (hall_scene, hall_camera) = hall();
+    let hall_acceptance = acceptance_setup(&hall_scene, &hall_camera, 64);
+    let mut hall_produced = hall_acceptance.clone();
+    hall_produced.seconds = 30.0;
+    let hall_dir = root.join("hall");
+    seed_pair(&hall_dir, genos_debug::reference::cache_key(&hall_acceptance));
+    let hall_before = dir_files(&hall_dir);
+    let hall_mode = DirMode::readonly(&hall_dir);
+    let hall_err = promote_isolated(&Promotion {
+        reference: &good,
+        produced: &hall_produced,
+        acceptance: &hall_acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &hall_dir,
+    })
+    .expect_err("hall staging must fail before replace");
+    assert!(!hall_err.contains("blocked"), "{hall_err}");
+    assert_eq!(dir_files(&hall_dir), hall_before, "{hall_err}");
+    drop(floor_mode);
+    drop(hall_mode);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn seed_pair(dir: &Path, key: u64) {
+    std::fs::create_dir_all(dir).expect("cache");
+    std::fs::write(dir.join(format!("{key:016x}.ref")), b"existing-ref-bytes").expect("seed ref");
+    std::fs::write(
+        dir.join(format!("{key:016x}.provenance.json")),
+        b"existing-note-bytes",
+    )
+    .expect("seed note");
+}
+
+struct DirMode {
+    path: PathBuf,
+    mode: u32,
+}
+
+impl DirMode {
+    fn readonly(path: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path).expect("mode").permissions().mode();
+        let mut locked = std::fs::metadata(path).expect("mode").permissions();
+        locked.set_mode(mode & !0o222);
+        std::fs::set_permissions(path, locked).expect("chmod");
+        Self { path: path.to_path_buf(), mode }
+    }
+}
+
+impl Drop for DirMode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+    }
+}
+
+fn note_field(note: &str, field: &str) -> Option<String> {
+    json_fields(note)
+        .into_iter()
+        .find(|(key, _)| key == field)
+        .map(|(_, value)| value)
+}
+
+#[test]
+fn render_cached_reuse_line_includes_the_sticky_cap() {
+    let line = cached_reuse_line(
+        "floor precompute",
+        "5a22737fc92f6b177083fb77995410f65281bedc",
+        0xdfe0_32d1_638e_605b,
+    );
+    assert!(line.contains("setup cap"), "{line}");
+    assert!(line.contains("capped noisy"), "{line}");
+    assert!(!line.contains("only when noise"), "{line}");
+    let hall = cached_reuse_line("precompute", "d8142c375dc515d73a041d485c37cb44bc2fe628", 1);
+    assert!(hall.contains("capped noisy"), "{hall}");
+    assert!(!hall.contains("only when noise"), "{hall}");
+}
+
+#[test]
+fn a_reused_floor_keeps_trace_elapsed_and_records_promotion() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = OFFLINE_MAX_SPP;
+    produced.seconds = PRECOMPUTE_SECONDS_CAP;
+    let commit = "5a22737fc92f6b177083fb77995410f65281bedc";
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let prior = floor_promotion_note(
+        commit,
+        key,
+        &produced,
+        &fixture_reference(0.026_066_182, OFFLINE_MAX_SPP, true, true),
+        false,
+        Some(24.5),
+    );
+    assert_eq!(
+        recorded_trace_seconds(true, 0.0, &prior).map(f32::to_bits),
+        Some(24.5_f32.to_bits()),
+        "reload must keep the sidecar clock"
+    );
+    assert_eq!(
+        recorded_trace_seconds(true, 0.0, "{\"scene\": \"floor\"}"),
+        None,
+        "a missing clock is not zero"
+    );
+    assert_eq!(
+        recorded_trace_seconds(false, 6.25, ""),
+        Some(6.25),
+        "a fresh trace keeps its own clock, including a real zero"
+    );
+    assert_eq!(recorded_trace_seconds(false, 0.0, &prior), Some(0.0));
+    let root = std::env::temp_dir().join(format!(
+        "cache-energy-floor-elapsed-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let note_path = root.join("provenance.json");
+    let mut loaded = fixture_reference(0.01, 8_192, true, true);
+    loaded.seconds = 0.0;
+    write_floor_isolated_sidecar(
+        &note_path,
+        commit,
+        key,
+        &produced,
+        &loaded,
+        true,
+        recorded_trace_seconds(true, loaded.seconds, &prior),
+    )
+    .expect("sidecar");
+    let kept = std::fs::read_to_string(&note_path).expect("note");
+    assert_eq!(note_field(&kept, "seconds").as_deref(), Some("24.5"), "{kept}");
+    assert_eq!(note_field(&kept, "promoted").as_deref(), Some("true"), "{kept}");
+    write_floor_isolated_sidecar(
+        &note_path,
+        commit,
+        key,
+        &produced,
+        &loaded,
+        false,
+        None,
+    )
+    .expect("missing clock");
+    let missing = std::fs::read_to_string(&note_path).expect("note");
+    assert_eq!(note_field(&missing, "seconds").as_deref(), Some("null"), "{missing}");
+    assert_ne!(note_field(&missing, "seconds").as_deref(), Some("0"));
+    assert_eq!(note_field(&missing, "promoted").as_deref(), Some("false"), "{missing}");
+    let fresh = fixture_reference(0.01, 128, true, true);
+    let hall_kept = hall_isolated_note(commit, key, &produced, &fresh, true);
+    assert!(hall_kept.contains("\"promoted\": true"), "{hall_kept}");
+    let hall_blocked = hall_isolated_note(commit, key, &produced, &fresh, false);
+    assert!(hall_blocked.contains("\"promoted\": false"), "{hall_blocked}");
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &loaded);
+    loaded.seconds = 24.5;
+    let acceptance_dir = root.join("acceptance");
+    let dest = promote_floor_isolated(&Promotion {
+        reference: &loaded,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_dir,
+    })
+    .expect("promote records the restored clock");
+    let cache_note = std::fs::read_to_string(acceptance_dir.join(format!("{key:016x}.provenance.json")))
+        .expect("acceptance note");
+    assert_eq!(note_field(&cache_note, "seconds").as_deref(), Some("24.5"), "{cache_note}");
+    assert_eq!(note_field(&cache_note, "promoted").as_deref(), Some("true"), "{cache_note}");
+    assert_eq!(dest, acceptance_dir.join(format!("{key:016x}.ref")));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
