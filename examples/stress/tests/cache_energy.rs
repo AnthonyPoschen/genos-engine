@@ -47,7 +47,7 @@
 //! under 0.02. A reconstructed linger from a rejected run is not a pass. The
 //! offline precompute in `docs/systems/lighting/cache-energy-precompute.md`
 //! can trace the same setup for longer, and the open floor can also raise the
-//! sample cap to 16384, then copy a converged file into the acceptance cache.
+//! sample cap to 262144, then copy a converged file into the acceptance cache.
 //! Those are execution limits. The 600 s and 4096 spp acceptance call stays.
 //! The oracle's `energy_mean` is the full picture,
 //! direct light included, and is a separate report.
@@ -80,7 +80,9 @@ const TRACE_SECONDS: f32 = 600.0;
 const PRECOMPUTE_SECONDS_CAP: f32 = 2400.0;
 
 /// Open-floor offline sample ceiling. An execution limit, not a noise target.
-const OFFLINE_MAX_SPP: u32 = 16_384;
+/// 2^18 stays below 2^20, where `(done + k)` meets `x` in the existing seed
+/// `(y << 40) ^ (x << 20) ^ (done + k)`.
+const OFFLINE_MAX_SPP: u32 = 262_144;
 
 const RESEARCH_SECONDS_CAP: f32 = 1200.0;
 
@@ -1170,7 +1172,7 @@ fn parse_floor_seconds(value: &str) -> Result<f32, String> {
 
 fn floor_budgets_from_env() -> Result<(u32, f32), String> {
     let spp = std::env::var("CACHE_ENERGY_FLOOR_MAX_SPP").map_err(|_| {
-        "CACHE_ENERGY_FLOOR_MAX_SPP is required and must be in 1..=16384".to_string()
+        format!("CACHE_ENERGY_FLOOR_MAX_SPP is required and must be in 1..={OFFLINE_MAX_SPP}")
     })?;
     let seconds = std::env::var("CACHE_ENERGY_FLOOR_SECONDS").map_err(|_| {
         "CACHE_ENERGY_FLOOR_SECONDS is required and must be finite and in (0, 2400]".to_string()
@@ -3150,11 +3152,12 @@ fn floor_offline_budget_rejects_out_of_range_and_overflow() {
     let _clear_seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", None);
     assert!(floor_budgets_from_env().is_err(), "a missing budget must not trace");
     for bad in [
-        "16385",
+        "262145",
+        "1048576",
         "4294967296",
         "99999999999999999999",
         "-1",
-        "+16384",
+        "+262144",
         "1.5",
         "0",
         "",
@@ -3166,11 +3169,11 @@ fn floor_offline_budget_rejects_out_of_range_and_overflow() {
         assert!(!err.contains("tracing"), "{bad}: {err}");
     }
     for bad in ["2401", "0", "-5", "inf", "nan", "1e99", ""] {
-        let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+        let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("262144"));
         let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some(bad));
         assert!(floor_budgets_from_env().is_err(), "{bad}");
     }
-    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("262144"));
     let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some("2400"));
     let (spp, seconds) = floor_budgets_from_env().expect("ceiling");
     assert_eq!(spp, OFFLINE_MAX_SPP);
@@ -3180,7 +3183,7 @@ fn floor_offline_budget_rejects_out_of_range_and_overflow() {
     assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
     assert_eq!(acceptance.noise_target.to_bits(), NOISE_TARGET.to_bits());
     assert!(acceptance_refusal(&[
-        ("CACHE_ENERGY_FLOOR_MAX_SPP", "16384"),
+        ("CACHE_ENERGY_FLOOR_MAX_SPP", "262144"),
         ("CACHE_ENERGY_FLOOR_SECONDS", "2400"),
     ])
     .is_ok());
@@ -3221,7 +3224,7 @@ fn a_converged_floor_above_4096_spp_promotes_only_inside_the_offline_cap() {
         .expect("provenance");
     assert!(note.contains("\"acceptance_max_spp\": 4096"), "{note}");
     assert!(note.contains("\"offline_max_spp\": 8192"), "{note}");
-    assert!(note.contains("\"offline_spp_ceiling\": 16384"), "{note}");
+    assert!(note.contains("\"offline_spp_ceiling\": 262144"), "{note}");
     assert!(note.contains("\"spp\": 8192"), "{note}");
     assert!(note.contains("\"acceptance_seconds\": 600"), "{note}");
     assert!(note.contains(commit), "{note}");
@@ -3261,8 +3264,8 @@ fn a_converged_floor_above_4096_spp_promotes_only_inside_the_offline_cap() {
         isolated: &isolated,
         acceptance_dir: &blocked,
     })
-    .expect_err("cap above 16384");
-    assert!(err.contains("16384") || err.contains("outside"), "{err}");
+    .expect_err("cap above 262144");
+    assert!(err.contains("262144") || err.contains("outside"), "{err}");
     assert_eq!(dir_files(&blocked), before);
 
     let (hall_scene, hall_camera) = hall();
@@ -3318,7 +3321,7 @@ fn a_noisy_floor_at_the_offline_cap_does_not_enter_the_cache() {
         isolated: &isolated,
         acceptance_dir: &acceptance_dir,
     })
-    .expect_err("noise above 0.02 at 16384 stays blocked");
+    .expect_err("noise above 0.02 at the offline cap stays blocked");
     assert!(err.contains("blocked"), "{err}");
     assert!(err.contains("0.02") || err.contains("0.020"), "{err}");
     assert_eq!(dir_files(&acceptance_dir), before);
@@ -3506,7 +3509,7 @@ fn picture_bounce_and_direct_ratios_are_exact() {
 #[test]
 fn ordinary_acceptance_stays_at_4096_and_accepts_a_converged_higher_spp() {
     let _lock = ENV_LOCK.lock().expect("env lock");
-    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("262144"));
     let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some("2400"));
     let _hall = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", Some("2400"));
     let (scene, camera) = open_floor();
@@ -3531,12 +3534,12 @@ fn ordinary_acceptance_stays_at_4096_and_accepts_a_converged_higher_spp() {
         seconds: 20.0,
         ..facts
     };
-    assert!(reference_verdict(&noisy_cap).expect_err("noisy 16384").contains("blocked"));
+    assert!(reference_verdict(&noisy_cap).expect_err("noisy offline cap").contains("blocked"));
     assert!(acceptance_refusal(&[("CACHE_ENERGY_SH", "1")]).is_err());
 }
 
 #[test]
-fn a_decimal_prefix_of_16384_is_refused_and_the_isolated_pair_stays() {
+fn a_decimal_prefix_of_the_offline_ceiling_is_refused_and_the_isolated_pair_stays() {
     let _lock = ENV_LOCK.lock().expect("env lock");
     let (scene, camera) = open_floor();
     let acceptance = acceptance_setup(&scene, &camera, 64);
@@ -3559,11 +3562,11 @@ fn a_decimal_prefix_of_16384_is_refused_and_the_isolated_pair_stays() {
     std::fs::write(&note_path, &note).expect("note");
     let before_ref = std::fs::read(&path).expect("ref bytes");
     let before_note = std::fs::read(&note_path).expect("note bytes");
-    for cap in [1_u32, 16, 163, 1638] {
+    for cap in [1_u32, 16, 163, 1638, 2, 26, 262, 2621, 26214, 16_384] {
         let mut requested = stored.clone();
         requested.max_spp = cap;
         let err = floor_isolated_trust(&path, &note, commit, &requested, key)
-            .expect_err("a decimal prefix of 16384 is a different budget");
+            .expect_err("a decimal prefix or the previous 16384 budget is a different integer");
         assert!(err.contains("untrusted"), "cap {cap}: {err}");
         assert_eq!(std::fs::read(&path).expect("ref"), before_ref, "cap {cap}");
         assert_eq!(
@@ -3572,7 +3575,7 @@ fn a_decimal_prefix_of_16384_is_refused_and_the_isolated_pair_stays() {
             "cap {cap} rewrote the sidecar"
         );
     }
-    floor_isolated_trust(&path, &note, commit, &stored, key).expect("16384 matches 16384");
+    floor_isolated_trust(&path, &note, commit, &stored, key).expect("262144 matches 262144");
     assert_eq!(std::fs::read(&path).expect("ref"), before_ref);
     assert_eq!(std::fs::read(&note_path).expect("note"), before_note);
     let _ = std::fs::remove_dir_all(&root);
@@ -3860,7 +3863,7 @@ fn a_reused_floor_keeps_trace_elapsed_and_records_promotion() {
 }
 
 #[test]
-#[ignore = "CPU path trace of the open floor, at most 16384 spp and 2400 s, not acceptance"]
+#[ignore = "CPU path trace of the open floor, at most 262144 spp and 2400 s, not acceptance"]
 fn precompute_floor_b64() {
     let _lock = ENV_LOCK.lock().expect("env lock");
     let (max_spp, seconds) = floor_budgets_from_env().expect("CACHE_ENERGY_FLOOR_MAX_SPP and CACHE_ENERGY_FLOOR_SECONDS");
