@@ -858,11 +858,13 @@ fn promote_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// Stage the reference and its sidecar in the destination directory, then
-/// rename each into place. A failure before the first rename leaves the
-/// existing pair. The two renames are not one transaction: a failure between
-/// them leaves the new reference beside the previous sidecar, and a later
-/// read still refuses a sidecar that does not match.
+/// Stage the reference and its sidecar, then rename the `.ref` and then the
+/// sidecar. A failure before the `.ref` rename leaves the existing pair byte
+/// for byte. The two renames are not one transaction. If the `.ref` rename
+/// has succeeded and the sidecar rename fails, this returns an error and the
+/// new `.ref` may remain beside the previous sidecar. That picture was already
+/// checked (finite samples, a hit, noise in `0..=0.02`). `render_cached` reads
+/// the `.ref` only and does not read the sidecar.
 fn publish_cached_pair(
     isolated: &Path,
     dest: &Path,
@@ -3680,9 +3682,9 @@ fn a_pre_publication_failure_preserves_the_acceptance_pair() {
     produced.max_spp = 8_192;
     produced.seconds = 30.0;
     let floor_dir = root.join("floor");
-    seed_pair(&floor_dir, genos_debug::reference::cache_key(&acceptance));
+    let floor_key = genos_debug::reference::cache_key(&acceptance);
+    let (floor_marker, floor_note) = seed_directory_dest(&floor_dir, floor_key);
     let floor_before = dir_files(&floor_dir);
-    let floor_mode = DirMode::readonly(&floor_dir);
     let err = promote_floor_isolated(&Promotion {
         reference: &good,
         produced: &produced,
@@ -3692,17 +3694,21 @@ fn a_pre_publication_failure_preserves_the_acceptance_pair() {
         isolated: &isolated,
         acceptance_dir: &floor_dir,
     })
-    .expect_err("floor staging must fail before replace");
+    .expect_err("floor replace must fail before the live name changes");
+    assert!(err.contains("reference replace failed"), "{err}");
     assert!(!err.contains("blocked"), "{err}");
     assert_eq!(dir_files(&floor_dir), floor_before, "{err}");
+    assert_eq!(std::fs::read(&floor_marker).expect("marker"), b"inside");
+    assert_eq!(std::fs::read(&floor_note).expect("note"), b"existing-note-bytes");
+    assert!(floor_dir.join(format!("{floor_key:016x}.ref")).is_dir());
     let (hall_scene, hall_camera) = hall();
     let hall_acceptance = acceptance_setup(&hall_scene, &hall_camera, 64);
     let mut hall_produced = hall_acceptance.clone();
     hall_produced.seconds = 30.0;
     let hall_dir = root.join("hall");
-    seed_pair(&hall_dir, genos_debug::reference::cache_key(&hall_acceptance));
+    let hall_key = genos_debug::reference::cache_key(&hall_acceptance);
+    let (hall_marker, hall_note) = seed_directory_dest(&hall_dir, hall_key);
     let hall_before = dir_files(&hall_dir);
-    let hall_mode = DirMode::readonly(&hall_dir);
     let hall_err = promote_isolated(&Promotion {
         reference: &good,
         produced: &hall_produced,
@@ -3712,45 +3718,27 @@ fn a_pre_publication_failure_preserves_the_acceptance_pair() {
         isolated: &isolated,
         acceptance_dir: &hall_dir,
     })
-    .expect_err("hall staging must fail before replace");
+    .expect_err("hall replace must fail before the live name changes");
+    assert!(hall_err.contains("reference replace failed"), "{hall_err}");
     assert!(!hall_err.contains("blocked"), "{hall_err}");
     assert_eq!(dir_files(&hall_dir), hall_before, "{hall_err}");
-    drop(floor_mode);
-    drop(hall_mode);
+    assert_eq!(std::fs::read(&hall_marker).expect("marker"), b"inside");
+    assert_eq!(std::fs::read(&hall_note).expect("note"), b"existing-note-bytes");
+    assert!(hall_dir.join(format!("{hall_key:016x}.ref")).is_dir());
     let _ = std::fs::remove_dir_all(&root);
 }
 
-fn seed_pair(dir: &Path, key: u64) {
+/// The live `.ref` name is a directory, so the first rename cannot replace it.
+/// This does not depend on the process being unable to write a mode-0555 directory.
+fn seed_directory_dest(dir: &Path, key: u64) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(dir).expect("cache");
-    std::fs::write(dir.join(format!("{key:016x}.ref")), b"existing-ref-bytes").expect("seed ref");
-    std::fs::write(
-        dir.join(format!("{key:016x}.provenance.json")),
-        b"existing-note-bytes",
-    )
-    .expect("seed note");
-}
-
-struct DirMode {
-    path: PathBuf,
-    mode: u32,
-}
-
-impl DirMode {
-    fn readonly(path: &Path) -> Self {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path).expect("mode").permissions().mode();
-        let mut locked = std::fs::metadata(path).expect("mode").permissions();
-        locked.set_mode(mode & !0o222);
-        std::fs::set_permissions(path, locked).expect("chmod");
-        Self { path: path.to_path_buf(), mode }
-    }
-}
-
-impl Drop for DirMode {
-    fn drop(&mut self) {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
-    }
+    let dest = dir.join(format!("{key:016x}.ref"));
+    std::fs::create_dir(&dest).expect("destination shape");
+    let marker = dest.join("keep");
+    std::fs::write(&marker, b"inside").expect("marker");
+    let note = dir.join(format!("{key:016x}.provenance.json"));
+    std::fs::write(&note, b"existing-note-bytes").expect("note");
+    (marker, note)
 }
 
 fn note_field(note: &str, field: &str) -> Option<String> {
