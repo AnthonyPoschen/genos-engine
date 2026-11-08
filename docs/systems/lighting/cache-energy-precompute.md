@@ -22,6 +22,20 @@ The trace writes under `target/cache-energy/precompute-isolated/<commit>/<key>/`
 
 Promotion copies into the acceptance cache only when all of these hold: the live precompute setup matches acceptance except seconds; both keys match the file name; the commit is this clean `HEAD`; noise is finite and at most 0.02; spp is in `1..=4096`; linear samples and hits are finite and non-empty; the file loads through the existing reader and matches that picture. A noisy cap, a NaN, an empty picture, or a wrong pose or commit leaves the acceptance cache untouched. A converged trace that used the final pass at the spp or time cap is valid. Acceptance still calls the 600 s setup. `render_cached` will then reuse the promoted file because the key matches and the noise is low enough.
 
+## Open floor sample cap
+
+The hall path above does not move `max_spp`. The open floor at 64 bounces can finish 4096 spp while the mean relative standard error is still above 0.02. The saved file has no sample sums, so that file cannot be continued. `render` already takes `max_spp` from the setup. The floor offline trace sets that cap explicitly, in `1..=16384`, and the seconds in `(0, 2400]`. 16384 and 2400 s are execution limits. They are not a noise target and not a prediction that the picture will converge.
+
+Acceptance stays 600 s, 4096 spp, noise 0.02, batch 32, the CPU analytic picture, the full linear-plus-hit cache, the floor pose, and 64 bounces. The cache key still hashes scene, eye, yaw, pitch, size, and bounce count. It does not hash the sample cap or the seconds. A file from another budget is not trusted: the sidecar names the cap, and a mismatch is refused before `render_cached`. The sidecar is metadata. It is not a proof of the samples.
+
+An spp above 4096 is copied only when that explicit cap is inside 16384 and the picture is finite, has a hit, and noise is at most 0.02. A noisy picture at the cap is blocked. The acceptance cache is left byte for byte, including a file that was already there. There is no second trace and no pick among replicates.
+
+```sh
+CACHE_ENERGY_FLOOR_MAX_SPP=16384 CACHE_ENERGY_FLOOR_SECONDS=2400 cargo test --release -p genos-stress --test cache_energy -- --ignored --exact --nocapture --test-threads=1 precompute_floor_b64
+```
+
+Acceptance ignores both variables. A missing value, a value outside the range, or a number that does not fit the type is refused before the trace.
+
 `research_continue` stays outside the acceptance cache and still cannot fill it.
 
 ## What this does not fix

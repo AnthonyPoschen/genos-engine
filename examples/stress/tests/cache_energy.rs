@@ -46,8 +46,10 @@
 //! the 600 s or 4096 spp cap still passes when the noise is already at or
 //! under 0.02. A reconstructed linger from a rejected run is not a pass. The
 //! offline precompute in `docs/systems/lighting/cache-energy-precompute.md`
-//! can trace the same setup for longer and only then copy a converged file
-//! into the acceptance cache. The oracle's `energy_mean` is the full picture,
+//! can trace the same setup for longer, and the open floor can also raise the
+//! sample cap to 16384, then copy a converged file into the acceptance cache.
+//! Those are execution limits. The 600 s and 4096 spp acceptance call stays.
+//! The oracle's `energy_mean` is the full picture,
 //! direct light included, and is a separate report.
 //!
 //! Per scene the test also reports blotch (mean relative error of 8x8 block
@@ -76,6 +78,9 @@ const MAX_SPP: u32 = 4096;
 const TRACE_SECONDS: f32 = 600.0;
 
 const PRECOMPUTE_SECONDS_CAP: f32 = 2400.0;
+
+/// Open-floor offline sample ceiling. An execution limit, not a noise target.
+const OFFLINE_MAX_SPP: u32 = 16_384;
 
 const RESEARCH_SECONDS_CAP: f32 = 1200.0;
 
@@ -545,7 +550,43 @@ fn precompute_setup(
     Ok(setup)
 }
 
-fn shares_acceptance_trace(
+fn floor_budget(max_spp: u32, seconds: f32) -> Result<(), String> {
+    if max_spp == 0 || max_spp > OFFLINE_MAX_SPP {
+        return Err(format!(
+            "floor max spp {max_spp} is outside 1..={OFFLINE_MAX_SPP}"
+        ));
+    }
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > PRECOMPUTE_SECONDS_CAP {
+        return Err(format!(
+            "floor seconds {seconds} must be finite and in (0, {PRECOMPUTE_SECONDS_CAP}]"
+        ));
+    }
+    Ok(())
+}
+
+/// Acceptance trace with an explicit sample cap and time cap. Both stay inside
+/// the offline ceilings. Noise, batch, bounces, pose, and the analytic picture
+/// stay on the acceptance setup.
+fn floor_precompute_setup(
+    scene: &Scene,
+    camera: &Camera,
+    bounces: u32,
+    max_spp: u32,
+    seconds: f32,
+) -> Result<genos_debug::reference::RefSetup, String> {
+    floor_budget(max_spp, seconds)?;
+    let mut setup = acceptance_setup(scene, camera, bounces);
+    setup.max_spp = max_spp;
+    setup.seconds = seconds;
+    if setup.triangles || setup.specular || !setup.materials.is_empty() {
+        return Err("floor precompute keeps the CPU analytic picture".into());
+    }
+    Ok(setup)
+}
+
+/// Scene, pose, size, batch, noise target, bounces, and analytic shapes.
+/// Sample cap and seconds are budgets, checked apart from this.
+fn shares_acceptance_identity(
     acceptance: &genos_debug::reference::RefSetup,
     produced: &genos_debug::reference::RefSetup,
 ) -> Result<(), String> {
@@ -565,7 +606,6 @@ fn shares_acceptance_trace(
         return Err("size differs".into());
     }
     if acceptance.spp != produced.spp
-        || acceptance.max_spp != produced.max_spp
         || acceptance.noise_target.to_bits() != produced.noise_target.to_bits()
         || acceptance.max_bounces != produced.max_bounces
     {
@@ -580,6 +620,17 @@ fn shares_acceptance_trace(
     Ok(())
 }
 
+fn shares_acceptance_trace(
+    acceptance: &genos_debug::reference::RefSetup,
+    produced: &genos_debug::reference::RefSetup,
+) -> Result<(), String> {
+    shares_acceptance_identity(acceptance, produced)?;
+    if acceptance.max_spp != produced.max_spp {
+        return Err("sampling budget differs".into());
+    }
+    Ok(())
+}
+
 struct Promotion<'a> {
     reference: &'a genos_debug::Reference,
     produced: &'a genos_debug::reference::RefSetup,
@@ -590,7 +641,7 @@ struct Promotion<'a> {
     acceptance_dir: &'a Path,
 }
 
-fn reference_acceptable(
+fn reference_picture(
     reference: &genos_debug::Reference,
     width: u32,
     height: u32,
@@ -619,6 +670,15 @@ fn reference_acceptable(
     if reference.linear.is_empty() || reference.hit.iter().all(|hit| !hit) {
         return Err("blocked: reference has no hits".into());
     }
+    Ok(())
+}
+
+fn reference_acceptable(
+    reference: &genos_debug::Reference,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    reference_picture(reference, width, height)?;
     if reference.spp == 0 || reference.spp > MAX_SPP {
         return Err(format!(
             "blocked: spp {} is outside 1..={MAX_SPP}",
@@ -627,6 +687,38 @@ fn reference_acceptable(
     }
     if reference.noise > NOISE_TARGET {
         let why = if reference.spp >= MAX_SPP {
+            "capped"
+        } else {
+            "above the noise target"
+        };
+        return Err(format!(
+            "blocked: reference noise {:.6} > {:.3} ({why}, spp {})",
+            reference.noise, NOISE_TARGET, reference.spp
+        ));
+    }
+    Ok(())
+}
+
+fn reference_within_offline_cap(
+    reference: &genos_debug::Reference,
+    width: u32,
+    height: u32,
+    spp_cap: u32,
+) -> Result<(), String> {
+    if spp_cap == 0 || spp_cap > OFFLINE_MAX_SPP {
+        return Err(format!(
+            "blocked: offline spp cap {spp_cap} is outside 1..={OFFLINE_MAX_SPP}"
+        ));
+    }
+    reference_picture(reference, width, height)?;
+    if reference.spp == 0 || reference.spp > spp_cap {
+        return Err(format!(
+            "blocked: spp {} is outside 1..={spp_cap}",
+            reference.spp
+        ));
+    }
+    if reference.noise > NOISE_TARGET {
+        let why = if reference.spp >= spp_cap {
             "capped"
         } else {
             "above the noise target"
@@ -751,6 +843,190 @@ fn promote_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// Sidecar for one floor trace. This is a record of the budget and the
+/// result, not a cryptographic proof of the samples.
+fn floor_promotion_note(
+    commit: &str,
+    key: u64,
+    produced: &genos_debug::reference::RefSetup,
+    reference: &genos_debug::Reference,
+    promoted: bool,
+) -> String {
+    format!(
+        "{{\n  \"source_commit\": \"{commit}\",\n  \"cache_key\": \"{key:016x}\",\n  \"scene\": \"floor\",\n  \"seconds\": {},\n  \"seconds_budget\": {},\n  \"acceptance_seconds\": {TRACE_SECONDS},\n  \"noise\": {},\n  \"spp\": {},\n  \"acceptance_max_spp\": {MAX_SPP},\n  \"offline_max_spp\": {},\n  \"offline_spp_ceiling\": {OFFLINE_MAX_SPP},\n  \"noise_target\": {},\n  \"spp_batch\": {},\n  \"bounces\": {},\n  \"width\": {},\n  \"height\": {},\n  \"yaw_bits\": {},\n  \"pitch_bits\": {},\n  \"eye_bits\": [{}, {}, {}],\n  \"triangles\": {},\n  \"specular\": {},\n  \"materials\": {},\n  \"estimator\": \"cpu-analytic\",\n  \"promoted\": {promoted}\n}}\n",
+        reference.seconds,
+        produced.seconds,
+        reference.noise,
+        reference.spp,
+        produced.max_spp,
+        produced.noise_target,
+        produced.spp,
+        produced.max_bounces,
+        produced.width,
+        produced.height,
+        produced.yaw.to_bits(),
+        produced.pitch.to_bits(),
+        produced.eye[0].to_bits(),
+        produced.eye[1].to_bits(),
+        produced.eye[2].to_bits(),
+        produced.triangles,
+        produced.specular,
+        produced.materials.len(),
+    )
+}
+
+fn floor_isolated_trust(
+    path: &Path,
+    note: &str,
+    commit: &str,
+    produced: &genos_debug::reference::RefSetup,
+    key: u64,
+) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let trusted = note.contains(&format!("\"source_commit\": \"{commit}\""))
+        && note.contains(&format!("\"cache_key\": \"{key:016x}\""))
+        && note.contains("\"scene\": \"floor\"")
+        && note.contains(&format!("\"acceptance_max_spp\": {MAX_SPP}"))
+        && note.contains(&format!("\"offline_max_spp\": {}", produced.max_spp))
+        && note.contains(&format!("\"offline_spp_ceiling\": {OFFLINE_MAX_SPP}"))
+        && note.contains(&format!("\"acceptance_seconds\": {TRACE_SECONDS}"))
+        && note.contains(&format!("\"yaw_bits\": {}", produced.yaw.to_bits()))
+        && note.contains(&format!("\"pitch_bits\": {}", produced.pitch.to_bits()))
+        && note.contains(&format!(
+            "\"eye_bits\": [{}, {}, {}]",
+            produced.eye[0].to_bits(),
+            produced.eye[1].to_bits(),
+            produced.eye[2].to_bits()
+        ))
+        && note.contains(&format!("\"bounces\": {}", produced.max_bounces))
+        && note.contains(&format!("\"spp_batch\": {}", produced.spp))
+        && note.contains("\"estimator\": \"cpu-analytic\"")
+        && note.contains("\"triangles\": false")
+        && note.contains("\"specular\": false");
+    if trusted {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing untrusted isolated reference {}",
+            path.display()
+        ))
+    }
+}
+
+/// Copy a converged floor trace into the acceptance cache. A miss leaves that
+/// directory byte for byte, including a file that was already there.
+fn promote_floor_isolated(promotion: &Promotion<'_>) -> Result<PathBuf, String> {
+    let commit = promotion.commit;
+    if commit.len() != 40
+        || !commit.chars().all(|c| c.is_ascii_hexdigit())
+        || commit != promotion.expected_commit
+    {
+        return Err(format!("source commit {commit} is not this precompute"));
+    }
+    if promotion.acceptance.max_spp != MAX_SPP {
+        return Err("acceptance spp cap is not 4096".into());
+    }
+    if promotion.acceptance.seconds.to_bits() != TRACE_SECONDS.to_bits() {
+        return Err("acceptance seconds are not 600".into());
+    }
+    floor_budget(promotion.produced.max_spp, promotion.produced.seconds)?;
+    shares_acceptance_identity(promotion.acceptance, promotion.produced)?;
+    if promotion.produced.triangles
+        || promotion.produced.specular
+        || !promotion.produced.materials.is_empty()
+    {
+        return Err("floor precompute keeps CPU analytic shapes and the full picture".into());
+    }
+    if genos_debug::reference::gpu_wanted() {
+        return Err("floor precompute refuses GENOS_REFERENCE_GPU".into());
+    }
+    let key = genos_debug::reference::cache_key(promotion.acceptance);
+    if key != genos_debug::reference::cache_key(promotion.produced) {
+        return Err("sampling budget leaked into the cache key".into());
+    }
+    reference_within_offline_cap(
+        promotion.reference,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+        promotion.produced.max_spp,
+    )?;
+    let loaded = genos_debug::reference::read_cached(
+        promotion.isolated,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+    )
+    .ok_or_else(|| {
+        format!(
+            "isolated reference {} is missing, empty, or the wrong picture",
+            promotion.isolated.display()
+        )
+    })?;
+    reference_within_offline_cap(
+        &loaded,
+        promotion.acceptance.width,
+        promotion.acceptance.height,
+        promotion.produced.max_spp,
+    )?;
+    if !pictures_match(&loaded, promotion.reference) {
+        return Err("isolated file does not match the trace".into());
+    }
+    std::fs::create_dir_all(promotion.acceptance_dir).map_err(|err| err.to_string())?;
+    let dest = promotion.acceptance_dir.join(format!("{key:016x}.ref"));
+    let note_path = promotion
+        .acceptance_dir
+        .join(format!("{key:016x}.provenance.json"));
+    let note = floor_promotion_note(commit, key, promotion.produced, promotion.reference, true);
+    std::fs::write(&note_path, note).map_err(|err| err.to_string())?;
+    if let Err(err) = std::fs::copy(promotion.isolated, &dest) {
+        let _ = std::fs::remove_file(&note_path);
+        return Err(err.to_string());
+    }
+    Ok(dest)
+}
+
+fn parse_floor_spp(value: &str) -> Result<u32, String> {
+    let text = value.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "CACHE_ENERGY_FLOOR_MAX_SPP {value} is not a u32 in 1..={OFFLINE_MAX_SPP}"
+        ));
+    }
+    let spp: u32 = text.parse().map_err(|_| {
+        format!("CACHE_ENERGY_FLOOR_MAX_SPP {value} is not a u32 in 1..={OFFLINE_MAX_SPP}")
+    })?;
+    if spp == 0 || spp > OFFLINE_MAX_SPP {
+        return Err(format!(
+            "CACHE_ENERGY_FLOOR_MAX_SPP {value} is outside 1..={OFFLINE_MAX_SPP}"
+        ));
+    }
+    Ok(spp)
+}
+
+fn parse_floor_seconds(value: &str) -> Result<f32, String> {
+    let seconds: f32 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("CACHE_ENERGY_FLOOR_SECONDS {value} is not a number"))?;
+    if !seconds.is_finite() || seconds <= 0.0 || seconds > PRECOMPUTE_SECONDS_CAP {
+        return Err(format!(
+            "CACHE_ENERGY_FLOOR_SECONDS {value} must be finite and in (0, {PRECOMPUTE_SECONDS_CAP}]"
+        ));
+    }
+    Ok(seconds)
+}
+
+fn floor_budgets_from_env() -> Result<(u32, f32), String> {
+    let spp = std::env::var("CACHE_ENERGY_FLOOR_MAX_SPP").map_err(|_| {
+        "CACHE_ENERGY_FLOOR_MAX_SPP is required and must be in 1..=16384".to_string()
+    })?;
+    let seconds = std::env::var("CACHE_ENERGY_FLOOR_SECONDS").map_err(|_| {
+        "CACHE_ENERGY_FLOOR_SECONDS is required and must be finite and in (0, 2400]".to_string()
+    })?;
+    Ok((parse_floor_spp(&spp)?, parse_floor_seconds(&seconds)?))
+}
+
 fn precompute_seconds_from_env() -> Result<f32, String> {
     let value = std::env::var("CACHE_ENERGY_PRECOMPUTE_SECONDS").map_err(|_| {
         "CACHE_ENERGY_PRECOMPUTE_SECONDS is required and must be finite and in (0, 2400]"
@@ -869,6 +1145,92 @@ fn precompute_hall_lit64_offline(seconds: f32) -> Result<String, String> {
     })?;
     eprintln!(
         "precompute promoted {} noise {} spp {} seconds {}",
+        dest.display(),
+        reference.noise,
+        reference.spp,
+        reference.seconds
+    );
+    Ok(format!("{key:016x}"))
+}
+
+/// One open-floor trace at an explicit spp cap and time cap. A noisy result
+/// stays in the isolated directory and is not copied, and this does not trace
+/// a second time. The sidecar is metadata, not a proof of the samples.
+fn precompute_floor_b64_offline(max_spp: u32, seconds: f32) -> Result<String, String> {
+    if genos_debug::reference::gpu_wanted() {
+        return Err(
+            "floor precompute refuses GENOS_REFERENCE_GPU; acceptance is the CPU analytic trace"
+                .into(),
+        );
+    }
+    let (commit, clean) = source_commit(&repo_root())?;
+    if !clean {
+        return Err(format!("floor precompute refuses a dirty worktree at {commit}"));
+    }
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let produced = floor_precompute_setup(&scene, &camera, 64, max_spp, seconds)?;
+    shares_acceptance_identity(&acceptance, &produced)?;
+    if acceptance.max_spp != MAX_SPP || acceptance.seconds.to_bits() != TRACE_SECONDS.to_bits() {
+        return Err("acceptance budget changed".into());
+    }
+    let key = genos_debug::reference::cache_key(&acceptance);
+    if key != genos_debug::reference::cache_key(&produced) {
+        return Err("sampling budget leaked into the cache key".into());
+    }
+    let isolated_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/cache-energy/precompute-isolated")
+        .join(&commit)
+        .join(format!("{key:016x}"));
+    let isolated = isolated_dir.join(format!("{key:016x}.ref"));
+    let note_path = isolated_dir.join("provenance.json");
+    let existing = if isolated.exists() {
+        std::fs::read_to_string(&note_path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    floor_isolated_trust(&isolated, &existing, &commit, &produced, key)?;
+    if isolated.exists() {
+        eprintln!(
+            "floor precompute: isolated file has provenance for {commit} key {key:016x}; render_cached reuses it only when noise is at or under {NOISE_TARGET}"
+        );
+    }
+    eprintln!(
+        "floor precompute identity\ncommit {commit}\nscene floor\nbounces 64\nkey {key:016x}\neye {:?} yaw {} bits {} pitch {} bits {}\nsize {}x{}\nspp_batch {} noise_target {} acceptance_max_spp {} offline_max_spp {} offline_spp_ceiling {OFFLINE_MAX_SPP}\nseconds_budget {} acceptance_seconds {}\ntriangles {} specular {} materials {}\nisolated {}\nacceptance_cache {}",
+        produced.eye,
+        produced.yaw,
+        produced.yaw.to_bits(),
+        produced.pitch,
+        produced.pitch.to_bits(),
+        produced.width,
+        produced.height,
+        produced.spp,
+        produced.noise_target,
+        acceptance.max_spp,
+        produced.max_spp,
+        produced.seconds,
+        acceptance.seconds,
+        produced.triangles,
+        produced.specular,
+        produced.materials.len(),
+        isolated.display(),
+        acceptance_cache().display()
+    );
+    let reference = genos_debug::reference::render_cached(&produced, &isolated_dir);
+    std::fs::create_dir_all(&isolated_dir).map_err(|err| err.to_string())?;
+    let note = floor_promotion_note(&commit, key, &produced, &reference, false);
+    std::fs::write(&note_path, &note).map_err(|err| err.to_string())?;
+    let dest = promote_floor_isolated(&Promotion {
+        reference: &reference,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit: &commit,
+        expected_commit: &commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_cache(),
+    })?;
+    eprintln!(
+        "floor precompute promoted {} noise {} spp {} seconds {}",
         dest.display(),
         reference.noise,
         reference.spp,
@@ -2455,6 +2817,562 @@ fn precompute_hall_lit64() {
     let _lock = ENV_LOCK.lock().expect("env lock");
     let seconds = precompute_seconds_from_env().expect("CACHE_ENERGY_PRECOMPUTE_SECONDS");
     precompute_hall_lit64_offline(seconds).expect("precompute");
+}
+
+fn dir_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut rows = Vec::new();
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let bytes = std::fs::read(entry.path()).unwrap_or_default();
+            rows.push((name, bytes));
+        }
+    }
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows
+}
+
+#[test]
+fn floor_sampling_budget_is_not_the_acceptance_identity() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    assert_eq!(acceptance.max_spp, MAX_SPP);
+    assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
+    assert_eq!(acceptance.noise_target.to_bits(), NOISE_TARGET.to_bits());
+    assert_eq!(acceptance.spp, 32);
+    assert_eq!(acceptance.max_bounces, 64);
+    assert!(!acceptance.triangles);
+    assert!(!acceptance.specular);
+    assert_eq!(acceptance.materials.len(), 0);
+    assert_eq!(acceptance.width, WIDTH);
+    assert_eq!(acceptance.height, HEIGHT);
+    assert_eq!(
+        acceptance.eye.map(f32::to_bits),
+        [0.0f32, 1.7, 6.0].map(f32::to_bits)
+    );
+    assert_eq!(acceptance.yaw.to_bits(), 0.0f32.to_bits());
+    assert_eq!(acceptance.pitch.to_bits(), (-0.12f32).to_bits());
+    let produced = floor_precompute_setup(
+        &scene,
+        &camera,
+        64,
+        OFFLINE_MAX_SPP,
+        PRECOMPUTE_SECONDS_CAP,
+    )
+    .expect("explicit floor budget");
+    assert_eq!(produced.max_spp, OFFLINE_MAX_SPP);
+    assert_eq!(produced.seconds.to_bits(), PRECOMPUTE_SECONDS_CAP.to_bits());
+    assert_eq!(produced.spp, acceptance.spp);
+    assert_eq!(produced.noise_target.to_bits(), acceptance.noise_target.to_bits());
+    assert_eq!(produced.max_bounces, acceptance.max_bounces);
+    assert_eq!(produced.eye.map(f32::to_bits), acceptance.eye.map(f32::to_bits));
+    shares_acceptance_identity(&acceptance, &produced).expect("budget stays off the identity");
+    let budget = shares_acceptance_trace(&acceptance, &produced)
+        .expect_err("max spp is a sampling budget, not a second identity");
+    assert!(budget.contains("sampling budget"), "{budget}");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    assert_eq!(
+        key,
+        genos_debug::reference::cache_key(&produced),
+        "sampling budget leaked into the cache key"
+    );
+    let direct = genos_debug::reference::cache_key(&acceptance_setup(&scene, &camera, 0));
+    assert_eq!(format!("{direct:016x}"), "e1d4a8f081cd9e2b");
+    assert_eq!(format!("{key:016x}"), "dfe032d1638e605b");
+    eprintln!("open floor b0 key {direct:016x} b64 key {key:016x}");
+}
+
+#[test]
+fn a_floor_budget_does_not_ignore_pose_bounces_or_estimator() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let produced = floor_precompute_setup(&scene, &camera, 64, OFFLINE_MAX_SPP, 10.0)
+        .expect("explicit floor budget");
+    let mut yaw = produced.clone();
+    yaw.yaw = -0.2;
+    assert!(shares_acceptance_identity(&acceptance, &yaw)
+        .expect_err("yaw")
+        .contains("yaw"));
+    let mut eye = produced.clone();
+    eye.eye[0] = 1.0;
+    assert!(shares_acceptance_identity(&acceptance, &eye)
+        .expect_err("eye")
+        .contains("eye"));
+    let mut pitch = produced.clone();
+    pitch.pitch = 0.2;
+    assert!(shares_acceptance_identity(&acceptance, &pitch)
+        .expect_err("pitch")
+        .contains("pitch"));
+    let mut size = produced.clone();
+    size.width = 80;
+    assert!(shares_acceptance_identity(&acceptance, &size)
+        .expect_err("size")
+        .contains("size"));
+    let mut bounces = produced.clone();
+    bounces.max_bounces = 3;
+    assert!(shares_acceptance_identity(&acceptance, &bounces)
+        .expect_err("bounces")
+        .contains("estimator"));
+    let mut noise = produced.clone();
+    noise.noise_target = 0.05;
+    assert!(shares_acceptance_identity(&acceptance, &noise)
+        .expect_err("noise target")
+        .contains("estimator"));
+    let mut batch = produced.clone();
+    batch.spp = 8;
+    assert!(shares_acceptance_identity(&acceptance, &batch)
+        .expect_err("batch")
+        .contains("estimator"));
+    let mut triangles = produced.clone();
+    triangles.triangles = true;
+    assert!(shares_acceptance_identity(&acceptance, &triangles)
+        .expect_err("triangles")
+        .contains("shape"));
+    let mut lobe = produced.clone();
+    lobe.specular = true;
+    assert!(shares_acceptance_identity(&acceptance, &lobe).is_err());
+    let mut paint = produced.clone();
+    paint.materials.push(Some(genos_debug::reference::SolidMaterial {
+        roughness: 0.4,
+        metallic: 0.0,
+    }));
+    assert!(shares_acceptance_identity(&acceptance, &paint).is_err());
+    let (other_scene, other_camera) = closed_box();
+    let other = floor_precompute_setup(&other_scene, &other_camera, 64, OFFLINE_MAX_SPP, 10.0)
+        .expect("closed box still has an acceptance setup");
+    assert!(shares_acceptance_identity(&acceptance, &other)
+        .expect_err("scene")
+        .contains("scene"));
+
+    let (hall_scene, hall_camera) = hall();
+    let hall_acceptance = acceptance_setup(&hall_scene, &hall_camera, 64);
+    let hall_produced =
+        precompute_setup(&hall_scene, &hall_camera, 64, PRECOMPUTE_SECONDS_CAP).expect("hall");
+    assert_eq!(hall_produced.max_spp, MAX_SPP);
+    assert_ne!(hall_produced.seconds.to_bits(), hall_acceptance.seconds.to_bits());
+    shares_acceptance_trace(&hall_acceptance, &hall_produced).expect("hall changes seconds only");
+    shares_acceptance_identity(&hall_acceptance, &hall_produced).expect("hall identity");
+}
+
+#[test]
+fn floor_offline_budget_rejects_out_of_range_and_overflow() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let (scene, camera) = open_floor();
+    for spp in [0, OFFLINE_MAX_SPP + 1, u32::MAX] {
+        assert!(
+            floor_precompute_setup(&scene, &camera, 64, spp, 10.0).is_err(),
+            "spp {spp}"
+        );
+    }
+    for seconds in [0.0, -1.0, 2400.1, f32::INFINITY, f32::NAN] {
+        assert!(
+            floor_precompute_setup(&scene, &camera, 64, OFFLINE_MAX_SPP, seconds).is_err(),
+            "seconds {seconds}"
+        );
+    }
+    let low = floor_precompute_setup(&scene, &camera, 64, 1, PRECOMPUTE_SECONDS_CAP)
+        .expect("1 spp is inside the ceiling");
+    assert_eq!(low.max_spp, 1);
+    assert_eq!(low.noise_target.to_bits(), NOISE_TARGET.to_bits());
+    assert_eq!(low.seconds.to_bits(), PRECOMPUTE_SECONDS_CAP.to_bits());
+    let _clear_spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", None);
+    let _clear_seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", None);
+    assert!(floor_budgets_from_env().is_err(), "a missing budget must not trace");
+    for bad in [
+        "16385",
+        "4294967296",
+        "99999999999999999999",
+        "-1",
+        "+16384",
+        "1.5",
+        "0",
+        "",
+        "nan",
+    ] {
+        let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some(bad));
+        let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some("2400"));
+        let err = floor_budgets_from_env().expect_err(bad);
+        assert!(!err.contains("tracing"), "{bad}: {err}");
+    }
+    for bad in ["2401", "0", "-5", "inf", "nan", "1e99", ""] {
+        let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+        let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some(bad));
+        assert!(floor_budgets_from_env().is_err(), "{bad}");
+    }
+    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+    let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some("2400"));
+    let (spp, seconds) = floor_budgets_from_env().expect("ceiling");
+    assert_eq!(spp, OFFLINE_MAX_SPP);
+    assert_eq!(seconds.to_bits(), PRECOMPUTE_SECONDS_CAP.to_bits());
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    assert_eq!(acceptance.max_spp, MAX_SPP);
+    assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
+    assert_eq!(acceptance.noise_target.to_bits(), NOISE_TARGET.to_bits());
+    assert!(acceptance_refusal(&[
+        ("CACHE_ENERGY_FLOOR_MAX_SPP", "16384"),
+        ("CACHE_ENERGY_FLOOR_SECONDS", "2400"),
+    ])
+    .is_ok());
+}
+
+#[test]
+fn a_converged_floor_above_4096_spp_promotes_only_inside_the_offline_cap() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = 8_192;
+    produced.seconds = 30.0;
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let good = fixture_reference(0.02, 8_192, true, true);
+    let root = std::env::temp_dir().join(format!("cache-energy-floor-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &good);
+    let acceptance_dir = root.join("acceptance");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let dest = promote_floor_isolated(&Promotion {
+        reference: &good,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_dir,
+    })
+    .expect("8192 spp inside the explicit cap promotes");
+    assert_eq!(dest, acceptance_dir.join(format!("{key:016x}.ref")));
+    let loaded = genos_debug::reference::read_cached(&dest, WIDTH, HEIGHT).expect("promoted");
+    assert_eq!(loaded.spp, 8_192);
+    assert_eq!(loaded.noise.to_bits(), good.noise.to_bits());
+    let note = std::fs::read_to_string(acceptance_dir.join(format!("{key:016x}.provenance.json")))
+        .expect("provenance");
+    assert!(note.contains("\"acceptance_max_spp\": 4096"), "{note}");
+    assert!(note.contains("\"offline_max_spp\": 8192"), "{note}");
+    assert!(note.contains("\"offline_spp_ceiling\": 16384"), "{note}");
+    assert!(note.contains("\"spp\": 8192"), "{note}");
+    assert!(note.contains("\"acceptance_seconds\": 600"), "{note}");
+    assert!(note.contains(commit), "{note}");
+    assert!(note.contains("\"scene\": \"floor\""), "{note}");
+
+    let mut at_acceptance_cap = produced.clone();
+    at_acceptance_cap.max_spp = MAX_SPP;
+    let above = fixture_reference(0.01, 4_097, true, true);
+    let blocked = root.join("blocked");
+    std::fs::create_dir_all(&blocked).expect("blocked");
+    let kept = blocked.join(format!("{key:016x}.ref"));
+    std::fs::write(&kept, b"already-valid").expect("seed");
+    let before = dir_files(&blocked);
+    let isolated_above = root.join("above.ref");
+    write_fixture(&isolated_above, &above);
+    let err = promote_floor_isolated(&Promotion {
+        reference: &above,
+        produced: &at_acceptance_cap,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated_above,
+        acceptance_dir: &blocked,
+    })
+    .expect_err("spp above 4096 needs an explicit cap above 4096");
+    assert!(err.contains("blocked"), "{err}");
+    assert_eq!(dir_files(&blocked), before);
+
+    let mut over_ceiling = produced.clone();
+    over_ceiling.max_spp = OFFLINE_MAX_SPP + 1;
+    let err = promote_floor_isolated(&Promotion {
+        reference: &good,
+        produced: &over_ceiling,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &blocked,
+    })
+    .expect_err("cap above 16384");
+    assert!(err.contains("16384") || err.contains("outside"), "{err}");
+    assert_eq!(dir_files(&blocked), before);
+
+    let (hall_scene, hall_camera) = hall();
+    let hall_acceptance = acceptance_setup(&hall_scene, &hall_camera, 64);
+    let mut hall_produced = hall_acceptance.clone();
+    hall_produced.seconds = PRECOMPUTE_SECONDS_CAP;
+    let hall_dir = root.join("hall");
+    let hall_isolated = root.join("hall.ref");
+    let hall_high = fixture_reference(0.01, 8_192, true, true);
+    write_fixture(&hall_isolated, &hall_high);
+    let hall_err = promote_isolated(&Promotion {
+        reference: &hall_high,
+        produced: &hall_produced,
+        acceptance: &hall_acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &hall_isolated,
+        acceptance_dir: &hall_dir,
+    })
+    .expect_err("hall promotion still stops at 4096 spp");
+    assert!(hall_err.contains("blocked"), "{hall_err}");
+    assert!(dir_files(&hall_dir).is_empty(), "{:?}", dir_files(&hall_dir));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_noisy_floor_at_the_offline_cap_does_not_enter_the_cache() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = OFFLINE_MAX_SPP;
+    produced.seconds = PRECOMPUTE_SECONDS_CAP;
+    let noisy = fixture_reference(0.036_648_18, OFFLINE_MAX_SPP, true, true);
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let root = std::env::temp_dir().join(format!("cache-energy-floor-noisy-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let isolated = root.join("isolated.ref");
+    write_fixture(&isolated, &noisy);
+    let acceptance_dir = root.join("acceptance");
+    std::fs::create_dir_all(&acceptance_dir).expect("cache");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    std::fs::write(acceptance_dir.join(format!("{key:016x}.ref")), b"valid-noisy-4096").expect("seed");
+    std::fs::write(acceptance_dir.join("hall-or-box.ref"), b"leave-me").expect("other");
+    let before = dir_files(&acceptance_dir);
+    let err = promote_floor_isolated(&Promotion {
+        reference: &noisy,
+        produced: &produced,
+        acceptance: &acceptance,
+        commit,
+        expected_commit: commit,
+        isolated: &isolated,
+        acceptance_dir: &acceptance_dir,
+    })
+    .expect_err("noise above 0.02 at 16384 stays blocked");
+    assert!(err.contains("blocked"), "{err}");
+    assert!(err.contains("0.02") || err.contains("0.020"), "{err}");
+    assert_eq!(dir_files(&acceptance_dir), before);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_bad_floor_precompute_preserves_the_acceptance_cache() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _gpu = EnvSet::set("GENOS_REFERENCE_GPU", None);
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = OFFLINE_MAX_SPP;
+    produced.seconds = 12.0;
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let good = fixture_reference(0.01, 5_000, true, true);
+    let root = std::env::temp_dir().join(format!("cache-energy-floor-bad-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let acceptance_dir = root.join("acceptance");
+    std::fs::create_dir_all(&acceptance_dir).expect("cache");
+    let key = genos_debug::reference::cache_key(&acceptance);
+    std::fs::write(acceptance_dir.join(format!("{key:016x}.ref")), b"valid-cache").expect("seed");
+    std::fs::write(acceptance_dir.join("box.ref"), b"box-cache").expect("other");
+    let before = dir_files(&acceptance_dir);
+    let mut case_index = 0u32;
+    let mut reject = |reference: &genos_debug::Reference,
+                      produced: &genos_debug::reference::RefSetup,
+                      commit: &str,
+                      bytes: Option<&[u8]>| {
+        case_index += 1;
+        let isolated = root.join(format!("isolated-{case_index}.ref"));
+        match bytes {
+            Some(bytes) => std::fs::write(&isolated, bytes).expect("bad file"),
+            None => write_fixture(&isolated, reference),
+        }
+        let result = promote_floor_isolated(&Promotion {
+            reference,
+            produced,
+            acceptance: &acceptance,
+            commit,
+            expected_commit: "d8142c375dc515d73a041d485c37cb44bc2fe628",
+            isolated: &isolated,
+            acceptance_dir: &acceptance_dir,
+        });
+        assert!(result.is_err(), "case {case_index} promoted: {result:?}");
+        assert_eq!(
+            dir_files(&acceptance_dir),
+            before,
+            "case {case_index} changed the cache"
+        );
+    };
+    reject(&fixture_reference(f32::NAN, 128, true, true), &produced, commit, None);
+    reject(&fixture_reference(0.01, 128, true, false), &produced, commit, None);
+    reject(&fixture_reference(0.01, 128, false, true), &produced, commit, None);
+    reject(&good, &produced, commit, Some(&[]));
+    let mut yaw = produced.clone();
+    yaw.yaw = 0.4;
+    reject(&good, &yaw, commit, None);
+    let mut bounces = produced.clone();
+    bounces.max_bounces = 2;
+    reject(&good, &bounces, commit, None);
+    let mut batch = produced.clone();
+    batch.spp = 16;
+    reject(&good, &batch, commit, None);
+    let mut noise = produced.clone();
+    noise.noise_target = 0.2;
+    reject(&good, &noise, commit, None);
+    reject(
+        &good,
+        &produced,
+        "0000000000000000000000000000000000000000",
+        None,
+    );
+    let mut seconds = produced.clone();
+    seconds.seconds = 2400.1;
+    reject(&good, &seconds, commit, None);
+    let mut triangles = produced.clone();
+    triangles.triangles = true;
+    reject(&good, &triangles, commit, None);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn floor_provenance_is_metadata_and_an_untrusted_file_is_refused() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    let mut produced = acceptance.clone();
+    produced.max_spp = OFFLINE_MAX_SPP;
+    produced.seconds = 20.0;
+    let commit = "d8142c375dc515d73a041d485c37cb44bc2fe628";
+    let picture = fixture_reference(0.01, 64, true, true);
+    let key = genos_debug::reference::cache_key(&acceptance);
+    let dir = std::env::temp_dir().join(format!("cache-energy-floor-trust-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("cached.ref");
+    std::fs::write(&path, b"old").expect("old file");
+    let missing = floor_isolated_trust(&path, "", commit, &produced, key).expect_err("no note");
+    assert!(missing.contains("untrusted"), "{missing}");
+    let hall_note = promotion_note(commit, key, &produced, &picture, false);
+    let hallish = floor_isolated_trust(&path, &hall_note, commit, &produced, key)
+        .expect_err("hall metadata is not a floor trace");
+    assert!(hallish.contains("untrusted"), "{hallish}");
+    let other = floor_promotion_note(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        key,
+        &produced,
+        &picture,
+        false,
+    );
+    let wrong = floor_isolated_trust(&path, &other, commit, &produced, key).expect_err("commit");
+    assert!(wrong.contains("untrusted"), "{wrong}");
+    let note = floor_promotion_note(commit, key, &produced, &picture, false);
+    floor_isolated_trust(&path, &note, commit, &produced, key).expect("matching metadata");
+    let mut other_budget = produced.clone();
+    other_budget.max_spp = 8_192;
+    let drifted = floor_isolated_trust(&path, &note, commit, &other_budget, key)
+        .expect_err("a different spp budget is a different trace");
+    assert!(drifted.contains("untrusted"), "{drifted}");
+    floor_isolated_trust(&dir.join("absent.ref"), "", commit, &produced, key)
+        .expect("nothing to trust");
+    assert!(
+        !note.contains("sha256") && !note.contains("signature"),
+        "provenance stays metadata: {note}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn picture_bounce_and_direct_ratios_are_exact() {
+    let n = (WIDTH * HEIGHT) as usize;
+    let mut full_hit = vec![false; n];
+    let mut direct_hit = vec![false; n];
+    let mut full_linear = vec![[0.0f32; 3]; n];
+    let mut direct_linear = vec![[0.0f32; 3]; n];
+    full_hit[0] = true;
+    full_hit[1] = true;
+    full_hit[3] = true;
+    direct_hit[0] = true;
+    direct_hit[1] = true;
+    direct_hit[3] = true;
+    full_linear[0] = [1.0, 1.0, 1.0];
+    direct_linear[1] = [1.0, 1.0, 1.0];
+    let mut live_bounce = vec![None; n];
+    let mut live_direct = vec![None; n];
+    live_bounce[0] = Some(2.0);
+    live_bounce[1] = Some(7.0);
+    live_bounce[2] = Some(100.0);
+    live_direct[0] = Some(4.0);
+    live_direct[1] = Some(1.0);
+    live_direct[2] = Some(100.0);
+    let image = |linear: Vec<[f32; 3]>, hit: Vec<bool>| genos_debug::Reference {
+        image: genos_debug::Image {
+            width: WIDTH,
+            height: HEIGHT,
+            rgb: vec![0; n * 3],
+        },
+        linear,
+        hit,
+        spp: 32,
+        seconds: 1.0,
+        noise: 0.0,
+        specular: None,
+    };
+    let direct = image(direct_linear, direct_hit);
+    let full = image(full_linear, full_hit);
+    let picture = picture_sums(&live_bounce, &live_direct, &direct, &full, &direct)
+        .expect("picture sums");
+    let white = luma([1.0, 1.0, 1.0]);
+    assert_eq!(picture.bounce_n, 2, "a miss and a missing sample stay out");
+    assert_eq!(picture.direct_n, 2);
+    assert_eq!(picture.ref_bounce, white, "a darker full pixel clamps at zero");
+    assert_eq!(picture.live_bounce, 9.0);
+    assert_eq!(picture.ref_direct, white);
+    assert_eq!(picture.live_direct, 5.0);
+    let bounce = linger_share(picture.live_bounce, picture.ref_bounce).expect("bounce ratio");
+    assert_eq!(bounce, 9.0 / white);
+    let direct_ratio = direct_oracle(picture.live_direct, picture.ref_direct).expect("direct");
+    assert_eq!(direct_ratio, DirectOracle::Ratio(5.0 / white));
+}
+
+#[test]
+fn ordinary_acceptance_stays_at_4096_and_accepts_a_converged_higher_spp() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let _spp = EnvSet::set("CACHE_ENERGY_FLOOR_MAX_SPP", Some("16384"));
+    let _seconds = EnvSet::set("CACHE_ENERGY_FLOOR_SECONDS", Some("2400"));
+    let _hall = EnvSet::set("CACHE_ENERGY_PRECOMPUTE_SECONDS", Some("2400"));
+    let (scene, camera) = open_floor();
+    let acceptance = acceptance_setup(&scene, &camera, 64);
+    assert_eq!(acceptance.max_spp, MAX_SPP);
+    assert_eq!(acceptance.seconds.to_bits(), TRACE_SECONDS.to_bits());
+    assert_eq!(acceptance.noise_target.to_bits(), NOISE_TARGET.to_bits());
+    assert_eq!(acceptance.spp, 32);
+    let facts = facts_of(&fixture_reference(0.01, OFFLINE_MAX_SPP, true, true), TRACE_SECONDS);
+    assert_eq!(facts.max_spp, MAX_SPP);
+    assert!(reference_verdict(&facts).is_ok(), "a converged file above 4096 still passes");
+    let noisy = ReferenceFacts {
+        noise: 0.036_648_18,
+        spp: MAX_SPP,
+        seconds: 6.282,
+        ..facts
+    };
+    assert!(reference_verdict(&noisy).expect_err("noisy 4096").contains("blocked"));
+    let noisy_cap = ReferenceFacts {
+        noise: 0.03,
+        spp: OFFLINE_MAX_SPP,
+        seconds: 20.0,
+        ..facts
+    };
+    assert!(reference_verdict(&noisy_cap).expect_err("noisy 16384").contains("blocked"));
+    assert!(acceptance_refusal(&[("CACHE_ENERGY_SH", "1")]).is_err());
+}
+
+#[test]
+#[ignore = "CPU path trace of the open floor, at most 16384 spp and 2400 s, not acceptance"]
+fn precompute_floor_b64() {
+    let _lock = ENV_LOCK.lock().expect("env lock");
+    let (max_spp, seconds) = floor_budgets_from_env().expect("CACHE_ENERGY_FLOOR_MAX_SPP and CACHE_ENERGY_FLOOR_SECONDS");
+    precompute_floor_b64_offline(max_spp, seconds).expect("precompute");
 }
 
 #[test]
