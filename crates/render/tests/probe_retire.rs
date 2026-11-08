@@ -15,10 +15,10 @@
 use genos_render::{GpuKind, LightingPreset, LightingSettings, Renderer, lighting_change_head};
 use genos_window::Window;
 
-const ROWS: usize = 18;
+const ROWS: usize = 22;
 const STRIDE: usize = 16;
 const HEAD: usize = 8;
-const OUT_FLOATS: usize = 392;
+const OUT_FLOATS: usize = 416;
 const RAYS: u32 = 4;
 const RETIRE_BIT: u32 = 1 << 19;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -41,6 +41,16 @@ const REAPPEAR: usize = 14;
 const MOVER: usize = 15;
 const MOVER_MISS: usize = 16;
 const SKY: usize = 17;
+const KEPT_DEAD: usize = 18;
+const KEPT_OFF: usize = 19;
+const KEPT_HOLE: usize = 20;
+const KEPT_BACK: usize = 21;
+/// Kept sentinel, fill sentinel, and older stratum, both probes.
+const KEPT_STILL: u32 = 0b11_1111;
+/// Probe 0 still held, probe 1 opened, both strata still stored.
+const KEPT_REVIVED: u32 = 0b11_0101;
+/// Both kept and fill slots opened, both strata still stored.
+const KEPT_OPEN: u32 = 0b11_0000;
 
 struct Row {
     zero: u32,
@@ -56,6 +66,7 @@ struct Row {
     planted: u32,
     covers: u32,
     hold: u32,
+    kept: u32,
     first: u32,
 }
 
@@ -106,13 +117,14 @@ fn row(words: &[f32], id: usize) -> Row {
         planted: word(words, at + 10),
         covers: word(words, at + 11),
         hold: word(words, at + 12),
+        kept: word(words, at + 14),
         first: word(words, at + 15),
     }
 }
 
 fn show(id: usize, row: &Row) -> String {
     format!(
-        "row {id} zero {} live {} opened {} gather {} filter {} wl {} wr {} sl {} sr {} cell {} planted {} covers {} hold {} first {}",
+        "row {id} zero {} live {} opened {} gather {} filter {} wl {} wr {} sl {} sr {} cell {} planted {} covers {} hold {} kept {} first {}",
         row.zero,
         row.live,
         row.opened,
@@ -126,6 +138,7 @@ fn show(id: usize, row: &Row) -> String {
         row.planted,
         row.covers,
         row.hold,
+        row.kept,
         row.first
     )
 }
@@ -188,6 +201,11 @@ fn retire_bit_is_packed_only_from_the_setting() {
 
 #[test]
 fn the_production_passes_return_before_the_retired_work() {
+    expect_pass_order();
+    expect_kept_membership();
+}
+
+fn expect_pass_order() {
     let cache = shader("shaders/lighting_cache.glsl");
     assert!(
         !cache.contains("LIGHTING_DIAG_PROBE_LIVE"),
@@ -246,6 +264,36 @@ fn the_production_passes_return_before_the_retired_work() {
     );
     assert!(hit_at < cast, "the hit slot is before the cast");
     assert!(trace[trace_at..hit_at].contains("return;"));
+}
+
+fn expect_kept_membership() {
+    let trace = shader("shaders/lighting_trace.comp");
+    let kept_skip = trace
+        .find("lighting_probe_kept_skip(h)")
+        .expect("kept hits check the probe record");
+    let crossed = trace
+        .find("lighting_kept_crossed(h, origin, dir)")
+        .expect("kept hits still use the change test");
+    assert!(
+        kept_skip < crossed,
+        "a retired probe returns before the kept re-trace"
+    );
+    let cache = shader("shaders/lighting_cache.glsl");
+    let skip_body = function_body(&cache, "bool lighting_probe_kept_skip(");
+    assert!(skip_body.contains("lighting_sh_probe_retire_on()"));
+    assert!(skip_body.contains("lighting_probe_record_live"));
+    assert!(!skip_body.contains("diag["));
+    let clear_body = function_body(&cache, "void lighting_probe_retire_clear(");
+    assert!(
+        !clear_body.contains("LIGHTING_STRATA"),
+        "place still clears only the current stratum"
+    );
+    let common = shader("shaders/lighting_common.glsl");
+    let fill = function_body(&common, "bool lighting_fill_ray(");
+    assert!(
+        fill.contains("pp.w < 0.5"),
+        "fills already require a live probe record"
+    );
 
     let gather = shader("shaders/lighting_gather.comp");
     let bin = function_body(&gather, "void gather_bin()");
@@ -287,9 +335,12 @@ fn the_production_passes_return_before_the_retired_work() {
     assert!(harness.contains("LIGHTING_FILTER_SPV"));
     let passes = function_body(&harness, "fn probe_retire_passes(");
     assert!(passes.contains("place, 1, 1, 1"));
-    assert!(passes.contains("trace, 1, 1, 1"));
+    assert!(passes.contains("trace, groups, 1, 1"));
     assert!(passes.contains("gather, 2, 1, 1"));
     assert!(passes.contains("filter, 1, 1, 1"));
+    let groups = function_body(&harness, "fn trace_groups(");
+    assert!(groups.contains('3'), "kept and fill use three groups");
+    assert!(groups.contains('1'), "probe rays stay one group");
 }
 
 #[test]
@@ -319,6 +370,7 @@ fn covered_footprints_drop_place_trace_gather_and_filter_work() {
 
     let rows: Vec<Row> = (0..ROWS).map(|id| row(&words, id)).collect();
     expect_rows(&rows);
+    expect_lifecycle(&rows);
 }
 
 fn expect_rows(rows: &[Row]) {
@@ -380,7 +432,19 @@ fn expect_rows(rows: &[Row]) {
     assert_eq!(again.right_held, 0, "{again_text}");
     assert_eq!(again.covers, 1, "{again_text}");
 
-    for id in [PARTIAL, FULL, OFF, SPLIT, SLANT, REAPPEAR, MOVER] {
+    for id in [
+        PARTIAL,
+        FULL,
+        OFF,
+        SPLIT,
+        SLANT,
+        REAPPEAR,
+        MOVER,
+        KEPT_DEAD,
+        KEPT_OFF,
+        KEPT_HOLE,
+        KEPT_BACK,
+    ] {
         assert_eq!(rows[id].covers, 1, "{}", show(id, &rows[id]));
     }
     for id in [
@@ -405,4 +469,40 @@ fn expect_rows(rows: &[Row]) {
         }
         assert_eq!(row.hold, 0, "{}", show(id, row));
     }
+}
+
+fn expect_lifecycle(rows: &[Row]) {
+    let dead = &rows[KEPT_DEAD];
+    let dead_text = show(KEPT_DEAD, dead);
+    assert_eq!(dead.live, 0, "{dead_text}");
+    assert_eq!(dead.opened, 0, "{dead_text}");
+    assert_eq!(dead.left_held, 1, "{dead_text}");
+    assert_eq!(dead.right_held, 1, "{dead_text}");
+    assert_eq!(dead.kept, KEPT_STILL, "{dead_text}");
+    assert_eq!(dead.first, 7, "{dead_text}");
+
+    let off = &rows[KEPT_OFF];
+    let off_text = show(KEPT_OFF, off);
+    assert_eq!(off.live, 2, "{off_text}");
+    assert_eq!(off.opened, 8, "{off_text}");
+    assert_eq!(off.kept, KEPT_OPEN, "{off_text}");
+    assert_eq!(off.first & 4, 0, "{off_text}");
+
+    let hole = &rows[KEPT_HOLE];
+    let hole_text = show(KEPT_HOLE, hole);
+    assert_eq!(hole.live, 1, "{hole_text}");
+    assert_eq!(hole.left_w, 0, "{hole_text}");
+    assert_eq!(hole.right_w, 1, "{hole_text}");
+    assert_eq!(hole.left_held, 1, "{hole_text}");
+    assert_eq!(hole.right_held, 0, "{hole_text}");
+    assert_eq!(hole.kept, KEPT_REVIVED, "{hole_text}");
+
+    let back = &rows[KEPT_BACK];
+    let back_text = show(KEPT_BACK, back);
+    assert_eq!(back.first & 0xff, 0, "{back_text}");
+    assert_eq!(back.first >> 8, KEPT_STILL, "{back_text}");
+    assert_eq!(back.live, 1, "{back_text}");
+    assert_eq!(back.left_held, 1, "{back_text}");
+    assert_eq!(back.right_held, 0, "{back_text}");
+    assert_eq!(back.kept, KEPT_REVIVED, "{back_text}");
 }

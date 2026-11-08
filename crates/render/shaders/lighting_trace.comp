@@ -118,7 +118,8 @@ void main() {
         // Past this frame's rays: one thread per kept hit, re-traced where it crossed
         // a change (lighting_kept_crossed). Not on the async queue (mode 2).
         uint h = ray - rays_end;
-        if (mode == 2u || h >= lighting_kept_hits() || !lighting_kept_crossed(h, origin, dir)) {
+        if (mode == 2u || h >= lighting_kept_hits() || lighting_probe_kept_skip(h)
+            || !lighting_kept_crossed(h, origin, dir)) {
             return;
         }
         at = lighting_kept_at(h);

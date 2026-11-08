@@ -15,17 +15,40 @@ use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 32_768) * 16;
-const OUT_FLOATS: usize = 392;
-const HEAD_SRC: usize = 360;
+const OUT_FLOATS: usize = 416;
+const HEAD_SRC: usize = 384;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 4;
-const ROWS: u32 = 18;
+const ROWS: u32 = 22;
 const REAPPEAR: u32 = 14;
+const KEPT_DEAD: u32 = 18;
+const KEPT_OFF: u32 = 19;
+const KEPT_BACK: u32 = 21;
 /// Mode 1 (probe rays only) and the quiet bit. Filter round and gather-pick stay clear.
 const PARAMS_Z: u32 = (1 << 8) | (1 << 10);
+/// Fill traces (params.z bit 6). Only the kept/fill rows set it.
+const FILL_BIT: u32 = 1 << 6;
 const FRAME: u32 = 100;
 const DIMS: [u32; 4] = [8, 4, 2, 1];
+
+fn lifecycle(row: u32) -> bool {
+    (KEPT_DEAD..=KEPT_BACK).contains(&row)
+}
+
+fn params_for(row: u32) -> u32 {
+    if lifecycle(row) {
+        PARAMS_Z | FILL_BIT
+    } else {
+        PARAMS_Z
+    }
+}
+
+/// Mode 1 picture trace is probe rays plus one kept group plus one fill group.
+/// 8 + 64 + 64 threads, so three groups of 64. The other rows stay one group.
+fn trace_groups(row: u32) -> u32 {
+    if lifecycle(row) { 3 } else { 1 }
+}
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -657,13 +680,27 @@ impl Gpu {
             self.begin_reused(cmd)?;
             self.probe_retire_barrier(cmd, 0x4000, 0x800, 0x4000, 0x20);
             for row in 0..ROWS {
-                self.probe_retire_pass(cmd, layout, set, plant, row, 0, 1, 1, 1);
-                self.probe_retire_passes(cmd, layout, set, place, trace, gather, filter);
-                self.probe_retire_pass(cmd, layout, set, plant, row, 1, 1, 1, 1);
-                if row == REAPPEAR {
-                    self.probe_retire_pass(cmd, layout, set, plant, row, 2, 1, 1, 1);
-                    self.probe_retire_passes(cmd, layout, set, place, trace, gather, filter);
-                    self.probe_retire_pass(cmd, layout, set, plant, row, 1, 1, 1, 1);
+                let params = params_for(row);
+                let groups = trace_groups(row);
+                self.probe_retire_pass(cmd, layout, set, plant, row, 0, params, 1, 1, 1);
+                self.probe_retire_passes(cmd, layout, set, place, trace, gather, filter, groups);
+                self.probe_retire_pass(cmd, layout, set, plant, row, 1, params, 1, 1, 1);
+                if row == REAPPEAR || row == KEPT_BACK {
+                    self.probe_retire_pass(cmd, layout, set, plant, row, 2, params, 1, 1, 1);
+                    self.probe_retire_passes(
+                        cmd, layout, set, place, trace, gather, filter, groups,
+                    );
+                    self.probe_retire_pass(cmd, layout, set, plant, row, 1, params, 1, 1, 1);
+                }
+                if row == KEPT_DEAD || row == KEPT_OFF {
+                    self.probe_retire_pass(
+                        cmd, layout, set, filter, row, 0, params | (1 << 1), 1, 1, 1,
+                    );
+                    self.probe_retire_pass(cmd, layout, set, plant, row, 3, params, 1, 1, 1);
+                    self.probe_retire_pass(
+                        cmd, layout, set, filter, row, 0, params | (2 << 1), 1, 1, 1,
+                    );
+                    self.probe_retire_pass(cmd, layout, set, plant, row, 4, params, 1, 1, 1);
                 }
             }
             self.probe_retire_barrier(cmd, 0x800, 0x4000, 0x40, 0x2000);
@@ -714,12 +751,15 @@ impl Gpu {
         trace: Handle,
         gather: Handle,
         filter: Handle,
+        groups: u32,
     ) {
         // The row is already in the push constants from the plant dispatch.
-        // These passes ignore lamp. Place is one group, trace is one group in
-        // mode 1, gather is one group per probe, filter is one group.
+        // These passes ignore lamp. Place is one group. Trace is one group for
+        // the probe rays, and three groups when the row plants kept hits and
+        // fills (mode 1: probe rays, then kept, then fill). Gather is one group
+        // per probe. Filter is round 0 here; rounds 1 and 2 are separate dispatches.
         self.probe_retire_bind(cmd, layout, set, place, 1, 1, 1);
-        self.probe_retire_bind(cmd, layout, set, trace, 1, 1, 1);
+        self.probe_retire_bind(cmd, layout, set, trace, groups, 1, 1);
         self.probe_retire_bind(cmd, layout, set, gather, 2, 1, 1);
         self.probe_retire_bind(cmd, layout, set, filter, 1, 1, 1);
     }
@@ -732,6 +772,7 @@ impl Gpu {
         pipe: Handle,
         row: u32,
         phase: u32,
+        params_z: u32,
         x: u32,
         y: u32,
         z: u32,
@@ -747,7 +788,7 @@ impl Gpu {
             }
             let pc = Pc {
                 dims: DIMS,
-                params: [4, 4, PARAMS_Z, FRAME],
+                params: [4, 4, params_z, FRAME],
                 lamp: [row, phase, 0, 0],
             };
             (self.fns.cmd_push)(

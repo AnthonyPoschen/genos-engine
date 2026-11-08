@@ -3588,6 +3588,17 @@ bool lighting_probe_trace_skip(uint ray) {
     uint rays = max(lighting_rays(), 1u);
     return work.v[lighting_probe_at(ray / rays)].w <= LIGHTING_CACHE_HAS_W;
 }
+// An older stratum stays in memory when place retires the probe. The kept
+// re-trace reads that stratum, not the probe record. Fill already requires
+// the probe record. Cache rays are not kept hits. Retire off does not use this.
+bool lighting_probe_kept_skip(uint h) {
+    if (!lighting_sh_probe_retire_on()) {
+        return false;
+    }
+    uint rays = max(lighting_rays(), 1u);
+    uint probe = h / rays / LIGHTING_STRATA;
+    return !lighting_probe_record_live(probe);
+}
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
