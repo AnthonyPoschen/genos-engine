@@ -2027,14 +2027,23 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
         return;
     }
     if (cache.v[3u * slot + 2u].w < 0.5) {
+        // z stays 0. A detail seed sets it after this call. Parent, resample,
+        // hit, and probe seeds stay unmarked, so an empty owner does not drop them.
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
 }
+bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
     if (!(sp.z > 0.0)) {
+        return vec4(0.0);
+    }
+    // Every caller of this read, including the default High denoise return,
+    // drops a detail seed whose owner is empty. The store itself stays: a
+    // read-only compose cannot clear it, and has_seed still sees the confidence.
+    if (lighting_sh_detail_seed_rejected(slot)) {
         return vec4(0.0);
     }
     return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), sp.z);
@@ -2256,6 +2265,18 @@ bool lighting_sh_detail_owner_lit(uint slot) {
         return false;
     }
     return lighting_sh_owning_detail(p, n).w > LIGHTING_CACHE_HAS_W;
+}
+// Sun word z above the empty-sample line marks a detail seed. lighting_sc_set_seed
+// writes 0 there, and the detail writer sets it after that. An empty owner
+// rejects the marked seed on every lighting_sc_seed return. Unmarked seeds stay.
+bool lighting_sh_detail_seed_rejected(uint slot) {
+    if (!lighting_sh_texel_detail_on()) {
+        return false;
+    }
+    if (!(cache.v[LIGHTING_SC_SUN_AT + slot].z > LIGHTING_CACHE_HAS_W)) {
+        return false;
+    }
+    return !lighting_sh_detail_owner_lit(slot);
 }
 vec4 lighting_sc_shown(uint slot) {
     // S72D coarse to fine: a texel shows the interpolation of the next level up
@@ -3296,7 +3317,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj);
 // S72M: the pixel's screen-probe irradiance (lighting_compose.comp), -1 when none.
 vec3 lighting_px_probes = vec3(-1.0);
 // Last compose indirect: world trust, probe-irradiance calls, and whether the
-// SH texel detail path retired that read. diag[0..2] sum the same over the frame.
+// SH texel detail path retired that read. diag[0..2] count displaying-compose
+// calls only. The maintenance compile runs the same function and does not add.
+// cells_only can still land on diag[0]: covers() does not read that toggle, and
+// the pixel then shows lighting_sh_read. A fixture dispatch is not a presented frame.
 float lighting_px_world_w = 0.0;
 uint lighting_px_probe_reads = 0u;
 uint lighting_px_probe_skipped = 0u;
@@ -3432,6 +3456,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 if (LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
+                    // The mark is what a later read-only compose uses to drop this
+                    // seed once the owner is empty. set_seed leaves it at 0.
+                    cache.v[LIGHTING_SC_SUN_AT + slot].z = 1.0;
                 }
                 detail_rgb = detail.rgb;
                 detail_kept = true;

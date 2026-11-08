@@ -12,8 +12,9 @@
 use genos_render::{lighting_change_head, GpuKind, LightingPreset, LightingSettings, Renderer};
 use genos_window::Window;
 
-const STRIDE: usize = 16;
-const ROWS: usize = 10;
+const STRIDE: usize = 17;
+const ROWS: usize = 12;
+const READ_ROWS: usize = 5;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
 
@@ -28,6 +29,7 @@ struct Row {
     own: f32,
     head_hi: u32,
     cell: [f32; 3],
+    mark: f32,
 }
 
 fn row(words: &[f32], id: usize) -> Row {
@@ -44,6 +46,7 @@ fn row(words: &[f32], id: usize) -> Row {
         own: w[11],
         head_hi: w[12].to_bits(),
         cell: [w[13], w[14], w[15]],
+        mark: w[16],
     }
 }
 
@@ -295,11 +298,163 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((lamp_blue.skipped - 1.0).abs() <= ABS);
     assert!(near(lamp_blue.cell, blue));
     assert!((lamp_blue.cell_same - 1.0).abs() <= ABS);
+    assert!(
+        (lamp_blue.mark - 1.0).abs() <= ABS,
+        "a live owner after the lamp keeps the detail mark"
+    );
+
+    let parent_rgb = [5.0, 1.0, 4.0];
+    let quiet_empty = &rows[10];
+    assert!(
+        near(quiet_empty.shown, probe),
+        "writes on, no lamp, empty owner showed {:?}, wanted the probe, not the old green seed",
+        quiet_empty.shown
+    );
+    assert!(
+        near(quiet_empty.seed, probe),
+        "the miss writer stored {:?}, wanted the probe seed",
+        quiet_empty.seed
+    );
+    assert!(
+        quiet_empty.mark.abs() <= ABS,
+        "the probe seed must clear the detail mark, mark {}",
+        quiet_empty.mark
+    );
+    assert!(quiet_empty.reads >= 1.0, "the empty owner still needs probes");
+    assert!(quiet_empty.skipped.abs() <= ABS);
+    assert!(
+        near(quiet_empty.cell, [0.0; 3]),
+        "the empty cell was filled {:?}",
+        quiet_empty.cell
+    );
+
+    let kept = &rows[11];
+    assert!(
+        near(kept.shown, parent_rgb),
+        "an unmarked parent seed showed {:?}, wanted {parent_rgb:?}",
+        kept.shown
+    );
+    assert!(
+        near(kept.seed, parent_rgb),
+        "the parent seed was replaced with {:?}",
+        kept.seed
+    );
+    assert!(kept.mark.abs() <= ABS, "a parent seed is not a detail seed");
+    assert!(kept.reads >= 1.0);
+    assert!(kept.skipped.abs() <= ABS);
+    assert!(
+        (covered.mark - 1.0).abs() <= ABS,
+        "the detail writer must mark its seed, mark {}",
+        covered.mark
+    );
 
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
     assert_eq!(skip, 3, "covered, denoise-off, and the blue owner skip");
-    assert_eq!(eval, 7, "the other rows still evaluate probe indirect");
-    assert_eq!(reads, 7, "one probe irradiance read on each evaluated row");
+    assert_eq!(eval, 9, "the other rows still evaluate probe indirect");
+    assert_eq!(reads, 9, "one probe irradiance read on each evaluated row");
+}
+
+#[test]
+fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
+    assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+    let words = renderer
+        .texel_detail_prod_readonly()
+        .expect("read-only production compose indirect");
+    assert_eq!(words.len(), 8 + ROWS * STRIDE);
+    let rows: Vec<Row> = (0..READ_ROWS).map(|id| row(&words, id)).collect();
+
+    let red = [8.0, 0.0, 0.0];
+    let own = [4.0, 2.0, 0.0];
+    let probe = [1.0, 2.0, 3.0];
+    let green = [0.0, 6.0, 0.0];
+    let parent_rgb = [5.0, 1.0, 4.0];
+
+    let stale = &rows[0];
+    assert!(
+        near(stale.shown, probe),
+        "read-only compose with an empty owner showed {:?}, wanted the probe, not the stale green seed",
+        stale.shown
+    );
+    assert!(
+        near(stale.seed, green),
+        "read-only compose must leave the stored detail seed, got {:?}",
+        stale.seed
+    );
+    assert!(
+        (stale.conf - 0.25).abs() <= ABS,
+        "stored confidence {}",
+        stale.conf
+    );
+    assert!(
+        (stale.mark - 1.0).abs() <= ABS,
+        "the detail mark stays, mark {}",
+        stale.mark
+    );
+    assert!((stale.world_w - 1.0).abs() <= ABS, "trust {}", stale.world_w);
+    assert!(stale.reads >= 1.0, "the empty owner still needs probes");
+    assert!(stale.skipped.abs() <= ABS);
+    assert!(near(stale.cell, [0.0; 3]));
+
+    let parent = &rows[1];
+    assert!(
+        near(parent.shown, parent_rgb),
+        "an unmarked parent seed showed {:?}, wanted {parent_rgb:?}",
+        parent.shown
+    );
+    assert!(near(parent.seed, parent_rgb), "stored parent {:?}", parent.seed);
+    assert!(parent.mark.abs() <= ABS);
+    assert!(parent.reads >= 1.0);
+    assert!(parent.skipped.abs() <= ABS);
+
+    let covered = &rows[2];
+    assert!(
+        near(covered.shown, red),
+        "a covered owner on the read-only compile showed {:?}",
+        covered.shown
+    );
+    assert!((covered.world_w - 1.0).abs() <= ABS);
+    assert!(covered.reads.abs() <= ABS, "probe reads {}", covered.reads);
+    assert!((covered.skipped - 1.0).abs() <= ABS);
+    assert!(
+        covered.conf.abs() <= ABS,
+        "read-only compose stored a seed, conf {}",
+        covered.conf
+    );
+
+    let sampled = &rows[3];
+    assert!(
+        near(sampled.shown, own),
+        "own samples showed {:?}, wanted the texel mean",
+        sampled.shown
+    );
+    assert!((sampled.world_w - 1.0).abs() <= ABS);
+    assert!(sampled.reads >= 1.0, "own samples still read probes");
+    assert!(sampled.skipped.abs() <= ABS);
+    assert!((sampled.own - 1.0).abs() <= ABS);
+
+    let blend = [
+        0.75 * parent_rgb[0] + 0.25 * probe[0],
+        0.75 * parent_rgb[1] + 0.25 * probe[1],
+        0.75 * parent_rgb[2] + 0.25 * probe[2],
+    ];
+    let mixed = &rows[4];
+    assert!(
+        near(mixed.shown, blend),
+        "mixed corners showed {:?}, wanted {blend:?}. The stale green corner must not stay in the blend",
+        mixed.shown
+    );
+    assert!(mixed.reads >= 1.0);
+    assert!(mixed.skipped.abs() <= ABS);
+
+    assert_eq!(words[2].to_bits(), 1, "only the covered owner skips");
+    assert_eq!(words[3].to_bits(), 4, "the other read-only rows evaluate");
+    assert_eq!(
+        words[4].to_bits(),
+        4,
+        "one probe irradiance read on each evaluated row"
+    );
 }

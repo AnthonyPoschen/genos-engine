@@ -8,6 +8,9 @@
 // mover, a slant, and a trust gate that hands the pixel back to the probes are
 // not this. Trust is not the test: those other estimators also return trust 1.
 // The owner read is one cell, not the ADR's trilinear neighbour blend.
+// cells_only is not this test. The toggle is applied later, inside
+// lighting_world_irradiance_in, so a cells_only pixel can still count as a
+// skip here and then show lighting_sh_read rather than the texel seed.
 // Defined after lighting_probe_irradiance: the cache include is earlier.
 bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     if (!lighting_sh_texel_detail_on() || obj || lighting_world_mode() != 3u) {
@@ -102,12 +105,20 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
             wsum += w;
             lighting_px_probe_reads += 1u;
         }
+        // Displaying compose only. Maintenance calls this function on the same
+        // pixels and must not add, or one frame pixel becomes two counts.
+        // diag[0] is a covers() skip, which cells_only can take before the
+        // picture shows lighting_sh_read. A fixture total is one dispatch.
+#ifndef GENOS_COMPOSE_MAINT
         atomicAdd(gstats.diag[LIGHTING_DIAG_PROBE_EVAL], 1u);
         atomicAdd(gstats.diag[LIGHTING_DIAG_PROBE_READS], lighting_px_probe_reads);
+#endif
     } else {
         lighting_px_probes = vec3(-1.0);
         lighting_px_probe_skipped = 1u;
+#ifndef GENOS_COMPOSE_MAINT
         atomicAdd(gstats.diag[LIGHTING_DIAG_PROBE_SKIP], 1u);
+#endif
     }
     const float CACHE_WEIGHT = 0.05;
     lighting_sc_display = true;
