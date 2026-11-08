@@ -71,6 +71,7 @@ struct MediaModules {
     inject: PathBuf,
     integrate: PathBuf,
     texel_detail: PathBuf,
+    texel_detail_ro: PathBuf,
 }
 
 /// Media and froxel modules, and the two compile-only checks that sit with them.
@@ -96,6 +97,12 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_detail: compile(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod.comp.spv"),
+        ),
+        // Same production function, compose's read-only specialization.
+        texel_detail_ro: compile_glslc_define(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod_ro.comp.spv"),
+            "LIGHTING_SC_WRITES=false",
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
@@ -197,7 +204,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -208,7 +215,8 @@ fn write_shader_glue(
             media.check.display(),
             media.inject.display(),
             media.integrate.display(),
-            media.texel_detail.display()
+            media.texel_detail.display(),
+            media.texel_detail_ro.display()
         ),
     )
     .unwrap();
@@ -262,6 +270,7 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
 fn rerun_shader_pieces() {
     for piece in [
         "lighting_common.glsl",
+        "lighting_screen_probe.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",

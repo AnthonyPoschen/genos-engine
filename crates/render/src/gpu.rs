@@ -1097,7 +1097,7 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
-    /// One lavapipe dispatch of `lighting_world_irradiance_in` with the
+    /// One lavapipe dispatch of `lighting_screen_probe_indirect` with the
     /// production cache. The rows are the stage 3 covered and uncovered cases.
     ///
     /// # Errors
@@ -1105,6 +1105,15 @@ impl Renderer {
     /// Returns an error when the device rejects the dispatch.
     pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
         self.gpu.texel_detail_prod()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly()
     }
 
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.

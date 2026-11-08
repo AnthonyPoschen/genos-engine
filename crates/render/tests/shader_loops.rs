@@ -7,13 +7,14 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 25] = [
+const SHADERS: [&str; 26] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
     "scene_data.glsl",
     "mesh_field.glsl",
     "lighting_common.glsl",
+    "lighting_screen_probe.glsl",
     "lighting_pack.glsl",
     "gbuffer.frag",
     "lighting_place.comp",
@@ -108,6 +109,7 @@ fn picture_compose_does_not_walk_occluders() {
         "lighting_compose.comp",
         "lighting_sun_compose.comp",
         "lighting_common.glsl",
+        "lighting_screen_probe.glsl",
     ] {
         let text = source(name);
         assert!(

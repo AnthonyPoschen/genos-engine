@@ -1,8 +1,10 @@
 //! Dispatch `texel_detail_prod.comp`.
 //!
 //! The shader includes `lighting_common.glsl` and calls
-//! `lighting_world_irradiance_in`. The buffers are the production cache, key
-//! table, and work block at the production slot count.
+//! `lighting_screen_probe_indirect`, the function compose calls. One module
+//! is the writing specialization. The other defines `LIGHTING_SC_WRITES` false,
+//! which is the read-only compose specialization. The buffers are the
+//! production cache, key table, and work block at the production slot count.
 
 use std::ffi::c_void;
 
@@ -10,9 +12,13 @@ use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
-const WORK_BYTES: u64 = (98_304 * 16 + 8) * 16;
-const OUT_FLOATS: usize = 4 + 10 * 24;
+// One screen probe shifts the change block past the cache-ray region. The
+// extra words keep that head inside the buffer.
+const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
+const OUT_FLOATS: usize = 8 + 12 * 17;
 const PC_BYTES: u32 = 48;
+const HEAD_WORDS: usize = 8;
+const HEAD_VARIANTS: usize = 3;
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -28,6 +34,7 @@ pub(super) struct Pipe {
     set: Handle,
     layout: Handle,
     pipe: Handle,
+    pipe_ro: Handle,
     pub(super) cmd: Handle,
     fence: Handle,
 }
@@ -50,22 +57,37 @@ fn ckeys_bytes() -> u64 {
 
 impl Gpu {
     pub(super) fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.texel_detail_dispatch(false)
+    }
+
+    /// Read-only compose specialization of the same production function.
+    pub(super) fn texel_detail_prod_readonly(&mut self) -> Result<Vec<f32>, String> {
+        self.texel_detail_dispatch(true)
+    }
+
+    fn texel_detail_dispatch(&mut self, readonly: bool) -> Result<Vec<f32>, String> {
         if self.texel_detail.is_none() {
-            self.texel_detail = Some(self.create_texel_detail()?);
+            self.texel_detail = Some(self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_SPV)?);
         }
-        self.dispatch_texel_detail()
+        self.dispatch_texel_detail(readonly)
     }
 
     pub(super) fn destroy_texel_detail(&mut self) {
-        let Some(mut pipe) = self.texel_detail.take() else {
-            return;
-        };
+        if let Some(pipe) = self.texel_detail.take() {
+            self.destroy_texel_pipe(pipe);
+        }
+    }
+
+    fn destroy_texel_pipe(&mut self, mut pipe: Pipe) {
         unsafe {
             if !pipe.fence.is_null() {
                 (self.fns.destroy_fence)(self.device, pipe.fence, std::ptr::null());
             }
             if !pipe.pipe.is_null() {
                 (self.fns.destroy_pipeline)(self.device, pipe.pipe, std::ptr::null());
+            }
+            if !pipe.pipe_ro.is_null() {
+                (self.fns.destroy_pipeline)(self.device, pipe.pipe_ro, std::ptr::null());
             }
             if !pipe.layout.is_null() {
                 (self.fns.destroy_layout)(self.device, pipe.layout, std::ptr::null());
@@ -87,7 +109,7 @@ impl Gpu {
         self.destroy_buffer(&mut pipe.stats);
     }
 
-    fn create_texel_detail(&mut self) -> Result<Pipe, String> {
+    fn create_texel_detail_pipe(&mut self, code: &[u8]) -> Result<Pipe, String> {
         let scene = self.make_buffer(256, 0x20, Memory::Readback)?;
         let mesh = self.make_buffer(256, 0x20, Memory::Readback)?;
         let gbuffer = self.make_buffer(256, 0x20, Memory::Readback)?;
@@ -189,7 +211,7 @@ impl Gpu {
                 "texel detail pipeline layout",
             )?;
         }
-        let module = self.shader(super::TEXEL_DETAIL_PROD_SPV)?;
+        let module = self.shader(code)?;
         #[repr(C)]
         struct Stage {
             s_type: i32,
@@ -239,6 +261,37 @@ impl Gpu {
             );
             (self.fns.destroy_shader)(self.device, module, std::ptr::null());
             check(result, "texel detail pipeline")?;
+        }
+        let module_ro = self.shader(super::TEXEL_DETAIL_PROD_RO_SPV)?;
+        let info_ro = PipeInfo {
+            s_type: 29,
+            next: std::ptr::null(),
+            flags: 0,
+            stage: Stage {
+                s_type: 18,
+                next: std::ptr::null(),
+                flags: 0,
+                stage: 0x20,
+                module: module_ro,
+                name: b"main\0".as_ptr().cast(),
+                spec: std::ptr::null(),
+            },
+            layout,
+            base: std::ptr::null_mut(),
+            base_index: -1,
+        };
+        let mut pipe_ro = std::ptr::null_mut();
+        unsafe {
+            let result = (self.fns.create_compute)(
+                self.device,
+                std::ptr::null_mut(),
+                1,
+                &info_ro as *const PipeInfo as *const u8,
+                std::ptr::null(),
+                &mut pipe_ro,
+            );
+            (self.fns.destroy_shader)(self.device, module_ro, std::ptr::null());
+            check(result, "texel detail read-only pipeline")?;
         }
         #[repr(C)]
         struct Size {
@@ -357,6 +410,7 @@ impl Gpu {
             set,
             layout,
             pipe,
+            pipe_ro,
             cmd,
             fence,
         };
@@ -433,9 +487,51 @@ impl Gpu {
         Ok(())
     }
 
+    fn write_texel_detail_heads(&self, memory: Handle) -> Result<(), String> {
+        let mut words = [0u32; HEAD_WORDS * HEAD_VARIANTS];
+        let variants = [
+            (true, true, false),
+            (false, true, false),
+            (true, true, true),
+        ];
+        for (i, (detail, cells, low)) in variants.into_iter().enumerate() {
+            let mut settings =
+                genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+            settings.surface_cache.sh_cells = cells;
+            settings.surface_cache.sh_texel_detail = detail;
+            if low {
+                settings.bounce.count = 0;
+            }
+            settings.sanitize();
+            let head = super::lighting_change_head(&settings);
+            let at = i * HEAD_WORDS;
+            words[at] = 0;
+            words[at + 1] = 1.0f32.to_bits();
+            words[at + 2] = ((2 * head.flags) as f32).to_bits();
+            words[at + 3] = (head.mode_cap as f32).to_bits();
+            words[at + 7] = (head.head_hi as f32).to_bits();
+        }
+        let bytes = u64::try_from(std::mem::size_of_val(&words))
+            .map_err(|err| format!("texel detail head size: {err}"))?;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, 0, bytes, 0, &mut mapped),
+                "map texel detail heads",
+            )?;
+            std::ptr::copy_nonoverlapping(
+                words.as_ptr().cast::<u8>(),
+                mapped.cast::<u8>(),
+                usize::try_from(bytes).map_err(|err| format!("texel detail head copy: {err}"))?,
+            );
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(())
+    }
+
     fn zero_memory(&self, memory: Handle, size: u64) -> Result<(), String> {
-        let bytes = usize::try_from(size)
-            .map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -448,8 +544,8 @@ impl Gpu {
         Ok(())
     }
 
-    fn dispatch_texel_detail(&mut self) -> Result<Vec<f32>, String> {
-        let (out_mem, pipe, layout, set, cmd, fence, zeros) = {
+    fn dispatch_texel_detail(&mut self, readonly: bool) -> Result<Vec<f32>, String> {
+        let (out_mem, pipe, pipe_ro, layout, set, cmd, fence, zeros) = {
             let Some(state) = self.texel_detail.as_ref() else {
                 return Err("texel detail production check is not created".into());
             };
@@ -478,6 +574,7 @@ impl Gpu {
             (
                 state.out.memory,
                 state.pipe,
+                state.pipe_ro,
                 state.layout,
                 state.set,
                 state.cmd,
@@ -488,6 +585,13 @@ impl Gpu {
         for (memory, size) in zeros {
             self.zero_memory(memory, size)?;
         }
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
         self.wait_fence(fence, "texel detail wait")?;
         let fences = [fence];
         unsafe {
@@ -530,11 +634,47 @@ impl Gpu {
                 params: [u32; 4],
                 lamp: [u32; 4],
             }
-            let pc = Pc {
-                dims: [1, 1, 0, 0],
+            let mut pc = Pc {
+                dims: [1, 1, 1, 1],
                 params: [0, 1, 0, 10],
                 lamp: [0; 4],
             };
+            if readonly {
+                // Writing compile plants the slots. It does not call compose.
+                pc.lamp[0] = 1;
+                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
+                (self.fns.cmd_push)(
+                    cmd,
+                    layout,
+                    0x20,
+                    0,
+                    PC_BYTES,
+                    std::ptr::from_ref(&pc).cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
+                let between = MemBar {
+                    s_type: 46,
+                    next: std::ptr::null(),
+                    src_access: 0x40,
+                    dst_access: 0x60,
+                };
+                (self.fns.cmd_barrier)(
+                    cmd,
+                    0x800,
+                    0x800,
+                    0,
+                    1,
+                    &between as *const MemBar as *const c_void,
+                    0,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null(),
+                );
+                pc.lamp[0] = 0;
+                (self.fns.cmd_bind_pipe)(cmd, 1, pipe_ro);
+            } else {
+                (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
+            }
             (self.fns.cmd_push)(
                 cmd,
                 layout,
