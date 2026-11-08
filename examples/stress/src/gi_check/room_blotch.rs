@@ -9,6 +9,12 @@
 //! the host scene does not move during settle. It does not change this room's
 //! lamp light. E11's 0.014 is a different capture (W7, 12.5 cm). This grade
 //! does not claim that number.
+//!
+//! `read_cached` is the decoder. It opens a path, and the `.ref` format has no
+//! seconds field, so the loaded `seconds` value is 0. The grade stages the
+//! hashed operand in a private directory and keeps the reference only when
+//! that path still holds those bytes. Sidecar `seconds_bits` is the writer's
+//! reported duration, not a clock read back from the file.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -65,7 +71,9 @@ missing-reference.
 The trace budget is fixed: shapes, 64 bounces, 320x180, batch 64, noise 0.01,
 max 262144 spp, 900 s, CPU analytic. GENOS_REFERENCE_GPU=1 is refused.
 The live picture is cells_only, surface_cache.sh_cells on, cache_async off,
-world cell 0.25 m. The native cache key does not encode those flags.
+world cell 0.25 m, sc_settle 0. The native cache key does not encode those flags.
+The capture child drops the lighting environment catalogue, then sets
+GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1.
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +115,7 @@ impl Class {
     }
 }
 
+#[derive(Debug)]
 struct Issue {
     class: Class,
     detail: String,
@@ -653,6 +662,158 @@ fn header_words(bytes: &[u8]) -> Option<(u32, u32, u32, u32)> {
     Some((word(0)?, word(1)?, word(2)?, word(3)?))
 }
 
+/// Linux `O_NOFOLLOW` (`asm-generic/fcntl.h`, octal 0400000).
+const O_NOFOLLOW: i32 = 0x20000;
+
+static STAGE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+struct PrivateStage {
+    dir: PathBuf,
+}
+
+impl PrivateStage {
+    fn path(&self) -> PathBuf {
+        self.dir.join("operand.ref")
+    }
+}
+
+impl Drop for PrivateStage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let hi = usize::from(byte >> 4);
+        let lo = usize::from(byte & 0x0f);
+        out.push(char::from(HEX[hi]));
+        out.push(char::from(HEX[lo]));
+    }
+    out
+}
+
+fn random_hex() -> String {
+    let mut bytes = [0_u8; 16];
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| {
+            use std::io::Read;
+            file.read_exact(&mut bytes)?;
+            Ok(())
+        })
+        .is_ok();
+    if !filled {
+        let tick = STAGE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let mixed = (u128::from(std::process::id()) << 64) | u128::from(tick) | nanos;
+        bytes = mixed.to_le_bytes();
+    }
+    hex_bytes(&bytes)
+}
+
+fn private_judge_dir() -> Result<PathBuf, Issue> {
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..8 {
+        let path = std::env::temp_dir().join(format!("room-blotch-judge-{}", random_hex()));
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(0o700);
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => {
+                return Err(issue(
+                    Class::SceneMismatch,
+                    format!("could not stage the reader: {err}"),
+                ));
+            }
+        }
+    }
+    Err(issue(Class::SceneMismatch, "could not stage the reader"))
+}
+
+fn exclusive_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn read_nofollow(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let mut got = Vec::new();
+    file.read_to_end(&mut got)?;
+    Ok(got)
+}
+
+fn hashed_operand_matches(path: &Path, bytes: &[u8]) -> bool {
+    read_nofollow(path).ok().as_deref() == Some(bytes)
+}
+
+fn private_stage(bytes: &[u8]) -> Result<PrivateStage, Issue> {
+    let dir = private_judge_dir()?;
+    let stage = PrivateStage { dir };
+    exclusive_write(&stage.path(), bytes).map_err(|err| {
+        issue(
+            Class::SceneMismatch,
+            format!("could not stage the reader: {err}"),
+        )
+    })?;
+    Ok(stage)
+}
+
+/// Decode `bytes` with [`reference::read_cached`].
+///
+/// The directory name is random and mode 0700. The file is created with
+/// `O_EXCL` and `O_NOFOLLOW`, so a symlink at a hash-derived path is not
+/// opened and not overwritten. `read_cached` reopens the path. The no-follow
+/// read must still match `bytes` after that, or the decoded reference is
+/// discarded. A same-user writer who replaces the file for the reopen and
+/// restores it before the second check can still race; the hash-named shared
+/// path is not used.
+fn reference_from_staged(path: &Path, bytes: &[u8], pose_name: &str) -> Result<Reference, Issue> {
+    if !hashed_operand_matches(path, bytes) {
+        return Err(issue(
+            Class::SceneMismatch,
+            format!("{pose_name} staged bytes differ from the hashed operand"),
+        ));
+    }
+    let loaded = reference::read_cached(path, WIDTH, HEIGHT);
+    if !hashed_operand_matches(path, bytes) {
+        return Err(issue(
+            Class::SceneMismatch,
+            format!("{pose_name} scored bytes differ from the hashed operand"),
+        ));
+    }
+    loaded.ok_or_else(|| {
+        issue(
+            Class::SceneMismatch,
+            format!("{pose_name} did not load through read_cached"),
+        )
+    })
+}
+
+fn load_verified(bytes: &[u8], pose_name: &str) -> Result<Reference, Issue> {
+    let staged = private_stage(bytes)?;
+    reference_from_staged(&staged.path(), bytes, pose_name)
+}
+
 fn samples_finite(reference: &Reference) -> bool {
     reference.noise.is_finite()
         && reference
@@ -727,25 +888,19 @@ fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Referenc
     if !noise.is_finite() || !seconds.is_finite() {
         return Err(issue(
             Class::NonFiniteReference,
-            format!("{} noise or seconds is not finite", pose.name),
+            format!("{} noise or reported seconds is not finite", pose.name),
         ));
     }
-    if noise < 0.0 {
+    if noise < 0.0 || seconds < 0.0 {
         return Err(issue(
             Class::NonFiniteReference,
-            format!("{} noise is negative", pose.name),
+            format!("{} noise or reported seconds is negative", pose.name),
         ));
     }
     if sidecar.spp == 0 || sidecar.spp > MAX_SPP {
         return Err(issue(
             Class::BudgetMismatch,
             format!("{} spp is {}", pose.name, sidecar.spp),
-        ));
-    }
-    if seconds <= 0.0 {
-        return Err(issue(
-            Class::BudgetMismatch,
-            format!("{} trace clock is missing", pose.name),
         ));
     }
     if noise > noise_target() {
@@ -757,21 +912,9 @@ fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Referenc
             ),
         ));
     }
-    let path = std::env::temp_dir().join(format!("room-blotch-judge-{sha}.ref"));
-    std::fs::write(&path, bytes).map_err(|err| {
-        issue(
-            Class::SceneMismatch,
-            format!("could not stage {} for the reader: {err}", pose.name),
-        )
-    })?;
-    let loaded = reference::read_cached(&path, WIDTH, HEIGHT);
-    let _ = std::fs::remove_file(&path);
-    let Some(loaded) = loaded else {
-        return Err(issue(
-            Class::SceneMismatch,
-            format!("{} did not load through read_cached", pose.name),
-        ));
-    };
+    // `seconds` is sidecar provenance. The file loader stores 0. A positive
+    // report does not prove a trace clock, and zero is not a budget mismatch.
+    let loaded = load_verified(bytes, pose.name)?;
     if !samples_finite(&loaded) {
         return Err(issue(
             Class::NonFiniteReference,
@@ -825,6 +968,12 @@ fn flags_of(text: &str) -> Result<(), Issue> {
     }
     if settings.experiments.cache_async {
         return Err(issue(Class::WrongFlags, "cache_async is on"));
+    }
+    if settings.experiments.sc_settle != 0 {
+        return Err(issue(
+            Class::WrongFlags,
+            format!("sc_settle is {}", settings.experiments.sc_settle),
+        ));
     }
     if settings.world_cache.cell_metres.to_bits() != cell_metres().to_bits() {
         return Err(issue(
@@ -1132,7 +1281,7 @@ fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict
 }
 
 fn protocol_note() -> &'static str {
-    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture waits 2 frames after settled and does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict."
+    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, sc_settle 0, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture waits 2 frames after settled and does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict. Sidecar seconds_bits is the writer's reported duration. The .ref format has no seconds field, so read_cached stores 0. That report is provenance. A zero report is not a budget mismatch, and a positive report is not a file clock."
 }
 
 fn json_escape(text: &str) -> String {
@@ -1201,15 +1350,57 @@ fn capture_args(scene: &Path, script: &Path, report: &Path) -> Vec<String> {
     ]
 }
 
-fn child_env_removals() -> [&'static str; 6] {
-    [
-        "GENOS_REFERENCE_GPU",
-        "GENOS_LIGHTING_ASYNC",
-        "GENOS_LIGHTING_PRESET",
-        "GENOS_LIGHTING_WORLD",
-        "GENOS_LIGHTING_WORLD_CELL",
-        "GENOS_LIGHTING_SC_FLAGS",
-    ]
+fn bytes_are_lighting_experiment(bytes: &[u8]) -> bool {
+    // The pieces stay separate so a prefix is not a new environment name.
+    let Some(rest) = bytes.strip_prefix(b"GENOS_") else {
+        return false;
+    };
+    rest.starts_with(b"LIGHTING_")
+        || rest.starts_with(b"GI2_")
+        || rest == b"GI_DEBUG"
+        || rest == b"COMPOSE_SC_WRITES"
+}
+
+fn capture_drops_env(name: &[u8]) -> bool {
+    bytes_are_lighting_experiment(name) || name == b"GENOS_REFERENCE_GPU"
+}
+
+#[cfg(test)]
+fn lighting_experiment_env(name: &str) -> bool {
+    bytes_are_lighting_experiment(name.as_bytes())
+}
+
+/// Parent bindings the capture child keeps. Lighting catalogue names are
+/// dropped, including deprecated `GENOS_GI2_*` aliases and `GENOS_GI_DEBUG`.
+/// `GENOS_COMPOSE_SC_WRITES` is dropped because the renderer reads it outside
+/// that catalogue and it changes surface-cache compose writes.
+/// `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` is then set to `1`.
+#[cfg(test)]
+fn capture_child_env(parent: &[(&str, &str)]) -> Vec<(String, String)> {
+    let mut child = Vec::new();
+    for (name, value) in parent {
+        if capture_drops_env(name.as_bytes()) {
+            continue;
+        }
+        child.push(((*name).to_string(), (*value).to_string()));
+    }
+    child.push((
+        "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS".to_string(),
+        "1".to_string(),
+    ));
+    child
+}
+
+fn seal_capture_command(command: &mut Command) {
+    use std::os::unix::ffi::OsStrExt;
+    let names: Vec<std::ffi::OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| capture_drops_env(name.as_bytes()))
+        .collect();
+    for name in names {
+        command.env_remove(name);
+    }
+    command.env("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "1");
 }
 
 fn run_capture(out: &Path) -> Result<(), String> {
@@ -1222,11 +1413,7 @@ fn run_capture(out: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     let mut command = Command::new(exe);
     command.args(capture_args(&scene, &script, &dir));
-    command.env("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "1");
-    for name in child_env_removals() {
-        command.env_remove(name);
-    }
-    command.env_remove("GENOS_LIGHTING_TOGGLES");
+    seal_capture_command(&mut command);
     let log_path = dir.join("run.log");
     let log =
         std::fs::File::create(&log_path).map_err(|err| format!("{}: {err}", log_path.display()))?;
@@ -1817,7 +2004,17 @@ mod tests {
     fn resolved_flags_require_cells_only_sh_async_off_and_25_cm() {
         let text = settings_text(|_| {});
         assert!(!text.contains("world_mode="));
+        assert!(text.contains("sc_settle=0"));
         assert!(flags_of(&text).is_ok());
+        let settle = settings_text(|settings| settings.experiments.sc_settle = 300);
+        assert_eq!(flags_of(&settle).unwrap_err().class, Class::WrongFlags);
+        let eye = eye();
+        let flags = settle.replace('\n', " || ");
+        let log = format!(
+            "pose room-a x={} y={} z={} yaw={} pitch={}\nsettle pose=room-a settled=true frames=10 still_frames=300 wall_ms=1\nresolved pose=room-a {flags}\n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch()
+        );
+        assert_eq!(judge_capture(&log)[0].class, Class::WrongFlags);
         let async_on = settings_text(|settings| settings.experiments.cache_async = true);
         assert_eq!(flags_of(&async_on).unwrap_err().class, Class::WrongFlags);
         let axis = settings_text(|settings| settings.surface_cache.sh_cells = false);
@@ -1935,10 +2132,9 @@ mod tests {
         let mut zero_clock = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.004, 32);
         zero_clock.seconds = 0.0;
         plant(&dir, &pose, &zero_clock);
-        assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
-            Class::BudgetMismatch
-        );
+        let loaded = judge_pose(&dir, &pose).unwrap();
+        assert_eq!(loaded.seconds, 0.0);
+        assert_eq!(loaded.spp, 32);
         let mut capped = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.004, 64);
         capped.seconds = 4.0;
         plant(&dir, &pose, &capped);
@@ -2082,5 +2278,286 @@ mod tests {
         std::fs::write(dir.join("room-a.json"), text).unwrap();
         assert!(judge_pose(&dir, &poses()[0]).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn operand_bytes(reference: &Reference) -> Vec<u8> {
+        let nonce = STAGE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = temp_dir(&format!("operand-{nonce}"));
+        let path = dir.join("one.ref");
+        reference::write_cached(&path, reference).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        bytes
+    }
+
+    #[test]
+    fn a_planted_symlink_is_not_written_and_scored_bytes_match_the_hash() {
+        let pose = poses()[0];
+        let mut reference = filled(WIDTH, HEIGHT, [0.2, 0.31, 0.41], 0.004, 64);
+        reference.seconds = 12.0;
+        let bytes = operand_bytes(&reference);
+        assert_eq!(bytes.len(), 748_816);
+        let sha = sha256_hex(&bytes);
+        let scratch_dir = temp_dir("symlink-scratch");
+        let scratch = scratch_dir.join("scratch");
+        let marker = vec![7_u8; bytes.len()];
+        std::fs::write(&scratch, &marker).unwrap();
+        let planted = std::env::temp_dir().join(format!("room-blotch-judge-{sha}.ref"));
+        let _ = std::fs::remove_file(&planted);
+        std::os::unix::fs::symlink(&scratch, &planted).unwrap();
+        let text = accepted_text(&pose, &reference, &sha);
+        let loaded = judge_bytes(&bytes, &text, &pose).unwrap();
+        assert_eq!(std::fs::read(&scratch).unwrap(), marker);
+        assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(loaded.linear[0], [0.2, 0.31, 0.41]);
+        assert_eq!(loaded.spp, 64);
+        assert_eq!(loaded.seconds, 0.0);
+        assert!(!planted.symlink_metadata().unwrap().file_type().is_file());
+        let _ = std::fs::remove_file(&planted);
+        let _ = std::fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn a_replaced_or_linked_stage_is_not_scored() {
+        let pose = poses()[0];
+        let mut reference = filled(WIDTH, HEIGHT, [0.11, 0.22, 0.33], 0.003, 64);
+        reference.seconds = 4.0;
+        let bytes = operand_bytes(&reference);
+        let stage = private_stage(&bytes).unwrap();
+        assert!(reference_from_staged(&stage.path(), &bytes, pose.name).is_ok());
+        std::fs::write(stage.path(), vec![1_u8; bytes.len()]).unwrap();
+        let replaced = reference_from_staged(&stage.path(), &bytes, pose.name).unwrap_err();
+        assert_eq!(replaced.class, Class::SceneMismatch);
+        assert!(replaced.detail.contains("staged bytes differ"));
+        let scratch_dir = temp_dir("link-target");
+        let scratch = scratch_dir.join("copy");
+        std::fs::write(&scratch, &bytes).unwrap();
+        std::fs::remove_file(stage.path()).unwrap();
+        std::os::unix::fs::symlink(&scratch, stage.path()).unwrap();
+        let linked = reference_from_staged(&stage.path(), &bytes, pose.name).unwrap_err();
+        assert_eq!(linked.class, Class::SceneMismatch);
+        assert_eq!(std::fs::read(&scratch).unwrap(), bytes);
+        let marker = vec![9_u8; 32];
+        let victim = scratch_dir.join("victim");
+        std::fs::write(&victim, &marker).unwrap();
+        let link = scratch_dir.join("predictable.ref");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(exclusive_write(&link, b"clobber").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), marker);
+        drop(stage);
+        assert!(!scratch_dir.join("operand.ref").exists());
+        let _ = std::fs::remove_dir_all(&scratch_dir);
+    }
+
+    #[test]
+    fn private_stage_directories_are_removed() {
+        let dir = {
+            let stage = private_stage(b"room-blotch-stage").unwrap();
+            let dir = stage.dir.clone();
+            assert!(dir.join("operand.ref").is_file());
+            dir
+        };
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn concurrent_judges_do_not_share_a_temp_path() {
+        let pose = poses()[0];
+        let mut left_ref = filled(WIDTH, HEIGHT, [0.2, 0.0, 0.0], 0.004, 64);
+        left_ref.seconds = 3.0;
+        let mut right_ref = filled(WIDTH, HEIGHT, [0.0, 0.2, 0.0], 0.004, 64);
+        right_ref.seconds = 9.0;
+        let left_bytes = operand_bytes(&left_ref);
+        let right_bytes = operand_bytes(&right_ref);
+        let left_sha = sha256_hex(&left_bytes);
+        let right_sha = sha256_hex(&right_bytes);
+        let left_text = accepted_text(&pose, &left_ref, &left_sha);
+        let right_text = accepted_text(&pose, &right_ref, &right_sha);
+        let (left, right) = std::thread::scope(|scope| {
+            let left_job = scope.spawn(|| judge_bytes(&left_bytes, &left_text, &pose));
+            let right_job = scope.spawn(|| judge_bytes(&right_bytes, &right_text, &pose));
+            (left_job.join().unwrap(), right_job.join().unwrap())
+        });
+        assert_eq!(left.unwrap().linear[0], [0.2, 0.0, 0.0]);
+        assert_eq!(right.unwrap().linear[0], [0.0, 0.2, 0.0]);
+        assert!(!std::env::temp_dir()
+            .join(format!("room-blotch-judge-{left_sha}.ref"))
+            .exists());
+        assert!(!std::env::temp_dir()
+            .join(format!("room-blotch-judge-{right_sha}.ref"))
+            .exists());
+    }
+
+    #[test]
+    fn reported_seconds_are_provenance_and_do_not_flip_the_sample_gate() {
+        let pose = poses()[0];
+        let mut reference = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.005, 64);
+        reference.seconds = 0.0;
+        let bytes = operand_bytes(&reference);
+        let sha = sha256_hex(&bytes);
+        let zero = accepted_text(&pose, &reference, &sha);
+        reference.seconds = 12.0;
+        let twelve = accepted_text(&pose, &reference, &sha);
+        let loaded_zero = judge_bytes(&bytes, &zero, &pose).unwrap();
+        let loaded_twelve = judge_bytes(&bytes, &twelve, &pose).unwrap();
+        assert_eq!(loaded_zero.seconds, 0.0);
+        assert_eq!(loaded_twelve.seconds, 0.0);
+        assert_eq!(loaded_zero.linear, loaded_twelve.linear);
+        assert_eq!(loaded_zero.spp, 64);
+        reference.seconds = -4.0;
+        let negative = accepted_text(&pose, &reference, &sha);
+        assert_eq!(
+            judge_bytes(&bytes, &negative, &pose).unwrap_err().class,
+            Class::NonFiniteReference
+        );
+
+        let fixture = include_str!("../../fixtures/room-blotch/room-a.UNACCEPTED.json");
+        assert!(fixture.contains("\"noise_bits\": 1013768127"));
+        assert!(fixture.contains("\"spp\": 72064"));
+        assert!(fixture.contains("\"seconds_bits\": 1147215451"));
+        let room_noise = f32::from_bits(1_013_768_127);
+        assert!(room_noise > noise_target());
+        let mut room_a = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], room_noise, 72_064);
+        room_a.seconds = f32::from_bits(1_147_215_451);
+        let room_bytes = operand_bytes(&room_a);
+        let room_text = accepted_text(&pose, &room_a, &sha256_hex(&room_bytes));
+        assert_eq!(
+            judge_bytes(&room_bytes, &room_text, &pose)
+                .unwrap_err()
+                .class,
+            Class::NoisyReference
+        );
+        let room_b = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/room-blotch/room-b.ref");
+        assert!(!room_b.exists());
+
+        let refs = temp_dir("seconds-refs");
+        let out_zero = temp_dir("seconds-out-zero");
+        let out_twelve = temp_dir("seconds-out-twelve");
+        let capture = temp_dir("seconds-capture");
+        std::fs::write(refs.join("room-a.ref"), &bytes).unwrap();
+        std::fs::write(refs.join("room-a.json"), &zero).unwrap();
+        let mut other_ref = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.005, 64);
+        other_ref.seconds = 0.0;
+        plant(&refs, &poses()[1], &other_ref);
+        let shown = reference::read_cached(&refs.join("room-a.ref"), WIDTH, HEIGHT).unwrap();
+        assert_eq!(shown.seconds, 0.0);
+        shown.image.save(&capture.join("room-a-live.png")).unwrap();
+        shown.image.save(&capture.join("room-b-live.png")).unwrap();
+        let eye = eye();
+        let flags = settings_text(|_| {}).replace('\n', " || ");
+        let report = format!(
+            "# script — PASS\n\n## Log\n\n- pose room-a x={} y={} z={} yaw={} pitch={}\n- settle pose=room-a settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-a {flags}\n- schedule pose=room-a before=4\n- schedule pose=room-a after=6\n- pose room-b x={} y={} z={} yaw={} pitch={}\n- settle pose=room-b settled=true frames=40 still_frames=300 wall_ms=1\n- resolved pose=room-b {flags}\n- schedule pose=room-b before=8\n- schedule pose=room-b after=10\n",
+            eye[0], eye[1], eye[2], poses()[0].yaw, pitch(),
+            eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
+        );
+        std::fs::write(capture.join("report.md"), &report).unwrap();
+        let verdict_zero = grade_dirs(&refs, Some(&capture), &out_zero).unwrap();
+        std::fs::write(refs.join("room-a.json"), &twelve).unwrap();
+        let mut twelve_b = std::fs::read_to_string(refs.join("room-b.json")).unwrap();
+        twelve_b = twelve_b.replace(
+            "\"seconds_bits\": 0",
+            &format!("\"seconds_bits\": {}", 12.0f32.to_bits()),
+        );
+        std::fs::write(refs.join("room-b.json"), twelve_b).unwrap();
+        let verdict_twelve = grade_dirs(&refs, Some(&capture), &out_twelve).unwrap();
+        assert_eq!(verdict_zero.class, verdict_twelve.class);
+        assert!(out_zero.join("room-a-reference.png").is_file());
+        assert!(out_twelve.join("room-a-reference.png").is_file());
+        let note = std::fs::read_to_string(out_twelve.join("verdict.json")).unwrap();
+        assert!(note.contains("reported duration"));
+        assert!(note.contains("read_cached stores 0"));
+        assert!(note.contains("zero report is not a budget mismatch"));
+        assert!(!note.contains("trace clock"));
+        let _ = std::fs::remove_dir_all(&refs);
+        let _ = std::fs::remove_dir_all(&out_zero);
+        let _ = std::fs::remove_dir_all(&out_twelve);
+        let _ = std::fs::remove_dir_all(&capture);
+    }
+
+    #[test]
+    fn capture_child_drops_a_poisoned_lighting_catalogue() {
+        let source = include_str!("../../../../crates/scene/src/lighting.rs");
+        let mut names = Vec::new();
+        let bytes = source.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index..].starts_with(b"GENOS_") {
+                let start = index;
+                index += 6;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_uppercase()
+                        || bytes[index].is_ascii_digit()
+                        || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                if index > start + 6 {
+                    names.push(&source[start..index]);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        names.sort_unstable();
+        names.dedup();
+        assert!(names.len() > 50, "{}", names.len());
+        for name in &names {
+            assert!(
+                lighting_experiment_env(name),
+                "{name} is in the lighting catalogue and would leak"
+            );
+        }
+        assert!(lighting_experiment_env("GENOS_COMPOSE_SC_WRITES"));
+        assert!(!lighting_experiment_env("PATH"));
+        assert!(!lighting_experiment_env("GENOS_REFERENCE_THREADS"));
+        assert!(!lighting_experiment_env("GENOS_GPU_TIMES"));
+        assert!(!lighting_experiment_env("GENOS_SCENE_DELTA"));
+        let parent = [
+            ("GENOS_LIGHTING_SC_SETTLE", "300"),
+            ("GENOS_LIGHTING_TIME", "18.5"),
+            ("GENOS_LIGHTING_DENOISE", "off"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET", "1"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_BLEND", "off"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA", "0"),
+            ("GENOS_LIGHTING_BOUNCES", "0"),
+            ("GENOS_LIGHTING_ASYNC", "1"),
+            ("GENOS_LIGHTING_PRESET", "low"),
+            ("GENOS_LIGHTING_WORLD", "0"),
+            ("GENOS_LIGHTING_WORLD_CELL", "1"),
+            ("GENOS_LIGHTING_SC_FLAGS", "1"),
+            ("GENOS_LIGHTING_TOGGLES", "none"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "0"),
+            ("GENOS_GI2_SC_SETTLE", "12"),
+            ("GENOS_GI2_DENOISE", "off"),
+            ("GENOS_GI_DEBUG", "1"),
+            ("GENOS_COMPOSE_SC_WRITES", "1"),
+            ("GENOS_REFERENCE_GPU", "1"),
+            ("PATH", "/usr/bin"),
+            ("GENOS_REFERENCE_THREADS", "8"),
+        ];
+        let child = capture_child_env(&parent);
+        let sh_cells: Vec<_> = child
+            .iter()
+            .filter(|(name, _)| name == "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS")
+            .collect();
+        assert_eq!(sh_cells.len(), 1);
+        assert_eq!(sh_cells[0].1, "1");
+        for (name, _) in parent {
+            if name == "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS" {
+                continue;
+            }
+            if lighting_experiment_env(name) || name == "GENOS_REFERENCE_GPU" {
+                assert!(
+                    child.iter().all(|(key, _)| key != name),
+                    "{name} leaked into the child"
+                );
+            }
+        }
+        assert!(child
+            .iter()
+            .any(|(name, value)| name == "PATH" && value == "/usr/bin"));
+        assert!(child
+            .iter()
+            .any(|(name, value)| name == "GENOS_REFERENCE_THREADS" && value == "8"));
     }
 }

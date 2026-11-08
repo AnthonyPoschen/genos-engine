@@ -10,7 +10,7 @@ room-a CPU analytic trace, one attempt, no retry:
 
 - noise `0.014457642` (bits `1013768127`), above `0.01`
 - spp `72064`, under the `262144` cap, so the cap did not accept the file
-- seconds `900.4743` (bits `1147215451`). The 900 s budget ended on the pass that crossed it. The clock was still at the cap. This is not a settled picture.
+- The trace process reported seconds `900.4743` (bits `1147215451`) in the sidecar. The `.ref` format does not store seconds; `read_cached` sets `seconds` to 0. That report is provenance of this run, not a clock the grade verified from the file. The 900 s budget ended on the pass that crossed it. This is not a settled picture.
 - size 320×180, 64 bounces, shapes, batch 64, file `748816` bytes
 - `room-a.ref` sha256 `837b2bbdee61d3856b0d96248340d19843cee594a8047cf5d17987b1f57fe5ec`
 - sidecar sha256 `dcba80712334a89ad7d3e33ae9bdd12608bebf84e0d522138dab7b72ae676384`
@@ -63,7 +63,7 @@ Grade exit 1. No `--capture`.
 
 ## Tests
 
-`cargo test -j 1 -p genos-stress --bin genos-stress room_blotch` — 16 passed, exit 0.
+`cargo test -j 1 -p genos-stress --bin genos-stress room_blotch` — 16 passed on the measurement commit. After the judge corrections the same command is 22 passed. The added tests cover a planted symlink, a replaced stage, directory cleanup, concurrent judges, reported seconds, and a poisoned lighting environment. No new trace was run.
 
 `cargo clippy -j 1 -p genos-stress --bin genos-stress --all-targets --no-deps -- -D warnings` — exit 0.
 
@@ -72,7 +72,7 @@ The blotch function is unchanged. An 8×8 step (live 0.2/0.8, reference 0.5, s=4
 Negative controls, each a different class from `physical-fail`:
 
 - `missing_refs_do_not_become_a_physical_fail`
-- `noisy_cap_floor_size_and_wrong_pose_stay_distinct` (noise 0.02 at 262144 spp, a 187216-byte floor file, a yaw-bit mismatch, a 4194304 max-spp sidecar, a zero trace clock, NaN, negative noise)
+- `noisy_cap_floor_size_and_wrong_pose_stay_distinct` (noise 0.02 at 262144 spp, a 187216-byte floor file, a yaw-bit mismatch, a 4194304 max-spp sidecar, NaN, negative noise). A zero reported duration is not a budget mismatch.
 - `known_floor_hashes_are_refused_and_a_room_hash_is_not`
 - `settle_timeout_is_unsettled_and_a_true_settle_at_900_is_not`
 - `the_other_pose_and_a_short_wait_are_distinct`
@@ -99,4 +99,4 @@ unset GENOS_REFERENCE_GPU GENOS_LIGHTING_ASYNC GENOS_LIGHTING_PRESET
 cargo build -j 1 --release --locked -p genos-stress --bin genos-stress
 ```
 
-A new trace uses the same flags as the cloud command above. Noise above 0.01 stays unaccepted, including when spp reaches 262144. `--capture` is only for a directory whose room-a and room-b files already pass the judge. The capture is one window: `--freeze-sun`, `--lighting-toggles cells_only`, `--lighting-cache-async off`, and `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` set on the child. `sh_cells` has no command-line flag. The child drops `GENOS_REFERENCE_GPU`, `GENOS_LIGHTING_ASYNC`, and the other lighting overrides listed in `docs/systems/lighting/room-blotch.md`.
+A new trace uses the same flags as the cloud command above. Noise above 0.01 stays unaccepted, including when spp reaches 262144. `--capture` is only for a directory whose room-a and room-b files already pass the judge. The capture is one window: `--freeze-sun`, `--lighting-toggles cells_only`, `--lighting-cache-async off`, and `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` set on the child after the lighting catalogue is cleared. `sh_cells` has no command-line flag. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`. Resolved `sc_settle` must be 0. No new trace was run for that correction. room-a stays unaccepted on the numbers above. room-b is still absent.

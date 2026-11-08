@@ -10,7 +10,7 @@ The stage 2 gate is a cache-only blotch mean of at most 0.014 on the room, with 
 - Poses: eye (0.664, 1.699, 9.629), pitch -0.12 rad. room-a yaw -0.679. room-b yaw -36 degrees. room-c and the close-up are not operands.
 - Picture: 320×180. The grade undoes the display tone curve and uses Rec.709 luminance, the same way gi-check does. The saved PNG is 8-bit. The linear samples stay in the `.ref`.
 - Mean of the two blotch scores. At or under 0.014 is `adr-pass`. Above that, with every guard clear, is `physical-fail`. The legacy word (0.023) is printed and is not the verdict.
-- Live picture: `cells_only`, `surface_cache.sh_cells` on, `cache_async` off, world cell 0.25 m, world mode 3. In-frame only. `sh_cells` has no command-line flag; the capture sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` on the child. The argument `--lighting-toggles cells_only` and `--lighting-cache-async off` are the supported controls for the other two.
+- Live picture: `cells_only`, `surface_cache.sh_cells` on, `cache_async` off, world cell 0.25 m, world mode 3, `sc_settle` 0. In-frame only. `sh_cells` has no command-line flag; the capture sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` on the child. The argument `--lighting-toggles cells_only` and `--lighting-cache-async off` are the supported controls for the other two. A non-zero `sc_settle` changes the world-mode 3 still-frame wait, so the resolved value must be 0.
 
 ## Why this is not the gi-check room script
 
@@ -22,7 +22,7 @@ This command does not call compare and does not path-trace during the grade. A m
 
 Each operand is `room-a.ref` plus `room-a.json`, and the same for room-b. The json is the identity the grade trusts: scene sha256 of `scenes/room.rhai`, pose bits, 320×180, 64 bounces, batch 64, noise target 0.01, max 262144 spp, 900 s budget, CPU analytic, shapes, sun frozen at the stress start hour, and the live-picture flags. The native cache key is recorded and is not the file name. Two different keys can still pass when the json matches.
 
-A file is accepted only when the samples are finite and the header noise is finite and at most 0.01. Reaching 262144 spp does not accept a noisier file. The old 4194304 spp reuse does not apply. A zero trace clock (what a cache-file loader stores) is a budget mismatch. Open-floor references (160×90, noise 0.02, the known floor hashes, or 187216 bytes) are a scene mismatch and are not renamed.
+A file is accepted only when the samples are finite and the header noise is finite and at most 0.01. Reaching 262144 spp does not accept a noisier file. The old 4194304 spp reuse does not apply. The `.ref` format does not store seconds. `read_cached` sets `seconds` to 0. `seconds_bits` in the json is the writer's reported duration, kept as provenance. The grade requires that field to be present, finite, and not negative. A zero report is not a budget mismatch, and a positive report is not a file clock read from the operand. `seconds_budget_bits` remains the requested 900 s budget, also provenance of the request. Open-floor references (160×90, noise 0.02, the known floor hashes, or 187216 bytes) are a scene mismatch and are not renamed. A numeric `adr-pass` is the blotch mean of the supplied pictures. A flat stand-in can meet it. That is not a physical room acceptance.
 
 ## Sun freeze and E11
 
@@ -38,12 +38,12 @@ These are not a physical fail. The first one is the verdict. The json lists all 
 |---|---|
 | missing-reference | `.ref` or `.json` absent |
 | noisy-reference | finite noise above 0.01 |
-| nonfinite-reference | noise, seconds, or a sample is not finite, or noise is negative |
+| nonfinite-reference | noise or reported seconds is not finite, noise or reported seconds is negative, or a sample is not finite |
 | scene-mismatch | wrong scene, size, estimator, hash, or a floor file |
 | pose-mismatch | eye, yaw, or pitch bits differ |
-| budget-mismatch | bounces, batch, noise target, max spp, spp, or the 900 s budget differ |
+| budget-mismatch | bounces, batch, noise target, max spp, spp, or the requested 900 s budget differ |
 | unsettled | settled is not true, including a false result at frame 900 |
-| wrong-flags | toggles are not exactly cells_only, sh_cells is off, cache_async is on, the cell is not 0.25 m, or world mode is not 3 |
+| wrong-flags | toggles are not exactly cells_only, sh_cells is off, cache_async is on, the cell is not 0.25 m, world mode is not 3, or sc_settle is not 0 |
 | sun-not-frozen | the resolved hour is not the frozen start hour |
 | missing-capture | no capture log |
 | missing-live | a 320×180 live PNG is absent |
@@ -61,7 +61,7 @@ genos-stress room-blotch trace --pose room-a --threads 4 --out DIR [--promote DI
 
 `--out` defaults to `./genos-debug/room-blotch`. It does not write under `$HOME`. `--refs` is required. Grade never writes a `.ref` and refuses a destination path that contains `reference-cache`. `--threads` wins over `GENOS_REFERENCE_THREADS`; when both are omitted the trace uses 4. `--promote` copies only after the isolated file passes the same judge. `GENOS_REFERENCE_GPU=1` is refused.
 
-`--capture` runs one proof window at 640×360 with `--freeze-sun`, `--lighting-toggles cells_only`, and `--lighting-cache-async off`, then grades. The child drops `GENOS_REFERENCE_GPU`, `GENOS_LIGHTING_ASYNC`, `GENOS_LIGHTING_PRESET`, `GENOS_LIGHTING_WORLD`, `GENOS_LIGHTING_WORLD_CELL`, `GENOS_LIGHTING_SC_FLAGS`, and `GENOS_LIGHTING_TOGGLES` so a parent experiment cannot leak in.
+`--capture` runs one proof window at 640×360 with `--freeze-sun`, `--lighting-toggles cells_only`, and `--lighting-cache-async off`, then grades. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every deprecated `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`, then sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1`. A parent value in that set does not reach the child. `GENOS_COMPOSE_SC_WRITES` is included because the renderer reads it outside the lighting settings catalogue and it changes surface-cache compose writes. Names outside that set, such as `GENOS_GPU_TIMES` and `GENOS_SCENE_DELTA`, are left as the parent set them.
 
 The trace is one CPU analytic pass budget: 64 bounces, 320×180 shapes, noise 0.01, max 262144 spp, 900 s. It refuses a dirty worktree so the sidecar commit matches the binary. An isolated file that already passes the judge is reused and not traced again.
 
