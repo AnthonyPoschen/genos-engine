@@ -14,14 +14,14 @@
 )]
 
 use genos_render::{
-    lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset, LightingSettings,
-    Renderer,
+    GpuKind, LightingPreset, LightingSettings, Renderer, TexelDetailPlant, lighting_change_head,
+    release_software_compiler_heap,
 };
 use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
 const ROWS: usize = 34;
-const TRAILER: usize = 36;
+const TRAILER: usize = 40;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -304,7 +304,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "a mover on a lit cell showed {:?}, wanted the cell, not the probe {probe:?} and not the world-texel seed {green:?}",
         mover.shown
     );
-    assert!(mover.reads.abs() <= ABS, "covered mover probe reads {}", mover.reads);
+    assert!(
+        mover.reads.abs() <= ABS,
+        "covered mover probe reads {}",
+        mover.reads
+    );
     assert!((mover.skipped - 1.0).abs() <= ABS);
     assert!(
         near(mover.seed, green),
@@ -312,7 +316,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         mover.seed
     );
     assert!((mover.conf - 0.25).abs() <= ABS, "conf {}", mover.conf);
-    assert!(mover.mark.abs() <= ABS, "the planted seed is not a detail mark");
+    assert!(
+        mover.mark.abs() <= ABS,
+        "the planted seed is not a detail mark"
+    );
     assert!(near(mover.cell, red), "mover cell {:?}", mover.cell);
     assert!((mover.cell_same - 1.0).abs() <= ABS);
 
@@ -376,7 +383,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the probe seed must clear the detail mark, mark {}",
         quiet_empty.mark
     );
-    assert!(quiet_empty.reads >= 1.0, "the empty owner still needs probes");
+    assert!(
+        quiet_empty.reads >= 1.0,
+        "the empty owner still needs probes"
+    );
     assert!(quiet_empty.skipped.abs() <= ABS);
     assert!(
         near(quiet_empty.cell, [0.0; 3]),
@@ -410,7 +420,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "an unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}. Sun word z is not the detail mark",
         scratch.shown
     );
-    assert!(near(scratch.seed, parent_rgb), "scratch seed {:?}", scratch.seed);
+    assert!(
+        near(scratch.seed, parent_rgb),
+        "scratch seed {:?}",
+        scratch.seed
+    );
     assert!(scratch.mark.abs() <= ABS, "scratch mark {}", scratch.mark);
     assert!(scratch.reads >= 1.0);
     assert!(scratch.skipped.abs() <= ABS);
@@ -447,7 +461,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!(mixed.reads.abs() <= ABS, "the blend still read probes");
     assert!((mixed.skipped - 1.0).abs() <= ABS);
-    assert!((mixed.cell_same - 1.0).abs() <= ABS, "a corner cell was written");
+    assert!(
+        (mixed.cell_same - 1.0).abs() <= ABS,
+        "a corner cell was written"
+    );
     assert!(near(mixed.cell, red), "primary corner {:?}", mixed.cell);
     assert!((mixed.mark - 1.0).abs() <= ABS, "blend mark {}", mixed.mark);
 
@@ -483,7 +500,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the far side of a thin wall showed {:?}, wanted the near red, not the leak {leak:?}",
         facing.shown
     );
-    assert!(!near(facing.shown, leak), "thin-wall leak {:?}", facing.shown);
+    assert!(
+        !near(facing.shown, leak),
+        "thin-wall leak {:?}",
+        facing.shown
+    );
     assert!(facing.reads.abs() <= ABS);
     assert!((facing.skipped - 1.0).abs() <= ABS);
     assert!((facing.cell_same - 1.0).abs() <= ABS);
@@ -540,7 +561,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the back of a thin wall showed {:?}, wanted green, not the front red",
         side.shown
     );
-    assert!(!near(side.shown, red), "the opposite side read the front cell");
+    assert!(
+        !near(side.shown, red),
+        "the opposite side read the front cell"
+    );
     assert!(side.reads.abs() <= ABS);
     assert!((side.skipped - 1.0).abs() <= ABS);
     assert!(near(side.cell, green), "back cell {:?}", side.cell);
@@ -550,7 +574,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(hit.head_hi, off.head_hi, "detail off, SH cells on");
     assert_eq!(off.mode_cap / 1000, 3, "world mode 3");
     assert_eq!(off.flags & 32, 0, "flag 32 is clear");
-    assert_eq!(off.flags & 256, 256, "flag 256 keeps the hit patch at 25 cm");
+    assert_eq!(
+        off.flags & 256,
+        256,
+        "flag 256 keeps the hit patch at 25 cm"
+    );
     assert_eq!(off.flags & 33_554_432, 0, "flag 33554432 is clear");
     assert!(
         near(hit.shown, red),
@@ -572,7 +600,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "hit-seed confidence {}, not a resample or probe seed",
         hit.conf
     );
-    assert!(hit.reads.abs() <= ABS, "no probe was valid, reads {}", hit.reads);
+    assert!(
+        hit.reads.abs() <= ABS,
+        "no probe was valid, reads {}",
+        hit.reads
+    );
     assert!(hit.skipped.abs() <= ABS);
     assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
     assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
@@ -586,7 +618,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!(detail_off_mover.reads >= 1.0);
     assert!(detail_off_mover.skipped.abs() <= ABS);
-    assert!(detail_off_mover.conf.abs() <= ABS, "detail off stored a seed");
+    assert!(
+        detail_off_mover.conf.abs() <= ABS,
+        "detail off stored a seed"
+    );
     assert!(near(detail_off_mover.cell, red));
     assert!((detail_off_mover.cell_same - 1.0).abs() <= ABS);
 
@@ -620,7 +655,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "a stale cell under a mover showed {:?}, wanted the probe",
         stale_mover.shown
     );
-    assert!(near(stale_mover.cell, red), "stale mover cell {:?}", stale_mover.cell);
+    assert!(
+        near(stale_mover.cell, red),
+        "stale mover cell {:?}",
+        stale_mover.cell
+    );
     assert!(stale_mover.reads >= 1.0);
     assert!(stale_mover.skipped.abs() <= ABS);
     assert!((stale_mover.cell_same - 1.0).abs() <= ABS);
@@ -636,10 +675,22 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "lamp off stayed on the stored mean {:?}",
         lamp_mover.shown
     );
-    assert!(lamp_mover.reads.abs() <= ABS, "lamp-off reads {}", lamp_mover.reads);
+    assert!(
+        lamp_mover.reads.abs() <= ABS,
+        "lamp-off reads {}",
+        lamp_mover.reads
+    );
     assert!((lamp_mover.skipped - 1.0).abs() <= ABS);
-    assert!(near(lamp_mover.cell, red), "lamp off rewrote the cell {:?}", lamp_mover.cell);
-    assert!(lamp_mover.conf.abs() <= ABS, "lamp off stored a seed {:?}", lamp_mover.seed);
+    assert!(
+        near(lamp_mover.cell, red),
+        "lamp off rewrote the cell {:?}",
+        lamp_mover.cell
+    );
+    assert!(
+        lamp_mover.conf.abs() <= ABS,
+        "lamp off stored a seed {:?}",
+        lamp_mover.seed
+    );
     assert!((lamp_mover.cell_same - 1.0).abs() <= ABS);
 
     let mover_mix = &rows[28];
@@ -703,20 +754,38 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         motion.seed
     );
     assert!((motion.cell_same - 1.0).abs() <= ABS);
-    assert!((motion.mark - 1.0).abs() <= ABS, "decoy same {}", motion.mark);
+    assert!(
+        (motion.mark - 1.0).abs() <= ABS,
+        "decoy same {}",
+        motion.mark
+    );
     let trail = &words[8 + ROWS * STRIDE..];
     assert_eq!(trail.len(), TRAILER);
     let orange = [9.0, 1.0, 0.0];
     let blue_tilt = motion_slant();
-    assert!(near([trail[0], trail[1], trail[2]], red), "pose A {:?}", &trail[0..3]);
+    assert!(
+        near([trail[0], trail[1], trail[2]], red),
+        "pose A {:?}",
+        &trail[0..3]
+    );
     assert!(trail[3].abs() <= ABS, "pose A reads {}", trail[3]);
     assert!((trail[4] - 1.0).abs() <= ABS, "pose A skip {}", trail[4]);
-    assert!((trail[5] - 1.0).abs() <= ABS, "pose A allocated a world texel");
+    assert!(
+        (trail[5] - 1.0).abs() <= ABS,
+        "pose A allocated a world texel"
+    );
     assert!((trail[6] - 1.0).abs() <= ABS, "pose A mutated the cell");
-    assert!(near([trail[7], trail[8], trail[9]], blue), "pose B {:?}", &trail[7..10]);
+    assert!(
+        near([trail[7], trail[8], trail[9]], blue),
+        "pose B {:?}",
+        &trail[7..10]
+    );
     assert!(trail[10].abs() <= ABS, "pose B reads {}", trail[10]);
     assert!((trail[11] - 1.0).abs() <= ABS);
-    assert!((trail[12] - 1.0).abs() <= ABS, "pose B allocated a world texel");
+    assert!(
+        (trail[12] - 1.0).abs() <= ABS,
+        "pose B allocated a world texel"
+    );
     assert!((trail[13] - 1.0).abs() <= ABS, "leaving A mutated a cell");
     assert!(
         near([trail[14], trail[15], trail[16]], blue_tilt),
@@ -730,18 +799,52 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(!near([trail[14], trail[15], trail[16]], blue));
     assert!(trail[17].abs() <= ABS);
     assert!((trail[18] - 1.0).abs() <= ABS);
-    assert!(near([trail[19], trail[20], trail[21]], orange), "+X {:?}", &trail[19..22]);
+    assert!(
+        near([trail[19], trail[20], trail[21]], orange),
+        "+X {:?}",
+        &trail[19..22]
+    );
     assert!(trail[22].abs() <= ABS);
     assert!((trail[23] - 1.0).abs() <= ABS);
-    assert!(near([trail[24], trail[25], trail[26]], green), "yawed -Z {:?}", &trail[24..27]);
-    assert!(!near([trail[24], trail[25], trail[26]], orange), "yaw kept the old axis");
+    assert!(
+        near([trail[24], trail[25], trail[26]], green),
+        "yawed -Z {:?}",
+        &trail[24..27]
+    );
+    assert!(
+        !near([trail[24], trail[25], trail[26]], orange),
+        "yaw kept the old axis"
+    );
     assert!(trail[27].abs() <= ABS);
     assert!((trail[28] - 1.0).abs() <= ABS);
-    assert!((trail[29] - 1.0).abs() <= ABS, "the object-local decoy was written");
+    assert!(
+        (trail[29] - 1.0).abs() <= ABS,
+        "the object-local decoy was written"
+    );
     assert!(
         near([trail[30], trail[31], trail[32]], red),
         "the vacated surface showed {:?}, wanted its own red cell",
         &trail[30..33]
+    );
+    assert!(
+        (trail[36] - 1.0).abs() <= ABS,
+        "a world texel already existed at pose A before the vacated shade, absent {}",
+        trail[36]
+    );
+    assert!(
+        trail[37].abs() <= ABS,
+        "the vacated shade did not claim a fine texel, absent {}",
+        trail[37]
+    );
+    assert!(
+        trail[38].abs() <= ABS,
+        "the claimed texel stored own samples {}, wanted none",
+        trail[38]
+    );
+    assert!(
+        (trail[39] - 1.0).abs() <= ABS,
+        "the claimed texel did not keep the detail mark {}",
+        trail[39]
     );
     assert!((trail[33] - 1.0).abs() <= ABS, "vacated cells changed");
     assert!((trail[34] - 1.0).abs() <= ABS, "+X cell changed");
@@ -769,30 +872,83 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
 }
 
+const READONLY_TEST: &str = "readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed";
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the child process reads the plant directory the supervisor passed"
+)]
+fn readonly_role_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("GENOS_TEXEL_RO_DIR").expect("the read-only plant directory"),
+    )
+}
+
+fn readonly_plant() {
+    let dir = readonly_role_dir();
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
+    assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+    let plant = renderer
+        .texel_detail_prod_plant()
+        .expect("writing compile plants the read-only scene");
+    assert_eq!(
+        ShutdownDevice::frames_presented(renderer),
+        0,
+        "the plant presents nothing"
+    );
+    let (cache, keys) = plant.into_paths();
+    std::fs::rename(&cache, dir.join("cache.bin")).expect("move the planted cache");
+    std::fs::rename(&keys, dir.join("keys.bin")).expect("move the planted keys");
+}
+
+fn readonly_supervise() {
+    // The planter exits before the reader starts. A fresh process does not
+    // keep the writing compiler heap. Drop plus malloc_trim in one process
+    // did not.
+    let dir = std::env::temp_dir().join(format!("genos-texel-ro-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("plant directory");
+    let exe = std::env::current_exe().expect("this test binary");
+    let plant = std::process::Command::new(&exe)
+        .args(["--exact", READONLY_TEST, "--nocapture", "--test-threads=1"])
+        .env("GENOS_TEXEL_RO_ROLE", "planter")
+        .env("GENOS_TEXEL_RO_DIR", &dir)
+        .status()
+        .expect("spawn the planter");
+    assert!(plant.success(), "planter status {plant}");
+    let reader = std::process::Command::new(&exe)
+        .args(["--exact", READONLY_TEST, "--nocapture", "--test-threads=1"])
+        .env("GENOS_TEXEL_RO_ROLE", "reader")
+        .env("GENOS_TEXEL_RO_DIR", &dir)
+        .status()
+        .expect("spawn the reader");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(reader.success(), "reader status {reader}");
+}
+
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the child process reads the role the supervisor passed"
+)]
 fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     // Default High compose is this specialization (COMPOSE_SC_WRITES false).
-    // On a 16 GiB lavapipe cgroup the reader dispatch was killed. The
-    // resident set was sampled around 9.8 GiB and the cgroup killer reported
-    // about 14.7 GiB anonymous. Two-row chunks, a stripped module, and the
-    // unstripped module with DontInline did not finish. A larger machine can
-    // still run these assertions. This note is not a pass.
-    // The writer and the reader are separate devices. One process that keeps
-    // both lavapipe compiler heaps exhausts the software-test budget.
-    let plant = {
-        let mut owner = open().expect("lavapipe device");
-        let renderer = &mut *owner.device;
-        assert_eq!(renderer.gpu_kind(), GpuKind::Software);
-        let plant = renderer
-            .texel_detail_prod_plant()
-            .expect("writing compile plants the read-only scene");
-        assert_eq!(
-            ShutdownDevice::frames_presented(renderer),
-            0,
-            "the plant presents nothing"
-        );
-        plant
-    };
+    // The planter exits before the reader starts. On this 16 GiB lavapipe
+    // cgroup the reader alone was killed (anon-rss 14711896 kB, total-vm
+    // 21216604 kB, DontInline on every function over 1000 words). That is
+    // not a pass. The assertions below are what a finished reader checks.
+    let role = std::env::var("GENOS_TEXEL_RO_ROLE").ok();
+    if role.is_none() {
+        readonly_supervise();
+        return;
+    }
+    if role.as_deref() == Some("planter") {
+        readonly_plant();
+        return;
+    }
+    assert_eq!(role.as_deref(), Some("reader"), "unknown read-only role");
+    let dir = readonly_role_dir();
+    let plant = TexelDetailPlant::from_paths(dir.join("cache.bin"), dir.join("keys.bin"));
     release_software_compiler_heap();
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
@@ -830,7 +986,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "the detail mark stays, mark {}",
         stale.mark
     );
-    assert!((stale.world_w - 1.0).abs() <= ABS, "trust {}", stale.world_w);
+    assert!(
+        (stale.world_w - 1.0).abs() <= ABS,
+        "trust {}",
+        stale.world_w
+    );
     assert!(stale.reads >= 1.0, "the empty owner still needs probes");
     assert!(stale.skipped.abs() <= ABS);
     assert!(near(stale.cell, [0.0; 3]));
@@ -841,7 +1001,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "an unmarked parent seed showed {:?}, wanted {parent_rgb:?}",
         parent.shown
     );
-    assert!(near(parent.seed, parent_rgb), "stored parent {:?}", parent.seed);
+    assert!(
+        near(parent.seed, parent_rgb),
+        "stored parent {:?}",
+        parent.seed
+    );
     assert!(parent.mark.abs() <= ABS);
     assert!(parent.reads >= 1.0);
     assert!(parent.skipped.abs() <= ABS);
@@ -892,7 +1056,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "read-only unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}, not the probe",
         alias.shown
     );
-    assert!(near(alias.seed, parent_rgb), "stored parent {:?}", alias.seed);
+    assert!(
+        near(alias.seed, parent_rgb),
+        "stored parent {:?}",
+        alias.seed
+    );
     assert!(alias.mark.abs() <= ABS, "sun scratch is not a detail mark");
     assert!(alias.reads >= 1.0);
     assert!(alias.skipped.abs() <= ABS);
@@ -928,7 +1096,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     );
     assert!(moved.reads.abs() <= ABS);
     assert!((moved.skipped - 1.0).abs() <= ABS);
-    assert!(moved.own.abs() <= ABS, "a world texel appeared, own {}", moved.own);
+    assert!(
+        moved.own.abs() <= ABS,
+        "a world texel appeared, own {}",
+        moved.own
+    );
     assert!(moved.conf.abs() <= ABS);
     assert!((moved.cell_same - 1.0).abs() <= ABS);
 
@@ -984,7 +1156,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         0,
         "this dispatch presents nothing"
     );
-    assert_eq!(words[2].to_bits(), 4, "covered owner plus three covered mover poses");
+    assert_eq!(
+        words[2].to_bits(),
+        4,
+        "covered owner plus three covered mover poses"
+    );
     assert_eq!(words[3].to_bits(), 8, "the other read-only rows evaluate");
     assert_eq!(
         words[4].to_bits(),

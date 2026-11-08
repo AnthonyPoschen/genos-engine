@@ -1492,6 +1492,16 @@ kind = "test"
 detail = "material_stream watchdog seconds"
 
 [[var]]
+name = "GENOS_TEXEL_RO_DIR"
+kind = "test"
+detail = "harness only: directory of the planted cache handed from the read-only planter process to the reader process"
+
+[[var]]
+name = "GENOS_TEXEL_RO_ROLE"
+kind = "test"
+detail = "harness only: planter or reader, so the read-only test's child process does not compile both modules"
+
+[[var]]
 name = "GENOS_COMPOSE_MAINT"
 kind = "build"
 detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"

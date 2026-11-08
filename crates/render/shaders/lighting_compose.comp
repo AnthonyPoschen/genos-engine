@@ -67,8 +67,11 @@ uint pack_rgb(vec3 rgb) {
 
 vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
     // lighting_screen_probe_indirect. A pixel whose displayed indirect is the
-    // SH texel detail value does not read screen-probe irradiance. Every other
-    // pixel still does, including slants, movers, and a miss.
+    // SH texel detail value does not read screen-probe irradiance. A covered
+    // mover is one of those pixels. Coverage and the display each call
+    // lighting_sh_read, so that pixel is two lookups, and diag counts the
+    // compose call, not one lookup. A mover whose read rejects, a miss, and
+    // an empty slant still read the probes.
     return lighting_screen_probe_indirect(p, pos, n);
 }
 

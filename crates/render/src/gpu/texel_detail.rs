@@ -15,14 +15,14 @@
 
 use std::ffi::c_void;
 
-use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
+use super::{Buffer, Gpu, Handle, Memory, check, read_f32s};
 
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
 // One screen probe shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
-const OUT_FLOATS: usize = 8 + 34 * 17 + 36;
+const OUT_FLOATS: usize = 8 + 34 * 17 + 40;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
@@ -66,18 +66,34 @@ pub struct TexelDetailPlant {
     keys: std::path::PathBuf,
 }
 
+impl TexelDetailPlant {
+    /// Hand the planted files to another process. Drop no longer deletes them.
+    pub fn into_paths(mut self) -> (std::path::PathBuf, std::path::PathBuf) {
+        (
+            std::mem::take(&mut self.cache),
+            std::mem::take(&mut self.keys),
+        )
+    }
+
+    /// A plant written by [`Self::into_paths`]. Drop deletes the files.
+    pub fn from_paths(cache: std::path::PathBuf, keys: std::path::PathBuf) -> Self {
+        Self { cache, keys }
+    }
+}
+
 impl Drop for TexelDetailPlant {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.cache);
-        let _ = std::fs::remove_file(&self.keys);
+        if !self.cache.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.cache);
+        }
+        if !self.keys.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.keys);
+        }
     }
 }
 
 fn plant_file(kind: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "genos-texel-{kind}-{}.bin",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("genos-texel-{kind}-{}.bin", std::process::id()))
 }
 
 fn ckeys_bytes() -> u64 {
@@ -138,9 +154,8 @@ impl Gpu {
         drop(plant);
         release_compiler_heap();
         // A few rows at a time. Counts accumulate in the output and in gstats.
-        // On a 16 GiB lavapipe cgroup the first chunk was still killed, at
-        // about 14.7 GiB anonymous. Splitting the rows did not make that
-        // dispatch a pass.
+        // The reader process alone, with DontInline on large functions, was
+        // killed at anon-rss 14711896 kB. Splitting the rows is not a pass.
         for begin in (0u32..12).step_by(2) {
             self.submit_texel(false, 0, begin, 2)?;
             release_compiler_heap();
@@ -669,7 +684,8 @@ impl Gpu {
         size: u64,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -689,8 +705,10 @@ impl Gpu {
         size: u64,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
-        let mut file = std::fs::File::open(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let mut file =
+            std::fs::File::open(path).map_err(|err| format!("read {}: {err}", path.display()))?;
         let file_len = file
             .metadata()
             .map_err(|err| format!("stat {}: {err}", path.display()))?
@@ -731,7 +749,13 @@ impl Gpu {
         )
     }
 
-    fn submit_texel(&mut self, reader: bool, lamp_x: u32, row: u32, rows: u32) -> Result<(), String> {
+    fn submit_texel(
+        &mut self,
+        reader: bool,
+        lamp_x: u32,
+        row: u32,
+        rows: u32,
+    ) -> Result<(), String> {
         let (pipe, layout, set, cmd, fence) = {
             let Some(state) = self.texel_detail.as_ref() else {
                 return Err("texel detail production check is not created".into());

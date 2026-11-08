@@ -3441,11 +3441,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // Resample and the hit patch are the estimators this read replaces.
         // They do not run for that texel, including when the read rejects
         // every corner: resample would copy a stale or far-side cell back in
-        // as a seed. A texel that is not a detail candidate (detail off, a
-        // mover, its own samples, a coarse size) keeps those two. The parent
-        // walk is off for every texel while texel detail is on, including a
-        // mover. A mover's trust is 0, so it shows the probes without that
-        // walk. An empty read falls through to the probe seed.
+        // as a seed. A texel that is not a detail candidate (detail off, its
+        // own samples, or a coarse size) keeps resample and the hit patch. A
+        // mover does not reach this loop while texel detail is on: it already
+        // returned the world-cell read. Detail off still enters with trust 0
+        // and shows the probes. The parent walk is off for every texel while
+        // texel detail is on. An empty read falls through to the probe seed.
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);

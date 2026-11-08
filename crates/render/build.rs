@@ -33,14 +33,7 @@ fn main() {
     let media = compile_media_modules(&out);
     let denoise = compile_denoise_modules(&out);
     let lighting = compile_lighting_modules(&out);
-    write_shader_glue(
-        &out,
-        &raster,
-        &media,
-        &denoise,
-        &lighting,
-        &reflection_spv,
-    );
+    write_shader_glue(&out, &raster, &media, &denoise, &lighting, &reflection_spv);
     rerun_shader_pieces();
 }
 
@@ -101,25 +94,21 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             true,
         ),
         // Same production function, compose's read-only specialization.
-        // PROD_READONLY drops the writing rows from this module. DontInline
-        // stays off. On a 16 GiB lavapipe cgroup the dispatch of this module,
-        // and of the unstripped module with DontInline on large functions,
-        // was killed (about 14.7 GiB anonymous). The writing specialization's
-        // dispatch completes.
+        // PROD_READONLY drops the writing rows. Large functions get DontInline.
+        // A fresh reader process with that module was still killed on a 16 GiB
+        // lavapipe cgroup: anon-rss 14711896 kB, total-vm 21216604 kB. The
+        // planter had exited. That is not a pass.
         texel_detail_ro: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
             &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
-            false,
+            true,
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
     let reflections_check = "shaders/reflections_check.comp";
     println!("cargo:rerun-if-changed={reflections_check}");
-    compile(
-        reflections_check,
-        &out.join("reflections_check.comp.spv"),
-    );
+    compile(reflections_check, &out.join("reflections_check.comp.spv"));
     // Not embedded: GPU parity fixture for pbr_brdf.glsl (tests/pbr_parity.rs).
     let pbr_check = "shaders/pbr_check.comp";
     println!("cargo:rerun-if-changed={pbr_check}");
@@ -404,7 +393,8 @@ fn compile_texel_detail(
             if let Some(ctrl_i) = fn_ctrl {
                 if i - fn_start > 1000 {
                     let at = ctrl_i * 4;
-                    let ctrl = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
+                    let ctrl =
+                        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
                     let ctrl = (ctrl & !1) | 2;
                     bytes[at..at + 4].copy_from_slice(&ctrl.to_le_bytes());
                 }

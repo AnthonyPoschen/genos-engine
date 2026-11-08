@@ -13,7 +13,7 @@ const uint PROD_ROWS = 34u;
 const uint PROD_STRIDE = 17u;
 const uint PROD_MOTION_AT = 33u;
 const uint PROD_TRAILER_AT = 8u + 34u * 17u;
-const uint PROD_TRAILER = 36u;
+const uint PROD_TRAILER = 40u;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
 const uint PROD_FRAME = 10u;
@@ -504,6 +504,13 @@ void prod_motion() {
     bool same_b = false;
     bool same_x = false;
     bool same_z = false;
+    // Step 5 shades pose A after the mover has gone to pose B. Nothing in the
+    // fixture claims a world texel there. The writing find does, because the
+    // world mode is not 2, and that empty texel is the detail candidate.
+    float vacate_absent_before = 1.0;
+    float vacate_absent_after = 1.0;
+    float vacate_own = -1.0;
+    float vacate_mark = 0.0;
     [[dont_unroll]] for (uint step = 0u; step < 6u; step++) {
         vec3 pos = PROD_POSE_A;
         vec3 nrm = a_n;
@@ -525,8 +532,17 @@ void prod_motion() {
             nrm = turned_n;
         } else {
             prod_mover_place(PROD_POSE_B - vec3(0.0, 1.0, 0.0), vec2(1.0, 0.0));
+            vacate_absent_before = prod_texel_absent(PROD_POSE_A, a_n);
         }
         shown_s[step] = prod_shade(pos, nrm);
+        if (step == 5u) {
+            vacate_absent_after = prod_texel_absent(PROD_POSE_A, a_n);
+            uint texel = lighting_cache_find_sized(PROD_POSE_A, a_n, false, LIGHTING_SC_TEXEL, PROD_POSE_A);
+            if (texel != ~0u) {
+                vacate_own = cache.v[3u * texel + 2u].w;
+                vacate_mark = cache.v[LIGHTING_SC_SPARSE_AT + texel].z < 0.0 ? 1.0 : 0.0;
+            }
+        }
         reads_s[step] = float(lighting_px_probe_reads);
         skip_s[step] = float(lighting_px_probe_skipped);
         if (step == 0u) {
@@ -570,6 +586,10 @@ void prod_motion() {
     prod_trailer(33u, vacated ? 1.0 : 0.0);
     prod_trailer(34u, same_x ? 1.0 : 0.0);
     prod_trailer(35u, same_z ? 1.0 : 0.0);
+    prod_trailer(36u, vacate_absent_before);
+    prod_trailer(37u, vacate_absent_after);
+    prod_trailer(38u, vacate_own);
+    prod_trailer(39u, vacate_mark);
     uint at = PROD_OUT_HEAD + PROD_MOTION_AT * PROD_STRIDE;
     prod_f(at, shown_s[0].r);
     prod_f(at + 1u, shown_s[0].g);
@@ -704,8 +724,8 @@ void prod_plant_scene() {
 
 void prod_readonly() {
     // lamp.y is the first row and lamp.z the count. The fixture runs a few
-    // rows at a time and the counts accumulate in gstats. A two-row dispatch
-    // of this specialization was still killed on a 16 GiB lavapipe cgroup.
+    // rows at a time and the counts accumulate in gstats. The reader process
+    // alone was still killed on a 16 GiB lavapipe cgroup (anon-rss 14711896 kB).
     uint begin = pc.lamp.y;
     uint count = pc.lamp.z == 0u ? 12u : pc.lamp.z;
     uint end = begin + count;
