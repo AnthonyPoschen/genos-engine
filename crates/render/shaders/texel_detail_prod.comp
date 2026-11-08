@@ -1,20 +1,20 @@
 #version 450
-// Production path for ADR 0039 stage 3. This dispatch calls
-// lighting_world_irradiance_in from lighting_cache.glsl, the function
-// lighting_compose.comp calls through lighting_world_irradiance.
+// Production compose indirect for ADR 0039. The head words are the Rust
+// settings pack (`lighting_change_head`). This shader copies them. It does
+// not build the detail bit. The call is `lighting_screen_probe_indirect`,
+// the function lighting_compose.comp calls.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 1) in;
 #include "lighting_common.glsl"
+#include "lighting_screen_probe.glsl"
 
-// Default experiments.sc_flags. Head 3.w bit 0 is surface_cache.sh_cells.
-// Bit 17 is surface_cache.sh_texel_detail. Denoise is ctrl bit 64.
-const uint PROD_SC_FLAGS = 6007050u;
-const uint PROD_SH_CELLS = 1u;
-const uint PROD_DETAIL_BIT = 131072u;
+const uint PROD_HEAD_WORDS = 8u;
+const uint PROD_ROWS = 10u;
+const uint PROD_STRIDE = 16u;
+const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
 const uint PROD_FRAME = 10u;
 const uint PROD_STAMP = 3u;
-const uint PROD_MODE = 3008u;
 const float PROD_HALF = 0.5;
 const float PROD_HALF_TEXEL = 0.0625;
 const float PROD_GAP = 8.0;
@@ -24,6 +24,7 @@ const float PROD_LAMP_RANGE = 64.0;
 const float PROD_LAMP_POWER = 8.0;
 const float PROD_LAMP_SHIFT = 1.0;
 const float PROD_CONF = 0.25;
+const float PROBE_Y0 = 0.282095;
 const vec3 PROD_UP = vec3(0.0, 1.0, 0.0);
 const vec3 PROD_RED = vec3(8.0, 0.0, 0.0);
 const vec3 PROD_GREEN = vec3(0.0, 6.0, 0.0);
@@ -31,9 +32,6 @@ const vec3 PROD_BLUE = vec3(0.0, 0.0, 7.0);
 const vec3 PROD_OWN = vec3(4.0, 2.0, 0.0);
 const vec3 PROD_SLANT = vec3(0.6, 0.8, 0.2);
 const vec3 PROD_PROBE = vec3(1.0, 2.0, 3.0);
-const uint PROD_HEAD = 4u;
-const uint PROD_STRIDE = 24u;
-const uint PROD_ROWS = 10u;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -43,18 +41,26 @@ void prod_f(uint i, float v) {
     outc.px[i] = floatBitsToUint(v);
 }
 
-void prod_head(bool detail_on) {
+void prod_head(uint variant) {
+    uint src = variant * PROD_HEAD_WORDS;
     uint at = lighting_change_at();
-    work.v[at] = vec4(0.0, 1.0, float(2u * PROD_SC_FLAGS), float(PROD_MODE));
+    work.v[at] = vec4(
+        uintBitsToFloat(ckeys.key[src]),
+        uintBitsToFloat(ckeys.key[src + 1u]),
+        uintBitsToFloat(ckeys.key[src + 2u]),
+        uintBitsToFloat(ckeys.key[src + 3u]));
     work.v[at + 1u] = vec4(0.0);
     work.v[at + 2u] = vec4(0.0);
-    uint head_w = PROD_SH_CELLS;
-    if (detail_on) {
-        head_w |= PROD_DETAIL_BIT;
-    }
-    work.v[at + 3u] = vec4(0.0, 0.0, 0.0, float(head_w));
-    work.v[at + 4u] = vec4(0.0, 0.0, 1.0, 0.0);
-    gstats.ctrl_bits = PROD_DENOISE;
+    work.v[at + 3u] = vec4(
+        uintBitsToFloat(ckeys.key[src + 4u]),
+        uintBitsToFloat(ckeys.key[src + 5u]),
+        uintBitsToFloat(ckeys.key[src + 6u]),
+        uintBitsToFloat(ckeys.key[src + 7u]));
+    work.v[at + 4u] = vec4(0.0);
+}
+
+void prod_lamp_clear() {
+    ckeys.key[LIGHTING_WRC_RING_AT + 8u] = 0u;
 }
 
 void prod_lamp(vec3 p) {
@@ -128,90 +134,119 @@ uint prod_owner(vec3 q, vec3 n, vec3 rgb, float samples) {
     return s;
 }
 
-void prod_store(uint id, vec4 shown, uint cell, vec4 mean_before, uint stamp_before, uint hash_before, bool detail_on) {
-    uint at = PROD_HEAD + id * PROD_STRIDE;
-    vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
-    uint stamp_after = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
-    uint hash_after = cell == ~0u ? 0u : prod_sh_hash(cell);
-    vec3 q = prod_texel(prod_pos(id), PROD_UP);
-    uint texel = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SC_TEXEL, q);
-    float conf = 0.0;
-    float own = 0.0;
-    vec3 seed_rgb = vec3(0.0);
-    if (texel != ~0u) {
-        conf = cache.v[LIGHTING_SC_SPARSE_AT + texel].z;
-        own = cache.v[3u * texel + 2u].w;
-        seed_rgb = lighting_sc_seed(texel).rgb;
-    }
-    prod_f(at, shown.r);
-    prod_f(at + 1u, shown.g);
-    prod_f(at + 2u, shown.b);
-    prod_f(at + 3u, shown.w);
-    prod_f(at + 4u, mean_before.r);
-    prod_f(at + 5u, mean_before.g);
-    prod_f(at + 6u, mean_before.b);
-    prod_f(at + 7u, mean_before.w);
-    prod_f(at + 8u, mean_after.r);
-    prod_f(at + 9u, mean_after.g);
-    prod_f(at + 10u, mean_after.b);
-    prod_f(at + 11u, mean_after.w);
-    prod_u(at + 12u, stamp_before);
-    prod_u(at + 13u, stamp_after);
-    prod_u(at + 14u, hash_before);
-    prod_u(at + 15u, hash_after);
-    prod_f(at + 16u, conf);
-    prod_f(at + 17u, own);
-    prod_f(at + 18u, detail_on ? 1.0 : 0.0);
-    prod_u(at + 19u, lighting_sc_flags());
-    prod_f(at + 20u, seed_rgb.r);
-    prod_f(at + 21u, seed_rgb.g);
-    prod_f(at + 22u, seed_rgb.b);
-    prod_f(at + 23u, (gstats.ctrl_bits & PROD_DENOISE) != 0u ? 1.0 : 0.0);
+void prod_probe(vec3 pos, vec3 n) {
+    work.v[lighting_probe_at(0u)] = vec4(pos, 1.0);
+    work.v[lighting_probe_at(0u) + 1u] = vec4(n, 0.0);
+    vec3 c = PROD_PROBE / PROBE_Y0;
+    work.v[lighting_shf_at(0u)] = vec4(c, 0.0);
+}
+
+const float PROD_MOVER_WORD = 300000.0;
+const float PROD_MOVER_RADIUS = 2.0;
+
+void prod_mover(vec3 pos) {
+    uint at = lighting_change_at();
+    work.v[at].w += PROD_MOVER_WORD;
+    uint m = at + LIGHTING_CHANGE_HEAD;
+    work.v[m] = vec4(pos - vec3(0.0, 1.0, 0.0), PROD_MOVER_RADIUS);
+    work.v[m + 1u] = vec4(pos - vec3(0.0, 1.0, 0.0), 1.0);
+    work.v[m + 2u] = vec4(1.0, 1.0, 1.0, 0.0);
+    work.v[m + 3u] = vec4(1.0, 0.0, 0.0, 0.0);
 }
 
 void main() {
-    prod_head(true);
+    gstats.ctrl_bits = PROD_DENOISE;
+    gstats.chg[31] = 1u;
+    prod_head(0u);
     prod_u(0u, lighting_sc_flags());
     prod_u(1u, uint(work.v[lighting_change_at() + 3u].w));
-    prod_u(2u, gstats.ctrl_bits);
-    prod_u(3u, lighting_world_mode());
-    prod_lamp(prod_pos(0u));
+    prod_u(2u, 0u);
+    prod_u(3u, 0u);
+    prod_u(4u, 0u);
+    prod_u(5u, lighting_world_mode());
+    prod_u(6u, ckeys.key[7u]);
+    prod_u(7u, ckeys.key[PROD_HEAD_WORDS + 7u]);
     for (uint id = 0u; id < PROD_ROWS; id++) {
-        bool detail_on = id != 2u && id != 9u;
-        prod_head(detail_on);
-        if (id >= 8u) {
-            gstats.ctrl_bits = 0u;
+        uint variant = 0u;
+        if (id == 2u) {
+            variant = 1u;
+        } else if (id == 8u) {
+            variant = 2u;
         }
-        lighting_px_probes = id == 0u ? PROD_PROBE : vec3(-1.0);
+        prod_head(variant);
+        prod_lamp_clear();
+        gstats.ctrl_bits = id == 7u ? 0u : PROD_DENOISE;
+        vec3 n = id == 5u ? normalize(PROD_SLANT) : PROD_UP;
         vec3 pos = prod_pos(id);
-        vec3 n = id == 6u ? normalize(PROD_SLANT) : PROD_UP;
         vec3 q = prod_texel(pos, PROD_UP);
-        vec3 owner_rgb = PROD_RED;
-        float owner_n = PROD_CELL_N;
-        if (id == 1u) {
-            owner_rgb = vec3(0.0);
-            owner_n = 0.0;
-        } else if (id == 3u) {
-            owner_rgb = PROD_BLUE;
+        if (id == 6u) {
+            prod_mover(pos);
         }
         uint cell = ~0u;
-        if (id != 7u) {
+        bool paint = id == 0u || id == 4u || id == 5u || id == 6u || id == 7u || id == 9u;
+        if (paint) {
             prod_paint(q, PROD_UP, PROD_GREEN, PROD_CELL_N);
-            cell = prod_owner(q, PROD_UP, owner_rgb, owner_n);
+            // The fine texel exists and is empty. Coverage is decided before
+            // compose claims a missing slot, which is how a later frame reads it.
+            uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+            if (texel != ~0u) {
+                cache.v[3u * texel + 2u] = vec4(0.0);
+            }
         }
-        if (id == 3u) {
+        if (id == 0u || id == 4u || id == 5u || id == 6u || id == 7u) {
+            cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+        } else if (id == 3u) {
+            cell = prod_owner(q, PROD_UP, vec3(0.0), 0.0);
+        } else if (id == 9u) {
+            cell = prod_owner(q, PROD_UP, PROD_BLUE, PROD_CELL_N);
+        }
+        if (id == 3u || id == 9u) {
             uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
             lighting_sc_set_seed(texel, PROD_GREEN, PROD_CONF, 0.0);
+            prod_lamp(pos);
         }
-        if (id == 4u || id == 7u) {
+        if (id == 4u) {
             uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
             cache.v[3u * texel + 2u] = vec4(PROD_OWN, PROD_OWN_N);
         }
-        vec4 mean = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
-        uint stamp = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
-        uint hash = cell == ~0u ? 0u : prod_sh_hash(cell);
-        bool mover = id == 5u;
-        vec4 shown = lighting_world_irradiance_in(pos, n, pos, mover);
-        prod_store(id, shown, cell, mean, stamp, hash, detail_on);
+        vec4 mean_before = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
+        uint stamp_before = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
+        uint hash_before = cell == ~0u ? 0u : prod_sh_hash(cell);
+        prod_probe(pos, n);
+        lighting_compose_px = uvec2(0u);
+        vec3 shown = lighting_screen_probe_indirect(uvec2(0u), pos, n);
+        vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
+        uint stamp_after = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
+        uint hash_after = cell == ~0u ? 0u : prod_sh_hash(cell);
+        bool same = all(equal(mean_before, mean_after)) && stamp_before == stamp_after && hash_before == hash_after;
+        uint texel = lighting_cache_find_sized(q, PROD_UP, false, LIGHTING_SC_TEXEL, q);
+        float conf = 0.0;
+        float own = 0.0;
+        vec3 seed_rgb = vec3(0.0);
+        if (texel != ~0u) {
+            conf = cache.v[LIGHTING_SC_SPARSE_AT + texel].z;
+            own = cache.v[3u * texel + 2u].w;
+            seed_rgb = lighting_sc_seed(texel).rgb;
+        }
+        uint at = PROD_OUT_HEAD + id * PROD_STRIDE;
+        prod_f(at, shown.r);
+        prod_f(at + 1u, shown.g);
+        prod_f(at + 2u, shown.b);
+        prod_f(at + 3u, lighting_px_world_w);
+        prod_f(at + 4u, float(lighting_px_probe_reads));
+        prod_f(at + 5u, float(lighting_px_probe_skipped));
+        prod_f(at + 6u, seed_rgb.r);
+        prod_f(at + 7u, seed_rgb.g);
+        prod_f(at + 8u, seed_rgb.b);
+        prod_f(at + 9u, conf);
+        prod_f(at + 10u, same ? 1.0 : 0.0);
+        prod_f(at + 11u, own);
+        prod_u(at + 12u, uint(work.v[lighting_change_at() + 3u].w));
+        prod_f(at + 13u, mean_after.r);
+        prod_f(at + 14u, mean_after.g);
+        prod_f(at + 15u, mean_after.b);
     }
+    prod_u(2u, gstats.diag[LIGHTING_DIAG_PROBE_SKIP]);
+    prod_u(3u, gstats.diag[LIGHTING_DIAG_PROBE_EVAL]);
+    prod_u(4u, gstats.diag[LIGHTING_DIAG_PROBE_READS]);
 }

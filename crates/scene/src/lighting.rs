@@ -519,11 +519,16 @@ pub struct SurfaceCacheSettings {
     /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3, default off).
     /// An empty fine world texel takes its first light from the one owning
     /// 25 cm SH cell, tilted to the texel's normal. The value is a
-    /// low-confidence seed, not an own sample. A lamp change drops it. The
-    /// cell is not written, and neighbour cells are not blended. While the
+    /// low-confidence seed, not an own sample. A lamp change drops it, and an
+    /// owner left empty does not keep the old seed on screen. The cell is not
+    /// written, and neighbour cells are not blended. That is the stage 2 owner
+    /// read. The ADR's trilinear neighbour read is not this setting. While the
     /// cell has light, the resample, parent, hit-patch, and probe seeds do
-    /// not write that texel. A miss, a mover, and a slanted pixel keep those
-    /// paths. Requires `sh_cells`; on without it does nothing. Head 3.w bit 17.
+    /// not write that texel. A miss keeps those writers. A mover is not
+    /// seeded. A slanted pixel misses the axis-only SH read and compose keeps
+    /// the screen probes. A pixel whose displayed indirect is this cell does
+    /// not read screen-probe irradiance. Requires `sh_cells`; on without it
+    /// does nothing. Head 3.w bit 17.
     pub sh_texel_detail: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///

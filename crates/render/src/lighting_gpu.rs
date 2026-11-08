@@ -2851,54 +2851,15 @@ impl Gpu {
             }
         }
         let mut block = vec![0f32; 4 * (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES)];
-        block[2] = (self.lighting.probe_runs & 1) as f32;
-        // World irradiance cells (lighting_cache.glsl, experiment): GENOS_LIGHTING_WORLD mode
-        // (1: pixels read the light cache, 2: probes average into world cells, 3:
-        // the surface cache) and `experiments.world_cap` frames (mode 3: ray sets a
-        // texel averages, default 16).
+        // World irradiance cells and the surface-cache flags. Head z is the
+        // probe-run bit plus twice the low flags. Head w is mode × 1000 + cap
+        // until the mover count is added below. Head 3.w is written after the
+        // last-camera copy, which shares that word.
         let world = self.lighting.settings.world_mode();
-        let cap = match self.lighting.settings.experiments.world_cap {
-            0 if world == 3 => LIGHTING_DEFAULT_SC_CAP,
-            0 => 32,
-            cap => cap,
-        }
-        .clamp(1, 999);
-        // Surface cache switches (lighting_cache.glsl lighting_sc_flags).
-        // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
-        // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
-        // 16777216 and up turned every lower flag on instead).
-        // S78S debug isolate toggles (`experiments.toggles`): direct only rides on
-        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-16.
-        let toggles = self.lighting.settings.experiments.toggles;
-        // Bit 20 is the estimator. Bit 30 selects the older hold path.
-        // `surface_cache.blend` forces both, so `experiments.sc_flags` cannot
-        // override them.
-        const GI_ESTIMATOR: u32 = 1 << 20;
-        const SURFACE_CACHE_HOLD: u32 = 1 << 30;
-        let mut flags_all = self.lighting.settings.experiments.sc_flags
-            | if toggles & genos_scene::LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
-                2097152
-            } else {
-                0
-            };
-        flags_all |= GI_ESTIMATOR;
-        match self.lighting.settings.surface_cache.blend {
-            genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
-            genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
-        }
-        // ADR 0039 stage 2: `surface_cache.sh_cells` sets bit 23 (SH-L1 world
-        // cells read at the true normal); `experiments.sc_flags` can set it too.
-        const SH_CELLS: u32 = 1 << 23;
-        if self.lighting.settings.surface_cache.sh_cells {
-            flags_all |= SH_CELLS;
-        }
-        // ADR 0039 stage 3. Head 3.w bit 17, beside the high flags, the budget
-        // shift, and the isolate toggles. The shader also requires SH cells.
-        const SH_TEXEL_DETAIL: u32 = 1 << 17;
-        let flags = flags_all & ((1 << 23) - 1);
+        let head = lighting_change_head(&self.lighting.settings);
+        let flags = head.flags;
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
-        block[3] = (world * 1000 + cap) as f32;
+        block[3] = head.mode_cap as f32;
         let mut used = 0;
         // Vec4s of the block the GPU gets: head, changes and movers.
         let mut sent = LIGHTING_CHANGE_HEAD;
@@ -2938,7 +2899,7 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", head.mode_cap % 1000, u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local cache entries for movers (GIBS §1.5). The public
             // knob is surface_cache.attach_movers. Static geometry stays on
@@ -2963,16 +2924,10 @@ impl Gpu {
             }
             block[4 + 3] = 1.0;
         }
-        // The camera up's w (head 3.w) is unread: the flags' high bits.
-        // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
-        // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
-        let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        let mut head_hi =
-            ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
-        if self.lighting.settings.surface_cache.sh_texel_detail {
-            head_hi |= SH_TEXEL_DETAIL;
-        }
-        block[4 * 3 + 3] = head_hi as f32;
+        // The camera up's w (head 3.w) is the flags' high bits, the budget
+        // shift, the isolate toggles, and the SH texel detail bit. Written
+        // after the last-camera copy, which fills this word from the basis.
+        block[4 * 3 + 3] = head.head_hi as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
@@ -3886,6 +3841,57 @@ fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read
 // Defaults with no env set (S54K): GI, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
+
+/// The change-block words `lighting_passes` uploads from the settings.
+/// `flags` is the low 23 surface-cache bits (head z, above the probe-run bit).
+/// `mode_cap` is world mode × 1000 + cap (head w, before mover counts).
+/// `head_hi` is head 3.w: high flags, the budget shift, the isolate toggles,
+/// and ADR 0039 stage 3 bit 17 (`surface_cache.sh_texel_detail`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightingChangeHead {
+    pub flags: u32,
+    pub mode_cap: u32,
+    pub head_hi: u32,
+}
+
+pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> LightingChangeHead {
+    let world = settings.world_mode();
+    let cap = match settings.experiments.world_cap {
+        0 if world == 3 => LIGHTING_DEFAULT_SC_CAP,
+        0 => 32,
+        cap => cap,
+    }
+    .clamp(1, 999);
+    let toggles = settings.experiments.toggles;
+    const GI_ESTIMATOR: u32 = 1 << 20;
+    const SURFACE_CACHE_HOLD: u32 = 1 << 30;
+    const SH_CELLS: u32 = 1 << 23;
+    const SH_TEXEL_DETAIL: u32 = 1 << 17;
+    let mut flags_all = settings.experiments.sc_flags
+        | if toggles & genos_scene::LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
+            2097152
+        } else {
+            0
+        };
+    flags_all |= GI_ESTIMATOR;
+    match settings.surface_cache.blend {
+        genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
+        genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+    }
+    if settings.surface_cache.sh_cells {
+        flags_all |= SH_CELLS;
+    }
+    let budget_shift = settings.gi.budget_shift.min(7);
+    let mut head_hi = ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
+    if settings.surface_cache.sh_texel_detail {
+        head_hi |= SH_TEXEL_DETAIL;
+    }
+    LightingChangeHead {
+        flags: flags_all & ((1 << 23) - 1),
+        mode_cap: world * 1000 + cap,
+        head_hi,
+    }
+}
 /// Lighting stats buffer: 24 words, diag[64], chg[32], the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`, the
 /// control block at word 124 (16 words), then the unfilled-pixel count and the

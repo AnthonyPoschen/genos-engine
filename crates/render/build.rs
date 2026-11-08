@@ -262,6 +262,7 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
 fn rerun_shader_pieces() {
     for piece in [
         "lighting_common.glsl",
+        "lighting_screen_probe.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cache_slots.glsl",

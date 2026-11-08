@@ -10,9 +10,13 @@ use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
-const WORK_BYTES: u64 = (98_304 * 16 + 8) * 16;
-const OUT_FLOATS: usize = 4 + 10 * 24;
+// One screen probe shifts the change block past the cache-ray region. The
+// extra words keep that head inside the buffer.
+const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
+const OUT_FLOATS: usize = 8 + 10 * 16;
 const PC_BYTES: u32 = 48;
+const HEAD_WORDS: usize = 8;
+const HEAD_VARIANTS: usize = 3;
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -433,9 +437,51 @@ impl Gpu {
         Ok(())
     }
 
+    fn write_texel_detail_heads(&self, memory: Handle) -> Result<(), String> {
+        let mut words = [0u32; HEAD_WORDS * HEAD_VARIANTS];
+        let variants = [
+            (true, true, false),
+            (false, true, false),
+            (true, true, true),
+        ];
+        for (i, (detail, cells, low)) in variants.into_iter().enumerate() {
+            let mut settings =
+                genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+            settings.surface_cache.sh_cells = cells;
+            settings.surface_cache.sh_texel_detail = detail;
+            if low {
+                settings.bounce.count = 0;
+            }
+            settings.sanitize();
+            let head = super::lighting_change_head(&settings);
+            let at = i * HEAD_WORDS;
+            words[at] = 0;
+            words[at + 1] = 1.0f32.to_bits();
+            words[at + 2] = ((2 * head.flags) as f32).to_bits();
+            words[at + 3] = (head.mode_cap as f32).to_bits();
+            words[at + 7] = (head.head_hi as f32).to_bits();
+        }
+        let bytes = u64::try_from(std::mem::size_of_val(&words))
+            .map_err(|err| format!("texel detail head size: {err}"))?;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, 0, bytes, 0, &mut mapped),
+                "map texel detail heads",
+            )?;
+            std::ptr::copy_nonoverlapping(
+                words.as_ptr().cast::<u8>(),
+                mapped.cast::<u8>(),
+                usize::try_from(bytes).map_err(|err| format!("texel detail head copy: {err}"))?,
+            );
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(())
+    }
+
     fn zero_memory(&self, memory: Handle, size: u64) -> Result<(), String> {
-        let bytes = usize::try_from(size)
-            .map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -488,6 +534,13 @@ impl Gpu {
         for (memory, size) in zeros {
             self.zero_memory(memory, size)?;
         }
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
         self.wait_fence(fence, "texel detail wait")?;
         let fences = [fence];
         unsafe {
@@ -531,7 +584,7 @@ impl Gpu {
                 lamp: [u32; 4],
             }
             let pc = Pc {
-                dims: [1, 1, 0, 0],
+                dims: [1, 1, 1, 1],
                 params: [0, 1, 0, 10],
                 lamp: [0; 4],
             };

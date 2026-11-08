@@ -275,7 +275,21 @@ fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
         "the screen arm does not take the owning-cell tilt"
     );
     let compose = shader("lighting_compose.comp");
-    assert!(compose.contains("return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));"));
+    let sun = shader("lighting_sun_compose.comp");
+    assert!(compose.contains("return lighting_screen_probe_indirect(p, pos, n);"));
+    assert!(sun.contains("return lighting_screen_probe_indirect(p, pos, n);"));
+    assert!(!compose.contains("lighting_probe_irradiance"));
+    assert!(!sun.contains("lighting_probe_irradiance"));
+    let probe = shader("lighting_screen_probe.glsl");
+    let indirect = function_body(
+        &probe,
+        "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
+    );
+    assert!(
+        indirect.contains("return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));"),
+        "an uncovered pixel, including a slant, still mixes the probes by world trust"
+    );
+    assert!(indirect.contains("return world.rgb;"));
 
     let slanted = [0.0_f32, 0.8, 0.6];
     assert!(
@@ -601,16 +615,34 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
 #[test]
 fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
     let relight = shader("lighting_cache.comp");
-    let settle = relight.find("if (lighting_lamp_settling())").expect("lamp settle");
-    let put = relight[settle..].find("lighting_sh_put").expect("harmonics store");
+    let settle = relight
+        .find("if (lighting_lamp_settling())")
+        .expect("lamp settle");
+    let put = relight[settle..]
+        .find("lighting_sh_put")
+        .expect("harmonics store");
     let window = &relight[settle..settle + put];
-    assert!(window.contains("wa = 1.0;"), "settling must replace the sample");
-    assert!(window.contains("lighting_tex_put"), "the mean is stored in that arm");
-    assert!(window.contains("o0 * sh_ls"), "held harmonics take the mean's sun gain");
+    assert!(
+        window.contains("wa = 1.0;"),
+        "settling must replace the sample"
+    );
+    assert!(
+        window.contains("lighting_tex_put"),
+        "the mean is stored in that arm"
+    );
+    assert!(
+        window.contains("o0 * sh_ls"),
+        "held harmonics take the mean's sun gain"
+    );
     let gain = relight.find("float sh_ls = 1.0;").expect("sun gain");
     let mean_scale = relight[gain..].find("old.rgb *= ls").expect("mean rescale");
-    let sh_scale = relight[gain..].find("o0 * sh_ls").expect("harmonic rescale");
-    assert!(mean_scale < sh_scale, "the mean is rescaled before the harmonics blend");
+    let sh_scale = relight[gain..]
+        .find("o0 * sh_ls")
+        .expect("harmonic rescale");
+    assert!(
+        mean_scale < sh_scale,
+        "the mean is rescaled before the harmonics blend"
+    );
 }
 
 #[test]
@@ -628,7 +660,11 @@ fn the_owning_cell_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
     );
-    precedes(screen, "lighting_sh_owning_detail(q, n)", "lighting_sc_resample");
+    precedes(
+        screen,
+        "lighting_sh_owning_detail(q, n)",
+        "lighting_sc_resample",
+    );
     assert!(screen.contains(
         "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
     ));
