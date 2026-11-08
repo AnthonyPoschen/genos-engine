@@ -62,7 +62,8 @@ missing-reference.
 --out DIR    screenshots, verdict.json, and copies of the inputs.
              Default: ./genos-debug/room-blotch. Not $HOME.
 --capture    after the refs pass, one proof window. Settle must be true.
-             Then wait 2 frames and capture. No compare, so a miss cannot trace.
+             The settle job then draws exactly 2 presents and saves the last.
+             No compare, so a miss cannot trace.
 --pose       room-a or room-b. No room-c and no close-up.
 --threads N  CPU trace width. Wins over GENOS_REFERENCE_THREADS.
              When omitted, that variable is used, else 4.

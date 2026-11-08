@@ -533,14 +533,7 @@ impl Tools {
     /// Run queued commands, put back the edits the example's update undid, and set
     /// the view. True when the example must read the picture back this frame.
     pub fn before_draw(&mut self, ctx: &mut Ctx) -> bool {
-        for cmd in genos_mcp::command::take() {
-            let args = Args(&cmd.args);
-            match self.run(&cmd.name, &args, ctx) {
-                Ok(Step::Reply(value)) => genos_mcp::command::reply(cmd.id, Ok(value)),
-                Ok(Step::Job(job)) => self.jobs.push(Running { id: cmd.id, job }),
-                Err(err) => genos_mcp::command::reply(cmd.id, Err(err)),
-            }
-        }
+        self.accept_commands(Some(ctx));
         self.poll_scene_loads(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
@@ -578,13 +571,53 @@ impl Tools {
                 }
             }
         }
+        let read = self.arm_readback();
+        let look = self.reading.map_or(self.look, |s| s.look);
+        ctx.renderer.set_debug_view(look.view);
+        self.overlay.clear();
+        read
+    }
+
+    /// `take` once, at the start of the present. A command that arrives after
+    /// this returns is taken on a later present. `before_draw` is this plus the
+    /// device. `ctx` is absent only when the command does not touch the device.
+    fn accept_commands(&mut self, mut ctx: Option<&mut Ctx>) {
+        for cmd in genos_mcp::command::take() {
+            let args = Args(&cmd.args);
+            let result = self.dispatch(&cmd.name, &args, ctx.as_deref_mut());
+            match result {
+                Ok(Step::Reply(value)) => genos_mcp::command::reply(cmd.id, Ok(value)),
+                Ok(Step::Job(job)) => self.jobs.push(Running { id: cmd.id, job }),
+                Err(err) => genos_mcp::command::reply(cmd.id, Err(err)),
+            }
+        }
+    }
+
+    fn dispatch(
+        &mut self,
+        name: &str,
+        args: &Args,
+        mut ctx: Option<&mut Ctx>,
+    ) -> Result<Step, String> {
+        let ui_default = ctx
+            .as_deref_mut()
+            .is_some_and(|ctx| ctx.host.scene().debug.ui);
+        if let Some(step) = self.frame_job(name, args, ui_default)? {
+            return Ok(step);
+        }
+        let Some(ctx) = ctx else {
+            return Err(format!("{name} needs the frame device"));
+        };
+        self.run(name, args, ctx)
+    }
+
+    /// Whether this present's picture must be read. The present is still
+    /// `self.frame`; the draw about to happen is `self.frame + 1`.
+    fn arm_readback(&mut self) -> bool {
         self.reading = self
             .jobs
             .iter()
             .find_map(|running| read_this_draw(self.frame, &running.job));
-        let look = self.reading.map_or(self.look, |s| s.look);
-        ctx.renderer.set_debug_view(look.view);
-        self.overlay.clear();
         self.reading.is_some()
     }
 
@@ -595,20 +628,48 @@ impl Tools {
         pixels: Option<&[u8]>,
         timing: FrameTiming,
     ) {
-        self.frame += 1;
-        self.reflection_stats = renderer.reflection_grade().ok();
-        self.timing.push_back((self.frame, timing));
-        while self.timing.len() > 240 {
-            self.timing.pop_front();
-        }
-        let frame_wall_ms = self.timing.back().map_or(0.0, |(_, t)| t.frame_ms);
-        let image = match (self.reading, pixels) {
-            (Some(_), Some(px)) => Some(Image::from_bgra(renderer.width(), renderer.height(), px)),
+        let offered = match (self.reading, pixels) {
+            (Some(_), Some(px)) => {
+                Some(Image::from_bgra(renderer.width(), renderer.height(), px))
+            }
             _ => None,
         };
         let stats = renderer.settle_stats();
         // The lighting has settled and a frame drawn from its held light is on screen.
         let settled_now = renderer.picture_settled() && stats.settled;
+        self.apply_present(
+            offered,
+            settled_now,
+            stats.still_frames,
+            timing.frame_ms,
+            Some(timing),
+            Some(renderer),
+        );
+    }
+
+    /// Number this present, keep `offered` only when [`Self::arm_readback`] asked
+    /// for it, and run the jobs. `before_draw` armed the read on the count before
+    /// this number. The saved pixels are this present or they are absent.
+    fn apply_present(
+        &mut self,
+        offered: Option<Image>,
+        settled_now: bool,
+        still_frames: u32,
+        frame_wall_ms: f64,
+        timing: Option<FrameTiming>,
+        mut renderer: Option<&mut Renderer>,
+    ) {
+        let image = self.reading.as_ref().and(offered);
+        self.frame += 1;
+        if let Some(renderer) = renderer.as_mut() {
+            self.reflection_stats = renderer.reflection_grade().ok();
+        }
+        if let Some(timing) = timing {
+            self.timing.push_back((self.frame, timing));
+            while self.timing.len() > 240 {
+                self.timing.pop_front();
+            }
+        }
         let mut image_used = false;
         let mut done = Vec::new();
         for (index, running) in self.jobs.iter_mut().enumerate() {
@@ -627,7 +688,7 @@ impl Tools {
                     self.frame,
                     image.as_ref(),
                     settled_now,
-                    stats.still_frames,
+                    still_frames,
                     frame_wall_ms,
                     left,
                     quiet,
@@ -657,34 +718,37 @@ impl Tools {
                     );
                     finished
                 }
-                Job::Reference(job) => {
-                    if job.on_draw(if image_used { None } else { image.as_ref() }) {
-                        job.scene = renderer
-                            .read_scene()
-                            .ok()
-                            .filter(|read| !read.rgb.is_empty());
-                        job.legacy_display = renderer.hdr_legacy_display();
-                        image_used = true;
+                Job::Reference(job) => match renderer.as_deref_mut() {
+                    None => Some(Err("reference needs the frame device".to_string())),
+                    Some(renderer) => {
+                        if job.on_draw(if image_used { None } else { image.as_ref() }) {
+                            job.scene = renderer
+                                .read_scene()
+                                .ok()
+                                .filter(|read| !read.rgb.is_empty());
+                            job.legacy_display = renderer.hdr_legacy_display();
+                            image_used = true;
+                        }
+                        let ready =
+                            job.reference.is_some() && (job.shot.is_none() || job.live.is_some());
+                        let failed =
+                            job.worker.is_none() && job.reference.is_none() && job.shot.is_none();
+                        if failed {
+                            Some(Err("the reference trace panicked".to_string()))
+                        } else if ready {
+                            let legacy_display = job.legacy_display;
+                            Some(finish_reference(
+                                job,
+                                &self.out_dir,
+                                &mut self.captures,
+                                &mut self.references,
+                                legacy_display,
+                            ))
+                        } else {
+                            None
+                        }
                     }
-                    let ready =
-                        job.reference.is_some() && (job.shot.is_none() || job.live.is_some());
-                    let failed =
-                        job.worker.is_none() && job.reference.is_none() && job.shot.is_none();
-                    if failed {
-                        Some(Err("the reference trace panicked".to_string()))
-                    } else if ready {
-                        let legacy_display = job.legacy_display;
-                        Some(finish_reference(
-                            job,
-                            &self.out_dir,
-                            &mut self.captures,
-                            &mut self.references,
-                            legacy_display,
-                        ))
-                    } else {
-                        None
-                    }
-                }
+                },
                 Job::SceneLoad { .. } => None,
                 Job::Flicker {
                     left,
@@ -736,7 +800,9 @@ impl Tools {
             let running = self.jobs.remove(index);
             genos_mcp::command::reply(running.id, result);
         }
-        self.flush_gi_frames(renderer);
+        if let Some(renderer) = renderer {
+            self.flush_gi_frames(renderer);
+        }
     }
 
     /// Append samples the renderer recorded after the last flush.
@@ -902,6 +968,66 @@ impl Tools {
             }
             None => default_name.map(|n| self.out_dir.join(n)),
         })
+    }
+
+    /// `wait`, `step`, and `wait_settled`. None when `name` is some other command.
+    /// These do not read the device. `run` handles the rest.
+    fn frame_job(
+        &mut self,
+        name: &str,
+        args: &Args,
+        ui_default: bool,
+    ) -> Result<Option<Step>, String> {
+        match name {
+            "step" => {
+                let n = args.u32("frames")?.unwrap_or(1).max(1);
+                self.steps_left += n;
+                Ok(Some(Step::Job(Job::Frames {
+                    left: n,
+                    accepted: self.frame,
+                })))
+            }
+            "wait" => Ok(Some(Step::Job(Job::Frames {
+                left: args.u32("frames")?.unwrap_or(1).max(1),
+                accepted: self.frame,
+            }))),
+            "wait_settled" => {
+                let then_frames = args.u32("then_frames")?;
+                let path = self.path_arg(args, "path", None)?;
+                let size = match (args.u32("width")?, args.u32("height")?) {
+                    (None, None) => None,
+                    (Some(w), Some(h)) => Some((w.max(1), h.max(1))),
+                    _ => return Err("wait_settled capture size needs width and height".into()),
+                };
+                if path.is_none() && (then_frames.unwrap_or(0) > 0 || size.is_some()) {
+                    return Err("wait_settled capture needs a path".into());
+                }
+                if path.is_some() && then_frames.unwrap_or(0) == 0 {
+                    return Err("wait_settled capture needs then_frames of at least 1".into());
+                }
+                let capture = if path.is_some() {
+                    Some(FrameCapture {
+                        path,
+                        size,
+                        look: self.look,
+                        ui: Self::shot_ui(args, ui_default)?,
+                    })
+                } else {
+                    None
+                };
+                Ok(Some(Step::Job(Job::Settle {
+                    left: args.u32("timeout_frames")?.unwrap_or(600).max(1),
+                    quiet: 0,
+                    need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
+                    frames: 0,
+                    wall_ms: 0.0,
+                    then_frames,
+                    capture,
+                    hold: None,
+                })))
+            }
+            _ => Ok(None),
+        }
     }
 
     #[allow(
@@ -1166,53 +1292,6 @@ impl Tools {
                     ),
                     ("frame", num(self.frame as f64)),
                 ]))
-            }
-            "step" => {
-                let n = args.u32("frames")?.unwrap_or(1).max(1);
-                self.steps_left += n;
-                Ok(Step::Job(Job::Frames {
-                    left: n,
-                    accepted: self.frame,
-                }))
-            }
-            "wait" => Ok(Step::Job(Job::Frames {
-                left: args.u32("frames")?.unwrap_or(1).max(1),
-                accepted: self.frame,
-            })),
-            "wait_settled" => {
-                let then_frames = args.u32("then_frames")?;
-                let path = self.path_arg(args, "path", None)?;
-                let size = match (args.u32("width")?, args.u32("height")?) {
-                    (None, None) => None,
-                    (Some(w), Some(h)) => Some((w.max(1), h.max(1))),
-                    _ => return Err("wait_settled capture size needs width and height".into()),
-                };
-                if path.is_none() && (then_frames.unwrap_or(0) > 0 || size.is_some()) {
-                    return Err("wait_settled capture needs a path".into());
-                }
-                if path.is_some() && then_frames.unwrap_or(0) == 0 {
-                    return Err("wait_settled capture needs then_frames of at least 1".into());
-                }
-                let capture = if path.is_some() {
-                    Some(FrameCapture {
-                        path,
-                        size,
-                        look: self.look,
-                        ui: Self::shot_ui(args, ui_default)?,
-                    })
-                } else {
-                    None
-                };
-                Ok(Step::Job(Job::Settle {
-                    left: args.u32("timeout_frames")?.unwrap_or(600).max(1),
-                    quiet: 0,
-                    need: args.u32("quiet_frames")?.unwrap_or(3).max(1),
-                    frames: 0,
-                    wall_ms: 0.0,
-                    then_frames,
-                    capture,
-                    hold: None,
-                }))
             }
             "view" => {
                 if let Some(m) = args.str("mode")? {
@@ -1916,10 +1995,6 @@ fn finish_reference(
     Ok(obj(fields))
 }
 
-/// The picture this draw should read, if any.
-///
-/// `completed` is the present count before this draw. The draw itself will be
-/// numbered `completed + 1`.
 fn frames_reply(frame: u64, left: &mut u32, accepted: u64) -> Option<Value> {
     *left = left.saturating_sub(1);
     (*left == 0).then(|| {
@@ -1930,6 +2005,10 @@ fn frames_reply(frame: u64, left: &mut u32, accepted: u64) -> Option<Value> {
     })
 }
 
+/// The picture this draw should read, if any.
+///
+/// `completed` is the present count before this draw. The draw itself will be
+/// numbered `completed + 1`.
 fn read_this_draw(completed: u64, job: &Job) -> Option<Shot> {
     let next = completed.saturating_add(1);
     match job {
@@ -3369,5 +3448,139 @@ mod tests {
         let loaded = Image::load(&path).unwrap();
         assert_eq!(loaded.rgb, vec![12, 0, 0]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Queue `call` only after `opened` is sent. The frame thread has already
+    /// taken this present, which is the gap a later `wait` cannot close.
+    fn call_after(opened: &std::sync::mpsc::Receiver<()>, args: Value) -> Result<Value, String> {
+        let _ = opened.recv();
+        genos_mcp::command::call("wait", args, std::time::Duration::from_secs(5))
+    }
+
+    fn take_until_job(tools: &mut Tools) -> bool {
+        for _ in 0..100_000 {
+            let before = tools.jobs.len();
+            tools.accept_commands(None);
+            if tools.jobs.len() > before {
+                return true;
+            }
+            std::thread::yield_now();
+        }
+        false
+    }
+
+    /// One present after its `take`. The offered byte is the present being
+    /// drawn (`frame + 1`). `apply_present` keeps it only when `arm_readback`
+    /// asked, then numbers that same present.
+    fn draw(tools: &mut Tools, settled_now: bool, still: u32, device_read_back: bool) {
+        let upcoming = tools.frame + 1;
+        tools.arm_readback();
+        let offered = device_read_back.then(|| pixel(upcoming));
+        tools.apply_present(offered, settled_now, still, 1.0, None, None);
+    }
+
+    /// The byte is the present the boundary is drawing. It is a synthetic
+    /// fixture, not a photographed room and not a physical grade.
+    #[test]
+    fn the_present_boundary_pairs_the_read_back_with_the_saved_frame() {
+        let mut tools = Tools::new();
+        tools.frame = 309;
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            call_after(&open_rx, genos_mcp::json::object([("frames", genos_mcp::json::int(2))]))
+        });
+        tools.accept_commands(None);
+        let before = tools.frame;
+        let _ = open_tx.send(());
+        draw(&mut tools, false, 0, true);
+        assert_eq!(tools.frame, before + 1);
+        assert!(take_until_job(&mut tools), "wait was not taken");
+        assert_eq!(tools.frame, before + 1);
+        draw(&mut tools, false, 0, true);
+        tools.accept_commands(None);
+        draw(&mut tools, false, 0, true);
+        let reply = worker.join().unwrap().unwrap();
+        assert_eq!(reply.get("accepted").and_then(Value::as_u64), Some(310));
+        assert_eq!(reply.get("frame").and_then(Value::as_u64), Some(312));
+        assert_ne!(
+            reply.get("frame").and_then(Value::as_u64),
+            Some(before + 2)
+        );
+
+        let dir = std::env::temp_dir().join(format!("genos-present-boundary-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shot = dir.join("room-a-live.png");
+        tools.frame = 0;
+        tools.out_dir = dir.clone();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = open_rx.recv();
+            genos_mcp::command::call(
+                "wait_settled",
+                genos_mcp::json::object([
+                    ("timeout_frames", genos_mcp::json::int(30)),
+                    ("quiet_frames", genos_mcp::json::int(1)),
+                    ("then_frames", genos_mcp::json::int(2)),
+                    ("path", genos_mcp::json::string("room-a-live.png")),
+                    ("width", genos_mcp::json::int(1)),
+                    ("height", genos_mcp::json::int(1)),
+                    ("ui", genos_mcp::json::bool(false)),
+                ]),
+                std::time::Duration::from_secs(5),
+            )
+        });
+        let _ = open_tx.send(());
+        assert!(take_until_job(&mut tools), "wait_settled was not taken");
+        draw(&mut tools, true, 7, true);
+        draw_taken(&mut tools, true, 7, true);
+        draw_taken(&mut tools, true, 7, true);
+        let saved = worker.join().unwrap().unwrap();
+        let settled_frame = saved.get("settled_frame").and_then(Value::as_u64);
+        let frame = saved.get("frame").and_then(Value::as_u64);
+        assert_eq!(saved.get("captured").and_then(Value::as_bool), Some(true));
+        assert_eq!(saved.get("frames").and_then(Value::as_u64), Some(1));
+        assert_eq!(saved.get("still_frames").and_then(Value::as_u64), Some(7));
+        assert_eq!(frame, settled_frame.map(|n| n + 2));
+        let loaded = Image::load(&shot).unwrap();
+        let byte = u8::try_from(frame.unwrap()).unwrap();
+        assert_eq!(loaded.rgb, vec![byte, 0, 0]);
+        assert_ne!(byte, u8::try_from(settled_frame.unwrap()).unwrap());
+
+        let miss = dir.join("missing.png");
+        tools.out_dir = dir.clone();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = open_rx.recv();
+            genos_mcp::command::call(
+                "wait_settled",
+                genos_mcp::json::object([
+                    ("timeout_frames", genos_mcp::json::int(30)),
+                    ("quiet_frames", genos_mcp::json::int(1)),
+                    ("then_frames", genos_mcp::json::int(2)),
+                    ("path", genos_mcp::json::string("missing.png")),
+                    ("width", genos_mcp::json::int(1)),
+                    ("height", genos_mcp::json::int(1)),
+                    ("ui", genos_mcp::json::bool(false)),
+                ]),
+                std::time::Duration::from_secs(5),
+            )
+        });
+        let _ = open_tx.send(());
+        assert!(take_until_job(&mut tools), "missing wait_settled was not taken");
+        draw(&mut tools, true, 7, false);
+        draw_taken(&mut tools, true, 7, false);
+        draw_taken(&mut tools, true, 7, false);
+        let err = worker.join().unwrap().unwrap_err();
+        assert!(err.contains("missing capture"), "{err}");
+        assert!(!miss.exists());
+        draw_taken(&mut tools, true, 7, true);
+        assert!(!miss.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn draw_taken(tools: &mut Tools, settled_now: bool, still: u32, device_read_back: bool) {
+        tools.accept_commands(None);
+        draw(tools, settled_now, still, device_read_back);
     }
 }
