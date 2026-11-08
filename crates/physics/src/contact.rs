@@ -277,14 +277,49 @@ fn append_mesh(
     flip: bool,
     out: &mut Vec<Manifold>,
 ) {
-    let Some((normal, depth)) = mesh_contact(owner, &mesh, other) else {
+    let Some(hit) = mesh_contact(owner, &mesh, other) else {
         return;
     };
-    if flip {
-        push_manifold(other_index, owner_index, other, owner, -normal, depth, out);
+    let (a_index, b_index, a, b, normal) = if flip {
+        (other_index, owner_index, other, owner, -hit.normal)
     } else {
-        push_manifold(owner_index, other_index, owner, other, normal, depth, out);
+        (owner_index, other_index, owner, other, hit.normal)
+    };
+    // The edge point is the crossing. Face clipping measures face vertices
+    // and drops a thin edge overlap, so the solver then sees depth 0.
+    if let Some(point) = hit.edge_point {
+        let Some(normal) = usable_normal(normal, hit.depth) else {
+            return;
+        };
+        let mut points = [ContactPoint::new(Vec3::ZERO, 0.0); 4];
+        points[0] = ContactPoint::new(point, hit.depth);
+        store_manifold(
+            &PendingManifold {
+                a_index,
+                b_index,
+                a,
+                b,
+                normal,
+                depth: hit.depth,
+                points,
+                count: 1,
+            },
+            out,
+        );
+    } else {
+        push_manifold(a_index, b_index, a, b, normal, hit.depth, out);
     }
+}
+
+struct PendingManifold<'a> {
+    a_index: u32,
+    b_index: u32,
+    a: &'a Body,
+    b: &'a Body,
+    normal: Vec3,
+    depth: f32,
+    points: [ContactPoint; 4],
+    count: u8,
 }
 
 fn push_manifold(
@@ -296,29 +331,55 @@ fn push_manifold(
     depth: f32,
     out: &mut Vec<Manifold>,
 ) {
+    let Some(normal) = usable_normal(normal, depth) else {
+        return;
+    };
+    let (points, count) = contact_points(a, b, normal, depth);
+    store_manifold(
+        &PendingManifold {
+            a_index,
+            b_index,
+            a,
+            b,
+            normal,
+            depth,
+            points,
+            count,
+        },
+        out,
+    );
+}
+
+fn usable_normal(normal: Vec3, depth: f32) -> Option<Vec3> {
     let normal = unit(normal);
     if !depth.is_finite() || depth <= 0.0 || !normal.x.is_finite() {
+        None
+    } else {
+        Some(normal)
+    }
+}
+
+fn store_manifold(pending: &PendingManifold<'_>, out: &mut Vec<Manifold>) {
+    if pending.count == 0 {
         return;
     }
-    let (points, count) = contact_points(a, b, normal, depth);
-    if count == 0 {
-        return;
-    }
-    let (t1, t2) = crate::solver::tangent_axes(normal);
-    let mut points = points;
-    let anchored = usize::from(count);
+    let (t1, t2) = crate::solver::tangent_axes(pending.normal);
+    let mut points = pending.points;
+    let anchored = usize::from(pending.count);
     for point in &mut points[..anchored] {
-        point.local_a = conjugate(a.orientation).rotate(point.position - a.position);
-        point.local_b = conjugate(b.orientation).rotate(point.position - b.position);
+        point.local_a =
+            conjugate(pending.a.orientation).rotate(point.position - pending.a.position);
+        point.local_b =
+            conjugate(pending.b.orientation).rotate(point.position - pending.b.position);
         point.depth0 = point.depth;
     }
     out.push(Manifold {
-        a: a_index,
-        b: b_index,
-        normal,
-        depth,
+        a: pending.a_index,
+        b: pending.b_index,
+        normal: pending.normal,
+        depth: pending.depth,
         points,
-        count,
+        count: pending.count,
         tangent_axis: [t1, t2],
         twist: 0.0,
     });
@@ -328,26 +389,63 @@ fn usize_index(value: u32) -> usize {
     usize::try_from(value).unwrap_or(0)
 }
 
-fn mesh_contact(owner: &Body, mesh: &Mesh, other: &Body) -> Option<(Vec3, f32)> {
-    let mut best: Option<(Vec3, f32)> = None;
+struct NarrowHit {
+    normal: Vec3,
+    depth: f32,
+    /// Set when the axis is an edge pair. The point is the midpoint of the
+    /// closest points on those edges.
+    edge_point: Option<Vec3>,
+}
+
+fn mesh_contact(owner: &Body, mesh: &Mesh, other: &Body) -> Option<NarrowHit> {
+    let mut best: Option<NarrowHit> = None;
     for piece in mesh.pieces() {
         let hit = match other.shape {
             Shape::Mesh(other_mesh) => {
-                let mut piece_best: Option<(Vec3, f32)> = None;
+                let mut piece_best: Option<NarrowHit> = None;
                 for other_piece in other_mesh.pieces() {
-                    if let Some(hit) = piece_piece(owner, *piece, other, *other_piece) {
-                        piece_best = deeper(piece_best, hit);
+                    if let Some(hit) = piece_pair(owner, *piece, other, *other_piece) {
+                        piece_best = keep_deeper(piece_best, hit);
                     }
                 }
                 piece_best
             }
-            _ => piece_body(owner, *piece, other),
+            _ => piece_body(owner, *piece, other).map(|(normal, depth)| NarrowHit {
+                normal,
+                depth,
+                edge_point: None,
+            }),
         };
         if let Some(hit) = hit {
-            best = deeper(best, hit);
+            best = keep_deeper(best, hit);
         }
     }
     best
+}
+
+fn keep_deeper(best: Option<NarrowHit>, hit: NarrowHit) -> Option<NarrowHit> {
+    match best {
+        Some(kept) if kept.depth >= hit.depth => Some(kept),
+        _ => Some(hit),
+    }
+}
+
+fn piece_pair(a: &Body, piece_a: Piece, b: &Body, piece_b: Piece) -> Option<NarrowHit> {
+    match (piece_a, piece_b) {
+        (Piece::Hull(left), Piece::Hull(right)) => {
+            let hit = hull_hull_contact(a, &left, b, &right)?;
+            Some(NarrowHit {
+                normal: hit.normal,
+                depth: hit.depth,
+                edge_point: hit.edge.then_some(hit.point),
+            })
+        }
+        _ => piece_piece(a, piece_a, b, piece_b).map(|(normal, depth)| NarrowHit {
+            normal,
+            depth,
+            edge_point: None,
+        }),
+    }
 }
 
 fn deeper(best: Option<(Vec3, f32)>, hit: (Vec3, f32)) -> Option<(Vec3, f32)> {
@@ -712,6 +810,9 @@ pub(crate) struct HullHit {
     pub normal: Vec3,
     pub depth: f32,
     pub point: Vec3,
+    /// True when `normal` is an edge-edge axis. The manifold keeps `point`
+    /// and `depth` instead of clipping faces.
+    pub edge: bool,
 }
 
 /// Edge axes win only when clearly shallower than the best face axis, so a
@@ -781,6 +882,7 @@ pub(crate) fn hull_hull_contact(a: &Body, left: &Hull, b: &Body, right: &Hull) -
                 normal,
                 depth,
                 point: (on_a + on_b) * 0.5,
+                edge: true,
             });
         }
     }
@@ -789,6 +891,7 @@ pub(crate) fn hull_hull_contact(a: &Body, left: &Hull, b: &Body, right: &Hull) -
         normal: face_normal,
         depth: face_depth,
         point: deepest_b - face_normal * (face_depth * 0.5),
+        edge: false,
     })
 }
 
@@ -2071,6 +2174,7 @@ mod edge_tests {
         let a = cube(Vec3::ZERO, Vec3::Z);
         let b = cube(Vec3::new(2.0 * reach - 0.05, 0.0, 0.0), Vec3::Y);
         let hit = hull_hull_contact(&a, &hull(&a), &b, &hull(&b)).unwrap_or_else(|| unreachable!());
+        assert!(hit.edge, "{hit:?}");
         assert!(
             (hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1.0e-4,
             "{hit:?}"
@@ -2097,6 +2201,7 @@ mod edge_tests {
         a.orientation = Quat::IDENTITY;
         b.orientation = Quat::IDENTITY;
         let hit = hull_hull_contact(&a, &hull(&a), &b, &hull(&b)).unwrap_or_else(|| unreachable!());
+        assert!(!hit.edge, "{hit:?}");
         assert!(
             (hit.normal - Vec3::new(-1.0, 0.0, 0.0)).length() < 1.0e-6,
             "{hit:?}"

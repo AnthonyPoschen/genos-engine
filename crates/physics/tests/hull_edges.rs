@@ -79,15 +79,11 @@ fn crossed_edges_apart_do_not_touch() {
     }
 }
 
-#[test]
-fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
-    let depth = 0.05_f32;
-    let mut world = crossed_cubes(-depth, 1.0);
+fn separate_along_x(world: &mut World, depth: f32) {
     let before = [world.bodies[0].position, world.bodies[1].position];
-    step(&mut world, DT);
+    step(world, DT);
     let moved_a = world.bodies[0].position - before[0];
     let moved_b = world.bodies[1].position - before[1];
-    // Pushed apart along x only.
     assert!(
         moved_a.x < 0.0 && moved_b.x > 0.0,
         "a {moved_a:?} b {moved_b:?}"
@@ -98,9 +94,60 @@ fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
             "sideways {moved:?}"
         );
     }
-    // Correction is bounded by the true edge depth, not a face overlap.
     let pushed = moved_b.x - moved_a.x;
     assert!(pushed <= depth, "pushed {pushed} for depth {depth}");
+}
+
+#[test]
+fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
+    let depth = 0.05_f32;
+    let mut world = crossed_cubes(-depth, 1.0);
+    // Correction is bounded by the true edge depth, not a face overlap.
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn a_thin_edge_overlap_still_separates_along_x() {
+    // 5 mm is above slop. No face vertex sits in that overlap.
+    let depth = 0.005_f32;
+    let mut world = crossed_cubes(-depth, 1.0);
+    separate_along_x(&mut world, depth);
+}
+
+/// Eight ulps of yaw. The edge overlap stays, and face clipping drops its samples.
+fn yawed_crossed_cubes(gap: f32) -> World {
+    let mut world = crossed_cubes(gap, 1.0);
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let yaw = f32::from_bits(quarter.to_bits().wrapping_add(8));
+    world.bodies[1].orientation = Quat::from_axis_angle(Vec3::Y, yaw);
+    world
+}
+
+#[test]
+fn a_few_ulps_of_yaw_still_separates_a_crossed_edge_overlap() {
+    let depth = 0.05_f32;
+    let mut world = yawed_crossed_cubes(-depth);
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn the_same_yaw_with_a_gap_does_not_move() {
+    let mut world = yawed_crossed_cubes(0.01);
+    let before = [world.bodies[0].position, world.bodies[1].position];
+    step(&mut world, DT);
+    assert_eq!(world.bodies[0].position, before[0]);
+    assert_eq!(world.bodies[1].position, before[1]);
+}
+
+#[test]
+fn aligned_hulls_overlapping_on_x_still_separate() {
+    let depth = 0.05_f32;
+    let a = Body::mesh(Vec3::ZERO, 1.0, &outward_box(HALF));
+    let b = Body::mesh(Vec3::new(1.0 - depth, 0.0, 0.0), 1.0, &outward_box(HALF));
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(a);
+    world.insert(b);
+    separate_along_x(&mut world, depth);
 }
 
 #[test]
