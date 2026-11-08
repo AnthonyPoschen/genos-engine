@@ -15,7 +15,7 @@ const CACHE_BYTES: u64 = SLOTS * 392;
 // One screen probe shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
-const OUT_FLOATS: usize = 8 + 22 * 17;
+const OUT_FLOATS: usize = 8 + 23 * 17;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;

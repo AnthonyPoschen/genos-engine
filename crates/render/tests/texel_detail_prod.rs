@@ -17,7 +17,7 @@ use genos_render::{lighting_change_head, GpuKind, LightingPreset, LightingSettin
 use genos_window::Window;
 
 const STRIDE: usize = 17;
-const ROWS: usize = 22;
+const ROWS: usize = 23;
 const READ_ROWS: usize = 6;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -524,6 +524,37 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(near(side.cell, green), "back cell {:?}", side.cell);
     assert!((side.cell_same - 1.0).abs() <= ABS);
 
+    let hit = &rows[22];
+    assert_eq!(hit.head_hi, off.head_hi, "detail off, SH cells on");
+    assert_eq!(off.mode_cap / 1000, 3, "world mode 3");
+    assert_eq!(off.flags & 32, 0, "flag 32 is clear");
+    assert_eq!(off.flags & 256, 256, "flag 256 keeps the hit patch at 25 cm");
+    assert_eq!(off.flags & 33_554_432, 0, "flag 33554432 is clear");
+    assert!(
+        near(hit.shown, red),
+        "detail off, no probe, parent and resample empty: showed {:?}, wanted the hit cell {red:?}, not the probe {probe:?}. seed {:?} conf {} trust {} reads {} cell {:?}",
+        hit.shown,
+        hit.seed,
+        hit.conf,
+        hit.world_w,
+        hit.reads,
+        hit.cell
+    );
+    assert!(
+        near(hit.seed, red),
+        "the hit fill must store the cell, seed {:?}",
+        hit.seed
+    );
+    assert!(
+        (hit.conf - 0.25).abs() <= ABS,
+        "hit-seed confidence {}, not a resample or probe seed",
+        hit.conf
+    );
+    assert!(hit.reads.abs() <= ABS, "no probe was valid, reads {}", hit.reads);
+    assert!(hit.skipped.abs() <= ABS);
+    assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
+    assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
+
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
@@ -531,8 +562,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         skip, 11,
         "owner rows, the slant, the blend rows, and the seeding compose skip"
     );
-    assert_eq!(eval, 12, "the other recorded rows still evaluate probe indirect");
-    assert_eq!(reads, 12, "one probe irradiance read on each evaluated row");
+    assert_eq!(eval, 13, "the other recorded rows still evaluate probe indirect");
+    assert_eq!(reads, 12, "the detail-off hit row has no probe; every other evaluated row reads one");
 }
 
 #[test]

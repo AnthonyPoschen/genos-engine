@@ -9,7 +9,7 @@ layout(local_size_x = 1) in;
 #include "lighting_screen_probe.glsl"
 
 const uint PROD_HEAD_WORDS = 8u;
-const uint PROD_ROWS = 22u;
+const uint PROD_ROWS = 23u;
 const uint PROD_STRIDE = 17u;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -71,6 +71,14 @@ const vec3 PROD_DOWN = vec3(0.0, -1.0, 0.0);
 const vec3 PROD_SIDE_POS = vec3(148.1875, -0.04, 4.1875);
 const vec3 PROD_SIDE_OTHER = vec3(148.1875, 0.0, 4.1875);
 const vec3 PROD_ALIAS_POS = vec3(200.0625, 0.0, 8.0625);
+// Detail off. 16.5 samples: the fractional part is 0.5, so the parent and
+// resample bilinear (they require fract(samples) < 0.1) leave this cell out.
+// lighting_cache_irradiance does not. It returns nothing below bounce 2
+// (lighting_bounce_ok), so this row and the stale row raise ctrl_bounce.
+// No probe is planted for this row. The stale row has one: a hit read that
+// ignores the detail-candidate gate would put that cell back instead.
+const vec3 PROD_HIT_POS = vec3(220.1875, 0.0, 4.1875);
+const float PROD_HIT_N = 16.5;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -224,11 +232,13 @@ void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, 
     } else if (id == 21u) {
         n = PROD_DOWN;
         pos = PROD_SIDE_POS;
+    } else if (id == 22u) {
+        pos = PROD_HIT_POS;
     }
     q = id == 19u ? PROD_PART_NEAR : prod_texel(pos, n);
     bool cover = id == 0u || id == 4u || id == 6u || id == 7u || id == 9u
         || id == 13u || id == 14u || id == 15u || id == 16u || id == 17u
-        || id == 18u || id == 19u || id == 20u || id == 21u;
+        || id == 18u || id == 19u || id == 20u || id == 21u || id == 22u;
     if (cover) {
         prod_empty_texel(q, n);
     }
@@ -288,6 +298,8 @@ void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, 
     } else if (id == 21u) {
         cell = prod_owner(pos, PROD_DOWN, PROD_GREEN, PROD_CELL_N);
         extra = prod_owner(PROD_SIDE_OTHER, PROD_UP, PROD_RED, PROD_CELL_N);
+    } else if (id == 22u) {
+        cell = prod_owner(q, PROD_UP, PROD_RED, PROD_HIT_N);
     }
     if (id == 3u || id == 9u) {
         uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
@@ -458,7 +470,7 @@ void main() {
     if (LIGHTING_SC_WRITES) {
     for (uint id = 0u; id < PROD_ROWS; id++) {
         uint variant = 0u;
-        if (id == 2u) {
+        if (id == 2u || id == 22u) {
             variant = 1u;
         } else if (id == 8u) {
             variant = 2u;
@@ -481,7 +493,16 @@ void main() {
         vec4 extra_before = extra == ~0u ? vec4(0.0) : cache.v[3u * extra + 2u];
         uint extra_stamp = extra == ~0u ? 0u : floatBitsToUint(cache.v[3u * extra].w);
         uint extra_hash = extra == ~0u ? 0u : prod_sh_hash(extra);
-        prod_probe(pos, n);
+        if (id == 22u) {
+            work.v[lighting_probe_at(0u)] = vec4(0.0);
+            work.v[lighting_probe_at(0u) + 1u] = vec4(0.0);
+        } else {
+            prod_probe(pos, n);
+        }
+        // Bounce 2 lets lighting_cache_irradiance answer. Below that it
+        // returns black before it loads a cell, so neither row would show
+        // whether the hit fill kept or dropped the cell.
+        gstats.ctrl_bounce = (id == 20u || id == 22u) ? 2u : 0u;
         lighting_compose_px = uvec2(0u);
         vec3 shown = lighting_screen_probe_indirect(uvec2(0u), pos, n);
         vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];

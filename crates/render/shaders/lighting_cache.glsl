@@ -621,8 +621,6 @@ const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
 const float LIGHTING_SH_HIT_SLANT = 0.999;
 // fp16 pack clamp (half max is ~65504; stay under so packHalf2x16 stays finite).
 const float LIGHTING_SH_HALF_CLAMP = 65000.0;
-// Skip a lattice axis when |n_a| is below this (weight would be tiny).
-const float LIGHTING_SH_AXIS_MIN = 0.35;
 // SH tilt read only when the hit cell is under this many LIGHTING_SH_CELL.
 const float LIGHTING_SH_HIT_SPAN = 1.2;
 // Cell/texel w threshold: has light (shared with the mean path's 0.5).
@@ -3429,12 +3427,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // trilinear neighbour read at its normal. That value is what the pixel
         // returns, whether or not this compile may write. Claim stays false.
         // A lamp change drops a stored seed before the cells are copied again.
-        // Resample, the parent walk, and the hit patch are the estimators this
-        // read replaces. They do not run for that texel, including when the
-        // read rejects every corner: resample would copy a stale or far-side
-        // cell back in as a seed. A texel this read does not cover (a mover,
-        // its own samples, a coarse size) keeps those estimators. An empty
-        // read falls through to the probe seed.
+        // Resample and the hit patch are the estimators this read replaces.
+        // They do not run for that texel, including when the read rejects
+        // every corner: resample would copy a stale or far-side cell back in
+        // as a seed. A texel that is not a detail candidate (detail off, a
+        // mover, its own samples, a coarse size) keeps those two. The parent
+        // walk is off for every texel while texel detail is on, including a
+        // mover. A mover's trust is 0, so it shows the probes without that
+        // walk. An empty read falls through to the probe seed.
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
@@ -3479,6 +3479,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (mode == 3u && lighting_sc_stale(slot)) {
             continue;
         }
+        // Texel detail on skips this walk for every texel, including a mover.
+        // A mover's trust is 0, so the pixel shows the probes without it.
         if (!detail_kept && v.w < 0.5 && mode == 3u && !lighting_sh_texel_detail_on()) {
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
@@ -3494,10 +3496,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
-            // SH cells already answered in the neighbour read. That read left
-            // out a stale, back-facing, or off-plane cell. The hit path does
-            // not apply those gates, so it must not put the cell back.
-            vec3 hc = lighting_sh_on() ? vec3(0.0) : lighting_cache_irradiance(q, n);
+            // A detail candidate already took the neighbour read. That read
+            // left out a stale, back-facing, or off-plane cell, and this hit
+            // read does not apply those gates, so that miss must not put the
+            // cell back. SH cells on with texel detail off is not that miss.
+            vec3 hc = detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
                 if (split) {

@@ -177,6 +177,11 @@ pub struct NeighbourCorner {
 }
 
 /// Weight of one corner. Zero when the corner is left out of the blend.
+///
+/// The weight is the trilinear weight times `dot(stored normal, query normal)`.
+/// Equal stored normals make that dot a common factor, so it cancels. Two
+/// stored normals that both face the query do not: the larger dot weighs more.
+/// That is not a pure trilinear blend.
 #[must_use]
 pub fn neighbour_corner_weight(normal: [f32; 3], cell: f32, corner: &NeighbourCorner) -> f32 {
     if corner.weight <= 0.0 || !corner.present || corner.samples < 0.5 || corner.stale {
@@ -653,6 +658,41 @@ mod tests {
         let mut stale = corner(1.0, red, up, 0.0, ShL1::default());
         stale.stale = true;
         assert!(super::neighbour_read(up, cell, &[stale]).is_none());
+    }
+
+    #[test]
+    fn equal_facing_cancels_and_mixed_facing_is_not_pure_trilinear() {
+        let up = [0.0, 1.0, 0.0];
+        let half = [0.0, 0.5, 0.0];
+        let red = [6.0, 0.0, 0.0];
+        let blue = [0.0, 0.0, 6.0];
+        let sh = ShL1::default();
+        let same = super::neighbour_read(
+            up,
+            0.25,
+            &[
+                corner(0.5, red, half, 0.0, sh),
+                corner(0.5, blue, half, 0.0, sh),
+            ],
+        )
+        .expect("equal facing");
+        assert!(close(same[0], 3.0, 1.0e-5), "{same:?}");
+        assert!(close(same[2], 3.0, 1.0e-5), "{same:?}");
+        let mixed = super::neighbour_read(
+            up,
+            0.25,
+            &[
+                corner(0.5, red, up, 0.0, sh),
+                corner(0.5, blue, half, 0.0, sh),
+            ],
+        )
+        .expect("mixed facing");
+        assert!(close(mixed[0], 4.0, 1.0e-5), "{mixed:?}");
+        assert!(close(mixed[2], 2.0, 1.0e-5), "{mixed:?}");
+        assert!(
+            (mixed[0] - 3.0).abs() > 0.5,
+            "mixed facing must not collapse to the pure trilinear mean {mixed:?}"
+        );
     }
 
     #[test]

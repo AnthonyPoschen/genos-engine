@@ -673,6 +673,18 @@ fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
     assert!(screen.contains(
         "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
     ));
+    assert!(
+        screen.contains("detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n)"),
+        "the hit fill stays for SH cells when texel detail is off"
+    );
+    assert!(
+        !screen.contains("lighting_sh_on() ? vec3(0.0)"),
+        "SH cells on must not zero the hit fill by itself"
+    );
+    assert!(
+        !text.contains("LIGHTING_SH_AXIS_MIN"),
+        "the unused axis-skip constant is gone"
+    );
     assert!(screen.contains("if (detail_kept)"));
     let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
     assert!(shown.contains("lighting_sh_texel_detail_on()"));

@@ -508,7 +508,9 @@ pub struct SurfaceCacheSettings {
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
     /// same rays, no new ones). Cells stay keyed by the dominant axis. The
-    /// screen and seed read blends the eight corners at the true normal. A
+    /// screen and seed read blends the eight corners at the true normal. The
+    /// corner weight is the trilinear weight times the facing dot. Equal stored
+    /// normals cancel that dot. A
     /// corner on the far side of a thin wall, or more than half a cell off the
     /// query plane, is left out. An axis-aligned ray hit still tilts the one
     /// owning cell. The read does not allocate. An empty slant keeps the
@@ -521,10 +523,12 @@ pub struct SurfaceCacheSettings {
     /// confidence. Sun word z is not that mark. A lamp change drops the seed,
     /// and an empty neighbour read does not keep a marked seed on screen. The
     /// cell is not written. An empty fine texel this setting covers does not
-    /// take resample, the parent walk, or the hit patch, even when the
-    /// neighbour read accepts nothing. The probe seed still runs for that
-    /// miss. Those older writers stay for a texel this read does not cover.
-    /// A mover is not seeded. A slanted pixel shows the same read
+    /// take resample or the hit patch, even when the neighbour read accepts
+    /// nothing. The probe seed still runs for that miss. Those two stay when
+    /// the texel is not a detail candidate, including SH cells on with this
+    /// setting off. The parent walk is off for every texel while this setting
+    /// is on, including a mover. A mover's trust is 0, so it shows the probes
+    /// without that walk. A mover is not seeded. A slanted pixel shows the same read
     /// and does not run those writers. A pixel whose displayed indirect is
     /// this read does not read screen-probe irradiance. Requires `sh_cells`;
     /// on without it does nothing. Head 3.w bit 17.
