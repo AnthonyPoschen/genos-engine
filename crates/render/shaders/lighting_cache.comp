@@ -6,9 +6,6 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
-// Same cut the rest of the cache uses (`size > 0.2`): a texel is at most
-// 0.125, and a world cell is the 25 cm hit patch.
-const float LIGHTING_HIT_PATCH = 0.2;
 // S78S: a texel's value write, counted by its change (lighting_chg).
 void lighting_tex_put(uint slot, vec4 v) {
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
