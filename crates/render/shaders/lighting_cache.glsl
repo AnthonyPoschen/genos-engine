@@ -2094,21 +2094,52 @@ bool lighting_sh_on() {
 uint lighting_sh_half2(float a, float b) {
     return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
 }
+// Same cut as `size > 0.2`: a texel is at most 0.125, a world cell is larger.
+const float LIGHTING_HIT_PATCH = 0.2;
+// A stored coefficient moved by at least one shared-exponent bucket.
+// Negative harmonics pack the positive and negative parts separately.
+bool lighting_sh_stored_moved(vec3 a, vec3 b) {
+    return lighting_pack_rgb9e5(max(a, vec3(0.0))) != lighting_pack_rgb9e5(max(b, vec3(0.0)))
+        || lighting_pack_rgb9e5(max(-a, vec3(0.0))) != lighting_pack_rgb9e5(max(-b, vec3(0.0)));
+}
+void lighting_sh_get(uint slot, out vec3 c0, out vec3 cx, out vec3 cy, out vec3 cz);
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
+    // freeze_cache holds every world-cache value, the mean and these coefficients.
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
+    vec3 before0;
+    vec3 beforex;
+    vec3 beforey;
+    vec3 beforez;
+    lighting_sh_get(slot, before0, beforex, beforey, beforez);
     if (!LIGHTING_SH_HALF) {
         cache.v[LIGHTING_SH_AT + slot] = vec4(c0, cx.r);
         cache.v[LIGHTING_SH_B_AT + slot] = vec4(cx.gb, cy.rg);
         cache.v[LIGHTING_SH_C_AT + slot] = vec4(cy.b, cz);
-        return;
-    }
-    cache.v[LIGHTING_SH_AT + slot] = uintBitsToFloat(uvec4(
-        lighting_sh_half2(c0.r, c0.g), lighting_sh_half2(c0.b, cx.r),
-        lighting_sh_half2(cx.g, cx.b), lighting_sh_half2(cy.r, cy.g)));
-    vec2 w = uintBitsToFloat(uvec2(lighting_sh_half2(cy.b, cz.r), lighting_sh_half2(cz.g, cz.b)));
-    if ((slot & 1u) == 0u) {
-        cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].xy = w;
     } else {
-        cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].zw = w;
+        cache.v[LIGHTING_SH_AT + slot] = uintBitsToFloat(uvec4(
+            lighting_sh_half2(c0.r, c0.g), lighting_sh_half2(c0.b, cx.r),
+            lighting_sh_half2(cx.g, cx.b), lighting_sh_half2(cy.r, cy.g)));
+        vec2 w = uintBitsToFloat(uvec2(lighting_sh_half2(cy.b, cz.r), lighting_sh_half2(cz.g, cz.b)));
+        if ((slot & 1u) == 0u) {
+            cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].xy = w;
+        } else {
+            cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].zw = w;
+        }
+    }
+    // Blocks compose recorded while reading this cell (display covers only).
+    // A slanted screen pixel never covers it: the lattice accepts no axis.
+    // A hit-shade tilt runs with display off, so it is not in this rect either.
+    vec3 after0;
+    vec3 afterx;
+    vec3 aftery;
+    vec3 afterz;
+    lighting_sh_get(slot, after0, afterx, aftery, afterz);
+    if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
+        && (lighting_sh_stored_moved(before0, after0) || lighting_sh_stored_moved(beforex, afterx)
+            || lighting_sh_stored_moved(beforey, aftery) || lighting_sh_stored_moved(beforez, afterz))) {
+        lighting_compose_mark_slot(slot);
     }
 }
 void lighting_sh_get(uint slot, out vec3 c0, out vec3 cx, out vec3 cy, out vec3 cz) {
