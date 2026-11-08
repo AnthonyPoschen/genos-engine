@@ -10,7 +10,7 @@ room-a CPU analytic trace, one attempt, no retry:
 
 - noise `0.014457642` (bits `1013768127`), above `0.01`
 - spp `72064`, under the `262144` cap, so the cap did not accept the file
-- The trace process reported seconds `900.4743` (bits `1147215451`) in the sidecar. The `.ref` format does not store seconds; `read_cached` sets `seconds` to 0. That report is provenance of this run, not a clock the grade verified from the file. The 900 s budget ended on the pass that crossed it. This is not a settled picture.
+- The trace process reported seconds `900.4743` (bits `1147215451`) in the sidecar. The `.ref` format does not store seconds; `read_cached` sets `seconds` to 0. That report is provenance of this run, not a clock the grade verified from the file. The requested stop in this sidecar is 900 s (`seconds_budget_bits` `1147207680`). Grading it with `--seconds 2400` is `budget-mismatch`. The file is not relabeled. The 900 s budget ended on the pass that crossed it. This is not a settled picture.
 - size 320×180, 64 bounces, shapes, batch 64, file `748816` bytes
 - `room-a.ref` sha256 `837b2bbdee61d3856b0d96248340d19843cee594a8047cf5d17987b1f57fe5ec`
 - sidecar sha256 `dcba80712334a89ad7d3e33ae9bdd12608bebf84e0d522138dab7b72ae676384`
@@ -23,7 +23,7 @@ room-b was not started. room-c and close-0 were not traced. No GPU window was op
 
 ## Why the next step is not a renderer change
 
-The estimator ran for the whole 900 s budget at 4 threads and was still noisier than 0.01, with samples left under the spp cap. A threshold change, a rename of a floor reference, or a second trace was not allowed. A later measurement, if one is authorized, is the same CPU estimator with a budget that can reach noise at or under 0.01. This bundle does not authorize that rerun.
+The estimator ran for the whole 900 s request at 4 threads and was still noisier than 0.01, with samples left under the spp cap. A threshold change, a rename of a floor reference, or a second trace was not allowed. A later measurement, if one is authorized, is the same CPU estimator with `--seconds 2400` on each pose. That flag is the requested stop. It does not raise the 262144 spp cap, the 0.01 noise gate, or the 0.014 grade. Omitting it still means 900. This bundle does not authorize that rerun, and this file was not traced at 2400.
 
 ## Source and binary
 
@@ -63,7 +63,7 @@ Grade exit 1. No `--capture`.
 
 ## Tests
 
-`cargo test -j 1 -p genos-stress --bin genos-stress room_blotch` — 16 passed on the measurement commit. After the judge corrections the same command is 22 passed. The added tests cover a planted symlink, a replaced stage, directory cleanup, concurrent judges, reported seconds, and a poisoned lighting environment. No new trace was run.
+`cargo test -j 1 -p genos-stress --bin genos-stress room_blotch` — 16 passed on the measurement commit. After the judge corrections the same command is 22 passed. The seconds-stop tests bring that to 24 passed: `--seconds` accepts only 900 and 2400, and a 900 sidecar graded at 2400 stays 900. No new trace was run.
 
 `cargo clippy -j 1 -p genos-stress --bin genos-stress --all-targets --no-deps -- -D warnings` — exit 0.
 
@@ -99,4 +99,4 @@ unset GENOS_REFERENCE_GPU GENOS_LIGHTING_ASYNC GENOS_LIGHTING_PRESET
 cargo build -j 1 --release --locked -p genos-stress --bin genos-stress
 ```
 
-A new trace uses the same flags as the cloud command above. Noise above 0.01 stays unaccepted, including when spp reaches 262144. `--capture` is only for a directory whose room-a and room-b files already pass the judge. The capture is one window: `--freeze-sun`, `--lighting-toggles cells_only`, `--lighting-cache-async off`, and `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` set on the child after the lighting catalogue is cleared. `sh_cells` has no command-line flag. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`. Resolved `sc_settle` must be 0. No new trace was run for that correction. room-a stays unaccepted on the numbers above. room-b is still absent.
+A new trace uses the same flags as the cloud command above, plus `--seconds 2400` on room-a and again on room-b when that longer stop is the one being requested. Without `--seconds` the stop stays 900. Noise above 0.01 stays unaccepted, including when spp reaches 262144. `--capture` is only for a directory whose room-a and room-b files already pass the judge for the same `--seconds`. The existing `room-a.UNACCEPTED.json` stays a 900 s request. The capture is one window: `--freeze-sun`, `--lighting-toggles cells_only`, `--lighting-cache-async off`, and `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1` set on the child after the lighting catalogue is cleared. `sh_cells` has no command-line flag. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`. Resolved `sc_settle` must be 0. No new trace was run for that correction. room-a stays unaccepted on the numbers above. room-b is still absent.

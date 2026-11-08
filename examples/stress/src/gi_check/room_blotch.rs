@@ -14,7 +14,9 @@
 //! seconds field, so the loaded `seconds` value is 0. The grade stages the
 //! hashed operand in a private directory and keeps the reference only when
 //! that path still holds those bytes. Sidecar `seconds_bits` is the writer's
-//! reported duration, not a clock read back from the file.
+//! reported duration, not a clock read back from the file. `seconds_budget_bits`
+//! is the stop this command asked for (900 when `--seconds` is omitted, or
+//! 2400). A sidecar from the other request does not match and is not rewritten.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,8 +50,8 @@ const FLOOR_SHA256: [&str; 2] = [
 ];
 
 const HELP: &str = "\
-genos-stress room-blotch grade --refs DIR [--out DIR] [--capture]
-genos-stress room-blotch trace --pose room-a|room-b [--out DIR] [--promote DIR] [--threads N]
+genos-stress room-blotch grade --refs DIR [--out DIR] [--capture] [--seconds N]
+genos-stress room-blotch trace --pose room-a|room-b [--out DIR] [--promote DIR] [--threads N] [--seconds N]
 
 grade scores room-a and room-b with metrics::blotch. The mean is compared with
 0.014. The gi-check room row still uses 0.023 and is not this verdict.
@@ -64,16 +66,21 @@ missing-reference.
 --pose       room-a or room-b. No room-c and no close-up.
 --threads N  CPU trace width. Wins over GENOS_REFERENCE_THREADS.
              When omitted, that variable is used, else 4.
+--seconds N  Requested trace stop, 900 or 2400. Omitted means 900.
+             grade requires seconds_budget_bits to equal this request.
+             A 900 sidecar stays 900; it is not relabeled 2400.
+             The value is the requested stop, not a clock read from the file.
+             There is no environment variable for this flag.
 --promote DIR  copy the isolated ref only when identity matches and noise is
              finite and <= 0.01. spp at 262144 does not accept a noisier file.
              A directory named reference-cache is refused.
 
-The trace budget is fixed: shapes, 64 bounces, 320x180, batch 64, noise 0.01,
-max 262144 spp, 900 s, CPU analytic. GENOS_REFERENCE_GPU=1 is refused.
+The other trace limits stay fixed: shapes, 64 bounces, 320x180, batch 64,
+noise 0.01, max 262144 spp, CPU analytic. GENOS_REFERENCE_GPU=1 is refused.
 The live picture is cells_only, surface_cache.sh_cells on, cache_async off,
-world cell 0.25 m, sc_settle 0. The native cache key does not encode those flags.
-The capture child drops the lighting environment catalogue, then sets
-GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1.
+world cell 0.25 m, sc_settle 0. The native cache key does not encode those
+flags or the seconds stop. The capture child drops the lighting environment
+catalogue, then sets GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1.
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -142,8 +149,70 @@ fn noise_target() -> f32 {
     0.01
 }
 
-fn seconds_budget() -> f32 {
-    900.0
+const DEFAULT_TRACE_SECONDS: f32 = 900.0;
+const LONG_TRACE_SECONDS: f32 = 2400.0;
+
+fn seconds_text(seconds: f32) -> &'static str {
+    if seconds.to_bits() == LONG_TRACE_SECONDS.to_bits() {
+        "2400"
+    } else {
+        "900"
+    }
+}
+
+fn require_trace_seconds(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err(format!("trace seconds are not finite ({value})"));
+    }
+    if value.to_bits() != DEFAULT_TRACE_SECONDS.to_bits()
+        && value.to_bits() != LONG_TRACE_SECONDS.to_bits()
+    {
+        return Err(format!("trace seconds are {value}, want 900 or 2400"));
+    }
+    Ok(value)
+}
+
+fn plain_seconds_token(text: &str) -> bool {
+    let text = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let mut parts = text.split('.');
+    let Some(whole) = parts.next() else {
+        return false;
+    };
+    let fraction = parts.next();
+    if parts.next().is_some() {
+        return false;
+    }
+    if whole.is_empty() || !whole.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    match fraction {
+        None => true,
+        Some(fraction) => {
+            !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit())
+        }
+    }
+}
+
+fn parse_trace_seconds(text: &str) -> Result<f32, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("--seconds needs a value".into());
+    }
+    let lower = text.to_ascii_lowercase();
+    let bare = lower.trim_start_matches(['+', '-']);
+    if bare == "nan" || bare == "inf" || bare == "infinity" {
+        return Err(format!("--seconds is not finite ({text})"));
+    }
+    if !plain_seconds_token(text) {
+        return Err(format!("--seconds is not a number ({text})"));
+    }
+    let value = text
+        .parse::<f32>()
+        .map_err(|_| format!("--seconds is not a number ({text})"))?;
+    if !value.is_finite() {
+        return Err(format!("--seconds is not finite ({text})"));
+    }
+    require_trace_seconds(value).map_err(|_| format!("--seconds is {text}, want 900 or 2400"))
 }
 
 fn cell_metres() -> f32 {
@@ -544,7 +613,7 @@ fn parse_eye_bits(token: &str) -> Result<[u32; 3], Issue> {
     Ok(bits)
 }
 
-fn parse_sidecar(text: &str) -> Result<Sidecar, Issue> {
+fn parse_sidecar(text: &str, seconds: f32) -> Result<Sidecar, Issue> {
     let fields = json_fields(text);
     let kind = fields
         .get("kind")
@@ -590,7 +659,26 @@ fn parse_sidecar(text: &str) -> Result<Sidecar, Issue> {
     expect_u32("spp_batch", SPP_BATCH)?;
     expect_u32("noise_target_bits", noise_target().to_bits())?;
     expect_u32("max_spp", MAX_SPP)?;
-    expect_u32("seconds_budget_bits", seconds_budget().to_bits())?;
+    let budget_bits = take_u32(&fields, "seconds_budget_bits")?;
+    let recorded = f32::from_bits(budget_bits);
+    if !recorded.is_finite() {
+        return Err(issue(
+            Class::NonFiniteReference,
+            "sidecar seconds_budget_bits is not finite",
+        ));
+    }
+    let seconds =
+        require_trace_seconds(seconds).map_err(|err| issue(Class::BudgetMismatch, err))?;
+    if budget_bits != seconds.to_bits() {
+        return Err(issue(
+            Class::BudgetMismatch,
+            format!(
+                "sidecar seconds_budget_bits is {budget_bits} ({recorded} s), want {} ({} s). The recorded budget is kept",
+                seconds.to_bits(),
+                seconds_text(seconds)
+            ),
+        ));
+    }
     expect_u32("world_cell_bits", cell_metres().to_bits())?;
     expect_u32("world_mode", 3)?;
     expect_u32("time_of_day_bits", frozen_time_of_day().to_bits())?;
@@ -822,7 +910,12 @@ fn samples_finite(reference: &Reference) -> bool {
             .all(|rgb| rgb.iter().all(|channel| channel.is_finite()))
 }
 
-fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Reference, Issue> {
+fn judge_bytes(
+    bytes: &[u8],
+    sidecar_text: &str,
+    pose: &Pose,
+    seconds: f32,
+) -> Result<Reference, Issue> {
     let sha = sha256_hex(bytes);
     if known_floor(&sha) {
         return Err(issue(
@@ -851,7 +944,7 @@ fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Referenc
             ),
         ));
     }
-    let sidecar = parse_sidecar(sidecar_text)?;
+    let sidecar = parse_sidecar(sidecar_text, seconds)?;
     if sidecar.pose != pose.name {
         return Err(issue(
             Class::PoseMismatch,
@@ -912,8 +1005,9 @@ fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Referenc
             ),
         ));
     }
-    // `seconds` is sidecar provenance. The file loader stores 0. A positive
-    // report does not prove a trace clock, and zero is not a budget mismatch.
+    // `seconds` above is the requested stop. The reported duration in the
+    // sidecar is separate provenance. The file loader stores 0. A positive
+    // report does not prove a file clock, and zero is not a budget mismatch.
     let loaded = load_verified(bytes, pose.name)?;
     if !samples_finite(&loaded) {
         return Err(issue(
@@ -930,7 +1024,7 @@ fn judge_bytes(bytes: &[u8], sidecar_text: &str, pose: &Pose) -> Result<Referenc
     Ok(loaded)
 }
 
-fn judge_pose(refs: &Path, pose: &Pose) -> Result<Reference, Issue> {
+fn judge_pose(refs: &Path, pose: &Pose, seconds: f32) -> Result<Reference, Issue> {
     let ref_path = refs.join(format!("{}.ref", pose.name));
     let json_path = refs.join(format!("{}.json", pose.name));
     if !ref_path.is_file() || !json_path.is_file() {
@@ -951,7 +1045,7 @@ fn judge_pose(refs: &Path, pose: &Pose) -> Result<Reference, Issue> {
             format!("reading {}: {err}", json_path.display()),
         )
     })?;
-    judge_bytes(&bytes, &text, pose)
+    judge_bytes(&bytes, &text, pose, seconds)
 }
 
 fn flags_of(text: &str) -> Result<(), Issue> {
@@ -1198,12 +1292,17 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), String> {
         .map_err(|err| format!("{} -> {}: {err}", from.display(), to.display()))
 }
 
-fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict, String> {
+fn grade_dirs(
+    refs: &Path,
+    capture: Option<&Path>,
+    out: &Path,
+    seconds: f32,
+) -> Result<Verdict, String> {
     std::fs::create_dir_all(out).map_err(|err| format!("{}: {err}", out.display()))?;
     let mut issues = Vec::new();
     let mut accepted = Vec::new();
     for pose in poses() {
-        match judge_pose(refs, &pose) {
+        match judge_pose(refs, &pose, seconds) {
             Ok(reference) => {
                 let png = out.join(format!("{}-reference.png", pose.name));
                 write_display(&reference, &png)?;
@@ -1241,7 +1340,7 @@ fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict
     }
     if !issues.is_empty() {
         let verdict = verdict_from(issues, None, None);
-        write_verdict(out, &verdict)?;
+        write_verdict(out, &verdict, seconds)?;
         return Ok(verdict);
     }
     let Some(dir) = capture else {
@@ -1250,7 +1349,7 @@ fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict
             None,
             None,
         );
-        write_verdict(out, &verdict)?;
+        write_verdict(out, &verdict, seconds)?;
         return Ok(verdict);
     };
     let mut scores = Vec::new();
@@ -1266,7 +1365,7 @@ fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict
     }
     if !issues.is_empty() {
         let verdict = verdict_from(issues, None, None);
-        write_verdict(out, &verdict)?;
+        write_verdict(out, &verdict, seconds)?;
         return Ok(verdict);
     }
     let start = scores.first().copied();
@@ -1276,12 +1375,12 @@ fn grade_dirs(refs: &Path, capture: Option<&Path>, out: &Path) -> Result<Verdict
     verdict
         .notes
         .push(format!("accepted {}", accepted.join(" ")));
-    write_verdict(out, &verdict)?;
+    write_verdict(out, &verdict, seconds)?;
     Ok(verdict)
 }
 
 fn protocol_note() -> &'static str {
-    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, sc_settle 0, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture waits 2 frames after settled and does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict. Sidecar seconds_bits is the writer's reported duration. The .ref format has no seconds field, so read_cached stores 0. That report is provenance. A zero report is not a budget mismatch, and a positive report is not a file clock."
+    "Protocol differs from E11 and from gi-check room.rhai. The sun line in scenes/room.rhai is commented out, and sun height reads directional lights only, so --freeze-sun does not change this room's lamp illumination. It holds time_of_day at the stress start hour. The live view is cells_only with surface_cache.sh_cells, cache_async off, sc_settle 0, and the 0.25 m world cell. room-b is settled at its pose in the same window after room-a, not after the 29-frame turn. The capture waits 2 frames after settled and does not wait on a reference worker. E11's 0.014 is the W7 12.5 cm gi-check blotch. This grade does not claim that historical score. The gi-check PASS word remains 0.023 and is not this verdict. Sidecar seconds_bits is the writer's reported duration. The .ref format has no seconds field, so read_cached stores 0. That report is provenance. A zero report is not a budget mismatch, and a positive report is not a file clock. seconds_budget_bits is the requested stop for this run, 900 when --seconds is omitted and 2400 when that is the request. The other stop is a budget mismatch and is not rewritten."
 }
 
 fn json_escape(text: &str) -> String {
@@ -1290,7 +1389,8 @@ fn json_escape(text: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn write_verdict(out: &Path, verdict: &Verdict) -> Result<(), String> {
+fn write_verdict(out: &Path, verdict: &Verdict, seconds: f32) -> Result<(), String> {
+    let seconds = require_trace_seconds(seconds)?;
     let number = |value: Option<f64>| match value {
         Some(value) => format!("{value:.8}"),
         None => "null".into(),
@@ -1318,13 +1418,14 @@ fn write_verdict(out: &Path, verdict: &Verdict) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join(",\n");
     let body = format!(
-        "{{\n  \"class\": \"{}\",\n  \"detail\": \"{}\",\n  \"adr_limit\": {ADR_LIMIT},\n  \"legacy_room_blotch_limit\": {ROOM_BLOTCH_LIMIT},\n  \"legacy_word\": {legacy},\n  \"start\": {},\n  \"mid\": {},\n  \"mean\": {},\n  \"scene_sha256\": \"{}\",\n  \"settle_timeout_frames\": {SETTLE_TIMEOUT},\n  \"capture_wait_frames\": {CAPTURE_WAIT},\n  \"issues\": [\n{issues}\n  ],\n  \"notes\": [\n{notes}\n  ]\n}}\n",
+        "{{\n  \"class\": \"{}\",\n  \"detail\": \"{}\",\n  \"adr_limit\": {ADR_LIMIT},\n  \"legacy_room_blotch_limit\": {ROOM_BLOTCH_LIMIT},\n  \"legacy_word\": {legacy},\n  \"start\": {},\n  \"mid\": {},\n  \"mean\": {},\n  \"scene_sha256\": \"{}\",\n  \"settle_timeout_frames\": {SETTLE_TIMEOUT},\n  \"capture_wait_frames\": {CAPTURE_WAIT},\n  \"seconds_budget\": {},\n  \"issues\": [\n{issues}\n  ],\n  \"notes\": [\n{notes}\n  ]\n}}\n",
         verdict.class.name(),
         json_escape(&verdict.detail),
         number(verdict.start),
         number(verdict.mid),
         number(verdict.mean),
         scene_sha256(),
+        seconds_text(seconds),
     );
     let path = out.join("verdict.json");
     std::fs::write(&path, body).map_err(|err| format!("{}: {err}", path.display()))
@@ -1437,6 +1538,7 @@ struct TraceRequest {
     out: PathBuf,
     promote: Option<PathBuf>,
     threads: u32,
+    seconds: f32,
     commit: String,
     gpu: bool,
 }
@@ -1467,7 +1569,8 @@ fn gpu_requested(env: Option<&str>) -> bool {
     env == Some("1")
 }
 
-fn room_setup(pose: &Pose) -> Result<RefSetup, String> {
+fn room_setup(pose: &Pose, seconds: f32) -> Result<RefSetup, String> {
+    let seconds = require_trace_seconds(seconds)?;
     let mut scene: Scene = genos_scene::load_str(ROOM_SCENE)?;
     scene.lighting.time_of_day = frozen_time_of_day();
     Ok(RefSetup {
@@ -1480,7 +1583,7 @@ fn room_setup(pose: &Pose) -> Result<RefSetup, String> {
         spp: SPP_BATCH,
         noise_target: noise_target(),
         max_spp: MAX_SPP,
-        seconds: seconds_budget(),
+        seconds,
         max_bounces: BOUNCES,
         triangles: false,
         materials: Vec::new(),
@@ -1495,9 +1598,11 @@ fn sidecar_text(
     key: u64,
     threads: u32,
     commit: &str,
-) -> String {
+    seconds: f32,
+) -> Result<String, String> {
+    let seconds = require_trace_seconds(seconds)?;
     let eye_bits = eye();
-    format!(
+    Ok(format!(
         "{{\n  \"kind\": \"room-blotch-ref\",\n  \"source_commit\": \"{commit}\",\n  \"scene\": \"room\",\n  \"scene_sha256\": \"{}\",\n  \"pose\": \"{}\",\n  \"eye_bits\": [{}, {}, {}],\n  \"yaw_bits\": {},\n  \"pitch_bits\": {},\n  \"width\": {WIDTH},\n  \"height\": {HEIGHT},\n  \"bounces\": {BOUNCES},\n  \"spp_batch\": {SPP_BATCH},\n  \"noise_target_bits\": {},\n  \"max_spp\": {MAX_SPP},\n  \"seconds_budget_bits\": {},\n  \"triangles\": false,\n  \"specular\": false,\n  \"materials\": 0,\n  \"estimator\": \"cpu-analytic\",\n  \"gpu_reference\": false,\n  \"sun_frozen\": true,\n  \"time_of_day_bits\": {},\n  \"cells_only\": true,\n  \"sh_cells\": true,\n  \"cache_async\": false,\n  \"world_cell_bits\": {},\n  \"world_mode\": 3,\n  \"noise_bits\": {},\n  \"spp\": {},\n  \"seconds_bits\": {},\n  \"threads\": {threads},\n  \"ref_sha256\": \"{sha}\",\n  \"native_cache_key\": \"{key:016x}\",\n  \"native_cache_key_note\": \"host scene at the frozen hour, sh_cells off, stall 0. Grade does not look this key up. The key omits toggles, sh_cells, cache_async, noise, seconds, and max_spp. It includes lighting.time_of_day and event_loop.longest_stall_ms.\"\n}}\n",
         scene_sha256(),
         pose.name,
@@ -1507,13 +1612,13 @@ fn sidecar_text(
         pose.yaw.to_bits(),
         pitch().to_bits(),
         noise_target().to_bits(),
-        seconds_budget().to_bits(),
+        seconds.to_bits(),
         frozen_time_of_day().to_bits(),
         cell_metres().to_bits(),
         reference.noise.to_bits(),
         reference.spp,
         reference.seconds.to_bits(),
-    )
+    ))
 }
 
 fn partial_path(path: &Path) -> PathBuf {
@@ -1568,22 +1673,26 @@ fn trace_pose(request: &TraceRequest) -> Result<(), String> {
     if let Some(dest) = &request.promote {
         refuses_acceptance_cache(dest)?;
     }
-    if judge_pose(&request.out, &request.pose).is_ok() {
+    if judge_pose(&request.out, &request.pose, request.seconds).is_ok() {
         eprintln!(
-            "room-blotch reused {} from {}",
+            "room-blotch reused {} from {} at the requested {} s budget",
             request.pose.name,
-            request.out.display()
+            request.out.display(),
+            seconds_text(request.seconds)
         );
         if let Some(dest) = &request.promote {
-            promote_pose(&request.out, dest, &request.pose)?;
+            promote_pose(&request.out, dest, &request.pose, request.seconds)?;
         }
         return Ok(());
     }
-    let setup = room_setup(&request.pose)?;
+    let setup = room_setup(&request.pose, request.seconds)?;
     let key = reference::cache_key(&setup);
     eprintln!(
-        "room-blotch trace {} 320x180 bounces {BOUNCES} noise 0.01 max_spp {MAX_SPP} seconds 900 threads {} commit {}",
-        request.pose.name, request.threads, request.commit
+        "room-blotch trace {} 320x180 bounces {BOUNCES} noise 0.01 max_spp {MAX_SPP} seconds {} threads {} commit {}",
+        request.pose.name,
+        seconds_text(request.seconds),
+        request.threads,
+        request.commit
     );
     let traced = with_reference_threads(request.threads, || reference::render(&setup));
     let scratch = request.out.join(format!("{}.ref.write", request.pose.name));
@@ -1599,27 +1708,29 @@ fn trace_pose(request: &TraceRequest) -> Result<(), String> {
         key,
         request.threads,
         &request.commit,
-    );
+        request.seconds,
+    )?;
     write_pair(&request.out, &request.pose, &bytes, &sidecar)?;
     eprintln!(
         "room-blotch traced {} noise {} spp {} seconds {}",
         request.pose.name, traced.noise, traced.spp, traced.seconds
     );
-    match judge_pose(&request.out, &request.pose) {
+    match judge_pose(&request.out, &request.pose, request.seconds) {
         Ok(_) => {}
         Err(found) => {
             return Err(format!("{}: {}", found.class.name(), found.detail));
         }
     }
     if let Some(dest) = &request.promote {
-        promote_pose(&request.out, dest, &request.pose)?;
+        promote_pose(&request.out, dest, &request.pose, request.seconds)?;
     }
     Ok(())
 }
 
-fn promote_pose(from: &Path, dest: &Path, pose: &Pose) -> Result<(), String> {
+fn promote_pose(from: &Path, dest: &Path, pose: &Pose, seconds: f32) -> Result<(), String> {
     refuses_acceptance_cache(dest)?;
-    judge_pose(from, pose).map_err(|found| format!("{}: {}", found.class.name(), found.detail))?;
+    judge_pose(from, pose, seconds)
+        .map_err(|found| format!("{}: {}", found.class.name(), found.detail))?;
     let before = dest.join(format!("{}.ref", pose.name));
     let backup_ref = std::fs::read(&before).ok();
     let backup_json = std::fs::read(dest.join(format!("{}.json", pose.name))).ok();
@@ -1636,7 +1747,7 @@ fn promote_pose(from: &Path, dest: &Path, pose: &Pose) -> Result<(), String> {
         }
         return Err(err);
     }
-    judge_pose(dest, pose).map_err(|found| {
+    judge_pose(dest, pose, seconds).map_err(|found| {
         if let Some(bytes) = &backup_ref {
             let _ = std::fs::write(dest.join(format!("{}.ref", pose.name)), bytes);
         }
@@ -1718,21 +1829,46 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
     }
 }
 
-fn grade_command(
+fn take_seconds(
     args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
-    gpu: Option<&str>,
+    flag: &str,
+    slot: &mut Option<f32>,
 ) -> Result<(), String> {
+    if slot.is_some() {
+        return Err("--seconds was given twice".into());
+    }
+    *slot = Some(parse_trace_seconds(&value_of(args, flag)?)?);
+    Ok(())
+}
+
+enum CommandArgs<T> {
+    Ready(T),
+    Help,
+}
+
+struct GradeArgs {
+    refs: PathBuf,
+    out: PathBuf,
+    capture: bool,
+    seconds: f32,
+}
+
+fn parse_grade_args(
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+) -> Result<CommandArgs<GradeArgs>, String> {
     let mut refs: Option<PathBuf> = None;
     let mut out = PathBuf::from("genos-debug/room-blotch");
     let mut capture = false;
+    let mut seconds: Option<f32> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--refs" => refs = Some(PathBuf::from(value_of(args, &arg)?)),
             "--out" => out = PathBuf::from(value_of(args, &arg)?),
             "--capture" => capture = true,
+            "--seconds" => take_seconds(args, &arg, &mut seconds)?,
             "-h" | "--help" => {
                 println!("{HELP}");
-                return Ok(());
+                return Ok(CommandArgs::Help);
             }
             other => return Err(format!("room-blotch grade: unknown option {other}\n{HELP}")),
         }
@@ -1740,13 +1876,35 @@ fn grade_command(
     let Some(refs) = refs else {
         return Err("room-blotch grade needs --refs DIR".into());
     };
+    Ok(CommandArgs::Ready(GradeArgs {
+        refs,
+        out,
+        capture,
+        seconds: seconds.unwrap_or(DEFAULT_TRACE_SECONDS),
+    }))
+}
+
+fn grade_command(
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+    gpu: Option<&str>,
+) -> Result<(), String> {
+    let parsed = match parse_grade_args(args)? {
+        CommandArgs::Help => return Ok(()),
+        CommandArgs::Ready(parsed) => parsed,
+    };
+    let GradeArgs {
+        refs,
+        out,
+        capture,
+        seconds,
+    } = parsed;
     refuses_acceptance_cache(&out)?;
     if capture {
         for pose in poses() {
-            if let Err(found) = judge_pose(&refs, &pose) {
+            if let Err(found) = judge_pose(&refs, &pose, seconds) {
                 let verdict = verdict_from(vec![found], None, None);
                 std::fs::create_dir_all(&out).map_err(|err| format!("{}: {err}", out.display()))?;
-                write_verdict(&out, &verdict)?;
+                write_verdict(&out, &verdict, seconds)?;
                 print_verdict(&verdict);
                 return Err(format!(
                     "room-blotch {} {}",
@@ -1763,13 +1921,13 @@ fn grade_command(
         }
         if let Err(err) = run_capture(&out) {
             let verdict = verdict_from(vec![issue(Class::MissingCapture, err.clone())], None, None);
-            write_verdict(&out, &verdict)?;
+            write_verdict(&out, &verdict, seconds)?;
             print_verdict(&verdict);
             return Err(err);
         }
     }
     let capture_dir = capture.then(|| out.join("capture"));
-    let verdict = grade_dirs(&refs, capture_dir.as_deref(), &out)?;
+    let verdict = grade_dirs(&refs, capture_dir.as_deref(), &out, seconds)?;
     print_verdict(&verdict);
     if verdict.class == Class::AdrPass {
         Ok(())
@@ -1782,15 +1940,22 @@ fn grade_command(
     }
 }
 
-fn trace_command(
+struct TraceArgs {
+    pose: Pose,
+    out: PathBuf,
+    promote: Option<PathBuf>,
+    threads: Option<u32>,
+    seconds: f32,
+}
+
+fn parse_trace_args(
     args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
-    gpu: Option<&str>,
-    threads_env: Option<&str>,
-) -> Result<(), String> {
+) -> Result<CommandArgs<TraceArgs>, String> {
     let mut pose_name: Option<String> = None;
     let mut out = PathBuf::from("genos-debug/room-blotch/isolated");
     let mut promote: Option<PathBuf> = None;
     let mut threads_arg: Option<u32> = None;
+    let mut seconds: Option<f32> = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--pose" => pose_name = Some(value_of(args, &arg)?),
@@ -1803,9 +1968,10 @@ fn trace_command(
                         .map_err(|_| format!("--threads is not an integer ({text})"))?,
                 );
             }
+            "--seconds" => take_seconds(args, &arg, &mut seconds)?,
             "-h" | "--help" => {
                 println!("{HELP}");
-                return Ok(());
+                return Ok(CommandArgs::Help);
             }
             other => return Err(format!("room-blotch trace: unknown option {other}\n{HELP}")),
         }
@@ -1818,6 +1984,24 @@ fn trace_command(
             "room-blotch trace pose is room-a or room-b, not {name}"
         ));
     };
+    Ok(CommandArgs::Ready(TraceArgs {
+        pose,
+        out,
+        promote,
+        threads: threads_arg,
+        seconds: seconds.unwrap_or(DEFAULT_TRACE_SECONDS),
+    }))
+}
+
+fn trace_command(
+    args: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+    gpu: Option<&str>,
+    threads_env: Option<&str>,
+) -> Result<(), String> {
+    let parsed = match parse_trace_args(args)? {
+        CommandArgs::Help => return Ok(()),
+        CommandArgs::Ready(parsed) => parsed,
+    };
     let (commit, clean) = git_head()?;
     if !clean {
         return Err(
@@ -1826,10 +2010,11 @@ fn trace_command(
         );
     }
     let request = TraceRequest {
-        pose,
-        out,
-        promote,
-        threads: reference_threads(threads_arg, threads_env)?,
+        pose: parsed.pose,
+        out: parsed.out,
+        promote: parsed.promote,
+        threads: reference_threads(parsed.threads, threads_env)?,
+        seconds: parsed.seconds,
         commit,
         gpu: gpu_requested(gpu),
     };
@@ -1875,7 +2060,9 @@ mod tests {
             0xabc,
             4,
             "779e9a67eb67b92d02428bb87af450e1b7adc723",
+            DEFAULT_TRACE_SECONDS,
         )
+        .unwrap()
     }
 
     fn plant(dir: &Path, pose: &Pose, reference: &Reference) {
@@ -2090,13 +2277,17 @@ mod tests {
         noisy.seconds = 30.0;
         plant(&dir, &pose, &noisy);
         assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
+            judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::NoisyReference
         );
         let floor = vec![0_u8; FLOOR_BYTES];
         let text = accepted_text(&pose, &noisy, &sha256_hex(&floor));
         assert_eq!(
-            judge_bytes(&floor, &text, &pose).unwrap_err().class,
+            judge_bytes(&floor, &text, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::SceneMismatch
         );
         let mut good = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.009, 128);
@@ -2110,7 +2301,9 @@ mod tests {
             );
         std::fs::write(dir.join("room-a.json"), wrong).unwrap();
         assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
+            judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::PoseMismatch
         );
         let cache = dir.join("reference-cache");
@@ -2119,20 +2312,24 @@ mod tests {
         broken.seconds = 4.0;
         plant(&dir, &pose, &broken);
         assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
+            judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::NonFiniteReference
         );
         let mut negative = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], -0.1, 32);
         negative.seconds = 4.0;
         plant(&dir, &pose, &negative);
         assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
+            judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::NonFiniteReference
         );
         let mut zero_clock = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.004, 32);
         zero_clock.seconds = 0.0;
         plant(&dir, &pose, &zero_clock);
-        let loaded = judge_pose(&dir, &pose).unwrap();
+        let loaded = judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(loaded.seconds, 0.0);
         assert_eq!(loaded.spp, 32);
         let mut capped = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.004, 64);
@@ -2143,12 +2340,14 @@ mod tests {
             .replace("\"max_spp\": 262144", "\"max_spp\": 4194304");
         std::fs::write(dir.join("room-a.json"), text).unwrap();
         assert_eq!(
-            judge_pose(&dir, &pose).unwrap_err().class,
+            judge_pose(&dir, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::BudgetMismatch
         );
         let kept = dir.join("kept.ref");
         std::fs::write(&kept, b"stay").unwrap();
-        let err = promote_pose(&dir, &dir, &pose);
+        let err = promote_pose(&dir, &dir, &pose, DEFAULT_TRACE_SECONDS);
         assert!(err.is_err());
         assert_eq!(std::fs::read(&kept).unwrap(), b"stay");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2178,7 +2377,7 @@ mod tests {
         );
         std::fs::write(capture.join("report.md"), report).unwrap();
         let before = std::fs::read(refs.join("room-a.ref")).unwrap();
-        let verdict = grade_dirs(&refs, Some(&capture), &out).unwrap();
+        let verdict = grade_dirs(&refs, Some(&capture), &out, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(verdict.class, Class::AdrPass, "{}", verdict.detail);
         assert_eq!(verdict.legacy_word, Some("PASS"));
         assert_eq!(std::fs::read(refs.join("room-a.ref")).unwrap(), before);
@@ -2196,7 +2395,7 @@ mod tests {
     fn missing_refs_do_not_become_a_physical_fail() {
         let refs = temp_dir("empty-refs");
         let out = temp_dir("empty-out");
-        let verdict = grade_dirs(&refs, None, &out).unwrap();
+        let verdict = grade_dirs(&refs, None, &out, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(verdict.class, Class::MissingReference);
         assert!(verdict.mean.is_none());
         let text = std::fs::read_to_string(out.join("verdict.json")).unwrap();
@@ -2258,7 +2457,7 @@ mod tests {
 
     #[test]
     fn native_key_changes_with_time_and_sh_cells_and_grade_ignores_it() {
-        let mut first = room_setup(&poses()[0]).unwrap();
+        let mut first = room_setup(&poses()[0], DEFAULT_TRACE_SECONDS).unwrap();
         let mut second = first.clone();
         second.scene.lighting.time_of_day = 12.0;
         assert_ne!(reference::cache_key(&first), reference::cache_key(&second));
@@ -2276,7 +2475,7 @@ mod tests {
             "\"native_cache_key\": \"ffffffffffffffff\"",
         );
         std::fs::write(dir.join("room-a.json"), text).unwrap();
-        assert!(judge_pose(&dir, &poses()[0]).is_ok());
+        assert!(judge_pose(&dir, &poses()[0], DEFAULT_TRACE_SECONDS).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2306,7 +2505,7 @@ mod tests {
         let _ = std::fs::remove_file(&planted);
         std::os::unix::fs::symlink(&scratch, &planted).unwrap();
         let text = accepted_text(&pose, &reference, &sha);
-        let loaded = judge_bytes(&bytes, &text, &pose).unwrap();
+        let loaded = judge_bytes(&bytes, &text, &pose, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(std::fs::read(&scratch).unwrap(), marker);
         assert!(planted.symlink_metadata().unwrap().file_type().is_symlink());
         assert_eq!(loaded.linear[0], [0.2, 0.31, 0.41]);
@@ -2374,8 +2573,10 @@ mod tests {
         let left_text = accepted_text(&pose, &left_ref, &left_sha);
         let right_text = accepted_text(&pose, &right_ref, &right_sha);
         let (left, right) = std::thread::scope(|scope| {
-            let left_job = scope.spawn(|| judge_bytes(&left_bytes, &left_text, &pose));
-            let right_job = scope.spawn(|| judge_bytes(&right_bytes, &right_text, &pose));
+            let left_job =
+                scope.spawn(|| judge_bytes(&left_bytes, &left_text, &pose, DEFAULT_TRACE_SECONDS));
+            let right_job = scope
+                .spawn(|| judge_bytes(&right_bytes, &right_text, &pose, DEFAULT_TRACE_SECONDS));
             (left_job.join().unwrap(), right_job.join().unwrap())
         });
         assert_eq!(left.unwrap().linear[0], [0.2, 0.0, 0.0]);
@@ -2398,8 +2599,8 @@ mod tests {
         let zero = accepted_text(&pose, &reference, &sha);
         reference.seconds = 12.0;
         let twelve = accepted_text(&pose, &reference, &sha);
-        let loaded_zero = judge_bytes(&bytes, &zero, &pose).unwrap();
-        let loaded_twelve = judge_bytes(&bytes, &twelve, &pose).unwrap();
+        let loaded_zero = judge_bytes(&bytes, &zero, &pose, DEFAULT_TRACE_SECONDS).unwrap();
+        let loaded_twelve = judge_bytes(&bytes, &twelve, &pose, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(loaded_zero.seconds, 0.0);
         assert_eq!(loaded_twelve.seconds, 0.0);
         assert_eq!(loaded_zero.linear, loaded_twelve.linear);
@@ -2407,7 +2608,9 @@ mod tests {
         reference.seconds = -4.0;
         let negative = accepted_text(&pose, &reference, &sha);
         assert_eq!(
-            judge_bytes(&bytes, &negative, &pose).unwrap_err().class,
+            judge_bytes(&bytes, &negative, &pose, DEFAULT_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
             Class::NonFiniteReference
         );
 
@@ -2422,7 +2625,7 @@ mod tests {
         let room_bytes = operand_bytes(&room_a);
         let room_text = accepted_text(&pose, &room_a, &sha256_hex(&room_bytes));
         assert_eq!(
-            judge_bytes(&room_bytes, &room_text, &pose)
+            judge_bytes(&room_bytes, &room_text, &pose, DEFAULT_TRACE_SECONDS)
                 .unwrap_err()
                 .class,
             Class::NoisyReference
@@ -2451,7 +2654,8 @@ mod tests {
             eye[0], eye[1], eye[2], poses()[1].yaw, pitch()
         );
         std::fs::write(capture.join("report.md"), &report).unwrap();
-        let verdict_zero = grade_dirs(&refs, Some(&capture), &out_zero).unwrap();
+        let verdict_zero =
+            grade_dirs(&refs, Some(&capture), &out_zero, DEFAULT_TRACE_SECONDS).unwrap();
         std::fs::write(refs.join("room-a.json"), &twelve).unwrap();
         let mut twelve_b = std::fs::read_to_string(refs.join("room-b.json")).unwrap();
         twelve_b = twelve_b.replace(
@@ -2459,7 +2663,8 @@ mod tests {
             &format!("\"seconds_bits\": {}", 12.0f32.to_bits()),
         );
         std::fs::write(refs.join("room-b.json"), twelve_b).unwrap();
-        let verdict_twelve = grade_dirs(&refs, Some(&capture), &out_twelve).unwrap();
+        let verdict_twelve =
+            grade_dirs(&refs, Some(&capture), &out_twelve, DEFAULT_TRACE_SECONDS).unwrap();
         assert_eq!(verdict_zero.class, verdict_twelve.class);
         assert!(out_zero.join("room-a-reference.png").is_file());
         assert!(out_twelve.join("room-a-reference.png").is_file());
@@ -2559,5 +2764,267 @@ mod tests {
         assert!(child
             .iter()
             .any(|(name, value)| name == "GENOS_REFERENCE_THREADS" && value == "8"));
+    }
+
+    fn words(items: &[&str]) -> Vec<String> {
+        items.iter().map(|item| (*item).to_string()).collect()
+    }
+
+    #[test]
+    fn seconds_flag_accepts_only_the_two_bounded_stops() {
+        assert!(HELP.contains("--seconds N"));
+        assert!(HELP.contains("900 or 2400"));
+        assert!(HELP.contains("no environment variable"));
+        assert!(run(words(&["trace", "--help"]).into_iter()).is_ok());
+        assert!(run(words(&["grade", "-h"]).into_iter()).is_ok());
+        let mut trace = words(&["--pose", "room-a", "--seconds", "2400", "--threads", "4"])
+            .into_iter()
+            .peekable();
+        let parsed = parse_trace_args(&mut trace).unwrap();
+        assert!(matches!(parsed, CommandArgs::Ready(_)));
+        let CommandArgs::Ready(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.pose.name, "room-a");
+        assert_eq!(parsed.threads, Some(4));
+        assert_eq!(parsed.seconds.to_bits(), LONG_TRACE_SECONDS.to_bits());
+        let mut omitted = words(&["--pose", "room-b"]).into_iter().peekable();
+        let parsed = parse_trace_args(&mut omitted).unwrap();
+        assert!(matches!(parsed, CommandArgs::Ready(_)));
+        let CommandArgs::Ready(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.seconds.to_bits(), DEFAULT_TRACE_SECONDS.to_bits());
+        let mut grade = words(&["--refs", "refs", "--seconds", "900.0"])
+            .into_iter()
+            .peekable();
+        let parsed = parse_grade_args(&mut grade).unwrap();
+        assert!(matches!(parsed, CommandArgs::Ready(_)));
+        let CommandArgs::Ready(parsed) = parsed else {
+            return;
+        };
+        assert_eq!(parsed.seconds.to_bits(), DEFAULT_TRACE_SECONDS.to_bits());
+        for bad in ["nan", "NaN", "inf", "+inf", "-inf", "infinity"] {
+            let err = run(words(&["trace", "--pose", "room-a", "--seconds", bad]).into_iter())
+                .unwrap_err();
+            assert!(err.contains("not finite"), "{bad}: {err}");
+            assert!(!err.contains("dirty worktree"), "{bad} reached the trace");
+        }
+        for bad in ["-1", "0", "1", "899", "901", "2399", "2401", "900.5"] {
+            let err = run(words(&["trace", "--pose", "room-a", "--seconds", bad]).into_iter())
+                .unwrap_err();
+            assert!(err.contains("want 900 or 2400"), "{bad}: {err}");
+            assert!(!err.contains("dirty worktree"), "{bad} reached the trace");
+        }
+        for bad in ["9e2", "abc", "900.", ""] {
+            let err = run(words(&["trace", "--pose", "room-a", "--seconds", bad]).into_iter())
+                .unwrap_err();
+            assert!(
+                err.contains("not a number") || err.contains("needs a value"),
+                "{bad}: {err}"
+            );
+            assert!(!err.contains("dirty worktree"), "{bad} reached the trace");
+        }
+        let twice = run(words(&[
+            "grade",
+            "--seconds",
+            "900",
+            "--seconds",
+            "2400",
+            "--refs",
+            "unused",
+        ])
+        .into_iter())
+        .unwrap_err();
+        assert!(twice.contains("twice"));
+        let missing = run(words(&["grade", "--seconds"]).into_iter()).unwrap_err();
+        assert!(missing.contains("needs a value"));
+        assert_eq!(
+            parse_trace_seconds("+2400").unwrap().to_bits(),
+            LONG_TRACE_SECONDS.to_bits()
+        );
+        assert_eq!(
+            parse_trace_seconds(" 900 ").unwrap().to_bits(),
+            DEFAULT_TRACE_SECONDS.to_bits()
+        );
+    }
+
+    #[test]
+    fn a_900_budget_is_not_relabeled_when_2400_is_requested() {
+        let pose = poses()[0];
+        let short_setup = room_setup(&pose, DEFAULT_TRACE_SECONDS).unwrap();
+        let long_setup = room_setup(&pose, LONG_TRACE_SECONDS).unwrap();
+        assert_eq!(
+            short_setup.seconds.to_bits(),
+            DEFAULT_TRACE_SECONDS.to_bits()
+        );
+        assert_eq!(long_setup.seconds.to_bits(), LONG_TRACE_SECONDS.to_bits());
+        assert_eq!(short_setup.max_spp, MAX_SPP);
+        assert_eq!(long_setup.max_spp, MAX_SPP);
+        assert_eq!(short_setup.noise_target.to_bits(), noise_target().to_bits());
+        assert_eq!(
+            reference::cache_key(&short_setup),
+            reference::cache_key(&long_setup)
+        );
+        assert!(room_setup(&pose, f32::NAN).is_err());
+        assert!(room_setup(&pose, f32::INFINITY).is_err());
+        assert!(room_setup(&pose, 12.0).is_err());
+
+        let mut reference = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.005, 64);
+        reference.seconds = 12.0;
+        let bytes = operand_bytes(&reference);
+        let sha = sha256_hex(&bytes);
+        let commit = "779e9a67eb67b92d02428bb87af450e1b7adc723";
+        let short_text =
+            sidecar_text(&pose, &reference, &sha, 1, 4, commit, DEFAULT_TRACE_SECONDS).unwrap();
+        let long_text =
+            sidecar_text(&pose, &reference, &sha, 1, 4, commit, LONG_TRACE_SECONDS).unwrap();
+        assert!(short_text.contains(&format!(
+            "\"seconds_budget_bits\": {}",
+            DEFAULT_TRACE_SECONDS.to_bits()
+        )));
+        assert!(long_text.contains(&format!(
+            "\"seconds_budget_bits\": {}",
+            LONG_TRACE_SECONDS.to_bits()
+        )));
+        assert!(short_text.contains(&format!("\"seconds_bits\": {}", 12.0f32.to_bits())));
+        assert!(long_text.contains(&format!("\"seconds_bits\": {}", 12.0f32.to_bits())));
+        assert!(judge_bytes(&bytes, &short_text, &pose, DEFAULT_TRACE_SECONDS).is_ok());
+        assert_eq!(
+            judge_bytes(&bytes, &short_text, &pose, LONG_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
+            Class::BudgetMismatch
+        );
+        assert!(judge_bytes(&bytes, &long_text, &pose, LONG_TRACE_SECONDS).is_ok());
+        let mismatch = judge_bytes(&bytes, &long_text, &pose, DEFAULT_TRACE_SECONDS).unwrap_err();
+        assert_eq!(mismatch.class, Class::BudgetMismatch);
+        assert!(mismatch.detail.contains("recorded budget is kept"));
+
+        reference.seconds = 2500.0;
+        let over =
+            sidecar_text(&pose, &reference, &sha, 1, 4, commit, DEFAULT_TRACE_SECONDS).unwrap();
+        let loaded = judge_bytes(&bytes, &over, &pose, DEFAULT_TRACE_SECONDS).unwrap();
+        assert_eq!(loaded.seconds, 0.0);
+        assert_eq!(loaded.spp, 64);
+
+        let mut noisy = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.02, MAX_SPP);
+        noisy.seconds = 30.0;
+        let noisy_bytes = operand_bytes(&noisy);
+        let noisy_sha = sha256_hex(&noisy_bytes);
+        let noisy_text =
+            sidecar_text(&pose, &noisy, &noisy_sha, 1, 4, commit, LONG_TRACE_SECONDS).unwrap();
+        assert_eq!(
+            judge_bytes(&noisy_bytes, &noisy_text, &pose, LONG_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
+            Class::NoisyReference
+        );
+        let mut over_spp = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.005, MAX_SPP + 1);
+        over_spp.seconds = 30.0;
+        let over_bytes = operand_bytes(&over_spp);
+        let over_sha = sha256_hex(&over_bytes);
+        let over_text = sidecar_text(
+            &pose,
+            &over_spp,
+            &over_sha,
+            1,
+            4,
+            commit,
+            LONG_TRACE_SECONDS,
+        )
+        .unwrap();
+        assert_eq!(
+            judge_bytes(&over_bytes, &over_text, &pose, LONG_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
+            Class::BudgetMismatch
+        );
+        let nan_text = long_text.replace(
+            &format!("\"seconds_budget_bits\": {}", LONG_TRACE_SECONDS.to_bits()),
+            &format!("\"seconds_budget_bits\": {}", f32::NAN.to_bits()),
+        );
+        assert_eq!(
+            judge_bytes(&bytes, &nan_text, &pose, LONG_TRACE_SECONDS)
+                .unwrap_err()
+                .class,
+            Class::NonFiniteReference
+        );
+
+        let fixture = include_str!("../../fixtures/room-blotch/room-a.UNACCEPTED.json");
+        assert!(fixture.contains(&format!(
+            "\"seconds_budget_bits\": {}",
+            DEFAULT_TRACE_SECONDS.to_bits()
+        )));
+        assert!(!fixture.contains(&format!(
+            "\"seconds_budget_bits\": {}",
+            LONG_TRACE_SECONDS.to_bits()
+        )));
+
+        let refs = temp_dir("budget-refs");
+        let out_long = temp_dir("budget-out-2400");
+        let out_default = temp_dir("budget-out-900");
+        for pose in poses() {
+            let mut sample = filled(WIDTH, HEIGHT, [0.2, 0.3, 0.4], 0.005, 64);
+            sample.seconds = 8.0;
+            plant(&refs, &pose, &sample);
+        }
+        let before = std::fs::read(refs.join("room-a.json")).unwrap();
+        let err = run(words(&[
+            "grade",
+            "--refs",
+            &refs.display().to_string(),
+            "--out",
+            &out_long.display().to_string(),
+            "--seconds",
+            "2400",
+        ])
+        .into_iter())
+        .unwrap_err();
+        assert!(err.contains("budget-mismatch"), "{err}");
+        assert!(!err.contains("adr-pass"));
+        assert_eq!(std::fs::read(refs.join("room-a.json")).unwrap(), before);
+        let copied = std::fs::read_to_string(out_long.join("inputs").join("room-a.json")).unwrap();
+        assert_eq!(copied.as_bytes(), before.as_slice());
+        let verdict = std::fs::read_to_string(out_long.join("verdict.json")).unwrap();
+        assert!(verdict.contains("\"class\": \"budget-mismatch\""));
+        assert!(verdict.contains("\"seconds_budget\": 2400"));
+        assert!(verdict.contains("\"adr_limit\": 0.014"));
+        assert!(verdict.contains("\"legacy_room_blotch_limit\": 0.023"));
+        assert!(!out_long.join("room-a-reference.png").is_file());
+        let default_err = run(words(&[
+            "grade",
+            "--refs",
+            &refs.display().to_string(),
+            "--out",
+            &out_default.display().to_string(),
+        ])
+        .into_iter())
+        .unwrap_err();
+        assert!(default_err.contains("missing-capture"), "{default_err}");
+        let default_verdict = std::fs::read_to_string(out_default.join("verdict.json")).unwrap();
+        assert!(default_verdict.contains("\"seconds_budget\": 900"));
+        assert!(!default_verdict.contains("budget-mismatch"));
+
+        let empty = temp_dir("budget-empty");
+        let empty_out = temp_dir("budget-empty-out");
+        let missing = run(words(&[
+            "grade",
+            "--refs",
+            &empty.display().to_string(),
+            "--out",
+            &empty_out.display().to_string(),
+            "--seconds",
+            "2400",
+        ])
+        .into_iter())
+        .unwrap_err();
+        assert!(missing.contains("missing-reference"), "{missing}");
+        assert!(!empty.join("room-a.ref").exists());
+        let _ = std::fs::remove_dir_all(&refs);
+        let _ = std::fs::remove_dir_all(&out_long);
+        let _ = std::fs::remove_dir_all(&out_default);
+        let _ = std::fs::remove_dir_all(&empty);
+        let _ = std::fs::remove_dir_all(&empty_out);
     }
 }

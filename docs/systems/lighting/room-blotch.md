@@ -20,9 +20,9 @@ This command does not call compare and does not path-trace during the grade. A m
 
 ## Identity
 
-Each operand is `room-a.ref` plus `room-a.json`, and the same for room-b. The json is the identity the grade trusts: scene sha256 of `scenes/room.rhai`, pose bits, 320×180, 64 bounces, batch 64, noise target 0.01, max 262144 spp, 900 s budget, CPU analytic, shapes, sun frozen at the stress start hour, and the live-picture flags. The native cache key is recorded and is not the file name. Two different keys can still pass when the json matches.
+Each operand is `room-a.ref` plus `room-a.json`, and the same for room-b. The json is the identity the grade trusts: scene sha256 of `scenes/room.rhai`, pose bits, 320×180, 64 bounces, batch 64, noise target 0.01, max 262144 spp, the requested seconds stop, CPU analytic, shapes, sun frozen at the stress start hour, and the live-picture flags. The native cache key is recorded and is not the file name. Two different keys can still pass when the json matches. The key does not include the seconds stop, so a 900 s file and a 2400 s file can share a key. The sidecar budget is what the grade matches.
 
-A file is accepted only when the samples are finite and the header noise is finite and at most 0.01. Reaching 262144 spp does not accept a noisier file. The old 4194304 spp reuse does not apply. The `.ref` format does not store seconds. `read_cached` sets `seconds` to 0. `seconds_bits` in the json is the writer's reported duration, kept as provenance. The grade requires that field to be present, finite, and not negative. A zero report is not a budget mismatch, and a positive report is not a file clock read from the operand. `seconds_budget_bits` remains the requested 900 s budget, also provenance of the request. Open-floor references (160×90, noise 0.02, the known floor hashes, or 187216 bytes) are a scene mismatch and are not renamed. A numeric `adr-pass` is the blotch mean of the supplied pictures. A flat stand-in can meet it. That is not a physical room acceptance.
+A file is accepted only when the samples are finite and the header noise is finite and at most 0.01. Reaching 262144 spp does not accept a noisier file. The old 4194304 spp reuse does not apply. The `.ref` format does not store seconds. `read_cached` sets `seconds` to 0. `seconds_bits` in the json is the writer's reported duration, kept as provenance. The grade requires that field to be present, finite, and not negative. A zero report is not a budget mismatch, and a positive report is not a file clock read from the operand. `seconds_budget_bits` is the stop this invocation requested. Omitted `--seconds` means 900. The only other accepted request is 2400. A sidecar written at the other stop is `budget-mismatch`. The grade copies that sidecar and does not rewrite it. A non-finite budget field is `nonfinite-reference`. The requested stop is provenance of the request, not a measurement that the process ran that long. Open-floor references (160×90, noise 0.02, the known floor hashes, or 187216 bytes) are a scene mismatch and are not renamed. A numeric `adr-pass` is the blotch mean of the supplied pictures. A flat stand-in can meet it. That is not a physical room acceptance.
 
 ## Sun freeze and E11
 
@@ -41,7 +41,7 @@ These are not a physical fail. The first one is the verdict. The json lists all 
 | nonfinite-reference | noise or reported seconds is not finite, noise or reported seconds is negative, or a sample is not finite |
 | scene-mismatch | wrong scene, size, estimator, hash, or a floor file |
 | pose-mismatch | eye, yaw, or pitch bits differ |
-| budget-mismatch | bounces, batch, noise target, max spp, spp, or the requested 900 s budget differ |
+| budget-mismatch | bounces, batch, noise target, max spp, spp, or `seconds_budget_bits` differ from this run's `--seconds` (900 when omitted, or 2400) |
 | unsettled | settled is not true, including a false result at frame 900 |
 | wrong-flags | toggles are not exactly cells_only, sh_cells is off, cache_async is on, the cell is not 0.25 m, world mode is not 3, or sc_settle is not 0 |
 | sun-not-frozen | the resolved hour is not the frozen start hour |
@@ -57,13 +57,14 @@ A settled true at frame 900 is a real settle on the last frame.
 genos-stress room-blotch grade --refs DIR --out ./genos-debug/room-blotch
 genos-stress room-blotch grade --refs DIR --out ./genos-debug/room-blotch --capture
 genos-stress room-blotch trace --pose room-a --threads 4 --out DIR [--promote DIR]
+genos-stress room-blotch trace --pose room-a --threads 4 --seconds 2400 --out DIR [--promote DIR]
 ```
 
-`--out` defaults to `./genos-debug/room-blotch`. It does not write under `$HOME`. `--refs` is required. Grade never writes a `.ref` and refuses a destination path that contains `reference-cache`. `--threads` wins over `GENOS_REFERENCE_THREADS`; when both are omitted the trace uses 4. `--promote` copies only after the isolated file passes the same judge. `GENOS_REFERENCE_GPU=1` is refused.
+`--out` defaults to `./genos-debug/room-blotch`. It does not write under `$HOME`. `--refs` is required. Grade never writes a `.ref` and refuses a destination path that contains `reference-cache`. `--threads` wins over `GENOS_REFERENCE_THREADS`; when both are omitted the trace uses 4. `--seconds` is 900 or 2400. Omitted means 900 on grade and on trace. There is no environment variable for it, so a parent environment cannot change the stop. `--promote` copies only after the isolated file passes the same judge, including the same `--seconds`. `GENOS_REFERENCE_GPU=1` is refused.
 
 `--capture` runs one proof window at 640×360 with `--freeze-sun`, `--lighting-toggles cells_only`, and `--lighting-cache-async off`, then grades. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every deprecated `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`, then sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1`. A parent value in that set does not reach the child. `GENOS_COMPOSE_SC_WRITES` is included because the renderer reads it outside the lighting settings catalogue and it changes surface-cache compose writes. Names outside that set, such as `GENOS_GPU_TIMES` and `GENOS_SCENE_DELTA`, are left as the parent set them.
 
-The trace is one CPU analytic pass budget: 64 bounces, 320×180 shapes, noise 0.01, max 262144 spp, 900 s. It refuses a dirty worktree so the sidecar commit matches the binary. An isolated file that already passes the judge is reused and not traced again.
+The trace is one CPU analytic pass: 64 bounces, 320×180 shapes, noise 0.01, max 262144 spp, and the `--seconds` stop (900 unless the command says 2400). It refuses a dirty worktree so the sidecar commit matches the binary. An isolated file is reused only when it passes the judge for that same stop. A 900 sidecar does not pass a 2400 request, and a 2400 sidecar does not pass a 900 request. Reuse does not rewrite `seconds_budget_bits`. Noise above 0.01 stays unaccepted at either stop, including at 262144 spp.
 
 ## Output
 
