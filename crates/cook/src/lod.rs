@@ -1669,12 +1669,16 @@ mod tests {
         let mut budget = CoverBudget::full();
         let stored = surface_bound(&from, &onto, &mut budget).unwrap_or(f32::NAN);
         let measured = lattice_against(&from, &onto, 8);
+        // The cover has to clear the truth. A relative 1e-6 is a few ulps of an
+        // f32 length at 1 m (`ulp(1) ≈ 1.2e-7`). It is not a millimetre of room
+        // for a short bound. The same slack covers the lattice comparison.
+        let slack = overhang.max(measured).max(1.0) * 1.0e-6;
         assert!(
-            stored + 1.0e-3 >= overhang,
+            stored + slack >= overhang,
             "stored {stored} under the {overhang} m overhang (height {height}, x {origin_x})"
         );
         assert!(
-            measured <= stored + 1.0e-3,
+            measured <= stored + slack,
             "lattice {measured} exceeds stored {stored}"
         );
     }
