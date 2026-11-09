@@ -65,34 +65,36 @@ A camera step clears the freeze (`still` goes to 0) and the probe evaluate retur
 
 ## This branch
 
-Lavapipe, same scripts, same size, High and Medium with the four bits on. The picture step is `LIGHTING_SETTLE_PICTURE_ALPHA` (1/32). Legacy numbers are the table above.
+Lavapipe, same scripts, same size, High and Medium with the four bits on. During the drain the picture step is still `LIGHTING_SETTLE_PICTURE_ALPHA` (1/32). After the drain, a fine texel with no filtered field shows the colour the a-trous push is about to store, and a stored field steps toward a later target by 1/16. Legacy numbers are the table above.
 
 Room, full view:
 
 | Window | Legacy | This branch |
 |---|---|---|
-| settle0 mean / max / popped | 0.00337 / 0.06079 / 0.561 | 0.00065 / 0.03388 / 0.11479 |
-| settle2 | 0.00342 / 0.13868 / 0.526 | 0.00055 / 0.01934 / 0.13299 |
-| settle11 | 0.00011 / 0.01815 / 0.00882 | 0.00012 / 0.01453 / 0.00806 |
-| held, after settle | 0 / 0 / 0, mean 0.14488 | 0 / 0 / 0, mean 0.14441 |
-| step, first frames mean / max | 0 / 0.00399 | 0.00001 / 0.00399 |
-| snap mean abs / max abs / mean luminance delta | 0.451 / 8 / −0.00014 | 0.476 / 9 / −0.00021 |
+| settle0 mean / max / popped | 0.00337 / 0.06079 / 0.561 | 0.00066 / 0.03388 / 0.11556 |
+| settle2 | 0.00342 / 0.13868 / 0.526 | 0.00054 / 0.01870 / 0.13083 |
+| settle11 | 0.00011 / 0.01815 / 0.00882 | 0.00004 / 0.00511 / 0.00028 |
+| held, after settle | 0 / 0 / 0, mean 0.14488 | 0 / 0 / 0, mean 0.14377 |
+| step, first frames mean / max | 0 / 0.00399 | 0 / 0.00397 |
+| snap mean abs / max abs / mean luminance delta | 0.451 / 8 / −0.00014 | 0.24181 / 4 / −0.00009 |
 
-`picture_settled` was frame 305. The path trace stopped at 16 spp, noise 0.479. `mean_rel` was 0.119 settled and 0.118 on the step, reference mean 0.530.
+`picture_settled` was frame 305. The path trace stopped at 16 spp, noise 0.479. `mean_rel` was 0.116 settled and 0.116 on the step, reference mean 0.530.
 
 Hall, bounce view:
 
 | Window | Legacy | This branch |
 |---|---|---|
-| settle0 mean / max / popped | 0.00491 / 0.172 / 0.860 | 0.00130 / 0.02851 / 0.16896 |
-| held, after the wait | 0 / 0 / 0 | 0 / 0 / 0 |
-| step, first frames mean / max / popped | 0.00007 / 0.028 / 0.0078 | 0.00014 / 0.02724 / 0.03625 |
-| snap mean abs / max abs / over 8 / mean luminance delta | 0.947 / 29 / 0.014 / −0.00090 | 0.708 / 43 / 0.00201 / −0.00057 |
+| settle0 mean / max / popped | 0.00491 / 0.172 / 0.860 | 0.00130 / 0.02851 / 0.17229 |
+| held, after the wait | 0 / 0 / 0 | 0 / 0.00315 / 0 |
+| step, first frames mean / max / popped | 0.00007 / 0.028 / 0.0078 | 0.00001 / 0.01286 / 0.00146 |
+| snap mean abs / max abs / over 8 / mean luminance delta | 0.947 / 29 / 0.014 / −0.00090 | 0.15757 / 17 / 0.00132 / −0.00002 |
 
-settle0 max and popped drop on both scenes. The room step max matches the legacy max. The room snap max is 9 display codes against 8, and the mean absolute difference is 0.476 against 0.451. The hall step pop share is 0.036 against 0.0078. The hall snap max is 43 against 29, in the same place as the earlier bits-on run (42) that still evaluated probes through the drain. Held frames are exact zeros.
+settle0 max and popped drop on both scenes. The room step max is under the legacy max, and the room snap is under the legacy mean and max. The hall step pop share is under 0.0078, and the hall snap max is under 29. The hall held window does not pop (share 0). Its worst pixel still moves by 0.00315 luminance, which the legacy column does not. The room held window is an exact zero.
 
 ## What this leaves
 
 The baseline flicker sits in the legacy relight and the screen-probe display for the frames the old predicate left on that path. This branch changes that predicate. While `lighting_lamp_settling()` is true, compose's `lighting_settle_own_covered` accepts a texel that already has samples when the neighbour read accepts, compose returns that cell and does not evaluate probes, and `lighting_compact_hold_texel_rays` no longer returns false just because a lamp is settling or the ring reaches the texel. The cell mean rays read still takes the set whole. The picture is a short step of those sets at `LIGHTING_SETTLE_PICTURE_ALPHA` (`LIGHTING_WRC_CHANGE_ALPHA`, 1/32). The one-set colour was louder than the legacy window. A step of 0.08 left the room settle0 max above that window. `lighting_sh_texel_detail_covers` stays strict so place does not inline the ring walk. The live read is the comparison. A disagreeing texel, a stale texel, a nearby move, and an object-local texel still keep their rays. Quiet frames still show own samples and still read probes. The ray-cut proof's settling-lamp row is now a hold. The numeric gates (blotch 0.014, cell energy 0.9, linger 0.05, lag 0.9, turn 0.403) are unchanged.
+
+The camera-step miss was not the 1/32 substitution, not a probe-shown pixel, and not a ray-hit parent. A path-view dump (compose mode 9, no tone map) of the hall step showed those pixels as fine texels that already had samples and did not yet have a filtered field. Probes were read and the estimator trust stayed 1, so they did not change the colour. The own mean is one settle set. The push writes the darker filtered field a few frames later, and that handoff was the hall pop and the hall snap. The room's extra codes were the strip a 3° yaw uncovers: the raw cell there is brighter than the field that strip settles to, and the own mean is darker. Compose shows `lighting_svgf_target` when the filter already has a colour, so the first frame matches the field the push stores. When that target is empty, it shows the cell only if the cell is at most two thirds of the mean's luminance. The hall one-set is about twice the cell, so those pixels show the cell. A planted mean beside its cell is closer than that and stays the mean, which keeps the production blend. The push moves a stored field by a sixteenth of a later gap, and holds it when the change is under 2% relative luminance. Detail off keeps the old drop and writes the filter straight through. `lighting_sh_texel_detail_covers` stays strict.
 
 The big camera-step snap is not reproduced at 160×90 on lavapipe for this room or this hall pose. A 1080p run on the owner's machine can repeat the same two scripts; lavapipe frame time is not that measurement.

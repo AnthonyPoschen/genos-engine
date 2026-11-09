@@ -92,6 +92,8 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;
     lighting_px_world_w = 0.0;
+    lighting_px_shade = 8u;
+    lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
     bool covered = false;
@@ -170,8 +172,15 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         if (covered) {
             return world.rgb;
         }
+        // Trust under a half means the probes own the pixel. A higher trust
+        // still shows the world colour; the path view's green channel marks
+        // the mix.
+        if (world.w < 0.5) {
+            lighting_px_shade = 3u;
+        }
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
     lighting_sc_display = false;
+    lighting_px_shade = 3u;
     return probes;
 }

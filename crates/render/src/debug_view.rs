@@ -33,11 +33,14 @@ pub enum ViewMode {
     /// Short-term relative standard deviation of the cache entry under each
     /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
+    /// Which path produced the bounce: cell step, fine texel, probe, or a ray
+    /// hit. The picture is flat codes, not light. See lighting_compose.comp.
+    Path,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 9] = [
+    pub const ALL: [ViewMode; 10] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -47,6 +50,7 @@ impl ViewMode {
         Self::Light,
         Self::Texels,
         Self::Variance,
+        Self::Path,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +64,7 @@ impl ViewMode {
             Self::Light => "light",
             Self::Texels => "texels",
             Self::Variance => "variance",
+            Self::Path => "path",
         }
     }
 

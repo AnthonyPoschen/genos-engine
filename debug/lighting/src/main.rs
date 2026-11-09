@@ -334,8 +334,8 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_surface_cache_blend",
     "fog_view",
 ];
-const VIEWS: [&str; 8] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
+const VIEWS: [&str; 9] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -1551,6 +1551,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
         ViewMode::Variance => "variance",
+        ViewMode::Path => "path",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -2597,6 +2598,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
         "variance" => ViewMode::Variance,
+        "path" => ViewMode::Path,
         _ => ViewMode::Full,
     }
 }

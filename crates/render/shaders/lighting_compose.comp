@@ -133,7 +133,7 @@ void main() {
         n = -n;
     }
     // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels.
+    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 path.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
 #ifdef GENOS_COMPOSE_MAINT
@@ -172,6 +172,20 @@ void main() {
 #ifdef GENOS_COMPOSE_MAINT
     return;
 #endif
+    if (mode == 9u) {
+        // Path codes, not light. R is lighting_px_shade / 8. G is 0 when the
+        // probe read was skipped, 0.5 when probes were read and trust stayed
+        // 1, 1 when the probes own the pixel. B is 1 when a corner took
+        // lighting_sc_parent. No dither: the bytes are the codes.
+        float pg = 0.0;
+        if (lighting_px_probe_skipped == 0u) {
+            bool mixed = lighting_px_world_w < 0.99 || lighting_px_shade == 3u || lighting_px_shade == 8u;
+            pg = mixed ? 1.0 : 0.5;
+        }
+        shown = vec3(float(lighting_px_shade) * (1.0 / 8.0), pg, float(lighting_px_parent));
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
     if ((gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;
