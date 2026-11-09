@@ -77,6 +77,7 @@ impl StepRecord {
 
 /// FNV-1a over every body's pose and velocities, then each wheel length.
 /// An orbit also mixes its wide position, wide velocity, and gravitational parameter.
+/// `World.origin` is mixed on every world.
 #[must_use]
 pub fn state_hash(world: &World) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -124,6 +125,9 @@ pub fn state_hash(world: &World) -> u64 {
             mix_f64(&mut hash, value);
         }
     }
+    mix_f64(&mut hash, world.origin.x);
+    mix_f64(&mut hash, world.origin.y);
+    mix_f64(&mut hash, world.origin.z);
     hash
 }
 
@@ -523,6 +527,10 @@ mod tests {
         assert!(line.contains("\"orbit_radius_m\":"));
         assert!(genos_mcp::parse(&line).is_ok());
         let before = record.hash;
+        session.world.origin.x += 1.0;
+        assert_ne!(state_hash(&session.world), before);
+        session.world.origin.x -= 1.0;
+        assert_eq!(state_hash(&session.world), before);
         let Some(space) = session.world.vehicles[0].space.as_mut() else {
             assert!(session.world.vehicles[0].space.is_some());
             return;

@@ -41,9 +41,9 @@ files describe lighting geometry and have no bodies, masses or velocities.
 `solver_bodies`, `wheel_rays`, `vehicle_count`, and `orbit_radius_m`. `hash`
 is FNV-1a over every body's pose and velocities, then each stored wheel length,
 bit for bit. An orbit also mixes its wide position, wide velocity, and
-gravitational parameter. Equal hashes at a step mean equal state. A world with
-no vehicle hashes the bodies only. `orbit_radius_m` is 0 when the scene has no
-orbit.
+gravitational parameter. The hash then mixes `World.origin`. Equal hashes at a
+step mean equal state. A world with no vehicle hashes the bodies and the origin.
+`orbit_radius_m` is 0 when the scene has no orbit.
 
 ## MCP and `POST /cmd/<name>`
 

@@ -199,7 +199,7 @@ Mass 1 000 kg, box half extents `(1, 1, 1)`, `Discrete`. `World.gravity` is zero
 
 `a_zero_gm_coast_leaves_the_circular_radius` is the negative control. The same speed with `GM = 0` leaves the 0.05 m band. The coast radius is `hypot(1e7, speed * 200)`.
 
-`debug/physics --scene orbit` runs this fixture at the harness step of `1/60` s for 200 steps. The JSON line gains `orbit_radius_m`. The hash gains the wide position, the wide velocity, and `GM` when an orbit is stored.
+`debug/physics --scene orbit` runs this fixture at the harness step of `1/60` s for 200 steps. The JSON line gains `orbit_radius_m`. The hash gains the wide position, the wide velocity, and `GM` when an orbit is stored, and it mixes `World.origin` on every scene.
 
 ### T1. Gear on an aircraft
 
