@@ -2925,10 +2925,18 @@ impl Gpu {
             eprintln!("lighting: restir prepare failed: the reservoir upload was forced off");
             return false;
         }
-        let Ok(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))) else {
+        let scale = self.lighting.settings.restir_resolution_scale;
+        let (rw, rh) = crate::restir_live::reservoir_size(width, height, scale);
+        if rw == 0 || rh == 0 {
             eprintln!("lighting: restir prepare failed: the pixel count does not fit");
             return false;
-        };
+        }
+        let reservoir_pixels = u64::from(rw).saturating_mul(u64::from(rh));
+        if u32::try_from(reservoir_pixels).is_err() {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
+            return false;
+        }
+        let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
         if self.lighting.restir_pipe.is_null() {
             let start = Instant::now();
             match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
@@ -2955,16 +2963,11 @@ impl Gpu {
             }
             self.note_pipeline_time("restir-direct", start);
         }
-        let need = crate::restir_live::buffer_bytes(u64::from(pixels));
-        if self.lighting.restir_buf.size < need
-            || self.lighting.restir_w != width
-            || self.lighting.restir_h != height
-        {
+        let need = crate::restir_live::buffer_bytes(reservoir_pixels);
+        if self.lighting.restir_buf.size < need {
             eprintln!(
-                "lighting: restir prepare failed: reservoir {} bytes at {}x{} does not cover {} bytes at {width}x{height}",
+                "lighting: restir prepare failed: reservoir {} bytes does not cover {} bytes at {rw}x{rh} (screen {width}x{height})",
                 self.lighting.restir_buf.size,
-                self.lighting.restir_w,
-                self.lighting.restir_h,
                 need
             );
             self.lighting.restir_have_prev = false;
@@ -2976,19 +2979,31 @@ impl Gpu {
         } else {
             crate::restir_live::RestirCam::default()
         };
+        let cost = crate::restir_live::RestirCost {
+            width: rw,
+            height: rh,
+            spatial_neighbors: self.lighting.settings.restir_spatial_neighbors,
+            spatial_radius: self.lighting.settings.restir_spatial_radius,
+            resolution_scale: scale,
+            checkerboard: self.lighting.settings.restir_spatial_checkerboard,
+            candidates: self.lighting.settings.restir_candidates,
+            split_passes: self.lighting.settings.restir_split_passes,
+            screen_width: width,
+            screen_height: height,
+        };
+        crate::restir_live::log_cost(rw, rh, &cost);
         let Some(mut prefix) = crate::restir_live::prefix(
             &self.lighting.restir_lamps,
             &self.lighting.restir_prev_lamps,
             &previous,
-            width,
-            height,
             self.lighting.frame,
             self.lighting.restir_slot,
+            cost,
         ) else {
             eprintln!("lighting: restir prepare failed: the reservoir prefix does not fit");
             return false;
         };
-        let reset = geom_reset || prefix.layout_changed || !self.lighting.restir_have_prev;
+        let reset = geom_reset || prefix.layout_changed || resized || !self.lighting.restir_have_prev;
         crate::restir_live::set_history_reset(&mut prefix.words, reset);
         self.lighting.restir_prev_lamps.clear();
         self.lighting
@@ -3028,11 +3043,42 @@ impl Gpu {
             at = end;
         }
         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+        self.lighting.restir_w = rw;
+        self.lighting.restir_h = rh;
         self.lighting.restir_frame = prefix.total_words.saturating_mul(4) <= self.lighting.restir_buf.size;
         self.lighting.restir_frame
     }
 
-    /// Initial, temporal, then spatial. Each dispatch is at most 65536 pixels.
+    fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
+        let pipe = self.lighting.restir_pipe;
+        let mut base = 0u32;
+        while base < pixels {
+            let count = (pixels - base).min(65536);
+            let groups = count.div_ceil(64).max(1);
+            let mut rpc = *pc;
+            rpc[9] = (rpc[9] & !(3 << 22)) | (pass << 22) | (1 << 21);
+            rpc[11] = base;
+            unsafe {
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.lighting.layout,
+                    0x20,
+                    0,
+                    LIGHTING_PC_BYTES,
+                    rpc.as_ptr().cast::<std::ffi::c_void>(),
+                );
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+                (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            }
+            base = base.saturating_add(65536);
+        }
+    }
+
+    /// Initial, then temporal, then spatial. Each dispatch is at most 65536
+    /// reservoir pixels. `restir_split_passes` clear runs temporal in the
+    /// initial invocation (one dispatch). The temporal stamp is then empty
+    /// and `restir_initial` is both passes. Checkerboard copies after spatial
+    /// and is included in the spatial stamp. Four queries, no fifth slot.
     fn dispatch_restir_di(&mut self, slot: usize, pc: &[u32; 12], pool: Handle, first: u32) {
         let width = self.lighting.restir_w;
         let height = self.lighting.restir_h;
@@ -3048,46 +3094,33 @@ impl Gpu {
         if !stamp {
             self.lighting.restir_query[slot] = u32::MAX;
         }
-        if stamp {
-            unsafe {
-                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_STAMP_AT);
-            }
-            self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
-        }
-        for mode in 0..3u32 {
-            let mut base = 0u32;
-            while base < pixels {
-                let count = (pixels - base).min(65536);
-                let groups = count.div_ceil(64).max(1);
-                let mut rpc = *pc;
-                rpc[9] = (rpc[9] & !(3 << 22)) | (mode << 22) | (1 << 21);
-                rpc[11] = base;
-                unsafe {
-                    (self.fns.cmd_push)(
-                        self.cmd,
-                        self.lighting.layout,
-                        0x20,
-                        0,
-                        LIGHTING_PC_BYTES,
-                        rpc.as_ptr().cast::<std::ffi::c_void>(),
-                    );
-                    (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
-                    (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
-                }
-                base = base.saturating_add(65536);
-            }
-            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+        let split = self.lighting.settings.restir_split_passes != 0;
+        let checker = self.lighting.settings.restir_spatial_checkerboard != 0;
+        let write_stamp = |this: &Self, at: u32| {
             if stamp {
                 unsafe {
-                    (self.fns.cmd_write_timestamp)(
-                        self.cmd,
-                        0x800,
-                        pool,
-                        first + RESTIR_STAMP_AT + 1 + mode,
-                    );
+                    (this.fns.cmd_write_timestamp)(this.cmd, 0x800, pool, first + RESTIR_STAMP_AT + at);
                 }
             }
+        };
+        if stamp {
+            self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
         }
+        write_stamp(self, 0);
+        self.dispatch_restir_pass(pixels, 0, pc);
+        write_stamp(self, 1);
+        if split {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 1, pc);
+        }
+        write_stamp(self, 2);
+        self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+        self.dispatch_restir_pass(pixels, 2, pc);
+        if checker {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 3, pc);
+        }
+        write_stamp(self, 3);
         unsafe {
             (self.fns.cmd_push)(
                 self.cmd,

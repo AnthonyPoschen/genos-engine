@@ -399,6 +399,48 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             lighting.lamp_pick.unbiased,
         ),
         Knob::switch("lighting_restir_di", "ReSTIR DI", lighting.restir_di),
+        Knob::number(
+            "lighting_restir_spatial_neighbors",
+            "ReSTIR neighbours",
+            lighting.restir_spatial_neighbors as f64,
+            (0.0, 16.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_spatial_radius",
+            "ReSTIR radius",
+            lighting.restir_spatial_radius as f64,
+            (0.0, 8.0),
+            1.0,
+            " px",
+        ),
+        Knob::number(
+            "lighting_restir_resolution_scale",
+            "ReSTIR scale",
+            lighting.restir_resolution_scale as f64,
+            (1.0, 4.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_candidates",
+            "ReSTIR candidates",
+            lighting.restir_candidates as f64,
+            (1.0, 32.0),
+            1.0,
+            "",
+        ),
+        Knob::switch(
+            "lighting_restir_spatial_checkerboard",
+            "ReSTIR checkerboard",
+            lighting.restir_spatial_checkerboard != 0,
+        ),
+        Knob::switch(
+            "lighting_restir_split_passes",
+            "ReSTIR split passes",
+            lighting.restir_split_passes != 0,
+        ),
         Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
         Knob::choice(
             "lighting_shadow_filter",
@@ -653,6 +695,16 @@ pub fn apply_lighting_knob(
         "lighting_lamp_pick_history" => ("lamp_pick_history", whole.max(1).to_string()),
         "lighting_lamp_pick_unbiased" => ("lamp_pick_unbiased", on_off(v)),
         "lighting_restir_di" => ("restir_di", on_off(v)),
+        "lighting_restir_spatial_neighbors" => ("restir_spatial_neighbors", whole.to_string()),
+        "lighting_restir_spatial_radius" => ("restir_spatial_radius", whole.to_string()),
+        "lighting_restir_resolution_scale" => {
+            ("restir_resolution_scale", whole.clamp(1, 4).to_string())
+        }
+        "lighting_restir_candidates" => ("restir_candidates", whole.max(1).to_string()),
+        "lighting_restir_spatial_checkerboard" => {
+            ("restir_spatial_checkerboard", u32::from(v >= 0.5).to_string())
+        }
+        "lighting_restir_split_passes" => ("restir_split_passes", u32::from(v >= 0.5).to_string()),
         "lighting_shadows" => ("shadows", on_off(v)),
         "lighting_shadow_filter" => (
             "shadow_filter",

@@ -298,14 +298,17 @@ void main() {
             // races the pixel that owns it. The next frame reads this slot.
             // Bit 21 with bits 18-20 clear is the production reservoir, including
             // mode off and mode hits. A quiet view must not return last frame's
-            // colour and skip that sample. Bit 19 is the labelled exact sum: it
-            // disables this signature hold, so a failed prepare in mode hits
-            // shades that sum instead of the previous reservoir colour. Mode 4
-            // may still hold a stored exact record. Restir-off keeps the hold.
-            // A stored exact record cannot survive into a reservoir frame.
+            // colour and skip that sample. The signature hold is the success
+            // path: bit 19 is clear on a frame whose prepare bound the reservoir,
+            // so the clear below does not run. Bit 19 is the labelled exact sum
+            // (a failed prepare, or restir off on a mode that used to sample).
+            // It clears only this signature hold, so mode hits shades that sum
+            // instead of the previous reservoir colour. Mode 4 may still hold a
+            // stored exact record. A stored exact record cannot survive into a
+            // reservoir frame.
             bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
                 && ((pc.lamp.y >> 18u) & 7u) == 0u;
-            bool hold = !restir_product && !lamp_pick_force_exact() && pc.lamp.x != 4u;
+            bool hold = !restir_product && pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
             if (!restir_product && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
@@ -316,6 +319,9 @@ void main() {
                     lamp_res_store(idx, lamp_res_slot_now(), held);
                     lamp_geo_store(idx, lamp_res_slot_now(), geo);
                 }
+            }
+            if (hold && ((pc.lamp.y >> 19u) & 1u) != 0u) {
+                hold = false;
             }
             if (hold) {
                 uint emitted = gbuf_word(idx, 3u);
@@ -628,7 +634,32 @@ void main() {
     uint restir_lamp = 0xffffffffu;
     float restir_w = 0.0;
     if (restir_pix) {
-        uint at = restir_words[6u] + idx * 4u;
+        // One reservoir may cover a block of screen pixels (header 7 and 8
+        // are the reservoir grid; pc.dims is the screen). Scale 1 keeps the
+        // screen index. Each screen pixel still traces its own shadow ray.
+        uint rpix = idx;
+        uint rw = restir_words[7u];
+        uint rh = restir_words[8u];
+        if (rw != 0u && rh != 0u && (rw != pc.dims.x || rh != pc.dims.y)) {
+            uint sx = pc.dims.x / rw;
+            uint sy = pc.dims.y / rh;
+            if (sx == 0u) {
+                sx = 1u;
+            }
+            if (sy == 0u) {
+                sy = 1u;
+            }
+            uint rx = (idx % pc.dims.x) / sx;
+            uint ry = (idx / pc.dims.x) / sy;
+            if (rx >= rw) {
+                rx = rw - 1u;
+            }
+            if (ry >= rh) {
+                ry = rh - 1u;
+            }
+            rpix = ry * rw + rx;
+        }
+        uint at = restir_words[6u] + rpix * 4u;
         restir_lamp = restir_words[at];
         float restir_sum = uintBitsToFloat(restir_words[at + 1u]);
         uint restir_m = restir_words[at + 2u];

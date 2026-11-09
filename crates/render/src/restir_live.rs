@@ -18,8 +18,25 @@ pub const LAMP_STRIDE: usize = 8;
 pub const HIST_STRIDE: u32 = 6;
 pub const CANDIDATES: u32 = 4;
 pub const PROPOSAL_TREE: u32 = 2;
+/// Product spatial taps. The scene setting is the source; this is the prefix default.
 pub const SPATIAL_NEIGHBORS: u32 = 4;
+/// Chebyshev radius of that window, in reservoir pixels.
 pub const SPATIAL_RADIUS: u32 = 2;
+/// Screen pixels along one edge of a reservoir cell. 1 is one reservoir per pixel.
+pub const RESOLUTION_SCALE: u32 = 1;
+/// 1 copies the even neighbour's spatial result onto odd reservoir pixels.
+pub const SPATIAL_CHECKERBOARD: u32 = 0;
+/// 1 keeps initial and temporal as two dispatches so each stamp is one pass.
+pub const SPLIT_PASSES: u32 = 0;
+/// Header word: screen pixels per reservoir edge.
+pub const SCALE_WORD: usize = 46;
+/// Header word: checkerboard spatial copy.
+pub const CHECKER_WORD: usize = 47;
+/// Header words: screen width and height. The reservoir grid is words 7 and 8.
+pub const SCREEN_W_WORD: usize = 48;
+pub const SCREEN_H_WORD: usize = 49;
+/// Header word: 1 splits initial and temporal into two dispatches.
+pub const SPLIT_WORD: usize = 50;
 /// Absolute history M cap: 20 frames of `CANDIDATES` initial samples. The
 /// per-frame clamp (20x the current M) still applies first.
 pub const M_CAP: u32 = 20 * CANDIDATES;
@@ -40,6 +57,94 @@ const _: () = assert!(HIST_ACCEPT_WORD == ANY_CHANGED_WORD + 4);
 const _: () = assert!(HIST_REJECT_WORD == HIST_ACCEPT_WORD + 1);
 const _: () = assert!(POINT_ADD_WORD == HIST_ACCEPT_WORD + 2);
 const _: () = assert!(POINT_ADD_WORD < HEADER_WORDS);
+const _: () = assert!(SPLIT_WORD < HEADER_WORDS);
+
+/// Pass costs the prefix writes into the header. The scene settings are the
+/// source. A test that omits them gets these product defaults.
+#[derive(Clone, Copy, Debug)]
+pub struct RestirCost {
+    /// Reservoir grid. The screen size is `screen_width` and `screen_height`.
+    pub width: u32,
+    pub height: u32,
+    pub spatial_neighbors: u32,
+    pub spatial_radius: u32,
+    pub resolution_scale: u32,
+    pub checkerboard: u32,
+    pub candidates: u32,
+    pub split_passes: u32,
+    pub screen_width: u32,
+    pub screen_height: u32,
+}
+
+impl Default for RestirCost {
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            spatial_neighbors: SPATIAL_NEIGHBORS,
+            spatial_radius: SPATIAL_RADIUS,
+            resolution_scale: RESOLUTION_SCALE,
+            checkerboard: SPATIAL_CHECKERBOARD,
+            candidates: CANDIDATES,
+            split_passes: SPLIT_PASSES,
+            screen_width: 0,
+            screen_height: 0,
+        }
+    }
+}
+
+/// Reservoir grid for a screen. Scale 1 keeps the screen size. A zero screen
+/// stays zero so a failed prepare does not dispatch one pixel.
+pub fn reservoir_size(width: u32, height: u32, scale: u32) -> (u32, u32) {
+    let scale = scale.clamp(1, 4);
+    if width == 0 || height == 0 {
+        return (0, 0);
+    }
+    ((width / scale).max(1), (height / scale).max(1))
+}
+
+/// One line of iteration counts. Lavapipe time is not this. Set
+/// `GENOS_RESTIR_COST=1`. The previous full-resolution window scan (4
+/// neighbours, radius 2) is printed beside the live taps.
+pub fn log_cost(reservoir_w: u32, reservoir_h: u32, cost: &RestirCost) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let on = *ON.get_or_init(|| {
+        #[expect(clippy::disallowed_methods, reason = "diagnostic knob read once")]
+        std::env::var("GENOS_RESTIR_COST").is_ok_and(|v| v == "1")
+    });
+    if !on {
+        return;
+    }
+    let pixels = u64::from(reservoir_w).saturating_mul(u64::from(reservoir_h));
+    let neighbors = u64::from(cost.spatial_neighbors.min(16));
+    let reach = u64::from(cost.spatial_radius.min(8));
+    let window = reach
+        .saturating_mul(2)
+        .saturating_add(1)
+        .saturating_pow(2)
+        .saturating_sub(1);
+    let spatial = if cost.checkerboard != 0 {
+        pixels.div_ceil(2).saturating_mul(neighbors)
+    } else {
+        pixels.saturating_mul(neighbors)
+    };
+    let old_window = u64::from(cost.screen_width)
+        .saturating_mul(u64::from(cost.screen_height))
+        .saturating_mul(24);
+    eprintln!(
+        "restir cost: reservoir={reservoir_w}x{reservoir_h} screen={}x{} scale={} candidates={} spatial_neighbors={} spatial_radius={} checkerboard={} split_passes={} initial_iters={} temporal_iters={pixels} spatial_phat={spatial} spatial_tries={} spatial_window={window} previous_full_window_scan={old_window}",
+        cost.screen_width,
+        cost.screen_height,
+        cost.resolution_scale.clamp(1, 4),
+        cost.candidates.clamp(1, 32),
+        neighbors,
+        reach,
+        u32::from(cost.checkerboard != 0),
+        u32::from(cost.split_passes != 0),
+        pixels.saturating_mul(u64::from(cost.candidates.clamp(1, 32))),
+        pixels.saturating_mul(neighbors).saturating_mul(4),
+    );
+}
 /// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
 /// and the changed-lamp bitset.
 pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 / 32;
@@ -146,10 +251,9 @@ pub fn prefix(
     lamps: &[GpuLamp],
     prev_lamps: &[GpuLamp],
     previous: &RestirCam,
-    width: u32,
-    height: u32,
     frame: u32,
     prev_slot: u32,
+    cost: RestirCost,
 ) -> Option<RestirPrefix> {
     let mut refs = Vec::new();
     let mut scene_index = Vec::new();
@@ -168,7 +272,11 @@ pub fn prefix(
     }
     let ranges: Vec<f32> = scene_index
         .iter()
-        .map(|id| lamps.get(usize::try_from(*id).unwrap_or(usize::MAX)).map_or(0.0, |item| item.range))
+        .map(|id| {
+            lamps
+                .get(usize::try_from(*id).unwrap_or(usize::MAX))
+                .map_or(0.0, |item| item.range)
+        })
         .collect();
     let tree = LightTree::build_ranged(&refs, &ranges);
     let nodes = tree.pack_words();
@@ -191,11 +299,12 @@ pub fn prefix(
         return None;
     }
     words.extend(nodes);
-    let (changed_base, layout_changed) =
-        push_changes(&mut words, lamps, prev_lamps, refs.len());
+    let (changed_base, layout_changed) = push_changes(&mut words, lamps, prev_lamps, refs.len());
     if words.len() > usize::try_from(PREFIX_CAP_WORDS).unwrap_or(usize::MAX) {
         return None;
     }
+    let width = cost.width;
+    let height = cost.height;
     let pixels = u64::from(width).saturating_mul(u64::from(height));
     let hist0 = u64::try_from(words.len()).unwrap_or(u64::MAX);
     let hist_words = pixels.saturating_mul(u64::from(HIST_STRIDE));
@@ -215,12 +324,18 @@ pub fn prefix(
     words[6] = scratch_u;
     words[7] = width;
     words[8] = height;
-    words[9] = CANDIDATES;
+    let candidates = cost.candidates.clamp(1, 32);
+    words[9] = candidates;
     words[10] = PROPOSAL_TREE;
     words[11] = DEFAULT_M_CLAMP;
-    words[12] = M_CAP;
-    words[13] = SPATIAL_NEIGHBORS;
-    words[14] = SPATIAL_RADIUS;
+    words[12] = candidates.saturating_mul(M_CAP / CANDIDATES);
+    words[13] = cost.spatial_neighbors.min(16);
+    words[14] = cost.spatial_radius.min(8);
+    words[SCALE_WORD] = cost.resolution_scale.clamp(1, 4);
+    words[CHECKER_WORD] = u32::from(cost.checkerboard != 0);
+    words[SCREEN_W_WORD] = cost.screen_width;
+    words[SCREEN_H_WORD] = cost.screen_height;
+    words[SPLIT_WORD] = u32::from(cost.split_passes != 0);
     words[15] = u32::from(layout_changed);
     if reuse_off() {
         // Diagnostic: no temporal history (word 15 forces the temporal pass
@@ -324,7 +439,12 @@ mod tests {
                 range: 8.0,
             },
         ];
-        let packed = prefix(&lamps, &lamps, &RestirCam::default(), 32, 16, 3, 0)
+        let cost = super::RestirCost {
+            width: 32,
+            height: 16,
+            ..super::RestirCost::default()
+        };
+        let packed = prefix(&lamps, &lamps, &RestirCam::default(), 3, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(u64::try_from(packed.words.len()).unwrap_or(u64::MAX) <= PREFIX_CAP_WORDS);
         assert_eq!(at(&packed.words, 0), 1, "the sun is not a leaf");
@@ -341,12 +461,37 @@ mod tests {
         assert!(at(&packed.words, 2) >= 1, "a lamp is a leaf");
         assert!(packed.total_words > u64::try_from(packed.words.len()).unwrap_or(0));
         assert_eq!(at(&packed.words, 12), super::M_CAP, "history M cap");
+        assert_eq!(at(&packed.words, 13), super::SPATIAL_NEIGHBORS);
+        assert_eq!(at(&packed.words, 14), super::SPATIAL_RADIUS);
+        assert_eq!(at(&packed.words, 46), super::RESOLUTION_SCALE);
+        assert_eq!(at(&packed.words, 50), super::SPLIT_PASSES);
         assert!(!packed.layout_changed);
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
         assert_eq!(packed.words.get(changed).copied(), Some(0), "nothing moved");
-        assert_eq!(packed.words.get(super::HIST_ACCEPT_WORD).copied().unwrap_or(0), 0);
-        assert_eq!(packed.words.get(super::HIST_REJECT_WORD).copied().unwrap_or(0), 0);
-        assert_eq!(packed.words.get(super::POINT_ADD_WORD).copied().unwrap_or(0), 0);
+        assert_eq!(
+            packed
+                .words
+                .get(super::HIST_ACCEPT_WORD)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            packed
+                .words
+                .get(super::HIST_REJECT_WORD)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
+        assert_eq!(
+            packed
+                .words
+                .get(super::POINT_ADD_WORD)
+                .copied()
+                .unwrap_or(0),
+            0
+        );
         let live = include_str!("../shaders/restir_live.comp");
         let direct = include_str!("../shaders/lighting_direct.comp");
         assert!(live.contains(&format!(
@@ -373,7 +518,12 @@ mod tests {
         };
         let before = [lamp(0.0), lamp(1.0), lamp(2.0)];
         let moved = [lamp(0.0), lamp(1.5), lamp(2.0)];
-        let packed = prefix(&moved, &before, &RestirCam::default(), 8, 8, 1, 0)
+        let cost = super::RestirCost {
+            width: 8,
+            height: 8,
+            ..super::RestirCost::default()
+        };
+        let packed = prefix(&moved, &before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(!packed.layout_changed, "same lamps, one moved");
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
@@ -383,7 +533,12 @@ mod tests {
             "only lamp 1 moved"
         );
         let fewer = [lamp(0.0), lamp(2.0)];
-        let packed = prefix(&fewer, &before, &RestirCam::default(), 8, 8, 1, 0)
+        let cost = super::RestirCost {
+            width: 8,
+            height: 8,
+            ..super::RestirCost::default()
+        };
+        let packed = prefix(&fewer, &before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(packed.layout_changed, "indices no longer match");
     }
@@ -394,7 +549,10 @@ mod tests {
         let mut words = vec![0u32; 40];
         words[15] = 1;
         super::set_history_reset(&mut words, false);
-        assert_eq!(words[15], 1, "shader-visible word 15 disagrees with the host");
+        assert_eq!(
+            words[15], 1,
+            "shader-visible word 15 disagrees with the host"
+        );
         words[15] = 0;
         super::set_history_reset(&mut words, true);
         assert_eq!(words[15], 1);
@@ -402,5 +560,4 @@ mod tests {
         super::set_history_reset(&mut words, false);
         assert_eq!(words[15], 0);
     }
-
 }

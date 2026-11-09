@@ -228,6 +228,21 @@ Role: LIGHTS · Literature: the noise-gate sample · More detail: `lamp_pick_unb
 **ReSTIR DI**: `restir_di`. Screen pixels shade one reservoir sample from the C1–C5 light tree, at every point-lamp count. On by default. Off is the labelled exact sum. The graded colour is that raw sample. A 32-frame mean is stored beside it and is not the picture. History is one reprojected pixel, relative depth 0.02, absolute 0.05 m, normal dot 0.9. The sun, the flame, and hit shades stay. `LampShadeGate::Exact` stays the labelled sum. With `GENOS_LIGHTING_LAMP_PICK_DIAG=1`, `lighting_lamp_pick_counts` reads `history_accepts` and `history_rejects` for that reprojection (a reset counts neither) and `restir_point_adds` for a near point lamp the direct loop added on a product pixel (stays 0 while the loop skips it). The three counts are restir header words 43, 44, and 45.
 Role: LIGHTS · Literature: ReSTIR DI (Bitterli et al. 2020); the light tree is Conty Estevez and Kulla, HPG 2018 · More detail: `crates/render/shaders/restir_live.comp`
 
+**ReSTIR spatial neighbours**: `restir_spatial_neighbors`. How many reservoirs the spatial pass merges. 0 skips that pass. Default 4. Header word 13. The radius is `restir_spatial_radius` (header word 14, default 2, reservoir pixels).
+Role: LIGHTS · Literature: ReSTIR spatial reuse (Bitterli et al. 2020) · More detail: `restir_live.comp`
+
+**ReSTIR resolution scale**: `restir_resolution_scale`. Screen pixels along one edge of a reservoir cell. Default 1 is one reservoir per pixel. 2 is one reservoir per 2×2, and each screen pixel still traces its own shadow ray. Header word 46.
+Role: LIGHTS · Literature: ReSTIR at a coarser grid · More detail: `restir_live.comp`
+
+**ReSTIR candidates**: `restir_candidates`. Initial light-tree candidates per reservoir. Default 4. Header word 9.
+Role: SAMPLE · Literature: ReSTIR M · More detail: `restir_sample.glsl`
+
+**ReSTIR checkerboard**: `restir_spatial_checkerboard`. 1 shades an odd reservoir pixel with the even neighbour's spatial sample. Default 0. Header word 47.
+Role: LIGHTS · Literature: checkerboard ReSTIR reuse · More detail: `restir_live.comp`
+
+**ReSTIR pass split**: `restir_split_passes`. 1 keeps initial and temporal as two dispatches so each GPU stamp is one pass. Default 0 runs temporal in the initial invocation, and the temporal stamp is then empty. Header word 50.
+Role: SCHED · Literature: — · More detail: `dispatch_restir_di`
+
 **Lamp layer** (proposed, ADR 0017): the finished indirect irradiance of one static point lamp, stored on the cache entries that lamp reaches, at unit white weight. A moving lamp does not get one. This is not the coarse layer, and it is not the traced field or the shown field.
 Role: STORE · Literature: Enlighten per-light transport (Martin and Einarsson, SIGGRAPH 2010); Lumen has none · More detail: [lamp-layering design](../systems/lamp-layering-design.md)
 

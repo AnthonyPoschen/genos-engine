@@ -303,6 +303,27 @@ fn gi_presets_shade_pixels_with_restir() {
 }
 
 #[test]
+fn restir_pass_cost_round_trips_and_clamps() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.restir_spatial_neighbors, 4);
+    assert_eq!(settings.restir_spatial_radius, 2);
+    assert_eq!(settings.restir_resolution_scale, 1);
+    assert_eq!(settings.restir_candidates, 4);
+    assert_eq!(settings.restir_spatial_checkerboard, 0);
+    assert_eq!(settings.restir_split_passes, 0);
+    settings.set_key("restir_spatial_neighbors", "8").expect("neighbors");
+    settings.set_key("restir_resolution_scale", "9").expect("scale");
+    settings.set_key("restir_candidates", "0").expect("candidates");
+    assert_eq!(settings.restir_spatial_neighbors, 8);
+    assert_eq!(settings.restir_resolution_scale, 4);
+    assert_eq!(settings.restir_candidates, 1);
+    let parsed = LightingSettings::parse(&settings.to_text()).expect("parse");
+    assert_eq!(parsed.restir_spatial_neighbors, 8);
+    assert_eq!(parsed.restir_resolution_scale, 4);
+    assert_eq!(parsed.restir_candidates, 1);
+}
+
+#[test]
 fn the_text_form_round_trips_every_preset() {
     for preset in LightingPreset::all() {
         let settings = LightingSettings::preset(*preset);

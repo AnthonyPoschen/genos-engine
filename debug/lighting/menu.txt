@@ -28,6 +28,12 @@ Pipeline | - | - | open | lighting_compose_reuse
 Pipeline | - | - | open | lighting_lamp_pick_reuse
 Pipeline | - | - | open | lighting_lamp_pick_unbiased
 Pipeline | - | - | open | lighting_restir_di
+Pipeline | - | - | open | lighting_restir_spatial_neighbors
+Pipeline | - | - | open | lighting_restir_spatial_radius
+Pipeline | - | - | open | lighting_restir_resolution_scale
+Pipeline | - | - | open | lighting_restir_candidates
+Pipeline | - | - | open | lighting_restir_spatial_checkerboard
+Pipeline | - | - | open | lighting_restir_split_passes
 Lamps | direct | Lamps | open | lighting_direct_lights
 Lamps | direct | Lamps | open | lighting_direct_refresh
 Lamps | direct | Lamps | open | lighting_direct_scale

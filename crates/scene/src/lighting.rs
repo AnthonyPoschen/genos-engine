@@ -193,6 +193,14 @@ impl ShadowFilter {
     }
 }
 
+/// Spatial reservoirs the product pass merges. 0 skips spatial reuse.
+pub const RESTIR_SPATIAL_NEIGHBORS: u32 = 4;
+/// Chebyshev radius of that window, in reservoir pixels.
+pub const RESTIR_SPATIAL_RADIUS: u32 = 2;
+/// Screen pixels along one edge of a reservoir cell. 1 is full resolution.
+pub const RESTIR_RESOLUTION_SCALE: u32 = 1;
+/// Initial candidates per reservoir. Header word 9.
+pub const RESTIR_CANDIDATES: u32 = 4;
 /// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
 pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
 /// Unshadowed reservoir candidates per pixel on Medium.
@@ -703,6 +711,21 @@ pub struct LightingSettings {
     /// Screen-pixel ReSTIR DI. On in every preset. Off is the labelled exact
     /// sum for a pixel mode that used to sample. Mode off already sums.
     pub restir_di: bool,
+    /// Spatial reservoirs merged per pixel. 0 skips the spatial pass. 1..=16.
+    pub restir_spatial_neighbors: u32,
+    /// Chebyshev radius of that window, in reservoir pixels. 0..=8.
+    pub restir_spatial_radius: u32,
+    /// Screen pixels along one edge of a reservoir cell. 1 is one reservoir
+    /// per pixel. 2 is one reservoir per 2×2. Each screen pixel still traces
+    /// its own shadow ray.
+    pub restir_resolution_scale: u32,
+    /// Initial candidates per reservoir. 1..=32. The header word the shader reads.
+    pub restir_candidates: u32,
+    /// 1 shades odd reservoir pixels with the even neighbour's spatial sample.
+    pub restir_spatial_checkerboard: u32,
+    /// 1 keeps initial and temporal as two dispatches so each GPU stamp is one
+    /// pass. 0 runs temporal in the initial invocation.
+    pub restir_split_passes: u32,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
@@ -888,6 +911,12 @@ impl LightingSettings {
             },
             lamp_pick: LampPickSettings::default(),
             restir_di: true,
+            restir_spatial_neighbors: RESTIR_SPATIAL_NEIGHBORS,
+            restir_spatial_radius: RESTIR_SPATIAL_RADIUS,
+            restir_resolution_scale: RESTIR_RESOLUTION_SCALE,
+            restir_candidates: RESTIR_CANDIDATES,
+            restir_spatial_checkerboard: 0,
+            restir_split_passes: 0,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
@@ -958,6 +987,12 @@ impl LightingSettings {
         };
         self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
+        self.restir_spatial_neighbors = self.restir_spatial_neighbors.min(16);
+        self.restir_spatial_radius = self.restir_spatial_radius.min(8);
+        self.restir_resolution_scale = self.restir_resolution_scale.clamp(1, 4);
+        self.restir_candidates = self.restir_candidates.clamp(1, 32);
+        self.restir_spatial_checkerboard = u32::from(self.restir_spatial_checkerboard != 0);
+        self.restir_split_passes = u32::from(self.restir_split_passes != 0);
     }
 
     /// World mode the shaders see. A forced mode wins once cache-to-cache is
@@ -1352,6 +1387,24 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
         let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
+        let _ = writeln!(
+            out,
+            "restir_spatial_neighbors={}",
+            self.restir_spatial_neighbors
+        );
+        let _ = writeln!(out, "restir_spatial_radius={}", self.restir_spatial_radius);
+        let _ = writeln!(
+            out,
+            "restir_resolution_scale={}",
+            self.restir_resolution_scale
+        );
+        let _ = writeln!(out, "restir_candidates={}", self.restir_candidates);
+        let _ = writeln!(
+            out,
+            "restir_spatial_checkerboard={}",
+            self.restir_spatial_checkerboard
+        );
+        let _ = writeln!(out, "restir_split_passes={}", self.restir_split_passes);
         let x = &self.experiments;
         let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
         let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
@@ -1549,6 +1602,12 @@ impl LightingSettings {
                 }
             }
             "restir_di" => self.restir_di = on(value)?,
+            "restir_spatial_neighbors" => self.restir_spatial_neighbors = num_u32(value)?,
+            "restir_spatial_radius" => self.restir_spatial_radius = num_u32(value)?,
+            "restir_resolution_scale" => self.restir_resolution_scale = num_u32(value)?,
+            "restir_candidates" => self.restir_candidates = num_u32(value)?,
+            "restir_spatial_checkerboard" => self.restir_spatial_checkerboard = num_u32(value)?,
+            "restir_split_passes" => self.restir_split_passes = num_u32(value)?,
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -1675,6 +1734,15 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
             ("GENOS_RESTIR_DI", "restir_di"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "restir_spatial_neighbors"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "restir_spatial_radius"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "restir_resolution_scale"),
+            ("GENOS_RESTIR_CANDIDATES", "restir_candidates"),
+            (
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+                "restir_spatial_checkerboard",
+            ),
+            ("GENOS_RESTIR_SPLIT_PASSES", "restir_split_passes"),
             ("GENOS_LIGHTING_ASYNC", "cache_async"),
             ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
             ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
