@@ -6,7 +6,7 @@ Design for review. Ground, aircraft, and space are the domains this proposal wou
 
 ## Context
 
-The pipeline plan sketches a wheeled car (P27–P31) and a thruster plus a wide orbit (P32). Those boxes were merged with the plan. They are not a reviewed vehicle decision. [ADR 0033](0033-physics-scale-broadphase-and-sleep.md) says vehicles are not decided there. No open pull request implements a vehicle.
+The pipeline plan sketches a wheeled car (P27–P31) and a thruster plus a wide orbit (P32). Those boxes were merged with the plan. They are not a reviewed vehicle decision. [ADR 0033](0033-physics-scale-broadphase-and-sleep.md) says vehicles are not decided there. G1, the four-wheel ground payload, S1, the thruster force, and S2, the wide orbit, are trial pull requests. This proposal stays proposed. Aircraft forces, the landing stage, and sea are not in those trials.
 
 Master already has the pieces a vehicle has to live on:
 
@@ -279,7 +279,7 @@ Gameplay networking still waits. This proposal does not open a socket, does not 
 
 ## Consequences
 
-`docs/systems/physics.md` records that a vehicle is not in the step. The commit that implements a stage updates the game use, the limits, and the five networking lines, and it adds the public words (`vehicle`, chassis payload, wheel ray) to `CONTEXT.md`.
+`docs/systems/physics.md` records G1, S1, and S2 in the step as trials, with the game use, the limits, and the five networking lines. `CONTEXT.md` has the public words those trials added. This proposal stays proposed. A later stage updates those same records for what it adds.
 
 Existing scenes stay the regression floor: resting pile, hull edges, ship lanes, the 10k static grid, sleep islands, and `cargo test -p genos-physics`. A vehicle stage that needs a looser assertion on those tests is wrong.
 
