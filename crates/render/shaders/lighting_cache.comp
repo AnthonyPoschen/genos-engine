@@ -281,7 +281,7 @@ void main() {
         // variance.
         if (sh && lighting_lamp_settling()) {
             vec4 prev = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-            vec3 picture = prev.w > 0.5 ? mix(prev.rgb, e, LIGHTING_SETTLE_PICTURE_ALPHA) : e;
+            vec3 picture = prev.w > LIGHTING_CACHE_HAS_W ? mix(prev.rgb, e, LIGHTING_SETTLE_PICTURE_ALPHA) : e;
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(picture, 1.0);
         }
         if (sh) {

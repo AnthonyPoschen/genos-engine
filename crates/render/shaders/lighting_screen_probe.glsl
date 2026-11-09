@@ -58,7 +58,7 @@ bool lighting_settle_own_covered(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         return false;
     }
     float size = lighting_cell_size(wpos);
-    if (size > 0.2) {
+    if (size > LIGHTING_WRC_CELL_SIZE) {
         return false;
     }
     uint ax = lighting_axis(n) >> 1u;
@@ -66,7 +66,7 @@ bool lighting_settle_own_covered(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     vec3 tb = vec3(0.0);
     ta[(ax + 1u) % 3u] = 1.0;
     tb[(ax + 2u) % 3u] = 1.0;
-    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - LIGHTING_CELL_HALF;
     vec2 g0 = floor(uv);
     vec2 f = uv - g0;
     bool any = false;
@@ -75,7 +75,7 @@ bool lighting_settle_own_covered(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (bil <= 0.0) {
             continue;
         }
-        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + LIGHTING_CELL_HALF;
         vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
         uint slot = lighting_cache_find_sized(q, n, false, size, pos);
         if (slot == ~0u || lighting_sc_stale(slot)) {
@@ -175,7 +175,7 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         // Trust under a half means the probes own the pixel. A higher trust
         // still shows the world colour; the path view's green channel marks
         // the mix.
-        if (world.w < 0.5) {
+        if (world.w < LIGHTING_CACHE_HAS_W) {
             lighting_px_shade = 3u;
         }
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));

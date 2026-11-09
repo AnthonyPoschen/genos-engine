@@ -1414,6 +1414,16 @@ const float LIGHTING_WRC_LOCAL_ALPHA = 1.0 / 8.0;
 // whole. This is the world-cell change rate. A step of 0.08 left the room
 // settle0 max above the legacy max.
 const float LIGHTING_SETTLE_PICTURE_ALPHA = LIGHTING_WRC_CHANGE_ALPHA;
+// Rec.709 luma, the floor under a relative step, and the cell-vs-mean gate.
+// The hall one-set is about twice the cell. A planted mean beside its cell
+// is closer than two thirds and stays the mean.
+const vec3 LIGHTING_LUMA = vec3(0.2126, 0.7152, 0.0722);
+const float LIGHTING_LUMA_FLOOR = 1.0e-4;
+const float LIGHTING_SETTLE_MEAN_RATIO = 2.0 / 3.0;
+// A stored field steps one sixteenth of the gap. A still field under two
+// percent relative luma holds, so hash jitter does not crawl.
+const float LIGHTING_SETTLE_FIELD_STEP = 1.0 / 16.0;
+const float LIGHTING_SETTLE_FIELD_HOLD = 0.02;
 
 float lighting_sc_cap(uint slot) {
     if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -2242,7 +2252,7 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         // reads the short step written beside it. Rays still read the mean.
         if (lighting_lamp_settling()) {
             vec4 picture = cache.v[LIGHTING_SC_EST_AT + 2u * s];
-            if (picture.w > 0.5) {
+            if (picture.w > LIGHTING_CACHE_HAS_W) {
                 v.rgb = picture.rgb;
             }
         }
@@ -3628,7 +3638,7 @@ const uint LIGHTING_DIAG_PROBE_READS = 2u;
 // seed; the picture may still be that field when the owner is unlit.
 uint lighting_px_classify_shown(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
-    if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2 && lighting_sc_svgf()) {
+    if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= LIGHTING_WRC_CELL_SIZE && lighting_sc_svgf()) {
         vec3 field = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
         uint pf = floatBitsToUint(cache.v[10u * LIGHTING_CACHE_SLOTS + slot].w);
         bool fresh = pf != 0u && (int(lighting_frame() - pf) <= 2 || lighting_view_held());
@@ -3638,12 +3648,12 @@ uint lighting_px_classify_shown(uint slot) {
         if (fresh && any(greaterThan(field, vec3(0.0)))) {
             return own.w >= LIGHTING_CACHE_HAS_W ? 2u : 5u;
         }
-        if (own.w > 0.5) {
+        if (own.w > LIGHTING_CACHE_HAS_W) {
             return 6u;
         }
         return 5u;
     }
-    if (own.w > 0.5) {
+    if (own.w > LIGHTING_CACHE_HAS_W) {
         return 6u;
     }
     return 8u;
@@ -3859,18 +3869,18 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                     corner_path = 2u;
                 } else {
                     vec4 cell = lighting_sh_read(q, n, false);
-                    float own_l = dot(v.rgb, vec3(0.2126, 0.7152, 0.0722));
-                    float cell_l = dot(cell.rgb, vec3(0.2126, 0.7152, 0.0722));
+                    float own_l = dot(v.rgb, LIGHTING_LUMA);
+                    float cell_l = dot(cell.rgb, LIGHTING_LUMA);
                     // The hall one-set is about twice the cell. A planted mean
                     // beside its cell is closer than that and stays the mean,
                     // including a corner of a bilinear blend.
-                    if (cell.w > LIGHTING_CACHE_HAS_W && own_l > 1.0e-4 && cell_l <= own_l * (2.0 / 3.0)) {
+                    if (cell.w > LIGHTING_CACHE_HAS_W && own_l > LIGHTING_LUMA_FLOOR && cell_l <= own_l * LIGHTING_SETTLE_MEAN_RATIO) {
                         v = vec4(cell.rgb, 1.0);
                         corner_path = 1u;
                     }
                 }
             }
-        } else if (v.w > 0.5) {
+        } else if (v.w > LIGHTING_CACHE_HAS_W) {
             corner_path = 6u;
         }
         if (mode == 3u && lighting_sc_stale(slot)) {
@@ -4795,9 +4805,9 @@ void lighting_svgf_push(uint slot) {
             // A settled texel jitters under the dirty-page epsilon. Stepping
             // that jitter moves a still picture. Hold the stored field. A real
             // handoff is well above this, so it still steps.
-            float prev_l = max(dot(prev, vec3(0.2126, 0.7152, 0.0722)), 1.0e-4);
-            float rel = dot(abs(outc - prev), vec3(0.2126, 0.7152, 0.0722)) / prev_l;
-            outc = rel < 0.02 ? prev : mix(prev, outc, 1.0 / 16.0);
+            float prev_l = max(dot(prev, LIGHTING_LUMA), LIGHTING_LUMA_FLOOR);
+            float rel = dot(abs(outc - prev), LIGHTING_LUMA) / prev_l;
+            outc = rel < LIGHTING_SETTLE_FIELD_HOLD ? prev : mix(prev, outc, LIGHTING_SETTLE_FIELD_STEP);
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);
