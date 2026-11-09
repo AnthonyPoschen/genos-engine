@@ -632,7 +632,7 @@ fn stored_error_bounds_the_deviation_and_is_monotone() {
 /// Coplanar covers close at the other mesh's triangle size, so these sheets
 /// follow triangle count. The old 4 mm cover took 34.5 s on a flat 8 m sheet
 /// and did not return on a flat 16 m sheet. Release cooks of these four are
-/// 0.02–0.13 s, so 2 s still fails a runaway split. Debug on a loaded CI
+/// 0.01–0.07 s, so 2 s still fails a runaway split. Debug on a loaded CI
 /// runner took 2.48 s for the wavy sheet, so the debug cap is 6 s.
 #[test]
 fn large_sheets_finish_quickly_and_the_bound_holds() {

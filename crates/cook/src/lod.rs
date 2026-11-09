@@ -13,8 +13,10 @@
 //! `distance(centroid) + r` is the other certificate. The cook stores the
 //! tighter of the two and splits only where that upper can still rise. A
 //! coplanar patch has a second certificate: distance to a plane is convex, so
-//! once the onto triangles that meet a region lie in a thin slab and cover it,
-//! the region stops. A flat sheet therefore stops at the other mesh's triangle
+//! once the onto triangles that meet a region lie in a thin slab and their
+//! projections leave nothing when subtracted from the query polygon, the
+//! region stops. A duplicate or an overlap cannot be counted twice. A flat
+//! sheet therefore stops at the other mesh's triangle
 //! size instead of at [`LOD_COVER_STOP_M`]. A per-mesh query budget stops a
 //! runaway split and
 //! keeps the largest upper still on the heap; that hit is counted by
@@ -44,8 +46,8 @@ pub const LOD_RATIOS: [f32; 3] = [0.5, 0.25, 0.125];
 const LOD_EIGHTHS: [usize; 3] = [4, 2, 1];
 /// Stamped into the cook hash. Borders stay locked.
 const LOD_LOCK_BORDER: u8 = 1;
-/// Stamped into the cook hash. 3 = vertex certificate plus a query budget.
-const LOD_ERROR_BOUND: u8 = 3;
+/// Stamped into the cook hash. 4 = the coplanar cover is a polygon difference.
+const LOD_ERROR_BOUND: u8 = 4;
 /// Stop splitting a sub-triangle once its covering radius is at most this, metres.
 /// 1/256 is exact in `f32`. Flat sheets close earlier, when one onto triangle
 /// already certifies the vertices.
@@ -437,9 +439,9 @@ fn triangle_ref(tris: &[MeshTriangle], index: u32) -> Option<&MeshTriangle> {
 /// Onto triangles a region may hand to the coplanar-cover test.
 /// More than this and the region is still larger than the onto mesh, so it splits.
 const PLANAR_CANDIDATES: usize = 128;
-/// Area shortfall, as a fraction of the query, that still counts as covered.
-/// The missing cap's height is at most `radius * sqrt(deficit)`.
-const PLANAR_AREA_SLACK: f32 = 1.0e-4;
+/// Cap on remainder polygons while subtracting. Past this the region splits
+/// instead of letting the difference fan out.
+const PLANAR_REMAINDER_CAP: usize = 512;
 
 /// Upper bound from a coplanar cover.
 ///
@@ -447,9 +449,11 @@ const PLANAR_AREA_SLACK: f32 = 1.0e-4;
 /// single onto triangle contains the query. A flat sheet straddles many onto
 /// triangles; those are coplanar, and distance to a plane is convex too. If the
 /// onto triangles that meet the query lie in a slab of thickness `slab` and
-/// their projections cover the query, every point of the query is within
-/// `plane distance + slab` of the surface. That closes the region at the onto
-/// mesh's triangle size instead of at [`LOD_COVER_STOP_M`].
+/// subtracting their projections from the query polygon leaves no remainder,
+/// every point of the query is within `plane distance + slab` of the surface
+/// (plus the subtraction tolerance). A positive remainder is not a cover:
+/// there is no area sum and no stand-in for the missing cap. That closes a
+/// flat sheet at the onto mesh's triangle size instead of at [`LOD_COVER_STOP_M`].
 fn planar_cover(
     onto: &OntoSurface<'_>,
     corners: [[f32; 3]; 3],
@@ -513,30 +517,16 @@ fn planar_cover(
         query_height = query_height.max(height);
     }
     let query_2d = corners.map(|corner| plane.project(corner));
-    let query_area = polygon_area(&query_2d);
-    if query_area <= 0.0 {
+    if polygon_area(&query_2d) <= 0.0 {
         return None;
     }
-    let mut covered = 0.0_f32;
-    let mut projected = Vec::with_capacity(scratch.hits.len());
-    for index in &scratch.hits {
-        let tri = triangle_ref(onto.tris, *index)?;
-        let flat = tri.positions.map(|corner| plane.project(corner));
-        if triangle_area_2d(flat) <= 0.0 {
-            continue;
-        }
-        projected.push(flat);
-        covered += polygon_area(&clip_to_query(&query_2d, &flat));
-    }
-    if overlaps_in_plane(&projected) {
+    let eps = cover_eps(corners);
+    if !projections_cover(onto.tris, &scratch.hits, &plane, &query_2d, eps) {
         return None;
     }
-    let deficit = (query_area - covered).max(0.0) / query_area;
-    if deficit > PLANAR_AREA_SLACK || !covered.is_finite() {
-        return None;
-    }
-    let gap = radius * deficit.sqrt();
-    let upper = f32::next_up(query_height + slab + gap);
+    // The clip is expanded by `eps`, so a point treated as covered can sit
+    // that far from the nearest onto triangle. That distance is proven.
+    let upper = f32::next_up(query_height + slab + eps);
     upper.is_finite().then_some(upper)
 }
 
@@ -617,128 +607,203 @@ impl Plane {
     }
 }
 
-fn overlaps_in_plane(triangles: &[[[f32; 2]; 3]]) -> bool {
-    for (left_index, left) in triangles.iter().enumerate() {
-        for right in triangles.iter().skip(left_index.saturating_add(1)) {
-            if triangles_overlap_2d(*left, *right) {
-                return true;
-            }
+/// In-plane tolerance for the polygon difference. Larger than an `f32` ulp at
+/// `scale`, smaller than a 0.1 mm step on the sheets this cook measures.
+fn cover_eps(corners: [[f32; 3]; 3]) -> f32 {
+    let mut scale = 1.0_f32;
+    for corner in corners {
+        for axis in corner {
+            scale = scale.max(axis.abs());
         }
     }
-    false
+    scale * 1.0e-6
 }
 
-fn triangles_overlap_2d(left: [[f32; 2]; 3], right: [[f32; 2]; 3]) -> bool {
-    for corner in left {
-        if strictly_inside(right, corner) {
-            return true;
-        }
-    }
-    for corner in right {
-        if strictly_inside(left, corner) {
-            return true;
-        }
-    }
-    for edge in 0..3 {
-        let next = (edge + 1) % 3;
-        for other in 0..3 {
-            let other_next = (other + 1) % 3;
-            if segments_cross(left[edge], left[next], right[other], right[other_next]) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn strictly_inside(triangle: [[f32; 2]; 3], point: [f32; 2]) -> bool {
-    let area = orient2(triangle[0], triangle[1], triangle[2]);
-    let scale = area.abs().max(1.0);
-    if area.abs() <= scale * 1.0e-6 {
-        return false;
-    }
-    let weight_a = orient2(triangle[1], triangle[2], point) / area;
-    let weight_b = orient2(triangle[2], triangle[0], point) / area;
-    let weight_c = orient2(triangle[0], triangle[1], point) / area;
-    weight_a > 1.0e-5 && weight_b > 1.0e-5 && weight_c > 1.0e-5
-}
-
-fn segments_cross(
-    start: [f32; 2],
-    end: [f32; 2],
-    other_start: [f32; 2],
-    other_end: [f32; 2],
+/// True when subtracting every onto projection from the query leaves no area.
+/// Each clip is removed from the remainder, so a duplicate or a partial overlap
+/// cannot fill a hole. The clips are expanded by `eps`; an empty remainder
+/// therefore means every query point is within `eps` of some onto triangle.
+fn projections_cover(
+    tris: &[MeshTriangle],
+    hits: &[u32],
+    plane: &Plane,
+    query: &[[f32; 2]; 3],
+    eps: f32,
 ) -> bool {
-    let left = orient2(start, end, other_start);
-    let right = orient2(start, end, other_end);
-    let across = orient2(other_start, other_end, start);
-    let back = orient2(other_start, other_end, end);
-    left * right < 0.0 && across * back < 0.0
+    let mut remainders: Vec<Vec<[f32; 2]>> = vec![query.to_vec()];
+    for index in hits {
+        if remainders.is_empty() {
+            return true;
+        }
+        let Some(tri) = triangle_ref(tris, *index) else {
+            return false;
+        };
+        let flat = tri.positions.map(|corner| plane.project(corner));
+        if triangle_area_2d(flat) <= eps * eps {
+            continue;
+        }
+        let mut next = Vec::new();
+        for polygon in &remainders {
+            if !boxes_meet(polygon, flat, eps) {
+                next.push(polygon.clone());
+                continue;
+            }
+            next.extend(subtract_convex(polygon, flat, eps));
+            if next.len() > PLANAR_REMAINDER_CAP {
+                return false;
+            }
+        }
+        remainders = next;
+    }
+    remainders
+        .iter()
+        .all(|polygon| polygon_area(polygon) <= 0.0)
+}
+
+fn boxes_meet(polygon: &[[f32; 2]], clip: [[f32; 2]; 3], eps: f32) -> bool {
+    let Some(first) = polygon.first() else {
+        return false;
+    };
+    let mut low = *first;
+    let mut high = *first;
+    for point in polygon {
+        low[0] = low[0].min(point[0]);
+        low[1] = low[1].min(point[1]);
+        high[0] = high[0].max(point[0]);
+        high[1] = high[1].max(point[1]);
+    }
+    let mut clip_low = clip[0];
+    let mut clip_high = clip[0];
+    for point in clip {
+        clip_low[0] = clip_low[0].min(point[0]);
+        clip_low[1] = clip_low[1].min(point[1]);
+        clip_high[0] = clip_high[0].max(point[0]);
+        clip_high[1] = clip_high[1].max(point[1]);
+    }
+    low[0] <= clip_high[0] + eps
+        && high[0] >= clip_low[0] - eps
+        && low[1] <= clip_high[1] + eps
+        && high[1] >= clip_low[1] - eps
+}
+
+/// `subject` minus the `eps`-neighbourhood of a convex triangle.
+/// The three outside pieces are disjoint: outside the first edge, then inside
+/// that edge and outside the next, then inside both and outside the last.
+fn subtract_convex(subject: &[[f32; 2]], clip: [[f32; 2]; 3], eps: f32) -> Vec<Vec<[f32; 2]>> {
+    let mut inside = subject.to_vec();
+    let mut outside = Vec::new();
+    for edge in 0..3 {
+        if inside.len() < 3 {
+            break;
+        }
+        let start = clip[edge];
+        let end = clip[(edge + 1) % 3];
+        let third = clip[(edge + 2) % 3];
+        let edge_len = span_len(start, end);
+        if edge_len <= eps {
+            return vec![subject.to_vec()];
+        }
+        let side = orient2(start, end, third);
+        if side.abs() <= eps * edge_len {
+            return vec![subject.to_vec()];
+        }
+        let (in_part, out_part) = split_halfplane(&inside, start, end, side > 0.0, eps, edge_len);
+        if polygon_area(&out_part) > 0.0 {
+            outside.push(out_part);
+        }
+        inside = in_part;
+    }
+    outside
+}
+
+fn split_halfplane(
+    polygon: &[[f32; 2]],
+    origin: [f32; 2],
+    edge: [f32; 2],
+    keep_positive: bool,
+    eps: f32,
+    edge_len: f32,
+) -> (Vec<[f32; 2]>, Vec<[f32; 2]>) {
+    let mut inside = Vec::new();
+    let mut outside = Vec::new();
+    let Some(last) = polygon.last().copied() else {
+        return (inside, outside);
+    };
+    let mut previous = last;
+    let mut previous_in = in_expanded(origin, edge, previous, keep_positive, eps, edge_len);
+    for point in polygon {
+        let point_in = in_expanded(origin, edge, *point, keep_positive, eps, edge_len);
+        if previous_in != point_in {
+            if let Some(hit) =
+                cross_offset(origin, edge, previous, *point, keep_positive, eps, edge_len)
+            {
+                inside.push(hit);
+                outside.push(hit);
+            }
+        }
+        if point_in {
+            inside.push(*point);
+        } else {
+            outside.push(*point);
+        }
+        previous = *point;
+        previous_in = point_in;
+    }
+    (inside, outside)
+}
+
+fn in_expanded(
+    origin: [f32; 2],
+    edge: [f32; 2],
+    point: [f32; 2],
+    keep_positive: bool,
+    eps: f32,
+    edge_len: f32,
+) -> bool {
+    let signed = orient2(origin, edge, point) / edge_len;
+    if keep_positive {
+        signed >= -eps
+    } else {
+        signed <= eps
+    }
+}
+
+fn cross_offset(
+    origin: [f32; 2],
+    edge: [f32; 2],
+    from: [f32; 2],
+    to: [f32; 2],
+    keep_positive: bool,
+    eps: f32,
+    edge_len: f32,
+) -> Option<[f32; 2]> {
+    let target = if keep_positive {
+        -eps * edge_len
+    } else {
+        eps * edge_len
+    };
+    let from_side = orient2(origin, edge, from);
+    let to_side = orient2(origin, edge, to);
+    let denom = from_side - to_side;
+    if !denom.is_finite() || denom.abs() <= f32::EPSILON {
+        return Some([f32::midpoint(from[0], to[0]), f32::midpoint(from[1], to[1])]);
+    }
+    let weight = ((from_side - target) / denom).clamp(0.0, 1.0);
+    let hit = [
+        from[0] + (to[0] - from[0]) * weight,
+        from[1] + (to[1] - from[1]) * weight,
+    ];
+    hit.iter().all(|axis| axis.is_finite()).then_some(hit)
+}
+
+fn span_len(start: [f32; 2], end: [f32; 2]) -> f32 {
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    (dx * dx + dy * dy).sqrt()
 }
 
 fn orient2(origin: [f32; 2], edge: [f32; 2], point: [f32; 2]) -> f32 {
     (edge[0] - origin[0]) * (point[1] - origin[1]) - (edge[1] - origin[1]) * (point[0] - origin[0])
-}
-
-fn clip_to_query(query: &[[f32; 2]; 3], subject: &[[f32; 2]; 3]) -> Vec<[f32; 2]> {
-    let mut polygon: Vec<[f32; 2]> = subject.to_vec();
-    for edge in 0..3 {
-        if polygon.is_empty() {
-            break;
-        }
-        let start = query[edge];
-        let end = query[(edge + 1) % 3];
-        let keep_positive = orient2(start, end, query[(edge + 2) % 3]) >= 0.0;
-        let mut next = Vec::with_capacity(polygon.len() + 1);
-        let mut previous = polygon[polygon.len() - 1];
-        let mut previous_inside = half_inside(start, end, previous, keep_positive);
-        for point in polygon.drain(..) {
-            let inside = half_inside(start, end, point, keep_positive);
-            if inside != previous_inside {
-                if let Some(hit) = segment_half_hit(start, end, previous, point) {
-                    next.push(hit);
-                }
-            }
-            if inside {
-                next.push(point);
-            }
-            previous = point;
-            previous_inside = inside;
-        }
-        polygon = next;
-    }
-    polygon
-}
-
-fn half_inside(start: [f32; 2], end: [f32; 2], point: [f32; 2], keep_positive: bool) -> bool {
-    let side = orient2(start, end, point);
-    if keep_positive {
-        side >= 0.0
-    } else {
-        side <= 0.0
-    }
-}
-
-fn segment_half_hit(
-    start: [f32; 2],
-    end: [f32; 2],
-    from: [f32; 2],
-    to: [f32; 2],
-) -> Option<[f32; 2]> {
-    let from_side = orient2(start, end, from);
-    let to_side = orient2(start, end, to);
-    let denom = from_side - to_side;
-    if denom.abs() <= f32::EPSILON {
-        return None;
-    }
-    let weight = from_side / denom;
-    if !(0.0..=1.0).contains(&weight) {
-        return None;
-    }
-    Some([
-        from[0] + (to[0] - from[0]) * weight,
-        from[1] + (to[1] - from[1]) * weight,
-    ])
 }
 
 fn polygon_area(polygon: &[[f32; 2]]) -> f32 {
@@ -1353,5 +1418,199 @@ mod tests {
             }
         }
         worst
+    }
+
+    fn assert_bound_covers_lattice(from: &Primitive, onto: &Primitive) {
+        let mut budget = CoverBudget::full();
+        let stored = surface_bound(from, onto, &mut budget).unwrap_or(f32::NAN);
+        let measured = lattice_against(from, onto, 16).max(lattice_against(onto, from, 16));
+        assert!(stored.is_finite(), "stored {stored}, lattice {measured}");
+        assert!(
+            measured <= stored + 1.0e-5,
+            "lattice {measured} exceeds stored {stored}"
+        );
+    }
+
+    fn holed_grid(duplicate: bool, overlap_half: bool) -> Primitive {
+        let mut mesh = grid_primitive(4, 1.0);
+        let row = 5_u32;
+        let mut kept = Vec::new();
+        for y in 0..4_u32 {
+            for x in 0..4_u32 {
+                if x == 1 && y == 1 {
+                    continue;
+                }
+                let i = y * row + x;
+                kept.extend([i, i + 1, i + row, i + 1, i + row + 1, i + row]);
+            }
+        }
+        if duplicate {
+            let copy = kept.clone();
+            kept.extend(copy);
+        }
+        if overlap_half {
+            let tris: Vec<[u32; 3]> = kept.as_chunks::<3>().0.to_vec();
+            for tri in tris {
+                let first = mesh
+                    .positions
+                    .get(usize::try_from(tri[0]).unwrap_or(0))
+                    .copied();
+                let third = mesh
+                    .positions
+                    .get(usize::try_from(tri[2]).unwrap_or(0))
+                    .copied();
+                let (Some(start), Some(end)) = (first, third) else {
+                    continue;
+                };
+                let mid = [
+                    f32::midpoint(start[0], end[0]),
+                    f32::midpoint(start[1], end[1]),
+                    f32::midpoint(start[2], end[2]),
+                ];
+                let Ok(index) = u32::try_from(mesh.positions.len()) else {
+                    continue;
+                };
+                mesh.positions.push(mid);
+                kept.extend([tri[0], tri[1], index]);
+            }
+        }
+        mesh.indices = kept;
+        mesh
+    }
+
+    #[test]
+    fn duplicated_triangles_do_not_fill_a_hole() {
+        let onto = holed_grid(true, false);
+        let from = grid_primitive(1, 1.0);
+        let mut budget = CoverBudget::full();
+        let stored = surface_bound(&from, &onto, &mut budget).unwrap_or(f32::NAN);
+        let measured = lattice_against(&from, &onto, 16);
+        assert!(
+            measured >= 0.05,
+            "lattice {measured} did not see the 0.25 cell hole"
+        );
+        assert!(
+            measured <= stored + 1.0e-5,
+            "duplicated cover stored {stored}, lattice {measured}"
+        );
+    }
+
+    #[test]
+    fn overlapping_triangles_do_not_fill_a_hole() {
+        let onto = holed_grid(false, true);
+        let from = grid_primitive(1, 1.0);
+        let mut budget = CoverBudget::full();
+        let stored = surface_bound(&from, &onto, &mut budget).unwrap_or(f32::NAN);
+        let measured = lattice_against(&from, &onto, 16);
+        assert!(measured >= 0.05, "lattice {measured} did not see the hole");
+        assert!(
+            measured <= stored + 1.0e-5,
+            "overlapping cover stored {stored}, lattice {measured}"
+        );
+    }
+
+    #[test]
+    fn a_five_millimetre_corner_cap_is_not_under_reported() {
+        // Equilateral, altitude 0.52 m. The 5 mm cap is a similar triangle, so
+        // its area fraction is under 1e-4 and `radius * sqrt(deficit)` is about
+        // 3.3 mm, inside the one-stop gate.
+        let height = 0.52_f32;
+        let half = height / 3.0_f32.sqrt();
+        let base_x = -0.005 + height;
+        let cut_half = half * (0.005 / height);
+        let from = Primitive {
+            positions: vec![
+                [-0.005, 0.0, 0.0],
+                [base_x, -half, 0.0],
+                [base_x, half, 0.0],
+            ],
+            indices: vec![0, 1, 2],
+            ..Primitive::default()
+        };
+        let onto = Primitive {
+            positions: vec![
+                [0.0, -cut_half, 0.0],
+                [base_x, -half, 0.0],
+                [base_x, half, 0.0],
+                [0.0, cut_half, 0.0],
+            ],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Primitive::default()
+        };
+        let mut budget = CoverBudget::full();
+        let stored = surface_bound(&from, &onto, &mut budget).unwrap_or(f32::NAN);
+        let measured = lattice_against(&from, &onto, 16);
+        assert!(measured >= 0.004, "lattice {measured} missed the 5 mm cap");
+        assert!(
+            measured <= stored + 1.0e-5,
+            "cap stored {stored}, lattice {measured}"
+        );
+    }
+
+    #[test]
+    fn a_tenth_millimetre_step_stays_above_the_lattice() {
+        let onto = Primitive {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [0.5, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.5, 1.0, 0.0],
+                [0.5, 0.0, 0.0001],
+                [1.0, 0.0, 0.0001],
+                [0.5, 1.0, 0.0001],
+                [1.0, 1.0, 0.0001],
+            ],
+            indices: vec![0, 1, 2, 1, 3, 2, 4, 5, 6, 5, 7, 6],
+            ..Primitive::default()
+        };
+        let from = Primitive {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            ..Primitive::default()
+        };
+        assert_bound_covers_lattice(&from, &onto);
+        let measured = lattice_against(&from, &onto, 16);
+        assert!(
+            measured >= 5.0e-5,
+            "lattice {measured} missed the 0.1 mm step"
+        );
+    }
+
+    #[test]
+    fn a_half_degree_crease_stays_above_the_lattice() {
+        let rise = 0.5_f32.to_radians().tan();
+        let onto = Primitive {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [0.5, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.5, 1.0, 0.0],
+                [1.0, 0.0, rise],
+                [1.0, 1.0, rise],
+            ],
+            indices: vec![0, 1, 2, 1, 3, 2, 1, 4, 3, 4, 5, 3],
+            ..Primitive::default()
+        };
+        let from = Primitive {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+            ],
+            indices: vec![0, 1, 2, 1, 3, 2],
+            ..Primitive::default()
+        };
+        assert_bound_covers_lattice(&from, &onto);
+        let measured = lattice_against(&from, &onto, 16);
+        assert!(
+            measured >= 0.5 * rise * 0.5,
+            "lattice {measured} missed the crease of {rise}"
+        );
     }
 }
