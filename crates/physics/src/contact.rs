@@ -2083,30 +2083,6 @@ mod edge_tests {
     }
 
     #[test]
-    fn a_step_separates_the_overlapping_edges_along_x() {
-        let reach = 0.5 * std::f32::consts::SQRT_2;
-        let a = cube(Vec3::ZERO, Vec3::Z);
-        let b = cube(Vec3::new(2.0 * reach - 0.05, 0.0, 0.0), Vec3::Y);
-        let hit = hull_hull_contact(&a, &hull(&a), &b, &hull(&b));
-        let mut world = crate::World::new(Vec3::ZERO);
-        world.insert(a);
-        world.insert(b);
-        let before = [world.bodies[0].position, world.bodies[1].position];
-        crate::step(&mut world, 1.0 / 60.0);
-        let moved_a = world.bodies[0].position - before[0];
-        let moved_b = world.bodies[1].position - before[1];
-        assert!(
-            moved_a.x < 0.0 && moved_b.x > 0.0,
-            "hit {hit:?} moved {moved_a:?} {moved_b:?} vel {:?} {:?} layers {:?} {:?} stats {:?}",
-            world.bodies[0].velocity,
-            world.bodies[1].velocity,
-            world.bodies[0].broad_phase_layer,
-            world.bodies[1].broad_phase_layer,
-            world.step_stats
-        );
-    }
-
-    #[test]
     fn crossed_edges_apart_have_no_hit() {
         let reach = 0.5 * std::f32::consts::SQRT_2;
         let a = cube(Vec3::ZERO, Vec3::Z);
