@@ -391,11 +391,32 @@ impl Renderer {
     }
 
     /// Rebuild the post chain for `hdr`. GI targets follow Potato so the check does not also build the High cache.
+    ///
+    /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
+    /// except Potato and Low settings, which stay SDR.
     pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
         self.gpu.lighting.settings =
             genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
         self.gpu.lighting.hdr = hdr;
-        self.gpu.make_lighting_targets()
+        self.gpu.lighting.budget_hdr = true;
+        let result = self.gpu.make_lighting_targets();
+        self.gpu.lighting.budget_hdr = false;
+        result
+    }
+
+    /// Ask the next frames to write the display-pass bloom tent and lattice samples.
+    pub fn set_bloom_probe(&mut self, on: bool) {
+        self.gpu.lighting.bloom_probe = on;
+    }
+
+    /// Bloom tent from the last display pass, before the intensity scale.
+    pub fn read_bloom_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_bloom_probe()
+    }
+
+    /// `agx_eval` at 64 lattice inputs, from the last display pass.
+    pub fn read_agx_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_agx_probe()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -810,8 +831,10 @@ impl Renderer {
     }
 
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_color()
+        self.gpu.copy_last_picture(false)?;
+        let pixels = self.gpu.read_color()?;
+        self.gpu.free_picture_host();
+        Ok(pixels)
     }
 
     /// Scene-referred radiance of the last compose, before the display transform.
@@ -819,8 +842,10 @@ impl Renderer {
     /// Empty when lighting has not allocated the image. Each texel goes through
     /// [`scene_read_from_rgba`], which calls [`scene_referred`].
     pub fn read_scene(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_scene_host()
+        self.gpu.copy_last_picture(true)?;
+        let scene = self.gpu.read_scene_host()?;
+        self.gpu.free_picture_host();
+        Ok(scene)
     }
 
     /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
@@ -1015,7 +1040,11 @@ impl Renderer {
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
-            Some(self.gpu.read_color()?)
+            let pixels = self.gpu.read_color()?;
+            if !self.keep_pictures {
+                self.gpu.free_picture_host();
+            }
+            Some(pixels)
         } else {
             None
         };
@@ -3136,12 +3165,6 @@ impl Gpu {
                 "image list",
             )?;
 
-            let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
-                8
-            } else {
-                4
-            };
-            let bytes = self.extent_w as u64 * self.extent_h as u64 * bpp;
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
                     self.format,
@@ -3155,7 +3178,7 @@ impl Gpu {
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
-                self.hosts[slot] = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+                self.hosts[slot] = Buffer::empty();
             }
             self.color = copy_image(&self.colors[0]);
             self.depth = copy_image(&self.depths[0]);
@@ -3633,6 +3656,7 @@ impl Gpu {
             self.copy_color_to_swapchain(swap);
             // The host copy is a whole picture over the bus; only a readback pays it.
             if self.copy_picture {
+                self.ensure_picture_host()?;
                 self.copy_color_to_buffer();
             }
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
@@ -4191,7 +4215,14 @@ impl Gpu {
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;
-        self.host = saved;
+        let freed = self.hosts[slot].buffer;
+        let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+        self.destroy_buffer(&mut host);
+        self.host = if saved.buffer.is_null() || saved.buffer == freed {
+            Buffer::empty()
+        } else {
+            saved
+        };
         Ok(pixels)
     }
 
@@ -4242,8 +4273,9 @@ impl Gpu {
     ///
     /// Reuses that frame's command buffer and fence; the next frame on this flight
     /// waits for the fence as usual.
-    fn copy_last_picture(&mut self) -> Result<(), String> {
+    fn copy_last_picture(&mut self, with_scene: bool) -> Result<(), String> {
         self.wait_gpu()?;
+        self.ensure_picture_host()?;
         unsafe {
             let fences = [self.fence];
             check(
@@ -4253,7 +4285,9 @@ impl Gpu {
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             self.copy_color_to_buffer();
-            self.copy_scene_for_readback();
+            if with_scene {
+                self.copy_scene_for_readback();
+            }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
             #[repr(C)]
             struct Submit {
@@ -4318,10 +4352,11 @@ impl Gpu {
     }
 
     /// BGRA8 picture of an HDR frame. The swapchain holds PQ or fp16 words, so
-    /// the display pass also stores the SDR bytes in each encode texel's fourth word.
+    /// the display pass stores the SDR bytes after the packed fp16 image.
     fn read_color_of_hdr(&self, bytes: usize) -> Result<Vec<u8>, String> {
         let pixels = bytes / 4;
-        let need = pixels.saturating_mul(16);
+        let tail = pixels.saturating_mul(8);
+        let need = tail.saturating_add(bytes);
         let memory = self.lighting.hdr_encode.memory;
         let size = self.lighting.hdr_encode.size;
         if memory.is_null() || usize::try_from(size).unwrap_or(0) < need {
@@ -4335,13 +4370,51 @@ impl Gpu {
                 "map hdr readback",
             )?;
             let words = mapped as *const u8;
-            for index in 0..pixels {
-                let src = words.add(index * 16 + 12);
-                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(index * 4), 4);
-            }
+            std::ptr::copy_nonoverlapping(words.add(tail), out.as_mut_ptr(), bytes);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(out)
+    }
+
+    fn picture_host_bytes(&self) -> u64 {
+        let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
+            8
+        } else {
+            4
+        };
+        u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(bpp)
+    }
+
+    /// The picture readback buffer is allocated for the copy and freed after the read.
+    fn ensure_picture_host(&mut self) -> Result<(), String> {
+        let bytes = self.picture_host_bytes();
+        if bytes == 0 {
+            return Ok(());
+        }
+        let slot = self.flight;
+        if self.hosts[slot].size < bytes {
+            let next = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+            let mut old = std::mem::replace(&mut self.hosts[slot], next);
+            self.destroy_buffer(&mut old);
+        }
+        self.host = copy_buffer(&self.hosts[slot]);
+        Ok(())
+    }
+
+    fn free_picture_host(&mut self) {
+        let handle = self.host.buffer;
+        if handle.is_null() {
+            return;
+        }
+        for slot in 0..2 {
+            if self.hosts[slot].buffer == handle {
+                let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+                self.destroy_buffer(&mut host);
+            }
+        }
+        self.host = Buffer::empty();
     }
 
     /// Device scene image to the host buffer. The fence has already waited.

@@ -8,6 +8,31 @@ const float AGX_LOG_MIN_C = -10.0;
 const float AGX_LOG_MAX_C = 6.5;
 const float AGX_SLOPE = 2.4;
 const float AGX_POWER = 1.5;
+const float AGX_SECTORS = 6.0;
+const float AGX_HUE_HALF = 0.5;
+const float AGX_SECTOR_GREEN = 2.0;
+const float AGX_SECTOR_CYAN = 3.0;
+const float AGX_SECTOR_BLUE = 4.0;
+const float AGX_SECTOR_MAGENTA = 5.0;
+const vec3 AGX_Y_W = vec3(0.2589235355689848, 0.6104985346066525, 0.13057792982436284);
+const vec3 AGX_INSET_0 = vec3(0.8566271562887792, 0.0951212454025349, 0.0482515983086858);
+const vec3 AGX_INSET_1 = vec3(0.13731897228355167, 0.7612419870090806, 0.10143904070736748);
+const vec3 AGX_INSET_2 = vec3(0.11189820804517953, 0.07679941456251757, 0.811302377392303);
+const vec3 AGX_OUTSET_0 = vec3(1.12710056963012, -0.11060663857826065, -0.01649393105185902);
+const vec3 AGX_OUTSET_1 = vec3(-0.14132975442135337, 1.1578236854732127, -0.01649393105185903);
+const vec3 AGX_OUTSET_2 = vec3(-0.14132975442135326, -0.11060663857826059, 1.251936392999614);
+const vec3 AGX_709_XYZ_0 = vec3(0.4123865632529918, 0.3575914909206254, 0.1804504912035637);
+const vec3 AGX_709_XYZ_1 = vec3(0.2126368216773238, 0.7151829818412507, 0.0721801964814255);
+const vec3 AGX_709_XYZ_2 = vec3(0.019330620152484, 0.1191971636402085, 0.9503725870054355);
+const vec3 AGX_XYZ_2020_0 = vec3(1.7166634277958805, -0.3556733197301399, -0.2533680878902478);
+const vec3 AGX_XYZ_2020_1 = vec3(-0.6666738361988869, 1.616455739824698, 0.0157682970961337);
+const vec3 AGX_XYZ_2020_2 = vec3(0.0176424817849772, -0.0427769763827532, 0.9422432810184308);
+const vec3 AGX_2020_XYZ_0 = vec3(0.636953506785074, 0.1446191846692331, 0.1688558539228734);
+const vec3 AGX_2020_XYZ_1 = vec3(0.262698338956556, 0.6780087657728165, 0.0592928952706273);
+const vec3 AGX_2020_XYZ_2 = vec3(0.0, 0.028073135847557, 1.0608272349505707);
+const vec3 AGX_XYZ_709_0 = vec3(3.241003232976359, -1.5373989694887855, -0.4986158819963629);
+const vec3 AGX_XYZ_709_1 = vec3(-0.9692242522025164, 1.875929983695176, 0.04155422634008472);
+const vec3 AGX_XYZ_709_2 = vec3(0.05563941985197547, -0.20401120612390994, 1.0571489771875333);
 
 vec3 agx_mul(vec3 r0, vec3 r1, vec3 r2, vec3 v) {
     return vec3(dot(r0, v), dot(r1, v), dot(r2, v));
@@ -47,23 +72,22 @@ float agx_curve(float x) {
     if (!(curved > 0.0)) {
         return 0.0;
     }
-    return pow(curved, 2.4);
+    return pow(curved, AGX_SLOPE);
 }
 
 vec3 agx_compensate(vec3 rgb) {
-    vec3 y_w = vec3(0.2589235355689848, 0.6104985346066525, 0.13057792982436284);
-    float y = dot(rgb, y_w);
+    float y = dot(rgb, AGX_Y_W);
     float peak = max(rgb.r, max(rgb.g, rgb.b));
     vec3 inverse = vec3(peak) - rgb;
     float max_inverse = max(inverse.r, max(inverse.g, inverse.b));
-    float y_compensate = max_inverse - dot(inverse, y_w) + y;
+    float y_compensate = max_inverse - dot(inverse, AGX_Y_W) + y;
     float min_rgb = min(rgb.r, min(rgb.g, rgb.b));
     float offset = max(-min_rgb, 0.0);
     vec3 shifted = rgb + vec3(offset);
     float peak_shifted = max(shifted.r, max(shifted.g, shifted.b));
     vec3 inverse_shifted = vec3(peak_shifted) - shifted;
     float max_inverse_shifted = max(inverse_shifted.r, max(inverse_shifted.g, inverse_shifted.b));
-    float y_new = max_inverse_shifted - dot(inverse_shifted, y_w) + dot(shifted, y_w);
+    float y_new = max_inverse_shifted - dot(inverse_shifted, AGX_Y_W) + dot(shifted, AGX_Y_W);
     float ratio = y_new > y_compensate ? y_compensate / y_new : 1.0;
     return shifted * ratio;
 }
@@ -78,13 +102,13 @@ vec3 agx_rgb_to_hsv(vec3 rgb) {
         if (rgb.r >= rgb.g && rgb.r >= rgb.b) {
             float sector = (rgb.g - rgb.b) / delta;
             if (sector < 0.0) {
-                sector += 6.0;
+                sector += AGX_SECTORS;
             }
-            hue = sector / 6.0;
+            hue = sector / AGX_SECTORS;
         } else if (rgb.g >= rgb.b) {
-            hue = ((rgb.b - rgb.r) / delta + 2.0) / 6.0;
+            hue = ((rgb.b - rgb.r) / delta + AGX_SECTOR_GREEN) / AGX_SECTORS;
         } else {
-            hue = ((rgb.r - rgb.g) / delta + 4.0) / 6.0;
+            hue = ((rgb.r - rgb.g) / delta + AGX_SECTOR_BLUE) / AGX_SECTORS;
         }
     }
     return vec3(hue, saturation, peak);
@@ -100,7 +124,7 @@ vec3 agx_hsv_to_rgb(vec3 hsv) {
     if (saturation == 0.0) {
         return vec3(value);
     }
-    float sector_f = hue * 6.0;
+    float sector_f = hue * AGX_SECTORS;
     float sector = floor(sector_f);
     float fraction = sector_f - sector;
     float p = value * (1.0 - saturation);
@@ -109,16 +133,16 @@ vec3 agx_hsv_to_rgb(vec3 hsv) {
     if (sector < 1.0) {
         return vec3(value, t, p);
     }
-    if (sector < 2.0) {
+    if (sector < AGX_SECTOR_GREEN) {
         return vec3(q, value, p);
     }
-    if (sector < 3.0) {
+    if (sector < AGX_SECTOR_CYAN) {
         return vec3(p, value, t);
     }
-    if (sector < 4.0) {
+    if (sector < AGX_SECTOR_BLUE) {
         return vec3(p, q, value);
     }
-    if (sector < 5.0) {
+    if (sector < AGX_SECTOR_MAGENTA) {
         return vec3(t, p, value);
     }
     return vec3(value, p, q);
@@ -127,9 +151,9 @@ vec3 agx_hsv_to_rgb(vec3 hsv) {
 float agx_lerp_hue(float start, float end, float t) {
     float delta = end - start;
     float wrapped = end;
-    if (delta > 0.5) {
+    if (delta > AGX_HUE_HALF) {
         wrapped = end - 1.0;
-    } else if (delta < -0.5) {
+    } else if (delta < -AGX_HUE_HALF) {
         wrapped = end + 1.0;
     }
     float hue = start + t * (wrapped - start);
@@ -141,53 +165,33 @@ float agx_lerp_hue(float start, float end, float t) {
 }
 
 float agx_encode(float x) {
-    float encoded = x <= 0.0 ? 0.0 : pow(x, 1.0 / 2.4);
+    float encoded = x <= 0.0 ? 0.0 : pow(x, 1.0 / AGX_SLOPE);
     return clamp(encoded, 0.0, 1.0);
 }
 
 vec3 agx_base(vec3 color) {
     vec3 guarded = agx_compensate(color);
-    vec3 inset = agx_mul(
-        vec3(0.8566271562887792, 0.0951212454025349, 0.0482515983086858),
-        vec3(0.13731897228355167, 0.7612419870090806, 0.10143904070736748),
-        vec3(0.11189820804517953, 0.07679941456251757, 0.811302377392303),
-        guarded
-    );
+    vec3 inset = agx_mul(AGX_INSET_0, AGX_INSET_1, AGX_INSET_2, guarded);
     vec3 pre = agx_rgb_to_hsv(inset);
     vec3 linear = vec3(agx_curve(inset.r), agx_curve(inset.g), agx_curve(inset.b));
     vec3 post = agx_rgb_to_hsv(linear);
     post.x = agx_lerp_hue(pre.x, post.x, AGX_HUE);
-    return agx_mul(
-        vec3(1.12710056963012, -0.11060663857826065, -0.01649393105185902),
-        vec3(-0.14132975442135337, 1.1578236854732127, -0.01649393105185903),
-        vec3(-0.14132975442135326, -0.11060663857826059, 1.251936392999614),
-        agx_hsv_to_rgb(post)
-    );
+    return agx_mul(AGX_OUTSET_0, AGX_OUTSET_1, AGX_OUTSET_2, agx_hsv_to_rgb(post));
 }
 
 vec3 agx_eval(vec3 scene) {
     vec3 rec2020 = agx_mul(
-        vec3(1.7166634277958805, -0.3556733197301399, -0.2533680878902478),
-        vec3(-0.6666738361988869, 1.616455739824698, 0.0157682970961337),
-        vec3(0.0176424817849772, -0.0427769763827532, 0.9422432810184308),
-        agx_mul(
-            vec3(0.4123865632529918, 0.3575914909206254, 0.1804504912035637),
-            vec3(0.2126368216773238, 0.7151829818412507, 0.0721801964814255),
-            vec3(0.019330620152484, 0.1191971636402085, 0.9503725870054355),
-            scene
-        )
+        AGX_XYZ_2020_0,
+        AGX_XYZ_2020_1,
+        AGX_XYZ_2020_2,
+        agx_mul(AGX_709_XYZ_0, AGX_709_XYZ_1, AGX_709_XYZ_2, scene)
     );
     vec3 formed = agx_base(rec2020);
     vec3 rec709 = agx_mul(
-        vec3(3.241003232976359, -1.5373989694887855, -0.4986158819963629),
-        vec3(-0.9692242522025164, 1.875929983695176, 0.04155422634008472),
-        vec3(0.05563941985197547, -0.20401120612390994, 1.0571489771875333),
-        agx_mul(
-            vec3(0.636953506785074, 0.1446191846692331, 0.1688558539228734),
-            vec3(0.262698338956556, 0.6780087657728165, 0.0592928952706273),
-            vec3(0.0, 0.028073135847557, 1.0608272349505707),
-            formed
-        )
+        AGX_XYZ_709_0,
+        AGX_XYZ_709_1,
+        AGX_XYZ_709_2,
+        agx_mul(AGX_2020_XYZ_0, AGX_2020_XYZ_1, AGX_2020_XYZ_2, formed)
     );
     vec3 guarded = agx_compensate(rec709);
     return vec3(agx_encode(guarded.r), agx_encode(guarded.g), agx_encode(guarded.b));

@@ -283,7 +283,7 @@ Frame budgets, using numbers already in the tree:
 
 - Basic scene, above 500 fps, means a frame under 2.0 ms. High post 1.20 ms plus the frozen lighting floor of 0.43 ms from ADR 0013 is 1.63 ms.
 - Stress scene, about 100 fps, means a frame under 10 ms. High post 1.20 ms plus the ADR 0013 High lighting cap of 8 ms at 1080p is 9.20 ms. The 8 ms cap is not a 1440p measurement. If 1440p lighting exceeds 8.80 ms, the lighting cap moves. This design does not raise the post ceiling to pay for it.
-The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366.
+The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366. The gate does not round: it compares allocated bytes with ceiling × 1024².
 
 - 4 GB is the minimum. High with scRGB is 79.685 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
 
