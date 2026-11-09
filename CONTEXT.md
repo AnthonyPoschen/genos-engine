@@ -148,6 +148,10 @@ _Avoid_: Speculative contact, time of impact
 The ground payload's in-plane force from a wheel's spin against its contact speed. Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip denominator)`. Lateral slip is the angle between the wheel heading and the contact velocity. The force uses a three-point curve and is capped by the suspension load. It is not a contact-solver row. A wheel with no positive radius applies none.
 _Avoid_: Pacejka, wheel body
 
+**Gearbox**:
+The ground payload's torque path when a drive block is present. A table of rpm and torque is interpolated. `gear` picks a ratio, including a negative reverse, then a final drive. Engine speed is the mean spin of the driven wheels through that ratio. An open differential writes the same torque to each driven wheel. The clutch is 0 or 1. Wheel spin integrates from that torque and the tyre reaction. No drive block leaves wheel spin as the game wrote it.
+_Avoid_: Limited-slip differential, clutch slip
+
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 _Avoid_: Joint, spring

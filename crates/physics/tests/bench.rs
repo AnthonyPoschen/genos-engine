@@ -99,4 +99,15 @@ fn timed_math_and_physics_batch_does_not_allocate() {
     let tyre_allocs = ALLOCS.load(Ordering::Relaxed) - before_tyre;
     println!("tyre_allocs={tyre_allocs}");
     assert_eq!(tyre_allocs, 0, "tyre step allocated {tyre_allocs} times");
+
+    let mut drive = genos_physics::first_gear_world();
+    step(&mut drive, 1.0 / 60.0);
+    let before_drive = ALLOCS.load(Ordering::Relaxed);
+    step(&mut drive, 1.0 / 60.0);
+    let drive_allocs = ALLOCS.load(Ordering::Relaxed) - before_drive;
+    println!("drive_allocs={drive_allocs}");
+    assert_eq!(
+        drive_allocs, 0,
+        "gearbox step allocated {drive_allocs} times"
+    );
 }
