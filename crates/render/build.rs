@@ -99,7 +99,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_detail: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod.comp.spv"),
-            &[],
+            &["-DGENOS_COMPOSE_WALK=1"],
             true,
         ),
         // Same production function, compose's read-only specialization.
@@ -111,7 +111,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_detail_ro: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
-            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
+            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1", "-DGENOS_COMPOSE_WALK=1"],
             false,
         ),
         // One specialization. No screen-probe include and no DontInline edit.
@@ -471,18 +471,22 @@ fn compile_texel_detail(
 }
 
 fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
+    let compose = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("compose"));
     let mut args = vec![src];
+    // The neighbour memo and the gather cap stay out of every other shader.
+    if compose {
+        args.push("-DGENOS_COMPOSE_WALK=1");
+    }
     args.extend(extra);
     args.extend(["-o", dest.to_str().unwrap()]);
     let status = Command::new("glslc").args(&args).status().expect("glslc");
     if !status.success() {
         panic!("glslc failed for {src} {extra:?}");
     }
-    if dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains("compose"))
-    {
+    if compose {
         mark_compose_dont_inline(dest);
     }
     dest.to_path_buf()
@@ -575,16 +579,25 @@ fn mark_compose_dont_inline(path: &std::path::Path) {
 
 /// glslc's wrapper does not forward `-D`. The plain a-trous kernel needs the macro.
 fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
+    let define_flag = format!("-D{define}");
+    let mut args = vec![
+        "-V",
+        "--target-env",
+        "vulkan1.0",
+        define_flag.as_str(),
+        src,
+        "-o",
+        dest.to_str().unwrap(),
+    ];
+    let compose = dest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("compose"));
+    if compose {
+        args.insert(4, "-DGENOS_COMPOSE_WALK=1");
+    }
     let status = Command::new("glslangValidator")
-        .args([
-            "-V",
-            "--target-env",
-            "vulkan1.0",
-            &format!("-D{define}"),
-            src,
-            "-o",
-            dest.to_str().unwrap(),
-        ])
+        .args(&args)
         .status()
         .expect("glslangValidator");
     if !status.success() {

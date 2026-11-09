@@ -358,7 +358,8 @@ def _guard_sources():
     # The screen and seed read is the eight-corner blend at the true normal.
     # A corner is found with claim false, then accepted, and only then stamped.
     # The old axis-only skip is not this read. The loop lives in
-    # lighting_sh_gather; lighting_sh_read returns that field's value.
+    # lighting_sh_gather. The compose compile memoizes that value; every other
+    # compile returns it directly. Neither claims a slot.
     read_at = shader.find("vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)")
     owner_at = shader.find("bool lighting_sh_detail_owner_lit", read_at if read_at >= 0 else 0)
     if read_at < 0 or owner_at < 0:

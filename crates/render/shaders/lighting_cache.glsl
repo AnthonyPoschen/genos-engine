@@ -880,21 +880,28 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
 // Compose's screen-probe indirect counts neighbour gathers. Other passes leave
 // the flag clear. lighting_compose_find_begin zeros the counters per pixel.
-// The count is the eight-cell read, not every cache search in the pixel: the
-// legacy parent and hit walks are not this regression.
+// The count is the eight-cell read, not every cache search in the pixel.
+// GENOS_COMPOSE_WALK is the compose compile only, so a ray shader does not
+// carry the counter or the memo.
+#ifdef GENOS_COMPOSE_WALK
 bool lighting_px_count_finds = false;
 bool lighting_px_in_gather = false;
 uint lighting_px_gathers = 0u;
 uint lighting_px_find_iters = 0u;
+#endif
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
+#ifdef GENOS_COMPOSE_WALK
     bool tally = lighting_px_count_finds && lighting_px_in_gather;
+#endif
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     uint free_at = LIGHTING_CACHE_SEARCH;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
+#ifdef GENOS_COMPOSE_WALK
         if (tally) {
             lighting_px_find_iters += 1u;
         }
+#endif
         uint k = ckeys.key[(start + i) & (LIGHTING_CACHE_SLOTS - 1u)];
         if (k == key) {
             uint found = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
@@ -909,9 +916,11 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
         return ~0u;
     }
     [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
+#ifdef GENOS_COMPOSE_WALK
         if (tally) {
             lighting_px_find_iters += 1u;
         }
+#endif
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
         if (prev == 0u) {
@@ -2228,9 +2237,11 @@ struct LightingShField {
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_WALK
     if (lighting_px_count_finds) {
         lighting_px_gathers += 1u;
     }
+#endif
     const float cs = LIGHTING_SH_CELL;
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     uint ax = lighting_axis(n) >> 1u;
@@ -2261,9 +2272,13 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         vec3 idx = g0 + vec3(float(dx), float(dy), float(dz));
         vec3 centre = (idx + vec3(LIGHTING_CELL_HALF) + inset) * cs;
         looks += 1u;
+#ifdef GENOS_COMPOSE_WALK
         lighting_px_in_gather = true;
+#endif
         uint s = lighting_cache_find_sized(centre, an, false, cs, p);
+#ifdef GENOS_COMPOSE_WALK
         lighting_px_in_gather = false;
+#endif
         if (s == ~0u) {
             continue;
         }
@@ -2312,6 +2327,8 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
 }
 // One invocation re-reads the same corner from coverage and from the pixel.
 // Four entries cover the bilinear corners. A fifth call gathers again.
+// The array stays in the compose compile. Other shaders return the gather.
+#ifdef GENOS_COMPOSE_WALK
 struct LightingShMemo {
     vec4 value;
     vec3 p;
@@ -2321,7 +2338,9 @@ struct LightingShMemo {
 };
 LightingShMemo lighting_sh_memo[4];
 uint lighting_sh_memo_n = 0u;
+#endif
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_WALK
     uint bit = claim ? 1u : 0u;
     for (uint i = 0u; i < 4u; i++) {
         if (i >= lighting_sh_memo_n) {
@@ -2343,6 +2362,9 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
         lighting_sh_memo[at].claim = bit;
     }
     return value;
+#else
+    return lighting_sh_gather(p, n, claim).value;
+#endif
 }
 // The stored detail seed stays while the neighbour read still has a corner.
 // A lamp change that leaves every corner empty must not keep showing the old
@@ -3682,13 +3704,16 @@ const uint LIGHTING_DIAG_PROBE_READS = 2u;
 // The cap does not stop the loop: a hang is still a hang.
 const uint LIGHTING_COMPOSE_GATHER_CAP = 4u;
 void lighting_compose_find_begin() {
+#ifdef GENOS_COMPOSE_WALK
     lighting_px_find_iters = 0u;
     lighting_px_gathers = 0u;
     lighting_sh_memo_n = 0u;
-    lighting_sh_owner_empty = ~0u;
     lighting_px_count_finds = true;
+#endif
+    lighting_sh_owner_empty = ~0u;
 }
 void lighting_compose_find_end() {
+#ifdef GENOS_COMPOSE_WALK
     lighting_px_count_finds = false;
     if (lighting_px_gathers > 0u) {
         atomicMax(gstats.pad2, lighting_px_gathers);
@@ -3696,6 +3721,7 @@ void lighting_compose_find_end() {
     if (lighting_px_find_iters > 0u) {
         atomicMax(gstats.pad3, lighting_px_find_iters);
     }
+#endif
 }
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
