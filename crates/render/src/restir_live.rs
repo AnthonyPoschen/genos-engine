@@ -34,7 +34,7 @@ pub const ANY_CHANGED_WORD: usize = 39;
 pub const HIST_ACCEPT_WORD: usize = 43;
 /// Surfaced pixels whose temporal reprojection rejected history.
 pub const HIST_REJECT_WORD: usize = 44;
-/// Near point lamps the direct loop added on a ReSTIR pixel.
+/// Near point lamps the direct loop added on a `ReSTIR` pixel.
 pub const POINT_ADD_WORD: usize = 45;
 const _: () = assert!(HIST_ACCEPT_WORD == ANY_CHANGED_WORD + 4);
 const _: () = assert!(HIST_REJECT_WORD == HIST_ACCEPT_WORD + 1);
@@ -344,9 +344,9 @@ mod tests {
         assert!(!packed.layout_changed);
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
         assert_eq!(packed.words.get(changed).copied(), Some(0), "nothing moved");
-        assert_eq!(at(&packed.words, super::HIST_ACCEPT_WORD as u32), 0);
-        assert_eq!(at(&packed.words, super::HIST_REJECT_WORD as u32), 0);
-        assert_eq!(at(&packed.words, super::POINT_ADD_WORD as u32), 0);
+        assert_eq!(packed.words.get(super::HIST_ACCEPT_WORD).copied().unwrap_or(0), 0);
+        assert_eq!(packed.words.get(super::HIST_REJECT_WORD).copied().unwrap_or(0), 0);
+        assert_eq!(packed.words.get(super::POINT_ADD_WORD).copied().unwrap_or(0), 0);
         let live = include_str!("../shaders/restir_live.comp");
         let direct = include_str!("../shaders/lighting_direct.comp");
         assert!(live.contains(&format!(

@@ -66,6 +66,7 @@ const DIAG_NAMES: [(&str, u32); 8] = [
 /// `gstats.diag` indices a shader can write. `LIGHTING_DIAG` defaults to false
 /// in source; this still collects every `lighting_dg` arm, so a true build is
 /// the same set. Source text, not a SPIR-V disassembly.
+#[allow(clippy::panic, reason = "a test aborts when a shader constant is missing")]
 fn named_u32(src: &str, name: &str) -> u32 {
     let key = format!("const uint {name} = ");
     let Some(at) = src.find(&key) else {

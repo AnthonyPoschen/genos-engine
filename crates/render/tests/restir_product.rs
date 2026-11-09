@@ -7,7 +7,7 @@
 //! This file checks the flag, the pipelines, and the shade counters. It does
 //! not loosen `REF_ERR` or `FRAME_STEP`.
 
-use genos_render::{DebugView, LampShadeGate, Renderer, ViewMode, World};
+use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
 use genos_scene::{AmbientMode, Camera, LampPickMode, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
@@ -147,30 +147,21 @@ fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
     assert!(direct.contains("sample is the graded colour"));
 }
 
-/// Flag off builds no ReSTIR pipeline. Flag on, product shade, every lamp
-/// count leaves `exact` at 0 and adds no near point lamp in the direct loop.
-/// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
-/// sample. The labelled exact gate still sums and does not take that loop.
-/// A still view keeps live history. A yaw keeps some and rejects some. A
-/// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
-/// rejects more than it keeps, and the lamps sit behind that face so the
-/// reservoir sample count is 0. Those rows are counter movement. They are
-/// not a depth-only or normal-only threshold.
-#[test]
-fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
-    let _diag = LampDiag;
-    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
-    let (_gpu, mut owner) = open();
-    let window = &mut *owner.window;
-    let renderer = &mut *owner.device;
-    renderer.set_debug_view(DebugView {
-        mode: ViewMode::Direct,
-        ..DebugView::default()
-    });
-    let camera = pose(0.0);
+fn assert_quiet(counts: &LampPickCounts, what: &str) {
+    assert_eq!(
+        counts.exact, 0,
+        "{what} fell back to the exact sum ({counts:?})"
+    );
+    assert_eq!(
+        counts.restir_point_adds, 0,
+        "{what} added a near point lamp in the direct loop ({counts:?})"
+    );
+}
+
+fn assert_flag_off(window: &mut Window, renderer: &mut Renderer, camera: &Camera) {
     let dark = hall(0);
     renderer.set_lighting_settings(product(false));
-    draw(window, renderer, &dark, &camera);
+    draw(window, renderer, &dark, camera);
     let off = names(renderer);
     assert!(
         off.iter().all(|name| !name.contains("restir")),
@@ -178,25 +169,25 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     );
     let off_counts = renderer.lighting_lamp_pick_counts();
     assert_eq!(
-        (off_counts.exact, off_counts.restir_point_adds, off_counts.history_accepts, off_counts.history_rejects),
+        (
+            off_counts.exact,
+            off_counts.restir_point_adds,
+            off_counts.history_accepts,
+            off_counts.history_rejects
+        ),
         (0, 0, 0, 0),
         "flag off counted a ReSTIR shade ({off_counts:?})"
     );
+}
 
+fn assert_lamp_counts(window: &mut Window, renderer: &mut Renderer, camera: &Camera) {
     renderer.set_lighting_settings(product(true));
     for count in [0usize, 1, 8, 32] {
         let world = hall(count);
-        draw(window, renderer, &world, &camera);
-        draw(window, renderer, &world, &camera);
+        draw(window, renderer, &world, camera);
+        draw(window, renderer, &world, camera);
         let counts = renderer.lighting_lamp_pick_counts();
-        assert_eq!(
-            counts.exact, 0,
-            "{count} lamps took the exact sum ({counts:?})"
-        );
-        assert_eq!(
-            counts.restir_point_adds, 0,
-            "{count} lamps added a near point lamp in the direct loop ({counts:?})"
-        );
+        assert_quiet(&counts, &format!("{count} lamps"));
         if count > 0 {
             assert!(
                 counts.restir > 0,
@@ -210,29 +201,24 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
             && built.iter().any(|name| name == "restir-direct"),
         "flag on did not build restir-di and restir-direct: {built:?}"
     );
+}
 
-    let lit = hall(8);
-    let still = pose(0.0);
+fn assert_still(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    lit: &World,
+    still: &Camera,
+) -> LampPickCounts {
     // The lamp list just changed, so this frame resets history.
-    draw(window, renderer, &lit, &still);
-    draw(window, renderer, &lit, &still);
+    draw(window, renderer, lit, still);
+    draw(window, renderer, lit, still);
     let held = renderer.lighting_lamp_pick_counts();
     eprintln!(
         "stable accept {} reject {} exact {} restir {} point_adds {}",
         held.history_accepts, held.history_rejects, held.exact, held.restir, held.restir_point_adds
     );
-    assert_eq!(
-        held.exact, 0,
-        "a still view fell back to the exact sum ({held:?})"
-    );
-    assert_eq!(
-        held.restir_point_adds, 0,
-        "a still view added a near point lamp in the direct loop ({held:?})"
-    );
-    assert!(
-        held.restir > 0,
-        "a still view dropped the reservoir ({held:?})"
-    );
+    assert_quiet(&held, "a still view");
+    assert!(held.restir > 0, "a still view dropped the reservoir ({held:?})");
     assert!(
         held.history_accepts > 0,
         "a still view kept no live history ({held:?})"
@@ -241,30 +227,25 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         held.history_rejects, 0,
         "a still view rejected live history ({held:?})"
     );
+    held
+}
 
+fn assert_yaw(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    lit: &World,
+    held: &LampPickCounts,
+) {
     let turned = pose(0.7);
-    draw(window, renderer, &lit, &turned);
+    draw(window, renderer, lit, &turned);
     let turn = renderer.lighting_lamp_pick_counts();
     eprintln!(
         "turn accept {} reject {} exact {} restir {} point_adds {}",
         turn.history_accepts, turn.history_rejects, turn.exact, turn.restir, turn.restir_point_adds
     );
-    assert_eq!(
-        turn.exact, 0,
-        "a yaw fell back to the exact sum ({turn:?})"
-    );
-    assert_eq!(
-        turn.restir_point_adds, 0,
-        "a yaw added a near point lamp in the direct loop ({turn:?})"
-    );
-    assert!(
-        turn.restir > 0,
-        "a yaw dropped the reservoir ({turn:?})"
-    );
-    assert!(
-        turn.history_accepts > 0,
-        "a yaw kept no live history ({turn:?})"
-    );
+    assert_quiet(&turn, "a yaw");
+    assert!(turn.restir > 0, "a yaw dropped the reservoir ({turn:?})");
+    assert!(turn.history_accepts > 0, "a yaw kept no live history ({turn:?})");
     assert!(
         turn.history_rejects > 0,
         "a yaw rejected no live history ({turn:?})"
@@ -273,14 +254,21 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         turn.history_accepts < held.history_accepts,
         "a yaw kept as much history as the still view ({turn:?} vs {held:?})"
     );
+}
 
-    // Back to the still pose, then a 2 m lift on the same floor. The assert
-    // is accepts > rejects. The reject count is not identified as depth,
-    // off-screen, or an empty reservoir.
-    draw(window, renderer, &lit, &still);
-    draw(window, renderer, &lit, &still);
+fn assert_lift(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    lit: &World,
+    still: &Camera,
+    held: &LampPickCounts,
+) -> LampPickCounts {
+    // Same floor, camera 2 m higher. The assert is accepts > rejects.
+    // The reject count is not identified as depth, off-screen, or empty.
+    draw(window, renderer, lit, still);
+    draw(window, renderer, lit, still);
     let lifted = pose_at(0.0, 3.6, 3.0, 0.0);
-    draw(window, renderer, &lit, &lifted);
+    draw(window, renderer, lit, &lifted);
     let mismatch = renderer.lighting_lamp_pick_counts();
     eprintln!(
         "lift accept {} reject {} exact {} restir {} point_adds {}",
@@ -290,14 +278,7 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         mismatch.restir,
         mismatch.restir_point_adds
     );
-    assert_eq!(
-        mismatch.exact, 0,
-        "a coplanar lift fell back to the exact sum ({mismatch:?})"
-    );
-    assert_eq!(
-        mismatch.restir_point_adds, 0,
-        "a coplanar lift added a near point lamp in the direct loop ({mismatch:?})"
-    );
+    assert_quiet(&mismatch, "a coplanar lift");
     assert!(
         mismatch.history_accepts > mismatch.history_rejects,
         "a coplanar lift kept no more history than it rejected ({mismatch:?})"
@@ -306,10 +287,13 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         mismatch.history_rejects < held.history_accepts,
         "a coplanar lift rejected more pixels than the still view kept ({mismatch:?})"
     );
+    mismatch
+}
 
-    // Same camera as the lift. The wall changes depth and normal together.
-    // The lamps are on the far side of the face, so the reservoir sample
-    // count is 0. That is the fixture, not a normal-only threshold.
+fn assert_wall(window: &mut Window, renderer: &mut Renderer, mismatch: &LampPickCounts) {
+    // Depth and normal change together. The lamps are behind the face, so
+    // the reservoir sample count is 0. That is the fixture.
+    let lifted = pose_at(0.0, 3.6, 3.0, 0.0);
     let blocked = hall_walls(
         8,
         vec![genos_scene::Wall {
@@ -334,14 +318,7 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         surface.restir,
         surface.restir_point_adds
     );
-    assert_eq!(
-        surface.exact, 0,
-        "a wall mismatch fell back to the exact sum ({surface:?})"
-    );
-    assert_eq!(
-        surface.restir_point_adds, 0,
-        "a wall mismatch added a near point lamp in the direct loop ({surface:?})"
-    );
+    assert_quiet(&surface, "a wall mismatch");
     assert!(
         surface.history_rejects > surface.history_accepts,
         "a facing wall kept at least as much history as it rejected ({surface:?})"
@@ -354,9 +331,11 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         surface.history_rejects > mismatch.history_rejects,
         "a facing wall rejected no more than the coplanar lift ({surface:?})"
     );
+}
 
+fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, still: &Camera) {
     renderer.set_lamp_shade_gate(LampShadeGate::Exact);
-    draw(window, renderer, &lit, &still);
+    draw(window, renderer, lit, still);
     let reference = renderer.lighting_lamp_pick_counts();
     eprintln!(
         "exact-gate exact {} restir {} point_adds {} accept {} reject {}",
@@ -383,4 +362,36 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         (0, 0),
         "the labelled exact gate ran live history ({reference:?})"
     );
+}
+
+/// Flag off builds no ReSTIR pipeline. Flag on, product shade, every lamp
+/// count leaves `exact` at 0 and adds no near point lamp in the direct loop.
+/// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
+/// sample. The labelled exact gate still sums and does not take that loop.
+/// A still view keeps live history. A yaw keeps some and rejects some. A
+/// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
+/// rejects more than it keeps, and the lamps sit behind that face so the
+/// reservoir sample count is 0. Those rows are counter movement. They are
+/// not a depth-only or normal-only threshold.
+#[test]
+fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let camera = pose(0.0);
+    assert_flag_off(window, renderer, &camera);
+    assert_lamp_counts(window, renderer, &camera);
+    let lit = hall(8);
+    let still = pose(0.0);
+    let held = assert_still(window, renderer, &lit, &still);
+    assert_yaw(window, renderer, &lit, &held);
+    let mismatch = assert_lift(window, renderer, &lit, &still, &held);
+    assert_wall(window, renderer, &mismatch);
+    assert_exact_gate(window, renderer, &lit, &still);
 }
