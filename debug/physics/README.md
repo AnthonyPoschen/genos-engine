@@ -26,6 +26,7 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `layer_filter` | Two overlapping debris spheres. | `pair_tests` stays 0 |
 | `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
 | `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
+| `locked_wheel` | That chassis at the settled height, 10 m/s, wheels locked, slip curve on, 60 steps. | `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -36,10 +37,11 @@ files describe lighting geometry and have no bodies, masses or velocities.
 `pair_slices`, `dynamic_pair_impulses`, `linear_energy`, `rotational_energy`,
 `max_speed`, `min_y`, `hash`, `contact_points`, `sleeping_bodies`,
 `pair_tests`, `broadphase_builds`, `tree_nodes`, `islands`, `awake_bodies`,
-`solver_bodies`, `wheel_rays`, and `vehicle_count`. `hash` is FNV-1a over
-every body's pose and velocities, then each stored wheel length, bit for bit.
-Equal hashes at a step mean equal state. A world with no vehicle hashes the
-bodies only.
+`solver_bodies`, `wheel_rays`, `vehicle_count`, and `tyre_contacts`. `hash` is
+FNV-1a over every body's pose and velocities, then each stored wheel length
+and that wheel's omega, bit for bit. Equal hashes at a step mean equal state.
+A world with no vehicle hashes the bodies only. `tyre_contacts` counts wheels
+that applied a slip force. A G1 ray with radius 0 stays at 0.
 
 ## MCP and `POST /cmd/<name>`
 
@@ -54,5 +56,7 @@ A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
 `chassis_rest` is the G1 trial from [ADR 0040](../../docs/adr/0040-vehicle-domains.md).
-The ADR stays proposed. A1 would add `aero_trim` and S1 would add `thruster`
-on this same headless path. Those scenes are not here. Sea has no scene.
+`locked_wheel` is the P28 slip curve on that chassis. The ADR stays proposed.
+A1 would add `aero_trim` and S1 would add `thruster` on this same headless path.
+Those scenes are not here. Sea has no scene. The gearbox and steering are not
+scenes here.

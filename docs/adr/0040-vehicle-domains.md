@@ -1,6 +1,6 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, is in the step as a trial. Aircraft forces, space forces, the landing stage, and sea are not in that trial.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, is in the step as a trial. P28's slip curve is in the step on that chassis. Aircraft forces, space forces, the landing stage, and sea are not in that trial.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
@@ -125,7 +125,7 @@ G1 is in the tree as a trial. This ADR stays proposed. A1, S1, and T1 are not im
 | S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 | Sea | none | a later ADR | none |
 
-P28 (tyre slip) and P29 (gearbox and open differential) stay in the plan, unchanged, and they wait on G1. This ADR does not restate them. Shape-cast wheels, anti-roll bars, and Pacejka stay out.
+P28 (tyre slip) is in the step on the G1 chassis as the plan's three-point curve. This ADR does not restate that curve. P29 (gearbox and open differential) stays in the plan and waits. Shape-cast wheels, anti-roll bars, and Pacejka stay out.
 
 ### G1. Four wheel rays
 
@@ -210,8 +210,10 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | A thruster misses force or torque | `max_force`, local position | `thruster` and the S1 bounds |
 | Gear that misses still pushes | `max_length` | `a_gear_that_misses_matches_the_aircraft` |
 | Two runs diverge | actuator order | the second world in each fixture |
+| A locked wheel does not slow the chassis | `mu_peak`, `radius`, wheel `omega` | `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`, `locked_wheel`, `tyre_contacts` |
+| A free wheel or a zero curve is braked | `omega`, `mu_peak` 0 | the free-wheel and zero-mu runs in that test |
 
-`wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. `--replay` and `--checkpoint` keep their current meaning.
+`wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. P28 adds `tyre_contacts` on that line and mixes each wheel's `omega` into the hash. `--replay` and `--checkpoint` keep their current meaning.
 
 ## Networking
 

@@ -144,6 +144,10 @@ _Avoid_: Shared stick, component
 A segment from a wheel's attach point along its chassis-frame direction, from the minimum length to the maximum length, excluding the chassis. G1 hits a plane or a box. A mesh is a miss. The suspension force is a spring-damper along that ray.
 _Avoid_: Speculative contact, time of impact
 
+**Tyre slip**:
+The ground payload's in-plane force from a wheel's spin against its contact speed. Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip denominator)`. Lateral slip is the angle between the wheel heading and the contact velocity. The force uses a three-point curve and is capped by the suspension load. It is not a contact-solver row. A wheel with no positive radius applies none.
+_Avoid_: Pacejka, wheel body
+
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 _Avoid_: Joint, spring

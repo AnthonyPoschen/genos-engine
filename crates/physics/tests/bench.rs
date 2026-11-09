@@ -91,4 +91,12 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         direction.x + matrix.cols[0] + world.bodies[0].position.y
     );
     assert_eq!(allocs, 0, "timed math and physics allocated {allocs} times");
+
+    let mut tyre = genos_physics::locked_wheel_world();
+    step(&mut tyre, 1.0 / 60.0);
+    let before_tyre = ALLOCS.load(Ordering::Relaxed);
+    step(&mut tyre, 1.0 / 60.0);
+    let tyre_allocs = ALLOCS.load(Ordering::Relaxed) - before_tyre;
+    println!("tyre_allocs={tyre_allocs}");
+    assert_eq!(tyre_allocs, 0, "tyre step allocated {tyre_allocs} times");
 }

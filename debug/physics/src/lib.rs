@@ -38,13 +38,14 @@ pub struct StepRecord {
     pub solver_bodies: u32,
     pub wheel_rays: u32,
     pub vehicle_count: u32,
+    pub tyre_contacts: u32,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{}}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{},\"tyre_contacts\":{}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -68,11 +69,12 @@ impl StepRecord {
             self.solver_bodies,
             self.wheel_rays,
             self.vehicle_count,
+            self.tyre_contacts,
         )
     }
 }
 
-/// FNV-1a over every body's pose and velocities, then each wheel length.
+/// FNV-1a over every body's pose and velocities, then each wheel length and omega.
 #[must_use]
 pub fn state_hash(world: &World) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -100,8 +102,9 @@ pub fn state_hash(world: &World) -> u64 {
         let Some(genos_physics::GroundContact::Wheeled(ground)) = vehicle.ground else {
             continue;
         };
-        for length in ground.lengths {
-            mix_f32(&mut hash, length);
+        for (length, wheel) in ground.lengths.iter().zip(ground.wheels.iter()) {
+            mix_f32(&mut hash, *length);
+            mix_f32(&mut hash, wheel.omega);
         }
     }
     hash
@@ -159,6 +162,7 @@ impl Session {
             hash: state_hash(&self.world),
             wheel_rays: stats.wheel_rays,
             vehicle_count: stats.vehicle_count,
+            tyre_contacts: stats.tyre_contacts,
             contact_points: stats.contact_points,
             sleeping_bodies: stats.sleeping_bodies,
             pair_tests: stats.pair_tests,
@@ -399,6 +403,8 @@ mod tests {
         let line = record.json("chassis_rest");
         assert!(line.contains("\"wheel_rays\":4"));
         assert!(line.contains("\"vehicle_count\":1"));
+        assert_eq!(record.tyre_contacts, 0);
+        assert!(line.contains("\"tyre_contacts\":0"));
         assert!(genos_mcp::parse(&line).is_ok());
         let before = record.hash;
         let Some(genos_physics::GroundContact::Wheeled(ref mut ground)) =
@@ -409,6 +415,63 @@ mod tests {
         };
         ground.lengths[0] += 0.01;
         assert_ne!(state_hash(&session.world), before);
+    }
+
+    #[test]
+    fn locked_wheel_slows_and_the_hash_covers_omega() {
+        let Some(scene) = find("locked_wheel") else {
+            assert!(find("locked_wheel").is_some());
+            return;
+        };
+        let mut session = Session::load(scene);
+        let mut twin = Session::load(scene);
+        let first = session.step();
+        let twin_first = twin.step();
+        assert_eq!(first.tyre_contacts, 4);
+        assert_eq!(first.wheel_rays, 4);
+        assert_eq!(first.hash, twin_first.hash);
+        let line = first.json("locked_wheel");
+        assert!(line.contains("\"tyre_contacts\":4"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        let before = first.hash;
+        assert!(
+            set_first_omega(&mut session.world, 0.25),
+            "locked scene has no wheeled ground"
+        );
+        assert_ne!(state_hash(&session.world), before);
+        assert!(set_first_omega(&mut session.world, 0.0));
+        assert_eq!(state_hash(&session.world), before);
+        for _ in 1..60 {
+            session.step();
+            twin.step();
+        }
+        let last = session.records.last().copied();
+        let twin_last = twin.records.last().copied();
+        let (Some(last), Some(twin_last)) = (last, twin_last) else {
+            assert!(session.records.last().is_some());
+            return;
+        };
+        assert_eq!(last.hash, twin_last.hash);
+        assert!(
+            last.max_speed < 6.0,
+            "locked scene speed {}",
+            last.max_speed
+        );
+        assert_eq!(last.tyre_contacts, 4);
+    }
+
+    fn set_first_omega(world: &mut genos_physics::World, omega: f32) -> bool {
+        let Some(vehicle) = world.vehicles.first_mut() else {
+            return false;
+        };
+        let Some(genos_physics::GroundContact::Wheeled(ref mut ground)) = vehicle.ground else {
+            return false;
+        };
+        let Some(wheel) = ground.wheels.first_mut() else {
+            return false;
+        };
+        wheel.omega = omega;
+        true
     }
 
     #[test]

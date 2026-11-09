@@ -1,7 +1,8 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper. Aircraft lift and
+//! This stage applies the wheeled ground spring-damper and, when a wheel has a
+//! positive radius, the plan's three-point slip curve. Aircraft lift and
 //! thruster force are later stages and are not applied here. Sea is not a field.
 
 use genos_math::{Quat, Vec3};
@@ -27,6 +28,9 @@ pub enum GroundContact {
 
 /// One suspension ray. `direction` is in the chassis frame, pointing from the
 /// chassis toward the surface.
+///
+/// Slip force is off when `radius` is not positive. G1 leaves it at 0. The
+/// game writes `omega`. This stage does not integrate it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Wheel {
     pub local_position: Vec3,
@@ -36,6 +40,18 @@ pub struct Wheel {
     pub max_length: f32,
     pub hz: f32,
     pub damping_ratio: f32,
+    pub radius: f32,
+    pub omega: f32,
+    /// Peak of the three-point curve. The plan default is 1.
+    pub mu_peak: f32,
+    /// Absolute slip where the curve reaches `mu_peak`. The plan default is 0.1.
+    pub slip_peak: f32,
+    /// Curve value at absolute slip 1, and beyond. The plan default is 0.7.
+    pub mu_slide: f32,
+    /// Metres per second. Longitudinal slip divides by
+    /// `max(planar speed, slip_denom)`. The plan names this term and does not
+    /// give a number. The default here is 1.
+    pub slip_denom: f32,
 }
 
 /// Four wheel rays and the last length of each ray.
@@ -97,6 +113,35 @@ pub fn chassis_rest_world(sleep_time: f32) -> World {
     world
 }
 
+/// The P28 fixture. The G1 chassis at the settled height, 10 m/s on +X.
+///
+/// Each wheel has radius 0.3 m, omega 0, `mu_peak` 1, `slip_peak` 0.1,
+/// `mu_slide` 0.7, and `slip_denom` 1. `sleep_time` is 10 s.
+#[must_use]
+pub fn locked_wheel_world() -> World {
+    let mut world = World::new(GRAVITY);
+    world.sleep_time = 10.0;
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    let mut chassis = Body::cuboid(
+        Vec3::new(0.0, 0.384_469, 0.0),
+        1_200.0,
+        Vec3::new(1.2, 0.15, 0.7),
+    );
+    chassis.friction = 0.6;
+    chassis.restitution = 0.0;
+    chassis.motion = MotionQuality::Discrete;
+    chassis.velocity = Vec3::new(10.0, 0.0, 0.0);
+    let index = world.insert(chassis);
+    let mut vehicle = g1_vehicle(index);
+    if let Some(GroundContact::Wheeled(ref mut ground)) = vehicle.ground {
+        for wheel in &mut ground.wheels {
+            wheel.radius = 0.3;
+        }
+    }
+    world.vehicles.push(vehicle);
+    world
+}
+
 fn g1_vehicle(chassis: usize) -> Vehicle {
     let wheel = |local_position: Vec3| Wheel {
         local_position,
@@ -106,6 +151,12 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
         max_length: 0.6,
         hz: 4.0,
         damping_ratio: 0.7,
+        radius: 0.0,
+        omega: 0.0,
+        mu_peak: 1.0,
+        slip_peak: 0.1,
+        mu_slide: 0.7,
+        slip_denom: 1.0,
     };
     let wheels = [
         wheel(Vec3::new(1.0, 0.0, 0.5)),
@@ -125,28 +176,35 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
 }
 
 /// Ground forces, after gravity and before the chassis is integrated.
+///
+/// Wheel index order is the only order. Each wheel applies its spring, then
+/// its slip force. Both use the velocity from the start of this pass.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
+    let mut contacts = 0_u32;
     let count = world.vehicles.len();
     for index in 0..count {
-        rays = rays.saturating_add(apply_ground(world, index, dt));
+        let (cast, slips) = apply_ground(world, index, dt);
+        rays = rays.saturating_add(cast);
+        contacts = contacts.saturating_add(slips);
     }
     world.step_stats.wheel_rays = rays;
+    world.step_stats.tyre_contacts = contacts;
 }
 
-fn apply_ground(world: &mut World, index: usize, dt: f32) -> u32 {
+fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32) {
     let Some(vehicle) = world.vehicles.get(index).copied() else {
-        return 0;
+        return (0, 0);
     };
     let Some(GroundContact::Wheeled(mut ground)) = vehicle.ground else {
-        return 0;
+        return (0, 0);
     };
     let Some(chassis) = world.bodies.get(vehicle.chassis).copied() else {
-        return 0;
+        return (0, 0);
     };
     if chassis.presence != Presence::Live || chassis.inverse_mass == 0.0 || chassis.sleeping {
-        return 0;
+        return (0, 0);
     }
     let mut pushes = [None; 4];
     for (wheel_index, wheel) in ground.wheels.iter().enumerate() {
@@ -159,13 +217,16 @@ fn apply_ground(world: &mut World, index: usize, dt: f32) -> u32 {
         }
     }
     let mut body = chassis;
+    let mut slips = 0_u32;
     for push in pushes {
-        let Some((force, arm)) = push else {
+        let Some(push) = push else {
             continue;
         };
-        body.velocity += force * (body.inverse_mass * dt);
-        let torque = arm.cross(force);
-        body.angular_velocity += world_inverse_inertia(&body, torque) * dt;
+        accelerate(&mut body, push.arm, push.suspension, dt);
+        if push.slip.length_squared() > 0.0 {
+            accelerate(&mut body, push.arm, push.slip, dt);
+            slips = slips.saturating_add(1);
+        }
     }
     if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
         stored.velocity = body.velocity;
@@ -176,7 +237,20 @@ fn apply_ground(world: &mut World, index: usize, dt: f32) -> u32 {
             slot.lengths = ground.lengths;
         }
     }
-    u32::try_from(ground.wheels.len()).unwrap_or(0)
+    (u32::try_from(ground.wheels.len()).unwrap_or(0), slips)
+}
+
+#[derive(Clone, Copy)]
+struct ContactPush {
+    arm: Vec3,
+    suspension: Vec3,
+    slip: Vec3,
+}
+
+fn accelerate(body: &mut Body, arm: Vec3, force: Vec3, dt: f32) {
+    body.velocity += force * (body.inverse_mass * dt);
+    let torque = arm.cross(force);
+    body.angular_velocity += world_inverse_inertia(body, torque) * dt;
 }
 
 fn sample_wheel(
@@ -184,7 +258,7 @@ fn sample_wheel(
     chassis: usize,
     body: &Body,
     wheel: &Wheel,
-) -> (f32, Option<(Vec3, Vec3)>) {
+) -> (f32, Option<ContactPush>) {
     let Some(direction) = aim(body, wheel.direction) else {
         return (wheel.max_length, None);
     };
@@ -200,8 +274,110 @@ fn sample_wheel(
         return (wheel.max_length, None);
     };
     let arm = body.orientation.rotate(wheel.local_position) + direction * length;
-    let force = push(body, wheel, direction, length, arm);
-    (length, force.map(|force| (force, arm)))
+    let Some(suspension) = push(body, wheel, direction, length, arm) else {
+        return (length, None);
+    };
+    let slip = slip_force(body, wheel, direction, arm, suspension.length());
+    (
+        length,
+        Some(ContactPush {
+            arm,
+            suspension,
+            slip,
+        }),
+    )
+}
+
+/// In-plane force from the three-point slip curve, capped by the spring load.
+///
+/// Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip_denom)`.
+/// Lateral slip is the angle between the wheel heading (local +X on the contact
+/// plane) and the contact velocity, from `atan2`. That call does not order
+/// wheels. `|force|` is capped by the spring load, so the slip impulse over
+/// `dt` does not exceed the spring impulse.
+fn slip_force(body: &Body, wheel: &Wheel, direction: Vec3, arm: Vec3, load: f32) -> Vec3 {
+    if wheel.radius <= 0.0 || load <= 0.0 || !wheel.radius.is_finite() || !wheel.omega.is_finite() {
+        return Vec3::ZERO;
+    }
+    let Some(heading) = plane_heading(body, direction) else {
+        return Vec3::ZERO;
+    };
+    let lateral = direction.cross(heading).normalize();
+    if lateral.length_squared() == 0.0 {
+        return Vec3::ZERO;
+    }
+    let at_point = body.velocity + body.angular_velocity.cross(arm);
+    let planar = at_point - direction * at_point.dot(direction);
+    let forward_speed = planar.dot(heading);
+    let lateral_speed = planar.dot(lateral);
+    let denom = planar.length().max(wheel.slip_denom);
+    let slip_long = ratio(wheel.omega * wheel.radius - forward_speed, denom);
+    let slip_lat = lateral_speed.atan2(forward_speed);
+    let force = heading * (signed_curve(slip_long, wheel) * load)
+        - lateral * (signed_curve(slip_lat, wheel) * load);
+    let capped = cap_to_load(force, load);
+    if capped.x.is_finite() && capped.y.is_finite() && capped.z.is_finite() {
+        capped
+    } else {
+        Vec3::ZERO
+    }
+}
+
+fn plane_heading(body: &Body, direction: Vec3) -> Option<Vec3> {
+    let aimed = body.orientation.rotate(Vec3::X);
+    let heading = (aimed - direction * aimed.dot(direction)).normalize();
+    (heading.length_squared() > 0.0).then_some(heading)
+}
+
+fn ratio(numerator: f32, denom: f32) -> f32 {
+    if denom > 1.0e-8 && numerator.is_finite() {
+        numerator / denom
+    } else {
+        0.0
+    }
+}
+
+fn signed_curve(slip: f32, wheel: &Wheel) -> f32 {
+    let magnitude = slip_curve(slip.abs(), wheel);
+    if slip > 0.0 {
+        magnitude
+    } else if slip < 0.0 {
+        -magnitude
+    } else {
+        0.0
+    }
+}
+
+/// Rises from 0 to `mu_peak` at `slip_peak`, then falls to `mu_slide` at slip 1.
+fn slip_curve(abs_slip: f32, wheel: &Wheel) -> f32 {
+    if !(abs_slip > 0.0) || !abs_slip.is_finite() {
+        return 0.0;
+    }
+    let peak = wheel.slip_peak;
+    if !(peak > 0.0) || peak >= 1.0 {
+        return if abs_slip >= 1.0 {
+            wheel.mu_slide
+        } else {
+            wheel.mu_peak
+        };
+    }
+    if abs_slip < peak {
+        return wheel.mu_peak * (abs_slip / peak);
+    }
+    if abs_slip >= 1.0 {
+        return wheel.mu_slide;
+    }
+    let t = (abs_slip - peak) / (1.0 - peak);
+    wheel.mu_peak + (wheel.mu_slide - wheel.mu_peak) * t
+}
+
+fn cap_to_load(force: Vec3, load: f32) -> Vec3 {
+    let cap = load.abs();
+    let mag_sq = force.length_squared();
+    if mag_sq <= cap * cap || mag_sq <= f32::MIN_POSITIVE {
+        return force;
+    }
+    force * (cap / mag_sq.sqrt())
 }
 
 fn aim(body: &Body, local_direction: Vec3) -> Option<Vec3> {
