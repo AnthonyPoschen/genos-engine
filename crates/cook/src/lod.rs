@@ -46,8 +46,8 @@ pub const LOD_RATIOS: [f32; 3] = [0.5, 0.25, 0.125];
 const LOD_EIGHTHS: [usize; 3] = [4, 2, 1];
 /// Stamped into the cook hash. Borders stay locked.
 const LOD_LOCK_BORDER: u8 = 1;
-/// Stamped into the cook hash. 4 = the coplanar cover is a polygon difference.
-const LOD_ERROR_BOUND: u8 = 4;
+/// Stamped into the cook hash. 5 = the coplanar close uses the offset miter.
+const LOD_ERROR_BOUND: u8 = 5;
 /// Stop splitting a sub-triangle once its covering radius is at most this, metres.
 /// 1/256 is exact in `f32`. Flat sheets close earlier, when one onto triangle
 /// already certifies the vertices.
@@ -451,7 +451,7 @@ const PLANAR_REMAINDER_CAP: usize = 512;
 /// onto triangles that meet the query lie in a slab of thickness `slab` and
 /// subtracting their projections from the query polygon leaves no remainder,
 /// every point of the query is within `plane distance + slab` of the surface
-/// (plus the subtraction tolerance). A positive remainder is not a cover:
+/// plus the offset mitre `eps / sin(a/2)`. A positive remainder is not a cover:
 /// there is no area sum and no stand-in for the missing cap. That closes a
 /// flat sheet at the onto mesh's triangle size instead of at [`LOD_COVER_STOP_M`].
 fn planar_cover(
@@ -521,12 +521,10 @@ fn planar_cover(
         return None;
     }
     let eps = cover_eps(corners);
-    if !projections_cover(onto.tris, &scratch.hits, &plane, &query_2d, eps) {
-        return None;
-    }
-    // The clip is expanded by `eps`, so a point treated as covered can sit
-    // that far from the nearest onto triangle. That distance is proven.
-    let upper = f32::next_up(query_height + slab + eps);
+    // Growing each edge by `eps` mitres at a vertex: the spike reaches
+    // `eps / sin(a/2)`, not `eps`. The close adds that reach.
+    let reach = projections_cover(onto.tris, &scratch.hits, &plane, &query_2d, eps)?;
+    let upper = f32::next_up(query_height + slab + reach);
     upper.is_finite().then_some(upper)
 }
 
@@ -619,45 +617,82 @@ fn cover_eps(corners: [[f32; 3]; 3]) -> f32 {
     scale * 1.0e-6
 }
 
-/// True when subtracting every onto projection from the query leaves no area.
-/// Each clip is removed from the remainder, so a duplicate or a partial overlap
-/// cannot fill a hole. The clips are expanded by `eps`; an empty remainder
-/// therefore means every query point is within `eps` of some onto triangle.
+/// Reach of an empty remainder, or `None` when area is left.
+/// Each clip is removed once, so a duplicate or a partial overlap cannot fill a
+/// hole. Clips are expanded by `eps` perpendicular to each edge; at a vertex of
+/// interior angle `a` that mitre reaches `eps / sin(a/2)`. The returned reach
+/// is the largest such spike among the clips that were subtracted.
 fn projections_cover(
     tris: &[MeshTriangle],
     hits: &[u32],
     plane: &Plane,
     query: &[[f32; 2]; 3],
     eps: f32,
-) -> bool {
+) -> Option<f32> {
     let mut remainders: Vec<Vec<[f32; 2]>> = vec![query.to_vec()];
+    let mut reach = 0.0_f32;
     for index in hits {
         if remainders.is_empty() {
-            return true;
+            break;
         }
-        let Some(tri) = triangle_ref(tris, *index) else {
-            return false;
-        };
+        let tri = triangle_ref(tris, *index)?;
         let flat = tri.positions.map(|corner| plane.project(corner));
         if triangle_area_2d(flat) <= eps * eps {
             continue;
         }
         let mut next = Vec::new();
+        let mut used = false;
         for polygon in &remainders {
             if !boxes_meet(polygon, flat, eps) {
                 next.push(polygon.clone());
                 continue;
             }
+            used = true;
             next.extend(subtract_convex(polygon, flat, eps));
             if next.len() > PLANAR_REMAINDER_CAP {
-                return false;
+                return None;
             }
+        }
+        if used {
+            reach = reach.max(miter_reach(flat, eps)?);
         }
         remainders = next;
     }
-    remainders
+    let clear = remainders
         .iter()
-        .all(|polygon| polygon_area(polygon) <= 0.0)
+        .all(|polygon| polygon_area(polygon) <= 0.0);
+    (clear && reach.is_finite() && reach > 0.0).then_some(reach)
+}
+
+/// Distance from a triangle vertex to the mitre of the two edges offset by `eps`.
+/// That is `eps / sin(a/2)` for interior angle `a`. `None` when the angle
+/// vanishes in `f32`, so the caller does not pretend the spike is bounded.
+fn miter_reach(clip: [[f32; 2]; 3], eps: f32) -> Option<f32> {
+    let mut reach = eps;
+    for index in 0..3 {
+        let here = clip[index];
+        let prev = clip[(index + 2) % 3];
+        let next = clip[(index + 1) % 3];
+        let to_prev = [prev[0] - here[0], prev[1] - here[1]];
+        let to_next = [next[0] - here[0], next[1] - here[1]];
+        let len_prev = (to_prev[0] * to_prev[0] + to_prev[1] * to_prev[1]).sqrt();
+        let len_next = (to_next[0] * to_next[0] + to_next[1] * to_next[1]).sqrt();
+        if len_prev <= eps || len_next <= eps {
+            return None;
+        }
+        let cos_angle = (to_prev[0] * to_next[0] + to_prev[1] * to_next[1]) / (len_prev * len_next);
+        let cos_angle = cos_angle.clamp(-1.0, 1.0);
+        let sin_half = f32::next_down(((1.0 - cos_angle) * 0.5).max(0.0).sqrt());
+        if sin_half <= 0.0 || !sin_half.is_finite() {
+            return None;
+        }
+        let spike = eps / sin_half;
+        if !spike.is_finite() {
+            return None;
+        }
+        reach = reach.max(spike);
+    }
+    Some(f32::next_up(reach))
 }
 
 fn boxes_meet(polygon: &[[f32; 2]], clip: [[f32; 2]; 3], eps: f32) -> bool {
@@ -686,7 +721,7 @@ fn boxes_meet(polygon: &[[f32; 2]], clip: [[f32; 2]; 3], eps: f32) -> bool {
         && high[1] >= clip_low[1] - eps
 }
 
-/// `subject` minus the `eps`-neighbourhood of a convex triangle.
+/// `subject` minus the edge-offset of a convex triangle (a mitre, not a disk).
 /// The three outside pieces are disjoint: outside the first edge, then inside
 /// that edge and outside the next, then inside both and outside the last.
 fn subtract_convex(subject: &[[f32; 2]], clip: [[f32; 2]; 3], eps: f32) -> Vec<Vec<[f32; 2]>> {
@@ -1612,5 +1647,55 @@ mod tests {
             measured >= 0.5 * rise * 0.5,
             "lattice {measured} missed the crease of {rise}"
         );
+    }
+
+    /// Query is the onto triangle with one base vertex pulled `overhang` metres
+    /// past the sharp corner. Analytic truth is that overhang.
+    fn assert_sharp_overhang(origin_x: f32, height: f32, overhang: f32) {
+        let left = [origin_x, 0.0, 0.0];
+        let right = [origin_x + 1.0, 0.0, 0.0];
+        let apex = [origin_x + 0.5, height, 0.0];
+        let hung = [origin_x - overhang, 0.0, 0.0];
+        let onto = Primitive {
+            positions: vec![left, right, apex],
+            indices: vec![0, 1, 2],
+            ..Primitive::default()
+        };
+        let from = Primitive {
+            positions: vec![hung, right, apex],
+            indices: vec![0, 1, 2],
+            ..Primitive::default()
+        };
+        let mut budget = CoverBudget::full();
+        let stored = surface_bound(&from, &onto, &mut budget).unwrap_or(f32::NAN);
+        let measured = lattice_against(&from, &onto, 8);
+        assert!(
+            stored + 1.0e-3 >= overhang,
+            "stored {stored} under the {overhang} m overhang (height {height}, x {origin_x})"
+        );
+        assert!(
+            measured <= stored + 1.0e-3,
+            "lattice {measured} exceeds stored {stored}"
+        );
+    }
+
+    #[test]
+    fn a_five_micrometre_spike_does_not_cover_five_centimetres() {
+        assert_sharp_overhang(0.0, 5.0e-6, 0.05);
+    }
+
+    #[test]
+    fn a_five_centimetre_spike_at_long_range_does_not_cover_two_centimetres() {
+        assert_sharp_overhang(5000.0, 0.05, 0.02);
+    }
+
+    #[test]
+    fn a_five_centimetre_spike_at_long_range_does_not_cover_five_centimetres() {
+        assert_sharp_overhang(5000.0, 0.05, 0.05);
+    }
+
+    #[test]
+    fn a_one_centimetre_spike_at_long_range_does_not_cover_ten_centimetres() {
+        assert_sharp_overhang(5000.0, 0.01, 0.10);
     }
 }
