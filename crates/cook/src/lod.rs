@@ -18,6 +18,9 @@ use genos_mesh::{Bvh, MeshTriangle};
 pub const LOD_COUNT: u32 = 4;
 /// Triangle targets for levels 1, 2, and 3, as fractions of level 0.
 pub const LOD_RATIOS: [f32; 3] = [0.5, 0.25, 0.125];
+/// The same targets as eighths of the source count: 4/8, 2/8, 1/8.
+/// The index target is this integer ratio, so the cook does not cast a rounded float.
+const LOD_EIGHTHS: [usize; 3] = [4, 2, 1];
 /// Absolute error cap passed to `meshopt_simplify`, metres.
 /// The target is the triangle count. This cap only stops a collapse that
 /// would move the surface by more than this. A game mesh is far smaller.
@@ -39,12 +42,12 @@ pub fn lod_chain(mesh: &GltfMesh) -> Vec<MeshLod> {
         error_m: 0.0,
         primitives: mesh.primitives.clone(),
     });
-    for ratio in LOD_RATIOS {
+    for eighths in LOD_EIGHTHS {
         let prev_error = levels.last().map_or(0.0, |level| level.error_m);
         let mut error = prev_error;
         let mut primitives = Vec::with_capacity(mesh.primitives.len());
         for (index, prim) in mesh.primitives.iter().enumerate() {
-            let (next, residual) = simplify_primitive(prim, ratio);
+            let (next, residual) = simplify_primitive(prim, eighths);
             let next_error = residual.max(vertex_deviation(prim, &next));
             let prev_count = levels
                 .last()
@@ -67,11 +70,11 @@ pub fn lod_chain(mesh: &GltfMesh) -> Vec<MeshLod> {
     levels
 }
 
-fn simplify_primitive(prim: &Primitive, ratio: f32) -> (Primitive, f32) {
+fn simplify_primitive(prim: &Primitive, eighths: usize) -> (Primitive, f32) {
     if !indexed(prim) {
         return (prim.clone(), 0.0);
     }
-    let target = target_indices(prim.indices.len(), ratio);
+    let target = target_indices(prim.indices.len(), eighths);
     if target >= prim.indices.len() {
         return (prim.clone(), 0.0);
     }
@@ -173,30 +176,14 @@ fn indexed(prim: &Primitive) -> bool {
             .all(|index| usize::try_from(*index).is_ok_and(|i| prim.positions.get(i).is_some()))
 }
 
-#[allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    reason = "the triangle target is a rounded fraction of the source count"
-)]
-fn round_tris(tris: usize, ratio: f32) -> usize {
-    let want = (tris as f64 * f64::from(ratio)).round();
-    if want <= 0.0 {
-        0
-    } else if want >= f64::from(u32::MAX) {
-        usize::try_from(u32::MAX).unwrap_or(0)
-    } else {
-        want as usize
-    }
-}
-
-fn target_indices(index_count: usize, ratio: f32) -> usize {
+fn target_indices(index_count: usize, eighths: usize) -> usize {
     let tris = index_count / 3;
-    if tris == 0 {
+    if tris == 0 || eighths == 0 {
         return 0;
     }
-    let want = round_tris(tris, ratio).clamp(1, tris);
+    // Nearest count at `eighths/8`, half rounding away from zero.
+    let want = tris.saturating_mul(eighths).saturating_add(4) / 8;
+    let want = want.clamp(1, tris);
     want.saturating_mul(3).min(index_count)
 }
 
@@ -278,5 +265,19 @@ pub(crate) fn levels_of(mesh: &crate::CookedMesh) -> Vec<MeshLod> {
         }]
     } else {
         mesh.lods.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LOD_EIGHTHS, LOD_RATIOS};
+
+    #[test]
+    fn eighths_match_the_published_ratios() {
+        assert_eq!(LOD_RATIOS.len(), LOD_EIGHTHS.len());
+        for (&ratio, eighths) in LOD_RATIOS.iter().zip(LOD_EIGHTHS) {
+            let scaled = u8::try_from(eighths).unwrap_or(u8::MAX);
+            assert_eq!((ratio * 8.0).to_bits(), f32::from(scaled).to_bits());
+        }
     }
 }
