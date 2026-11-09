@@ -1,5 +1,5 @@
 #version 450
-// Display pass. The lattice sample stays out of the GI compose shader so the
+// Display pass. AgX is evaluated here, not sampled from a lattice, so the
 // plain compile stays the pre-HDR shader. This pass reads the scene radiance
 // compose stored, adds the same-frame bloom, applies exposure, and replaces
 // the 8-bit picture. Mode 1 is AgX. Mode 0 and mode 2 keep the shoulder.
@@ -17,9 +17,7 @@ layout(std430, set = 0, binding = 8) buffer Out {
     uint px[];
 } outc;
 
-layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
-    vec4 px[];
-} scene_lin;
+#include "hdr_scene.glsl"
 
 layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
     vec4 v;
@@ -33,11 +31,8 @@ layout(std430, set = 0, binding = 17) buffer HdrEncode {
 } encode;
 
 #include "hdr_display.glsl"
+#include "hdr_agx_eval.glsl"
 
-// Lattice of agx_rec709. N = 32, log2 from -12 to 10, x-fastest.
-const float AGX_LOG_MIN = -12.0;
-const float AGX_LOG_SPAN = 22.0;
-const float AGX_LAST = 31.0;
 const float PQ_C1_NUM = 3424.0;
 const float PQ_C1_DEN = 4096.0;
 const float PQ_C2_NUM = 2413.0;
@@ -71,39 +66,6 @@ const float DISPLAY_GAMMA = 2.4;
 const float FMT_A2B10 = 64.0;
 const float FMT_A2R10 = 58.0;
 const float FMT_R16F = 97.0;
-layout(std430, set = 0, binding = 15) restrict readonly buffer AgxLut {
-    vec4 texel[];
-} agx_lut;
-
-vec3 agx_fetch(int x, int y, int z) {
-    int index = (z * 32 + y) * 32 + x;
-    return agx_lut.texel[index].rgb;
-}
-
-vec3 agx_sample(vec3 c) {
-    vec3 p = (log2(max(c, vec3(1e-8))) - vec3(AGX_LOG_MIN)) / AGX_LOG_SPAN;
-    p = clamp(p, 0.0, 1.0);
-    vec3 g = p * AGX_LAST;
-    ivec3 i0 = clamp(ivec3(floor(g)), ivec3(0), ivec3(31));
-    ivec3 i1 = min(i0 + ivec3(1), ivec3(31));
-    vec3 f = g - vec3(i0);
-    vec3 c000 = agx_fetch(i0.x, i0.y, i0.z);
-    vec3 c100 = agx_fetch(i1.x, i0.y, i0.z);
-    vec3 c010 = agx_fetch(i0.x, i1.y, i0.z);
-    vec3 c110 = agx_fetch(i1.x, i1.y, i0.z);
-    vec3 c001 = agx_fetch(i0.x, i0.y, i1.z);
-    vec3 c101 = agx_fetch(i1.x, i0.y, i1.z);
-    vec3 c011 = agx_fetch(i0.x, i1.y, i1.z);
-    vec3 c111 = agx_fetch(i1.x, i1.y, i1.z);
-    vec3 c00 = mix(c000, c100, f.x);
-    vec3 c10 = mix(c010, c110, f.x);
-    vec3 c01 = mix(c001, c101, f.x);
-    vec3 c11 = mix(c011, c111, f.x);
-    vec3 c0 = mix(c00, c10, f.y);
-    vec3 c1 = mix(c01, c11, f.y);
-    return mix(c0, c1, f.z);
-}
-
 #include "hdr_shoulder.glsl"
 
 float pq_st2084(float nits) {
@@ -185,17 +147,15 @@ void main() {
         return;
     }
     uint index = p.y * pc.dims.x + p.x;
-    vec3 scene = scene_lin.px[index].rgb;
-    vec3 c = add_bloom(scene, index);
-    // The display pass's bloom add, before exposure. An HDR encode overwrites it.
-    vec3 bloom_added = c - scene;
+    vec3 scene = scene_load(index).rgb;
+    vec3 c = add_bloom(scene, index, pc.dims.x, pc.dims.y);
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;
     }
     c *= exposure;
     vec3 formed = (hdr.v.y > MODE_LO && hdr.v.y < MODE_HI)
-        ? agx_sample(c)
+        ? agx_eval(c)
         : vec3(tone_channel(c.r), tone_channel(c.g), tone_channel(c.b));
     outc.px[index] = pack_rgb(dither8(formed, p));
     if (hdr.v.w > MODE_LO) {
@@ -219,11 +179,5 @@ void main() {
             encode.words[base] = packHalf2x16(encoded.rg);
             encode.words[base + 1u] = packHalf2x16(vec2(encoded.b, 1.0));
         }
-    } else {
-        uint at = index * 4u;
-        encode.words[at] = floatBitsToUint(bloom_added.r);
-        encode.words[at + 1u] = floatBitsToUint(bloom_added.g);
-        encode.words[at + 2u] = floatBitsToUint(bloom_added.b);
-        encode.words[at + 3u] = 0u;
     }
 }

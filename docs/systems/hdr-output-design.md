@@ -88,7 +88,7 @@ Near the camera still matters most, and it matters in the grade, not by allocati
 
 **Pick: AgX base**, the Eary Chow generator ([AgX_LUT_Gen](https://github.com/EaryChow/AgX_LUT_Gen) `AgX_Base_Rec2020`, then the sRGB cube path). Log2 runs from −10 to +6.5 around middle grey 0.18. The sigmoid slope is 2.4 and both powers are 1.5. The hue mix is 40%. The SDR code is power 2.4, which is what that cube stores. The CPU reference is `agx_rec709`. The gate compares it to generator samples, max CIEDE2000 ≤ 0.5.
 
-**Departure:** `legacy_bytes` binds the plain compose compile. That SPIR-V is the pre-HDR compose shader, with no scene-image or bloom binding. The HDR compile (`GENOS_HDR_COMPOSE`) stores scene radiance, adds bloom, applies exposure, and writes the shoulder. The lattice sample is a later pass (`hdr_agx.comp`) that samples `agx_rec709`. It is not a branch in the GI compose shader.
+**Departure:** `legacy_bytes` binds the plain compose compile. That SPIR-V is the pre-HDR compose shader, with no scene-image or bloom binding. The HDR compile (`GENOS_HDR_COMPOSE`) stores scene radiance, adds bloom, applies exposure, and writes the shoulder. AgX is a later pass (`hdr_agx.comp`) that evaluates `agx_rec709`. The 32³ lattice is not uploaded. It is not a branch in the GI compose shader.
 
 **Rejected as the implementation of this pick:** Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve", 2016, [knarkowicz.wordpress.com](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/). The coefficients `(2.51, 0.03, 2.43, 0.59, 0.14)` are a rational fit of an older ACES curve, then a clamp to 1. Shipping that fit and calling it ACES or AgX would be a silent departure. `display=aces` is the Academy 2.0 transform, not this fit. It lands in phase 5's alternate, after AgX is the default.
 
@@ -209,9 +209,9 @@ GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 | Image | Size at 1440p | Notes |
 |---|---|---|
 | Scene-referred | 2560×1440, one image | Not per frame in flight. Compose writes it. The grade reads it. |
-| Bloom levels | 1280×720 down to 40×22 | The whole pyramid is kept so a reused frame samples it. |
+| Bloom levels | preset pyramid, RGBA16F | High is 1280×720 down to 40×22. Low's four levels start at 640×360. No full-resolution bloom image. |
 | Exposed | same as the scene, or the swapchain's transient | The display pass can read the scene and the bloom sum and write the swapchain. A stored exposed image is not required for SDR. |
-| Histogram | 256 × `uint` | Device buffer. The CPU reads it after the fence. |
+| Histogram | preset bin count × `uint`, plus two short luma halves | High is 256 bins and 128 still samples. Fixed exposure does not allocate it. The CPU reads the header after the fence. |
 | Exposure state | two floats | Current scale and target scale. CPU owned. |
 
 Passes, in order, each skipped when its inputs are off:

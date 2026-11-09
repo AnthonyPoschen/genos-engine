@@ -21,7 +21,8 @@ use genos_render::{
     hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
     pack_f32,
     pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
-    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, HdrSwapchain,
+    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, post_chain,
+    mib_centi, mib_cents, HdrSwapchain,
     HDR_PEAK_NITS,
     Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
     COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
@@ -289,6 +290,24 @@ fn live_metrics() -> Vec<Metric> {
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         collected_ms("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
         at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
+        equal("passes_fallback", chain_passes(LightingPreset::Potato), 0.0),
+        equal("passes_low", chain_passes(LightingPreset::Low), 7.0),
+        equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
+        equal("passes_high", chain_passes(LightingPreset::High), 11.0),
+        equal("passes_ultra", chain_passes_ultra(), 13.0),
+        equal("base_low", chain_base(LightingPreset::Low), 640.0),
+        equal("base_medium", chain_base(LightingPreset::Medium), 1280.0),
+        equal("base_high", chain_base(LightingPreset::High), 1280.0),
+        equal("base_ultra", chain_base_ultra(), 1280.0),
+        equal("coarse_low", chain_coarse(LightingPreset::Low), 80.0),
+        equal("coarse_medium", chain_coarse(LightingPreset::Medium), 80.0),
+        equal("coarse_high", chain_coarse(LightingPreset::High), 40.0),
+        equal("coarse_ultra", chain_coarse_ultra(), 20.0),
+        vram_1440("vram_1440_fallback", BudgetSlot::Fallback, 28.13),
+        vram_1440("vram_1440_low", BudgetSlot::Low, 37.46),
+        vram_1440("vram_1440_medium", BudgetSlot::Medium, 37.49),
+        vram_1440("vram_1440_high", BudgetSlot::High, 37.50),
+        vram_1440("vram_1440_ultra", BudgetSlot::Ultra, 37.50),
     ]
 }
 
@@ -1194,6 +1213,156 @@ fn load_hall() -> Result<genos_scene::Scene, String> {
     )))
 }
 
+fn preset_chain(preset: LightingPreset) -> genos_render::PostChain {
+    post_chain(
+        2560,
+        1440,
+        &HdrSettings::for_preset(preset),
+        false,
+        false,
+    )
+}
+
+fn chain_passes(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).passes)
+}
+
+fn chain_passes_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false, false).passes)
+}
+
+fn chain_base(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).base_w)
+}
+
+fn chain_base_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false, false).base_w)
+}
+
+fn chain_coarse(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).coarse_w)
+}
+
+fn chain_coarse_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false, false).coarse_w)
+}
+
+#[derive(Clone, Copy)]
+enum BudgetSlot {
+    Fallback,
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+struct Budget {
+    ok: bool,
+    fallback: f64,
+    low: f64,
+    medium: f64,
+    high: f64,
+    ultra: f64,
+}
+
+fn budget() -> &'static Budget {
+    static CELL: OnceLock<Budget> = OnceLock::new();
+    CELL.get_or_init(measure_budget)
+}
+
+fn empty_budget() -> Budget {
+    Budget {
+        ok: false,
+        fallback: 0.0,
+        low: 0.0,
+        medium: 0.0,
+        high: 0.0,
+        ultra: 0.0,
+    }
+}
+
+fn measure_budget() -> Budget {
+    match measure_budget_device() {
+        Ok(budget) => budget,
+        Err(err) => {
+            eprintln!("hdr gate 1440: {err}");
+            empty_budget()
+        }
+    }
+}
+
+fn measure_budget_device() -> Result<Budget, String> {
+    let mut window = Window::open_proof(2560, 1440)?;
+    let frame = window.pump();
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let renderer = &mut *owner.device;
+    let (width, height) = renderer.picture_extent();
+    if width != 2560 || height != 1440 {
+        return Err(format!("swapchain is {width}x{height}, wanted 2560x1440"));
+    }
+    let presets = [
+        (HdrSettings::for_preset(LightingPreset::Potato), "fallback"),
+        (HdrSettings::for_preset(LightingPreset::Low), "low"),
+        (HdrSettings::for_preset(LightingPreset::Medium), "medium"),
+        (HdrSettings::for_preset(LightingPreset::High), "high"),
+        (HdrSettings::ultra(), "ultra"),
+    ];
+    let mut values = [0.0; 5];
+    for (index, (hdr, name)) in presets.into_iter().enumerate() {
+        renderer.layout_post(hdr.clone())?;
+        let (got_w, got_h) = renderer.picture_extent();
+        if got_w != 2560 || got_h != 1440 {
+            return Err(format!("{name} extent {got_w}x{got_h}"));
+        }
+        let got = renderer.post_vram_device();
+        let want = post_chain(got_w, got_h, &hdr, false, false).mib();
+        if (got - want).abs() > 1.0e-4 {
+            return Err(format!("{name} device {got} formula {want}"));
+        }
+        if let Some(slot) = values.get_mut(index) {
+            *slot = got;
+        }
+    }
+    Ok(Budget {
+        ok: true,
+        fallback: values[0],
+        low: values[1],
+        medium: values[2],
+        high: values[3],
+        ultra: values[4],
+    })
+}
+
+fn vram_1440(name: &'static str, slot: BudgetSlot, ceiling: f64) -> Metric {
+    let sample = budget();
+    let got = match slot {
+        BudgetSlot::Fallback => sample.fallback,
+        BudgetSlot::Low => sample.low,
+        BudgetSlot::Medium => sample.medium,
+        BudgetSlot::High => sample.high,
+        BudgetSlot::Ultra => sample.ultra,
+    };
+    let status = if sample.ok && mib_cents(got) <= mib_cents(ceiling) {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    let value = if sample.ok {
+        mib_centi(got)
+    } else {
+        ceiling + 1.0
+    };
+    Metric {
+        name,
+        value: Some(value),
+        threshold: ceiling,
+        compare: Compare::AtMost,
+        status,
+    }
+}
+
 fn open_grade_renderer() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(160, 90)?;
     let frame = window.pump();
@@ -1552,8 +1721,12 @@ fn gpu_bloom_error(broken: bool) -> f64 {
     }
     let scale = if broken { 2.0 } else { 1.0 };
     let pyramid = bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale);
-    let added = bloom_delta(&grab.bloom_add, &grab.bloom_ref, scale);
-    pyramid.max(added)
+    if grab.bloom_add.is_empty() {
+        pyramid
+    } else {
+        let added = bloom_delta(&grab.bloom_add, &grab.bloom_ref, scale);
+        pyramid.max(added)
+    }
 }
 
 struct EncodeGrab {

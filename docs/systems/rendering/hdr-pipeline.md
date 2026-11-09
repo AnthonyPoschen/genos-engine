@@ -16,7 +16,7 @@ Status: **accepted** (Engine bot, 29 Oct 2026). ADR: [0027](../../adr/0027-hdr-p
 ### Why AgX over ACES
 
 - AgX's inset/outset keeps hue as saturated lights brighten; a red lamp goes towards white instead of skewing to orange. ACES 1.x skews hue, and the common Narkowicz fit is not ACES.
-- AgX is a per-channel curve plus two 3×3 matrices, baked into a 32³ lattice, one texture read per pixel on every preset.
+- AgX is a per-channel curve plus two 3×3 matrices. The display pass evaluates that curve. The 32³ lattice stays a CPU reference and is not resident.
 - ACES 2.0 stays an alternate for teams that grade against it. Its body is the Academy CTL or nothing.
 
 ### Why the dual-filter bloom
@@ -51,6 +51,16 @@ Ceilings from the ADR 0015 design §7 at 1440p, carried to the new names. Ultra'
 | ms ceiling, Steam Deck 800p | n/a | 1.50 | n/a | n/a | n/a |
 
 The Deck's 40 fps target is a 25 ms frame (ADR 0023). 1.50 ms is 6% of it. The 4070's 500 fps basic-scene goal is a 2.0 ms frame. High post 1.20 ms plus the frozen lighting floor of 0.43 ms is 1.63 ms. A preset whose measured post time misses its ceiling drops a bloom level first, then the histogram size.
+
+The shipped chain is one RGBA16F scene image plus the preset's bloom pyramid, also RGBA16F. There is no full-resolution bloom image and no second scratch. High and Ultra start at half resolution (1280×720 at 1440p) and keep six and seven levels, the same Karis, 13-tap, and tent as the CPU pyramid. Low's four levels start at quarter resolution, so the first dispatch is one 4× Karis average instead of two half-resolution passes. Fallback stores no pyramid. The SDR path does not keep an encode image or a host copy of the scene. Auto exposure keeps a histogram of the preset's bin count and two short luma histories (32, 64, or 128 samples). Fixed exposure does not. `hdr_output_gate` checks these bytes at 2560×1440 on lavapipe, rounded to the two decimals in the table. The millisecond ceilings are still the 4070 numbers above; this record does not replace them with a lavapipe time.
+
+### Networking
+
+- Replicated state: none. The pyramid, the meter, and the exposure scale are present-client.
+- Authority: the client that presents the frame.
+- Prediction / rollback: none. A missed sample waits one frame.
+- Determinism: the CPU pyramid is the reference. The GPU chain is the same taps, stored as binary16.
+- Headless server: no post chain. A server does not present.
 
 ## 4. Headless reference
 

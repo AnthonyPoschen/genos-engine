@@ -40,20 +40,6 @@ const LIGHTING_CACHE_RAYS: u32 = 16;
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
-/// `hdr_meter.comp` header: 4096 bin counts plus moved, total, and two pads.
-const METER_HEADER_BYTES: u64 = 16_400;
-const METER_BIN_CAP: usize = 4096;
-/// Still-check stride. The histogram counts every pixel. This stride does not.
-const STILL_STRIDE: u32 = 32;
-
-fn still_sample_slots(pixels: u64) -> u64 {
-    let stride = u64::from(STILL_STRIDE);
-    if pixels == 0 {
-        1
-    } else {
-        pixels.saturating_add(stride - 1) / stride
-    }
-}
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
@@ -118,23 +104,22 @@ pub(crate) struct Lighting {
     gbuf: Buffer,
     work: Buffer,
     out: Buffer,
-    /// Scene-referred radiance, RGBA32F. w is the eye distance in metres.
+    /// Scene-referred radiance, RGBA16F. w is the eye distance in metres.
     scene_lin: Buffer,
-    /// Host copy of `scene_lin`, filled when a picture is read back.
+    /// Host copy of `scene_lin`, allocated for a picture readback and freed after it.
     scene_host: Buffer,
     /// Exposure, display mode, bloom intensity, output mode, then white, peak, and format.
     /// Host-visible. The compose shader reads the first `vec4`.
     hdr_params: Buffer,
     /// HDR10 PQ or scRGB codes, RGBA32F. The fp16 image, when the swapchain is scRGB, follows it.
     hdr_encode: Buffer,
-    /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
+    /// Dummy binding. AgX is evaluated in the display shader, so the lattice is not resident.
     agx_lut: Buffer,
-    /// Full-resolution bloom, then the mip chain. The GPU pyramid writes it.
-    /// The intensity scale is not in the texels.
+    /// Bloom mip pyramid, RGBA16F, finest level first. No full-resolution image.
     bloom: Buffer,
     /// Last still-check share from the GPU meter. Zero until a comparison exists.
     still_pop: f64,
-    /// GPU histogram and the stride-32 luma halves. The header is the bin counts.
+    /// GPU histogram and two short luma halves. The header is the bin counts.
     meter_dev: Buffer,
     /// Host copy of the meter header. Read after the fence, one frame late.
     meter_host: Buffer,
@@ -144,6 +129,10 @@ pub(crate) struct Lighting {
     meter_has_prev: bool,
     /// Which luma half holds the previous frame. The dispatch flips it.
     meter_ping: u32,
+    /// Bin count of the meter dispatch `take_meter` reads. Zero when that pass did not run.
+    meter_bins: u32,
+    /// [`crate::hdr_output::post_signature`] of the buffers `make_lighting_targets` built.
+    post_sig: u64,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
     hdr: genos_scene::HdrSettings,
@@ -465,6 +454,8 @@ impl Default for Lighting {
             meter_pending: false,
             meter_has_prev: false,
             meter_ping: 0,
+            meter_bins: 0,
+            post_sig: 0,
             meter_ev: None,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
@@ -1182,29 +1173,27 @@ impl Gpu {
             0x20 | 0x1 | 0x2,
             Memory::Device,
         )?;
-        let scene_bytes = pixels.saturating_mul(16).max(16);
-        self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
+        let encode_full = self.post_encode_full();
+        let scrgb_tail = encode_full && self.format == crate::hdr_output::FORMAT_R16F;
+        let chain = crate::hdr_output::post_chain(w, h, &self.lighting.hdr, encode_full, scrgb_tail);
+        self.lighting.scene_lin =
+            self.make_buffer(chain.scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
         // Transfer-dst so the pyramid can write the bloom intensity word.
-        // Eight floats: scale, mode, bloom, output, white, peak, format, pad.
-        self.lighting.hdr_params = self.make_buffer(32, 0x20 | 0x2, Memory::Upload)?;
-        let mut encode_bytes = scene_bytes;
-        if self.format == crate::hdr_output::FORMAT_R16F {
-            encode_bytes = encode_bytes.saturating_add(scene_bytes / 2);
-        }
+        // Eight floats: scale, mode, bloom, output, white, peak, format, bloom divisor.
+        self.lighting.hdr_params = self.make_buffer(chain.params_bytes, 0x20 | 0x2, Memory::Upload)?;
         // Storage for the encode pass, transfer-src when the fp16 tail is copied.
-        self.lighting.hdr_encode = self.make_buffer(encode_bytes, 0x20 | 0x1, Memory::Upload)?;
-        self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
-        self.write_agx_lut();
-        // The second half holds the mip chain and two upsample scratches.
-        self.lighting.bloom = self.make_buffer(scene_bytes.saturating_mul(2), 0x20, Memory::Upload)?;
-        let meter_slots = still_sample_slots(pixels);
-        let meter_bytes = METER_HEADER_BYTES.saturating_add(meter_slots.saturating_mul(8));
+        // SDR keeps a dummy so the descriptor stays valid.
+        self.lighting.hdr_encode =
+            self.make_buffer(chain.encode_bytes, 0x20 | 0x1, Memory::Upload)?;
+        self.lighting.agx_lut = self.make_buffer(chain.lut_bytes, 0x20, Memory::Upload)?;
+        self.lighting.bloom = self.make_buffer(chain.bloom_bytes, 0x20, Memory::Upload)?;
         // Storage for the histogram, transfer so the header can be cleared and copied.
         self.lighting.meter_dev =
-            self.make_buffer(meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.lighting.meter_host = self.make_buffer(METER_HEADER_BYTES, 0x2, Memory::Readback)?;
+            self.make_buffer(chain.meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        self.lighting.meter_host = self.make_buffer(chain.meter_host_bytes, 0x2, Memory::Readback)?;
+        self.lighting.post_sig = crate::hdr_output::post_signature(&self.lighting.hdr, encode_full, scrgb_tail);
         self.lighting.meter_pending = false;
+        self.lighting.meter_bins = 0;
         self.lighting.meter_has_prev = false;
         self.lighting.meter_ping = 0;
         self.lighting.meter_ev = None;
@@ -2328,7 +2317,12 @@ impl Gpu {
         self.refresh_hdr_surface()?;
         let key = lighting_alloc_key(&self.lighting.settings);
         let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
-        if (key != self.lighting.alloc_key || resized) && self.lighting.ready {
+        let encode_full = self.post_encode_full();
+        let scrgb_tail = encode_full && self.format == crate::hdr_output::FORMAT_R16F;
+        let post_sig = crate::hdr_output::post_signature(&self.lighting.hdr, encode_full, scrgb_tail);
+        if (key != self.lighting.alloc_key || resized || post_sig != self.lighting.post_sig)
+            && self.lighting.ready
+        {
             self.make_lighting_targets()?;
         }
         Ok(())
@@ -2371,7 +2365,15 @@ impl Gpu {
             return;
         }
         self.lighting.meter_pending = false;
-        let words = METER_BIN_CAP + 4;
+        let bins = usize::try_from(self.lighting.meter_bins).unwrap_or(0);
+        if bins == 0 {
+            return;
+        }
+        let words = bins.saturating_add(4);
+        let bytes = u64::try_from(words.saturating_mul(4)).unwrap_or(0);
+        if bytes == 0 || self.lighting.meter_host.size < bytes {
+            return;
+        }
         let mut raw = vec![0_u32; words];
         unsafe {
             let mut mapped = std::ptr::null_mut();
@@ -2379,7 +2381,7 @@ impl Gpu {
                 self.device,
                 self.lighting.meter_host.memory,
                 0,
-                METER_HEADER_BYTES,
+                bytes,
                 0,
                 &mut mapped,
             ) != 0
@@ -2390,8 +2392,8 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, self.lighting.meter_host.memory);
         }
         let had_prev = self.lighting.meter_has_prev;
-        let moved = raw.get(METER_BIN_CAP).copied().unwrap_or(0);
-        let total = raw.get(METER_BIN_CAP + 1).copied().unwrap_or(0);
+        let moved = raw.get(bins).copied().unwrap_or(0);
+        let total = raw.get(bins.saturating_add(1)).copied().unwrap_or(0);
         if had_prev {
             self.lighting.still_pop = if total == 0 {
                 1.0
@@ -2405,9 +2407,6 @@ impl Gpu {
         if self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto {
             return;
         }
-        let bins = usize::try_from(self.lighting.hdr.histogram_bins)
-            .unwrap_or(256)
-            .clamp(1, METER_BIN_CAP);
         let counts = raw[..bins].to_vec();
         let occupied = counts
             .iter()
@@ -2463,63 +2462,70 @@ impl Gpu {
 
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
     /// The intensity word is updated after the chain so the display pass adds it.
+    /// Upsamples write the finer mip in place. The display pass tents that mip to full resolution.
     fn record_gpu_bloom(&mut self, width: u32, height: u32) -> Result<(), String> {
         if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
             return Ok(());
         }
-        let pixels = width.saturating_mul(height);
-        let levels = self.lighting.hdr.bloom_levels.min(8);
+        let levels = crate::hdr_output::bloom_level_count(&self.lighting.hdr);
         if levels == 0 {
             return Ok(());
         }
-        let mut mips = Vec::new();
-        let mut cursor = pixels;
-        let mut level_w = width;
-        let mut level_h = height;
-        for _ in 0..levels {
-            level_w = (level_w / 2).max(1);
-            level_h = (level_h / 2).max(1);
-            mips.push((level_w, level_h, cursor));
-            cursor = cursor.saturating_add(level_w.saturating_mul(level_h));
-        }
-        let scratch_px = mips.first().map_or(0, |(w, h, _)| w.saturating_mul(*h));
-        let scratch_a = cursor;
-        let scratch_b = cursor.saturating_add(scratch_px);
-        let end = scratch_b.saturating_add(scratch_px);
-        if u64::from(end) > self.lighting.bloom.size / 16 {
+        let mips = crate::hdr_output::bloom_mips(width, height, levels);
+        if u64::from(mips.texels).saturating_mul(8) > self.lighting.bloom.size {
             eprintln!("lighting: bloom chain does not fit");
             return Ok(());
         }
-        let Some(&(first_w, first_h, first_dst)) = mips.first() else {
+        let Some(first) = mips.levels.first() else {
             return Ok(());
         };
-        self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
-        for index in 1..mips.len() {
-            let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
-                return Ok(());
-            };
-            let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
-                return Ok(());
-            };
-            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
-        }
-        let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
-            return Ok(());
+        let first_mode = if crate::hdr_output::bloom_divisor(levels) == 4 {
+            4
+        } else {
+            0
         };
-        let last = mips.len().saturating_sub(1);
-        let mut ping = 0u32;
-        for finer in (0..last).rev() {
-            let Some(&(finer_w, finer_h, finer_off)) = mips.get(finer) else {
+        self.bloom_dispatch(
+            first.width,
+            first.height,
+            width,
+            height,
+            0,
+            first.texel,
+            first_mode,
+            0,
+        );
+        for index in 1..mips.levels.len() {
+            let Some(src) = mips.levels.get(index - 1) else {
                 return Ok(());
             };
-            let dst = if ping == 0 { scratch_a } else { scratch_b };
-            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
-            src_w = finer_w;
-            src_h = finer_h;
-            src = dst;
-            ping ^= 1;
+            let Some(dst) = mips.levels.get(index) else {
+                return Ok(());
+            };
+            self.bloom_dispatch(dst.width, dst.height, src.width, src.height, src.texel, dst.texel, 1, 0);
         }
-        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
+        let count = mips.levels.len();
+        if count > 1 {
+            let mut src_index = count - 1;
+            for finer in (0..count - 1).rev() {
+                let Some(src) = mips.levels.get(src_index) else {
+                    return Ok(());
+                };
+                let Some(dst) = mips.levels.get(finer) else {
+                    return Ok(());
+                };
+                self.bloom_dispatch(
+                    dst.width,
+                    dst.height,
+                    src.width,
+                    src.height,
+                    src.texel,
+                    dst.texel,
+                    2,
+                    dst.texel,
+                );
+                src_index = finer;
+            }
+        }
         let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
         let cmd = self.cmd;
         let dst = self.lighting.hdr_params.buffer;
@@ -2584,25 +2590,44 @@ impl Gpu {
         )
     }
 
-    /// Host view of the full-resolution bloom image. The mip chain after it is omitted.
+    /// Full-resolution bloom, reconstructed by tent-upsampling the finest stored mip.
     fn read_bloom_host(&self) -> Result<Vec<f32>, String> {
-        let width = usize::try_from(self.extent_w).unwrap_or(0);
-        let height = usize::try_from(self.extent_h).unwrap_or(0);
-        let count = width.saturating_mul(height).saturating_mul(4);
-        if count == 0 || self.lighting.bloom.memory.is_null() {
+        let levels = crate::hdr_output::bloom_level_count(&self.lighting.hdr);
+        if levels == 0 || self.lighting.bloom.memory.is_null() || self.lighting.bloom.size == 0 {
             return Ok(Vec::new());
         }
-        let bytes = u64::try_from(count.saturating_mul(4)).unwrap_or(0);
-        if self.lighting.bloom.size < bytes {
+        let size = usize::try_from(self.lighting.bloom.size).unwrap_or(0);
+        if size == 0 {
             return Ok(Vec::new());
         }
-        read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.bloom.memory,
-            count,
-        )
+        let mut raw = vec![0u8; size];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.bloom.memory,
+                0,
+                self.lighting.bloom.size,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(Vec::new());
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), size);
+            (self.fns.unmap_mem)(self.device, self.lighting.bloom.memory);
+        }
+        Ok(crate::hdr_output::bloom_rgba_from_chain(
+            &raw,
+            self.extent_w,
+            self.extent_h,
+            levels,
+        ))
+    }
+
+    /// True when the encode side buffer is the full picture. SDR keeps a dummy.
+    fn post_encode_full(&self) -> bool {
+        self.hdr_output_word() > 0.0
     }
 
     /// 0 keeps the 8-bit picture. 1 is HDR10. 2 is scRGB. Forced SDR stays 0.
@@ -2660,7 +2685,15 @@ impl Gpu {
         let white = crate::hdr_output::pack_f32(crate::hdr_output::graphics_white_linear());
         let peak = crate::hdr_output::pack_f32(crate::hdr_output::HDR_PEAK_NITS);
         let format_code = crate::hdr_output::swapchain_format_code(self.format);
-        let words = [scale, mode, 0.0_f32, output, white, peak, format_code, 0.0];
+        let divisor = if self.bloom_active() {
+            f32::from(u16::try_from(crate::hdr_output::bloom_divisor(
+                crate::hdr_output::bloom_level_count(&self.lighting.hdr),
+            ))
+            .unwrap_or(0))
+        } else {
+            0.0
+        };
+        let words = [scale, mode, 0.0_f32, output, white, peak, format_code, divisor];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
@@ -2683,34 +2716,11 @@ impl Gpu {
         self.memory_barrier(0x4000, 0x800 | 0x80, 0x4000, 0x20);
     }
 
-    fn write_agx_lut(&mut self) {
-        if self.lighting.agx_lut.memory.is_null() {
-            return;
-        }
-        let words = crate::hdr_output::agx_lut_words();
-        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0);
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            if (self.fns.map_mem)(
-                self.device,
-                self.lighting.agx_lut.memory,
-                0,
-                bytes,
-                0,
-                &mut mapped,
-            ) != 0
-            {
-                return;
-            }
-            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<f32>(), words.len());
-            (self.fns.unmap_mem)(self.device, self.lighting.agx_lut.memory);
-        }
-    }
-
-    /// Histogram of every pixel, and a stride-32 still check. The header is copied
-    /// for the next frame. Luma halves stay on the device.
+    /// Histogram of every pixel, and a short still check. The header is copied
+    /// for the next frame. Luma halves stay on the device. Fixed exposure skips it.
     fn record_gpu_meter(&mut self, width: u32, height: u32) {
         if self.lighting.hdr.legacy_bytes
+            || self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto
             || self.lighting.meter_pipe.is_null()
             || self.lighting.meter_dev.buffer.is_null()
             || self.lighting.meter_host.buffer.is_null()
@@ -2719,35 +2729,37 @@ impl Gpu {
         {
             return;
         }
+        let chain = crate::hdr_output::post_chain(width, height, &self.lighting.hdr, false, false);
+        if chain.bins == 0 || chain.meter_bytes > self.lighting.meter_dev.size {
+            return;
+        }
+        let header = u64::from(chain.bins.saturating_add(4)).saturating_mul(4);
+        if header == 0 || self.lighting.meter_host.size < header {
+            return;
+        }
         let pixels = u64::from(width).saturating_mul(u64::from(height));
-        if pixels == 0 || self.lighting.meter_dev.size < METER_HEADER_BYTES {
+        if pixels == 0 {
             return;
         }
         unsafe {
-            (self.fns.cmd_fill_buffer)(
-                self.cmd,
-                self.lighting.meter_dev.buffer,
-                0,
-                METER_HEADER_BYTES,
-                0,
-            );
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.meter_dev.buffer, 0, header, 0);
         }
         self.memory_barrier(0x800 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
-        let bins = self.lighting.hdr.histogram_bins.clamp(1, 4096);
-        let do_hist = u32::from(
-            self.lighting.hdr.exposure_mode == genos_scene::ExposureMode::Auto,
-        );
-        let slots = u32::try_from(still_sample_slots(pixels)).unwrap_or(u32::MAX);
+        let stride = if chain.slots == 0 {
+            0
+        } else {
+            u32::try_from(pixels.div_ceil(u64::from(chain.slots))).unwrap_or(u32::MAX)
+        };
         let pc = [
             width,
             height,
-            bins,
-            slots,
+            chain.bins,
+            chain.slots,
             u32::from(self.lighting.meter_has_prev),
             self.lighting.meter_ping & 1,
-            STILL_STRIDE,
-            do_hist,
-            0,
+            stride,
+            1,
+            chain.bins.saturating_add(4),
             0,
             0,
             0,
@@ -2775,7 +2787,7 @@ impl Gpu {
         let region = Region {
             src: 0,
             dst: 0,
-            size: METER_HEADER_BYTES,
+            size: header,
         };
         unsafe {
             (self.fns.cmd_copy_buffer)(
@@ -2786,6 +2798,7 @@ impl Gpu {
                 &region as *const Region as *const u8,
             );
         }
+        self.lighting.meter_bins = chain.bins;
         self.lighting.meter_pending = true;
         self.lighting.meter_ping ^= 1;
     }

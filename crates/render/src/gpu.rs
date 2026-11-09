@@ -385,6 +385,19 @@ impl Renderer {
         self.gpu.read_host(slot)
     }
 
+    /// Swapchain size the device allocated. A requested size can differ when the compositor clamps it.
+    pub fn picture_extent(&self) -> (u32, u32) {
+        (self.gpu.extent_w, self.gpu.extent_h)
+    }
+
+    /// Rebuild the post chain for `hdr`. GI targets follow Potato so the check does not also build the High cache.
+    pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.gpu.lighting.settings =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        self.gpu.lighting.hdr = hdr;
+        self.gpu.make_lighting_targets()
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if !extent_needed(self.width, self.height, width, height) {
             return Ok(());
@@ -811,7 +824,7 @@ impl Renderer {
     }
 
     /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
-    /// intensity scale. The mip chain sits past this image and is not returned.
+    /// intensity scale. The stored chain is the mip pyramid; this tents the finest mip up.
     pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
         self.gpu.read_bloom_host()
     }
@@ -4332,17 +4345,25 @@ impl Gpu {
     }
 
     /// Device scene image to the host buffer. The fence has already waited.
+    /// The host buffer is allocated here and freed by [`Self::read_scene_host`].
     fn copy_scene_for_readback(&mut self) {
         let src = self.lighting.scene_lin.buffer;
-        let dst = self.lighting.scene_host.buffer;
-        if src.is_null() || dst.is_null() {
+        let need = self.lighting.scene_lin.size;
+        if src.is_null() || need == 0 {
             return;
         }
-        let size = self
-            .lighting
-            .scene_lin
-            .size
-            .min(self.lighting.scene_host.size);
+        if self.lighting.scene_host.buffer.is_null() || self.lighting.scene_host.size < need {
+            let Ok(host) = self.make_buffer(need, 0x2, Memory::Readback) else {
+                return;
+            };
+            let mut old = std::mem::replace(&mut self.lighting.scene_host, host);
+            self.destroy_buffer(&mut old);
+        }
+        let dst = self.lighting.scene_host.buffer;
+        if dst.is_null() {
+            return;
+        }
+        let size = need.min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -4368,32 +4389,46 @@ impl Gpu {
         }
     }
 
-    fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
-        let pixels = self.extent_w as usize * self.extent_h as usize;
-        let bytes = pixels.saturating_mul(16);
+    fn read_scene_host(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        let bytes = u64::try_from(pixels.saturating_mul(8)).unwrap_or(0);
+        let empty = crate::hdr_output::SceneRead {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+            distance_m: Vec::new(),
+        };
         if bytes == 0
             || self.lighting.scene_host.memory.is_null()
-            || self.lighting.scene_host.size < bytes as u64
+            || self.lighting.scene_host.size < bytes
         {
-            return Ok(crate::hdr_output::SceneRead {
-                width: 0,
-                height: 0,
-                rgb: Vec::new(),
-                distance_m: Vec::new(),
-            });
+            return Ok(empty);
         }
-        let values = read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.scene_host.memory,
-            pixels.saturating_mul(4),
-        )?;
-        Ok(crate::hdr_output::scene_read_from_rgba(
-            self.extent_w,
-            self.extent_h,
-            &values,
-        ))
+        let size = usize::try_from(bytes).unwrap_or(0);
+        let mut raw = vec![0u8; size];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.scene_host.memory,
+                0,
+                bytes,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(empty);
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), size);
+            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
+        }
+        let values = crate::hdr_output::rgba_f32_from_rgba16f(&raw, pixels);
+        let read = crate::hdr_output::scene_read_from_rgba(self.extent_w, self.extent_h, &values);
+        let mut host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
+        self.destroy_buffer(&mut host);
+        Ok(read)
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {

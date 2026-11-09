@@ -11,12 +11,29 @@ layout(push_constant) uniform Push {
 } pc;
 
 layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
-    vec4 px[];
+    uint words[];
 } scene_lin;
 
 layout(std430, set = 0, binding = 16) buffer BloomChain {
-    vec4 px[];
+    uint words[];
 } bloom;
+
+vec3 load_scene(uint i) {
+    vec2 rg = unpackHalf2x16(scene_lin.words[i * 2u]);
+    vec2 ba = unpackHalf2x16(scene_lin.words[i * 2u + 1u]);
+    return vec3(rg, ba.x);
+}
+
+vec3 load_bloom(uint texel) {
+    vec2 rg = unpackHalf2x16(bloom.words[texel * 2u]);
+    vec2 ba = unpackHalf2x16(bloom.words[texel * 2u + 1u]);
+    return vec3(rg, ba.x);
+}
+
+void store_bloom(uint texel, vec3 c) {
+    bloom.words[texel * 2u] = packHalf2x16(c.rg);
+    bloom.words[texel * 2u + 1u] = packHalf2x16(vec2(c.b, 0.0));
+}
 
 const float REC709_R = 0.2126;
 const float REC709_G = 0.7152;
@@ -40,7 +57,7 @@ vec3 at_scene(uint w, uint h, uint x, uint y) {
     if (x >= w || y >= h) {
         return vec3(0.0);
     }
-    return scene_lin.px[y * w + x].rgb;
+    return load_scene(y * w + x);
 }
 
 vec3 box2_scene(uint w, uint h, uint x, uint y) {
@@ -85,7 +102,7 @@ vec3 at_bloom(uint base, uint w, uint h, int x, int y) {
     if (uint(x) >= w || uint(y) >= h) {
         return vec3(0.0);
     }
-    return bloom.px[base + uint(y) * w + uint(x)].rgb;
+    return load_bloom(base + uint(y) * w + uint(x));
 }
 
 vec3 bilinear(uint base, uint w, uint h, float u, float v) {
@@ -128,6 +145,15 @@ vec3 downsample13(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint d
     return acc;
 }
 
+// Quarter-resolution first step. Four half-resolution Karis samples, averaged.
+vec3 karis4(uint src_w, uint src_h, uvec2 p) {
+    vec3 acc = karis_at(src_w, src_h, p * 2u);
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 0u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(0u, 1u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 1u));
+    return acc * 0.25;
+}
+
 float tent(int dx, int dy) {
     if (dx == 0 && dy == 0) {
         return TENT_CENTRE;
@@ -167,13 +193,15 @@ void main() {
     vec3 color;
     if (mode == 0u) {
         color = karis_at(src_w, src_h, p);
+    } else if (mode == 4u) {
+        color = karis4(src_w, src_h, p);
     } else if (mode == 1u) {
         color = downsample13(src, src_w, src_h, p, dst_w, dst_h);
     } else {
         color = upsample3(src, src_w, src_h, p, dst_w, dst_h);
         if (mode == 2u) {
-            color += bloom.px[pc.params.w + p.y * dst_w + p.x].rgb;
+            color += load_bloom(pc.params.w + p.y * dst_w + p.x);
         }
     }
-    bloom.px[dst] = vec4(color, 0.0);
+    store_bloom(dst, color);
 }

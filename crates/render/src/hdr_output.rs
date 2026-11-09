@@ -863,15 +863,21 @@ pub struct Image {
 }
 
 /// Lattice edge. Log2 from [`AGX_LOG_MIN`] to [`AGX_LOG_MAX`], inclusive.
+/// The CPU reference. The display pass evaluates `AgX` and does not upload this.
+#[cfg(test)]
 pub const AGX_LUT_N: usize = 32;
 /// Lowest log2 the `AgX` lattice stores.
+#[cfg(test)]
 pub const AGX_LOG_MIN: f64 = -12.0;
 /// Highest log2 the `AgX` lattice stores.
+#[cfg(test)]
 pub const AGX_LOG_MAX: f64 = 10.0;
 /// Bytes of the `vec4` lattice (`N³ × 16`).
+#[cfg(test)]
 pub const AGX_LUT_BYTES: u64 = 32 * 32 * 32 * 16;
 
 /// Linear radiance at lattice index `index` along one axis.
+#[cfg(test)]
 #[must_use]
 pub fn agx_lut_linear(index: usize) -> f64 {
     let span = AGX_LUT_N.saturating_sub(1).max(1);
@@ -879,7 +885,8 @@ pub fn agx_lut_linear(index: usize) -> f64 {
     (AGX_LOG_MIN + t * (AGX_LOG_MAX - AGX_LOG_MIN)).exp2()
 }
 
-/// One lattice texel. The compose shader samples the buffer this fills.
+/// One lattice texel of the CPU reference.
+#[cfg(test)]
 #[must_use]
 pub fn agx_lut_texel(x: usize, y: usize, z: usize) -> [f64; 3] {
     agx_rec709([
@@ -890,6 +897,7 @@ pub fn agx_lut_texel(x: usize, y: usize, z: usize) -> [f64; 3] {
 }
 
 /// Packed `vec4` words, x-fastest. `w` is 0. Built once per process.
+#[cfg(test)]
 #[must_use]
 pub fn agx_lut_words() -> &'static [f32] {
     static WORDS: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
@@ -906,6 +914,10 @@ pub fn agx_lut_words() -> &'static [f32] {
                 }
             }
         }
+        debug_assert_eq!(
+            u64::try_from(words.len().saturating_mul(4)).unwrap_or(0),
+            AGX_LUT_BYTES
+        );
         words
     })
 }
@@ -1356,6 +1368,406 @@ fn floor_u32(value: f64) -> u32 {
     u32::try_from(floor_i32(value.max(0.0))).unwrap_or(u32::MAX)
 }
 
+fn u64_to_f64(value: u64) -> f64 {
+    if let Ok(narrow) = u32::try_from(value) {
+        return f64::from(narrow);
+    }
+    let hi = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let lo = u32::try_from(value & 0xffff_ffff).unwrap_or(0);
+    f64::from(hi) * 4_294_967_296.0 + f64::from(lo)
+}
+
+/// MiB from a byte count. `1024²`, not `1000²`.
+#[must_use]
+pub fn bytes_to_mib(bytes: u64) -> f64 {
+    u64_to_f64(bytes) / (1024.0 * 1024.0)
+}
+
+/// Two-decimal MiB, the precision of the published ceilings.
+#[must_use]
+pub fn mib_centi(mib: f64) -> f64 {
+    (mib * 100.0).round() / 100.0
+}
+
+/// Rounded hundredths, as an integer. `28.13` is `2813`.
+#[must_use]
+pub fn mib_cents(mib: f64) -> f64 {
+    (mib * 100.0).round()
+}
+
+fn resident(bytes: u64) -> u64 {
+    bytes.div_ceil(16).saturating_mul(16).max(16)
+}
+
+/// Base divisor of the bloom pyramid. `0` stores nothing. `4` is the Low
+/// pyramid (quarter resolution). Every other level count starts at half resolution.
+#[must_use]
+pub fn bloom_divisor(levels: u32) -> u32 {
+    match levels {
+        0 => 0,
+        4 => 4,
+        _ => 2,
+    }
+}
+
+/// Levels the GPU actually builds. Legacy bytes, bloom off, or intensity 0 store nothing.
+#[must_use]
+pub fn bloom_level_count(hdr: &genos_scene::HdrSettings) -> u32 {
+    let positive = matches!(
+        hdr.bloom_intensity.partial_cmp(&0.0),
+        Some(std::cmp::Ordering::Greater)
+    );
+    if hdr.legacy_bytes || !hdr.bloom || !positive {
+        0
+    } else {
+        hdr.bloom_levels.min(8)
+    }
+}
+
+/// Downsamples plus in-place upsamples. The full-resolution tent is the display pass.
+#[must_use]
+pub fn bloom_passes(levels: u32) -> u32 {
+    if levels == 0 {
+        0
+    } else {
+        levels.saturating_mul(2).saturating_sub(1)
+    }
+}
+
+/// One stored bloom mip. `texel` is the index of its first texel in the chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BloomMip {
+    pub width: u32,
+    pub height: u32,
+    pub texel: u32,
+}
+
+/// The mip pyramid for `levels`, starting at [`bloom_divisor`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BloomMips {
+    pub levels: Vec<BloomMip>,
+    pub texels: u32,
+}
+
+fn half_dim(value: u32) -> u32 {
+    (value / 2).max(1)
+}
+
+fn quarter_dim(value: u32) -> u32 {
+    (value / 4).max(1)
+}
+
+/// Mip table. Level 4 (Low) starts at quarter resolution. Every other count starts at half.
+#[must_use]
+pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
+    let levels = levels.min(8);
+    if levels == 0 || width == 0 || height == 0 {
+        return BloomMips {
+            levels: Vec::new(),
+            texels: 0,
+        };
+    }
+    let mut level_w = if bloom_divisor(levels) == 4 {
+        quarter_dim(width)
+    } else {
+        half_dim(width)
+    };
+    let mut level_h = if bloom_divisor(levels) == 4 {
+        quarter_dim(height)
+    } else {
+        half_dim(height)
+    };
+    let mut stored = Vec::new();
+    let mut cursor = 0u32;
+    for _ in 0..levels {
+        let texels = level_w.saturating_mul(level_h);
+        stored.push(BloomMip {
+            width: level_w,
+            height: level_h,
+            texel: cursor,
+        });
+        cursor = cursor.saturating_add(texels);
+        level_w = half_dim(level_w);
+        level_h = half_dim(level_h);
+    }
+    BloomMips {
+        levels: stored,
+        texels: cursor,
+    }
+}
+
+fn meter_active(hdr: &genos_scene::HdrSettings) -> bool {
+    !hdr.legacy_bytes && matches!(hdr.exposure_mode, genos_scene::ExposureMode::Auto)
+}
+
+fn meter_bins(hdr: &genos_scene::HdrSettings) -> u32 {
+    if meter_active(hdr) {
+        hdr.histogram_bins.clamp(1, 256)
+    } else {
+        0
+    }
+}
+
+fn meter_slots(bins: u32) -> u32 {
+    if bins == 0 {
+        0
+    } else if bins <= 64 {
+        32
+    } else if bins <= 128 {
+        64
+    } else {
+        128
+    }
+}
+
+/// Device bytes of the post chain at `width`×`height`.
+///
+/// Scene and bloom are RGBA16F. Bloom storage is the mip pyramid only.
+/// The encode image is resident only when `encode_full` (HDR10 or scRGB).
+/// `scrgb_tail` adds the fp16 image after that. The `AgX` lattice is not resident.
+/// The meter is a dummy unless exposure is auto.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostChain {
+    pub scene_bytes: u64,
+    pub bloom_bytes: u64,
+    pub encode_bytes: u64,
+    pub lut_bytes: u64,
+    pub params_bytes: u64,
+    pub meter_bytes: u64,
+    pub meter_host_bytes: u64,
+    pub bytes: u64,
+    pub passes: u32,
+    pub base_w: u32,
+    pub base_h: u32,
+    pub coarse_w: u32,
+    pub coarse_h: u32,
+    pub bins: u32,
+    pub slots: u32,
+    pub divisor: u32,
+}
+
+impl PostChain {
+    /// The chain in MiB.
+    #[must_use]
+    pub fn mib(&self) -> f64 {
+        bytes_to_mib(self.bytes)
+    }
+}
+
+/// Byte sizes the allocator uses. Host scene memory is not included: it is allocated for a readback and freed.
+#[must_use]
+pub fn post_chain(
+    width: u32,
+    height: u32,
+    hdr: &genos_scene::HdrSettings,
+    encode_full: bool,
+    scrgb_tail: bool,
+) -> PostChain {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    let scene_bytes = resident(pixels.saturating_mul(8));
+    let levels = bloom_level_count(hdr);
+    let mips = bloom_mips(width, height, levels);
+    let bloom_bytes = if levels == 0 {
+        resident(0)
+    } else {
+        resident(u64::from(mips.texels).saturating_mul(8))
+    };
+    let encode_bytes = if encode_full {
+        let mut bytes = pixels.saturating_mul(16);
+        if scrgb_tail {
+            bytes = bytes.saturating_add(pixels.saturating_mul(8));
+        }
+        resident(bytes)
+    } else {
+        resident(0)
+    };
+    let bins = meter_bins(hdr);
+    let slots = meter_slots(bins);
+    let (meter_bytes, meter_host_bytes) = if bins == 0 {
+        (resident(0), resident(0))
+    } else {
+        let header = u64::from(bins.saturating_add(4)).saturating_mul(4);
+        let device = header.saturating_add(u64::from(slots).saturating_mul(8));
+        (resident(device), resident(header))
+    };
+    let params_bytes = 32;
+    let lut_bytes = resident(0);
+    let (base_w, base_h) = mips
+        .levels
+        .first()
+        .map_or((0, 0), |mip| (mip.width, mip.height));
+    let (coarse_w, coarse_h) = mips
+        .levels
+        .last()
+        .map_or((0, 0), |mip| (mip.width, mip.height));
+    let bytes = scene_bytes
+        .saturating_add(bloom_bytes)
+        .saturating_add(encode_bytes)
+        .saturating_add(lut_bytes)
+        .saturating_add(params_bytes)
+        .saturating_add(meter_bytes)
+        .saturating_add(meter_host_bytes);
+    PostChain {
+        scene_bytes,
+        bloom_bytes,
+        encode_bytes,
+        lut_bytes,
+        params_bytes,
+        meter_bytes,
+        meter_host_bytes,
+        bytes,
+        passes: bloom_passes(levels),
+        base_w,
+        base_h,
+        coarse_w,
+        coarse_h,
+        bins,
+        slots,
+        divisor: bloom_divisor(levels),
+    }
+}
+
+fn mix_tag(sig: u64, value: u64) -> u64 {
+    sig.wrapping_mul(0x1000_0000_01b3).wrapping_add(value)
+}
+
+/// Changes when the post allocation must be rebuilt.
+#[must_use]
+pub fn post_signature(
+    hdr: &genos_scene::HdrSettings,
+    encode_full: bool,
+    scrgb_tail: bool,
+) -> u64 {
+    let exposure = match hdr.exposure_mode {
+        genos_scene::ExposureMode::Auto => 1,
+        genos_scene::ExposureMode::Camera => 2,
+        genos_scene::ExposureMode::Fixed => 3,
+    };
+    let output = match hdr.output {
+        genos_scene::OutputMode::Auto => 1,
+        genos_scene::OutputMode::Sdr => 2,
+        genos_scene::OutputMode::Hdr10 => 3,
+        genos_scene::OutputMode::Scrgb => 4,
+    };
+    let mut sig = mix_tag(0, u64::from(bloom_level_count(hdr)));
+    sig = mix_tag(sig, u64::from(hdr.histogram_bins));
+    sig = mix_tag(sig, exposure);
+    sig = mix_tag(sig, output);
+    sig = mix_tag(sig, u64::from(hdr.legacy_bytes));
+    sig = mix_tag(sig, u64::from(encode_full));
+    mix_tag(sig, u64::from(scrgb_tail))
+}
+
+/// IEEE binary16 to binary32. Used when a picture readback unpacks the scene image.
+#[must_use]
+pub fn f32_from_f16(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exp = u32::from((bits >> 10) & 0x1f);
+    let frac = u32::from(bits & 0x03ff);
+    let out = if exp == 0 {
+        if frac == 0 {
+            sign
+        } else {
+            let mut mantissa = frac;
+            let mut exponent: i32 = 113;
+            while mantissa & 0x0400 == 0 {
+                mantissa <<= 1;
+                exponent -= 1;
+            }
+            mantissa &= 0x03ff;
+            let exp_bits = u32::try_from(exponent).unwrap_or(0);
+            sign | (exp_bits << 23) | (mantissa << 13)
+        }
+    } else if exp == 31 {
+        sign | (0xff << 23) | (frac << 13)
+    } else {
+        sign | ((exp + (127 - 15)) << 23) | (frac << 13)
+    };
+    f32::from_bits(out)
+}
+
+fn f16_pair(raw: &[u8], word: usize) -> [f32; 2] {
+    let base = word.saturating_mul(4);
+    let lo = u16::from_le_bytes([
+        raw.get(base).copied().unwrap_or(0),
+        raw.get(base.saturating_add(1)).copied().unwrap_or(0),
+    ]);
+    let hi = u16::from_le_bytes([
+        raw.get(base.saturating_add(2)).copied().unwrap_or(0),
+        raw.get(base.saturating_add(3)).copied().unwrap_or(0),
+    ]);
+    [f32_from_f16(lo), f32_from_f16(hi)]
+}
+
+/// RGBA32F texels from an RGBA16F buffer. `w` is the eye distance.
+#[must_use]
+pub fn rgba_f32_from_rgba16f(raw: &[u8], pixels: usize) -> Vec<f32> {
+    let mut out = vec![0.0_f32; pixels.saturating_mul(4)];
+    for index in 0..pixels {
+        let rg = f16_pair(raw, index.saturating_mul(2));
+        let ba = f16_pair(raw, index.saturating_mul(2).saturating_add(1));
+        let slot = index.saturating_mul(4);
+        if let Some(r) = out.get_mut(slot) {
+            *r = rg[0];
+        }
+        if let Some(g) = out.get_mut(slot.saturating_add(1)) {
+            *g = rg[1];
+        }
+        if let Some(b) = out.get_mut(slot.saturating_add(2)) {
+            *b = ba[0];
+        }
+        if let Some(a) = out.get_mut(slot.saturating_add(3)) {
+            *a = ba[1];
+        }
+    }
+    out
+}
+
+/// Full-resolution bloom from the finest stored mip. The tent is [`bloom_upsample`].
+#[must_use]
+pub fn bloom_rgba_from_chain(raw: &[u8], width: u32, height: u32, levels: u32) -> Vec<f32> {
+    let mips = bloom_mips(width, height, levels);
+    let Some(finest) = mips.levels.first() else {
+        return Vec::new();
+    };
+    let texels = usize::try_from(finest.width.saturating_mul(finest.height)).unwrap_or(0);
+    let bytes = texels.saturating_mul(8);
+    if texels == 0 || raw.len() < bytes {
+        return Vec::new();
+    }
+    let dst_w = usize::try_from(width).unwrap_or(0);
+    let dst_h = usize::try_from(height).unwrap_or(0);
+    let src_w = usize::try_from(finest.width).unwrap_or(0);
+    let src_h = usize::try_from(finest.height).unwrap_or(0);
+    let mut planes = [Vec::new(), Vec::new(), Vec::new()];
+    for index in 0..texels {
+        let rg = f16_pair(raw, index.saturating_mul(2));
+        let ba = f16_pair(raw, index.saturating_mul(2).saturating_add(1));
+        planes[0].push(f64::from(rg[0]));
+        planes[1].push(f64::from(rg[1]));
+        planes[2].push(f64::from(ba[0]));
+    }
+    let mut out = vec![0.0_f32; dst_w.saturating_mul(dst_h).saturating_mul(4)];
+    for (channel, plane) in planes.iter().enumerate() {
+        let up = bloom_upsample(
+            &Image {
+                pixels: plane.clone(),
+                width: src_w,
+                height: src_h,
+            },
+            dst_w,
+            dst_h,
+        );
+        for (index, sample) in up.pixels.iter().enumerate() {
+            let slot = index.saturating_mul(4).saturating_add(channel);
+            if let Some(dst) = out.get_mut(slot) {
+                *dst = narrow_f32(*sample);
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1489,5 +1901,36 @@ mod tests {
             }
             assert!(got.iter().all(|channel| channel.is_finite()));
         }
+    }
+
+    #[test]
+    fn post_chain_at_1440p_rounds_into_the_published_ceilings() {
+        let width = 2560;
+        let height = 1440;
+        let potato = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Potato);
+        let low = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Low);
+        let medium = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Medium);
+        let high = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::High);
+        let ultra = genos_scene::HdrSettings::ultra();
+        let cases = [
+            (&potato, 2813.0, 0, 0, 0),
+            (&low, 3746.0, 7, 640, 80),
+            (&medium, 3749.0, 9, 1280, 80),
+            (&high, 3750.0, 11, 1280, 40),
+            (&ultra, 3750.0, 13, 1280, 20),
+        ];
+        for (hdr, cents, passes, base, coarse) in cases {
+            let chain = post_chain(width, height, hdr, false, false);
+            assert!(mib_cents(chain.mib()) <= cents, "{cents} {}", chain.bytes);
+            assert_eq!(chain.passes, passes);
+            assert_eq!(chain.base_w, base);
+            assert_eq!(chain.coarse_w, coarse);
+        }
+        assert!(post_chain(width, height, &low, false, false).bytes
+            < post_chain(width, height, &medium, false, false).bytes);
+        assert!(post_chain(width, height, &medium, false, false).passes
+            < post_chain(width, height, &high, false, false).passes);
+        assert_eq!(f32_from_f16(0x3c00).to_bits(), 1.0_f32.to_bits());
+        assert_eq!(f32_from_f16(0x3800).to_bits(), 0.5_f32.to_bits());
     }
 }
