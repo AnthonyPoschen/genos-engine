@@ -265,8 +265,11 @@ version = "0.1.0"
 name = "genos-particles"
 version = "0.1.0"
 dependencies = [
+ "genos-debug",
+ "genos-mcp",
  "genos-render",
  "genos-scene",
+ "genos-window",
 ]
 
 [[package]]

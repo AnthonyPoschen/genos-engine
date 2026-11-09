@@ -200,7 +200,23 @@ fn particle_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "fx.spawn",
-            "Place the stage-1 emitter at x, y, z and turn it on. count is optional. A file path is accepted and ignored: stage 1 has no .gfx parser.",
+            "Place the stage-1 emitter at x, y, z and turn it on. count is optional. Omitted, a count of 0 becomes 64 so the step dispatches. A file path is accepted and ignored: stage 1 has no .gfx parser.",
+        ),
+        spec(
+            "fx_stats",
+            "Same counters as get_particle_stats. Rhai name for fx.stats.",
+        ),
+        spec(
+            "fx_set",
+            "Same as fx.set. Rhai name: param is the settings key, value is the text.",
+        ),
+        spec(
+            "fx_list",
+            "Same as fx.list. Rhai name for the stage-1 emitter list.",
+        ),
+        spec(
+            "fx_spawn",
+            "Same as fx.spawn. Rhai name. Omitted count on a zero emitter becomes 64.",
         ),
     ]
 }

@@ -1634,6 +1634,16 @@ struct Gpu {
     particle_stamped: bool,
     /// The keep pass already drew this frame's particles.
     particle_drawn: bool,
+    /// Flight whose compute was recorded into the command buffer just submitted.
+    particle_submitted: usize,
+    /// Copy this frame's scene depth so the next step can collide with it.
+    capture_particle_depth: bool,
+    /// Per-flight D32 copy of the scene depth. Read after that flight's fence.
+    particle_depth_readback: [Option<Buffer>; 2],
+    /// That flight's copy has been recorded at least once.
+    particle_depth_copied: [bool; 2],
+    /// Width and height of the copied depth.
+    particle_depth_extent: [(u32, u32); 2],
     /// Froxel targets, pipelines, and the standalone command buffer.
     froxel: Option<fog::Targets>,
     /// What the next frame's froxel pass runs. None skips the pass.
@@ -2526,6 +2536,11 @@ impl Gpu {
                 particle_stats: crate::particle_sim::ParticleStats::default(),
                 particle_stamped: false,
                 particle_drawn: false,
+                particle_submitted: 0,
+                capture_particle_depth: false,
+                particle_depth_readback: [None, None],
+                particle_depth_copied: [false, false],
+                particle_depth_extent: [(0, 0), (0, 0)],
                 froxel: None,
                 froxel_frame: None,
                 froxel_pass_ms: 0.0,
@@ -3567,6 +3582,15 @@ impl Gpu {
         let slot = self.flight;
         self.wait_fence(self.fence, "wait fence")?;
         self.flight_live[slot] = false;
+        // The sim buffers are one set. Wait the other flight before this frame
+        // reads or writes them. Params, depth, and queries are already per flight.
+        if self.particle_job.is_some() || self.particle_pass.is_some() {
+            let other = 1 - slot;
+            if self.flight_live[other] {
+                self.wait_flight(other)?;
+                self.flight_live[other] = false;
+            }
+        }
         let fences = [self.fence];
         unsafe {
             self.collect_slot_after_wait(slot)?;
@@ -3625,6 +3649,7 @@ impl Gpu {
                     !filtering && !lighting,
                 );
                 self.color_layout[slot] = 6;
+                self.copy_scene_depth_for_particles(slot)?;
                 self.frame_stamp(slot, FrameStamp::Gbuffer);
                 self.froxel_wrote = false;
                 self.record_froxel()?;
@@ -4224,8 +4249,12 @@ impl Gpu {
 
     fn wait_gpu(&mut self) -> Result<(), String> {
         self.wait_fence(self.fence, "present wait")?;
+        let submitted = 1 - self.flight.min(1);
+        self.flight_live[submitted] = false;
         self.collect_froxel_time();
-        self.collect_particle_stats();
+        if submitted == self.particle_submitted {
+            self.collect_particle_stats_slot(submitted);
+        }
         Ok(())
     }
 
@@ -5913,7 +5942,9 @@ impl Gpu {
                 format: 126,
                 samples: 1,
                 load: depth_load,
-                store: 1,
+                // The main pass stores depth so a later copy can feed particle collision.
+                // The keep pass discards it.
+                store: u32::from(keep),
                 stencil_load: 1,
                 stencil_store: 1,
                 initial: 0,

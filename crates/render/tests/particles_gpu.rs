@@ -271,3 +271,139 @@ fn gpu_matches_the_cpu_mirror_and_the_cap_holds() {
         "a particle in front of the camera is behind depth 0"
     );
 }
+
+#[test]
+fn a_different_dt_and_a_skipped_dead_ring_match_on_device() {
+    let (width, height, mut life) = open();
+    let aspect = width as f32 / height.max(1) as f32;
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let mut settings = emitter(8, 8);
+    settings.life = 1.0;
+    settings.rate = 20.0;
+    let mut cpu = CpuParticles::new();
+    let mut slow = Vec::new();
+    for frame in 0..6 {
+        let dt = if frame < 3 { DT } else { 0.1 };
+        life.device.set_particle_dt(dt);
+        let _ = life.window.pump();
+        life.device
+            .draw(&world(settings.clone()), &camera, true)
+            .expect("draw")
+            .expect("readback");
+        let input = StepInput::from_settings(
+            &settings,
+            dt,
+            view_proj(&camera, aspect),
+            0,
+            0,
+            Vec::new(),
+        );
+        cpu.step(&input);
+        let gpu = life.device.particle_positions().expect("positions");
+        let peak = agree(&gpu, cpu.positions());
+        assert!(peak <= POS_ABS, "dt {dt} drifted {peak}");
+        assert_eq!(life.device.particle_stats().alive, cpu.alive());
+        if frame == 5 {
+            assert_ne!(gpu, slow, "a larger dt did not move the sim");
+        } else if frame == 2 {
+            slow = gpu;
+        }
+    }
+
+    life.device.set_particle_dt(f32::NAN);
+    let before = life.device.particle_positions().expect("before nan");
+    let mut nan_cpu = cpu.clone();
+    for _ in 0..3 {
+        let _ = life.window.pump();
+        life.device
+            .draw(&world(settings.clone()), &camera, true)
+            .expect("nan draw")
+            .expect("readback");
+        let input = StepInput::from_settings(
+            &settings,
+            f32::NAN,
+            view_proj(&camera, aspect),
+            0,
+            0,
+            Vec::new(),
+        );
+        nan_cpu.step(&input);
+    }
+    let gpu = life.device.particle_positions().expect("nan");
+    assert_eq!(gpu, before, "a non-finite dt moved the device sim");
+    let peak = agree(&gpu, nan_cpu.positions());
+    assert!(peak <= POS_ABS, "nan dt drifted {peak}");
+
+    let mut leak = emitter(2, 2);
+    leak.seed = DEFAULT_SEED.wrapping_add(4);
+    leak.life = 0.05;
+    leak.rate = 60.0;
+    life.device.set_particle_fault(ParticleFault::SkipDeadPush);
+    life.device.set_particle_dt(DT);
+    let mut leaked = CpuParticles::new();
+    for _ in 0..40 {
+        let _ = life.window.pump();
+        life.device
+            .draw(&world(leak.clone()), &camera, true)
+            .expect("leak draw")
+            .expect("readback");
+        let mut input = StepInput::from_settings(
+            &leak,
+            DT,
+            view_proj(&camera, aspect),
+            0,
+            0,
+            Vec::new(),
+        );
+        input.skip_dead = true;
+        leaked.step(&input);
+        let gpu = life.device.particle_positions().expect("leak");
+        let peak = agree(&gpu, leaked.positions());
+        assert!(peak <= POS_ABS, "skip-dead drifted {peak}");
+        assert_eq!(life.device.particle_stats().alive, leaked.alive());
+    }
+    assert_eq!(leaked.spawned(), 2, "the dead ring refilled");
+    assert_eq!(life.device.particle_stats().spawned, 2);
+
+    life.device.set_particle_fault(ParticleFault::None);
+    leak.seed = DEFAULT_SEED.wrapping_add(5);
+    let mut healthy = CpuParticles::new();
+    for _ in 0..40 {
+        let _ = life.window.pump();
+        life.device
+            .draw(&world(leak.clone()), &camera, true)
+            .expect("healthy draw")
+            .expect("readback");
+        step_cpu(&mut healthy, &leak, aspect, &camera, 0, 0, Vec::new());
+    }
+    assert!(
+        healthy.spawned() > 2,
+        "the control did not refill, spawned {}",
+        healthy.spawned()
+    );
+    assert_eq!(life.device.particle_stats().spawned, healthy.spawned());
+}
+
+#[test]
+fn frames_without_readback_match_the_mirror() {
+    let (width, height, mut life) = open();
+    let aspect = width as f32 / height.max(1) as f32;
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let mut settings = emitter(16, 8);
+    settings.spread = 0.4;
+    let mut cpu = CpuParticles::new();
+    for _ in 0..6 {
+        let _ = life.window.pump();
+        life.device.set_particle_dt(DT);
+        life.device
+            .draw_with_overlay(&world(settings.clone()), &camera, &[], false, false)
+            .expect("submit");
+        step_cpu(&mut cpu, &settings, aspect, &camera, 0, 0, Vec::new());
+    }
+    life.device.finish_particles().expect("finish");
+    let gpu = life.device.particle_positions().expect("positions");
+    let peak = agree(&gpu, cpu.positions());
+    assert!(peak <= POS_ABS, "unread frames drifted {peak}");
+    assert_eq!(life.device.particle_stats().alive, cpu.alive());
+    assert!(cpu.alive() > 0);
+}

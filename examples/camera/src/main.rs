@@ -662,6 +662,7 @@ fn run() -> Result<i32, String> {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
         }
+        renderer.set_particle_dt(if paused { 0.0 } else { dt });
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =

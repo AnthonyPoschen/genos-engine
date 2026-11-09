@@ -283,6 +283,20 @@ impl CpuParticles {
         &self.positions
     }
 
+    /// Bit mix of the alive count and the compacted positions. Replay and checkpoint compare it.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut hash = u64::from(self.alive).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for position in &self.positions {
+            for axis in position {
+                hash = hash
+                    .wrapping_mul(0x0000_0100_0000_01B3)
+                    .wrapping_add(axis.to_bits());
+            }
+        }
+        hash
+    }
+
     /// Depth fade of each compacted particle, 0 to 1.
     #[must_use]
     pub fn fades(&self) -> &[f64] {
@@ -465,7 +479,8 @@ fn spawn_slot(input: &StepInput, rng: &mut u32) -> Slot {
 }
 
 fn push_dead(dead: &mut [u32], budget: u32, head: &mut u32, dead_count: &mut u32, index: u32) {
-    if budget == 0 {
+    // A full ring has nowhere to write. Growing past the budget would alias a live index.
+    if budget == 0 || *dead_count >= budget {
         return;
     }
     let tail = head.wrapping_add(*dead_count) % budget;
@@ -715,6 +730,29 @@ mod tests {
         assert!(moved.alive() > 0);
         assert_eq!(frozen.alive(), 0);
         assert_ne!(moved.positions(), frozen.positions());
+        let mut nan = CpuParticles::new();
+        let mut inf = CpuParticles::new();
+        let mut bad = input.clone();
+        bad.dt = f32::NAN;
+        let mut huge = input.clone();
+        huge.dt = f32::INFINITY;
+        for _ in 0..10 {
+            nan.step(&bad);
+            inf.step(&huge);
+        }
+        assert_eq!(nan.alive(), 0, "NaN dt spawned");
+        assert_eq!(inf.alive(), 0, "infinite dt spawned");
+    }
+
+    #[test]
+    fn a_full_dead_ring_refuses_another_push() {
+        let mut dead = [0u32, 1, 2, 3];
+        let mut head = 0u32;
+        let mut count = 4u32;
+        push_dead(&mut dead, 4, &mut head, &mut count, 9);
+        assert_eq!(count, 4);
+        assert_eq!(dead, [0, 1, 2, 3]);
+        assert_eq!(head, 0);
     }
 
     #[test]

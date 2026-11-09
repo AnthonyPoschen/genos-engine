@@ -1484,10 +1484,10 @@ impl Tools {
                 apply_particle_update(&mut ctx.host.scene().particles, args.0)?;
                 reply(particle_settings_value(&ctx.host.scene().particles))
             }
-            "get_particle_stats" | "fx.stats" => {
+            "get_particle_stats" | "fx.stats" | "fx_stats" => {
                 reply(particle_stats_value(&ctx.host.scene().particles, ctx.renderer))
             }
-            "fx.set" => {
+            "fx.set" | "fx_set" => {
                 let param = args
                     .str("param")?
                     .ok_or_else(|| "fx.set needs param".to_string())?;
@@ -1497,11 +1497,11 @@ impl Tools {
                 ctx.host.scene().particles.set_key(&param, &value)?;
                 reply(particle_settings_value(&ctx.host.scene().particles))
             }
-            "fx.list" => reply(obj(vec![(
+            "fx.list" | "fx_list" => reply(obj(vec![(
                 "emitters",
                 list(vec![text("stage1")]),
             )])),
-            "fx.spawn" => {
+            "fx.spawn" | "fx_spawn" => {
                 let x = args
                     .f64("x")?
                     .ok_or_else(|| "fx.spawn needs x".to_string())?;
@@ -1519,6 +1519,8 @@ impl Tools {
                         return Err("fx.spawn count is a whole number".into());
                     }
                     particles.set_key("count", &format!("{count:.0}"))?;
+                } else if particles.count == 0 {
+                    particles.set_key("count", &genos_scene::SPAWN_COUNT.to_string())?;
                 }
                 reply(particle_settings_value(particles))
             }

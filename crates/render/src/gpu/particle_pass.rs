@@ -40,18 +40,27 @@ pub(super) struct Job {
     up: [f32; 4],
 }
 
+/// Host-written inputs and the timestamp pool for one frame in flight.
+///
+/// The other flight may still be on the GPU. These objects are not shared with it.
+struct Flight {
+    params: Buffer,
+    depth: Buffer,
+    queries: Handle,
+    compute_pool: Handle,
+    compute_set: Handle,
+}
+
 pub(super) struct Pass {
     budget: u32,
-    params: Buffer,
+    /// Persistent sim. One copy. The other flight is waited before a host read or a dispatch.
     state: Buffer,
     slots: Buffer,
     dead: Buffer,
     compact: Buffer,
     indirect: Buffer,
-    depth: Buffer,
+    flights: [Flight; 2],
     compute_desc_layout: Handle,
-    compute_pool: Handle,
-    compute_set: Handle,
     compute_layout: Handle,
     compute_pipe: Handle,
     draw_desc_layout: Handle,
@@ -59,7 +68,6 @@ pub(super) struct Pass {
     draw_set: Handle,
     draw_layout: Handle,
     draw_pipe: Handle,
-    queries: Handle,
     bytes: u64,
 }
 
@@ -103,15 +111,23 @@ impl Gpu {
         self.particle_drawn = false;
         let Some(job) = self.particle_job else {
             self.particle_stamped = false;
+            self.particle_stats.alive = 0;
+            self.particle_stats.spawned = 0;
+            self.particle_stats.draw_instances = 0;
+            self.particle_stats.sim_ms = 0.0;
+            self.particle_stats.draw_ms = 0.0;
             return Ok(());
         };
         let depth_bytes = self.particle_depth_bytes();
+        let slot = self.flight.min(1);
         self.ensure_particle_pass(job.budget, depth_bytes)?;
-        self.write_particle_inputs(&job)?;
+        self.write_particle_inputs(slot, &job)?;
         let (pipe, layout, set, queries) = {
             let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
-            (pass.compute_pipe, pass.compute_layout, pass.compute_set, pass.queries)
+            let flight = &pass.flights[slot];
+            (pass.compute_pipe, pass.compute_layout, flight.compute_set, flight.queries)
         };
+        self.particle_submitted = slot;
         unsafe {
             if !queries.is_null() {
                 (self.fns.cmd_reset_query)(self.cmd, queries, 0, 4);
@@ -136,7 +152,12 @@ impl Gpu {
             let Some(pass) = self.particle_pass.as_ref() else {
                 return;
             };
-            (pass.draw_pipe, pass.draw_layout, pass.draw_set, pass.indirect.buffer)
+            (
+                pass.draw_pipe,
+                pass.draw_layout,
+                pass.draw_set,
+                pass.indirect.buffer,
+            )
         };
         let Some(job) = self.particle_job else {
             return;
@@ -212,13 +233,18 @@ impl Gpu {
     }
 
     pub(super) fn collect_particle_stats(&mut self) {
+        self.collect_particle_stats_slot(self.flight.min(1));
+    }
+
+    pub(super) fn collect_particle_stats_slot(&mut self, slot: usize) {
         if !self.particle_stamped {
             return;
         }
         let Some(pass) = self.particle_pass.as_ref() else {
             return;
         };
-        let queries = pass.queries;
+        let slot = slot.min(1);
+        let queries = pass.flights[slot].queries;
         let state = copy_buffer_handle(&pass.state);
         let indirect = copy_buffer_handle(&pass.indirect);
         let bytes = pass.bytes;
@@ -272,11 +298,19 @@ impl Gpu {
         };
         destroy_pipe(
             self,
-            pass.queries,
+            pass.flights[0].queries,
             pass.compute_pipe,
             pass.compute_layout,
-            pass.compute_pool,
+            pass.flights[0].compute_pool,
             pass.compute_desc_layout,
+        );
+        destroy_pipe(
+            self,
+            pass.flights[1].queries,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            pass.flights[1].compute_pool,
+            std::ptr::null_mut(),
         );
         destroy_pipe(
             self,
@@ -286,12 +320,26 @@ impl Gpu {
             pass.draw_pool,
             pass.draw_desc_layout,
         );
+        let [flight0, flight1] = pass.flights;
         let mut buffers = [
-            pass.params, pass.state, pass.slots, pass.dead, pass.compact, pass.indirect,
-            pass.depth,
+            pass.state,
+            pass.slots,
+            pass.dead,
+            pass.compact,
+            pass.indirect,
+            flight0.params,
+            flight0.depth,
+            flight1.params,
+            flight1.depth,
         ];
         for buffer in &mut buffers {
             self.destroy_buffer(buffer);
+        }
+        for slot in 0..2 {
+            if let Some(mut readback) = self.particle_depth_readback[slot].take() {
+                self.destroy_buffer(&mut readback);
+            }
+            self.particle_depth_copied[slot] = false;
         }
     }
 
@@ -316,17 +364,16 @@ impl Gpu {
             self.particle_pass = Some(self.create_particle_pass(budget, depth_bytes)?);
             return Ok(());
         }
-        let too_small = self
-            .particle_pass
-            .as_ref()
-            .is_some_and(|pass| pass.depth.size < depth_bytes);
+        let too_small = self.particle_pass.as_ref().is_some_and(|pass| {
+            pass.flights.iter().any(|flight| flight.depth.size < depth_bytes)
+        });
         if too_small {
             self.grow_particle_depth(depth_bytes)?;
         }
         Ok(())
     }
 
-    fn write_particle_inputs(&mut self, job: &Job) -> Result<(), String> {
+    fn write_particle_inputs(&mut self, slot: usize, job: &Job) -> Result<(), String> {
         let mut flags = self.particle_fault.bits();
         if job.freeze {
             flags |= FREEZE_FLAG;
@@ -339,9 +386,10 @@ impl Gpu {
         let depth = self.particle_depth.clone();
         let (params_buf, depth_buf) = {
             let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
+            let flight = &pass.flights[slot.min(1)];
             (
-                copy_buffer_handle(&pass.params),
-                copy_buffer_handle(&pass.depth),
+                copy_buffer_handle(&flight.params),
+                copy_buffer_handle(&flight.depth),
             )
         };
         self.write_buffer(&params_buf, &params)?;
@@ -367,38 +415,79 @@ impl Gpu {
 
     fn create_particle_pass(&mut self, budget: u32, depth_bytes: u64) -> Result<Pass, String> {
         let slots = u64::from(budget);
-        let params = self.make_buffer(PARAMS_BYTES, 0x20, Memory::Upload)?;
         let state = self.make_buffer(STATE_BYTES, 0x20, Memory::Readback)?;
         let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, Memory::Readback)?;
         let dead = self.make_buffer(slots * 4, 0x20, Memory::Readback)?;
         let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20, Memory::Readback)?;
         let indirect = self.make_buffer(INDIRECT_BYTES, 0x20 | 0x100, Memory::Readback)?;
-        let depth = self.make_buffer(depth_bytes.max(4), 0x20, Memory::Upload)?;
         self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
         self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
+        let depth_bytes = depth_bytes.max(4);
+        let mut flights = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let params = self.make_buffer(PARAMS_BYTES, 0x20, Memory::Upload)?;
+            let depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
+            let queries = if self.timestamp_period > 0.0 {
+                self.make_query_pool_n(4).unwrap_or(std::ptr::null_mut())
+            } else {
+                std::ptr::null_mut()
+            };
+            flights.push((params, depth, queries));
+        }
+        let (params0, depth0, queries0) = flights.remove(0);
+        let (params1, depth1, queries1) = flights.remove(0);
         let compute = self.particle_compute_pipeline(&[
-            params.buffer, state.buffer, slot_buf.buffer, dead.buffer, compact.buffer,
-            indirect.buffer, depth.buffer,
+            params0.buffer,
+            state.buffer,
+            slot_buf.buffer,
+            dead.buffer,
+            compact.buffer,
+            indirect.buffer,
+            depth0.buffer,
         ])?;
+        let (pool1, set1) = alloc_set(self, compute.0, 7)?;
+        write_storage_bindings(
+            self,
+            set1,
+            &[
+                params1.buffer,
+                state.buffer,
+                slot_buf.buffer,
+                dead.buffer,
+                compact.buffer,
+                indirect.buffer,
+                depth1.buffer,
+            ],
+        )?;
         let draw = self.particle_draw_pipeline(compact.buffer)?;
-        let queries = if self.timestamp_period > 0.0 {
-            self.make_query_pool_n(4).unwrap_or(std::ptr::null_mut())
-        } else {
-            std::ptr::null_mut()
-        };
-        let bytes = buffer_bytes(budget).saturating_add(depth.size);
+        let bytes = buffer_bytes(budget)
+            .saturating_add(PARAMS_BYTES)
+            .saturating_add(depth0.size)
+            .saturating_add(depth1.size);
         Ok(Pass {
             budget,
-            params,
             state,
             slots: slot_buf,
             dead,
             compact,
             indirect,
-            depth,
+            flights: [
+                Flight {
+                    params: params0,
+                    depth: depth0,
+                    queries: queries0,
+                    compute_pool: compute.1,
+                    compute_set: compute.2,
+                },
+                Flight {
+                    params: params1,
+                    depth: depth1,
+                    queries: queries1,
+                    compute_pool: pool1,
+                    compute_set: set1,
+                },
+            ],
             compute_desc_layout: compute.0,
-            compute_pool: compute.1,
-            compute_set: compute.2,
             compute_layout: compute.3,
             compute_pipe: compute.4,
             draw_desc_layout: draw.0,
@@ -406,37 +495,122 @@ impl Gpu {
             draw_set: draw.2,
             draw_layout: draw.3,
             draw_pipe: draw.4,
-            queries,
             bytes,
         })
     }
 
     fn grow_particle_depth(&mut self, depth_bytes: u64) -> Result<(), String> {
-        let mut depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
-        let handles = {
-            let Some(pass) = self.particle_pass.as_mut() else {
-                self.destroy_buffer(&mut depth);
-                return Err("particle pass missing".into());
+        for slot in 0..2 {
+            let mut depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
+            let (set, handles) = {
+                let Some(pass) = self.particle_pass.as_mut() else {
+                    self.destroy_buffer(&mut depth);
+                    return Err("particle pass missing".into());
+                };
+                std::mem::swap(&mut pass.flights[slot].depth, &mut depth);
+                pass.bytes = buffer_bytes(pass.budget)
+                    .saturating_add(PARAMS_BYTES)
+                    .saturating_add(pass.flights[0].depth.size)
+                    .saturating_add(pass.flights[1].depth.size);
+                let set = pass.flights[slot].compute_set;
+                let handles = [
+                    pass.flights[slot].params.buffer,
+                    pass.state.buffer,
+                    pass.slots.buffer,
+                    pass.dead.buffer,
+                    pass.compact.buffer,
+                    pass.indirect.buffer,
+                    pass.flights[slot].depth.buffer,
+                ];
+                (set, handles)
             };
-            std::mem::swap(&mut pass.depth, &mut depth);
-            pass.bytes = buffer_bytes(pass.budget).saturating_add(pass.depth.size);
-            [
-                pass.params.buffer,
-                pass.state.buffer,
-                pass.slots.buffer,
-                pass.dead.buffer,
-                pass.compact.buffer,
-                pass.indirect.buffer,
-                pass.depth.buffer,
-            ]
-        };
-        self.destroy_buffer(&mut depth);
-        let set = self
-            .particle_pass
-            .as_ref()
-            .map(|pass| pass.compute_set)
-            .ok_or("particle pass missing")?;
+            self.destroy_buffer(&mut depth);
         write_storage_bindings(self, set, &handles)?;
+        }
+        Ok(())
+    }
+
+    /// After the scene pass, copy D32 depth into this flight's readback.
+    /// The keep pass discards depth, so this runs before that pass.
+    pub(super) fn copy_scene_depth_for_particles(&mut self, slot: usize) -> Result<(), String> {
+        if !self.capture_particle_depth || self.extent_w == 0 || self.extent_h == 0 {
+            return Ok(());
+        }
+        let slot = slot.min(1);
+        let bytes = u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(4);
+        let too_small = self
+            .particle_depth_readback[slot]
+            .as_ref()
+            .is_none_or(|buffer| buffer.size < bytes);
+        if too_small {
+            let next = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+            if let Some(mut old) = self.particle_depth_readback[slot].take() {
+                self.destroy_buffer(&mut old);
+            }
+            self.particle_depth_readback[slot] = Some(next);
+        }
+        let Some(buffer) = self.particle_depth_readback[slot].as_ref() else {
+            return Ok(());
+        };
+        let buffer = buffer.buffer;
+        let image = self.depth.image;
+        depth_to_transfer(self, image);
+        copy_depth_image(self, image, buffer);
+        self.particle_depth_copied[slot] = true;
+        self.particle_depth_extent[slot] = (self.extent_w, self.extent_h);
+        Ok(())
+    }
+
+    /// Previous frame's depth, after that flight's fence. `None` before the first copy.
+    pub(super) fn take_particle_depth(&mut self) -> Result<Option<(u32, u32, Vec<f32>)>, String> {
+        let slot = self.particle_submitted.min(1);
+        let slot = if self.particle_depth_copied[slot] {
+            slot
+        } else if self.particle_depth_copied[1 - slot] {
+            1 - slot
+        } else {
+            return Ok(None);
+        };
+        if self.flight_live[slot] {
+            self.wait_flight(slot)?;
+            self.flight_live[slot] = false;
+        }
+        let (width, height) = self.particle_depth_extent[slot];
+        let Some(buffer) = self.particle_depth_readback[slot].as_ref() else {
+            return Ok(None);
+        };
+        let buffer = copy_buffer_handle(buffer);
+        let texels = usize::try_from(u64::from(width).saturating_mul(u64::from(height))).unwrap_or(0);
+        let bytes = read_range(self, &buffer, 0, texels.saturating_mul(4))?;
+        let mut samples = Vec::with_capacity(texels);
+        let mut offset = 0;
+        while offset + 4 <= bytes.len() {
+            let raw = [
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ];
+            samples.push(f32::from_ne_bytes(raw));
+            offset += 4;
+        }
+        Ok(Some((width, height, samples)))
+    }
+
+    /// Wait both flights, then read the sim buffers. A frame without color readback
+    /// still has to finish before the CPU mirror is compared.
+    pub(super) fn finish_particles(&mut self) -> Result<(), String> {
+        for slot in 0..2 {
+            if self.flight_live[slot] {
+                self.wait_flight(slot)?;
+                self.flight_live[slot] = false;
+            }
+        }
+        if self.particle_stamped {
+            self.collect_particle_stats_slot(self.particle_submitted);
+        }
         Ok(())
     }
 
@@ -532,6 +706,29 @@ impl super::Renderer {
         self.gpu.particle_stats
     }
 
+    /// Copy the scene depth on the next draw when `on` is set.
+    pub fn set_particle_depth_capture(&mut self, on: bool) {
+        self.gpu.capture_particle_depth = on;
+    }
+
+    /// Depth stored by the previous captured frame, or `None` before that copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the flight fence or the map fails.
+    pub fn take_particle_depth(&mut self) -> Result<Option<(u32, u32, Vec<f32>)>, String> {
+        self.gpu.take_particle_depth()
+    }
+
+    /// Wait both frames in flight so a later position read is not racing a submit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a fence wait fails.
+    pub fn finish_particles(&mut self) -> Result<(), String> {
+        self.gpu.finish_particles()
+    }
+
     /// Compacted positions from the last waited frame, metres.
     ///
     /// # Errors
@@ -551,8 +748,6 @@ fn pack_params(job: &Job, dt: f32, flags: u32, depth_w: u32, depth_h: u32) -> [u
     write_u32(&mut bytes, 64, &[job.generation, depth_w, depth_h, 0]);
     write_f32(&mut bytes, 80, &[job.soft_band, 0.0, 0.0, 0.0]);
     write_f32(&mut bytes, 96, &job.view_proj);
-    write_f32(&mut bytes, 160, &job.right);
-    write_f32(&mut bytes, 176, &job.up);
     bytes
 }
 
@@ -595,6 +790,120 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     [v[0] / len, v[1] / len, v[2] / len]
 }
 
+fn depth_to_transfer(gpu: &Gpu, image: Handle) {
+    #[repr(C)]
+    struct Range {
+        aspect: u32,
+        mip: u32,
+        levels: u32,
+        layer: u32,
+        layers: u32,
+    }
+    #[repr(C)]
+    struct Barrier {
+        s_type: i32,
+        next: *const c_void,
+        src_access: u32,
+        dst_access: u32,
+        old: u32,
+        new: u32,
+        src_queue: u32,
+        dst_queue: u32,
+        image: Handle,
+        range: Range,
+    }
+    let barrier = Barrier {
+        s_type: 45,
+        next: std::ptr::null(),
+        src_access: 0x400,
+        dst_access: 0x800,
+        old: 3,
+        new: 6,
+        src_queue: u32::MAX,
+        dst_queue: u32::MAX,
+        image,
+        range: Range {
+            aspect: 2,
+            mip: 0,
+            levels: 1,
+            layer: 0,
+            layers: 1,
+        },
+    };
+    unsafe {
+        (gpu.fns.cmd_barrier)(
+            gpu.cmd,
+            0x200,
+            0x1000,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            1,
+            &barrier as *const Barrier as *const u8,
+        );
+    }
+}
+
+fn copy_depth_image(gpu: &Gpu, image: Handle, buffer: Handle) {
+    #[repr(C)]
+    struct Layers {
+        aspect: u32,
+        mip: u32,
+        layer: u32,
+        count: u32,
+    }
+    #[repr(C)]
+    struct Offset {
+        x: i32,
+        y: i32,
+        z: i32,
+    }
+    #[repr(C)]
+    struct Extent {
+        w: u32,
+        h: u32,
+        d: u32,
+    }
+    #[repr(C)]
+    struct Region {
+        offset: u64,
+        row: u32,
+        height: u32,
+        layers: Layers,
+        image_offset: Offset,
+        extent: Extent,
+    }
+    let region = Region {
+        offset: 0,
+        row: 0,
+        height: 0,
+        layers: Layers {
+            aspect: 2,
+            mip: 0,
+            layer: 0,
+            count: 1,
+        },
+        image_offset: Offset { x: 0, y: 0, z: 0 },
+        extent: Extent {
+            w: gpu.extent_w,
+            h: gpu.extent_h,
+            d: 1,
+        },
+    };
+    unsafe {
+        (gpu.fns.cmd_copy_to_buffer)(
+            gpu.cmd,
+            image,
+            6,
+            buffer,
+            1,
+            &region as *const Region as *const u8,
+        );
+    }
+}
+
 fn memory_barrier(gpu: &Gpu, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
     #[repr(C)]
     struct MemBar {
@@ -629,11 +938,12 @@ fn write_particle_stamp(gpu: &Gpu, query: u32, stage: u32) {
     let Some(pass) = gpu.particle_pass.as_ref() else {
         return;
     };
-    if pass.queries.is_null() || gpu.timestamp_period <= 0.0 {
+    let queries = pass.flights[gpu.flight.min(1)].queries;
+    if queries.is_null() || gpu.timestamp_period <= 0.0 {
         return;
     }
     unsafe {
-        (gpu.fns.cmd_write_timestamp)(gpu.cmd, stage, pass.queries, query);
+        (gpu.fns.cmd_write_timestamp)(gpu.cmd, stage, queries, query);
     }
 }
 

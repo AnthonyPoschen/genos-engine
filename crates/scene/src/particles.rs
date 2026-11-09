@@ -21,6 +21,10 @@ pub const HIGH_MAX_PARTICLES: u32 = 1_048_576;
 /// Seed the step uses when the setting is zero. A zero xorshift stays zero.
 pub const DEFAULT_SEED: u32 = 0xA341_316C;
 
+/// Live cap `--fx-spawn` and `fx.spawn` use when the emitter is at count 0
+/// and neither `--fx-count` nor `GENOS_FX_COUNT` set one.
+pub const SPAWN_COUNT: u32 = 64;
+
 /// Named budget. `Custom` means a knob was set after the preset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticlePreset {
@@ -326,9 +330,13 @@ impl ParticleSettings {
         if let Some(enabled) = cli.enabled {
             out.enabled = enabled;
         }
+        let count_set = cli.count.is_some() || env.count.is_some();
         if let Some(origin) = cli.origin {
             out.origin = origin;
             out.enabled = true;
+            if !count_set && out.count == 0 {
+                out.count = SPAWN_COUNT;
+            }
         }
         out
     }
@@ -563,5 +571,22 @@ mod tests {
         assert_eq!(resolved.count, 4);
         assert!(resolved.freeze);
         assert_eq!(resolved.preset, ParticlePreset::Custom);
+    }
+
+    #[test]
+    fn spawn_without_a_count_dispatches() {
+        let scene = ParticleSettings::default();
+        let mut cli = ParticleCli::default();
+        apply_particle_arg(&mut cli, "--fx-spawn", Some("1,2,3")).unwrap();
+        let spawned = scene.resolve(&cli, &ParticleEnv::default());
+        assert!(spawned.enabled);
+        assert_eq!(spawned.origin, [1.0, 2.0, 3.0]);
+        assert_eq!(spawned.count, SPAWN_COUNT);
+        assert!(spawned.dispatches());
+        let mut counted = cli.clone();
+        counted.count = Some(0);
+        let held = scene.resolve(&counted, &ParticleEnv::default());
+        assert_eq!(held.count, 0);
+        assert!(!held.dispatches());
     }
 }

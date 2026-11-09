@@ -51,7 +51,7 @@ pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, Men
 pub use particles::{
     apply_particle_arg, particle_flag_needs_value, ParticleCli, ParticleEnv, ParticleLight,
     ParticlePreset, ParticleSettings, DEFAULT_SEED, HIGH_MAX_PARTICLES, LOW_MAX_PARTICLES,
-    MEDIUM_MAX_PARTICLES,
+    MEDIUM_MAX_PARTICLES, SPAWN_COUNT,
 };
 pub use reflections::{
     check_reflection_arg, reflection_flag_needs_value, Caustics, ReflectionCli, ReflectionEnv,

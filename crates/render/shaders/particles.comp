@@ -25,8 +25,6 @@ layout(std430, set = 0, binding = 0) readonly buffer Params {
     uvec4 generation_depth;
     vec4 soft_pad;
     mat4 view_proj;
-    vec4 right_size;
-    vec4 up_axis;
 } params;
 
 layout(std430, set = 0, binding = 1) buffer State {
@@ -149,7 +147,8 @@ void main() {
     }
     state.words[7] = 0u;
     float dt = params.albedo_dt.w;
-    bool moving = dt > 0.0 && (flags & FREEZE) == 0u;
+    // NaN and infinity match the CPU mirror: neither integrates nor emits.
+    bool moving = !isnan(dt) && !isinf(dt) && dt > 0.0 && (flags & FREEZE) == 0u;
     bool depth_on = (flags & DEPTH) != 0u;
     bool skip_dead = (flags & SKIP_DEAD) != 0u;
     if (moving) {
@@ -227,7 +226,11 @@ void main() {
         cursor += 1u;
     }
     indirect.vertex_count = 6u;
-    indirect.instance_count = (flags & SKIP_INDIRECT) != 0u ? 0u : state.words[4];
+    uint drawn = state.words[4];
+    if (drawn > budget) {
+        drawn = budget;
+    }
+    indirect.instance_count = (flags & SKIP_INDIRECT) != 0u ? 0u : drawn;
     indirect.first_vertex = 0u;
     indirect.first_instance = 0u;
 }

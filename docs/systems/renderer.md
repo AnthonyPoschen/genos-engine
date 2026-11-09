@@ -86,7 +86,7 @@ There is no skinned clip player. A mesh animates only when the game writes a new
 
 A particle does not occlude. `affects_light` is not the lit flag and is not the emission flag. Emitting particles share one fire term. There is not one lamp per ember.
 
-The stage-1 GPU buffer is a vertex-pulled quad in the keep pass, after lighting, so a card is not in the G-buffer. The Low budget is 65536 particles and the stage-1 buffers stay within 16 MB. `sort`, `lit`, and `half_res` are stored and are not passes yet. The depth collision reads an uploaded buffer, not the scene depth image. `fx.sort_ms` and `fx.overdraw_px` stay 0.
+The stage-1 GPU buffer is a vertex-pulled quad in the keep pass, after lighting, so a card is not in the G-buffer. The Low budget is 65536 particles and the stage-1 buffers stay within 16 MB. Params, the depth upload, and the timestamp queries are one set per frame in flight. The sim buffers are one set, and the other flight is waited before the next dispatch. `sort`, `lit`, and `half_res` are stored and are not passes yet. The depth collision reads an uploaded buffer. The lighting and stress loops fill it from the previous frame's stored scene depth when that knob is on. `fx.sort_ms` and `fx.overdraw_px` stay 0.
 
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
