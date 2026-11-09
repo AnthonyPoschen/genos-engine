@@ -55,7 +55,7 @@ There is no island solver and no air drag. A large `dt` drifts from `½gt²`. A 
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision. `--fixture spin` is one step of a long thin box, half extents `(0.02, 1.5, 0.02)` m, spinning a quarter turn about Z beside a block. `tunnel_count` is 1 when that block is still at rest. The closing bound's `|ω| r` term is what strikes it. `--fixture wide` is the same swept ships with centres 40 m apart, one step and no gravity. The 36 m gap needs more than one radius slice, so a time-of-impact cap of 1 counts in `tunnel_count`. `--fixture rotor` flies a 3 kg cube, half extents 1 m, at 2 rad/s about Z with no gravity. `rotational_energy_j` is `1/2 Izz ωz²` from that size and mass, 4 J.
 
-A mesh collider is a few convex pieces, not the source triangles. Two concave meshes do not get a triangle-versus-triangle test. The piece count stops at 6. A very thin sheet can be missed by the voxel sample. An edge-edge overlap whose face clip lands on a face pair that misses (witness depth near 0) still closes the separating-axis depth.
+A mesh collider is a few convex pieces, not the source triangles. Two concave meshes do not get a triangle-versus-triangle test. The piece count stops at 6. A very thin sheet can be missed by the voxel sample.
 
 The camera calls this step from the scene crate. Lights have no collider.
 
@@ -78,7 +78,6 @@ The camera calls this step from the scene crate. Lights have no collider.
 | Batch insert diverges | `insert_many`, `refit` | `ten_thousand_batch_matches_one_by_one_positions` |
 | One body in a pile wakes alone | `sleep_linear` 0.12, `sleep_angular` 0.25, `sleep_time` 0.5 | `solver_bodies`, `sleeping` on `debug/physics --scene sleep_island` and `two_piles_sleep_on_their_own_and_a_touch_wakes_one` |
 | A box past an edge does not tip | contact point, inverse inertia | `a_box_past_the_edge_tips_and_one_over_the_ledge_stays` |
-| Crossed edges stay overlapped | face-clip witness, separating-axis depth | `crossed_edges_overlapping_separate_along_x_by_the_edge_depth` |
 | Spin on a floor does not slow | tangent rows, `friction` | `a_spinning_box_on_the_floor_slows_down` |
 | A hull pile jitters or never sleeps | 0.5 s, 0.12 m/s, 0.25 rad/s | `a_hull_pile_settles_and_sleeps_without_jitter`. `sleeping_bodies` on the debug step line |
 | Mechanical energy grows | implicit gyroscopic step, split position correction | `mechanical_energy_does_not_grow_over_six_hundred_steps` |
