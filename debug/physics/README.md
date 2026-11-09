@@ -27,6 +27,8 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
 | `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
 | `aero_trim` | 1 000 kg aircraft trimmed at 50 m/s and 100 m for 120 steps. | `a_trimmed_aircraft_holds_altitude_and_speed` |
+| `gear_miss` | A1 aircraft, four rays, max length 0.5 m, no plane, 120 steps. | `a_gear_that_misses_matches_the_aircraft` |
+| `gear_share` | 1 000 kg aircraft on the G1 plane at 20 m/s, 180 steps, `sleep_time` 10 s. | `a_gear_on_the_plane_shares_the_weight` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -54,10 +56,13 @@ bodies only.
 A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
-`chassis_rest` is the G1 trial and `aero_trim` is the A1 trial from
+`chassis_rest` is the G1 trial, `aero_trim` is the A1 trial, and `gear_miss`
+and `gear_share` are the T1 trial from
 [ADR 0040](../../docs/adr/0040-vehicle-domains.md). `aero_trim` starts awake.
 A chassis that begins that scene asleep, with the trim throttle already open
 and its velocity cleared, wakes on the first step and takes that step's
-gravity. The ADR stays proposed.
+gravity. `gear_miss` matches that trim with four rays that miss. `gear_share`
+starts at the G1 pose and settles with lift and the springs sharing the weight.
+The ADR stays proposed.
 S1 would add `thruster` on this same headless path. That scene is not here.
 Sea has no scene.

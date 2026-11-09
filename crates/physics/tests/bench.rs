@@ -119,4 +119,26 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         wake_allocs, 0,
         "aircraft wake step allocated {wake_allocs} times"
     );
+
+    let mut gear = genos_physics::gear_share_world();
+    step(&mut gear, 1.0 / 60.0);
+    let before_gear = ALLOCS.load(Ordering::Relaxed);
+    step(&mut gear, 1.0 / 60.0);
+    let gear_allocs = ALLOCS.load(Ordering::Relaxed) - before_gear;
+    println!("gear_allocs={gear_allocs}");
+    assert_eq!(
+        gear_allocs, 0,
+        "gear share step allocated {gear_allocs} times"
+    );
+
+    let mut miss = genos_physics::gear_miss_world();
+    step(&mut miss, 1.0 / 60.0);
+    let before_miss = ALLOCS.load(Ordering::Relaxed);
+    step(&mut miss, 1.0 / 60.0);
+    let miss_allocs = ALLOCS.load(Ordering::Relaxed) - before_miss;
+    println!("gear_miss_allocs={miss_allocs}");
+    assert_eq!(
+        miss_allocs, 0,
+        "gear miss step allocated {miss_allocs} times"
+    );
 }

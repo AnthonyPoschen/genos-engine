@@ -45,8 +45,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    aero_trim_world, chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle,
-    Wheel, WheeledGround,
+    aero_trim_world, chassis_rest_world, gear_miss_world, gear_share_world, Aircraft,
+    GroundContact, SpaceCraft, Thruster, Vehicle, Wheel, WheeledGround,
 };
 
 pub use destruction::{

@@ -1,6 +1,6 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, and A1, steady aircraft lift, drag, and thrust, are in the step as a trial. Space forces, the landing stage, and sea are not in that trial.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, A1, steady aircraft lift, drag, and thrust, and T1, gear on that aircraft, are in the step as a trial. Space forces and sea are not in that trial.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
@@ -114,14 +114,14 @@ That field is not part of `Vehicle` under this proposal.
 
 ## Stages and fixtures
 
-G1 and A1 are in the tree as a trial. This ADR stays proposed. S1 and T1 are not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
+G1, A1, and T1 are in the tree as a trial. This ADR stays proposed. S1 is not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
 
 | Stage | Payload | Waits on | Fixture |
 | --- | --- | --- | --- |
 | G1 | `Wheeled` only | in the step as a trial | `a_chassis_rests_on_four_springs`, `a_parked_chassis_sleeps_and_stops_casting` |
 | A1 | `Aircraft` only | in the step as a trial | `a_trimmed_aircraft_holds_altitude_and_speed` |
 | S1 | `SpaceCraft` only | acceptance | `a_thruster_in_zero_gravity_matches_force_and_torque` |
-| T1 | aircraft and wheeled ground | G1 and A1 | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
+| T1 | aircraft and wheeled ground | in the step as a trial | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
 | S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 | Sea | none | a later ADR | none |
 
@@ -178,6 +178,8 @@ Box inertia is `Ixx = m/3 (hy² + hz²)`. Here `I = 2000/3` kg·m² on each axis
 
 `a_gear_on_the_plane_shares_the_weight`. Mass 1 000 kg, so suspended mass is 250 kg and `k = 157913.670` N/m. The same wheels as G1. The plane from G1. Forward speed 20 m/s. `cl` stays the A1 constant. `q = 0.5 * 1.225 * 400 = 245`. Lift is 1 569.6 N. The springs carry `9810 - 1569.6 = 8240.4` N. Compression per wheel is 0.013046 m. Settled centre height is 0.386954 m. `thrust_max` is the drag at 20 m/s from the A1 `cd` formula, `throttle = 1`. After 180 steps, with `sleep_time = 10`: centre `y` within 0.02 m of 0.386954, `|velocity.y| < 0.05`, `|velocity.x - 20| < 0.05`, body up within 0.01 rad of world up. A second run matches bits.
 
+`debug/physics --scene gear_miss` runs the miss fixture for 120 steps. `debug/physics --scene gear_share` runs the weight fixture for 180 steps. The weight fixture starts at the G1 pose, `(0, 0.45, 0)`, with the G1 box.
+
 ## Sea
 
 Sea is an open question, not a commitment. Anthony described it as buoyancy. This section is the representation a later ADR would accept or drop. No fixture here is a gate. No type here is added. No stage is numbered.
@@ -208,7 +210,8 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | A wheel ray is treated as swept collision | `MotionQuality::Discrete` | `ccd_applied`, `toi_failed`, `pair_slices` on the G1 fixture |
 | Trim drift or a surprise moment | `cl`, `thrust_max`, `induced` | `aero_trim` and the A1 bit match |
 | A thruster misses force or torque | `max_force`, local position | `thruster` and the S1 bounds |
-| Gear that misses still pushes | `max_length` | `a_gear_that_misses_matches_the_aircraft` |
+| Gear that misses still pushes | `max_length` | `a_gear_that_misses_matches_the_aircraft`, `gear_miss` |
+| Lift and the springs disagree on the settled height | `cl`, `thrust_max` | `a_gear_on_the_plane_shares_the_weight`, `gear_share` |
 | Two runs diverge | actuator order | the second world in each fixture |
 
 `wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. `--replay` and `--checkpoint` keep their current meaning.

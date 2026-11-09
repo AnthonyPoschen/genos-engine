@@ -475,6 +475,63 @@ mod tests {
     }
 
     #[test]
+    fn gear_miss_matches_trim_and_casts_four_rays() {
+        let scene = find("gear_miss").unwrap_or(&SCENES[0]);
+        let mut session = Session::load(scene);
+        assert_eq!(session.scene.name, "gear_miss");
+        let record = session.step();
+        assert_eq!(record.wheel_rays, 4);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("gear_miss");
+        assert!(line.contains("\"wheel_rays\":4"));
+        assert!(line.contains("\"vehicle_count\":1"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        session.run(119);
+        let body = session.world.bodies[0];
+        assert_eq!(body.position.y.to_bits(), 100.0_f32.to_bits());
+        assert_eq!(body.velocity.x.to_bits(), 50.0_f32.to_bits());
+        assert_eq!(body.velocity.y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(body.angular_velocity, genos_math::Vec3::ZERO);
+        assert_eq!(session.world.step_stats.wheel_rays, 4);
+        let Some(genos_physics::GroundContact::Wheeled(ground)) =
+            session.world.vehicles[0].ground
+        else {
+            assert!(session.world.vehicles[0].ground.is_some());
+            return;
+        };
+        for length in ground.lengths {
+            assert_eq!(length.to_bits(), 0.5_f32.to_bits());
+        }
+        assert!(replay(scene, 120).is_ok(), "gear_miss replay diverged");
+    }
+
+    #[test]
+    fn gear_share_settles_on_the_plane() {
+        let scene = find("gear_share").unwrap_or(&SCENES[0]);
+        let mut session = Session::load(scene);
+        assert_eq!(session.scene.name, "gear_share");
+        session.run(180);
+        let chassis = session.world.vehicles[0].chassis;
+        let body = session.world.bodies[chassis];
+        let height_error = (body.position.y - 0.386_954).abs();
+        assert!(
+            height_error < 0.02,
+            "centre y {} is {height_error} m from 0.386954",
+            body.position.y
+        );
+        assert!(body.velocity.y.abs() < 0.05, "vertical {}", body.velocity.y);
+        assert!(
+            (body.velocity.x - 20.0).abs() < 0.05,
+            "forward {}",
+            body.velocity.x
+        );
+        assert_eq!(session.world.step_stats.wheel_rays, 4);
+        assert_eq!(session.world.step_stats.vehicle_count, 1);
+        assert!(!session.world.step_stats.ccd_applied);
+        assert!(replay(scene, 180).is_ok(), "gear_share replay diverged");
+    }
+
+    #[test]
     fn json_line_names_the_scene_and_hash() {
         let mut session = Session::load(&SCENES[0]);
         let line = session.step().json("ship_lanes");

@@ -11,7 +11,10 @@
 //! lighting geometry, not bodies.
 
 use genos_math::{Quat, Vec3};
-use genos_physics::{aero_trim_world, chassis_rest_world, Body, MotionQuality, World};
+use genos_physics::{
+    aero_trim_world, chassis_rest_world, gear_miss_world, gear_share_world, Body, MotionQuality,
+    World,
+};
 
 /// One entry in the scene picker.
 pub struct SceneInfo {
@@ -29,7 +32,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 9] = [
+pub const SCENES: [SceneInfo; 11] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -83,6 +86,18 @@ pub const SCENES: [SceneInfo; 9] = [
         summary: "1 000 kg aircraft trimmed at 50 m/s and 100 m, lift equals weight (ADR 0040 A1)",
         steps: 120,
         build: aero_trim,
+    },
+    SceneInfo {
+        name: "gear_miss",
+        summary: "A1 aircraft with four rays, max length 0.5 m, no plane, so every ray misses (ADR 0040 T1)",
+        steps: 120,
+        build: gear_miss,
+    },
+    SceneInfo {
+        name: "gear_share",
+        summary: "1 000 kg aircraft on four rays over a plane; lift and the springs share the weight (ADR 0040 T1)",
+        steps: 180,
+        build: gear_share,
     },
 ];
 
@@ -285,6 +300,14 @@ fn chassis_rest() -> World {
 
 fn aero_trim() -> World {
     aero_trim_world()
+}
+
+fn gear_miss() -> World {
+    gear_miss_world()
+}
+
+fn gear_share() -> World {
+    gear_share_world()
 }
 
 fn sleep_island() -> World {

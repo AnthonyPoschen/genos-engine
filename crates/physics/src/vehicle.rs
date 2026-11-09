@@ -1,9 +1,9 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper and steady aircraft
-//! lift, drag, and thrust. Thruster force is a later stage and is not applied
-//! here. Sea is not a field.
+//! This step applies the wheeled ground spring-damper and steady aircraft
+//! lift, drag, and thrust. The landing stage sets both of those payloads.
+//! Thruster force is a later stage and is not applied here. Sea is not a field.
 
 use genos_math::{Quat, Vec3};
 
@@ -100,31 +100,43 @@ pub fn chassis_rest_world(sleep_time: f32) -> World {
     world
 }
 
-fn g1_vehicle(chassis: usize) -> Vehicle {
-    let wheel = |local_position: Vec3| Wheel {
+const fn g1_vehicle(chassis: usize) -> Vehicle {
+    Vehicle {
+        chassis,
+        ground: Some(g1_ground(0.6)),
+        aircraft: None,
+        space: None,
+    }
+}
+
+/// G1 spring numbers. `max_length` is 0.6 on the ground fixture and 0.5 when
+/// the same rays hang under the trimmed aircraft with no surface in range.
+const fn g1_wheel(local_position: Vec3, max_length: f32) -> Wheel {
+    Wheel {
         local_position,
         direction: Vec3::new(0.0, -1.0, 0.0),
         rest_length: 0.4,
         min_length: 0.1,
-        max_length: 0.6,
+        max_length,
         hz: 4.0,
         damping_ratio: 0.7,
-    };
-    let wheels = [
-        wheel(Vec3::new(1.0, 0.0, 0.5)),
-        wheel(Vec3::new(1.0, 0.0, -0.5)),
-        wheel(Vec3::new(-1.0, 0.0, 0.5)),
-        wheel(Vec3::new(-1.0, 0.0, -0.5)),
-    ];
-    Vehicle {
-        chassis,
-        ground: Some(GroundContact::Wheeled(WheeledGround {
-            wheels,
-            lengths: [0.4, 0.4, 0.4, 0.4],
-        })),
-        aircraft: None,
-        space: None,
     }
+}
+
+const fn g1_wheels(max_length: f32) -> [Wheel; 4] {
+    [
+        g1_wheel(Vec3::new(1.0, 0.0, 0.5), max_length),
+        g1_wheel(Vec3::new(1.0, 0.0, -0.5), max_length),
+        g1_wheel(Vec3::new(-1.0, 0.0, 0.5), max_length),
+        g1_wheel(Vec3::new(-1.0, 0.0, -0.5), max_length),
+    ]
+}
+
+const fn g1_ground(max_length: f32) -> GroundContact {
+    GroundContact::Wheeled(WheeledGround {
+        wheels: g1_wheels(max_length),
+        lengths: [0.4, 0.4, 0.4, 0.4],
+    })
 }
 
 /// The A1 fixture: a trimmed 1 000 kg aircraft. No ground and no plane.
@@ -173,6 +185,56 @@ fn trim_aircraft(mass: f32, gravity: Vec3) -> Aircraft {
     }
 }
 
+/// The T1 miss fixture: the A1 aircraft plus four G1 rays with `max_length`
+/// 0.5. There is no plane. The centre is at 100 m, so every ray misses.
+#[must_use]
+pub fn gear_miss_world() -> World {
+    let mut world = aero_trim_world();
+    if let Some(vehicle) = world.vehicles.first_mut() {
+        vehicle.ground = Some(g1_ground(0.5));
+    }
+    world
+}
+
+/// The T1 weight fixture: a 1 000 kg chassis on the G1 plane and the G1 rays.
+///
+/// The start pose is the G1 pose, `(0, 0.45, 0)`, with forward speed 20 m/s.
+/// `cl` stays the A1 constant. `thrust_max` is the drag at 20 m/s from the A1
+/// `cd` formula. `sleep_time` of 10 keeps the chassis awake for the 3 s check.
+#[must_use]
+pub fn gear_share_world() -> World {
+    let mut world = World::new(GRAVITY);
+    world.sleep_time = 10.0;
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    let mut chassis = Body::cuboid(
+        Vec3::new(0.0, 0.45, 0.0),
+        1_000.0,
+        Vec3::new(1.2, 0.15, 0.7),
+    );
+    chassis.friction = 0.6;
+    chassis.restitution = 0.0;
+    chassis.velocity = Vec3::new(20.0, 0.0, 0.0);
+    chassis.motion = MotionQuality::Discrete;
+    let index = world.insert(chassis);
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: Some(g1_ground(0.6)),
+        aircraft: Some(landing_aircraft(1_000.0, world.gravity)),
+        space: None,
+    });
+    world
+}
+
+/// A1 `cl`, with thrust set to the drag at 20 m/s.
+fn landing_aircraft(mass: f32, gravity: Vec3) -> Aircraft {
+    let mut aircraft = trim_aircraft(mass, gravity);
+    let speed = 20.0_f32;
+    let q = 0.5 * aircraft.air_density * (speed * speed);
+    let cd = aircraft.cd0 + aircraft.induced * (aircraft.cl * aircraft.cl);
+    aircraft.thrust_max = (q * aircraft.wing_area) * cd;
+    aircraft
+}
+
 /// Wake a sleeping chassis, and the rest of its island, when aircraft thrust
 /// would write a finite non-zero force.
 ///
@@ -203,8 +265,10 @@ pub(crate) fn wake_sleeping_aircraft(world: &mut World) {
 
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
-/// Order is aircraft, then ground. Thrusters stay unapplied so a later stage
-/// can insert them between those two without a second integrator.
+/// Order is aircraft, then ground. The landing stage sets both payloads on
+/// one chassis. A ray that misses stores `max_length` and adds no force.
+/// Thrusters stay unapplied so a later stage can insert them between those
+/// two without a second integrator.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
@@ -271,8 +335,8 @@ fn apply_aircraft(world: &mut World, index: usize, dt: f32) {
 fn aircraft_force(aircraft: &Aircraft, body: &Body, gravity: Vec3, dt: f32) -> Option<Vec3> {
     // `apply_forces` has already added `gravity * dt`. Dynamic pressure uses the
     // velocity from before that increment: that is the speed in the trim
-    // association, and drag is zero when that speed is zero. A spring increment
-    // on the same body is outside this stage.
+    // association, and drag is zero when that speed is zero. The ground spring
+    // runs after this sample, so a spring increment is not in this velocity.
     let air = body.velocity - gravity * dt;
     if !finite_aircraft(aircraft) || !finite_vec(air) {
         return None;
