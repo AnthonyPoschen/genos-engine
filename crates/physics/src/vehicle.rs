@@ -531,10 +531,12 @@ fn tyre_reaction(chassis: &Body, wheel: &Wheel, push: &ContactPush) -> f32 {
 /// In-plane force from the three-point slip curve, capped by the spring load.
 ///
 /// Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip_denom)`.
-/// Lateral slip is the angle between the wheel heading (local +X on the contact
-/// plane) and the contact velocity, from `atan2`. That call does not order
-/// wheels. `|force|` is capped by the spring load, so the slip impulse over
-/// `dt` does not exceed the spring impulse.
+/// Lateral slip is the angle from the direction of travel, `atan2(lateral speed, |forward speed|)`.
+/// `atan2(lateral, forward)` is π in straight reverse and would apply `mu_slide`
+/// sideways at zero sideslip. The sign follows the lateral speed, so the force
+/// opposes sideslip in both directions. The call does not order wheels.
+/// `|force|` is capped by the spring load, so the slip impulse over `dt` does
+/// not exceed the spring impulse.
 fn slip_force(body: &Body, wheel: &Wheel, direction: Vec3, arm: Vec3, load: f32) -> Vec3 {
     if wheel.radius <= 0.0 || load <= 0.0 || !wheel.radius.is_finite() || !wheel.omega.is_finite() {
         return Vec3::ZERO;
@@ -552,7 +554,7 @@ fn slip_force(body: &Body, wheel: &Wheel, direction: Vec3, arm: Vec3, load: f32)
     let lateral_speed = planar.dot(lateral);
     let denom = planar.length().max(wheel.slip_denom);
     let slip_long = ratio(wheel.omega * wheel.radius - forward_speed, denom);
-    let slip_lat = lateral_speed.atan2(forward_speed);
+    let slip_lat = slip_angle(lateral_speed, forward_speed);
     let force = heading * (signed_curve(slip_long, wheel) * load)
         - lateral * (signed_curve(slip_lat, wheel) * load);
     let capped = cap_to_load(force, load);
@@ -560,6 +562,18 @@ fn slip_force(body: &Body, wheel: &Wheel, direction: Vec3, arm: Vec3, load: f32)
         capped
     } else {
         Vec3::ZERO
+    }
+}
+
+/// Angle of the contact velocity from the wheel's travel direction.
+///
+/// Zero when the chassis rolls straight ahead or straight back. Positive when
+/// the lateral speed is positive, so a single restoring sign works both ways.
+fn slip_angle(lateral_speed: f32, forward_speed: f32) -> f32 {
+    if lateral_speed.is_finite() && forward_speed.is_finite() {
+        lateral_speed.atan2(forward_speed.abs())
+    } else {
+        0.0
     }
 }
 
@@ -771,4 +785,93 @@ fn conjugate(orientation: Quat) -> Quat {
         -orientation.z,
         orientation.w,
     )
+}
+
+#[cfg(test)]
+mod slip_angle_tests {
+    use super::{plane_heading, slip_force, Wheel};
+    use crate::{Body, MotionQuality};
+    use genos_math::Vec3;
+
+    fn wheel(omega: f32) -> Wheel {
+        Wheel {
+            local_position: Vec3::new(1.0, 0.0, 0.5),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            rest_length: 0.4,
+            min_length: 0.1,
+            max_length: 0.6,
+            hz: 4.0,
+            damping_ratio: 0.7,
+            radius: 0.3,
+            omega,
+            mu_peak: 1.0,
+            slip_peak: 0.1,
+            mu_slide: 0.7,
+            slip_denom: 1.0,
+            driven: false,
+            inertia: 0.0,
+        }
+    }
+
+    fn rolling(velocity: Vec3) -> Body {
+        let mut body = Body::cuboid(Vec3::ZERO, 1_200.0, Vec3::new(1.2, 0.15, 0.7));
+        body.velocity = velocity;
+        body.motion = MotionQuality::Discrete;
+        body
+    }
+
+    fn lateral_of(body: &Body) -> Vec3 {
+        let direction = Vec3::new(0.0, -1.0, 0.0);
+        let Some(heading) = plane_heading(body, direction) else {
+            return Vec3::ZERO;
+        };
+        direction.cross(heading).normalize()
+    }
+
+    #[test]
+    fn straight_reverse_matched_roll_has_no_lateral_force() {
+        let body = rolling(Vec3::new(-10.0, 0.0, 0.0));
+        let force = slip_force(
+            &body,
+            &wheel(-10.0 / 0.3),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::ZERO,
+            3_000.0,
+        );
+        let lateral = force.dot(lateral_of(&body));
+        assert!(
+            lateral.abs() < 1.0e-3,
+            "straight reverse lateral force {lateral}"
+        );
+        assert!(
+            force.length() < 1.0e-2,
+            "matched reverse roll force {force:?}"
+        );
+    }
+
+    #[test]
+    fn reverse_and_forward_sideslip_forces_oppose_the_lateral_speed() {
+        let direction = Vec3::new(0.0, -1.0, 0.0);
+        let reverse = rolling(Vec3::new(-10.0, 0.0, 2.0));
+        let reverse_force = slip_force(
+            &reverse,
+            &wheel(-10.0 / 0.3),
+            direction,
+            Vec3::ZERO,
+            3_000.0,
+        );
+        let reverse_lateral = reverse_force.dot(lateral_of(&reverse));
+        assert!(
+            reverse_lateral < -100.0,
+            "reverse sideslip force {reverse_lateral}"
+        );
+        let forward = rolling(Vec3::new(10.0, 0.0, 2.0));
+        let forward_force =
+            slip_force(&forward, &wheel(10.0 / 0.3), direction, Vec3::ZERO, 3_000.0);
+        let forward_lateral = forward_force.dot(lateral_of(&forward));
+        assert!(
+            forward_lateral < -100.0,
+            "forward sideslip force {forward_lateral}"
+        );
+    }
 }

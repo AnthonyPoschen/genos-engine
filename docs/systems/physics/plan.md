@@ -615,7 +615,7 @@ P27–P32 are the wheeled-car and thruster sketches in this plan. They are not a
 
 ### P28. Tyre slip
 
-- [x] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. The curve is an explicit force on the G1 chassis, not a contact impulse. `slip_denom` defaults to 1 m/s. `|slip| > 1` holds `mu_slide`. Radius 0 applies no slip force.
+- [x] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. The curve is an explicit force on the G1 chassis, not a contact impulse. `slip_denom` defaults to 1 m/s. `|slip| > 1` holds `mu_slide`. Radius 0 applies no slip force. Lateral slip is `atan2(lateral speed, |forward speed|)`, the angle from the direction of travel, so straight reverse is not `mu_slide` sideways.
 - **Behavior:** Longitudinal slip is `(wheel_omega * radius - contact_speed_forward) / max(|contact_speed|, slip_denom)`. Lateral slip is the angle between the wheel heading and the contact velocity. A simplified curve: friction rises linearly to `mu_peak` at `slip_peak` (defaults 1.0 and 0.1) and falls to `mu_slide` (default 0.7) at slip 1. The impulse is capped by the suspension normal load.
 - **Test:** `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`
   - Chassis at 10 m/s, wheel omega 0, `mu_peak` 1. After 1 second speed is below 6 m/s.

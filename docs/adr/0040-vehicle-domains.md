@@ -109,7 +109,7 @@ That field is not part of `Vehicle` under this proposal.
 - A thruster's world force is `orientation * normalize(local_direction) * throttle * max_force`. World torque is `(orientation * local_position) × force`. The same `velocity` and `angular_velocity` update as the suspension force consumes it. Gravity is `World.gravity`. The space payload does not zero it. The S1 fixture sets gravity to zero. Aircraft lift, drag, and thrust use that linear update with zero torque.
 - Domain code does not set `Body.spring` or `Body.motor`. A parked chassis can sleep under the existing rule. While it sleeps, the wheel-ray count is 0 and suspension force is 0. An aircraft with `throttle > 0`, or a thruster with `throttle > 0`, holds the chassis awake the way a motor does.
 - Force order in the existing dynamic loop, after `apply_forces` and before `integrate_body`: aircraft, space, ground. Torque is added to `angular_velocity` before `implicit_gyroscopic`. Swept motion still integrates inside `ccd.rs`.
-- Wheel index order and thruster index order are the only orders. No `atan2` and no hash-map walk. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
+- Wheel index order and thruster index order are the only orders. There is no hash-map walk. `atan2` does not order wheels, contacts, or actuators. P28 uses it inside one wheel for the slip angle from the direction of travel, `atan2(lateral speed, |forward speed|)`, so straight reverse at zero sideslip is not a lateral force. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
 - A world with no vehicles does no vehicle work. The allocation bench stays green.
 
 ## Stages and fixtures
@@ -212,6 +212,7 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | Two runs diverge | actuator order | the second world in each fixture |
 | A locked wheel does not slow the chassis | `mu_peak`, `radius`, wheel `omega` | `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`, `locked_wheel`, `tyre_contacts` |
 | A free wheel or a zero curve is braked | `omega`, `mu_peak` 0 | the free-wheel and zero-mu runs in that test |
+| Straight reverse gains a lateral speed | slip angle from the travel direction | `a_matched_roll_in_reverse_stays_straight_and_sideslip_restores` |
 | First gear does not move the chassis | `throttle`, `gear`, the ratio list | `first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel`, `first_gear`, `drive_wheels` |
 | An open clutch still drives | `clutch` 0 | the open-clutch run in that test |
 

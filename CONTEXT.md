@@ -145,7 +145,7 @@ A segment from a wheel's attach point along its chassis-frame direction, from th
 _Avoid_: Speculative contact, time of impact
 
 **Tyre slip**:
-The ground payload's in-plane force from a wheel's spin against its contact speed. Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip denominator)`. Lateral slip is the angle between the wheel heading and the contact velocity. The force uses a three-point curve and is capped by the suspension load. It is not a contact-solver row. A wheel with no positive radius applies none.
+The ground payload's in-plane force from a wheel's spin against its contact speed. Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip denominator)`. Lateral slip is the angle from the direction of travel, `atan2(lateral speed, |forward speed|)`. The force uses a three-point curve and is capped by the suspension load. It is not a contact-solver row. A wheel with no positive radius applies none.
 _Avoid_: Pacejka, wheel body
 
 **Gearbox**:
