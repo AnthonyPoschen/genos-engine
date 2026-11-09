@@ -1,0 +1,273 @@
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::too_many_lines, reason = "the lavapipe agreement, the cap, and the negative control share one device"))]
+
+//! Stage-1 compute on lavapipe against the f64 mirror.
+//!
+//! Positions may differ by 1e-3 m. Alive counts match. A step that drops `dt`
+//! must miss that gate. Skipping the indirect count draws nothing.
+
+use genos_render::{
+    CpuParticles, ParticleFault, Renderer, StepInput, World, LOW_VRAM_BYTES,
+};
+use genos_scene::{
+    view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3,
+    DEFAULT_SEED,
+};
+use genos_window::{Lifecycle, Window};
+
+const DT: f32 = 1.0 / 60.0;
+const POS_ABS: f64 = 1.0e-3;
+
+fn open() -> (u32, u32, Lifecycle<Renderer>) {
+    let mut window = Window::open_proof(64, 64).expect("proof window");
+    let frame = window.pump();
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+    (
+        frame.width,
+        frame.height,
+        Lifecycle::new(window, renderer, permit),
+    )
+}
+
+fn world(particles: ParticleSettings) -> World {
+    World::from_scene(Scene {
+        floor: Floor {
+            position: Vec3::new(0.0, 0.0, 0.0),
+            half_x: 4.0,
+            half_z: 4.0,
+            color: [0.2, 0.2, 0.2],
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: None,
+        lighting: LightingSettings::preset(LightingPreset::Potato),
+        debug: genos_scene::DebugSettings::default(),
+        fps_counter: genos_scene::FpsCounterSettings::default(),
+        event_loop: genos_scene::EventLoopSettings::default(),
+        reflections: genos_scene::ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: genos_scene::FogSettings::default(),
+        menu: genos_scene::MenuSettings::default(),
+        particles,
+    })
+}
+
+fn emitter(max_particles: u32, count: u32) -> ParticleSettings {
+    let mut settings = ParticleSettings::preset(genos_scene::ParticlePreset::Custom);
+    settings.enabled = true;
+    settings.max_particles = max_particles;
+    settings.count = count;
+    settings.rate = 30.0;
+    settings.life = 2.0;
+    settings.rise = 0.4;
+    settings.spread = 0.25;
+    settings.size = 0.2;
+    settings.seed = DEFAULT_SEED;
+    settings.origin = [0.0, 1.7, 0.0];
+    settings.albedo = [0.1, 0.2, 0.9];
+    settings
+}
+
+fn step_cpu(
+    cpu: &mut CpuParticles,
+    settings: &ParticleSettings,
+    aspect: f32,
+    camera: &Camera,
+    depth_w: u32,
+    depth_h: u32,
+    depth: Vec<f32>,
+) {
+    let mut input = StepInput::from_settings(
+        settings,
+        DT,
+        view_proj(camera, aspect),
+        depth_w,
+        depth_h,
+        depth,
+    );
+    input.skip_dead = false;
+    input.skip_indirect = false;
+    cpu.step(&input);
+}
+
+fn agree(gpu: &[[f32; 3]], cpu: &[[f64; 3]]) -> f64 {
+    assert_eq!(gpu.len(), cpu.len(), "alive lists differ");
+    let mut peak = 0.0_f64;
+    for (got, want) in gpu.iter().zip(cpu) {
+        for axis in 0..3 {
+            peak = peak.max((f64::from(got[axis]) - want[axis]).abs());
+        }
+    }
+    peak
+}
+
+fn draw(
+    life: &mut Lifecycle<Renderer>,
+    world: &World,
+    camera: &Camera,
+) -> Vec<u8> {
+    let _ = life.window.pump();
+    life.device.set_particle_dt(DT);
+    life.device
+        .draw(world, camera, true)
+        .expect("draw")
+        .expect("readback")
+}
+
+fn center_blue(pixels: &[u8], width: u32, height: u32) -> u8 {
+    let x = width / 2;
+    let y = height / 2;
+    let index = (y * width + x) * 4;
+    pixels.get(index as usize).copied().unwrap_or(0)
+}
+
+#[test]
+fn gpu_matches_the_cpu_mirror_and_the_cap_holds() {
+    let (width, height, mut life) = open();
+    let aspect = width as f32 / height.max(1) as f32;
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let mut settings = emitter(16, 8);
+    let mut cpu = CpuParticles::new();
+    let mut first = Vec::new();
+    for _ in 0..5 {
+        let drawn = world(settings.clone());
+        draw(&mut life, &drawn, &camera);
+        step_cpu(&mut cpu, &settings, aspect, &camera, 0, 0, Vec::new());
+        let gpu = life.device.particle_positions().expect("positions");
+        let peak = agree(&gpu, cpu.positions());
+        assert!(peak <= POS_ABS, "gpu drifted {peak} m from the f64 mirror");
+        assert_eq!(life.device.particle_stats().alive, cpu.alive());
+        first = gpu;
+    }
+    assert!(cpu.alive() > 0, "the emitter never spawned");
+    let stats = life.device.particle_stats();
+    assert!(stats.sim_ms > 0.0, "sim timestamp was not written");
+    assert!(stats.vram_bytes > 0);
+    assert!(stats.vram_bytes <= LOW_VRAM_BYTES);
+    assert!(stats.line().contains("fx.alive="));
+    assert_eq!(stats.sort_ms, 0.0);
+    assert_eq!(stats.overdraw_px, 0);
+
+    let mut broken = CpuParticles::new();
+    let mut dropped = settings.clone();
+    dropped.freeze = true;
+    for _ in 0..5 {
+        step_cpu(&mut broken, &dropped, aspect, &camera, 0, 0, Vec::new());
+    }
+    assert_eq!(broken.alive(), 0, "a frozen step must not spawn");
+    assert_ne!(
+        broken.positions(),
+        cpu.positions(),
+        "dropping motion must miss the agreement gate"
+    );
+
+    settings.seed = DEFAULT_SEED.wrapping_add(1);
+    draw(&mut life, &world(settings.clone()), &camera);
+    settings.seed = DEFAULT_SEED;
+    let mut again = CpuParticles::new();
+    for _ in 0..5 {
+        draw(&mut life, &world(settings.clone()), &camera);
+        step_cpu(&mut again, &settings, aspect, &camera, 0, 0, Vec::new());
+    }
+    let gpu = life.device.particle_positions().expect("replay");
+    let peak = agree(&gpu, again.positions());
+    assert!(peak <= POS_ABS, "replay drifted {peak}");
+    assert_eq!(gpu, first, "the same seed did not replay");
+
+    let mut capped = emitter(4, 64);
+    capped.rate = 240.0;
+    capped.life = 5.0;
+    let mut cap_cpu = CpuParticles::new();
+    for _ in 0..6 {
+        draw(&mut life, &world(capped.clone()), &camera);
+        step_cpu(&mut cap_cpu, &capped, aspect, &camera, 0, 0, Vec::new());
+        let gpu = life.device.particle_positions().expect("cap");
+        let peak = agree(&gpu, cap_cpu.positions());
+        assert!(peak <= POS_ABS, "cap drifted {peak}");
+        assert!(cap_cpu.alive() <= 4, "alive {}", cap_cpu.alive());
+        assert_eq!(life.device.particle_stats().alive, cap_cpu.alive());
+    }
+    assert_eq!(cap_cpu.spawned() - cap_cpu.died(), cap_cpu.alive());
+
+    let mut card = emitter(4, 1);
+    card.seed = DEFAULT_SEED.wrapping_add(2);
+    card.rate = 60.0;
+    card.spread = 0.0;
+    card.rise = 0.0;
+    card.size = 8.0;
+    card.albedo = [0.0, 0.0, 1.0];
+    card.life = 10.0;
+    life.device.set_particle_fault(ParticleFault::None);
+    let pixels = draw(&mut life, &world(card.clone()), &camera);
+    let shown = center_blue(&pixels, width, height);
+    assert!(shown > 200, "centre blue {shown}, the card was not drawn");
+    life.device.set_particle_fault(ParticleFault::SkipIndirect);
+    card.rate = 0.0;
+    let hidden = draw(&mut life, &world(card.clone()), &camera);
+    let skipped = center_blue(&hidden, width, height);
+    assert!(
+        skipped < shown / 2,
+        "skip-indirect still drew blue {skipped} (was {shown})"
+    );
+    let after = life.device.particle_stats();
+    assert_eq!(after.draw_instances, 0);
+    assert!(after.alive > 0, "the particle should still be alive");
+    life.device.set_particle_fault(ParticleFault::None);
+
+    let mut depth_settings = emitter(4, 1);
+    depth_settings.seed = DEFAULT_SEED.wrapping_add(3);
+    depth_settings.spread = 0.0;
+    depth_settings.rise = 0.0;
+    depth_settings.rate = 60.0;
+    depth_settings.life = 10.0;
+    depth_settings.depth_collision = true;
+    draw(&mut life, &world(depth_settings.clone()), &camera);
+    assert_eq!(life.device.particle_stats().alive, 1);
+    depth_settings.rate = 0.0;
+    life.device.set_particle_depth(1, 1, &[0.0]);
+    let mut depth_cpu = CpuParticles::new();
+    step_cpu(
+        &mut depth_cpu,
+        &depth_settings,
+        aspect,
+        &camera,
+        0,
+        0,
+        Vec::new(),
+    );
+    // The GPU already integrated the spawn frame. Catch the mirror up, then collide.
+    depth_settings.rate = 60.0;
+    depth_cpu = CpuParticles::new();
+    step_cpu(
+        &mut depth_cpu,
+        &depth_settings,
+        aspect,
+        &camera,
+        0,
+        0,
+        Vec::new(),
+    );
+    depth_settings.rate = 0.0;
+    step_cpu(
+        &mut depth_cpu,
+        &depth_settings,
+        aspect,
+        &camera,
+        1,
+        1,
+        vec![0.0],
+    );
+    draw(&mut life, &world(depth_settings), &camera);
+    let gpu = life.device.particle_positions().expect("depth");
+    let peak = agree(&gpu, depth_cpu.positions());
+    assert!(peak <= POS_ABS, "depth step drifted {peak}");
+    assert_eq!(
+        life.device.particle_stats().alive, 0,
+        "a particle in front of the camera is behind depth 0"
+    );
+}

@@ -1,6 +1,6 @@
 # Particle effects (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. Extends the CPU particles in `crates/render/src/particles.rs` and the [rendering extras plan](rendering/extras-plan.md) "Particles"; binds to [fog design](fog-and-volumetric-lighting-design.md) (#76), [HDR design](hdr-output-design.md) (#75), [GI design](gi-design.md).
+Status: stage 1 implemented. Stages 2 and 3 stay design. Owner: Engine. Extends the CPU particles in `crates/render/src/particles.rs` and the [rendering extras plan](rendering/extras-plan.md) "Particles"; binds to [fog design](fog-and-volumetric-lighting-design.md) (#76), [HDR design](hdr-output-design.md) (#75), [GI design](gi-design.md).
 
 ## 1. Goal
 Thousands to a million GPU-simulated particles per scene (sparks, smoke, dust, rain, magic), emitters defined as data, lit by the same lights/GI, fogged, HDR-correct, sorted or order-independent, inside a per-preset budget.
@@ -11,7 +11,8 @@ Thousands to a million GPU-simulated particles per scene (sparks, smoke, dust, r
 | Seeded CPU emitter, smoke from fire, card builder | done | `crates/render/src/particles.rs`, tests `particles.rs`, `particle_frame.rs`, `particle_resident.rs` |
 | Particle atlas images | done | `pack.rs`, `ember.png`, `smoke.png` |
 | Density card → fog card, fire → one light | done | `particles.rs`, `crates/load/src/emitters.rs` |
-| GPU simulation, sorting, lit particles | missing | extras plan row "GPU particle simulation" |
+| GPU emit, simulate, compact, indirect draw | stage 1 | `shaders/particles.comp`, `src/gpu/particle_pass.rs`, `src/particle_sim.rs` |
+| Sorting, froxel lighting, half-resolution, `.gfx` | later | stages 2 and 3 below |
 
 ## 3. Prior art
 - Haar & Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015 (persistent buffer, compute update) — extras plan already cites.
@@ -34,6 +35,12 @@ Stage 1: move simulation to compute (extras plan order: sim first, expander seco
 
 **Deviation flags.** Lighting particles from the froxel grid instead of per-pixel follows Frostbite/Destiny practice, not Thomas 2014. Smoke with density keeps becoming fog cards (existing behaviour) rather than sorted sprites.
 
+**Stage 1 as built.** One compute invocation walks the dead/alive ring, integrates, emits, and compacts into a GPU buffer. The keep pass draws that buffer with `vkCmdDrawIndirect` and a vertex-pulled quad (`particles.vert`, `particles.frag`). The CPU card builder in `particles.rs` stays for emitters that are not this path, including the camera flame. A disabled emitter, a zero count, or a zero budget does not dispatch. Particles are not written into the G-buffer. The fire stays one lamp.
+
+The depth test reads an uploaded depth storage buffer (`Renderer::set_particle_depth`). It does not sample the scene depth attachment, because the compute step is recorded before the pass that writes this frame's depth. The fade is one centre NDC sample stored in the compact colour, not a per-pixel Lorach 2007 sample. The walk is serial so the f64 mirror matches order. Haar and Aaltonen 2015 use parallel dead lists and atomics. That parallel walk is the departure.
+
+`sort`, `lit`, and `half_res` are stored and written by the preset. Stage 1 does not dispatch a sort, a froxel light, or a half-resolution target. There is no `.gfx` parser. `--fx-spawn` and `fx.spawn` place this one emitter. `fx.sort_ms` and `fx.overdraw_px` stay 0. `fx.sim_ms` and `fx.draw_ms` are lavapipe timestamps when a frame has run. They are not a score against the GTX 1060 ceilings in section 7.
+
 ## 6. Data and settings
 `settings.particles`: `max_particles` (Low 64K / Med 256K / High 1M), `sort` (Low off → WBOIT, Med/High on), `lit` (Low vertex-only, High per-particle froxel + GI), `half_res` (Low on), `depth_collision` (Med+). Emitters `.gfx`: rate, burst, lifetime, shape, forces, curves, atlas frame, blend mode, `seed`.
 
@@ -53,7 +60,12 @@ Mutations: skip dead-list push (leak), reverse sort, drop dt, ignore fog transmi
 CLI `--fx-spawn <file.gfx> x y z`, `--fx-max`, `--fx-freeze`. MCP `fx.spawn`, `fx.set {emitter,param,value}`, `fx.stats`, `fx.list`, `view overdraw|particle-id`; emitter files hot-reload. Agent edits a `.gfx`, replays a seeded script, reads `fx.*` and grades screenshots.
 
 ## 10. Networking
-Cosmetic: never replicated. Clients spawn from replicated gameplay events (impacts, abilities) with an event-derived seed; headless server runs no particles.
+
+- Replicated state: none. Particles are cosmetic and are never replicated.
+- Authority: the client that sees the effect. The server does not own a particle buffer.
+- Prediction / rollback: none. A client spawns from a replicated gameplay event (an impact, an ability) and does not rewind the buffer.
+- Determinism: the spawn seed is derived from that event. The same seed and the same steps match the CPU mirror. The buffer itself is not a replicated snapshot.
+- Headless server: the server runs no particles. A zero count does not dispatch.
 
 ## 11. Decisions for Anthony
 1. Budget numbers per preset (64K/256K/1M) OK?

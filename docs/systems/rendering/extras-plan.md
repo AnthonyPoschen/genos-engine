@@ -95,7 +95,7 @@ The CPU emitter, the card builder, the resident image, and the single fire term 
 
 Cards stay out of the G-buffer. An emitter that must bounce uses a proxy mesh (a baked SDF and texels), which is the GI rule for anything that is not a stable surface. The fire term stays one lamp, as `renderer.md` says. One lamp per ember is not added.
 
-The published reference for the GPU step is a persistent particle buffer updated in compute, the same structure as the crowd and particle sections of the SIGGRAPH 2015 GPU-driven pipelines talk (Haar and Aaltonen). **Deviation.** That talk also expands particles into the GPU-driven index buffer. Here the existing card builder remains the expander until the meshlet draw exists. The simulation moves first. The expansion moves with the indirect-draw step.
+The published reference for the GPU step is a persistent particle buffer updated in compute, the same structure as the crowd and particle sections of the SIGGRAPH 2015 GPU-driven pipelines talk (Haar and Aaltonen). **Deviation.** That talk uses parallel dead lists. Stage 1 walks one invocation so the CPU mirror matches order. The draw is a vertex-pulled quad and `vkCmdDrawIndirect` in the keep pass, not an expansion into the dynamic vertex buffer: six vertices times 48 bytes at the Low budget would pass the 16 MB ceiling. The CPU card builder remains the expander for an emitter that is not this path, including the camera flame.
 
 ### Post
 
@@ -285,9 +285,9 @@ Commit: `render: store metallic and roughness, lighting unchanged`.
 
 ### Step 5: GPU particle integrate
 
-Files: `crates/render/shaders/particles.comp`, `crates/render/src/particles.rs`.
+Files: `crates/render/shaders/particles.comp`, `crates/render/src/particle_sim.rs`, `crates/render/src/gpu/particle_pass.rs`. The CPU emitter stays in `crates/render/src/particles.rs`.
 
-The shader reads the emitter record (origin, life, rate) from a uniform the CPU fills and writes the card vertices into the dynamic vertex buffer. The CPU does not read those vertices back. `object_cards` stays the path for an emitter that is not marked `gpu`, including the camera flame. A `gpu` emitter skips `object_cards`. `particle_resident.rs` still proves the image is not reuploaded.
+Stage 1 is in. The shader reads the emitter record the CPU fills and writes a compact buffer. The keep pass pulls a quad from that buffer. The CPU does not read positions on the default frame path. `object_cards` stays the path for the camera flame. `particle_resident.rs` still proves the image is not reuploaded. Sort, froxel lighting, half resolution, and `.gfx` are not this step.
 
 Test: `cargo test -p genos-render --test particles` (CPU path unchanged). A new CPU test simulates one particle for one step in Rust and checks the GPU shader's formula matches, by compiling the formula in Rust next to the shader comment. The owner's `scripts/particles.rhai` on `scenes/particles.rhai` captures frame 0 and frame 60. The ember has moved. The image atlas generation in the log is unchanged.
 

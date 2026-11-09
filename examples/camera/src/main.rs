@@ -27,6 +27,7 @@ const SHOW_PARTICLES: bool = false;
 use genos_scene::{
     load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
     Floor, FogSettings, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings,
+    ParticleSettings,
     ReflectionSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
@@ -861,6 +862,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }

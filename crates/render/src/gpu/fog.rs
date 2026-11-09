@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, Scene};
+use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, ParticleSettings, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
 use crate::fog::{
@@ -1585,6 +1585,7 @@ fn empty_scene() -> Scene {
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }

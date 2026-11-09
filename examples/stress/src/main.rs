@@ -80,7 +80,8 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ParticleSettings,
+    ReflectionSettings, Scene,
     Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
@@ -1420,6 +1421,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }

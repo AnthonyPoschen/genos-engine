@@ -1,0 +1,233 @@
+#version 450
+// Stage-1 emit, integrate, and compact. One invocation walks every slot so
+// the order matches crates/render/src/particle_sim.rs (the f64 position mirror).
+// Haar and Aaltonen (SIGGRAPH 2015) do this from many threads. The dead ring
+// and the persistent buffer are theirs; the serial walk is the departure that
+// keeps the alive count and the spawn order identical to the mirror.
+layout(local_size_x = 1) in;
+
+struct Slot {
+    vec4 position_age;
+    vec4 velocity_life;
+};
+
+struct Compact {
+    vec4 position_age;
+    vec4 velocity_life;
+    vec4 albedo_fade;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Params {
+    vec4 origin_rate;
+    vec4 motion;
+    vec4 albedo_dt;
+    uvec4 seed_budget_count_flags;
+    uvec4 generation_depth;
+    vec4 soft_pad;
+    mat4 view_proj;
+    vec4 right_size;
+    vec4 up_axis;
+} params;
+
+layout(std430, set = 0, binding = 1) buffer State {
+    uint words[];
+} state;
+
+layout(std430, set = 0, binding = 2) buffer SlotBuf {
+    Slot slots[];
+} slots;
+
+layout(std430, set = 0, binding = 3) buffer DeadBuf {
+    uint indices[];
+} dead;
+
+layout(std430, set = 0, binding = 4) buffer CompactBuf {
+    Compact items[];
+} compact;
+
+layout(std430, set = 0, binding = 5) buffer Indirect {
+    uint vertex_count;
+    uint instance_count;
+    uint first_vertex;
+    uint first_instance;
+} indirect;
+
+layout(std430, set = 0, binding = 6) readonly buffer DepthBuf {
+    float samples[];
+} depth_buf;
+
+const uint FREEZE = 1u;
+const uint SKIP_DEAD = 2u;
+const uint SKIP_INDIRECT = 4u;
+const uint DEPTH = 8u;
+const uint DEFAULT_SEED = 0xA341316Cu;
+const float UNIT_SCALE = 16777216.0;
+const float HALF = 0.5;
+const float TAU = 6.283185307179586;
+
+uint xorshift(uint x) {
+    x ^= x << 13u;
+    x ^= x >> 17u;
+    x ^= x << 5u;
+    if (x == 0u) {
+        x = DEFAULT_SEED;
+    }
+    return x;
+}
+
+float unit() {
+    state.words[1] = xorshift(state.words[1]);
+    return float(state.words[1] >> 8u) / UNIT_SCALE;
+}
+
+void push_dead(uint budget, uint index) {
+    if (budget == 0u || state.words[3] >= budget) {
+        return;
+    }
+    uint tail = (state.words[2] + state.words[3]) % budget;
+    dead.indices[tail] = index;
+    state.words[3] += 1u;
+}
+
+float depth_fade(vec3 position) {
+    uint depth_w = params.generation_depth.y;
+    uint depth_h = params.generation_depth.z;
+    if (depth_w == 0u || depth_h == 0u) {
+        return 1.0;
+    }
+    vec4 clip = params.view_proj * vec4(position, 1.0);
+    if (abs(clip.w) < 1e-12) {
+        return 1.0;
+    }
+    vec3 ndc = clip.xyz / clip.w;
+    vec2 uv = ndc.xy * HALF + HALF;
+    if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) {
+        return 1.0;
+    }
+    uint x = min(uint(floor(uv.x * float(depth_w))), depth_w - 1u);
+    uint y = min(uint(floor(uv.y * float(depth_h))), depth_h - 1u);
+    float sample_z = depth_buf.samples[y * depth_w + x];
+    float delta = sample_z - ndc.z;
+    if (delta < 0.0) {
+        return -1.0;
+    }
+    float band = params.soft_pad.x > 0.0 ? params.soft_pad.x : 1e-4;
+    return clamp(delta / band, 0.0, 1.0);
+}
+
+void main() {
+    uint seed = params.seed_budget_count_flags.x;
+    uint budget = params.seed_budget_count_flags.y;
+    uint cap = params.seed_budget_count_flags.z;
+    uint flags = params.seed_budget_count_flags.w;
+    uint generation = params.generation_depth.x;
+    if (budget == 0u) {
+        indirect.vertex_count = 6u;
+        indirect.instance_count = 0u;
+        indirect.first_vertex = 0u;
+        indirect.first_instance = 0u;
+        return;
+    }
+    if (cap > budget) {
+        cap = budget;
+    }
+    if (state.words[9] == 0u || state.words[0] != generation) {
+        state.words[0] = generation;
+        state.words[1] = seed;
+        state.words[2] = 0u;
+        state.words[3] = budget;
+        state.words[4] = 0u;
+        state.words[5] = 0u;
+        state.words[6] = 0u;
+        state.words[7] = 0u;
+        state.words[8] = floatBitsToUint(0.0);
+        state.words[9] = 1u;
+        for (uint index = 0u; index < budget; index++) {
+            dead.indices[index] = index;
+            slots.slots[index].velocity_life.w = 0.0;
+        }
+    }
+    state.words[7] = 0u;
+    float dt = params.albedo_dt.w;
+    bool moving = dt > 0.0 && (flags & FREEZE) == 0u;
+    bool depth_on = (flags & DEPTH) != 0u;
+    bool skip_dead = (flags & SKIP_DEAD) != 0u;
+    if (moving) {
+        for (uint index = 0u; index < budget; index++) {
+            float life = slots.slots[index].velocity_life.w;
+            if (life <= 0.0) {
+                continue;
+            }
+            float age = slots.slots[index].position_age.w + dt;
+            vec3 position = slots.slots[index].position_age.xyz
+                + slots.slots[index].velocity_life.xyz * dt;
+            slots.slots[index].position_age = vec4(position, age);
+            float fade = depth_fade(position);
+            if (age >= life || (depth_on && fade < 0.0)) {
+                slots.slots[index].velocity_life.w = 0.0;
+                state.words[4] -= 1u;
+                state.words[6] += 1u;
+                if (!skip_dead) {
+                    push_dead(budget, index);
+                }
+            }
+        }
+        float clock = uintBitsToFloat(state.words[8]) + dt;
+        float rate = params.origin_rate.w;
+        float interval = rate > 0.0 ? 1.0 / rate : 1e9;
+        uint guard = 0u;
+        while (clock >= interval && state.words[4] < cap && state.words[3] > 0u && guard < cap) {
+            guard += 1u;
+            clock -= interval;
+            uint head = state.words[2] % budget;
+            uint index = dead.indices[head];
+            state.words[2] = (state.words[2] + 1u) % budget;
+            state.words[3] -= 1u;
+            float u = unit();
+            float v = unit();
+            float angle = u * TAU;
+            float radius = sqrt(v) * params.motion.z;
+            float dx = unit();
+            float dz = unit();
+            vec3 origin = params.origin_rate.xyz;
+            float spread = params.motion.z;
+            vec3 position = vec3(
+                origin.x + cos(angle) * radius,
+                origin.y,
+                origin.z + sin(angle) * radius);
+            vec3 velocity = vec3((dx - HALF) * spread, params.motion.x, (dz - HALF) * spread);
+            float life = max(params.motion.y, 0.0);
+            slots.slots[index].position_age = vec4(position, 0.0);
+            slots.slots[index].velocity_life = vec4(velocity, life);
+            if (life <= 0.0) {
+                push_dead(budget, index);
+                continue;
+            }
+            state.words[4] += 1u;
+            state.words[5] += 1u;
+            state.words[7] += 1u;
+        }
+        state.words[8] = floatBitsToUint(clock);
+    }
+    uint cursor = 0u;
+    vec3 albedo = params.albedo_dt.xyz;
+    for (uint index = 0u; index < budget; index++) {
+        float life = slots.slots[index].velocity_life.w;
+        if (life <= 0.0) {
+            continue;
+        }
+        vec3 position = slots.slots[index].position_age.xyz;
+        float fade = depth_fade(position);
+        if (fade < 0.0) {
+            fade = 0.0;
+        }
+        compact.items[cursor].position_age = slots.slots[index].position_age;
+        compact.items[cursor].velocity_life = slots.slots[index].velocity_life;
+        compact.items[cursor].albedo_fade = vec4(albedo, fade);
+        cursor += 1u;
+    }
+    indirect.vertex_count = 6u;
+    indirect.instance_count = (flags & SKIP_INDIRECT) != 0u ? 0u : state.words[4];
+    indirect.first_vertex = 0u;
+    indirect.first_instance = 0u;
+}

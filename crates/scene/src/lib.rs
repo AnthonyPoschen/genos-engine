@@ -12,6 +12,7 @@ mod fog;
 mod fps_counter;
 mod lighting;
 mod menu;
+mod particles;
 mod reflections;
 mod script;
 mod settings;
@@ -47,6 +48,11 @@ pub use lighting::{
     LIGHTING_BOUNCES_UNLIMITED,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
+pub use particles::{
+    apply_particle_arg, particle_flag_needs_value, ParticleCli, ParticleEnv, ParticleLight,
+    ParticlePreset, ParticleSettings, DEFAULT_SEED, HIGH_MAX_PARTICLES, LOW_MAX_PARTICLES,
+    MEDIUM_MAX_PARTICLES,
+};
 pub use reflections::{
     check_reflection_arg, reflection_flag_needs_value, Caustics, ReflectionCli, ReflectionEnv,
     ReflectionSettings, ReflectionTracer,

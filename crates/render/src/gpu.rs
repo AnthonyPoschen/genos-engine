@@ -181,6 +181,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 mod fog;
 mod media_check;
+mod particle_pass;
 mod stage;
 mod traffic;
 
@@ -995,6 +996,8 @@ impl Renderer {
         self.gpu.note_overlay_count(overlay_count);
         self.gpu
             .note_reflections(world, camera, aspect, quad_first, quad_count);
+        self.gpu
+            .note_particles(&world.scene.particles, camera, aspect);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
@@ -1613,6 +1616,24 @@ struct Gpu {
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
     media_groups: u32,
+    /// Stage-1 particle buffers. Absent until an emitter dispatches.
+    particle_pass: Option<particle_pass::Pass>,
+    /// The emitter the next compute step runs. None skips the dispatch.
+    particle_job: Option<particle_pass::Job>,
+    /// Seconds for the next particle step. Zero does not integrate or emit.
+    particle_dt: f32,
+    /// Skip-dead or skip-indirect mutation. None is the specified step.
+    particle_fault: crate::particle_sim::ParticleFault,
+    /// Depth samples uploaded for the next step. Empty skips collision.
+    particle_depth: Vec<f32>,
+    /// Width and height of `particle_depth`.
+    particle_depth_size: (u32, u32),
+    /// Last completed particle step.
+    particle_stats: crate::particle_sim::ParticleStats,
+    /// This frame's command buffer wrote particle timestamps.
+    particle_stamped: bool,
+    /// The keep pass already drew this frame's particles.
+    particle_drawn: bool,
     /// Froxel targets, pipelines, and the standalone command buffer.
     froxel: Option<fog::Targets>,
     /// What the next frame's froxel pass runs. None skips the pass.
@@ -1805,6 +1826,7 @@ struct Fns {
     cmd_bind_pipe: FnBindPipe,
     cmd_bind_vb: FnBindVb,
     cmd_draw: FnDraw,
+    cmd_draw_indirect: FnDrawIndirect,
     cmd_push: FnPush,
     cmd_viewport: FnViewport,
     cmd_scissor: FnScissor,
@@ -1913,6 +1935,7 @@ type FnBeginRp = unsafe extern "system" fn(Handle, *const u8, u32);
 type FnBindPipe = unsafe extern "system" fn(Handle, u32, Handle);
 type FnBindVb = unsafe extern "system" fn(Handle, u32, u32, *const Handle, *const u64);
 type FnDraw = unsafe extern "system" fn(Handle, u32, u32, u32, u32);
+type FnDrawIndirect = unsafe extern "system" fn(Handle, Handle, u64, u32, u32);
 type FnPush = unsafe extern "system" fn(Handle, Handle, u32, u32, u32, *const c_void);
 type FnViewport = unsafe extern "system" fn(Handle, u32, u32, *const f32);
 type FnScissor = unsafe extern "system" fn(Handle, u32, u32, *const i32);
@@ -2494,6 +2517,15 @@ impl Gpu {
                 media_check: None,
                 media_ms: None,
                 media_groups: 1,
+                particle_pass: None,
+                particle_job: None,
+                particle_dt: 0.0,
+                particle_fault: crate::particle_sim::ParticleFault::None,
+                particle_depth: Vec::new(),
+                particle_depth_size: (0, 0),
+                particle_stats: crate::particle_sim::ParticleStats::default(),
+                particle_stamped: false,
+                particle_drawn: false,
                 froxel: None,
                 froxel_frame: None,
                 froxel_pass_ms: 0.0,
@@ -3543,6 +3575,7 @@ impl Gpu {
             }
             self.collect_hdr_time(slot);
             self.collect_froxel_time();
+            self.collect_particle_stats();
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
@@ -3583,6 +3616,7 @@ impl Gpu {
                     self.lighting_begin(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
+                self.record_particle_compute()?;
                 self.raster_scene(
                     self.framebuffer,
                     self.extent_w,
@@ -3607,6 +3641,9 @@ impl Gpu {
                 if lighting && !filtering && self.overlay_count > 0 {
                     self.raster_overlay();
                 }
+                if lighting && !filtering {
+                    self.record_particle_draw();
+                }
                 self.frame_stamp(slot, FrameStamp::EarlyOverlay);
                 if self.antialias == Antialias::Fxaa {
                     self.resolve_fxaa(slot)?;
@@ -3615,6 +3652,9 @@ impl Gpu {
             self.frame_stamp(slot, FrameStamp::Resolve);
             if filtering && self.overlay_count > 0 {
                 self.raster_overlay();
+            }
+            if filtering || !self.lighting_active() {
+                self.record_particle_draw();
             }
             self.frame_stamp(slot, FrameStamp::Overlay);
             self.copy_color_to_swapchain(swap);
@@ -4185,6 +4225,7 @@ impl Gpu {
     fn wait_gpu(&mut self) -> Result<(), String> {
         self.wait_fence(self.fence, "present wait")?;
         self.collect_froxel_time();
+        self.collect_particle_stats();
         Ok(())
     }
 
@@ -8848,6 +8889,7 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_particle_pass();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
@@ -9168,6 +9210,7 @@ fn load_fns(
             cmd_bind_pipe: d!("vkCmdBindPipeline"),
             cmd_bind_vb: d!("vkCmdBindVertexBuffers"),
             cmd_draw: d!("vkCmdDraw"),
+            cmd_draw_indirect: d!("vkCmdDrawIndirect"),
             cmd_push: d!("vkCmdPushConstants"),
             cmd_viewport: d!("vkCmdSetViewport"),
             cmd_scissor: d!("vkCmdSetScissor"),

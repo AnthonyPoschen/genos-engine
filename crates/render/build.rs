@@ -232,7 +232,26 @@ fn write_shader_glue(
         ));
     }
     append_hdr_compose(&mut glue_text, out);
+    append_particles(&mut glue_text, out);
     std::fs::write(&glue, glue_text).unwrap();
+}
+
+fn append_particles(glue_text: &mut String, out: &std::path::Path) {
+    let comp = compile("shaders/particles.comp", &out.join("particles.comp.spv"));
+    let vert = compile("shaders/particles.vert", &out.join("particles.vert.spv"));
+    let frag = compile("shaders/particles.frag", &out.join("particles.frag.spv"));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_COMP_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        comp.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_VERT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        vert.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        frag.display()
+    ));
 }
 
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
@@ -297,6 +316,9 @@ fn rerun_shader_pieces() {
         "hdr_agx.comp",
         "transmit.comp",
         "fxaa.comp",
+        "particles.comp",
+        "particles.vert",
+        "particles.frag",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

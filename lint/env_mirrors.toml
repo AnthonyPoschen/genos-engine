@@ -1336,6 +1336,26 @@ kind = "mirror"
 detail = "--fog-samples"
 
 [[var]]
+name = "GENOS_FX_PRESET"
+kind = "mirror"
+detail = "--fx-preset"
+
+[[var]]
+name = "GENOS_FX_MAX"
+kind = "mirror"
+detail = "--fx-max"
+
+[[var]]
+name = "GENOS_FX_COUNT"
+kind = "mirror"
+detail = "--fx-count"
+
+[[var]]
+name = "GENOS_FX_FREEZE"
+kind = "mirror"
+detail = "--fx-freeze"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"

@@ -46,7 +46,7 @@ The crate is `crates/render`, package `genos-render`.
 - `World`, `Object`, `DrawKind`, and `in_view` are in `src/world.rs`.
 - Triangle positions are packed in `src/pack.rs`, and shape blocks are in `src/pool.rs`.
 - `FrameMemory` in `src/budget.rs` counts those blocks and the particle image against one byte budget.
-- The particle step and the card builder are in `src/particles.rs`.
+- The CPU particle step and the card builder are in `src/particles.rs`. Stage-1 GPU emit, simulate, and compact are `src/particle_sim.rs`, `shaders/particles.comp`, and `src/gpu/particle_pass.rs`. The keep pass draws them with `vkCmdDrawIndirect`. The CPU cards stay for the camera flame. The GPU path is off until `settings.particles` is enabled with a non-zero count.
 - GPU lighting is `src/lighting_gpu.rs` and `shaders/lighting_*.comp`. `shaders/gbuffer.vert` and `gbuffer.frag` write the G-buffer. `shaders/overlay.frag` draws particle cards and the fallback picture before the lighting targets exist.
 - `mesh::compose` and `mesh::tone` are the CPU direct-light checks the tests compare against.
 
@@ -85,6 +85,8 @@ The camera calls `draw_profiled` in detailed profile mode. Basic mode and off mo
 There is no skinned clip player. A mesh animates only when the game writes a new pose.
 
 A particle does not occlude. `affects_light` is not the lit flag and is not the emission flag. Emitting particles share one fire term. There is not one lamp per ember.
+
+The stage-1 GPU buffer is a vertex-pulled quad in the keep pass, after lighting, so a card is not in the G-buffer. The Low budget is 65536 particles and the stage-1 buffers stay within 16 MB. `sort`, `lit`, and `half_res` are stored and are not passes yet. The depth collision reads an uploaded buffer, not the scene depth image. `fx.sort_ms` and `fx.overdraw_px` stay 0.
 
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
