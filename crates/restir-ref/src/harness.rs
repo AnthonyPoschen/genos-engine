@@ -207,16 +207,8 @@ fn variance(values: &[f32]) -> f32 {
         / scale
 }
 
-#[allow(
-    clippy::as_conversions,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
 fn narrow_ms(value: f64) -> f32 {
-    value as f32
+    genos_math::f32_from_f64(value)
 }
 
 /// Text form of a report, one JSON object.
