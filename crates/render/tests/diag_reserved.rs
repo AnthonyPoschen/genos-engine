@@ -4,11 +4,12 @@
 //! ad-hoc instrumentation on 61..63 changed the lit picture when `LIGHTING_DIAG` was on.
 
 const RESERVED: [u32; 5] = [40, 41, 61, 62, 63];
-const SHADERS: [(&str, &str); 4] = [
+const SHADERS: [(&str, &str); 5] = [
     ("lighting_cache.glsl", include_str!("../shaders/lighting_cache.glsl")),
     ("lighting_direct.comp", include_str!("../shaders/lighting_direct.comp")),
     ("lighting_compact.comp", include_str!("../shaders/lighting_compact.comp")),
     ("lighting_screen.comp", include_str!("../shaders/lighting_screen.comp")),
+    ("restir_live.comp", include_str!("../shaders/restir_live.comp")),
 ];
 
 fn literal_after(src: &str, pat: &str) -> Vec<(usize, u32)> {

@@ -398,6 +398,10 @@ pub struct LightingAtrousStats {
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
 /// sum, `restir` shaded one pairwise sample or one ReSTIR DI sample. Counts stay zero unless the diag
 /// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
+/// `history_accepts` / `history_rejects` are `diag[5]` / `diag[6]`: the live
+/// temporal reprojection kept or rejected a surfaced pixel. A history reset
+/// counts neither. `restir_point_adds` is `diag[13]`: near point lamps the
+/// direct loop added on a ReSTIR pixel. It stays 0 while that loop skips them.
 /// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
 /// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
 /// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
@@ -424,6 +428,12 @@ pub struct LampPickCounts {
     pub near_tests: u32,
     pub px_lamps: u32,
     pub hit_lamps: u32,
+    /// Surfaced pixels whose live temporal reprojection kept history.
+    pub history_accepts: u32,
+    /// Surfaced pixels whose live temporal reprojection rejected history.
+    pub history_rejects: u32,
+    /// Near point lamps added by the direct loop on a ReSTIR pixel.
+    pub restir_point_adds: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -1470,6 +1480,9 @@ impl Gpu {
                 near_tests: w[LAMP_PICK_DIAG_WORD - 14],
                 px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
                 hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
+                history_accepts: w[LAMP_PICK_DIAG_WORD - 48 + RESTIR_HIST_ACCEPT_DIAG],
+                history_rejects: w[LAMP_PICK_DIAG_WORD - 48 + RESTIR_HIST_REJECT_DIAG],
+                restir_point_adds: w[LAMP_PICK_DIAG_WORD - 48 + RESTIR_POINT_ADD_DIAG],
             })
             .unwrap_or_default()
     }
@@ -4190,6 +4203,16 @@ const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
+/// Live temporal reprojection kept a surfaced pixel. `restir_live.comp`.
+const RESTIR_HIST_ACCEPT_DIAG: usize = 5;
+/// Live temporal reprojection rejected a surfaced pixel. `restir_live.comp`.
+const RESTIR_HIST_REJECT_DIAG: usize = 6;
+/// Near point lamp the direct loop added on a ReSTIR pixel. `lighting_direct.comp`.
+const RESTIR_POINT_ADD_DIAG: usize = 13;
+const _: () = assert!(RESTIR_HIST_ACCEPT_DIAG != RESTIR_HIST_REJECT_DIAG);
+const _: () = assert!(RESTIR_POINT_ADD_DIAG < 40);
+const _: () = assert!(RESTIR_HIST_ACCEPT_DIAG < 40 && RESTIR_HIST_REJECT_DIAG < 40);
+const _: () = assert!(LAMP_PICK_DIAG_WORD - 48 + RESTIR_POINT_ADD_DIAG < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;

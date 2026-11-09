@@ -7,9 +7,12 @@
 //!
 //! For every current pixel, history is *truly valid* when the previous
 //! camera saw the same surface point (its ray to the point hits nothing
-//! nearer). The gate: on a yaw turn, the reprojection keeps at least 97 % of
-//! truly valid pixels, and keeps under 1 % of disoccluded ones (only those
-//! whose history pixel happens to sit on a matching surface).
+//! nearer). The live gate is the shader's combination: relative depth 0.02,
+//! absolute 0.05 m, normal dot 0.9, one tap, and the candidate ray. On a yaw
+//! turn that combination keeps at least 97 % of truly valid pixels and under
+//! 1 % of disoccluded ones. The imported C5 policy (relative 0.1, five taps)
+//! is printed as a historical diagnostic. It is not the live gate, and a miss
+//! on the live policy is a failure of this test.
 
 #![allow(
     clippy::pedantic,
@@ -111,16 +114,35 @@ fn gbuffer(c: &Cam) -> Vec<(V, V, f32)> {
 
 struct Params {
     depth_rel: f32,
+    depth_abs: f32,
+    normal_min: f32,
     search: bool,
     candidate_ray: bool,
 }
-const OLD: Params = Params {
+/// View-depth mirror. Not the live shader: `restir_reproject` compares the
+/// candidate ray, not this frame's view depth.
+const VIEW_DEPTH: Params = Params {
     depth_rel: 0.02,
+    depth_abs: 0.05,
+    normal_min: 0.9,
     search: false,
     candidate_ray: false,
 };
-const NEW: Params = Params {
+/// Live `restir_reproject`: relative 0.02, absolute 0.05 m, normal 0.9, one
+/// tap, candidate ray. Same numbers as `restir_live.comp`.
+const LIVE: Params = Params {
+    depth_rel: 0.02,
+    depth_abs: 0.05,
+    normal_min: 0.9,
+    search: false,
+    candidate_ray: true,
+};
+/// Imported C5 head (Bitterli 2020 §6 relative 0.1, five taps). Historical
+/// diagnostic only. Not an authorization of the live constants.
+const C5_HISTORICAL: Params = Params {
     depth_rel: 0.1,
+    depth_abs: 0.05,
+    normal_min: 0.9,
     search: true,
     candidate_ray: true,
 };
@@ -130,10 +152,10 @@ fn depth_normal(p: &Params, z_ref: f32, z_other: f32, n_ref: V, n_other: V) -> b
         return false;
     }
     let gap = (z_ref - z_other).abs();
-    if gap / z_ref > p.depth_rel && gap > 0.05 {
+    if gap / z_ref > p.depth_rel && gap > p.depth_abs {
         return false;
     }
-    dot(n_ref, n_other) >= 0.9
+    dot(n_ref, n_other) >= p.normal_min
 }
 
 /// Pixel `floor(px) + offset`, or `None` off the grid. Lossless: the floor is
@@ -211,8 +233,31 @@ fn same_plane_nearby(prev: &Cam, hist: &[(V, V, f32)], pos: V, n: V) -> bool {
         })
 }
 
-/// (kept valid / valid, kept disoccluded / disoccluded) over a yaw turn.
-fn retention(p: &Params, yaw_step: f32, strafe_step: f32, frames: usize) -> (f32, f32) {
+struct Retention {
+    valid: u32,
+    kept: u32,
+    occl: u32,
+    false_keep: u32,
+}
+
+impl Retention {
+    fn keep(&self) -> f32 {
+        self.kept as f32 / self.valid.max(1) as f32
+    }
+
+    fn false_rate(&self) -> f32 {
+        self.false_keep as f32 / self.occl.max(1) as f32
+    }
+
+    fn rejected(&self) -> u32 {
+        self.valid.saturating_sub(self.kept)
+    }
+}
+
+/// Counts over a yaw turn. `kept / valid` is retained truly-visible history.
+/// `valid - kept` is the rejection of that history. `false_keep / occl` is
+/// history kept on a true disocclusion.
+fn retention(p: &Params, yaw_step: f32, strafe_step: f32, frames: usize) -> Retention {
     let (mut valid, mut kept, mut occl, mut false_keep) = (0u32, 0u32, 0u32, 0u32);
     for f in 0..frames {
         let (pc, cc) = (
@@ -246,27 +291,71 @@ fn retention(p: &Params, yaw_step: f32, strafe_step: f32, frames: usize) -> (f32
             }
         }
     }
-    (
-        kept as f32 / valid.max(1) as f32,
-        false_keep as f32 / occl.max(1) as f32,
-    )
+    Retention {
+        valid,
+        kept,
+        occl,
+        false_keep,
+    }
 }
 
 #[test]
 fn a_camera_turn_keeps_temporal_history_except_on_disocclusion() {
     // Pure yaw (no disocclusion possible: occlusion does not depend on
     // orientation), then yaw while strafing past the pillar.
+    // 97 % retained and 1 % false-keep are the established expectation.
+    // They are not lowered when the live policy misses them.
     for &(step, strafe) in &[(1.0f32, 0.0f32), (3.0, 0.0), (2.0, -0.05)] {
-        let (old_keep, old_false) = retention(&OLD, step, strafe, 8);
-        let (new_keep, new_false) = retention(&NEW, step, strafe, 8);
-        eprintln!("yaw {step} deg strafe {strafe} m/frame: old keep {old_keep:.4} false {old_false:.4} | new keep {new_keep:.4} false {new_false:.4}");
-        assert!(
-            new_keep >= 0.97,
-            "turn {step}: kept {new_keep} of valid history"
+        let view = retention(&VIEW_DEPTH, step, strafe, 8);
+        let live = retention(&LIVE, step, strafe, 8);
+        let c5 = retention(&C5_HISTORICAL, step, strafe, 8);
+        eprintln!(
+            "yaw {step} deg strafe {strafe} m/frame: \
+             view-depth kept {kept_v}/{valid_v} ({keep_v:.4}) rejected {rej_v} false {fk_v}/{oc_v} ({fr_v:.4}) | \
+             live kept {kept}/{valid} ({keep:.4}) rejected {rej} false {fk}/{oc} ({fr:.4}) | \
+             c5-historical kept {kept_c}/{valid_c} ({keep_c:.4}) rejected {rej_c} false {fk_c}/{oc_c} ({fr_c:.4})",
+            kept_v = view.kept,
+            valid_v = view.valid,
+            keep_v = view.keep(),
+            rej_v = view.rejected(),
+            fk_v = view.false_keep,
+            oc_v = view.occl,
+            fr_v = view.false_rate(),
+            kept = live.kept,
+            valid = live.valid,
+            keep = live.keep(),
+            rej = live.rejected(),
+            fk = live.false_keep,
+            oc = live.occl,
+            fr = live.false_rate(),
+            kept_c = c5.kept,
+            valid_c = c5.valid,
+            keep_c = c5.keep(),
+            rej_c = c5.rejected(),
+            fk_c = c5.false_keep,
+            oc_c = c5.occl,
+            fr_c = c5.false_rate(),
         );
         assert!(
-            new_false <= 0.01,
-            "turn {step}: kept {new_false} of disoccluded history"
+            live.keep() >= 0.97,
+            "live turn {step}: kept {}/{} ({:.4}) of valid history, rejected {}",
+            live.kept,
+            live.valid,
+            live.keep(),
+            live.rejected(),
+        );
+        assert!(
+            live.false_rate() <= 0.01,
+            "live turn {step}: kept {}/{} ({:.4}) of disoccluded history",
+            live.false_keep,
+            live.occl,
+            live.false_rate(),
+        );
+        assert!(
+            c5.keep() >= 0.97 && c5.false_rate() <= 0.01,
+            "c5 historical diagnostic moved: keep {:.4} false {:.4}",
+            c5.keep(),
+            c5.false_rate(),
         );
     }
 }
