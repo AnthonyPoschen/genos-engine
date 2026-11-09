@@ -1,0 +1,16 @@
+name: vendor apstack skills
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Full 40-character commit SHA of AnthonyPoschen/agent-skills to vendor.
+        required: true
+        type: string
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  vendor-apstack:
+    uses: AnthonyPoschen/agent-skills/.github/workflows/vendor-apstack-skills.yml@76909160f9aafb063d79f7211554dc60224620b2
+    with:
+      sha: ${{ inputs.sha }}
