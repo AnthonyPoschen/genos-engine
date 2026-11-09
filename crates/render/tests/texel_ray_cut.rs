@@ -148,8 +148,8 @@ fn ray_cut_bit_is_packed_only_from_the_setting() {
     assert_eq!(low.head_hi & RAY_CUT_BIT, RAY_CUT_BIT);
     assert_eq!(low.mode_cap / 1000, 0, "Low stays probe GI");
     assert_eq!(on.mode_cap / 1000, 3);
-    assert_eq!(plain.head_hi & RAY_CUT_BIT, 0, "the preset default is off");
-    assert_eq!(plain.head_hi & DETAIL_BIT, 0);
+    assert_eq!(plain.head_hi & RAY_CUT_BIT, RAY_CUT_BIT, "High defaults the ray cut on");
+    assert_eq!(plain.head_hi & DETAIL_BIT, DETAIL_BIT, "High defaults texel detail on");
 }
 
 #[test]
@@ -226,7 +226,9 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
         assert_eq!(row.seed_same, 1, "row {id} wrote the seed");
         assert_eq!(row.mean_same, 1, "row {id} wrote the texel mean");
     }
-    let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK];
+    // A ring timestamp is a settling lamp. The live cell agrees, so the rays
+    // are cut. The picture during that settle is the cell, not a second relight.
+    let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK, LAMP];
     for id in held_rows {
         let row = &rows[id];
         assert_eq!(row.held, 1, "row {id} should hold");
@@ -264,7 +266,7 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
             row.looked
         );
     }
-    for id in [STALE_TEXEL, LAMP, MOVE, DETAIL_OFF, CUT_OFF, LOW, COARSE, MOVER] {
+    for id in [STALE_TEXEL, MOVE, DETAIL_OFF, CUT_OFF, LOW, COARSE, MOVER] {
         let row = &rows[id];
         assert_eq!(row.held, 0, "row {id} must keep its rays");
         assert_eq!(row.rays, 0, "row {id} cut {}", row.rays);
@@ -275,8 +277,8 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     let rays: u32 = rows.iter().map(|row| row.rays).sum();
     assert_eq!(word(&words, 0), held);
     assert_eq!(word(&words, 1), rays);
-    assert_eq!(held, 5);
-    assert_eq!(rays, 5 * FULL_SET);
+    assert_eq!(held, 6);
+    assert_eq!(rays, 6 * FULL_SET);
     assert_eq!(word(&words, 2), 0, "the gate does not list a young cell");
     assert_eq!(word(&words, 3), 0, "the gate does not list a world-cell refresh");
 }

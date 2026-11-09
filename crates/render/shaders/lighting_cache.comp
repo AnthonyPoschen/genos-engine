@@ -274,6 +274,16 @@ void main() {
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
+        // The mean above is the set, so a bounce drops the old light in one
+        // round. Compose shows those sets at LIGHTING_SETTLE_PICTURE_ALPHA.
+        // Rays keep `mean`. The short colour
+        // is the cell's estimator slot, which a world cell does not use for
+        // variance.
+        if (sh && lighting_lamp_settling()) {
+            vec4 prev = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+            vec3 picture = prev.w > 0.5 ? mix(prev.rgb, e, LIGHTING_SETTLE_PICTURE_ALPHA) : e;
+            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(picture, 1.0);
+        }
         if (sh) {
             // Same weights as the mean (2 pi / rays a ray), same blend alpha.
             float wr = LIGHTING_TAU / rays;
@@ -288,6 +298,11 @@ void main() {
                 vec3 oz;
                 lighting_sh_get(slot, o0, ox, oy, oz);
                 float a = min(wa, 1.0);
+                // The lobes are the picture's tilt. The mean stays the whole
+                // set; the lobes follow the short step stored above.
+                if (lighting_lamp_settling()) {
+                    a = LIGHTING_SETTLE_PICTURE_ALPHA;
+                }
                 n0 = mix(o0 * sh_ls, n0, a);
                 nx = mix(ox * sh_ls, nx, a);
                 ny = mix(oy * sh_ls, ny, a);

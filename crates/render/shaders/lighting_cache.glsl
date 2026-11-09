@@ -1092,27 +1092,6 @@ const float LIGHTING_SC_RESAMPLE_SETS = 4.0;
 bool lighting_near_change(vec3 p);
 bool lighting_sc_light_quiet();
 float lighting_seed_sunfrac = 0.0;
-// S72N: first fill from the coarser sizes (2x, then 4x), bilinear over the lit
-// coplanar cells there (any coverage), so it has no cell-shaped steps. The 25 cm
-// cell holding pos is still claimed as a seed a pixel needs (reveal burst).
-vec4 lighting_sc_parent_bilerp(vec3 pos, vec3 n, float size) {
-    float s2 = size * 2.0;
-    if (s2 > 0.2) {
-        uint c = lighting_cache_find_sized(pos, n, true, s2, pos);
-        if (c != ~0u) {
-            cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
-            cache.v[LIGHTING_WORLD_AT + c].z = uintBitsToFloat(lighting_frame());
-        }
-    }
-    [[dont_unroll]] for (uint l = 0u; l < 2u; l++) {
-        vec4 r = lighting_sc_bilerp_cover(pos, n, s2, 1.0e-3);
-        if (r.w > -0.5) {
-            return vec4(r.rgb, 1.0);
-        }
-        s2 *= 2.0;
-    }
-    return vec4(0.0);
-}
 vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
     lighting_seed_sunfrac = 0.0;
     vec4 best = vec4(0.0);
@@ -1431,6 +1410,10 @@ const float LIGHTING_SC_CHANGE_ALPHA = 1.0 / 24.0;
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
 const float LIGHTING_WRC_CHANGE_ALPHA = 1.0 / 32.0;
 const float LIGHTING_WRC_LOCAL_ALPHA = 1.0 / 8.0;
+// Picture step while a lamp is settling. The ray mean still takes the set
+// whole. This is the world-cell change rate. A step of 0.08 left the room
+// settle0 max above the legacy max.
+const float LIGHTING_SETTLE_PICTURE_ALPHA = LIGHTING_WRC_CHANGE_ALPHA;
 
 float lighting_sc_cap(uint slot) {
     if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -2255,6 +2238,14 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         if (v.w < LIGHTING_CACHE_HAS_W) {
             continue;
         }
+        // While a lamp is settling the stored mean is one set. The picture
+        // reads the short step written beside it. Rays still read the mean.
+        if (lighting_lamp_settling()) {
+            vec4 picture = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+            if (picture.w > 0.5) {
+                v.rgb = picture.rgb;
+            }
+        }
         if (lighting_sc_stale(s)) {
             continue;
         }
@@ -2366,10 +2357,11 @@ vec4 lighting_sc_shown(uint slot) {
             // where nothing reached yet.
             // The field is light as of now (S72V7), no gain.
             // S72V10: only a field the push wrote this frame or the last (stamp
-            // in the a-trous buffer B .w); a texel coming back on screen after
-            // more than 30 frames off it held the field from when it left. Until
-            // its field is rebuilt (next frame) it shows the WRC as of now
-            // (parent bilinear), not that old light.
+            // in the a-trous buffer B .w). A stale field used to fall through to
+            // the per-axis world read while texel detail was off. High and
+            // Medium default that bit on, and the other presets are not world
+            // mode 3, so no preset reached that read. Own samples show below.
+            // The per-axis read stays for the cache-only view with SH cells off.
             uint pf = floatBitsToUint(cache.v[10u * LIGHTING_CACHE_SLOTS + slot].w);
             // While the camera is held, the field last written stays what pixels
             // show. The push idle and a frozen frame do not rewrite the stamp, and
@@ -2379,16 +2371,6 @@ vec4 lighting_sc_shown(uint slot) {
             have = fresh && any(greaterThan(field, vec3(0.0)));
             if (have) {
                 return vec4(field, 1.0);
-            }
-            // Detail off: the per-axis world read, not the neighbour blend.
-            // With texel detail on, a texel that has its own samples shows those
-            // samples. The cell seed already covered the empty texel above.
-            if (!fresh && own.w > 0.5 && !lighting_sh_texel_detail_on()) {
-                vec4 nbs = cache.v[3u * slot + 1u];
-                vec4 pb = lighting_sc_wrc_now(cache.v[3u * slot].xyz, nbs.xyz);
-                if (pb.w > 0.5) {
-                    return vec4(pb.rgb, 1.0);
-                }
             }
             // S72V8: no field yet: the texel's own sets before its seed (a seed is
             // a first-fill guess and must never outlast real samples; S72V-V5
@@ -3218,10 +3200,12 @@ bool lighting_sh_lum_disagrees(float hi, float lo) {
 // later cell change is not frozen. A missing, empty, stale, back-facing, or
 // off-plane corner is not agreement. Corners that disagree by the sparse ratio
 // are a contact or a corner, and the texel keeps its rays. A stale texel, a
-// lamp that is settling, a lamp that reaches this texel, a nearby move, and an
-// object-local texel do not hold. A 25 cm cell does not hold: the world cache
-// is the source this read does not write. Claim stays false. The seed, the
-// cell mean, and the harmonics are not stored.
+// nearby move, and an object-local texel do not hold. A lamp that is settling,
+// including the drain flag and a recent ring entry, does not by itself keep
+// the rays: the live cell is the comparison, and while that lamp is settling
+// the cell is what the picture shows. A 25 cm cell does not hold: the world
+// cache is the source this read does not write. Claim stays false. The seed,
+// the cell mean, and the harmonics are not stored.
 bool lighting_compact_hold_texel_rays(uint slot) {
     if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
@@ -3237,7 +3221,7 @@ bool lighting_compact_hold_texel_rays(uint slot) {
     if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > LIGHTING_CACHE_HAS_W) {
         return false;
     }
-    if (lighting_sc_stale(slot) || lighting_lamp_settling() || lighting_sc_lamp_touched(slot)) {
+    if (lighting_sc_stale(slot)) {
         return false;
     }
     bool mover;
@@ -3422,7 +3406,11 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 // texel whose neighbour read has a corner. A slant has no fine texel: flag
 // 2048 returns that same read, and the skip is that read having a corner.
 // Own samples, a parent, a resample, a miss, and a trust gate that hands the
-// pixel back to the probes are not this. Trust is not the test. A mover is
+// pixel back to the probes are not this. While a lamp is settling, compose
+// makes that exception itself (`lighting_settle_own_covered`): the live cell
+// is the picture, including a texel that already has samples. The exception
+// stays out of this function. Place inlines it, and the ring walk here
+// overflowed lavapipe's shader stack. Trust is not the test. A mover is
 // this when the world-cell read at its current position and true normal
 // accepts a corner: that read is what the pixel shows, and it does not seed.
 // cells_only is not this test. The toggle is applied later, inside
@@ -3747,20 +3735,28 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // They do not run for that texel, including when the read rejects
         // every corner: resample would copy a stale or far-side cell back in
         // as a seed. A texel that is not a detail candidate (detail off, a
-        // mover, its own samples, a coarse size) keeps those two. The parent
-        // walk is off for every texel while texel detail is on, including a
-        // mover. A mover's trust is 0, so it shows the probes without that
-        // walk. An empty read falls through to the probe seed.
-        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
+        // mover, its own samples, a coarse size) keeps those two. The compose
+        // parent walk is gone: it ran only while texel detail was off, and no
+        // preset is in that state. Ray hits still call lighting_sc_parent.
+        // A mover is not seeded. An empty read falls through to the probe seed.
+        bool detail_empty = cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
+        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && detail_empty;
+        // Drain and a recent lamp ring: the live cell is the picture, even
+        // when the texel already has samples. The read is the short step of
+        // the cell's sets, not the one-set mean the rays keep. Those samples
+        // are not shown and are not rewritten here. A quiet frame still shows
+        // them. This shares the one neighbour read below. A second call in
+        // this function overflowed lavapipe's shader stack on a full frame.
+        bool settle_show = lighting_sh_texel_detail_on() && !obj && split && lighting_lamp_settling() && !detail_empty;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
-        if (detail_candidate) {
-            if (LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
+        if (detail_candidate || settle_show) {
+            if (detail_candidate && LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
             vec4 detail = lighting_sh_read(q, n, false);
             if (detail.w > LIGHTING_CACHE_HAS_W) {
-                if (LIGHTING_SC_WRITES) {
+                if (detail_candidate && LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
                     // The mark is the sign of the confidence. set_seed stores a
                     // positive confidence and clears sun word z, which is the
@@ -3794,20 +3790,6 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         if (mode == 3u && lighting_sc_stale(slot)) {
             continue;
-        }
-        // Texel detail on skips this walk for every texel, including a mover.
-        // A mover's trust is 0, so the pixel shows the probes without it.
-        if (!detail_kept && v.w < 0.5 && mode == 3u && !lighting_sh_texel_detail_on()) {
-            if (split) {
-                // S72N: the coarser cells bilinear (a nearest parent showed its
-                // 50 cm / 1 m squares), kept as a low-confidence seed.
-                v = lighting_sc_parent_bilerp(q, n, size);
-                if (v.w > 0.5) {
-                    lighting_sc_set_seed(slot, v.rgb, 0.25, lighting_bilerp_sunfrac);
-                }
-            } else {
-                v = lighting_sc_parent(q, n, size);
-            }
         }
         if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch

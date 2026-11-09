@@ -196,7 +196,8 @@ fn retire_bit_is_packed_only_from_the_setting() {
     assert_eq!(low.head_hi & RETIRE_BIT, RETIRE_BIT);
     assert_eq!(low.mode_cap / 1000, 0, "Low stays probe GI");
     assert_eq!(on.mode_cap / 1000, 3);
-    assert_eq!(plain.head_hi & RETIRE_BIT, 0, "the preset default is off");
+    assert_eq!(plain.head_hi & RETIRE_BIT, RETIRE_BIT, "High defaults probe retire on");
+    assert_eq!(plain.head_hi & DETAIL_BIT, DETAIL_BIT, "High defaults texel detail on");
 }
 
 #[test]

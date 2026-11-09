@@ -505,7 +505,9 @@ pub struct SurfaceCacheSettings {
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
     /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
-    /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
+    /// Key `surface_cache.sh_cells` (ADR 0039 stage 2). On for High and Medium.
+    /// Off for Low and for presets with no world cache. The three product bits
+    /// below do nothing unless this is on. 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
     /// same rays, no new ones). Cells stay keyed by the dominant axis. The
     /// screen and seed read blends the eight corners at the true normal. The
@@ -516,7 +518,8 @@ pub struct SurfaceCacheSettings {
     /// owning cell. The read does not allocate. An empty slant keeps the
     /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
-    /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3, default off).
+    /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
     /// An empty fine world texel takes its first light from the trilinear
     /// neighbour read, at the texel's true normal. The value is a
     /// low-confidence seed, not an own sample. The detail mark is a negative
@@ -526,8 +529,8 @@ pub struct SurfaceCacheSettings {
     /// take resample or the hit patch, even when the neighbour read accepts
     /// nothing. The probe seed still runs for that miss. Those two stay when
     /// the texel is not a detail candidate, including SH cells on with this
-    /// setting off. The parent walk is off for every texel while this setting
-    /// is on. A mover is not seeded. With this setting on, a mover shows the
+    /// setting off. The compose parent walk is gone. Ray hits still call
+    /// `lighting_sc_parent`. A mover is not seeded. With this setting on, a mover shows the
     /// world-cell read at its current world position and true normal, claim
     /// false, and skips the probe irradiance read when that read accepts a
     /// corner. Detail off still has mover trust 0 and shows the probes. A slanted
@@ -536,7 +539,8 @@ pub struct SurfaceCacheSettings {
     /// this read does not read screen-probe irradiance. Requires `sh_cells`;
     /// on without it does nothing. Head 3.w bit 17.
     pub sh_texel_detail: bool,
-    /// Key `surface_cache.sh_texel_ray_cut` (ADR 0039 stage 4, default off).
+    /// Key `surface_cache.sh_texel_ray_cut` (ADR 0039 stage 4). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
     /// A fine world texel skips its own rays when the live 25 cm neighbour read
     /// is complete and the accepted corners agree within the existing sparse
     /// luminance ratio. The texel's own samples, not its seed, are what is
@@ -547,7 +551,9 @@ pub struct SurfaceCacheSettings {
     /// The read does not write the cell. Requires `sh_texel_detail`; on without
     /// it does nothing. Head 3.w bit 18.
     pub sh_texel_ray_cut: bool,
-    /// Key `surface_cache.sh_probe_retire` (ADR 0039 stage 5 slice, default off).
+    /// Key `surface_cache.sh_probe_retire` (ADR 0039 stage 5 slice). On for High
+    /// and Medium. Off for Low (ADR open question 2) and for presets with no
+    /// world cache. The knob stays. The probe passes stay.
     /// A screen probe whose bilinear footprint has no uncovered surface does not
     /// run place's surface search, does not trace, does not finish a gather bin,
     /// and does not run the filter body. The footprint is recomputed every place
@@ -704,6 +710,15 @@ pub struct LightingSettings {
     pub time_of_day: f32,
 }
 
+/// High and Medium keep the directional product. Low and the presets with no
+/// world cache do not. The knobs stay, so a later `set_key` can turn a bit back on.
+fn clear_sh_product(cache: &mut SurfaceCacheSettings) {
+    cache.sh_cells = false;
+    cache.sh_texel_detail = false;
+    cache.sh_texel_ray_cut = false;
+    cache.sh_probe_retire = false;
+}
+
 impl Default for LightingSettings {
     fn default() -> Self {
         Self::preset(LightingPreset::High)
@@ -725,6 +740,7 @@ impl LightingSettings {
                 s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
+                clear_sh_product(&mut s.surface_cache);
                 s.gi.enabled = false;
                 s.bounce.count = 0;
                 s.probes.enabled = false;
@@ -747,11 +763,15 @@ impl LightingSettings {
                 s.bounce.count = 1;
                 s.probes.rays = 64;
                 s.world_cache.enabled = false;
+                // No world cache, so the directional product bits stay off.
+                // Turning the knobs on without the cache still does nothing.
+                clear_sh_product(&mut s.surface_cache);
                 s.denoiser.enabled = false;
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
+                clear_sh_product(&mut s.surface_cache);
                 s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
@@ -767,6 +787,9 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
+                // ADR 0039 open question 2: Low keeps screen probes until a
+                // 1060 measurement exists. The knobs can still turn the bits on.
+                clear_sh_product(&mut s.surface_cache);
                 s.direct.max_lights = 4;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
@@ -786,6 +809,8 @@ impl LightingSettings {
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
+                // High's directional product stays on: SH cells, texel detail,
+                // the ray cut, and probe retire.
                 s.direct.max_lights = 8;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
@@ -833,10 +858,10 @@ impl LightingSettings {
                 firefly_sigma: 8.0,
                 ray_budget: 0,
                 dormant_rays: 0,
-                sh_cells: false,
-                sh_texel_detail: false,
-                sh_texel_ray_cut: false,
-                sh_probe_retire: false,
+                sh_cells: true,
+                sh_texel_detail: true,
+                sh_texel_ray_cut: true,
+                sh_probe_retire: true,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
