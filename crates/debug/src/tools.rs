@@ -3708,12 +3708,41 @@ mod tests {
         genos_mcp::command::reply(cmd.id, reply);
     }
 
+    /// Pid-scoped directory for one room-script test. Drop removes it, so a
+    /// failed assertion still clears the directory. `prepare` starts empty:
+    /// a missing directory is fine, and a leftover that cannot be removed
+    /// fails the test.
+    struct RoomScriptDir {
+        path: std::path::PathBuf,
+    }
+
+    impl RoomScriptDir {
+        fn prepare(path: std::path::PathBuf) -> Self {
+            if let Err(err) = std::fs::remove_dir_all(&path) {
+                assert_eq!(
+                    err.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "could not empty room-script dir {}: {err}",
+                    path.display()
+                );
+            }
+            std::fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for RoomScriptDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     struct HostRoomScript {
         ok: bool,
         result: String,
         report: String,
         seen: Vec<(String, Value)>,
-        dir: std::path::PathBuf,
+        dir: RoomScriptDir,
     }
 
     /// The checked-in script through `run_script` and the commands it registers.
@@ -3721,19 +3750,17 @@ mod tests {
     /// not a room photograph and not a blotch grade.
     fn run_room_script_on_host(label: &str, script: &std::path::Path) -> HostRoomScript {
         let _queue = script_queue();
-        let dir = std::env::temp_dir().join(format!(
+        let dir = RoomScriptDir::prepare(std::env::temp_dir().join(format!(
             "genos-room-script-{label}-{}",
             std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        )));
         let settings_text = capture_settings_text();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fixture_seen = std::sync::Arc::clone(&seen);
         let fixture_stop = std::sync::Arc::clone(&stop);
         let fixture_text = settings_text;
-        let fixture_dir = dir.clone();
+        let fixture_dir = dir.path.clone();
         let fixture = std::thread::spawn(move || {
             let mut tools = Tools::new();
             tools.out_dir = fixture_dir;
@@ -3752,13 +3779,13 @@ mod tests {
         });
         let ok = crate::script::run_script(&crate::script::ScriptRun {
             script: script.to_path_buf(),
-            report_dir: dir.clone(),
+            report_dir: dir.path.clone(),
             trace: false,
         });
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         fixture.join().unwrap();
-        let result = std::fs::read_to_string(dir.join("result.json")).unwrap();
-        let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
+        let result = std::fs::read_to_string(dir.path.join("result.json")).unwrap();
+        let report = std::fs::read_to_string(dir.path.join("report.md")).unwrap();
         let seen = match seen.lock() {
             Ok(seen) => seen.clone(),
             Err(poison) => poison.into_inner().clone(),
@@ -3793,21 +3820,19 @@ mod tests {
         text.replacen(from, to, 1)
     }
 
-    fn write_room_script(label: &str, text: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
+    fn write_room_script(label: &str, text: &str) -> RoomScriptDir {
+        let dir = RoomScriptDir::prepare(std::env::temp_dir().join(format!(
             "genos-room-script-src-{label}-{}",
             std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("script.rhai");
-        std::fs::write(&path, text).unwrap();
-        path
+        )));
+        std::fs::write(dir.path.join("script.rhai"), text).unwrap();
+        dir
     }
 
     fn assert_room_eye(args: &Value, yaw: f64) {
         let eyes = [0.664_f64, 1.699, 9.629];
         let position = args.get("position").and_then(Value::as_array).unwrap();
+        assert_eq!(position.len(), eyes.len(), "eye {position:?}");
         for (got, want) in position.iter().zip(eyes) {
             let got = got.as_f64().unwrap();
             assert!((got - want).abs() < 1.0e-9, "eye {got} {want}");
@@ -3871,15 +3896,14 @@ mod tests {
         let settings_text = capture_settings_text();
         for name in ["room-a", "room-b"] {
             let resolved =
-                std::fs::read_to_string(run.dir.join(format!("resolved-{name}.txt"))).unwrap();
+                std::fs::read_to_string(run.dir.path.join(format!("resolved-{name}.txt"))).unwrap();
             assert_eq!(resolved, settings_text);
             assert!(resolved.contains("sc_settle=0"));
-            assert!(run.dir.join(format!("{name}-live.png")).is_file());
+            assert!(run.dir.path.join(format!("{name}-live.png")).is_file());
         }
         assert!(run.report.contains("schedule pose=room-a"));
         assert!(run.report.contains("schedule pose=room-b"));
         assert!(run.report.contains("captured=true"));
-        let _ = std::fs::remove_dir_all(&run.dir);
     }
 
     /// `shoot` still names `eye`, and the outer `let eye` is still there.
@@ -3906,7 +3930,7 @@ mod tests {
         assert!(text.contains("let eye = [0.664, 1.699, 9.629];"));
         assert!(text.contains("position: eye"));
         let script = write_room_script("undeclared-eye", &text);
-        let run = run_room_script_on_host("undeclared-eye", &script);
+        let run = run_room_script_on_host("undeclared-eye", &script.path.join("script.rhai"));
         assert!(!run.ok, "{}", run.result);
         assert!(
             run.result.contains("Variable not found: eye"),
@@ -3915,10 +3939,8 @@ mod tests {
         );
         let names: Vec<&str> = run.seen.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["status", "time", "view"]);
-        assert!(!run.dir.join("room-a-live.png").is_file());
+        assert!(!run.dir.path.join("room-a-live.png").is_file());
         assert!(!run.report.contains("captured=true"));
-        let _ = std::fs::remove_dir_all(&run.dir);
-        let _ = std::fs::remove_dir_all(script.parent().unwrap());
     }
 
     /// The tail and the size stay. The path the contract saves is gone, so
@@ -3934,7 +3956,7 @@ mod tests {
         assert!(text.contains("require(settled.captured == true, `missing-capture ${name}`)"));
         assert!(!text.contains("path: `${name}-live.png`"));
         let script = write_room_script("missing-capture", &text);
-        let run = run_room_script_on_host("missing-capture", &script);
+        let run = run_room_script_on_host("missing-capture", &script.path.join("script.rhai"));
         assert!(!run.ok, "{}", run.result);
         assert!(
             run.result.contains("wait_settled capture needs a path"),
@@ -3963,9 +3985,7 @@ mod tests {
         assert_eq!(settle.get("then_frames").and_then(Value::as_i64), Some(2));
         assert_eq!(settle.get("width").and_then(Value::as_i64), Some(320));
         assert_eq!(settle.get("height").and_then(Value::as_i64), Some(180));
-        assert!(!run.dir.join("room-a-live.png").is_file());
+        assert!(!run.dir.path.join("room-a-live.png").is_file());
         assert!(!run.report.contains("captured=true"));
-        let _ = std::fs::remove_dir_all(&run.dir);
-        let _ = std::fs::remove_dir_all(script.parent().unwrap());
     }
 }
