@@ -264,8 +264,9 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
 /// Ground forces, after gravity and before the chassis is integrated.
 ///
 /// Wheel index order is the only order. Each wheel applies its spring, then
-/// its slip force. Both use the velocity from the start of this pass. Wheel
-/// spin is integrated after that force, from the same sample.
+/// its slip force. Both use the velocity from the start of this pass. With a
+/// drive block, wheel spin is integrated before the slip force, from that
+/// same velocity, and the force uses the updated spin.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
@@ -308,17 +309,39 @@ fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32, u32) {
     }
     let mut body = chassis;
     let mut slips = 0_u32;
-    for push in pushes {
+    for push in &pushes {
         let Some(push) = push else {
             continue;
         };
         accelerate(&mut body, push.arm, push.suspension, dt);
-        if push.slip.length_squared() > 0.0 {
-            accelerate(&mut body, push.arm, push.slip, dt);
+    }
+    let wrote = spin_wheels(&mut ground, &chassis, &pushes, dt);
+    // A driven wheel's slip force is the force at the updated spin. Using the
+    // pre-update spin applies the tyre's full slope one step late and the
+    // chassis speed oscillates through zero.
+    let driven = ground.drive.is_some();
+    for (index, push) in pushes.iter().enumerate() {
+        let Some(push) = push else {
+            continue;
+        };
+        let slip = if driven {
+            ground.wheels.get(index).map_or(Vec3::ZERO, |wheel| {
+                slip_force(
+                    &chassis,
+                    wheel,
+                    push.direction,
+                    push.arm,
+                    push.suspension.length(),
+                )
+            })
+        } else {
+            push.slip
+        };
+        if slip.length_squared() > 0.0 {
+            accelerate(&mut body, push.arm, slip, dt);
             slips = slips.saturating_add(1);
         }
     }
-    let wrote = spin_wheels(&mut ground, &chassis, &pushes, dt);
     if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
         stored.velocity = body.velocity;
         stored.angular_velocity = body.angular_velocity;
@@ -385,7 +408,11 @@ fn sample_wheel(
     )
 }
 
-/// Axle share plus the tyre reaction, explicit Euler. No drive block leaves `omega` alone.
+/// Axle share plus the tyre reaction. No drive block leaves `omega` alone.
+///
+/// Where the drive force fits in the rising part of the slip curve, the
+/// reaction slope is integrated implicitly. Explicit Euler at `1/60` steps
+/// over that slope and flips the sign of `omega`.
 fn spin_wheels(
     ground: &mut WheeledGround,
     chassis: &Body,
@@ -402,19 +429,127 @@ fn spin_wheels(
             continue;
         }
         let drive_torque = if wheel.driven { share } else { 0.0 };
-        let reaction = pushes
-            .get(index)
-            .and_then(|push| push.as_ref())
-            .map_or(0.0, |push| tyre_reaction(chassis, wheel, push));
-        let delta = (drive_torque + reaction) * dt / wheel.inertia;
-        if delta.is_finite() {
-            wheel.omega += delta;
+        let push = pushes.get(index).and_then(|item| item.as_ref());
+        let reaction = push.map_or(0.0, |item| tyre_reaction(chassis, wheel, item));
+        let next = advance_omega(
+            wheel.omega,
+            drive_torque,
+            reaction,
+            wheel,
+            chassis,
+            push,
+            dt,
+        );
+        if next.is_finite() {
+            wheel.omega = next;
         }
         if wheel.driven && drive_torque.abs() > 0.0 {
             wrote = wrote.saturating_add(1);
         }
     }
     wrote
+}
+
+/// Implicit step along the linear tyre slope when that slope can balance the drive.
+/// Otherwise one explicit step. Neither path allocates.
+fn advance_omega(
+    omega: f32,
+    drive_torque: f32,
+    reaction: f32,
+    wheel: &Wheel,
+    chassis: &Body,
+    push: Option<&ContactPush>,
+    dt: f32,
+) -> f32 {
+    let explicit = explicit_spin(omega, drive_torque, reaction, wheel.inertia, dt);
+    let Some(push) = push else {
+        return explicit;
+    };
+    let Some(sample) = tyre_sample(chassis, wheel, push) else {
+        return explicit;
+    };
+    let Some(slope) = grip_slope(wheel, sample.denom, sample.load) else {
+        return explicit;
+    };
+    let target = drive_torque / wheel.radius;
+    if !target.is_finite() || target.abs() > sample.max_longitudinal {
+        return explicit;
+    }
+    let free = sample.forward_speed / wheel.radius;
+    let step = dt / wheel.inertia;
+    let denom = 1.0 - step * slope;
+    if !(denom > 1.0e-6) || !free.is_finite() {
+        return explicit;
+    }
+    let next = (omega + step * (drive_torque - slope * free)) / denom;
+    if next.is_finite() {
+        next
+    } else {
+        explicit
+    }
+}
+
+fn explicit_spin(omega: f32, drive_torque: f32, reaction: f32, inertia: f32, dt: f32) -> f32 {
+    if !(inertia > 0.0) {
+        return omega;
+    }
+    let delta = (drive_torque + reaction) * dt / inertia;
+    if delta.is_finite() {
+        omega + delta
+    } else {
+        omega
+    }
+}
+
+struct TyreSample {
+    forward_speed: f32,
+    denom: f32,
+    load: f32,
+    max_longitudinal: f32,
+}
+
+fn tyre_sample(chassis: &Body, wheel: &Wheel, push: &ContactPush) -> Option<TyreSample> {
+    let heading = plane_heading(chassis, push.direction)?;
+    let lateral = push.direction.cross(heading).normalize();
+    if lateral.length_squared() == 0.0 || !(wheel.radius > 0.0) {
+        return None;
+    }
+    let at_point = chassis.velocity + chassis.angular_velocity.cross(push.arm);
+    let planar = at_point - push.direction * at_point.dot(push.direction);
+    let forward_speed = planar.dot(heading);
+    let lateral_speed = planar.dot(lateral);
+    let denom = planar.length().max(wheel.slip_denom);
+    let load = push.suspension.length();
+    if !(load > 0.0) || !(denom > 1.0e-8) || !forward_speed.is_finite() {
+        return None;
+    }
+    let mu_lat = signed_curve(slip_angle(lateral_speed, forward_speed), wheel).abs();
+    let room = if mu_lat < 1.0 {
+        (1.0 - mu_lat * mu_lat).sqrt()
+    } else {
+        0.0
+    };
+    let max_mu = wheel.mu_peak.min(room).max(0.0);
+    Some(TyreSample {
+        forward_speed,
+        denom,
+        load,
+        max_longitudinal: (max_mu * load).min(load.abs()),
+    })
+}
+
+/// `d(reaction) / d(omega)` on the rising part of the curve. Negative.
+fn grip_slope(wheel: &Wheel, denom: f32, load: f32) -> Option<f32> {
+    if !(wheel.radius > 0.0)
+        || !(wheel.slip_peak > 0.0)
+        || !(wheel.mu_peak > 0.0)
+        || !(denom > 1.0e-8)
+        || !(load > 0.0)
+    {
+        return None;
+    }
+    let slope = -wheel.radius * wheel.radius * load * wheel.mu_peak / (wheel.slip_peak * denom);
+    (slope.is_finite() && slope < 0.0).then_some(slope)
 }
 
 fn drive_share(drive: &Drive, ground: &WheeledGround) -> f32 {
@@ -785,6 +920,42 @@ fn conjugate(orientation: Quat) -> Quat {
         -orientation.z,
         orientation.w,
     )
+}
+
+#[cfg(test)]
+mod curve_tests {
+    use super::{curve_torque, Drive};
+
+    fn sloped() -> Drive {
+        let mut curve_rpm = [0.0; 8];
+        curve_rpm[0] = 1_000.0;
+        curve_rpm[1] = 5_000.0;
+        let mut torque = [0.0; 8];
+        torque[0] = 100.0;
+        torque[1] = 300.0;
+        Drive {
+            throttle: 1.0,
+            clutch: 1.0,
+            gear: 0,
+            final_drive: 1.0,
+            ratios: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ratio_count: 1,
+            curve_rpm,
+            curve_torque: torque,
+            curve_count: 2,
+        }
+    }
+
+    #[test]
+    fn torque_table_interpolates_inside_and_holds_at_the_ends() {
+        let drive = sloped();
+        assert!((curve_torque(&drive, 0.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, -500.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 1_000.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 3_000.0) - 200.0).abs() < 1.0e-3);
+        assert!((curve_torque(&drive, 5_000.0) - 300.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 9_000.0) - 300.0).abs() < 1.0e-4);
+    }
 }
 
 #[cfg(test)]

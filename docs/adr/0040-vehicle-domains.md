@@ -214,6 +214,7 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | A free wheel or a zero curve is braked | `omega`, `mu_peak` 0 | the free-wheel and zero-mu runs in that test |
 | Straight reverse gains a lateral speed | slip angle from the travel direction | `a_matched_roll_in_reverse_stays_straight_and_sideslip_restores` |
 | First gear does not move the chassis | `throttle`, `gear`, the ratio list | `first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel`, `first_gear`, `drive_wheels` |
+| Wheel spin flips sign under throttle | implicit grip slope, `inertia`, `slip_peak` | `wheel_spin_stays_in_the_slip_band_without_sign_flips`. `|d omega|` stays under 2 rad/s and the final spin stays inside `slip_peak` of road speed |
 | An open clutch still drives | `clutch` 0 | the open-clutch run in that test |
 
 `wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. P28 adds `tyre_contacts` on that line and mixes each wheel's `omega` into the hash. P29 adds `drive_wheels` on that line. `--replay` and `--checkpoint` keep their current meaning.

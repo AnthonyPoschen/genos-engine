@@ -279,8 +279,22 @@ fn first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel() {
     assert!(forward_body.velocity.x > flat_x);
 
     let (reverse, _) = gear_run(120, Gear::Reverse);
-    let reverse_x = chassis(&reverse).velocity.x;
-    assert!(reverse_x < 0.0, "reverse speed {reverse_x}");
+    let reverse_body = chassis(&reverse);
+    assert!(
+        reverse_body.velocity.x < 0.0,
+        "reverse speed {}",
+        reverse_body.velocity.x
+    );
+    assert!(
+        reverse_body.velocity.z.abs() < 0.05,
+        "reverse lateral speed {}",
+        reverse_body.velocity.z
+    );
+    assert!(
+        reverse_body.position.z.abs() < 0.05,
+        "reverse lateral drift {}",
+        reverse_body.position.z
+    );
 
     // Negative control: throttle stays 1 and the clutch is open.
     let (open, _) = gear_run(120, Gear::Open);
@@ -306,6 +320,78 @@ fn first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel() {
     );
     assert_eq!(air.step_stats.drive_wheels, 2);
     assert!(drive_ok(&chassis(&air)));
+}
+
+/// Explicit Euler flips omega dozens of times on this fixture. The implicit grip step must not.
+#[test]
+fn wheel_spin_stays_in_the_slip_band_without_sign_flips() {
+    for (label, kind) in [("forward", Gear::Forward), ("reverse", Gear::Reverse)] {
+        let mut world = genos_physics::first_gear_world();
+        let mut twin = genos_physics::first_gear_world();
+        prepare(&mut world, kind);
+        prepare(&mut twin, kind);
+        let mut prev = [0.0_f32; 4];
+        let mut flips = 0_u32;
+        let mut max_step = 0.0_f32;
+        for _ in 0..120 {
+            step(&mut world, DT);
+            step(&mut twin, DT);
+            assert!(same_pose(&world, &twin), "{label} runs diverged");
+            let Some(sampled) = ground(&world) else {
+                assert!(ground(&world).is_some());
+                return;
+            };
+            for (index, wheel) in sampled.wheels.iter().enumerate() {
+                let delta = wheel.omega - prev[index];
+                if delta.abs() > max_step {
+                    max_step = delta.abs();
+                }
+                let crossed = (prev[index] > 0.0 && wheel.omega < 0.0)
+                    || (prev[index] < 0.0 && wheel.omega > 0.0);
+                if crossed {
+                    flips = flips.saturating_add(1);
+                }
+                prev[index] = wheel.omega;
+            }
+        }
+        let body = chassis(&world);
+        assert_eq!(flips, 0, "{label} omega sign flips {flips}");
+        assert!(
+            max_step < 2.0,
+            "{label} |d omega| {max_step} rad/s in one step"
+        );
+        assert!(
+            body.velocity.z.abs() < 0.05,
+            "{label} lateral speed {}",
+            body.velocity.z
+        );
+        assert!(
+            body.position.z.abs() < 0.05,
+            "{label} lateral drift {}",
+            body.position.z
+        );
+        let Some(sampled) = ground(&world) else {
+            assert!(ground(&world).is_some());
+            return;
+        };
+        let road = body.velocity.x / 0.3;
+        let band = 0.1 * body.velocity.x.abs().max(1.0) / 0.3;
+        for wheel in &sampled.wheels {
+            let error = (wheel.omega - road).abs();
+            assert!(
+                error <= band,
+                "{label} omega {} is {error} from road speed/radius {road}, band {band}",
+                wheel.omega
+            );
+        }
+        if label == "forward" {
+            assert!(body.velocity.x > 1.0, "forward {}", body.velocity.x);
+            assert!(sampled.wheels.iter().all(|wheel| wheel.omega > 0.0));
+        } else {
+            assert!(body.velocity.x < 0.0, "reverse {}", body.velocity.x);
+            assert!(sampled.wheels.iter().all(|wheel| wheel.omega < 0.0));
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

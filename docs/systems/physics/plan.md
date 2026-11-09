@@ -625,7 +625,7 @@ P27–P32 are the wheeled-car and thruster sketches in this plan. They are not a
 
 ### P29. Engine, gearbox, differential
 
-- [x] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. The clutch engages only for the bit pattern of `1.0`. Wheel `omega` integrates only when a drive block is present and the wheel inertia is positive. The axle share is an explicit torque, not a constraint row.
+- [x] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. The clutch engages only for the bit pattern of `1.0`. Wheel `omega` integrates only when a drive block is present and the wheel inertia is positive. The axle share is an explicit torque, not a constraint row. In the grip region the tyre slope is implicit, so `1/60` does not flip `omega`.
 - **Behavior:** Torque curve is a table of `(rpm, torque)` in N·m, linearly interpolated. Gearbox is a list of ratios, including a negative reverse, plus a final drive. `gear` is an index the game sets. Engine omega comes from the driven wheels through the engaged ratio. An open differential writes equal drive torque to the driven wheels. Clutch is 0 or 1 in this step.
 - **Test:** `first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel`
   - Throttle 1, gear 0, ratio 3, curve `(0 rpm, 200 N·m)` to `(5 000 rpm, 200 N·m)`. After 2 seconds the chassis velocity X is positive and greater than 1 m/s.
