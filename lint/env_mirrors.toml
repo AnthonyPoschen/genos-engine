@@ -1356,6 +1356,11 @@ kind = "mirror"
 detail = "--fx-freeze"
 
 [[var]]
+name = "GENOS_FX_SYNC_CHILD"
+kind = "test"
+detail = "particles_gpu overlap child: clean, skip, or reflect"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"
