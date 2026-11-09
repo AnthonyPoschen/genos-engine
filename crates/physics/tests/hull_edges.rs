@@ -90,7 +90,10 @@ fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
     // Pushed apart along x only.
     assert!(
         moved_a.x < 0.0 && moved_b.x > 0.0,
-        "a {moved_a:?} b {moved_b:?}"
+        "a {moved_a:?} b {moved_b:?} vel {:?} {:?} stats {:?}",
+        world.bodies[0].velocity,
+        world.bodies[1].velocity,
+        world.step_stats
     );
     for moved in [moved_a, moved_b] {
         assert!(
