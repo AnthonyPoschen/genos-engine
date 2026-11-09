@@ -12,9 +12,9 @@ The thin-wall reject uses the six copies: the other side is a different entry, a
 
 ## Recommendation
 
-Pack every live face of one spatial cell into a side pool (a **face pack**). The world-cell hash keeps today's half-cell inset, so a wall on a grid plane stays in one cell, and the world-cell branch of `lighting_cache_key_sized` stops hashing the axis. Texel keys share that function and keep the salt. Each face keeps its uniform-hemisphere rays, the exact cosine mean, the fp16 SH-L1, the sun share and sun baseline, and the relight frame. A query gathers each dominant axis whose dot with the normal is positive (one lattice on a flat wall, two on the cone, three on a corner). The face weight is `max(dot, 0)` times a sample-count ramp inside the gather. At a pure axis the other dots are zero, so the value is that face's mean. On the cone the adjacent faces both contribute. The opposite face stays a different record and drops out. A face that has just been relit once does not enter a two-face blend at full weight.
+Pack every live face of one spatial cell into a side pool (a **face pack**). The world-cell hash keeps today's half-cell inset, so a wall on a grid plane stays in one cell, and the world-cell branch of `lighting_cache_key_sized` stops hashing the axis. Texel keys share that function and keep the salt. Each face keeps its uniform-hemisphere rays, the exact cosine mean, the fp16 SH-L1, the sun share and sun baseline, and the relight frame. A query gathers each dominant axis whose dot with the normal is positive (one lattice on a flat wall, two on the cone, three on a corner). The face weight is `max(dot, 0)` times a sample-count ramp inside the gather. The ramp keys off faces stored in the slot: a face with one sample is ramped whenever another stored face exists, including for a pixel 0.5° off the pure axis. It does not key off how many axes that pixel dots. At a pure axis the other dots are zero, so the value is that face's mean. On the cone the adjacent faces both contribute. The opposite face stays a different record and drops out.
 
-Same-facing surfaces inside that face are **cell residents**. The offset is the cell-relative signed distance to the geometric plane, not the dominant-axis coordinate. The query picks one winning resident. Every other resident's corners are dropped before the trilinear sum. A full face refuses the new surface and the query misses, which keeps the probes and the texel rays.
+Same-facing surfaces inside that face are **cell residents**. The offset is the cell-relative signed distance to the geometric plane, not the dominant-axis coordinate. Each corner converts the query by its own centre, `dot(query - centre, n) - stored_offset`. One plane wins. Every corner on that plane stays in the trilinear sum, and every other plane is dropped. The lower offset breaks a tie inside that comparison. A full face refuses the new surface and the query misses, which keeps the probes and the texel rays.
 
 A body-centred lattice is a later A/B against this cubic pack. It is not the store. Plain L1, a full-sphere trace from a surface point, a smoothstep across the old keys, a tighter plane test alone, and camera-distance cell bands are not the fix.
 
@@ -116,7 +116,7 @@ The hash key for a world cell stays `floor(pos / size - inset)` with `inset = 0.
 
 A 5 cm wall can already land both sides in one index once the salt is gone (front `z = 0.13` insets to 0, back `z = 0.08` insets to 0). The face record is what keeps those sides apart. Removing the salt without the pack would merge them.
 
-The fat hash slot stays the header so compact and the relight list keep walking slots. It is not a stand-in mean. When the pack is on, the 24 B fp16 SH region on that slot (`LIGHTING_SH_AT` plus the paired half at `LIGHTING_SH_B_AT`) is not harmonics. Harmonics live only on the resident. Those 192 bits hold the six face heads: a presence bit and an 18-bit pool index each (114 bits). 262144 is 2^18, so an index needs 18 bits and has no spare pattern for "empty". The presence bit is the empty mark. The remaining bits stay unused.
+The fat hash slot stays the header so compact and the relight list keep walking slots. It is not a stand-in mean. When the pack is on, the 24 B fp16 SH region on that slot (`LIGHTING_SH_AT` plus the paired half at `LIGHTING_SH_B_AT`) is not harmonics. Harmonics live only on the resident. Those 192 bits hold the six face heads. The index width follows the pool cap, not the default count of 262144. The largest power-of-two pool that stays inside 48 MiB at 64 B is 524288 records (32 MiB), which is 19 bits, and 262144 is only 18. A head is a presence bit plus 19 index bits (120 bits for six heads). 524288 is 2^19, so an index needs 19 bits and has no spare pattern for "empty". The presence bit is the empty mark. The remaining bits stay unused. Stage 4 can raise the count to that cap without widening the head.
 
 `lighting_sc_wrc_now` on the pack-on path stays single-axis. It loads the one face whose axis is `lighting_axis(n)` and reads that face's mean. It does not run the multi-axis gather. Detail-off bilinear stays per axis. One writer updates that face's mean, SH, sun share, and sun baseline together (`sh_ls` scales the mean and the harmonics, and the sun word, the way the slot path does today).
 
@@ -131,29 +131,29 @@ A resident record is 54 B, stored aligned to 64 B:
 | Sun share and sun baseline, fp32 × 2 | 8 | `LIGHTING_SC_SUN_AT` `x` and `y`. Two faces do not share one share |
 | Relight frame | 4 | The stamp `lighting_sc_stale` uses. One header stamp cannot stale one face and not the other |
 
-54 B aligns to 64 B. The 10 B pad holds the next-resident link: a has-next bit and an 18-bit index. The link is not in the fat slot. Six heads plus six second indices would be 216 bits and do not fit the 192-bit SH region. 262144 × 64 B = 16 MiB.
+54 B aligns to 64 B. The 10 B pad holds the next-resident link: a has-next bit and a 19-bit index, the same width as the head. The link is not in the fat slot. Six heads plus six second indices would be 240 bits and do not fit the 192-bit SH region. 262144 × 64 B = 16 MiB. 524288 × 64 B = 32 MiB, which is the cap the 19-bit field is sized for.
 
 The lit-from point stays `lighting_sc_centre` on that resident's plane. Empty faces take no record.
 
 Rays stay uniform on the face's hemisphere, from that resident's point. The cosine remains the irradiance weight. The sample domain does not become a sphere. The `wa` path is the world-cell arm's path, copied onto the resident: plain `add / (t + add)`, dark fill, the change floor, and `wa = 1` while settling. The ray loop (direction, cosine weight, SH sums in registers) is the part that is reused. The stores are not. `lighting_tex_put`, `lighting_sh_put`, the sun word, and the relight frame index a slot in the fat table. A pool index is not a slot. Those four writes are retargeted at the resident. The estimator arrays stay per fat slot. The world-cell arm returns before them, so a face does not grow an estimator pair. There is no second relight shader. There is a retargeted store.
 
-Read: for each dominant axis with `dot(axis, n) > 0`, the eight corners of **that axis's inset lattice**. The query has already chosen one winning resident (below). Corners of any other resident are dropped before the sum. A kept corner contributes
+Read: for each dominant axis with `dot(axis, n) > 0`, the eight corners of **that axis's inset lattice**. From stage 2, the query has already chosen one winning plane (below). Corners on any other plane are dropped before the sum. A kept corner contributes
 
 `max(dot(axis, n), 0) * trilinear * ramp(n) * that resident's tilt`.
 
-`ramp` is inside this gather. It is not `lighting_sc_shown`.
+`ramp` is inside this gather. It is not `lighting_sc_shown`. It is a property of the face stored in the slot, not of how many axes this pixel dots.
 
-- One positive-dot face with `n >= 1`: `ramp = 1`. A lone wall still shows its mean on the first relight, which is today's `w = 1` accept.
-- Two or more such faces: `ramp(n) = clamp((n - 1) / LIGHTING_SC_HANDOVER, 0, 1)` with `LIGHTING_SC_HANDOVER = 16`. The frame a second face first stores `n = 1`, its ramp is 0, and the blend equals the one-face gather. Each later sample raises that face by 1/16 of its dot weight. It reaches full weight at `n = 17`.
+- The slot stores only this face, and `n >= 1`: `ramp = 1`. A lone wall still shows its mean on the first relight, which is today's `w = 1` accept.
+- The slot stores any other face: `ramp(n) = clamp((n - 1) / LIGHTING_SC_HANDOVER, 0, 1)` with `LIGHTING_SC_HANDOVER = 16`. A face with `n = 1` has ramp 0 on every query that reads it. A pixel on the pure axis and a pixel 0.5° off that axis use the same ramp. Counting positive dots splits them: the pure-axis pixel has one positive dot and takes the young face at full weight, and the pixel 0.5° off has two and takes that face at ramp 0, so it shows the other face's colour for one frame. That is the step at the wall/bevel join. Each later sample raises that face by 1/16 of its dot weight. It reaches full weight at `n = 17`.
 
-Weights renormalize. A missing face, a stale face (its own relight frame), and a ramp of 0 add nothing and do not darken. At a pure axis every other dot is 0, the other walks are skipped, and the value is that face's mean (`assert_eq!(sh.tilt(e, axis, axis), e)`). On the cone, `normalize(0, 1, 1)` gives +Y and +Z `dot = 0.707`. The tie itself is classified +Y, because `|y| == |z|` takes the `a.y >= a.z` arm. A hair toward +Z classifies +Z. The sweep is that neighbourhood. The opposite face is `dot <= 0` and stays out. The pack-on gather does not apply `abs(dot(stored - p, n)) > 0.5 * cell`. That test drops a bevel corner whose stored point has walked more than half a cell off the query plane, which is a step in the sweep. The pack-off path keeps the test. Stage 2's resident match is what separates same-facing surfaces.
+Weights renormalize. A missing face, a stale face (its own relight frame), and a ramp of 0 add nothing and do not darken. At a pure axis every other dot is 0, the other walks are skipped, and the value is that face's mean (`assert_eq!(sh.tilt(e, axis, axis), e)`). On the cone, `normalize(0, 1, 1)` gives +Y and +Z `dot = 0.707`. The tie itself is classified +Y, because `|y| == |z|` takes the `a.y >= a.z` arm. A hair toward +Z classifies +Z. The sweep is that neighbourhood. The opposite face is `dot <= 0` and stays out. The pack-on gather keeps `abs(dot(stored - p, n)) > 0.5 * cell` through stage 1. Removing it there would accept a second same-facing surface in the same band the test already fails to split, before a resident exists. Stage 2 deletes the test on the pack-on path. The resident match replaces it. The pack-off path keeps the test until stage 5.
 
 | | |
 |---|---|
-| Memory | Pool, not a ×6 stripe on the 1M table. Six always-on SH copies would be 6 × 24 B × 1,048,576 = 144 MiB, past the ADR 0039 envelope. A pool of live residents does not. High default 262144 × 64 B = 16 MiB. The fat slot stays a header. Its 24 B SH region holds the six 18-bit heads when the pack is on. An extra face is 64 B, not another 392 B slot. |
+| Memory | Pool, not a ×6 stripe on the 1M table. Six always-on SH copies would be 6 × 24 B × 1,048,576 = 144 MiB, past the ADR 0039 envelope. A pool of live residents does not. High default 262144 × 64 B = 16 MiB. The fat slot stays a header. Its 24 B SH region holds the six 19-bit heads when the pack is on. An extra face is 64 B, not another 392 B slot. |
 | Compute | Relight count matches live faces, which is today's live axis copies. A flat wall is eight hash lookups, the same as today. The cone walks a second lattice (16) and a corner a third (24), each probe up to `LIGHTING_CACHE_SEARCH` (16). That cost is listed and does not reject the option. A cell that already holds both faces still needs the second walk when the other face was claimed on the other inset. |
 | Accuracy | Axis-aligned surfaces keep today's mean, so the energy gate has the same estimator it has now. Slanted surfaces use the tilt they already use, from the face that actually sampled that hemisphere. Thin walls stay two records. |
-| Failure | A seventh orientation in one cell cannot happen: there are six axes. Pool exhaustion refuses the claim. The query misses (probes, texel rays). It does not alias onto another face. A second face with `n = 1` has ramp 0 in a two-face blend, so the arrival frame does not step. Leaving that face at full `tri * facing` once `w >= 0.5` is the pop this ramp exists to remove. |
+| Failure | A seventh orientation in one cell cannot happen: there are six axes. Pool exhaustion refuses the claim. The query misses (probes, texel rays). It does not alias onto another face. A face with `n = 1` has ramp 0 when the slot stores another face, on the pure axis and 0.5° off it, so the arrival frame does not step. Leaving that face at full `tri * facing` once `w >= 0.5` is the pop this ramp exists to remove. |
 
 This is the recommendation. It is the ADR 0039 store: SH-L1 per sampled hemisphere, faces packed instead of six fat entries, texels still downstream.
 
@@ -201,7 +201,7 @@ The inset stays in the key. Dropping it would put a grid-plane wall on a cell bo
 |---|---|
 | Memory | The A3 pool. |
 | Compute | Eight lookups on a flat wall. Sixteen on the cone, twenty-four on a three-axis corner. Same figure as B1. A shared inset cell stores both faces on one header instead of a second fat entry. |
-| Accuracy | Exact at the axis, because the other weights are zero and the tilt-at-axis identity holds. Across the cone, a second face contributes only through `ramp`. The frame it first stores a sample, the ramp is 0. |
+| Accuracy | Exact at the axis, because the other weights are zero and the tilt-at-axis identity holds. Across the cone, a face with `n = 1` contributes only through `ramp` when the slot already stores another face. A slot with one stored face stays at `ramp = 1`. The positive-dot count does not choose the ramp. |
 | Failure | A read does not allocate (`claim` false stays false). A lattice with no face leaves that weight out and does not darken the other. A miss of every face leaves the probes, as today. |
 
 Recommended. It is the read half of A3, not a second design.
@@ -247,7 +247,7 @@ Replace `0.5 * cell` with a smaller constant, for example 2 cm.
 | Accuracy | Splits the 2 mm neighbour case when the gap exceeds the new constant. Does nothing for the same-slot case (`z = 0` and `z = 0.10` are one entry). |
 | Failure | A bevel or a displacement larger than the constant rejects the corner and falls through to the probes: a dark step on a surface that is one surface. The stored point of a flat wall is on the plane (`lighting_sc_centre`), so flat walls survive. The shared slot does not. |
 
-Not the fix. The pack-off gather keeps `0.5 * cell`. The pack-on gather drops that test in stage 1, because a bevel corner fails it. Shrinking the constant still does not split a shared slot.
+Not the fix. The pack-off gather keeps `0.5 * cell`. The pack-on gather keeps it through stage 1 as well. Stage 2 deletes it when the resident match replaces it. Stage 1 does not widen the same-facing band. Shrinking the constant still does not split a shared slot.
 
 ### Option C2. Put a plane quantum in the hash key
 
@@ -270,7 +270,9 @@ The stored offset is the signed distance from the cell centre to the geometric p
 
 A hit attaches to the resident within the radius. A hit outside every radius claims a new resident when the face is under `R`. There is no temporal hysteresis. An exact tie (two residents at the same distance) keeps the lower offset. It does not average, and it does not follow which resident was claimed first.
 
-The winning resident is chosen once per query: the closest resident on that face, inside the radius, lower offset on a tie. Corners that hold any other resident are dropped before the trilinear sum. If each corner picked its own winner, the 2 mm pair would still blend. A query outside every radius misses. Dropped corners add no weight and do not darken the winner.
+The read converts each corner by that corner's own centre. The distance from the query to a resident at that corner is `dot(query - centre, n) - stored_offset`, where `centre` is the corner's cell centre and `stored_offset` is that resident's cell-relative plane offset. The winning plane is the smallest of those distances. An equal distance keeps the lower offset, and that rule is only the tie break inside this comparison. It is not a sort of the stored offsets before the distance is computed.
+
+Once that plane has won, every corner on it stays in the trilinear sum. Corners on any other plane are dropped. A corner is not dropped because its own centre would have preferred a different resident, and it is not kept because it lost the plane test by half a cell. If each corner kept its own nearest plane, the 2 mm pair would still blend. A query outside every radius misses. Dropped corners add no weight and do not darken the winner. The masked bevel gate checks this: a 45° ramp is one plane, each of the eight corners is converted by its own centre, and all eight stay.
 
 Relight origin is that resident's `lighting_sc_centre`. Rays stay uniform on the face hemisphere. The cosine is the irradiance weight. The scheduler walks the resident list. The ray loop is the world-cell loop. The mean, SH, sun word, and relight frame are stored on the resident, not through the slot-indexed writes.
 
@@ -381,7 +383,7 @@ Every failure mode and every knob above is readable. The implementing stage adds
 | One wall split into two residents | resident count in the GI dump. The one-wall fixture expects 1. |
 | Cone seam | the cone-sweep fixture: max step between 0.5° samples across 45°. |
 | Same-facing leak | the 10 cm fixture and the 2 mm fixture, two colours, each surface reads its own. |
-| Young face enters a two-face blend at full weight | the gather ramp. The arrival fixture (stage 1) expects a zero step on the frame `n` first hits 1. `lighting_sc_debug_size` still shows the count. `lighting_sc_shown` is not this ramp. |
+| Young face enters at full weight while another face is stored | the gather ramp, keyed off stored faces in the slot. The arrival fixture (stage 1) expects a zero step on the frame `n` first hits 1, on the bevel and 0.5° off the pure axis. `lighting_sc_debug_size` still shows the count. `lighting_sc_shown` is not this ramp. |
 | Ray cut held a second resident | `diag[38]` / `diag[39]` stay the hold counters. The new case expects hold false. |
 | Cell size, pool, residents, sheet, rays, pack, BCC | the settings themselves, MCP and the debug menu. |
 | Face mean and SH disagree | one writer, and the dump flags a face whose mean and SH were stored on different frames. It is a bug if it fires. |
@@ -439,14 +441,15 @@ Deletes: nothing.
 
 Setting `surface_cache.sh_face_pack`, default off. Requires `surface_cache.sh_cells`. Residents stay 1. Sheet is unused.
 
-World-cell claims with the pack on keep the inset. The world-cell branch of `lighting_cache_key_sized` stops hashing the axis. The texel branch of that function still hashes it. A face that shares that inset cell is another resident on the header. Reads use the A3/B2 weight, including `ramp`. The pack-on gather does not apply the half-cell plane test. `claim` false still does not allocate. Seed, coverage, slants, and movers stay claim false. `lighting_sc_wrc_now` on this path stays single-axis: the face for `lighting_axis(n)`, not the weighted gather. One writer updates that face's mean, SH, sun share, and sun baseline (`sh_ls`).
+World-cell claims with the pack on keep the inset. The world-cell branch of `lighting_cache_key_sized` stops hashing the axis. The texel branch of that function still hashes it. A face that shares that inset cell is another resident on the header. Reads use the A3/B2 weight, including `ramp`, and `ramp` follows the faces stored in the slot. The pack-on gather keeps the half-cell plane test. Residents do not exist yet, so removing the test would widen the same-facing band. `claim` false still does not allocate. Seed, coverage, slants, and movers stay claim false. `lighting_sc_wrc_now` on this path stays single-axis: the face for `lighting_axis(n)`, not the weighted gather. It keeps the plane test too. One writer updates that face's mean, SH, sun share, and sun baseline (`sh_ls`).
 
 Lavapipe gate, on the stage 0 `cell_gaps` test once it exists:
 
-- Axis-aligned gather equals the old per-axis mean (the tilt-at-axis identity), including a lone face with `n = 1` (`ramp = 1`).
+- Axis-aligned gather equals the old per-axis mean (the tilt-at-axis identity), including a slot that stores only one face with `n = 1` (`ramp = 1`).
 - Cone sweep, 0.5° steps, both faces already mature: the max step is within the Lipschitz of the two tilts (the band-1 term is linear in the normal), not a step the size of the other room's colour. A wall planted on a grid plane stays on one face through the sweep. A miss of that wall fails the stage.
-- The half-cell plane test is off on this gather. A bevel corner whose stored point sits more than 0.125 m off the query plane stays in the sum. If that corner drops, the stage fails. The pack-off gather still drops it. Taking the test off does not close gap 3: the stage 1 bevel is one surface, and a second same-facing plane is the stage 2 fixture.
-- Arrival: on the 45° bevel, the second face's count goes from 0 to 1 in one relight during the sweep. That frame's gather equals the one-face gather. The next relight moves the colour by at most one step of `ramp` (1/16 of that face's dot weight), not the whole colour difference.
+- The half-cell plane test stays on. A second same-facing plane is the stage 2 fixture. This stage does not accept a wider band than pack off.
+- Arrival: on the 45° bevel, the second stored face's count goes from 0 to 1 in one relight during the sweep. That frame's gather equals the one-face gather, because the ramp follows the stored faces and the new face's ramp is 0. The next relight moves the colour by at most one step of `ramp` (1/16 of that face's dot weight), not the whole colour difference.
+- Arrival, 0.5° off the pure axis, at the wall/bevel join. The slot already stores the wall face. The bevel face's first sample is `n = 1`. The pixel 0.5° off the wall axis and the pixel on the wall axis agree: the new face contributes 0. The off-axis pixel does not take it at full `tri * facing` for one frame.
 - Thin wall: each side reads its own face. The back face's dot is ≤ 0. Sun share and the relight frame are per face: a stale face is left out while the other face still contributes.
 - `texel_detail_prod`, `texel_ray_cut`, `probe_retire` green with the pack off, and green with the pack on for the cases they already plant (one face, one plane).
 - Oracle, pack on against pack off: `slant` and `slant-day` `slant_mid_err` no worse (that crop is not the seam); `turn` `ref_err_near` no worse; `bevel` masked `ref_err_near` lower than pack off; `gap` is not this stage's leak gate. Energy, linger, and lag stay the ADR stage 1/2 gates when `cache_energy` is run (`cargo test --release -p genos-stress --test cache_energy -- --ignored --nocapture --test-threads=1`). That command is the owner's machine. A lavapipe miss of the picture is a fail; a lavapipe time is not. Merging this stage before those three gates is the exception in "Order against ADR 0039".
@@ -461,8 +464,8 @@ Lavapipe gate:
 
 - Planted 10 cm pair: each plane reads its own colour. Planted 2 mm pair across the lattice split: the same.
 - One flat wall, including a wall on a grid plane: one resident, sample count matches a single-resident run.
-- A 45° ramp: one resident. The masked bevel crop does not gain a sheet seam. `slant_mid_err` is not this check.
-- The 2 mm pair: one query, one winner, and the other resident's corners are absent from the sum. An equal-distance tie keeps the lower offset on every corner.
+- A 45° ramp: one resident. The masked bevel crop checks the corner conversion: each corner uses its own centre, `dot(query - centre, n) - stored_offset`, and all eight corners of that one plane stay. The crop does not gain a sheet seam. `slant_mid_err` is not this check.
+- The 2 mm pair: one winning plane. Every corner on that plane stays in the sum. Other planes are absent. An equal distance keeps the lower offset, and that tie break is inside the per-corner comparison, so every corner names the same plane.
 - `bevel` masked `ref_err_near` still beats pack-off.
 - `gap` masked `ref_err_near` on the near plane is lower than stage 1. The far repeat may tie.
 - Ray cut: a second live resident on that face does not hold. The existing hold cases in `texel_ray_cut` still hold. Cell words stay unwritten.
@@ -470,7 +473,7 @@ Lavapipe gate:
 - A third surface with `R = 2` misses and does not take resident 1's colour. `resident_refused` increments.
 - Mover, detail on: still `lighting_sh_read` at the current pose, claim false, no new resident.
 
-Deletes, after that gate: nothing further in `lighting_sh_gather`. Stage 1 already removed `plane > LIGHTING_CELL_HALF * cs` from the pack-on gather. `lighting_sc_wrc_now` keeps that test. It is the single-axis detail-off read, and it is not the seam grade. `neighbour_corner_weight` gains the one-winner resident pick and keeps the old half-cell reject for the pack-off path.
+Deletes, after that gate: `plane > LIGHTING_CELL_HALF * cs` on the pack-on path in `lighting_sh_gather` and in `lighting_sc_wrc_now`. The resident match replaces it. Stage 1 left the test in place. The pack-off path keeps it. `neighbour_corner_weight` gains the one-winning-plane pick and keeps the old half-cell reject for the pack-off path.
 
 ### Stage 3 — BCC A/B
 
