@@ -1749,7 +1749,15 @@ fn contact_points(a: &Body, b: &Body, normal: Vec3, depth: f32) -> ([ContactPoin
         );
     }
     if let Some(clipped) = face_clip(a, b, normal) {
-        return clipped;
+        // An edge-edge overlap can clip onto a face pair that misses. That
+        // witness depth is ~0, so the solver leaves the bodies where they
+        // are. The separating-axis depth is the overlap to close. Ubuntu
+        // 26.04's libm moves the clip across that boundary; the axis depth
+        // does not. Keep the clip only when a witness is at least half as
+        // deep as that overlap.
+        if clip_reaches(&clipped, depth) {
+            return clipped;
+        }
     }
     let mut found = [(f32::NEG_INFINITY, Vec3::ZERO); 4];
     let mut count = 0_u8;
@@ -1776,6 +1784,21 @@ fn contact_points(a: &Body, b: &Body, normal: Vec3, depth: f32) -> ([ContactPoin
         points[index] = ContactPoint::new(position, point_depth);
     }
     (points, count)
+}
+
+/// True when the face clip's deepest witness is deep enough to stand in for
+/// the separating-axis overlap. A miss is near 0 while the axes still report
+/// the edge crossing.
+fn clip_reaches(clipped: &([ContactPoint; 4], u8), depth: f32) -> bool {
+    const SLOP: f32 = 0.001;
+    if depth <= SLOP {
+        return true;
+    }
+    let mut deepest = 0.0_f32;
+    for point in clipped.0.iter().take(usize::from(clipped.1)) {
+        deepest = deepest.max(point.depth);
+    }
+    deepest + SLOP >= depth * 0.5
 }
 
 /// Surface point of a sphere or capsule. `outward` points from the other body
