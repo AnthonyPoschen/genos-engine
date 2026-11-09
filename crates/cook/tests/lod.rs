@@ -631,9 +631,9 @@ fn stored_error_bounds_the_deviation_and_is_monotone() {
 
 /// Coplanar covers close at the other mesh's triangle size, so these sheets
 /// follow triangle count. The old 4 mm cover took 34.5 s on a flat 8 m sheet
-/// and did not return on a flat 16 m sheet. 2 s is many times the release cost
-/// (tens of milliseconds) and still above the debug cost, and it fails a
-/// runaway split.
+/// and did not return on a flat 16 m sheet. Release cooks of these four are
+/// 0.02–0.13 s, so 2 s still fails a runaway split. Debug on a loaded CI
+/// runner took 2.48 s for the wavy sheet, so the debug cap is 6 s.
 #[test]
 fn large_sheets_finish_quickly_and_the_bound_holds() {
     let cases = [
@@ -646,9 +646,10 @@ fn large_sheets_finish_quickly_and_the_bound_holds() {
         let started = std::time::Instant::now();
         let chain = lod_chain(&mesh);
         let secs = started.elapsed().as_secs_f64();
+        let limit = if cfg!(debug_assertions) { 6.0 } else { 2.0 };
         assert!(
-            secs < 2.0,
-            "{name} cooked in {secs:.2} s, over the 2 s budget"
+            secs < limit,
+            "{name} cooked in {secs:.2} s, over the {limit:.0} s budget"
         );
         let source = &mesh.primitives[0];
         let coarsest = chain.last().unwrap();
