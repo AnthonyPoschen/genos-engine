@@ -1,16 +1,21 @@
-//! The `.gcook` record, version 1. Little-endian.
+//! The `.gcook` record, version 2. Little-endian.
 //!
 //! `GCK1`, version, asset id, settings hash, inputs (uri, SHA-256), then the
 //! meshes, the instances and the unsupported notes, then a SHA-256 of every
 //! byte before it. A record of another version, or one whose trailer does not
 //! match, is not returned.
+//!
+//! Each mesh stores its LOD chain after the name: level count, then each
+//! level's object-space error in metres and that level's primitives. Level 0
+//! is the imported mesh and its error is 0. The chain is length-delimited, so
+//! a later cluster section can follow the notes without rewriting these bytes.
 
 use genos_load::{sha256, GltfMesh, MeshInstance, Primitive};
 
 use crate::{CookError, Cooked, CookedMesh};
 
 pub const MAGIC: &[u8; 4] = b"GCK1";
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const NONE: u32 = u32::MAX;
 
 /// One file the cook read. The source itself has an empty `uri`.
@@ -41,23 +46,14 @@ pub fn encode(c: &Cooked) -> Vec<u8> {
     for m in &c.meshes {
         w.0.extend_from_slice(&m.bake_key.to_le_bytes());
         w.opt_str(m.mesh.name.as_deref());
-        w.len(m.mesh.primitives.len());
-        for p in &m.mesh.primitives {
-            w.u32(
-                p.material
-                    .and_then(|i| u32::try_from(i).ok())
-                    .unwrap_or(NONE),
-            );
-            w.floats(&p.positions);
-            w.floats(&p.normals);
-            w.floats(&p.texcoords);
-            w.len(p.texcoord_sets.len());
-            for set in &p.texcoord_sets {
-                w.floats(set);
+        let lods = crate::lod::levels_of(m);
+        w.len(lods.len());
+        for lod in &lods {
+            w.u32(lod.error_m.to_bits());
+            w.len(lod.primitives.len());
+            for p in &lod.primitives {
+                w.primitive(p);
             }
-            w.floats(&p.tangents);
-            w.len(p.indices.len());
-            p.indices.iter().for_each(|&i| w.u32(i));
         }
     }
     w.len(c.instances.len());
@@ -86,36 +82,26 @@ pub fn decode(bytes: &[u8]) -> Result<Cooked, CookError> {
     for _ in 0..r.len()? {
         let bake_key = u64::from_le_bytes(r.array()?);
         let name = r.opt_str()?;
-        let mut primitives = Vec::new();
+        let mut lods = Vec::new();
         for _ in 0..r.len()? {
-            let material = r.u32()?;
-            let positions = r.floats()?;
-            let normals = r.floats()?;
-            let texcoords = r.floats()?;
-            let mut texcoord_sets = Vec::new();
+            let error_m = f32::from_bits(r.u32()?);
+            let mut primitives = Vec::new();
             for _ in 0..r.len()? {
-                texcoord_sets.push(r.floats()?);
+                primitives.push(r.primitive()?);
             }
-            let tangents = r.floats()?;
-            let mut indices = Vec::new();
-            for _ in 0..r.len()? {
-                indices.push(r.u32()?);
-            }
-            primitives.push(Primitive {
-                positions,
-                normals,
-                texcoords,
-                texcoord_sets,
-                tangents,
-                indices,
-                material: (material != NONE)
-                    .then(|| usize::try_from(material).ok())
-                    .flatten(),
+            lods.push(genos_load::MeshLod {
+                error_m,
+                primitives,
             });
         }
+        let primitives = lods
+            .first()
+            .map(|level| level.primitives.clone())
+            .ok_or(CookError::Corrupt("lod"))?;
         meshes.push(CookedMesh {
             mesh: GltfMesh { name, primitives },
             bake_key,
+            lods,
         });
     }
     let mut instances = Vec::new();
@@ -205,6 +191,23 @@ impl W {
         self.0.push(u8::from(s.is_some()));
         self.str(s.unwrap_or(""));
     }
+    fn primitive(&mut self, p: &Primitive) {
+        self.u32(
+            p.material
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(NONE),
+        );
+        self.floats(&p.positions);
+        self.floats(&p.normals);
+        self.floats(&p.texcoords);
+        self.len(p.texcoord_sets.len());
+        for set in &p.texcoord_sets {
+            self.floats(set);
+        }
+        self.floats(&p.tangents);
+        self.len(p.indices.len());
+        p.indices.iter().for_each(|&i| self.u32(i));
+    }
     fn floats<const N: usize>(&mut self, v: &[[f32; N]]) {
         self.len(v.len());
         for x in v.iter().flatten() {
@@ -252,6 +255,32 @@ impl R<'_> {
         let some = self.array::<1>()?[0] != 0;
         let s = self.str()?;
         Ok(some.then_some(s))
+    }
+    fn primitive(&mut self) -> Result<Primitive, CookError> {
+        let material = self.u32()?;
+        let positions = self.floats()?;
+        let normals = self.floats()?;
+        let texcoords = self.floats()?;
+        let mut texcoord_sets = Vec::new();
+        for _ in 0..self.len()? {
+            texcoord_sets.push(self.floats()?);
+        }
+        let tangents = self.floats()?;
+        let mut indices = Vec::new();
+        for _ in 0..self.len()? {
+            indices.push(self.u32()?);
+        }
+        Ok(Primitive {
+            positions,
+            normals,
+            texcoords,
+            texcoord_sets,
+            tangents,
+            indices,
+            material: (material != NONE)
+                .then(|| usize::try_from(material).ok())
+                .flatten(),
+        })
     }
     fn floats<const N: usize>(&mut self) -> Result<Vec<[f32; N]>, CookError> {
         let n = self.len()?;

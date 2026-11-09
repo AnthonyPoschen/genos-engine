@@ -10,8 +10,8 @@ Draw scenes with far more triangles than the GPU can raster by picking, per obje
 |---|---|---|
 | glTF mesh load, BVH | done | `crates/load/src/gltf.rs`, `crates/mesh/src/bvh.rs` |
 | Draw | `vkCmdDraw` per draw, CPU frustum cull `in_view` | `crates/render/src/world.rs`, `gltf_draw.rs` |
-| LOD | missing (GI design names up to 4 LODs) | – |
-| Meshlet cook | planned, not built (asset plan step 8, meshoptimizer, cook-only) | `crates/cook` (not yet created) |
+| LOD | stage 1 chain cooked; CPU select by screen error. GPU cull, dither fade, and the cluster DAG are not started | `crates/cook/src/lod.rs`, `crates/load/src/lod.rs` |
+| Meshlet cook | planned, not built (asset plan step 8, meshoptimizer, cook-only) | `crates/cook` |
 | Page streaming | textures done (#77) | `stream.rs`, `pages.rs`, `vram.rs` |
 
 ## 3. Prior art
@@ -34,6 +34,8 @@ Draw scenes with far more triangles than the GPU can raster by picking, per obje
 
 ## 5. Recommendation: staged
 1. **Stage 1 – discrete chain + GPU cull.** Cook 4 LODs with `meshopt_simplify` (target 50/25/12.5%, error in object-space metres, store it). Select by projected error `e * H / (2 d tan(fov/2)) < τ` (τ = 1 px High, 2 px Low). Dithered cross-fade over 0.25 s on a switch. Compute instance cull (frustum + two-pass HiZ) fills `vkCmdDrawIndexedIndirectCount` (core in Vulkan 1.2). Ships value soon and is the BLAS source for GI.
+
+   The cook and the CPU selector are in. `meshopt_simplify` runs with `meshopt_SimplifyErrorAbsolute`. Its residual can undershoot the distance from a level-0 vertex to the simplified surface, so the stored metres are the max of that residual and the vertex distance (mesh BVH). The chain is the length-delimited LOD block in `.gcook` version 2. `select_lod` applies the formula, then `lod_bias` as a level offset (Low +1). It keeps the previous level until the projected error has crossed τ by 10% (`LOD_HYSTERESIS`), so a camera on the switch distance does not flip. That hold is the CPU stand-in for the 0.25 s dither fade; the fade, the compute cull, and the draw switching off level 0 are not in this code.
 2. **Stage 2 – cluster DAG.** Same cook adds 64v/64t meshlets (`meshopt_buildMeshlets`), group-of-~8 locked-boundary simplify, parent error spheres (Karis 2021). Compute cluster cull and LOD cut, indexed indirect on the hardware rasterizer. Cluster pages stream through the #77 page/VRAM budget; hierarchy stays resident.
 3. **Stage 3 – optional `VK_EXT_mesh_shader` path** only if Stage 2 timings on the 4070 show the index-expansion compute is >15% of geometry ms. Needs an ADR amendment. Compute stays the default and the Low path.
 Software raster (D) stays out.

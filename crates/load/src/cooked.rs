@@ -6,10 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::lod::MeshLod;
 use crate::{hex, object_path, sha256, GltfMesh, MeshInstance, Primitive};
 
 const GCOOK_MAGIC: &[u8; 4] = b"GCK1";
-const GCOOK_VERSION: u32 = 1;
+/// Same number as `genos_cook::FORMAT_VERSION`. A mismatch is a corrupt record.
+const GCOOK_VERSION: u32 = 2;
 const GTEX_MAGIC: &[u8; 4] = b"GTX1";
 const GTEX_VERSION: u32 = 1;
 const NONE: u32 = u32::MAX;
@@ -49,7 +51,10 @@ impl From<std::io::Error> for CookedError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CookedGeometry {
     pub asset_id: [u8; 32],
+    /// Level 0 of each mesh. The draw path reads this.
     pub meshes: Vec<GltfMesh>,
+    /// One chain per mesh, parallel to [`Self::meshes`].
+    pub lods: Vec<Vec<MeshLod>>,
     pub instances: Vec<MeshInstance>,
 }
 
@@ -190,36 +195,27 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<CookedGeometry, CookedError> {
         let _hash = r.array::<32>()?;
     }
     let mut meshes = Vec::new();
+    let mut chains = Vec::new();
     for _ in 0..r.len()? {
         let _bake_key = r.array::<8>()?;
         let name = r.opt_str()?;
-        let mut primitives = Vec::new();
+        let mut lods = Vec::new();
         for _ in 0..r.len()? {
-            let material = r.u32()?;
-            let positions = r.vecs::<3>()?;
-            let normals = r.vecs::<3>()?;
-            let texcoords = r.vecs::<2>()?;
-            let mut texcoord_sets = Vec::new();
+            let error_m = f32::from_bits(r.u32()?);
+            let mut primitives = Vec::new();
             for _ in 0..r.len()? {
-                texcoord_sets.push(r.vecs::<2>()?);
+                primitives.push(r.primitive()?);
             }
-            let tangents = r.vecs::<4>()?;
-            let mut indices = Vec::new();
-            for _ in 0..r.len()? {
-                indices.push(r.u32()?);
-            }
-            primitives.push(Primitive {
-                positions,
-                normals,
-                texcoords,
-                texcoord_sets,
-                tangents,
-                indices,
-                material: (material != NONE)
-                    .then(|| usize::try_from(material).ok())
-                    .flatten(),
+            lods.push(MeshLod {
+                error_m,
+                primitives,
             });
         }
+        let primitives = lods
+            .first()
+            .map(|level| level.primitives.clone())
+            .ok_or(CookedError::Corrupt("gcook lod"))?;
+        chains.push(lods);
         meshes.push(GltfMesh { name, primitives });
     }
     let mut instances = Vec::new();
@@ -246,6 +242,7 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<CookedGeometry, CookedError> {
     Ok(CookedGeometry {
         asset_id,
         meshes,
+        lods: chains,
         instances,
     })
 }
@@ -414,6 +411,32 @@ impl<'a> R<'a> {
         let some = self.take(1)?[0] != 0;
         let s = self.str()?;
         Ok(some.then_some(s))
+    }
+    fn primitive(&mut self) -> Result<Primitive, CookedError> {
+        let material = self.u32()?;
+        let positions = self.vecs::<3>()?;
+        let normals = self.vecs::<3>()?;
+        let texcoords = self.vecs::<2>()?;
+        let mut texcoord_sets = Vec::new();
+        for _ in 0..self.len()? {
+            texcoord_sets.push(self.vecs::<2>()?);
+        }
+        let tangents = self.vecs::<4>()?;
+        let mut indices = Vec::new();
+        for _ in 0..self.len()? {
+            indices.push(self.u32()?);
+        }
+        Ok(Primitive {
+            positions,
+            normals,
+            texcoords,
+            texcoord_sets,
+            tangents,
+            indices,
+            material: (material != NONE)
+                .then(|| usize::try_from(material).ok())
+                .flatten(),
+        })
     }
     fn vecs<const N: usize>(&mut self) -> Result<Vec<[f32; N]>, CookedError> {
         let n = self.len()?;
