@@ -8,11 +8,13 @@
 //! For every current pixel, history is *truly valid* when the previous
 //! camera saw the same surface point (its ray to the point hits nothing
 //! nearer). The live gate is the shader's combination: relative depth 0.02,
-//! absolute 0.05 m, normal dot 0.9, one tap, and the candidate ray. On a yaw
-//! turn that combination keeps at least 97 % of truly valid pixels and under
-//! 1 % of disoccluded ones. The imported C5 policy (relative 0.1, five taps)
-//! is printed as a historical diagnostic. It is not the live gate, and a miss
-//! on the live policy is a failure of this test.
+//! absolute 0.05 m, normal dot 0.9, one tap, and the candidate ray. Yaw rows
+//! grade retained valid history (at least 97 %). Pure yaw has an empty
+//! disocclusion set, so it does not grade false-keep. A sideways step past
+//! the pillar grades false-keep (at most 1 %) on a pinned nonempty set. A
+//! test-only policy that accepts any history sample must fail that bar on
+//! the same set. The imported C5 policy (relative 0.1, five taps) is printed
+//! as a historical diagnostic. This file is a CPU mirror, not SPIR-V.
 
 #![allow(
     clippy::pedantic,
@@ -138,11 +140,21 @@ const LIVE: Params = Params {
     candidate_ray: true,
 };
 /// Imported C5 head (Bitterli 2020 §6 relative 0.1, five taps). Historical
-/// diagnostic only. Not an authorization of the live constants.
+/// diagnostic only. Printed, never asserted.
 const C5_HISTORICAL: Params = Params {
     depth_rel: 0.1,
     depth_abs: 0.05,
     normal_min: 0.9,
+    search: true,
+    candidate_ray: true,
+};
+/// Test-only. Accepts any positive history depth and any normal, including
+/// five taps. The live shader does not use these numbers. On a real
+/// disocclusion this must fail the 1 % false-keep bar.
+const FORBIDDEN_REUSE: Params = Params {
+    depth_rel: 1.0e6,
+    depth_abs: 1.0e6,
+    normal_min: -1.0,
     search: true,
     candidate_ray: true,
 };
@@ -241,16 +253,27 @@ struct Retention {
 }
 
 impl Retention {
-    fn keep(&self) -> f32 {
-        self.kept as f32 / self.valid.max(1) as f32
+    /// Retained fraction of truly valid pixels. `None` when that set is empty,
+    /// so an empty set cannot pass the 97 % bar.
+    fn keep(&self) -> Option<f32> {
+        (self.valid > 0).then_some(self.kept as f32 / self.valid as f32)
     }
 
-    fn false_rate(&self) -> f32 {
-        self.false_keep as f32 / self.occl.max(1) as f32
+    /// False-keep fraction of disoccluded pixels. `None` when that set is
+    /// empty, so an empty set cannot pass the 1 % bar.
+    fn false_rate(&self) -> Option<f32> {
+        (self.occl > 0).then_some(self.false_keep as f32 / self.occl as f32)
     }
 
     fn rejected(&self) -> u32 {
         self.valid.saturating_sub(self.kept)
+    }
+}
+
+fn pct(rate: Option<f32>) -> String {
+    match rate {
+        Some(value) => format!("{value:.4}"),
+        None => "n/a".to_string(),
     }
 }
 
@@ -299,63 +322,123 @@ fn retention(p: &Params, yaw_step: f32, strafe_step: f32, frames: usize) -> Rete
     }
 }
 
+fn report(label: &str, view: &Retention, live: &Retention, c5: &Retention) {
+    eprintln!(
+        "{label}: \
+         view-depth kept {kept_v}/{valid_v} ({keep_v}) rejected {rej_v} false {fk_v}/{oc_v} ({fr_v}) | \
+         live kept {kept}/{valid} ({keep}) rejected {rej} false {fk}/{oc} ({fr}) | \
+         c5-historical kept {kept_c}/{valid_c} ({keep_c}) rejected {rej_c} false {fk_c}/{oc_c} ({fr_c})",
+        kept_v = view.kept,
+        valid_v = view.valid,
+        keep_v = pct(view.keep()),
+        rej_v = view.rejected(),
+        fk_v = view.false_keep,
+        oc_v = view.occl,
+        fr_v = pct(view.false_rate()),
+        kept = live.kept,
+        valid = live.valid,
+        keep = pct(live.keep()),
+        rej = live.rejected(),
+        fk = live.false_keep,
+        oc = live.occl,
+        fr = pct(live.false_rate()),
+        kept_c = c5.kept,
+        valid_c = c5.valid,
+        keep_c = pct(c5.keep()),
+        rej_c = c5.rejected(),
+        fk_c = c5.false_keep,
+        oc_c = c5.occl,
+        fr_c = pct(c5.false_rate()),
+    );
+}
+
+fn assert_keep(live: &Retention, label: &str) {
+    let Some(keep) = live.keep() else {
+        panic!("{label}: valid history was empty");
+    };
+    assert!(
+        keep >= 0.97,
+        "{label}: kept {}/{} ({keep:.4}) of valid history, rejected {}",
+        live.kept,
+        live.valid,
+        live.rejected(),
+    );
+}
+
 #[test]
 fn a_camera_turn_keeps_temporal_history_except_on_disocclusion() {
-    // Pure yaw (no disocclusion possible: occlusion does not depend on
-    // orientation), then yaw while strafing past the pillar.
-    // 97 % retained and 1 % false-keep are the established expectation.
-    // They are not lowered when the live policy misses them.
+    // Keep rows. Pure yaw cannot disocclude (occlusion does not depend on
+    // orientation), so occl stays 0 and false-keep is not graded. The small
+    // strafe is still a keep row: its disocclusion count is too small for
+    // the 1 % bar. 97 % is not lowered when the live policy misses it.
+    // C5 is printed and not asserted.
     for &(step, strafe) in &[(1.0f32, 0.0f32), (3.0, 0.0), (2.0, -0.05)] {
         let view = retention(&VIEW_DEPTH, step, strafe, 8);
         let live = retention(&LIVE, step, strafe, 8);
         let c5 = retention(&C5_HISTORICAL, step, strafe, 8);
-        eprintln!(
-            "yaw {step} deg strafe {strafe} m/frame: \
-             view-depth kept {kept_v}/{valid_v} ({keep_v:.4}) rejected {rej_v} false {fk_v}/{oc_v} ({fr_v:.4}) | \
-             live kept {kept}/{valid} ({keep:.4}) rejected {rej} false {fk}/{oc} ({fr:.4}) | \
-             c5-historical kept {kept_c}/{valid_c} ({keep_c:.4}) rejected {rej_c} false {fk_c}/{oc_c} ({fr_c:.4})",
-            kept_v = view.kept,
-            valid_v = view.valid,
-            keep_v = view.keep(),
-            rej_v = view.rejected(),
-            fk_v = view.false_keep,
-            oc_v = view.occl,
-            fr_v = view.false_rate(),
-            kept = live.kept,
-            valid = live.valid,
-            keep = live.keep(),
-            rej = live.rejected(),
-            fk = live.false_keep,
-            oc = live.occl,
-            fr = live.false_rate(),
-            kept_c = c5.kept,
-            valid_c = c5.valid,
-            keep_c = c5.keep(),
-            rej_c = c5.rejected(),
-            fk_c = c5.false_keep,
-            oc_c = c5.occl,
-            fr_c = c5.false_rate(),
+        report(
+            &format!("yaw {step} deg strafe {strafe} m/frame"),
+            &view,
+            &live,
+            &c5,
         );
-        assert!(
-            live.keep() >= 0.97,
-            "live turn {step}: kept {}/{} ({:.4}) of valid history, rejected {}",
-            live.kept,
-            live.valid,
-            live.keep(),
-            live.rejected(),
-        );
-        assert!(
-            live.false_rate() <= 0.01,
-            "live turn {step}: kept {}/{} ({:.4}) of disoccluded history",
-            live.false_keep,
-            live.occl,
-            live.false_rate(),
-        );
-        assert!(
-            c5.keep() >= 0.97 && c5.false_rate() <= 0.01,
-            "c5 historical diagnostic moved: keep {:.4} false {:.4}",
-            c5.keep(),
-            c5.false_rate(),
-        );
+        assert_keep(&live, &format!("live turn {step}"));
+        if strafe == 0.0 {
+            assert_eq!(
+                live.occl, 0,
+                "pure yaw produced a disocclusion sample; it is a keep row only"
+            );
+            assert!(live.false_rate().is_none());
+        }
     }
+
+    // One 1.2 m step to the left, past the pillar. Revealed points whose
+    // history tap lands on the pillar are a depth-and-normal mismatch
+    // together. The denominator is that disocclusion set.
+    let step = 0.0f32;
+    let strafe = -1.2f32;
+    let frames = 1usize;
+    let view = retention(&VIEW_DEPTH, step, strafe, frames);
+    let live = retention(&LIVE, step, strafe, frames);
+    let c5 = retention(&C5_HISTORICAL, step, strafe, frames);
+    let loose = retention(&FORBIDDEN_REUSE, step, strafe, frames);
+    report("disocclusion strafe -1.2 m", &view, &live, &c5);
+    eprintln!(
+        "forbidden-reuse false {}/{} ({})",
+        loose.false_keep,
+        loose.occl,
+        pct(loose.false_rate()),
+    );
+    assert_keep(&live, "live disocclusion");
+    // Measured on this hallway: 389 disoccluded pixels, 0 false keeps.
+    // The floor stays in the hundreds so a 1 % bar is several pixels, and an
+    // empty set cannot pass.
+    const DISOCCLUSION_FLOOR: u32 = 300;
+    assert!(
+        live.occl >= DISOCCLUSION_FLOOR,
+        "disocclusion denominator {} is below {DISOCCLUSION_FLOOR}",
+        live.occl
+    );
+    let Some(false_rate) = live.false_rate() else {
+        panic!("disocclusion denominator was empty");
+    };
+    assert!(
+        false_rate <= 0.01,
+        "live disocclusion kept {}/{} ({false_rate:.4})",
+        live.false_keep,
+        live.occl
+    );
+    assert_eq!(
+        loose.occl, live.occl,
+        "the negative control counted a different disocclusion set"
+    );
+    let Some(loose_rate) = loose.false_rate() else {
+        panic!("forbidden reuse had an empty disocclusion set");
+    };
+    assert!(
+        loose.false_keep >= DISOCCLUSION_FLOOR && loose_rate > 0.5,
+        "forbidden reuse kept {}/{} ({loose_rate:.4}); the 1 % bar did not fail",
+        loose.false_keep,
+        loose.occl
+    );
 }

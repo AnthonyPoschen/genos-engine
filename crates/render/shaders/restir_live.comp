@@ -38,11 +38,12 @@ const float RESTIR_NDC_HALF = 0.5;
 const uint RESTIR_TEMPORAL_TRIES = 1u;
 const ivec2 RESTIR_TEMPORAL_OFFSETS[1] = ivec2[1](ivec2(0, 0));
 // Temporal reprojection decision, one count per surfaced pixel when header
-// word 15 is clear. A reset counts neither. Owned by this pass: not the
-// screen working words (40, 41, 61-63) and not the lamp-pick words (48-60).
-// The host reads them only when pc.lamp.y bit 17 is set.
-const uint RESTIR_DIAG_HIST_ACCEPT = 5u;
-const uint RESTIR_DIAG_HIST_REJECT = 6u;
+// word 15 is clear. A reset counts neither. These are restir header words,
+// copied to the stats readback. Compact keeps gstats.diag[5] and [6] for the
+// gradient check when LIGHTING_DIAG is on. The host reads the copy only when
+// pc.lamp.y bit 17 is set.
+const uint RESTIR_DIAG_HIST_ACCEPT = 43u;
+const uint RESTIR_DIAG_HIST_REJECT = 44u;
 
 uint64_t g_state;
 uint64_t g_inc;
@@ -347,13 +348,13 @@ void restir_temporal(uint pixel) {
     vec3 hist_pos;
     vec3 hist_n;
     bool reuse = restir_hdr(15u) == 0u && surfaced && restir_reproject(pos, nrm, hist_pixel, hist_pos, hist_n);
-    // The depth/normal/off-screen decision. Not a synthetic add: reuse is the
-    // same flag the merge below consumes. A reset (word 15) is not a rejection.
+    // reuse is the same flag the merge below consumes. A reset (word 15)
+    // counts neither an accept nor a reject.
     if (((pc.lamp.y >> 17u) & 1u) != 0u && surfaced && restir_hdr(15u) == 0u) {
         if (reuse) {
-            atomicAdd(gstats.diag[RESTIR_DIAG_HIST_ACCEPT], 1u);
+            atomicAdd(restir_words[RESTIR_DIAG_HIST_ACCEPT], 1u);
         } else {
-            atomicAdd(gstats.diag[RESTIR_DIAG_HIST_REJECT], 1u);
+            atomicAdd(restir_words[RESTIR_DIAG_HIST_REJECT], 1u);
         }
     }
     uint stride = restir_hdr(19u);

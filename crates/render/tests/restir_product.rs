@@ -125,9 +125,10 @@ fn names(renderer: &Renderer) -> Vec<String> {
 
 #[test]
 fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
-    // Wiring lock for the constants and the diag owners. The numbers are
-    // graded by `turn_reprojection` (live policy) and by the product draw
-    // below. This source check does not accept the shader.
+    // Wiring lock for the constants and the counter words. Source text is
+    // not SPIR-V, and it does not grade a pixel. `turn_reprojection` grades
+    // the CPU mirror of the live policy. The product draw below shows the
+    // counters move. Neither is a per-pixel depth or normal threshold.
     let live = include_str!("../shaders/restir_live.comp");
     let direct = include_str!("../shaders/lighting_direct.comp");
     assert!(live.contains("const float RESTIR_DEPTH_REL = 0.02;"));
@@ -135,9 +136,12 @@ fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
     assert!(live.contains("const float RESTIR_NORMAL_MIN = 0.9;"));
     assert!(live.contains("const uint RESTIR_TEMPORAL_TRIES = 1u;"));
     assert!(live.contains("const ivec2 RESTIR_TEMPORAL_OFFSETS[1]"));
-    assert!(live.contains("const uint RESTIR_DIAG_HIST_ACCEPT = 5u;"));
-    assert!(live.contains("const uint RESTIR_DIAG_HIST_REJECT = 6u;"));
-    assert!(direct.contains("atomicAdd(gstats.diag[13u], 1u);"));
+    assert!(live.contains("const uint RESTIR_DIAG_HIST_ACCEPT = 43u;"));
+    assert!(live.contains("const uint RESTIR_DIAG_HIST_REJECT = 44u;"));
+    assert!(live.contains("atomicAdd(restir_words[RESTIR_DIAG_HIST_ACCEPT], 1u);"));
+    assert!(direct.contains("const uint RESTIR_DIAG_POINT_ADD = 45u;"));
+    assert!(direct.contains("atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);"));
+    assert!(!direct.contains("atomicAdd(gstats.diag[13u], 1u);"));
     assert!(!direct.contains("e = e_exact + e_mean"));
     assert!(!direct.contains("e = e_mean"));
     assert!(direct.contains("sample is the graded colour"));
@@ -148,8 +152,10 @@ fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
 /// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
 /// sample. The labelled exact gate still sums and does not take that loop.
 /// A still view keeps live history. A yaw keeps some and rejects some. A
-/// coplanar lift keeps the floor. A facing wall rejects it. A still view and
-/// a yaw both stay off the sum.
+/// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
+/// rejects more than it keeps, and the lamps sit behind that face so the
+/// reservoir sample count is 0. Those rows are counter movement. They are
+/// not a depth-only or normal-only threshold.
 #[test]
 fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     let _diag = LampDiag;
@@ -268,8 +274,9 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         "a yaw kept as much history as the still view ({turn:?} vs {held:?})"
     );
 
-    // Back to the still pose, then a 2 m lift. The lift is the only change
-    // from the frame before it, so the rejection is the depth test.
+    // Back to the still pose, then a 2 m lift on the same floor. The assert
+    // is accepts > rejects. The reject count is not identified as depth,
+    // off-screen, or an empty reservoir.
     draw(window, renderer, &lit, &still);
     draw(window, renderer, &lit, &still);
     let lifted = pose_at(0.0, 3.6, 3.0, 0.0);
@@ -291,19 +298,18 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
         mismatch.restir_point_adds, 0,
         "a coplanar lift added a near point lamp in the direct loop ({mismatch:?})"
     );
-    // The live test compares the candidate ray to the stored depth. A lift that
-    // stays on the floor plane keeps history. View-depth would reject it.
     assert!(
         mismatch.history_accepts > mismatch.history_rejects,
-        "a coplanar lift rejected the floor plane ({mismatch:?})"
+        "a coplanar lift kept no more history than it rejected ({mismatch:?})"
     );
     assert!(
         mismatch.history_rejects < held.history_accepts,
         "a coplanar lift rejected more pixels than the still view kept ({mismatch:?})"
     );
 
-    // Same camera as the lift. The new wall faces the camera, so its normal
-    // misses the floor history. That is the depth/normal rejection.
+    // Same camera as the lift. The wall changes depth and normal together.
+    // The lamps are on the far side of the face, so the reservoir sample
+    // count is 0. That is the fixture, not a normal-only threshold.
     let blocked = hall_walls(
         8,
         vec![genos_scene::Wall {
@@ -338,7 +344,11 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     );
     assert!(
         surface.history_rejects > surface.history_accepts,
-        "a facing wall kept the floor history ({surface:?})"
+        "a facing wall kept at least as much history as it rejected ({surface:?})"
+    );
+    assert_eq!(
+        surface.restir, 0,
+        "a facing wall shaded a reservoir sample; the lamps sit behind that face ({surface:?})"
     );
     assert!(
         surface.history_rejects > mismatch.history_rejects,
