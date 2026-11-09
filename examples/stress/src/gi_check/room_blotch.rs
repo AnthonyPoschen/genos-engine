@@ -50,7 +50,7 @@ const FLOOR_SHA256: [&str; 2] = [
 ];
 
 const HELP: &str = "\
-genos-stress room-blotch grade --refs DIR [--out DIR] [--capture] [--seconds N]
+genos-stress room-blotch grade --refs DIR [--out DIR] [--capture] [--seconds N] [--sh-path on|off]
 genos-stress room-blotch trace --pose room-a|room-b [--out DIR] [--promote DIR] [--threads N] [--seconds N]
 
 grade scores room-a and room-b with metrics::blotch. The mean is compared with
@@ -82,6 +82,14 @@ The live picture is cells_only, surface_cache.sh_cells on, cache_async off,
 world cell 0.25 m, sc_settle 0. The native cache key does not encode those
 flags or the seconds stop. The capture child drops the lighting environment
 catalogue, then sets GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1.
+--sh-path    on or off. Omitted means off. It does not change the engine
+             default. on sets the capture child's
+             GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL,
+             GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT, and
+             GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE to 1 after the
+             catalogue is cleared. off leaves those three unset, so the
+             preset default (off) is what the draw resolves. The 0.014
+             gate is unchanged.
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1579,6 +1587,7 @@ fn bytes_are_lighting_experiment(bytes: &[u8]) -> bool {
         || rest.starts_with(b"GI2_")
         || rest == b"GI_DEBUG"
         || rest == b"COMPOSE_SC_WRITES"
+        || rest == b"RESTIR_DI"
 }
 
 fn capture_drops_env(name: &[u8]) -> bool {
@@ -1595,8 +1604,16 @@ fn lighting_experiment_env(name: &str) -> bool {
 /// `GENOS_COMPOSE_SC_WRITES` is dropped because the renderer reads it outside
 /// that catalogue and it changes surface-cache compose writes.
 /// `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` is then set to `1`.
+/// `sh_path` also sets the three ADR 0039 detail keys to `1`. Off leaves
+/// them unset so the preset default stays off.
+const SH_PATH_ENV: &[(&str, &str)] = &[
+    ("GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL", "1"),
+    ("GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT", "1"),
+    ("GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE", "1"),
+];
+
 #[cfg(test)]
-fn capture_child_env(parent: &[(&str, &str)]) -> Vec<(String, String)> {
+fn capture_child_env(parent: &[(&str, &str)], sh_path: bool) -> Vec<(String, String)> {
     let mut child = Vec::new();
     for (name, value) in parent {
         if capture_drops_env(name.as_bytes()) {
@@ -1608,10 +1625,15 @@ fn capture_child_env(parent: &[(&str, &str)]) -> Vec<(String, String)> {
         "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS".to_string(),
         "1".to_string(),
     ));
+    if sh_path {
+        for (name, value) in SH_PATH_ENV {
+            child.push(((*name).to_string(), (*value).to_string()));
+        }
+    }
     child
 }
 
-fn seal_capture_command(command: &mut Command) {
+fn seal_capture_command(command: &mut Command, sh_path: bool) {
     use std::os::unix::ffi::OsStrExt;
     let names: Vec<std::ffi::OsString> = std::env::vars_os()
         .map(|(name, _)| name)
@@ -1621,9 +1643,14 @@ fn seal_capture_command(command: &mut Command) {
         command.env_remove(name);
     }
     command.env("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "1");
+    if sh_path {
+        for (name, value) in SH_PATH_ENV {
+            command.env(name, value);
+        }
+    }
 }
 
-fn run_capture(out: &Path) -> Result<(), String> {
+fn run_capture(out: &Path, sh_path: bool) -> Result<(), String> {
     let dir = out.join("capture");
     std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let scene = dir.join("room-scene.rhai");
@@ -1633,7 +1660,7 @@ fn run_capture(out: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
     let mut command = Command::new(exe);
     command.args(capture_args(&scene, &script, &dir));
-    seal_capture_command(&mut command);
+    seal_capture_command(&mut command, sh_path);
     let log_path = dir.join("run.log");
     let log =
         std::fs::File::create(&log_path).map_err(|err| format!("{}: {err}", log_path.display()))?;
@@ -1970,6 +1997,8 @@ struct GradeArgs {
     out: PathBuf,
     capture: bool,
     seconds: f32,
+    /// ADR 0039 detail path. Omitted and `off` leave the three settings unset.
+    sh_path: bool,
 }
 
 fn parse_grade_args(
@@ -1979,12 +2008,21 @@ fn parse_grade_args(
     let mut out = PathBuf::from("genos-debug/room-blotch");
     let mut capture = false;
     let mut seconds: Option<f32> = None;
+    let mut sh_path = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--refs" => refs = Some(PathBuf::from(value_of(args, &arg)?)),
             "--out" => out = PathBuf::from(value_of(args, &arg)?),
             "--capture" => capture = true,
             "--seconds" => take_seconds(args, &arg, &mut seconds)?,
+            "--sh-path" => {
+                let text = value_of(args, &arg)?;
+                sh_path = match text.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("--sh-path is on or off, not {other}")),
+                };
+            }
             "-h" | "--help" => {
                 println!("{HELP}");
                 return Ok(CommandArgs::Help);
@@ -2000,6 +2038,7 @@ fn parse_grade_args(
         out,
         capture,
         seconds: seconds.unwrap_or(DEFAULT_TRACE_SECONDS),
+        sh_path,
     }))
 }
 
@@ -2016,6 +2055,7 @@ fn grade_command(
         out,
         capture,
         seconds,
+        sh_path,
     } = parsed;
     refuses_acceptance_cache(&out)?;
     if capture {
@@ -2038,7 +2078,7 @@ fn grade_command(
                     .into(),
             );
         }
-        if let Err(err) = run_capture(&out) {
+        if let Err(err) = run_capture(&out, sh_path) {
             let verdict = verdict_from(vec![issue(Class::MissingCapture, err.clone())], None, None);
             write_verdict(&out, &verdict, seconds)?;
             print_verdict(&verdict);
@@ -2925,21 +2965,41 @@ mod tests {
             ("GENOS_LIGHTING_SC_FLAGS", "1"),
             ("GENOS_LIGHTING_TOGGLES", "none"),
             ("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", "0"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL", "0"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT", "0"),
+            ("GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE", "0"),
             ("GENOS_GI2_SC_SETTLE", "12"),
             ("GENOS_GI2_DENOISE", "off"),
             ("GENOS_GI_DEBUG", "1"),
             ("GENOS_COMPOSE_SC_WRITES", "1"),
+            ("GENOS_RESTIR_DI", "1"),
             ("GENOS_REFERENCE_GPU", "1"),
             ("PATH", "/usr/bin"),
             ("GENOS_REFERENCE_THREADS", "8"),
         ];
-        let child = capture_child_env(&parent);
+        let child = capture_child_env(&parent, false);
         let sh_cells: Vec<_> = child
             .iter()
             .filter(|(name, _)| name == "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS")
             .collect();
         assert_eq!(sh_cells.len(), 1);
         assert_eq!(sh_cells[0].1, "1");
+        for name in [
+            "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL",
+            "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT",
+            "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
+        ] {
+            assert!(
+                child.iter().all(|(key, _)| key != name),
+                "{name} leaked when --sh-path is off"
+            );
+        }
+        let on = capture_child_env(&parent, true);
+        for (name, value) in SH_PATH_ENV {
+            let hits: Vec<_> = on.iter().filter(|(key, _)| key == name).collect();
+            assert_eq!(hits.len(), 1, "{name}");
+            assert_eq!(hits[0].1, *value);
+        }
         for (name, _) in parent {
             if name == "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS" {
                 continue;
@@ -2997,6 +3057,18 @@ mod tests {
             return;
         };
         assert_eq!(parsed.seconds.to_bits(), DEFAULT_TRACE_SECONDS.to_bits());
+        assert!(!parsed.sh_path);
+        let mut path_on = words(&["--refs", "refs", "--sh-path", "on"])
+            .into_iter()
+            .peekable();
+        let parsed = parse_grade_args(&mut path_on).unwrap();
+        let CommandArgs::Ready(parsed) = parsed else {
+            return;
+        };
+        assert!(parsed.sh_path);
+        let bad_path =
+            run(words(&["grade", "--refs", "refs", "--sh-path", "maybe"]).into_iter()).unwrap_err();
+        assert!(bad_path.contains("on or off"), "{bad_path}");
         for bad in ["nan", "NaN", "inf", "+inf", "-inf", "infinity"] {
             let err = run(words(&["trace", "--pose", "room-a", "--seconds", bad]).into_iter())
                 .unwrap_err();
