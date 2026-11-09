@@ -140,8 +140,17 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         u32::from(settings.denoiser.enabled && settings.denoiser.screen),
         // Bit 0: reservoirs are allocated. Bit 1: a second slot for spatial reuse.
         // Radius 0 is one slot (temporal only).
-        u32::from(settings.lamp_pick.reuse()) | (u32::from(settings.lamp_pick.radius > 0) << 1),
+        // Bit 2: ReSTIR DI reservoirs. Sized while nothing is in flight.
+        u32::from(settings.lamp_pick.reuse())
+            | (u32::from(settings.lamp_pick.radius > 0) << 1)
+            | (u32::from(settings.restir_di) << 2),
     )
+}
+
+/// The ReSTIR direct module replaces the product shade. Exact, random, and
+/// broken stay on the existing module.
+pub(crate) fn restir_product_shade(restir_di: bool, gate: LampShadeGate) -> bool {
+    restir_di && gate == LampShadeGate::Product
 }
 
 /// Which shade the noise gate asks for. Production is [`Product`](Self::Product).
@@ -834,6 +843,11 @@ mod probe_still_tests {
         assert!(!direct_shade_plain(LampPickMode::Pixels, 3, LampShadeGate::Product));
         assert!(!direct_shade_plain(LampPickMode::Both, 3, LampShadeGate::Product));
         assert!(!direct_shade_plain(LampPickMode::Hits, 3, LampShadeGate::Product));
+        assert!(restir_product_shade(true, LampShadeGate::Product));
+        assert!(!restir_product_shade(false, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, LampShadeGate::Exact));
+        assert!(!restir_product_shade(true, LampShadeGate::Random));
+        assert!(!restir_product_shade(true, LampShadeGate::Broken));
     }
 
     /// Place searches, trace rays, gather bins, and filter bodies for `live`

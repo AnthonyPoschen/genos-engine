@@ -333,6 +333,23 @@ pub(crate) struct Lighting {
     lamp_res_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
+    /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
+    restir_buf: Buffer,
+    restir_pipe: Handle,
+    restir_direct: Handle,
+    /// This frame shades screen pixels from the reservoir.
+    restir_frame: bool,
+    restir_slot: u32,
+    restir_prev: crate::restir_live::RestirCam,
+    restir_have_prev: bool,
+    /// Timestamp query of the three ReSTIR passes. `u32::MAX` if this slot skipped them.
+    restir_query: [u32; 2],
+    restir_lamps: Vec<crate::pack::GpuLamp>,
+    restir_prev_lamps: Vec<crate::pack::GpuLamp>,
+    restir_view: crate::restir_live::RestirCam,
+    restir_w: u32,
+    restir_h: u32,
+    restir_clear: bool,
     /// Positive point lamps in the uploaded scene. The sun is not counted.
     point_lamps: u32,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
@@ -379,7 +396,7 @@ pub struct LightingAtrousStats {
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
-/// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
+/// sum, `restir` shaded one pairwise sample or one ReSTIR DI sample. Counts stay zero unless the diag
 /// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
 /// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
 /// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
@@ -565,6 +582,20 @@ impl Default for Lighting {
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             shade_gate: LampShadeGate::Product,
+            restir_buf: Buffer::empty(),
+            restir_pipe: std::ptr::null_mut(),
+            restir_direct: std::ptr::null_mut(),
+            restir_frame: false,
+            restir_slot: 0,
+            restir_prev: crate::restir_live::RestirCam::default(),
+            restir_have_prev: false,
+            restir_query: [u32::MAX; 2],
+            restir_lamps: Vec::new(),
+            restir_prev_lamps: Vec::new(),
+            restir_view: crate::restir_live::RestirCam::default(),
+            restir_w: 0,
+            restir_h: 0,
+            restir_clear: false,
             point_lamps: 0,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
@@ -640,6 +671,15 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting atrous",
 ];
 
+fn copy_gpu_lamp(lamp: &crate::pack::GpuLamp) -> crate::pack::GpuLamp {
+    crate::pack::GpuLamp {
+        pos: lamp.pos,
+        color: lamp.color,
+        directional: lamp.directional,
+        range: lamp.range,
+    }
+}
+
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
@@ -670,7 +710,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -759,7 +799,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 45 };
+            let size = Size { kind: 7, count: 48 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -1232,6 +1272,22 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        // ReSTIR reservoirs are sized here, after the frames in flight have
+        // finished. A resize inside a recording frame is not this path.
+        let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
+        self.destroy_buffer(&mut restir_old);
+        let restir_bytes = if settings.restir_di {
+            crate::restir_live::buffer_bytes(pixels)
+        } else {
+            256
+        };
+        self.lighting.restir_buf = self.make_buffer(restir_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
+        self.lighting.restir_w = if settings.restir_di { w } else { 0 };
+        self.lighting.restir_h = if settings.restir_di { h } else { 0 };
+        self.lighting.restir_clear = true;
+        self.lighting.restir_have_prev = false;
+        self.lighting.restir_slot = 0;
+        self.lighting.restir_frame = false;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -1295,6 +1351,7 @@ impl Gpu {
                 (10, self.lighting.cache.buffer),
                 (11, stats),
                 (12, self.lighting.lamp_res.buffer),
+                (19, self.lighting.restir_buf.buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -1543,6 +1600,17 @@ impl Gpu {
             }
             _ => {}
         }
+        self.lighting.restir_lamps.clear();
+        self.lighting.restir_lamps.extend(pack.lamps.iter().map(copy_gpu_lamp));
+        self.lighting.restir_view = crate::restir_live::RestirCam {
+            eye: pack.eye,
+            right: pack.view_right,
+            up: pack.view_up,
+            forward: pack.view_forward,
+            tan: pack.view_tan,
+            aspect: pack.view_aspect,
+            valid: true,
+        };
     }
 
     /// True when this frame's sun step is inside the staleness budget and the
@@ -1941,8 +2009,11 @@ impl Gpu {
         }
     }
 
-    /// Reservoir shade, or the pre-reservoir sum when that sum is what reuse would do.
+    /// Reservoir shade, the ReSTIR module, or the pre-reservoir sum.
     fn direct_pipe(&self) -> Handle {
+        if self.lighting.restir_frame && !self.lighting.restir_direct.is_null() {
+            return self.lighting.restir_direct;
+        }
         if direct_shade_plain(
             self.lighting.settings.lamp_pick.mode,
             self.lighting.point_lamps,
@@ -2797,6 +2868,194 @@ impl Gpu {
         self.lighting.meter_ping ^= 1;
     }
 
+    /// Upload the light tree and the point lamps. Reservoirs stay on the device.
+    /// The product gate is the only shade that reads them.
+    fn prepare_restir_di(
+        &mut self,
+        width: u32,
+        height: u32,
+        changes: Option<&Vec<[f32; 4]>>,
+    ) -> bool {
+        self.lighting.restir_frame = false;
+        if !restir_product_shade(self.lighting.settings.restir_di, self.lighting.shade_gate)
+            || width == 0
+            || height == 0
+        {
+            if !self.lighting.settings.restir_di {
+                self.lighting.restir_have_prev = false;
+            }
+            return false;
+        }
+        let Ok(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))) else {
+            return false;
+        };
+        if self.lighting.restir_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
+                Ok(pipe) => self.lighting.restir_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir di off: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-di", start);
+        }
+        if self.lighting.restir_direct.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                LIGHTING_DIRECT_RESTIR_SPV,
+                self.lighting.layout,
+                "restir-direct",
+            ) {
+                Ok(pipe) => self.lighting.restir_direct = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir direct off: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-direct", start);
+        }
+        let need = crate::restir_live::buffer_bytes(u64::from(pixels));
+        if self.lighting.restir_buf.size < need
+            || self.lighting.restir_w != width
+            || self.lighting.restir_h != height
+        {
+            self.lighting.restir_have_prev = false;
+            return false;
+        }
+        let geom_reset = changes.is_none();
+        let previous = if self.lighting.restir_have_prev {
+            self.lighting.restir_prev
+        } else {
+            crate::restir_live::RestirCam::default()
+        };
+        let Some(mut prefix) = crate::restir_live::prefix(
+            &self.lighting.restir_lamps,
+            &self.lighting.restir_prev_lamps,
+            &previous,
+            width,
+            height,
+            self.lighting.frame,
+            self.lighting.restir_slot,
+        ) else {
+            eprintln!("lighting: restir prefix does not fit");
+            return false;
+        };
+        let reset = geom_reset || prefix.layout_changed || !self.lighting.restir_have_prev;
+        crate::restir_live::set_history_reset(&mut prefix.words, reset);
+        self.lighting.restir_prev_lamps.clear();
+        self.lighting
+            .restir_prev_lamps
+            .extend(self.lighting.restir_lamps.iter().map(copy_gpu_lamp));
+        if self.lighting.restir_clear {
+            self.lighting.restir_clear = false;
+            unsafe {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    0,
+                    self.lighting.restir_buf.size,
+                    0,
+                );
+            }
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+        }
+        let mut at = 0usize;
+        while at < prefix.words.len() {
+            let end = (at + 16384).min(prefix.words.len());
+            let Ok(offset) = u64::try_from(at.saturating_mul(4)) else {
+                return false;
+            };
+            let Ok(bytes) = u64::try_from(end.saturating_sub(at).saturating_mul(4)) else {
+                return false;
+            };
+            unsafe {
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    offset,
+                    bytes,
+                    prefix.words[at..end].as_ptr().cast::<std::ffi::c_void>(),
+                );
+            }
+            at = end;
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+        self.lighting.restir_frame = prefix.total_words.saturating_mul(4) <= self.lighting.restir_buf.size;
+        self.lighting.restir_frame
+    }
+
+    /// Initial, temporal, then spatial. Each dispatch is at most 65536 pixels.
+    fn dispatch_restir_di(&mut self, slot: usize, pc: &[u32; 12], pool: Handle, first: u32) {
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let Some(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))).ok()
+        else {
+            return;
+        };
+        let pipe = self.lighting.restir_pipe;
+        if pipe.is_null() || pixels == 0 {
+            return;
+        }
+        let stamp = !pool.is_null();
+        if !stamp {
+            self.lighting.restir_query[slot] = u32::MAX;
+        }
+        if stamp {
+            unsafe {
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_STAMP_AT);
+            }
+            self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
+        }
+        for mode in 0..3u32 {
+            let mut base = 0u32;
+            while base < pixels {
+                let count = (pixels - base).min(65536);
+                let groups = count.div_ceil(64).max(1);
+                let mut rpc = *pc;
+                rpc[9] = (rpc[9] & !(3 << 22)) | (mode << 22) | (1 << 21);
+                rpc[11] = base;
+                unsafe {
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.lighting.layout,
+                        0x20,
+                        0,
+                        LIGHTING_PC_BYTES,
+                        rpc.as_ptr().cast::<std::ffi::c_void>(),
+                    );
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+                    (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+                }
+                base = base.saturating_add(65536);
+            }
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            if stamp {
+                unsafe {
+                    (self.fns.cmd_write_timestamp)(
+                        self.cmd,
+                        0x800,
+                        pool,
+                        first + RESTIR_STAMP_AT + 1 + mode,
+                    );
+                }
+            }
+        }
+        unsafe {
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<std::ffi::c_void>(),
+            );
+        }
+        self.lighting.restir_prev = self.lighting.restir_view;
+        self.lighting.restir_have_prev = true;
+        self.lighting.restir_slot ^= 1;
+    }
+
     fn lighting_passes(&mut self, slot: usize) -> Result<(), String> {
         self.lighting.hdr_query[slot] = u32::MAX;
         self.write_hdr_exposure();
@@ -3298,6 +3557,12 @@ impl Gpu {
             // indirect read needs the draw-indirect stage
             // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
             self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
+            let restir_on = self.prepare_restir_di(w, h, changes.as_ref());
+            if restir_on {
+                pc[9] |= 1 << 21;
+            } else {
+                self.lighting.restir_query[slot] = u32::MAX;
+            }
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
@@ -3328,6 +3593,12 @@ impl Gpu {
             let first = slot as u32 * LIGHTING_STAMPS;
             if let Some(pool) = stamps {
                 (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
+            }
+            if restir_on {
+                let pool = stamps.unwrap_or(std::ptr::null_mut());
+                self.dispatch_restir_di(slot, &pc, pool, first);
+            }
+            if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
@@ -3488,7 +3759,10 @@ impl Gpu {
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
                 if let Some(pool) = stamps {
-                    (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
+                    let at = first + 1 + k as u32;
+                    if at < first + RESTIR_STAMP_AT {
+                        (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
+                    }
                 }
             }
             if agx_display {
@@ -3763,6 +4037,7 @@ impl Gpu {
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
         let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
+        let mut restir_buf = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         for k in 0..2 {
@@ -3783,6 +4058,7 @@ impl Gpu {
         self.destroy_buffer(&mut meter_dev);
         self.destroy_buffer(&mut meter_host);
         self.destroy_buffer(&mut lamp_res);
+        self.destroy_buffer(&mut restir_buf);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         unsafe {
@@ -3792,6 +4068,8 @@ impl Gpu {
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
                 .chain(std::iter::once(&mut self.lighting.direct_plain))
+                .chain(std::iter::once(&mut self.lighting.restir_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
@@ -3963,7 +4241,9 @@ const LIGHTING_ATROUS_STAT: usize = 120;
 /// `None` when those two would fall outside [`LIGHTING_STAMPS`].
 fn hdr_stamp_base(groups: usize, first: u32) -> Option<u32> {
     let used = u32::try_from(groups).unwrap_or(u32::MAX).saturating_add(1);
-    if used.saturating_add(2) > LIGHTING_STAMPS {
+    // ReSTIR owns the queries at RESTIR_STAMP_AT. A long pass list skips the
+    // bloom pair rather than sharing those queries.
+    if used.saturating_add(2) > RESTIR_STAMP_AT {
         return None;
     }
     Some(first.saturating_add(used))

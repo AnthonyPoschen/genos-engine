@@ -694,6 +694,9 @@ pub struct LightingSettings {
     /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
     /// Potato and day-cycle trace every lamp.
     pub lamp_pick: LampPickSettings,
+    /// Screen-pixel ReSTIR DI. Off until a frame asks for it. The product
+    /// exact sum stays the shade while this is off.
+    pub restir_di: bool,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
@@ -881,6 +884,7 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            restir_di: false,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
@@ -1344,6 +1348,7 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
         let x = &self.experiments;
         let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
         let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
@@ -1540,6 +1545,7 @@ impl LightingSettings {
                     self.lamp_pick.mode = LampPickMode::Both;
                 }
             }
+            "restir_di" => self.restir_di = on(value)?,
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -1665,6 +1671,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_RESTIR_DI", "restir_di"),
             ("GENOS_LIGHTING_ASYNC", "cache_async"),
             ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
             ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),

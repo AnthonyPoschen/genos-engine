@@ -215,6 +215,8 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). Off by default.
+                            The argument wins. The picture stays the raw sample.
   --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
   --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)
   --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
@@ -333,6 +335,7 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
+    restir_di: Option<String>,
     /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
     block_ms: Option<Duration>,
     /// `--lifecycle-close-early`. The mirror applies when this stays false.
@@ -486,6 +489,7 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
+        restir_di: None,
         block_ms: None,
         close_early: false,
         lighting_experiments: Vec::new(),
@@ -600,6 +604,7 @@ fn options() -> Result<Options, String> {
             "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
             "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
             "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
+            "--restir-di" => opts.restir_di = Some(value()?),
             flag if lighting_experiment_flag(flag).is_some() => {
                 if let Some(i) = lighting_experiment_flag(flag) {
                     opts.lighting_experiments.push((i, value()?));
@@ -924,6 +929,7 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             "lamp_pick_unbiased",
             "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
         ),
+        (opts.restir_di.as_deref(), "restir_di", "GENOS_RESTIR_DI"),
     ];
     for (value, key, var) in keys {
         if let Some(value) = value {

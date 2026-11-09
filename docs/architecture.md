@@ -49,6 +49,8 @@ crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
 crates/lighting-ref/ package genos-lighting-ref
+crates/restir-ref/  package genos-restir-ref
+crates/restir-gpu/  package genos-restir-gpu
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
 crates/audio/       package genos-audio

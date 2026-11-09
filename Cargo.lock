@@ -289,9 +289,26 @@ dependencies = [
  "genos-load",
  "genos-math",
  "genos-mesh",
+ "genos-restir-ref",
  "genos-scene",
  "genos-ui",
  "genos-window",
+]
+
+[[package]]
+name = "genos-restir-gpu"
+version = "0.1.0"
+dependencies = [
+ "genos-math",
+ "genos-restir-ref",
+]
+
+[[package]]
+name = "genos-restir-ref"
+version = "0.1.0"
+dependencies = [
+ "genos-json",
+ "genos-math",
 ]
 
 [[package]]

@@ -3938,7 +3938,9 @@ impl Gpu {
         let counts = self.lighting.frame_counts[slot];
         let mut bucket_ms = [0.0f64; BUCKETS];
         if !ids.is_empty() && !times.lighting_pool.is_null() {
-            let mut g = vec![0u64; ids.len() + 1];
+            // Pass stamps stop before the ReSTIR queries. A longer list is not timed.
+            let stamp_n = (ids.len() + 1).min(RESTIR_STAMP_AT as usize);
+            let mut g = vec![0u64; stamp_n];
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
@@ -3974,6 +3976,40 @@ impl Gpu {
                         bucket_ms[B_SHADOWS as usize] += ms;
                         if times.print {
                             times.lighting_bucket[B_SHADOWS as usize] += ms;
+                        }
+                    }
+                }
+                let restir_at = self.lighting.restir_query[slot];
+                if restir_at != u32::MAX {
+                    let mut raw = [0u64; 4];
+                    let restir_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            restir_at,
+                            4,
+                            32,
+                            raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    if restir_got == 0 {
+                        let part = |a, b| tick_delta(a, b, bits) as f64 * period / 1.0e6;
+                        let parts = [
+                            part(raw[0], raw[1]),
+                            part(raw[1], raw[2]),
+                            part(raw[2], raw[3]),
+                        ];
+                        let sum = parts[0] + parts[1] + parts[2];
+                        bucket_ms[B_DIRECT as usize] += sum;
+                        if times.print {
+                            times.lighting[3] += sum;
+                            times.lighting_bucket[B_DIRECT as usize] += sum;
+                            times.restir[0] += parts[0];
+                            times.restir[1] += parts[1];
+                            times.restir[2] += parts[2];
+                            times.restir_frames += 1;
                         }
                     }
                 }
@@ -4047,7 +4083,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -4071,7 +4107,18 @@ impl Gpu {
                 self.last_unfilled
                     .map(|stats| format!(" | {}", stats.line()))
                     .unwrap_or_default(),
-                lamp_pick_line
+                lamp_pick_line,
+                if times.restir_frames > 0 {
+                    let n = f64::from(times.restir_frames);
+                    format!(
+                        " restir_initial={:.3} restir_temporal={:.3} restir_spatial={:.3}",
+                        times.restir[0] / n,
+                        times.restir[1] / n,
+                        times.restir[2] / n
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
         if !times.light_spans.is_empty() {
@@ -9588,6 +9635,9 @@ struct GpuTimes {
     lighting: [f64; 9],
     /// Per-bucket sums, including cache rays, hit light, and shadows.
     lighting_bucket: [f64; 12],
+    /// ReSTIR DI pass sums (initial, temporal, spatial) over `restir_frames`.
+    restir: [f64; 3],
+    restir_frames: u32,
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
     prefill_frames: u32,
@@ -9604,7 +9654,10 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
 /// One before the passes, one after each dispatch, then the HDR pair when it fits.
-const LIGHTING_STAMPS: u32 = 28;
+/// ReSTIR uses four queries at [`RESTIR_STAMP_AT`], past the pass list.
+const LIGHTING_STAMPS: u32 = 36;
+/// Before initial, after initial, after temporal, after spatial.
+const RESTIR_STAMP_AT: u32 = 32;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
@@ -9654,6 +9707,8 @@ impl Default for GpuTimes {
             lighting_frames: 0,
             lighting: [0.0; 9],
             lighting_bucket: [0.0; 12],
+            restir: [0.0; 3],
+            restir_frames: 0,
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
