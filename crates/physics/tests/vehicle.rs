@@ -232,6 +232,69 @@ fn a_locked_wheel_slows_the_car_and_a_free_wheel_rolls() {
     );
 }
 
+/// Matched-roll reverse stays straight. A reverse sideslip is pushed back; a zero curve is not.
+#[test]
+fn a_matched_roll_in_reverse_stays_straight_and_sideslip_restores() {
+    let mut straight = genos_physics::locked_wheel_world();
+    let mut twin = genos_physics::locked_wheel_world();
+    straight.bodies[1].velocity = Vec3::new(-10.0, 0.0, 0.0);
+    twin.bodies[1].velocity = Vec3::new(-10.0, 0.0, 0.0);
+    match_roll(&mut straight);
+    match_roll(&mut twin);
+    step(&mut straight, DT);
+    step(&mut twin, DT);
+    assert!(same_pose(&straight, &twin), "two reverse rolls diverged");
+    let first = chassis(&straight);
+    // One step from vz = 0. The lateral force is mass * vz / dt.
+    let lateral_force = first.velocity.z * 1_200.0 / DT;
+    assert!(
+        first.velocity.z.abs() < 1.0e-4,
+        "reverse vz {} implies lateral force {lateral_force}",
+        first.velocity.z
+    );
+    for _ in 1..60 {
+        match_roll(&mut straight);
+        match_roll(&mut twin);
+        step(&mut straight, DT);
+        step(&mut twin, DT);
+        assert!(same_pose(&straight, &twin), "two reverse rolls diverged");
+    }
+    let body = chassis(&straight);
+    assert!(
+        body.position.z.abs() < 1.0e-3,
+        "reverse drifted to z {}",
+        body.position.z
+    );
+    assert!(
+        body.velocity.x < -9.0,
+        "matched reverse braked to {}",
+        body.velocity.x
+    );
+
+    let mut slide = genos_physics::locked_wheel_world();
+    let mut mute = genos_physics::locked_wheel_world();
+    slide.bodies[1].velocity = Vec3::new(-10.0, 0.0, 2.0);
+    mute.bodies[1].velocity = Vec3::new(-10.0, 0.0, 2.0);
+    flatten_curve(&mut mute);
+    for _ in 0..60 {
+        match_roll(&mut slide);
+        match_roll(&mut mute);
+        step(&mut slide, DT);
+        step(&mut mute, DT);
+    }
+    let restored = chassis(&slide).velocity.z.abs();
+    let untouched = chassis(&mute).velocity.z.abs();
+    assert!(restored < 0.5, "reverse sideslip stayed at {restored}");
+    assert!(
+        untouched > 1.5,
+        "zero curve restored sideslip to {untouched}"
+    );
+    assert!(
+        restored < untouched,
+        "the curve did not restore more than zero mu"
+    );
+}
+
 fn step_pair(steps: u32, free: bool, zero_mu: bool) -> (World, World) {
     let mut world = genos_physics::locked_wheel_world();
     let mut twin = genos_physics::locked_wheel_world();
