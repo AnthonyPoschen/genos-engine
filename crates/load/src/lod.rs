@@ -4,8 +4,9 @@
 //! The cook writes the chain. This module only projects the stored object-space
 //! error and picks a level. It does not simplify.
 //!
-//! The projected error is `e * s * H / (2 d tan(fov/2))`. `s` is the instance
-//! transform's max column scale. `d` is the view-space depth of the nearest
+//! The projected error is `e * s * H / (2 d tan(fov/2))`. `s` is an upper bound
+//! on the instance transform's operator norm (the largest singular value of
+//! the 3×3). `d` is the view-space depth of the nearest
 //! point of the instance bounds (`forward · (corner - eye)`), the same depth
 //! the perspective divide uses, not the Euclidean distance to the centre.
 //! A level is eligible when that value is under `τ` (`LodView::error_px`).
@@ -62,7 +63,7 @@ pub struct LodView {
     /// View-space depth of the nearest bounds point, metres (`d`).
     /// Positive in front of the camera. Not the distance to the centre.
     pub depth_m: f32,
-    /// Max column length of the instance transform. Multiplies `error_m`.
+    /// Upper bound on the operator norm of the instance 3×3. Multiplies `error_m`.
     pub scale: f32,
     /// Viewport height, pixels (`H`).
     pub height_px: f32,
@@ -74,16 +75,84 @@ pub struct LodView {
     pub bias: i32,
 }
 
-/// Longest of the three axis columns. A reflection still contributes its length.
+/// Upper bound on the operator norm of the column-major 3×3.
+///
+/// The value is the largest singular value, `sqrt` of the largest eigenvalue
+/// of `MᵀM`. A column length is that norm for a pure scale or reflection, and
+/// it is short of the norm once a column is sheared into another.
 #[must_use]
 pub fn max_axis_scale(transform: &[f32; 16]) -> f32 {
-    let column = |base: usize| {
-        let x = transform.get(base).copied().unwrap_or(0.0);
-        let y = transform.get(base + 1).copied().unwrap_or(0.0);
-        let z = transform.get(base + 2).copied().unwrap_or(0.0);
-        (x * x + y * y + z * z).sqrt()
-    };
-    column(0).max(column(4)).max(column(8))
+    let c0 = column3(transform, 0);
+    let c1 = column3(transform, 4);
+    let c2 = column3(transform, 8);
+    if [c0, c1, c2]
+        .iter()
+        .any(|column| column.iter().any(|axis| !axis.is_finite()))
+    {
+        return f32::INFINITY;
+    }
+    let lambda = largest_eigenvalue(
+        dot3(c0, c0),
+        dot3(c0, c1),
+        dot3(c0, c2),
+        dot3(c1, c1),
+        dot3(c1, c2),
+        dot3(c2, c2),
+    );
+    if !lambda.is_finite() {
+        return f32::INFINITY;
+    }
+    lambda.max(0.0).sqrt()
+}
+
+fn column3(transform: &[f32; 16], base: usize) -> [f32; 3] {
+    [
+        transform.get(base).copied().unwrap_or(0.0),
+        transform.get(base + 1).copied().unwrap_or(0.0),
+        transform.get(base + 2).copied().unwrap_or(0.0),
+    ]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Largest eigenvalue of a symmetric 3×3, via the trigonometric form of the
+/// cubic (Kopp, "Efficient numerical diagonalization of hermitian 3×3 matrices").
+/// Off-diagonals are `ab`, `ac`, `bc`.
+fn largest_eigenvalue(aa: f32, ab: f32, ac: f32, bb: f32, bc: f32, cc: f32) -> f32 {
+    let off = ab * ab + ac * ac + bc * bc;
+    if off <= 0.0 {
+        return aa.max(bb).max(cc).max(0.0);
+    }
+    let mean = (aa + bb + cc) * (1.0 / 3.0);
+    let p2 = (aa - mean) * (aa - mean)
+        + (bb - mean) * (bb - mean)
+        + (cc - mean) * (cc - mean)
+        + 2.0 * off;
+    if p2 <= 0.0 || !p2.is_finite() {
+        return mean.max(0.0);
+    }
+    let scale = (p2 * (1.0 / 6.0)).sqrt();
+    if scale <= 0.0 || !scale.is_finite() {
+        return mean.max(0.0);
+    }
+    let b00 = (aa - mean) / scale;
+    let b11 = (bb - mean) / scale;
+    let b22 = (cc - mean) / scale;
+    let b01 = ab / scale;
+    let b02 = ac / scale;
+    let b12 = bc / scale;
+    let det = b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02)
+        + b02 * (b01 * b12 - b11 * b02);
+    let half = (det * 0.5).clamp(-1.0, 1.0);
+    let phi = half.acos() * (1.0 / 3.0);
+    let two_p = 2.0 * scale;
+    let third = std::f32::consts::TAU / 3.0;
+    let e0 = mean + two_p * phi.cos();
+    let e1 = mean + two_p * (phi + third).cos();
+    let e2 = mean + two_p * (phi + 2.0 * third).cos();
+    e0.max(e1).max(e2).max(0.0)
 }
 
 /// Minimum `forward · (world - eye)` over the transformed bounds corners.
@@ -350,5 +419,91 @@ mod tests {
         let errors = [0.0, 2.0];
         assert_eq!(select_lod(&errors, unit, None), 1);
         assert_eq!(select_lod(&errors, grown, None), 0);
+    }
+
+    fn column_length(transform: &[f32; 16]) -> f32 {
+        let column = |base: usize| {
+            let x = transform[base];
+            let y = transform[base + 1];
+            let z = transform[base + 2];
+            (x * x + y * y + z * z).sqrt()
+        };
+        column(0).max(column(4)).max(column(8))
+    }
+
+    #[test]
+    fn a_shear_uses_the_operator_norm_not_the_longest_column() {
+        // Columns (1,0,0), (1,1,0), (0,0,1). Longest column is √2.
+        // Singular value is √((3+√5)/2) = φ ≈ 1.618, which is larger.
+        let z = -1400.0;
+        let shear = [
+            1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, z, 1.0,
+        ];
+        let scale = max_axis_scale(&shear);
+        let column = column_length(&shear);
+        let expected = f32::midpoint(3.0, 5.0_f32.sqrt()).sqrt();
+        assert!(
+            (scale - expected).abs() < 1.0e-4,
+            "operator norm {scale}, expected {expected}"
+        );
+        assert!(
+            scale > column + 0.1,
+            "operator norm {scale} must clear the longest column {column}"
+        );
+        let tan_half = (FOV_60 * 0.5).tan();
+        let depth = f32::midpoint(column, scale) * 1000.0 / (2.0 * tan_half);
+        let view = view_for_instance(
+            EYE,
+            FORWARD,
+            1000.0,
+            FOV_60,
+            1.0,
+            0,
+            LodInstance {
+                bounds_min: [0.0, 0.0, 0.0],
+                bounds_max: [0.0, 0.0, 0.0],
+                transform: [
+                    1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -depth,
+                    1.0,
+                ],
+            },
+        );
+        assert!((view.scale - scale).abs() < 1.0e-4);
+        let errors = [0.0, 1.0];
+        assert_eq!(select_lod(&errors, view, None), 0);
+        assert_eq!(
+            select_lod(
+                &errors,
+                LodView {
+                    scale: column,
+                    ..view
+                },
+                None,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn depth_at_or_behind_the_camera_stays_on_the_finest_level() {
+        let errors = [0.0, 0.1, 1.0, 10.0];
+        let behind = LodInstance {
+            bounds_min: [0.0, 0.0, 1.0],
+            bounds_max: [1.0, 1.0, 2.0],
+            transform: identity(),
+        };
+        let behind_view = view_for_instance(EYE, FORWARD, 1000.0, FOV_60, 1.0, 0, behind);
+        assert!(behind_view.depth_m <= 0.0);
+        assert_eq!(select_lod(&errors, behind_view, None), 0);
+        assert_eq!(select_lod(&[1.0, 10.0], behind_view, None), 0);
+
+        let crossing = LodInstance {
+            bounds_min: [-1.0, -1.0, -1.0],
+            bounds_max: [1.0, 1.0, 1.0],
+            transform: identity(),
+        };
+        let crossing_view = view_for_instance(EYE, FORWARD, 1000.0, FOV_60, 1.0, 0, crossing);
+        assert_eq!(crossing_view.depth_m, 0.0);
+        assert_eq!(select_lod(&errors, crossing_view, None), 0);
     }
 }

@@ -4,11 +4,11 @@
 )]
 
 //! Stage 1 discrete LOD chain (geometry-lod design): cook determinism, monotone
-//! triangle counts, the two-sided object-space error bound, locked borders,
+//! triangle counts, the Lipschitz object-space error bound, locked borders,
 //! selector hysteresis, and a planted selector that drops the depth term.
 
 use genos_bake::{BakeMode, BakeSettings};
-use genos_cook::{cook, encode, lod_chain};
+use genos_cook::{cook, encode, lod_chain, LOD_COVER_STOP_M};
 use genos_load::{select_lod, GltfMesh, GltfScene, ImportDoc, LodView, Primitive, LOD_HYSTERESIS};
 
 const RATIOS: [f64; 3] = [0.5, 0.25, 0.125];
@@ -79,43 +79,231 @@ fn settings(dir: &std::path::Path) -> BakeSettings {
     }
 }
 
-/// Vertices, edge midpoints, and face interiors of `from`, measured onto `onto`.
-fn max_surface_deviation(from: &Primitive, onto: &Primitive) -> f32 {
-    let mut worst = 0.0_f32;
-    for point in surface_points(from) {
-        worst = worst.max(min_distance(point, onto));
+/// At least 16 samples along each edge. A longer edge gets more, so the
+/// lattice's own miss stays under the cook's covering-radius stop. The cook
+/// does not use this lattice.
+const LATTICE_PER_EDGE: u8 = 16;
+
+fn lattice_segments(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> usize {
+    let longest = dist(a, b).max(dist(b, c)).max(dist(c, a));
+    let need = if LOD_COVER_STOP_M > 0.0 && longest.is_finite() {
+        ceil_usize(longest / LOD_COVER_STOP_M)
+    } else {
+        0
+    };
+    need.max(usize::from(LATTICE_PER_EDGE))
+}
+
+fn ceil_usize(value: f32) -> usize {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
     }
-    worst
+    let mut whole = value.ceil();
+    let mut count = 0_usize;
+    let cap = usize::from(u16::MAX);
+    while whole >= 1.0 && count < cap {
+        whole -= 1.0;
+        count += 1;
+    }
+    count
 }
 
-fn two_sided(source: &Primitive, level: &Primitive) -> f32 {
-    max_surface_deviation(source, level).max(max_surface_deviation(level, source))
+fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let span = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt()
 }
 
-fn surface_points(prim: &Primitive) -> Vec<[f32; 3]> {
-    let interiors = [
-        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
-        [0.5, 0.25, 0.25],
-        [0.25, 0.5, 0.25],
-        [0.25, 0.25, 0.5],
-    ];
+fn lattice_points(prim: &Primitive) -> Vec<[f32; 3]> {
     let mut out = Vec::new();
     for tri in prim.indices.as_chunks::<3>().0 {
-        let Some(a) = vertex(prim, tri[0]) else {
+        let Some(corner_a) = vertex(prim, tri[0]) else {
             continue;
         };
-        let Some(b) = vertex(prim, tri[1]) else {
+        let Some(corner_b) = vertex(prim, tri[1]) else {
             continue;
         };
-        let Some(c) = vertex(prim, tri[2]) else {
+        let Some(corner_c) = vertex(prim, tri[2]) else {
             continue;
         };
-        out.extend([a, b, c, mid(a, b), mid(b, c), mid(c, a)]);
-        for weights in interiors {
-            out.push(bary(a, b, c, weights));
+        let segments = lattice_segments(corner_a, corner_b, corner_c);
+        let denom = usize_f32(segments);
+        for i in 0..=segments {
+            let rest = segments - i;
+            for j in 0..=rest {
+                let weight_c = rest - j;
+                out.push(bary(
+                    corner_a,
+                    corner_b,
+                    corner_c,
+                    [
+                        usize_f32(i) / denom,
+                        usize_f32(j) / denom,
+                        usize_f32(weight_c) / denom,
+                    ],
+                ));
+            }
         }
     }
     out
+}
+
+fn usize_f32(value: usize) -> f32 {
+    match u16::try_from(value) {
+        Ok(narrow) => f32::from(narrow),
+        Err(_) => f32::from(u16::MAX),
+    }
+}
+
+/// Brute-force closest distance, accelerated by an xy bin. A triangle is stored
+/// in every cell its bounds overlap, and the search stops only once the next
+/// ring of cells is farther than the best hit. The distance itself is Ericson's
+/// closest point, not the cook's BVH.
+struct LatticeOracle {
+    tris: Vec<([f32; 3], [f32; 3], [f32; 3])>,
+    origin: [f32; 2],
+    cell: f32,
+    nx: usize,
+    ny: usize,
+    bins: Vec<Vec<u32>>,
+}
+
+impl LatticeOracle {
+    fn build(prim: &Primitive) -> Self {
+        let mut tris = Vec::new();
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for tri in prim.indices.as_chunks::<3>().0 {
+            let Some(a) = vertex(prim, tri[0]) else {
+                continue;
+            };
+            let Some(b) = vertex(prim, tri[1]) else {
+                continue;
+            };
+            let Some(c) = vertex(prim, tri[2]) else {
+                continue;
+            };
+            for point in [a, b, c] {
+                min_x = min_x.min(point[0]);
+                min_y = min_y.min(point[1]);
+                max_x = max_x.max(point[0]);
+                max_y = max_y.max(point[1]);
+            }
+            tris.push((a, b, c));
+        }
+        let cells = 32_usize;
+        let span_x = (max_x - min_x).max(1.0e-4);
+        let span_y = (max_y - min_y).max(1.0e-4);
+        let cell = span_x.max(span_y) / f32::from(u8::try_from(cells).unwrap_or(1));
+        let nx = cells;
+        let ny = cells;
+        let mut bins = vec![Vec::new(); nx * ny];
+        for (index, (a, b, c)) in tris.iter().enumerate() {
+            let lo_x = a[0].min(b[0]).min(c[0]);
+            let lo_y = a[1].min(b[1]).min(c[1]);
+            let hi_x = a[0].max(b[0]).max(c[0]);
+            let hi_y = a[1].max(b[1]).max(c[1]);
+            let i0 = bucket((lo_x - min_x) / cell, nx);
+            let i1 = bucket((hi_x - min_x) / cell, nx);
+            let j0 = bucket((lo_y - min_y) / cell, ny);
+            let j1 = bucket((hi_y - min_y) / cell, ny);
+            let slot = u32::try_from(index).unwrap_or(u32::MAX);
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    if let Some(bin) = bins.get_mut(j * nx + i) {
+                        bin.push(slot);
+                    }
+                }
+            }
+        }
+        Self {
+            tris,
+            origin: [min_x, min_y],
+            cell,
+            nx,
+            ny,
+            bins,
+        }
+    }
+
+    fn deviation(from: &Primitive, onto: &Primitive) -> f32 {
+        let oracle = Self::build(onto);
+        let mut seen = vec![0_u32; oracle.tris.len()];
+        let mut stamp = 0_u32;
+        let mut worst = 0.0_f32;
+        for point in lattice_points(from) {
+            stamp = stamp.wrapping_add(1);
+            if stamp == 0 {
+                seen.fill(0);
+                stamp = 1;
+            }
+            worst = worst.max(oracle.closest(point, &mut seen, stamp));
+        }
+        worst
+    }
+
+    fn closest(&self, point: [f32; 3], seen: &mut [u32], stamp: u32) -> f32 {
+        if self.tris.is_empty() || self.cell <= 0.0 {
+            return f32::MAX;
+        }
+        let width = self.cell * f32::from(u16::try_from(self.nx).unwrap_or(u16::MAX));
+        let height = self.cell * f32::from(u16::try_from(self.ny).unwrap_or(u16::MAX));
+        let inside = point[0] >= self.origin[0]
+            && point[1] >= self.origin[1]
+            && point[0] <= self.origin[0] + width
+            && point[1] <= self.origin[1] + height;
+        if !inside {
+            return self.tris.iter().fold(f32::MAX, |best, (a, b, c)| {
+                best.min(dist_point_triangle(point, *a, *b, *c))
+            });
+        }
+        let ix = bucket((point[0] - self.origin[0]) / self.cell, self.nx);
+        let iy = bucket((point[1] - self.origin[1]) / self.cell, self.ny);
+        let mut best = f32::MAX;
+        let max_ring = self.nx.max(self.ny);
+        for ring in 0..=max_ring {
+            if ring > 0 {
+                let ahead = f32::from(u16::try_from(ring - 1).unwrap_or(u16::MAX)) * self.cell;
+                if ahead >= best {
+                    break;
+                }
+            }
+            let i0 = ix.saturating_sub(ring);
+            let j0 = iy.saturating_sub(ring);
+            let i1 = ix.saturating_add(ring).min(self.nx.saturating_sub(1));
+            let j1 = iy.saturating_add(ring).min(self.ny.saturating_sub(1));
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let on_ring = i == i0 || i == i1 || j == j0 || j == j1 || ring == 0;
+                    if !on_ring {
+                        continue;
+                    }
+                    let Some(bin) = self.bins.get(j * self.nx + i) else {
+                        continue;
+                    };
+                    for slot in bin {
+                        let index = usize::try_from(*slot).unwrap_or(usize::MAX);
+                        if seen.get(index).is_some_and(|mark| *mark == stamp) {
+                            continue;
+                        }
+                        if let Some(mark) = seen.get_mut(index) {
+                            *mark = stamp;
+                        }
+                        let Some((a, b, c)) = self.tris.get(index) else {
+                            continue;
+                        };
+                        best = best.min(dist_point_triangle(point, *a, *b, *c));
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+fn lattice_two_sided(source: &Primitive, level: &Primitive) -> f32 {
+    LatticeOracle::deviation(source, level).max(LatticeOracle::deviation(level, source))
 }
 
 fn min_distance(point: [f32; 3], prim: &Primitive) -> f32 {
@@ -135,20 +323,26 @@ fn min_distance(point: [f32; 3], prim: &Primitive) -> f32 {
     best
 }
 
-fn mid(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        f32::midpoint(a[0], b[0]),
-        f32::midpoint(a[1], b[1]),
-        f32::midpoint(a[2], b[2]),
-    ]
-}
-
 fn bary(a: [f32; 3], b: [f32; 3], c: [f32; 3], w: [f32; 3]) -> [f32; 3] {
     [
         a[0] * w[0] + b[0] * w[1] + c[0] * w[2],
         a[1] * w[0] + b[1] * w[1] + c[1] * w[2],
         a[2] * w[0] + b[2] * w[1] + c[2] * w[2],
     ]
+}
+
+fn bucket(t: f32, n: usize) -> usize {
+    if !t.is_finite() || t <= 0.0 || n == 0 {
+        return 0;
+    }
+    let last = n - 1;
+    let mut index = 0_usize;
+    let mut edge = 1.0_f32;
+    while index < last && edge <= t {
+        index += 1;
+        edge += 1.0;
+    }
+    index
 }
 
 fn vertex(prim: &Primitive, index: u32) -> Option<[f32; 3]> {
@@ -259,59 +453,120 @@ fn two_cooks_of_the_same_mesh_are_the_same_bytes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Open n×n sheet: 4n boundary vertices, corners once. A locked border cannot
+/// drop below the triangulation of that loop, 4n−2.
+fn locked_border_floor(cells: usize) -> usize {
+    cells.saturating_mul(4).saturating_sub(2)
+}
+
 #[test]
 fn triangle_counts_are_monotone_and_near_the_targets() {
-    let mesh = wavy(32);
+    let cells = 32_usize;
+    let mesh = wavy(cells);
     let chain = lod_chain(&mesh);
     assert_eq!(chain.len(), 4);
     assert_eq!(chain[0].error_m.to_bits(), 0.0_f32.to_bits());
     assert_eq!(chain[0].primitives, mesh.primitives);
     let lod0 = triangles(&mesh);
+    let floor = locked_border_floor(cells);
+    let floor_ratio = f64::from(u32::try_from(floor).unwrap_or(u32::MAX))
+        / f64::from(u32::try_from(lod0).unwrap_or(1));
     let mut previous = lod0;
     for (level, ratio) in chain.iter().skip(1).zip(RATIOS) {
         let count = level_tris(level);
         assert!(count <= previous, "{count} tris after {previous}");
+        assert!(
+            count >= floor,
+            "{count} tris is under the LockBorder floor {floor} (4n−2)"
+        );
         let got = f64::from(u32::try_from(count).unwrap_or(u32::MAX))
             / f64::from(u32::try_from(lod0).unwrap_or(1));
+        let expected = ratio.max(floor_ratio);
         let tol = 0.10 * ratio;
         assert!(
-            (got - ratio).abs() <= tol,
-            "ratio {got} is outside {ratio} ± {tol}"
+            (got - expected).abs() <= tol,
+            "ratio {got} is outside {expected} ± {tol} (LockBorder floor {floor})"
         );
         previous = count;
+    }
+
+    // n = 4 has 32 triangles. 12.5% is 4, and the floor is 14, so the floor binds.
+    let small_cells = 4_usize;
+    let small = lod_chain(&wavy(small_cells));
+    let small_floor = locked_border_floor(small_cells);
+    let small_lod0 = level_tris(&small[0]);
+    assert!(small_lod0 / 8 < small_floor);
+    for level in small.iter().skip(1) {
+        let count = level_tris(level);
+        assert!(
+            count >= small_floor,
+            "{count} tris on a {small_cells}×{small_cells} sheet is under the LockBorder floor {small_floor}"
+        );
     }
 }
 
 #[test]
 fn stored_error_bounds_the_deviation_and_is_monotone() {
-    let mesh = wavy(32);
-    let chain = lod_chain(&mesh);
-    let source = &mesh.primitives[0];
-    let mut previous = 0.0_f32;
-    for (i, level) in chain.iter().enumerate() {
-        assert!(level.error_m.is_finite() && level.error_m >= previous);
-        let measured = two_sided(source, &level.primitives[0]);
-        if i == 0 {
-            // The imported surface against itself. Closest-point noise only.
-            assert!(measured <= 1.0e-5, "level 0 self deviation {measured}");
-        } else {
+    for cells in [4_usize, 8, 16, 32] {
+        let mesh = wavy(cells);
+        let started = std::time::Instant::now();
+        let chain = lod_chain(&mesh);
+        let cook_ms = started.elapsed().as_secs_f64() * 1.0e3;
+        let source = &mesh.primitives[0];
+        let mut previous = 0.0_f32;
+        for (i, level) in chain.iter().enumerate() {
             assert!(
-                measured <= level.error_m,
-                "level {i}: surface deviation {measured} ({}) exceeds stored {} ({})",
-                measured.to_bits(),
-                level.error_m,
-                level.error_m.to_bits()
+                level.error_m.is_finite() && level.error_m >= previous,
+                "{cells}×{cells} level {i} error {}",
+                level.error_m
             );
+            let measured = lattice_two_sided(source, &level.primitives[0]);
+            if cells == 4 && i == 1 {
+                let brute = brute_two_sided(source, &level.primitives[0]);
+                assert!(
+                    (measured - brute).abs() <= 1.0e-6,
+                    "lattice bin {measured} disagreed with the full scan {brute}"
+                );
+            }
+            if i == 0 {
+                assert!(
+                    measured <= 1.0e-5,
+                    "{cells}×{cells} level 0 self deviation {measured}"
+                );
+            } else {
+                assert!(
+                    measured <= level.error_m,
+                    "{cells}×{cells} level {i}: lattice {measured} exceeds stored {}",
+                    level.error_m
+                );
+                let slack = 2.0 * LOD_COVER_STOP_M;
+                assert!(
+                    level.error_m <= measured + slack,
+                    "{cells}×{cells} level {i}: stored {} is more than {slack} m above lattice {measured}",
+                    level.error_m
+                );
+            }
+            previous = level.error_m;
         }
-        previous = level.error_m;
+        let coarsest = chain.last().unwrap();
+        assert!(
+            coarsest.error_m > 1.0e-4,
+            "{cells}×{cells} coarsest error {} after {cook_ms:.1} ms should be a real bound",
+            coarsest.error_m
+        );
     }
-    let coarsest = chain.last().unwrap();
-    let measured = two_sided(source, &coarsest.primitives[0]);
-    assert!(
-        measured > 1.0e-4 && coarsest.error_m > 0.0,
-        "coarsest error {} deviation {measured} should be a real bound",
-        coarsest.error_m
-    );
+}
+
+fn brute_two_sided(source: &Primitive, level: &Primitive) -> f32 {
+    brute_deviation(source, level).max(brute_deviation(level, source))
+}
+
+fn brute_deviation(from: &Primitive, onto: &Primitive) -> f32 {
+    let mut worst = 0.0_f32;
+    for point in lattice_points(from) {
+        worst = worst.max(min_distance(point, onto));
+    }
+    worst
 }
 
 #[test]

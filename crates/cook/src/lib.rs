@@ -26,7 +26,7 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
-pub use lod::{lod_chain, LOD_COUNT, LOD_RATIOS, LOD_TARGET_ERROR_M};
+pub use lod::{lod_chain, LOD_COUNT, LOD_COVER_STOP_M, LOD_RATIOS, LOD_TARGET_ERROR_M};
 pub use package::{manifest, package, Manifest};
 pub use parallel::{map_by_cost, Threads};
 pub use texture::{
