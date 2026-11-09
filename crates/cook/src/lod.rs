@@ -7,22 +7,30 @@
 //!
 //! `meshopt_simplify` reports the max collapse residual (`meshopt_SimplifyErrorAbsolute`,
 //! metres). That residual can sit below the distance between the two surfaces.
-//! The stored error is a two-sided upper bound. Distance-to-surface is
-//! 1-Lipschitz, so a sample at a sub-triangle's centroid plus that sample's
-//! covering radius (the farthest vertex) bounds every point of the
-//! sub-triangle. The cook splits until the radius is at most
-//! [`LOD_COVER_STOP_M`], and only where `distance + radius` can raise the
-//! running maximum. The simplifier residual is not that bound: it can sit
-//! above or below the surface distance. A non-finite sample or residual is
-//! not stored as zero.
+//! The stored error is a two-sided upper bound. Distance to one onto triangle
+//! is convex, so its maximum on a sub-triangle is attained at a vertex, and
+//! distance to the whole surface is at most that. The Lipschitz value
+//! `distance(centroid) + r` is the other certificate. The cook stores the
+//! tighter of the two and splits only where that upper can still rise. A
+//! coplanar patch has a second certificate: distance to a plane is convex, so
+//! once the onto triangles that meet a region lie in a thin slab and cover it,
+//! the region stops. A flat sheet therefore stops at the other mesh's triangle
+//! size instead of at [`LOD_COVER_STOP_M`]. A per-mesh query budget stops a
+//! runaway split and
+//! keeps the largest upper still on the heap; that hit is counted by
+//! [`lod_cover_budget_hits`]. The simplifier residual is not the bound: it
+//! can sit above or below the surface distance. A non-finite sample or
+//! residual is not stored as zero.
 //!
 //! Each primitive is simplified with `LockBorder`, so a shared edge between
 //! primitives stays on the imported vertices. An open n×n sheet then keeps its
 //! 4n boundary vertices, and a triangulation of that loop has at least 4n−2
 //! triangles.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
 use genos_load::{GltfMesh, MeshLod, Primitive, Sha256};
 use genos_mesh::{Bvh, MeshTriangle};
@@ -36,14 +44,25 @@ pub const LOD_RATIOS: [f32; 3] = [0.5, 0.25, 0.125];
 const LOD_EIGHTHS: [usize; 3] = [4, 2, 1];
 /// Stamped into the cook hash. Borders stay locked.
 const LOD_LOCK_BORDER: u8 = 1;
-/// Stamped into the cook hash. 2 = 1-Lipschitz cover, both directions.
-const LOD_ERROR_BOUND: u8 = 2;
+/// Stamped into the cook hash. 3 = vertex certificate plus a query budget.
+const LOD_ERROR_BOUND: u8 = 3;
 /// Stop splitting a sub-triangle once its covering radius is at most this, metres.
-/// 1/256 is exact in `f32`. The stored bound is then the measured distance
-/// plus at most this radius.
+/// 1/256 is exact in `f32`. Flat sheets close earlier, when one onto triangle
+/// already certifies the vertices.
 pub const LOD_COVER_STOP_M: f32 = 1.0 / 256.0;
-/// Split cap. A metre-scale triangle reaches the stop long before this.
+/// Most cover queries one mesh may spend across every level and both directions.
+/// Past this the cook keeps the largest upper still on the heap.
+pub const LOD_COVER_QUERY_BUDGET: u32 = 2_000_000;
+/// Split cap for one lineage. The query budget is what bounds the frontier.
 const COVER_DEPTH: u32 = 16;
+/// Times the cook stopped early because [`LOD_COVER_QUERY_BUDGET`] was spent.
+static COVER_BUDGET_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// How many cooks on this process stored a budget-limited error.
+#[must_use]
+pub fn lod_cover_budget_hits() -> u32 {
+    COVER_BUDGET_HITS.load(AtomicOrdering::Relaxed)
+}
 /// Absolute error cap passed to `meshopt_simplify`, metres.
 /// The target is the triangle count. This cap only stops a collapse that
 /// would move the surface by more than this. A game mesh is far smaller.
@@ -58,11 +77,13 @@ pub(crate) fn stamp_settings(hasher: &mut Sha256) {
     hasher.update(&[LOD_LOCK_BORDER, LOD_ERROR_BOUND]);
     hasher.update(&LOD_COVER_STOP_M.to_bits().to_le_bytes());
     hasher.update(&COVER_DEPTH.to_le_bytes());
+    hasher.update(&LOD_COVER_QUERY_BUDGET.to_le_bytes());
 }
 
 /// The four-level chain. Level 0 is `mesh` unchanged.
 #[must_use]
 pub fn lod_chain(mesh: &GltfMesh) -> Vec<MeshLod> {
+    let mut budget = CoverBudget::full();
     let mut levels = Vec::with_capacity(usize::try_from(LOD_COUNT).unwrap_or(4));
     levels.push(MeshLod {
         error_m: 0.0,
@@ -74,7 +95,7 @@ pub fn lod_chain(mesh: &GltfMesh) -> Vec<MeshLod> {
         let mut primitives = Vec::with_capacity(mesh.primitives.len());
         for (index, prim) in mesh.primitives.iter().enumerate() {
             let (next, residual) = simplify_primitive(prim, eighths);
-            let next_error = combined_error(residual, surface_bound(prim, &next));
+            let next_error = combined_error(residual, surface_bound(prim, &next, &mut budget));
             let prev_count = levels
                 .last()
                 .and_then(|level| level.primitives.get(index))
@@ -92,6 +113,9 @@ pub fn lod_chain(mesh: &GltfMesh) -> Vec<MeshLod> {
             error_m: error,
             primitives,
         });
+    }
+    if budget.limited {
+        COVER_BUDGET_HITS.fetch_add(1, AtomicOrdering::Relaxed);
     }
     levels
 }
@@ -139,14 +163,38 @@ fn combined_error(residual: f32, deviation: Option<f32>) -> f32 {
     }
 }
 
+struct CoverBudget {
+    left: u32,
+    limited: bool,
+}
+
+impl CoverBudget {
+    fn full() -> Self {
+        Self {
+            left: LOD_COVER_QUERY_BUDGET,
+            limited: false,
+        }
+    }
+
+    fn take(&mut self, count: u32) -> bool {
+        if self.left < count {
+            self.limited = true;
+            false
+        } else {
+            self.left -= count;
+            true
+        }
+    }
+}
+
 /// Upper bound on the distance between the two surfaces, both directions.
 /// `None` when a sample, a radius, or a closest-point distance is non-finite.
-fn surface_bound(source: &Primitive, level: &Primitive) -> Option<f32> {
+fn surface_bound(source: &Primitive, level: &Primitive, budget: &mut CoverBudget) -> Option<f32> {
     if same_triangle_set(source, level)? {
         return Some(0.0);
     }
-    let fine_to_coarse = directed_bound(source, level)?;
-    let coarse_to_fine = directed_bound(level, source)?;
+    let fine_to_coarse = directed_bound(source, level, budget)?;
+    let coarse_to_fine = directed_bound(level, source, budget)?;
     let worst = fine_to_coarse.max(coarse_to_fine);
     worst.is_finite().then_some(worst)
 }
@@ -178,15 +226,16 @@ fn triangle_keys(prim: &Primitive) -> Option<Vec<[[u32; 3]; 3]>> {
 }
 
 /// One sub-triangle waiting to be split or accepted.
-/// `upper` is `distance(centroid) + covering radius`, an upper bound on the
-/// distance from any point of the sub-triangle to `onto`.
+/// `upper` bounds the distance from any of its points to `onto`.
+/// `closed` means splitting cannot be required: a vertex certificate is
+/// already within [`LOD_COVER_STOP_M`] of the centroid distance, or `r` is.
 #[derive(Clone, Copy)]
 struct Cover {
     corners: [[f32; 3]; 3],
     upper: f32,
-    radius: f32,
     depth: u32,
     id: u64,
+    closed: bool,
 }
 
 impl PartialEq for Cover {
@@ -213,7 +262,7 @@ impl Ord for Cover {
     }
 }
 
-fn directed_bound(from: &Primitive, onto: &Primitive) -> Option<f32> {
+fn directed_bound(from: &Primitive, onto: &Primitive, budget: &mut CoverBudget) -> Option<f32> {
     let onto_tris = primitive_triangles(onto);
     let mut from_tris = Vec::new();
     for tri in from.indices.as_chunks::<3>().0 {
@@ -231,66 +280,699 @@ fn directed_bound(from: &Primitive, onto: &Primitive) -> Option<f32> {
         return None;
     }
     let bvh = Bvh::build(&onto_tris);
-    let reach = diagonal(&from.positions)
-        .max(diagonal(&onto.positions))
-        .max(1.0)
-        * 2.0;
-    if !reach.is_finite() {
+    let surface = OntoSurface {
+        grid: RefCell::new(None),
+        tris: &onto_tris,
+        bvh: &bvh,
+    };
+    let mut scratch = CoverScratch::new(onto_tris.len());
+    let loose = pair_diagonal(&from.positions, &onto.positions);
+    if !loose.is_finite() {
         return None;
     }
     let mut next_id = 0_u64;
     let mut heap = BinaryHeap::new();
     for corners in from_tris {
-        heap.push(cover_of(&bvh, &onto_tris, corners, 0, reach, &mut next_id)?);
+        let id = next_id;
+        next_id = next_id.saturating_add(1);
+        if budget.take(1) {
+            heap.push(cover_of(&surface, corners, 0, loose, id, &mut scratch)?);
+        } else {
+            heap.push(Cover {
+                corners,
+                upper: loose,
+                depth: 0,
+                id,
+                closed: true,
+            });
+        }
     }
     while let Some(region) = heap.pop() {
-        if region.radius <= LOD_COVER_STOP_M || region.depth >= COVER_DEPTH {
+        if region.closed || region.depth >= COVER_DEPTH {
+            return region.upper.is_finite().then_some(region.upper);
+        }
+        // Four children replace this region. Spending fewer would leave a gap.
+        if !budget.take(4) {
             return region.upper.is_finite().then_some(region.upper);
         }
         for child in subdivide(region.corners) {
+            let id = next_id;
+            next_id = next_id.saturating_add(1);
             heap.push(cover_of(
-                &bvh,
-                &onto_tris,
+                &surface,
                 child,
                 region.depth.saturating_add(1),
-                reach,
-                &mut next_id,
+                loose,
+                id,
+                &mut scratch,
             )?);
         }
     }
     Some(0.0)
 }
 
+struct OntoSurface<'a> {
+    tris: &'a [MeshTriangle],
+    bvh: &'a Bvh,
+    /// Built on the first coplanar-cover query. A mesh that closes from the
+    /// vertex certificate never allocates it.
+    grid: RefCell<Option<TriGrid>>,
+}
+
+struct CoverScratch {
+    seen: Vec<u32>,
+    stamp: u32,
+    hits: Vec<u32>,
+}
+
+impl CoverScratch {
+    fn new(triangles: usize) -> Self {
+        Self {
+            seen: vec![0; triangles],
+            stamp: 0,
+            hits: Vec::new(),
+        }
+    }
+}
+
 fn cover_of(
-    bvh: &Bvh,
-    tris: &[MeshTriangle],
+    onto: &OntoSurface<'_>,
     corners: [[f32; 3]; 3],
     depth: u32,
-    reach: f32,
-    next_id: &mut u64,
+    loose: f32,
+    id: u64,
+    scratch: &mut CoverScratch,
 ) -> Option<Cover> {
     let sample = centroid(corners);
     if sample.iter().any(|axis| !axis.is_finite()) {
         return None;
     }
     let radius = covering_radius(sample, corners)?;
-    let distance = match bvh.closest(tris, sample, reach) {
-        Some((_, _, distance)) if distance.is_finite() => padded_distance(distance, sample),
-        _ => return None,
-    };
-    let upper = f32::next_up(distance + radius);
-    if !upper.is_finite() {
+    let (index, _, raw) = onto.bvh.closest(onto.tris, sample, loose)?;
+    if !raw.is_finite() {
         return None;
     }
-    let id = *next_id;
-    *next_id = next_id.saturating_add(1);
-    Some(Cover {
+    let distance = padded_distance(raw, sample);
+    let lipschitz = f32::next_up(distance + radius);
+    let tri = triangle_ref(onto.tris, index)?;
+    let mut vertex_upper = vertex_certificate(tri, corners)?;
+    if vertex_upper > distance + LOD_COVER_STOP_M {
+        for corner in corners {
+            let (corner_index, _, corner_raw) = onto.bvh.closest(onto.tris, corner, loose)?;
+            if !corner_raw.is_finite() {
+                return None;
+            }
+            if corner_index == index {
+                continue;
+            }
+            let corner_tri = triangle_ref(onto.tris, corner_index)?;
+            vertex_upper = vertex_upper.min(vertex_certificate(corner_tri, corners)?);
+        }
+    }
+    let mut upper = lipschitz.min(vertex_upper);
+    let vertex_tight = vertex_upper <= distance + LOD_COVER_STOP_M;
+    let mut closed = radius <= LOD_COVER_STOP_M || vertex_tight;
+    // Below a few stops, one more split is cheaper than a coplanar-cover query,
+    // and a mesh whose triangles are already that small never builds the grid.
+    if !closed && radius > LOD_COVER_STOP_M * 4.0 {
+        if let Some(planar) = planar_cover(onto, corners, index, radius, scratch) {
+            // A loose slab is still a bound, but closing on it would miss the
+            // 2-stop tightness the lattice checks. Keep splitting until the
+            // certificate sits within one stop of the centroid distance.
+            if planar <= upper && planar <= distance + LOD_COVER_STOP_M {
+                upper = planar;
+                closed = true;
+            }
+        }
+    }
+    upper.is_finite().then_some(Cover {
         corners,
         upper,
-        radius,
         depth,
         id,
+        closed,
     })
+}
+
+/// `max` over the sub-triangle of distance to `tri` is attained at a vertex,
+/// because that distance is convex. The surface is no farther than this one triangle.
+fn vertex_certificate(tri: &MeshTriangle, corners: [[f32; 3]; 3]) -> Option<f32> {
+    let mut worst = 0.0_f32;
+    for corner in corners {
+        let closest = tri.closest_point(corner);
+        let span = distance(corner, closest);
+        if !span.is_finite() {
+            return None;
+        }
+        worst = worst.max(padded_distance(span, corner));
+    }
+    let worst = f32::next_up(worst);
+    worst.is_finite().then_some(worst)
+}
+
+fn triangle_ref(tris: &[MeshTriangle], index: u32) -> Option<&MeshTriangle> {
+    usize::try_from(index).ok().and_then(|slot| tris.get(slot))
+}
+
+/// Onto triangles a region may hand to the coplanar-cover test.
+/// More than this and the region is still larger than the onto mesh, so it splits.
+const PLANAR_CANDIDATES: usize = 128;
+/// Area shortfall, as a fraction of the query, that still counts as covered.
+/// The missing cap's height is at most `radius * sqrt(deficit)`.
+const PLANAR_AREA_SLACK: f32 = 1.0e-4;
+
+/// Upper bound from a coplanar cover.
+///
+/// Distance to one triangle is convex, so a vertex certificate is exact once a
+/// single onto triangle contains the query. A flat sheet straddles many onto
+/// triangles; those are coplanar, and distance to a plane is convex too. If the
+/// onto triangles that meet the query lie in a slab of thickness `slab` and
+/// their projections cover the query, every point of the query is within
+/// `plane distance + slab` of the surface. That closes the region at the onto
+/// mesh's triangle size instead of at [`LOD_COVER_STOP_M`].
+fn planar_cover(
+    onto: &OntoSurface<'_>,
+    corners: [[f32; 3]; 3],
+    plane_index: u32,
+    radius: f32,
+    scratch: &mut CoverScratch,
+) -> Option<f32> {
+    let plane_tri = triangle_ref(onto.tris, plane_index)?;
+    let plane = Plane::from_triangle(plane_tri)?;
+    let mut bounds_min = corners[0];
+    let mut bounds_max = corners[0];
+    for corner in corners {
+        for axis in 0..3 {
+            bounds_min[axis] = bounds_min[axis].min(corner[axis]);
+            bounds_max[axis] = bounds_max[axis].max(corner[axis]);
+        }
+    }
+    for axis in 0..3 {
+        bounds_min[axis] -= LOD_COVER_STOP_M;
+        bounds_max[axis] += LOD_COVER_STOP_M;
+    }
+    scratch.stamp = scratch.stamp.wrapping_add(1);
+    if scratch.stamp == 0 {
+        scratch.seen.fill(0);
+        scratch.stamp = 1;
+    }
+    scratch.hits.clear();
+    {
+        let mut slot = onto.grid.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(TriGrid::build(onto.tris));
+        }
+        let grid = slot.as_ref()?;
+        grid.collect(
+            bounds_min,
+            bounds_max,
+            &mut scratch.seen,
+            scratch.stamp,
+            &mut scratch.hits,
+            PLANAR_CANDIDATES.saturating_add(1),
+        );
+    }
+    if scratch.hits.is_empty() || scratch.hits.len() > PLANAR_CANDIDATES {
+        return None;
+    }
+    scratch.hits.sort_unstable();
+    let centre = centroid(corners);
+    let slab = slab_of_nearby(
+        onto.tris,
+        &mut scratch.hits,
+        &plane,
+        centre,
+        radius + LOD_COVER_STOP_M,
+    )?;
+    let mut query_height = 0.0_f32;
+    for corner in corners {
+        let height = plane.height(corner);
+        if !height.is_finite() {
+            return None;
+        }
+        query_height = query_height.max(height);
+    }
+    let query_2d = corners.map(|corner| plane.project(corner));
+    let query_area = polygon_area(&query_2d);
+    if query_area <= 0.0 {
+        return None;
+    }
+    let mut covered = 0.0_f32;
+    let mut projected = Vec::with_capacity(scratch.hits.len());
+    for index in &scratch.hits {
+        let tri = triangle_ref(onto.tris, *index)?;
+        let flat = tri.positions.map(|corner| plane.project(corner));
+        if triangle_area_2d(flat) <= 0.0 {
+            continue;
+        }
+        projected.push(flat);
+        covered += polygon_area(&clip_to_query(&query_2d, &flat));
+    }
+    if overlaps_in_plane(&projected) {
+        return None;
+    }
+    let deficit = (query_area - covered).max(0.0) / query_area;
+    if deficit > PLANAR_AREA_SLACK || !covered.is_finite() {
+        return None;
+    }
+    let gap = radius * deficit.sqrt();
+    let upper = f32::next_up(query_height + slab + gap);
+    upper.is_finite().then_some(upper)
+}
+
+/// Slab thickness of the onto triangles that come within `reach` of `centre`.
+/// Drops the rest. `None` when a nearby triangle leaves the slab, or none remain.
+fn slab_of_nearby(
+    tris: &[MeshTriangle],
+    hits: &mut Vec<u32>,
+    plane: &Plane,
+    centre: [f32; 3],
+    reach: f32,
+) -> Option<f32> {
+    let mut slab = 0.0_f32;
+    let mut near = Vec::new();
+    for index in hits.iter() {
+        let tri = triangle_ref(tris, *index)?;
+        let closest = tri.closest_point(centre);
+        if distance(closest, centre) > reach {
+            continue;
+        }
+        let mut local = plane.height(closest);
+        for corner in tri.positions {
+            if distance(corner, centre) <= reach {
+                local = local.max(plane.height(corner));
+            }
+        }
+        if !local.is_finite() || local > LOD_COVER_STOP_M {
+            return None;
+        }
+        slab = slab.max(local);
+        near.push(*index);
+    }
+    if near.is_empty() {
+        return None;
+    }
+    hits.clone_from(&near);
+    Some(slab)
+}
+
+struct Plane {
+    normal: [f32; 3],
+    offset: f32,
+    tangent: [f32; 3],
+    bitangent: [f32; 3],
+}
+
+impl Plane {
+    fn from_triangle(tri: &MeshTriangle) -> Option<Self> {
+        if tri.area() <= 0.0 {
+            return None;
+        }
+        let normal = tri.face_normal();
+        let offset = dot3(normal, tri.positions[0]);
+        if !offset.is_finite() || normal.iter().any(|axis| !axis.is_finite()) {
+            return None;
+        }
+        let helper = if normal[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let tangent = normalize3(cross3(normal, helper))?;
+        let bitangent = cross3(normal, tangent);
+        Some(Self {
+            normal,
+            offset,
+            tangent,
+            bitangent,
+        })
+    }
+
+    fn height(&self, point: [f32; 3]) -> f32 {
+        (dot3(self.normal, point) - self.offset).abs()
+    }
+
+    fn project(&self, point: [f32; 3]) -> [f32; 2] {
+        [dot3(self.tangent, point), dot3(self.bitangent, point)]
+    }
+}
+
+fn overlaps_in_plane(triangles: &[[[f32; 2]; 3]]) -> bool {
+    for (left_index, left) in triangles.iter().enumerate() {
+        for right in triangles.iter().skip(left_index.saturating_add(1)) {
+            if triangles_overlap_2d(*left, *right) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn triangles_overlap_2d(left: [[f32; 2]; 3], right: [[f32; 2]; 3]) -> bool {
+    for corner in left {
+        if strictly_inside(right, corner) {
+            return true;
+        }
+    }
+    for corner in right {
+        if strictly_inside(left, corner) {
+            return true;
+        }
+    }
+    for edge in 0..3 {
+        let next = (edge + 1) % 3;
+        for other in 0..3 {
+            let other_next = (other + 1) % 3;
+            if segments_cross(left[edge], left[next], right[other], right[other_next]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn strictly_inside(triangle: [[f32; 2]; 3], point: [f32; 2]) -> bool {
+    let area = orient2(triangle[0], triangle[1], triangle[2]);
+    let scale = area.abs().max(1.0);
+    if area.abs() <= scale * 1.0e-6 {
+        return false;
+    }
+    let weight_a = orient2(triangle[1], triangle[2], point) / area;
+    let weight_b = orient2(triangle[2], triangle[0], point) / area;
+    let weight_c = orient2(triangle[0], triangle[1], point) / area;
+    weight_a > 1.0e-5 && weight_b > 1.0e-5 && weight_c > 1.0e-5
+}
+
+fn segments_cross(
+    start: [f32; 2],
+    end: [f32; 2],
+    other_start: [f32; 2],
+    other_end: [f32; 2],
+) -> bool {
+    let left = orient2(start, end, other_start);
+    let right = orient2(start, end, other_end);
+    let across = orient2(other_start, other_end, start);
+    let back = orient2(other_start, other_end, end);
+    left * right < 0.0 && across * back < 0.0
+}
+
+fn orient2(origin: [f32; 2], edge: [f32; 2], point: [f32; 2]) -> f32 {
+    (edge[0] - origin[0]) * (point[1] - origin[1]) - (edge[1] - origin[1]) * (point[0] - origin[0])
+}
+
+fn clip_to_query(query: &[[f32; 2]; 3], subject: &[[f32; 2]; 3]) -> Vec<[f32; 2]> {
+    let mut polygon: Vec<[f32; 2]> = subject.to_vec();
+    for edge in 0..3 {
+        if polygon.is_empty() {
+            break;
+        }
+        let start = query[edge];
+        let end = query[(edge + 1) % 3];
+        let keep_positive = orient2(start, end, query[(edge + 2) % 3]) >= 0.0;
+        let mut next = Vec::with_capacity(polygon.len() + 1);
+        let mut previous = polygon[polygon.len() - 1];
+        let mut previous_inside = half_inside(start, end, previous, keep_positive);
+        for point in polygon.drain(..) {
+            let inside = half_inside(start, end, point, keep_positive);
+            if inside != previous_inside {
+                if let Some(hit) = segment_half_hit(start, end, previous, point) {
+                    next.push(hit);
+                }
+            }
+            if inside {
+                next.push(point);
+            }
+            previous = point;
+            previous_inside = inside;
+        }
+        polygon = next;
+    }
+    polygon
+}
+
+fn half_inside(start: [f32; 2], end: [f32; 2], point: [f32; 2], keep_positive: bool) -> bool {
+    let side = orient2(start, end, point);
+    if keep_positive {
+        side >= 0.0
+    } else {
+        side <= 0.0
+    }
+}
+
+fn segment_half_hit(
+    start: [f32; 2],
+    end: [f32; 2],
+    from: [f32; 2],
+    to: [f32; 2],
+) -> Option<[f32; 2]> {
+    let from_side = orient2(start, end, from);
+    let to_side = orient2(start, end, to);
+    let denom = from_side - to_side;
+    if denom.abs() <= f32::EPSILON {
+        return None;
+    }
+    let weight = from_side / denom;
+    if !(0.0..=1.0).contains(&weight) {
+        return None;
+    }
+    Some([
+        from[0] + (to[0] - from[0]) * weight,
+        from[1] + (to[1] - from[1]) * weight,
+    ])
+}
+
+fn polygon_area(polygon: &[[f32; 2]]) -> f32 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0_f32;
+    for (index, point) in polygon.iter().enumerate() {
+        let next = polygon[(index + 1) % polygon.len()];
+        sum += point[0] * next[1] - next[0] * point[1];
+    }
+    (sum * 0.5).abs()
+}
+
+fn triangle_area_2d(triangle: [[f32; 2]; 3]) -> f32 {
+    polygon_area(&triangle)
+}
+
+fn dot3(left: [f32; 3], right: [f32; 3]) -> f32 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+fn cross3(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+    [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+}
+
+fn normalize3(value: [f32; 3]) -> Option<[f32; 3]> {
+    let length = dot3(value, value).sqrt();
+    if length > 0.0 && length.is_finite() {
+        Some([value[0] / length, value[1] / length, value[2] / length])
+    } else {
+        None
+    }
+}
+
+struct TriGrid {
+    origin: [f32; 3],
+    cell: f32,
+    dims: [usize; 3],
+    offsets: Vec<u32>,
+    indices: Vec<u32>,
+}
+
+impl TriGrid {
+    fn build(tris: &[MeshTriangle]) -> Self {
+        let mut bounds_min = [f32::INFINITY; 3];
+        let mut bounds_max = [f32::NEG_INFINITY; 3];
+        for tri in tris {
+            for corner in tri.positions {
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(corner[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(corner[axis]);
+                }
+            }
+        }
+        if tris.is_empty() || !bounds_min[0].is_finite() {
+            return Self {
+                origin: [0.0; 3],
+                cell: 1.0,
+                dims: [1, 1, 1],
+                offsets: vec![0, 0],
+                indices: Vec::new(),
+            };
+        }
+        let span = [0, 1, 2].map(|axis| (bounds_max[axis] - bounds_min[axis]).max(0.0));
+        let longest = span
+            .into_iter()
+            .fold(0.0_f32, f32::max)
+            .max(LOD_COVER_STOP_M);
+        let cell = (longest / 32.0).max(LOD_COVER_STOP_M);
+        let dims = span.map(|axis| grid_dim(axis, cell));
+        let bins = dims[0]
+            .saturating_mul(dims[1])
+            .saturating_mul(dims[2])
+            .max(1);
+        let mut counts = vec![0_u32; bins];
+        for tri in tris {
+            for slot in bin_slots(bounds_min, cell, dims, tri_bounds(tri)) {
+                if let Some(count) = counts.get_mut(slot) {
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        let mut offsets = Vec::with_capacity(bins + 1);
+        offsets.push(0_u32);
+        for count in &counts {
+            let last = offsets.last().copied().unwrap_or(0);
+            offsets.push(last.saturating_add(*count));
+        }
+        let total = usize::try_from(offsets.last().copied().unwrap_or(0)).unwrap_or(0);
+        let mut indices = vec![0_u32; total];
+        let mut cursor = offsets.clone();
+        for (index, tri) in tris.iter().enumerate() {
+            let Ok(stored) = u32::try_from(index) else {
+                continue;
+            };
+            for slot in bin_slots(bounds_min, cell, dims, tri_bounds(tri)) {
+                let Some(at) = cursor.get_mut(slot) else {
+                    continue;
+                };
+                if let Some(dest) = usize::try_from(*at)
+                    .ok()
+                    .and_then(|pos| indices.get_mut(pos))
+                {
+                    *dest = stored;
+                    *at = at.saturating_add(1);
+                }
+            }
+        }
+        Self {
+            origin: bounds_min,
+            cell,
+            dims,
+            offsets,
+            indices,
+        }
+    }
+
+    fn collect(
+        &self,
+        bounds_min: [f32; 3],
+        bounds_max: [f32; 3],
+        seen: &mut [u32],
+        stamp: u32,
+        out: &mut Vec<u32>,
+        limit: usize,
+    ) {
+        for slot in bin_slots(self.origin, self.cell, self.dims, (bounds_min, bounds_max)) {
+            let Some(start) = self.offsets.get(slot).copied() else {
+                continue;
+            };
+            let Some(end) = self.offsets.get(slot + 1).copied() else {
+                continue;
+            };
+            let Ok(from) = usize::try_from(start) else {
+                continue;
+            };
+            let Ok(to) = usize::try_from(end) else {
+                continue;
+            };
+            for index in self.indices.get(from..to).unwrap_or(&[]) {
+                let Ok(seen_at) = usize::try_from(*index) else {
+                    continue;
+                };
+                if let Some(mark) = seen.get_mut(seen_at) {
+                    if *mark != stamp {
+                        *mark = stamp;
+                        out.push(*index);
+                        if out.len() >= limit {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tri_bounds(tri: &MeshTriangle) -> ([f32; 3], [f32; 3]) {
+    let mut bounds_min = tri.positions[0];
+    let mut bounds_max = tri.positions[0];
+    for corner in tri.positions {
+        for axis in 0..3 {
+            bounds_min[axis] = bounds_min[axis].min(corner[axis]);
+            bounds_max[axis] = bounds_max[axis].max(corner[axis]);
+        }
+    }
+    (bounds_min, bounds_max)
+}
+
+fn grid_dim(span: f32, cell: f32) -> usize {
+    if cell <= 0.0 {
+        return 1;
+    }
+    lattice_slot(span / cell, 48).saturating_add(1).clamp(1, 48)
+}
+
+fn lattice_slot(value: f32, cap: usize) -> usize {
+    if !(value.is_finite() && value > 0.0) || cap == 0 {
+        return 0;
+    }
+    let mut slot = 0_usize;
+    let mut left = value;
+    let last = cap - 1;
+    while left >= 1.0 && slot < last {
+        left -= 1.0;
+        slot += 1;
+    }
+    slot
+}
+
+fn bin_slots(
+    origin: [f32; 3],
+    cell: f32,
+    dims: [usize; 3],
+    bounds: ([f32; 3], [f32; 3]),
+) -> Vec<usize> {
+    if cell <= 0.0 {
+        return Vec::new();
+    }
+    let lo = [0, 1, 2].map(|axis| lattice_slot((bounds.0[axis] - origin[axis]) / cell, dims[axis]));
+    let hi = [0, 1, 2].map(|axis| lattice_slot((bounds.1[axis] - origin[axis]) / cell, dims[axis]));
+    let mut slots = Vec::new();
+    let mut z = lo[2];
+    loop {
+        let mut y = lo[1];
+        loop {
+            let mut x = lo[0];
+            loop {
+                slots.push(
+                    (z.saturating_mul(dims[1]).saturating_add(y))
+                        .saturating_mul(dims[0])
+                        .saturating_add(x),
+                );
+                if x >= hi[0] {
+                    break;
+                }
+                x += 1;
+            }
+            if y >= hi[1] {
+                break;
+            }
+            y += 1;
+        }
+        if z >= hi[2] {
+            break;
+        }
+        z += 1;
+    }
+    slots
 }
 
 /// Farthest vertex from `sample`. Distance to a fixed point is convex, so the
@@ -370,10 +1052,11 @@ fn primitive_triangles(level: &Primitive) -> Vec<MeshTriangle> {
         .collect()
 }
 
-fn diagonal(points: &[[f32; 3]]) -> f32 {
+/// Upper bound on the distance between any point of `from` and any point of `onto`.
+fn pair_diagonal(from: &[[f32; 3]], onto: &[[f32; 3]]) -> f32 {
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];
-    for point in points {
+    for point in from.iter().chain(onto.iter()) {
         for axis in 0..3 {
             if let (Some(lo), Some(hi), Some(value)) =
                 (min.get_mut(axis), max.get_mut(axis), point.get(axis))
@@ -385,7 +1068,12 @@ fn diagonal(points: &[[f32; 3]]) -> f32 {
     }
     let span = [0, 1, 2]
         .map(|axis| max.get(axis).copied().unwrap_or(0.0) - min.get(axis).copied().unwrap_or(0.0));
-    (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt()
+    let diagonal = (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
+    if diagonal.is_finite() {
+        f32::next_up(diagonal.max(1.0))
+    } else {
+        diagonal
+    }
 }
 
 fn indexed(prim: &Primitive) -> bool {
@@ -492,7 +1180,10 @@ pub(crate) fn levels_of(mesh: &crate::CookedMesh) -> Vec<MeshLod> {
 
 #[cfg(test)]
 mod tests {
-    use super::{combined_error, surface_bound, LOD_COVER_STOP_M, LOD_EIGHTHS, LOD_RATIOS};
+    use super::{
+        combined_error, directed_bound, surface_bound, CoverBudget, LOD_COVER_STOP_M, LOD_EIGHTHS,
+        LOD_RATIOS,
+    };
     use genos_load::Primitive;
 
     #[test]
@@ -513,7 +1204,8 @@ mod tests {
         };
         let level = source.clone();
         source.positions[0][2] = f32::NAN;
-        assert!(surface_bound(&source, &level).is_none());
+        let mut budget = CoverBudget::full();
+        assert!(surface_bound(&source, &level, &mut budget).is_none());
         let stored = combined_error(0.0, None);
         assert!(!stored.is_finite());
         assert_ne!(stored.to_bits(), 0.0_f32.to_bits());
@@ -530,7 +1222,9 @@ mod tests {
 
     #[test]
     fn the_cover_bounds_a_rigid_lift() {
-        let bound = surface_bound(&flat_triangle(0.0), &flat_triangle(0.2)).unwrap_or(f32::NAN);
+        let mut budget = CoverBudget::full();
+        let bound = surface_bound(&flat_triangle(0.0), &flat_triangle(0.2), &mut budget)
+            .unwrap_or(f32::NAN);
         assert!(
             bound >= 0.2,
             "lift of 0.2 m stored {bound}, which is under the displacement"
@@ -539,5 +1233,125 @@ mod tests {
             bound <= 0.2 + LOD_COVER_STOP_M,
             "lift of 0.2 m stored {bound}, looser than the stop radius"
         );
+        assert!(!budget.limited);
+    }
+
+    #[test]
+    fn a_spent_query_budget_still_bounds_the_surface() {
+        let fine = grid_primitive(4, 1.0);
+        let coarse = Primitive {
+            positions: vec![[0.0, 0.0, 0.25], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            ..Primitive::default()
+        };
+        let mut budget = CoverBudget {
+            left: 1,
+            limited: false,
+        };
+        let stored = directed_bound(&coarse, &fine, &mut budget).unwrap_or(f32::NAN);
+        assert!(budget.limited);
+        assert!(stored.is_finite());
+        let measured = lattice_against(&coarse, &fine, 8);
+        assert!(
+            measured <= stored,
+            "lattice {measured} exceeds the budget-limited bound {stored}"
+        );
+    }
+
+    fn grid_primitive(cells: usize, metres: f32) -> Primitive {
+        let n = cells + 1;
+        let mut positions = Vec::new();
+        let span = f32::from(u16::try_from(cells).unwrap_or(1));
+        for y in 0..=cells {
+            for x in 0..=cells {
+                let fx = f32::from(u16::try_from(x).unwrap_or(0)) / span;
+                let fy = f32::from(u16::try_from(y).unwrap_or(0)) / span;
+                positions.push([fx * metres, fy * metres, 0.0]);
+            }
+        }
+        let mut indices = Vec::new();
+        let row = u32::try_from(n).unwrap_or(0);
+        for y in 0..cells {
+            for x in 0..cells {
+                let i = u32::try_from(y * n + x).unwrap_or(0);
+                indices.extend([i, i + 1, i + row, i + 1, i + row + 1, i + row]);
+            }
+        }
+        Primitive {
+            positions,
+            indices,
+            ..Primitive::default()
+        }
+    }
+
+    fn lattice_against(from: &Primitive, onto: &Primitive, segments: usize) -> f32 {
+        let targets: Vec<genos_mesh::MeshTriangle> = onto
+            .indices
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter_map(|tri| {
+                let corner = |slot: usize| {
+                    tri.get(slot).and_then(|index| {
+                        usize::try_from(*index)
+                            .ok()
+                            .and_then(|slot| onto.positions.get(slot).copied())
+                    })
+                };
+                Some(genos_mesh::MeshTriangle::flat(
+                    [corner(0)?, corner(1)?, corner(2)?],
+                    0,
+                    true,
+                ))
+            })
+            .collect();
+        let mut worst = 0.0_f32;
+        let denom = f32::from(u16::try_from(segments).unwrap_or(1)).max(1.0);
+        for tri in from.indices.as_chunks::<3>().0 {
+            let corner = |slot: usize| {
+                tri.get(slot).and_then(|index| {
+                    usize::try_from(*index)
+                        .ok()
+                        .and_then(|slot| from.positions.get(slot).copied())
+                })
+            };
+            let Some(corner_a) = corner(0) else { continue };
+            let Some(corner_b) = corner(1) else { continue };
+            let Some(corner_c) = corner(2) else { continue };
+            for step_a in 0..=segments {
+                let rest = segments - step_a;
+                for step_b in 0..=rest {
+                    let step_c = rest - step_b;
+                    let weight = |step: usize, corner: [f32; 3], axis: usize| {
+                        f32::from(u16::try_from(step).unwrap_or(0))
+                            * corner.get(axis).copied().unwrap_or(0.0)
+                    };
+                    let point = [
+                        (weight(step_a, corner_a, 0)
+                            + weight(step_b, corner_b, 0)
+                            + weight(step_c, corner_c, 0))
+                            / denom,
+                        (weight(step_a, corner_a, 1)
+                            + weight(step_b, corner_b, 1)
+                            + weight(step_c, corner_c, 1))
+                            / denom,
+                        (weight(step_a, corner_a, 2)
+                            + weight(step_b, corner_b, 2)
+                            + weight(step_c, corner_c, 2))
+                            / denom,
+                    ];
+                    let mut best = f32::MAX;
+                    for target in &targets {
+                        let hit = target.closest_point(point);
+                        let span = [point[0] - hit[0], point[1] - hit[1], point[2] - hit[2]];
+                        let dist =
+                            (span[0] * span[0] + span[1] * span[1] + span[2] * span[2]).sqrt();
+                        best = best.min(dist);
+                    }
+                    worst = worst.max(best);
+                }
+            }
+        }
+        worst
     }
 }

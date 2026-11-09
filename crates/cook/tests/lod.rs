@@ -17,6 +17,37 @@ fn unit(n: usize) -> f32 {
     f32::from(u16::try_from(n).unwrap_or(u16::MAX))
 }
 
+fn scaled_sheet(cells: usize, metres: f32, amplitude: f32) -> GltfMesh {
+    let n = cells + 1;
+    let mut positions = Vec::with_capacity(n * n);
+    let span = unit(cells);
+    for y in 0..n {
+        for x in 0..n {
+            let fx = unit(x) / span;
+            let fy = unit(y) / span;
+            let z =
+                (fx * std::f32::consts::PI).sin() * (fy * std::f32::consts::PI).sin() * amplitude;
+            positions.push([fx * metres, fy * metres, z]);
+        }
+    }
+    let mut indices = Vec::with_capacity(cells * cells * 6);
+    for y in 0..cells {
+        for x in 0..cells {
+            let i = u32::try_from(y * n + x).unwrap();
+            let row = u32::try_from(n).unwrap();
+            indices.extend([i, i + 1, i + row, i + 1, i + row + 1, i + row]);
+        }
+    }
+    GltfMesh {
+        name: Some(String::from("sheet")),
+        primitives: vec![Primitive {
+            positions,
+            indices,
+            ..Primitive::default()
+        }],
+    }
+}
+
 fn wavy(cells: usize) -> GltfMesh {
     let n = cells + 1;
     let mut positions = Vec::with_capacity(n * n);
@@ -147,6 +178,39 @@ fn lattice_points(prim: &Primitive) -> Vec<[f32; 3]> {
     out
 }
 
+fn lattice_points_fixed(prim: &Primitive, segments: usize) -> Vec<[f32; 3]> {
+    let mut out = Vec::new();
+    let denom = usize_f32(segments).max(1.0);
+    for tri in prim.indices.as_chunks::<3>().0 {
+        let Some(corner_a) = vertex(prim, tri[0]) else {
+            continue;
+        };
+        let Some(corner_b) = vertex(prim, tri[1]) else {
+            continue;
+        };
+        let Some(corner_c) = vertex(prim, tri[2]) else {
+            continue;
+        };
+        for i in 0..=segments {
+            let rest = segments - i;
+            for j in 0..=rest {
+                let weight_c = rest - j;
+                out.push(bary(
+                    corner_a,
+                    corner_b,
+                    corner_c,
+                    [
+                        usize_f32(i) / denom,
+                        usize_f32(j) / denom,
+                        usize_f32(weight_c) / denom,
+                    ],
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn usize_f32(value: usize) -> f32 {
     match u16::try_from(value) {
         Ok(narrow) => f32::from(narrow),
@@ -228,11 +292,19 @@ impl LatticeOracle {
     }
 
     fn deviation(from: &Primitive, onto: &Primitive) -> f32 {
+        Self::deviation_of(onto, lattice_points(from))
+    }
+
+    fn deviation_fixed(from: &Primitive, onto: &Primitive, segments: usize) -> f32 {
+        Self::deviation_of(onto, lattice_points_fixed(from, segments))
+    }
+
+    fn deviation_of(onto: &Primitive, points: Vec<[f32; 3]>) -> f32 {
         let oracle = Self::build(onto);
         let mut seen = vec![0_u32; oracle.tris.len()];
         let mut stamp = 0_u32;
         let mut worst = 0.0_f32;
-        for point in lattice_points(from) {
+        for point in points {
             stamp = stamp.wrapping_add(1);
             if stamp == 0 {
                 seen.fill(0);
@@ -553,6 +625,44 @@ fn stored_error_bounds_the_deviation_and_is_monotone() {
             coarsest.error_m > 1.0e-4,
             "{cells}×{cells} coarsest error {} after {cook_ms:.1} ms should be a real bound",
             coarsest.error_m
+        );
+    }
+}
+
+/// Coplanar covers close at the other mesh's triangle size, so these sheets
+/// follow triangle count. The old 4 mm cover took 34.5 s on a flat 8 m sheet
+/// and did not return on a flat 16 m sheet. 2 s is many times the release cost
+/// (tens of milliseconds) and still above the debug cost, and it fails a
+/// runaway split.
+#[test]
+fn large_sheets_finish_quickly_and_the_bound_holds() {
+    let cases = [
+        ("flat 8 m", scaled_sheet(32, 8.0, 0.0)),
+        ("flat 16 m", scaled_sheet(32, 16.0, 0.0)),
+        ("floor 20 m", scaled_sheet(20, 20.0, 0.0)),
+        ("wavy 40 m", scaled_sheet(40, 40.0, 0.25)),
+    ];
+    for (name, mesh) in cases {
+        let started = std::time::Instant::now();
+        let chain = lod_chain(&mesh);
+        let secs = started.elapsed().as_secs_f64();
+        assert!(
+            secs < 2.0,
+            "{name} cooked in {secs:.2} s, over the 2 s budget"
+        );
+        let source = &mesh.primitives[0];
+        let coarsest = chain.last().unwrap();
+        let measured = LatticeOracle::deviation_fixed(source, &coarsest.primitives[0], 8).max(
+            LatticeOracle::deviation_fixed(&coarsest.primitives[0], source, 8),
+        );
+        assert!(
+            measured <= coarsest.error_m + 1.0e-5,
+            "{name}: lattice {measured} exceeds stored {}",
+            coarsest.error_m
+        );
+        assert!(
+            coarsest.error_m.is_finite(),
+            "{name} stored a non-finite error"
         );
     }
 }
