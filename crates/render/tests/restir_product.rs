@@ -456,7 +456,8 @@ fn gi_1bounce_quiet_frames_read_the_reservoir() {
 }
 
 /// A forced prepare failure is the labelled exact sum. The next reservoir
-/// frame does not keep that hold.
+/// frame does not keep that hold. Mode hits used to return the previous
+/// reservoir colour from the quiet-view hold once bit 21 was clear.
 #[test]
 fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
     let _diag = LampDiag;
@@ -470,51 +471,61 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
     });
     let world = hall(8);
     let camera = pose(0.0);
-    // Mode reuse writes the 32-frame exact record. GI and probes arm the hold.
-    renderer.set_lighting_settings(quiet_restir(LampPickMode::Reuse));
-    draw(window, renderer, &world, &camera);
-    draw(window, renderer, &world, &camera);
-    let live = renderer.lighting_lamp_pick_counts();
-    assert!(live.restir > 0, "the reservoir did not shade ({live:?})");
-    assert_eq!(
-        renderer.lighting_restir_prepare_failures(),
-        0,
-        "a live frame counted a prepare failure"
-    );
-    renderer.force_restir_prepare_failure(true);
-    draw(window, renderer, &world, &camera);
-    let failed = renderer.lighting_lamp_pick_counts();
-    eprintln!(
-        "restir prepare fail exact {} restir {} failures {}",
-        failed.exact,
-        failed.restir,
-        renderer.lighting_restir_prepare_failures()
-    );
-    assert!(
-        renderer.lighting_restir_prepare_failures() >= 1,
-        "the forced failure was not counted"
-    );
-    assert!(
-        failed.exact > 0,
-        "the failed frame did not shade the labelled exact sum ({failed:?})"
-    );
-    assert_eq!(
-        failed.restir, 0,
-        "the failed frame still counted a reservoir sample ({failed:?})"
-    );
-    renderer.force_restir_prepare_failure(false);
-    draw(window, renderer, &world, &camera);
-    let again = renderer.lighting_lamp_pick_counts();
-    eprintln!(
-        "restir after fail exact {} restir {}",
-        again.exact, again.restir
-    );
-    assert_eq!(
-        again.exact, 0,
-        "the exact hold survived into a restir frame ({again:?})"
-    );
-    assert!(
-        again.restir > 0,
-        "the frame after the failure did not read the reservoir ({again:?})"
-    );
+    // GI and probes arm the hold. Reuse writes the exact counter. Hits does
+    // not: the full walk is the ray count, which the hold would leave at 0.
+    for mode in [LampPickMode::Reuse, LampPickMode::Hits] {
+        renderer.force_restir_prepare_failure(false);
+        renderer.set_lighting_settings(quiet_restir(mode));
+        draw(window, renderer, &world, &camera);
+        draw(window, renderer, &world, &camera);
+        let live = renderer.lighting_lamp_pick_counts();
+        let failures = renderer.lighting_restir_prepare_failures();
+        assert!(
+            live.restir > 0,
+            "{mode:?} did not shade the reservoir ({live:?})"
+        );
+        renderer.force_restir_prepare_failure(true);
+        draw(window, renderer, &world, &camera);
+        let failed = renderer.lighting_lamp_pick_counts();
+        eprintln!(
+            "restir prepare fail {mode:?} rays {} exact {} restir {} failures {}",
+            failed.pixels,
+            failed.exact,
+            failed.restir,
+            renderer.lighting_restir_prepare_failures()
+        );
+        assert!(
+            renderer.lighting_restir_prepare_failures() > failures,
+            "{mode:?} did not count the forced failure"
+        );
+        assert_eq!(
+            failed.restir, 0,
+            "{mode:?} still counted a reservoir sample ({failed:?})"
+        );
+        assert!(
+            failed.pixels > live.pixels,
+            "{mode:?} kept the previous colour instead of the labelled sum ({failed:?} vs {live:?})"
+        );
+        if mode == LampPickMode::Reuse {
+            assert!(
+                failed.exact > 0,
+                "reuse did not shade the labelled exact sum ({failed:?})"
+            );
+        }
+        renderer.force_restir_prepare_failure(false);
+        draw(window, renderer, &world, &camera);
+        let again = renderer.lighting_lamp_pick_counts();
+        eprintln!(
+            "restir after fail {mode:?} exact {} restir {}",
+            again.exact, again.restir
+        );
+        assert_eq!(
+            again.exact, 0,
+            "{mode:?} kept the exact hold into a restir frame ({again:?})"
+        );
+        assert!(
+            again.restir > 0,
+            "{mode:?} did not read the reservoir after the failure ({again:?})"
+        );
+    }
 }

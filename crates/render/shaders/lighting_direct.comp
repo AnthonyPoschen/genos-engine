@@ -298,12 +298,14 @@ void main() {
             // races the pixel that owns it. The next frame reads this slot.
             // Bit 21 with bits 18-20 clear is the production reservoir, including
             // mode off and mode hits. A quiet view must not return last frame's
-            // colour and skip that sample. The labelled exact sum (bit 19) and
-            // restir-off keep the hold. A stored exact record cannot survive
-            // into a frame that binds the reservoir.
+            // colour and skip that sample. Bit 19 is the labelled exact sum: it
+            // disables this signature hold, so a failed prepare in mode hits
+            // shades that sum instead of the previous reservoir colour. Mode 4
+            // may still hold a stored exact record. Restir-off keeps the hold.
+            // A stored exact record cannot survive into a reservoir frame.
             bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
                 && ((pc.lamp.y >> 18u) & 7u) == 0u;
-            bool hold = !restir_product && pc.lamp.x != 4u;
+            bool hold = !restir_product && !lamp_pick_force_exact() && pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
             if (!restir_product && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {

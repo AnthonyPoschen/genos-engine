@@ -100,7 +100,8 @@ bool lamp_pick_diag() {
 
 // The noise gate sets this so a still view keeps tracing the random path.
 // Production leaves it clear and does not take this hold: a restir product
-// pixel shades the reservoir on a quiet frame. The labelled exact path holds.
+// pixel shades the reservoir on a quiet frame. Bit 19 skips this signature
+// hold so a failed prepare shades the labelled exact sum.
 bool lamp_pick_hold_off() {
     return ((pc.lamp.y >> 18u) & 1u) != 0u;
 }
