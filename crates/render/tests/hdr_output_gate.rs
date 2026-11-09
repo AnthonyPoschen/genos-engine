@@ -1452,7 +1452,11 @@ fn measure_budget_device() -> Result<Budget, String> {
             }
             let got = renderer.hdr_vram_bytes();
             let encode = genos_render::post_encode_resident(&hdr);
-            let want = post_chain(got_w, got_h, &hdr, encode).mib() * 1024.0 * 1024.0;
+            let chain = post_chain(got_w, got_h, &hdr, encode);
+            let Some(device_bytes) = renderer.post_device_bytes(&chain) else {
+                return Err(format!("{name} {mode:?} device {got} does not match the chain"));
+            };
+            let want = genos_render::bytes_to_mib(device_bytes) * 1024.0 * 1024.0;
             if (got - want).abs() > 0.5 {
                 return Err(format!("{name} {mode:?} device {got} formula {want}"));
             }

@@ -115,7 +115,7 @@ pub(crate) struct Lighting {
     hdr_encode: Buffer,
     /// Shared 16-byte descriptor stand-in. AgX is evaluated, so the lattice is not resident.
     agx_lut: Buffer,
-    /// Bloom mip pyramid, RGB16F, finest level first. No full-resolution image and no alpha.
+    /// Bloom mip pyramid. Finest level is RGBA16F. Later levels are RGB16F pairs. No full-resolution image.
     bloom: Buffer,
     /// Last still-check share from the GPU meter. Zero until a comparison exists.
     still_pop: f64,
@@ -2586,8 +2586,19 @@ impl Gpu {
                 pc.as_ptr() as *const c_void,
             );
             let texels = u64::from(dst_w).saturating_mul(u64::from(dst_h));
-            let pairs = u32::try_from(texels.div_ceil(2)).unwrap_or(1);
-            (self.fns.cmd_dispatch)(self.cmd, pairs.div_ceil(64).max(1), 1, 1);
+            // Word 0 is the RGBA16F mip: one thread per texel, 8×8. Later mips
+            // pack two texels per thread; a group is still 64 invocations.
+            if dst == 0 {
+                (self.fns.cmd_dispatch)(
+                    self.cmd,
+                    dst_w.div_ceil(8).max(1),
+                    dst_h.div_ceil(8).max(1),
+                    1,
+                );
+            } else {
+                let pairs = u32::try_from(texels.div_ceil(2)).unwrap_or(1);
+                (self.fns.cmd_dispatch)(self.cmd, pairs.div_ceil(64).max(1), 1, 1);
+            }
         }
         self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
     }

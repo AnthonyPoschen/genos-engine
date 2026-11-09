@@ -1456,13 +1456,15 @@ pub fn bloom_passes(levels: u32) -> u32 {
 }
 
 /// One stored bloom mip. `texel` is its first texel. `word` is its first uint.
-/// Storage is RGB16F: two texels share 12 bytes. Alpha is not stored.
+/// The finest mip (`rgba`) is RGBA16F, 8 bytes a texel. Later mips are RGB16F,
+/// two texels in 12 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BloomMip {
     pub width: u32,
     pub height: u32,
     pub texel: u32,
     pub word: u32,
+    pub rgba: bool,
 }
 
 /// The mip pyramid for `levels`, starting at [`bloom_divisor`].
@@ -1470,7 +1472,7 @@ pub struct BloomMip {
 pub struct BloomMips {
     pub levels: Vec<BloomMip>,
     pub texels: u32,
-    /// RGB16F bytes, including a pad texel when a mip has an odd count.
+    /// Finest mip RGBA16F, later mips RGB16F pairs, including a pad texel on an odd count.
     pub bytes: u64,
 }
 
@@ -1506,17 +1508,23 @@ pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
     let mut stored = Vec::new();
     let mut cursor = 0u32;
     let mut bytes = 0u64;
-    for _ in 0..levels {
+    for index in 0..levels {
         let texels = level_w.saturating_mul(level_h);
+        let rgba = index == 0;
         let word = u32::try_from(bytes / 4).unwrap_or(u32::MAX);
         stored.push(BloomMip {
             width: level_w,
             height: level_h,
             texel: cursor,
             word,
+            rgba,
         });
-        let pairs = u64::from(texels).div_ceil(2);
-        bytes = bytes.saturating_add(pairs.saturating_mul(12));
+        let added = if rgba {
+            u64::from(texels).saturating_mul(8)
+        } else {
+            u64::from(texels).div_ceil(2).saturating_mul(12)
+        };
+        bytes = bytes.saturating_add(added);
         cursor = cursor.saturating_add(texels);
         level_w = half_dim(level_w);
         level_h = half_dim(level_h);
@@ -1552,12 +1560,15 @@ fn meter_slots(bins: u32) -> u32 {
     }
 }
 
-/// Device bytes of the post chain at `width`×`height`.
+/// Device bytes of the post chain at `width`×`height`, before driver alignment.
 ///
-/// Scene is RGBA16F. Bloom is the mip pyramid in RGB16F (no alpha), two texels
-/// per 12 bytes. The encode image is 12 bytes a pixel (RGBA16F codes, then
-/// BGRA) only when `encode_full`. Unused bindings share one 16-byte stand-in,
-/// counted once in `lut_bytes`. The meter is empty unless exposure is auto.
+/// Scene is RGBA16F. The finest bloom mip is RGBA16F. Later mips are RGB16F,
+/// two texels per 12 bytes. The encode image is 12 bytes a pixel (RGBA16F
+/// codes, then BGRA) only when `encode_full`. Unused bindings share one
+/// 16-byte stand-in, counted once in `lut_bytes`. The meter is empty unless
+/// exposure is auto. [`post_device_bytes`] accepts a buffer whose
+/// `VkMemoryRequirements.size` is this logical size, or that size rounded up
+/// to the alignment Vulkan reported for the same buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostChain {
     pub scene_bytes: u64,
@@ -1584,6 +1595,81 @@ impl PostChain {
     pub fn mib(&self) -> f64 {
         bytes_to_mib(self.bytes)
     }
+}
+
+/// `VkMemoryRequirements.size`. `align` of 0 or 1 leaves `size` unchanged.
+/// A zero `size` stays zero: that buffer was not created.
+#[must_use]
+pub fn align_device_bytes(size: u64, align: u64) -> u64 {
+    if size == 0 || align <= 1 {
+        return size;
+    }
+    let rem = size % align;
+    if rem == 0 {
+        size
+    } else {
+        size.saturating_add(align.saturating_sub(rem))
+    }
+}
+
+/// One allocated post buffer: `VkMemoryRequirements.size` and its alignment.
+#[derive(Clone, Copy, Debug)]
+pub struct PostBuffer {
+    pub size: u64,
+    pub align: u64,
+}
+
+/// The post buffers that are live after layout. `scene_host` is the readback copy and must be empty.
+#[derive(Clone, Copy, Debug)]
+pub struct PostDevice {
+    pub scene: PostBuffer,
+    pub scene_host: PostBuffer,
+    pub bloom: PostBuffer,
+    pub encode: PostBuffer,
+    pub lut: PostBuffer,
+    pub params: PostBuffer,
+    pub meter: PostBuffer,
+    pub meter_host: PostBuffer,
+}
+
+/// `size` is the logical byte count, or that count rounded up to `align`.
+///
+/// Alignment is the offset requirement. Lavapipe reports an alignment of 64
+/// and a size equal to the request. A 4070 reports the size rounded to 16.
+#[must_use]
+pub fn device_size_matches(logical: u64, buffer: PostBuffer) -> bool {
+    if logical == 0 {
+        return buffer.size == 0;
+    }
+    buffer.size == logical || buffer.size == align_device_bytes(logical, buffer.align)
+}
+
+/// Sum of `VkMemoryRequirements.size` when every buffer matches [`device_size_matches`].
+#[must_use]
+pub fn post_device_bytes(chain: &PostChain, device: PostDevice) -> Option<u64> {
+    let matched = device_size_matches(chain.scene_bytes, device.scene)
+        && device_size_matches(0, device.scene_host)
+        && device_size_matches(chain.bloom_bytes, device.bloom)
+        && device_size_matches(chain.encode_bytes, device.encode)
+        && device_size_matches(chain.lut_bytes, device.lut)
+        && device_size_matches(chain.params_bytes, device.params)
+        && device_size_matches(chain.meter_bytes, device.meter)
+        && device_size_matches(chain.meter_host_bytes, device.meter_host);
+    if !matched {
+        return None;
+    }
+    Some(
+        device
+            .scene
+            .size
+            .saturating_add(device.scene_host.size)
+            .saturating_add(device.bloom.size)
+            .saturating_add(device.encode.size)
+            .saturating_add(device.lut.size)
+            .saturating_add(device.params.size)
+            .saturating_add(device.meter.size)
+            .saturating_add(device.meter_host.size),
+    )
 }
 
 /// Byte sizes the allocator uses. Host scene memory is not included: it is allocated for a readback and freed.
@@ -1713,14 +1799,13 @@ fn half_at(raw: &[u8], byte: usize) -> f32 {
     f32_from_f16(u16::from_le_bytes([lo, hi]))
 }
 
-/// One RGB16F bloom texel. Two texels share 12 bytes.
-fn bloom_texel_rgb(raw: &[u8], local: usize) -> [f32; 3] {
-    let base = (local / 2).saturating_mul(12);
-    let offset = (local % 2).saturating_mul(6);
+/// One RGBA16F bloom texel. The finest mip is stored this way.
+fn rgba_texel(raw: &[u8], local: usize) -> [f32; 3] {
+    let base = local.saturating_mul(8);
     [
-        half_at(raw, base.saturating_add(offset)),
-        half_at(raw, base.saturating_add(offset).saturating_add(2)),
-        half_at(raw, base.saturating_add(offset).saturating_add(4)),
+        half_at(raw, base),
+        half_at(raw, base.saturating_add(2)),
+        half_at(raw, base.saturating_add(4)),
     ]
 }
 
@@ -1769,8 +1854,7 @@ pub fn bloom_rgba_from_chain(raw: &[u8], width: u32, height: u32, levels: u32) -
         return Vec::new();
     };
     let texels = usize::try_from(finest.width.saturating_mul(finest.height)).unwrap_or(0);
-    let pairs = texels.div_ceil(2);
-    let bytes = pairs.saturating_mul(12);
+    let bytes = texels.saturating_mul(8);
     if texels == 0 || raw.len() < bytes {
         return Vec::new();
     }
@@ -1780,7 +1864,7 @@ pub fn bloom_rgba_from_chain(raw: &[u8], width: u32, height: u32, levels: u32) -
     let src_h = usize::try_from(finest.height).unwrap_or(0);
     let mut planes = [Vec::new(), Vec::new(), Vec::new()];
     for index in 0..texels {
-        let rgb = bloom_texel_rgb(raw, index);
+        let rgb = rgba_texel(raw, index);
         planes[0].push(f64::from(rgb[0]));
         planes[1].push(f64::from(rgb[1]));
         planes[2].push(f64::from(rgb[2]));
@@ -1952,10 +2036,10 @@ mod tests {
         let ultra = genos_scene::HdrSettings::ultra();
         let cases = [
             (&potato, 28.13, 29_491_248_u64, 0, 0, 0),
-            (&low, 37.46, 31_328_048, 7, 640, 80),
-            (&medium, 37.49, 36_858_416, 9, 1280, 80),
-            (&high, 37.50, 36_865_232, 11, 1280, 40),
-            (&ultra, 37.50, 36_866_552, 13, 1280, 20),
+            (&low, 37.46, 31_788_848, 7, 640, 80),
+            (&medium, 37.49, 38_701_616, 9, 1280, 80),
+            (&high, 37.50, 38_708_432, 11, 1280, 40),
+            (&ultra, 37.50, 38_709_752, 13, 1280, 20),
         ];
         for (hdr, mib, bytes, passes, base, coarse) in cases {
             let chain = post_chain(width, height, hdr, false);
@@ -1986,9 +2070,9 @@ mod tests {
         let ultra_chain = post_chain(width, height, &ultra_hdr, true);
         let medium_chain = post_chain(width, height, &medium_hdr, true);
         assert_eq!(high_chain.encode_bytes, pixels * 12);
-        assert_eq!(high_chain.bytes, 81_102_032);
-        assert_eq!(ultra_chain.bytes, 81_103_352);
-        assert_eq!(medium_chain.bytes, 81_095_216);
+        assert_eq!(high_chain.bytes, 82_945_232);
+        assert_eq!(ultra_chain.bytes, 82_946_552);
+        assert_eq!(medium_chain.bytes, 82_938_416);
         assert!(u64_to_f64(medium_chain.bytes) <= mib_ceiling_bytes(79.68));
         assert!(u64_to_f64(high_chain.bytes) <= mib_ceiling_bytes(79.69));
         assert!(u64_to_f64(ultra_chain.bytes) <= mib_ceiling_bytes(79.69));
@@ -1998,16 +2082,78 @@ mod tests {
             height: 0,
             texel: 0,
             word: 0,
+            rgba: false,
         });
         assert_eq!(last.width, 20);
         assert_eq!(last.height, 11);
+        assert!(!last.rgba);
         assert_eq!(u64::from(last.width) * u64::from(last.height) * 6, 1_320);
+        let finest = ultra_mips.levels.first().copied().unwrap_or(BloomMip {
+            width: 0,
+            height: 0,
+            texel: 0,
+            word: 0,
+            rgba: false,
+        });
+        assert!(finest.rgba);
+        assert_eq!(finest.word, 0);
         assert!(post_chain(width, height, &low, false).bytes
             < post_chain(width, height, &medium, false).bytes);
         assert!(post_chain(width, height, &medium, false).passes
             < post_chain(width, height, &high, false).passes);
         assert_eq!(f32_from_f16(0x3c00).to_bits(), 1.0_f32.to_bits());
         assert_eq!(f32_from_f16(0x7bff).to_bits(), 65504.0_f32.to_bits());
+    }
+
+    #[test]
+    fn device_size_is_the_request_or_that_request_rounded_to_its_alignment() {
+        let chain = post_chain(2560, 1440, &genos_scene::HdrSettings::ultra(), false);
+        assert_eq!(
+            align_device_bytes(chain.bloom_bytes, 16),
+            chain.bloom_bytes + 8
+        );
+        let reported = |align, bloom_size, bloom_align| PostDevice {
+            scene: PostBuffer {
+                size: chain.scene_bytes,
+                align,
+            },
+            scene_host: PostBuffer { size: 0, align: 0 },
+            bloom: PostBuffer {
+                size: bloom_size,
+                align: bloom_align,
+            },
+            encode: PostBuffer {
+                size: chain.encode_bytes,
+                align,
+            },
+            lut: PostBuffer {
+                size: chain.lut_bytes,
+                align,
+            },
+            params: PostBuffer {
+                size: chain.params_bytes,
+                align,
+            },
+            meter: PostBuffer {
+                size: chain.meter_bytes,
+                align,
+            },
+            meter_host: PostBuffer {
+                size: chain.meter_host_bytes,
+                align,
+            },
+        };
+        let nvidia = post_device_bytes(&chain, reported(16, chain.bloom_bytes + 8, 16)).unwrap_or(0);
+        assert_eq!(nvidia, chain.bytes + 8);
+        assert!(u64_to_f64(nvidia) <= mib_ceiling_bytes(37.50));
+        // Alignment 64 with the size left at the request. Rounding the request
+        // up to that alignment would invent bytes the device did not allocate.
+        let same = post_device_bytes(&chain, reported(64, chain.bloom_bytes, 64)).unwrap_or(0);
+        assert_eq!(same, chain.bytes);
+        assert_eq!(
+            post_device_bytes(&chain, reported(16, chain.bloom_bytes + 8, 8)),
+            None
+        );
     }
 
     #[test]

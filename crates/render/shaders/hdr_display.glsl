@@ -12,17 +12,12 @@ const float BLOOM_TENT_CORNER = 0.0625;
 const float BLOOM_PROBE_FLAG = 100.0;
 const float BLOOM_ROUND = 0.5;
 
-// Finest mip, RGB16F, two texels in 12 bytes, starting at word 0.
+// Finest mip is RGBA16F at word 0. The tent runs at full resolution, so this
+// stays two aligned loads. Coarser mips are packed and are not sampled here.
 vec3 bloom_load(uint local) {
-    uint pair = local >> 1u;
-    uint w = pair * 3u;
-    vec2 a_rg = unpackHalf2x16(bloom_add.words[w]);
-    vec2 mid = unpackHalf2x16(bloom_add.words[w + 1u]);
-    vec2 b_gb = unpackHalf2x16(bloom_add.words[w + 2u]);
-    if ((local & 1u) == 0u) {
-        return vec3(a_rg, mid.x);
-    }
-    return vec3(mid.y, b_gb);
+    vec2 rg = unpackHalf2x16(bloom_add.words[local * 2u]);
+    vec2 ba = unpackHalf2x16(bloom_add.words[local * 2u + 1u]);
+    return vec3(rg, ba.x);
 }
 
 vec3 bloom_at(uint base_w, uint base_h, int x, int y) {

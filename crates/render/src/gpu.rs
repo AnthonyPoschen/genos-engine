@@ -535,6 +535,32 @@ impl Renderer {
         bytes as f64
     }
 
+    /// Sum of `VkMemoryRequirements.size` for the post buffers, when each size is
+    /// the logical size or that size rounded up to the buffer's alignment.
+    ///
+    /// This is the number [`Self::hdr_vram_bytes`] reports. `None` means a buffer
+    /// is a different size from the chain.
+    pub fn post_device_bytes(&self, chain: &crate::hdr_output::PostChain) -> Option<u64> {
+        let lighting = &self.gpu.lighting;
+        let buffer = |source: &Buffer| crate::hdr_output::PostBuffer {
+            size: source.size,
+            align: source.align,
+        };
+        crate::hdr_output::post_device_bytes(
+            chain,
+            crate::hdr_output::PostDevice {
+                scene: buffer(&lighting.scene_lin),
+                scene_host: buffer(&lighting.scene_host),
+                bloom: buffer(&lighting.bloom),
+                encode: buffer(&lighting.hdr_encode),
+                lut: buffer(&lighting.agx_lut),
+                params: buffer(&lighting.hdr_params),
+                meter: buffer(&lighting.meter_dev),
+                meter_host: buffer(&lighting.meter_host),
+            },
+        )
+    }
+
     /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
     pub fn post_vram_device(&self) -> f64 {
         self.hdr_vram_bytes() / (1024.0 * 1024.0)
@@ -1760,7 +1786,10 @@ struct Image {
 struct Buffer {
     buffer: Handle,
     memory: Handle,
+    /// `VkMemoryRequirements.size`. At least the size asked for, and a multiple of `align`.
     size: u64,
+    /// `VkMemoryRequirements.alignment`. Zero on an empty buffer.
+    align: u64,
 }
 
 struct StreamSource {
@@ -6860,6 +6889,7 @@ impl Gpu {
             let mut req = [0u8; 24];
             (self.fns.buffer_reqs)(self.device, buffer, req.as_mut_ptr());
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let align = u64::from_ne_bytes(req[8..16].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
             let memory = self.alloc(req_size, bits, memory)?;
             check(
@@ -6870,6 +6900,7 @@ impl Gpu {
                 buffer,
                 memory,
                 size: req_size,
+                align,
             })
         }
     }
@@ -8598,6 +8629,7 @@ fn copy_buffer(buffer: &Buffer) -> Buffer {
         buffer: buffer.buffer,
         memory: buffer.memory,
         size: buffer.size,
+        align: buffer.align,
     }
 }
 
@@ -8617,6 +8649,7 @@ impl Buffer {
             buffer: std::ptr::null_mut(),
             memory: std::ptr::null_mut(),
             size: 0,
+            align: 0,
         }
     }
 }

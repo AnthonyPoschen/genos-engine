@@ -209,7 +209,7 @@ GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 | Image | Size at 1440p | Notes |
 |---|---|---|
 | Scene-referred | 2560×1440, one image | Not per frame in flight. Compose writes it. The grade reads it. |
-| Bloom levels | preset pyramid, RGBA16F | High is 1280×720 down to 40×22. Low's four levels start at 640×360. No full-resolution bloom image. |
+| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | High is 1280×720 down to 40×22. Low's four levels start at 640×360. No full-resolution bloom image. |
 | Exposed | same as the scene, or the swapchain's transient | The display pass can read the scene and the bloom sum and write the swapchain. A stored exposed image is not required for SDR. |
 | Histogram | preset bin count × `uint`, plus two short luma halves | High is 256 bins and 128 still samples. Fixed exposure does not allocate it. The CPU reads the header after the fence. |
 | Exposure state | two floats | Current scale and target scale. CPU owned. |
