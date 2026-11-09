@@ -763,7 +763,6 @@ fn run() -> Result<i32, String> {
         let draw_start = Instant::now();
         renderer.set_particle_dt(dt);
         let drawn_world = if loading { &load_world } else { app.world() };
-        feed_particle_depth(renderer, &drawn_world.scene.particles)?;
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
         tools.after_draw(
@@ -891,7 +890,6 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
             app.advance(STEP);
             let read = frame == 3;
             renderer.set_particle_dt(STEP);
-            feed_particle_depth(renderer, &app.world().scene.particles)?;
             pixels = renderer.draw(app.world(), &camera, read)?;
             checked_frames += 1;
         }
@@ -1236,21 +1234,6 @@ impl Host for App {
             pitch: cp.pitch,
         })
     }
-}
-
-fn feed_particle_depth(
-    renderer: &mut Renderer,
-    particles: &genos_scene::ParticleSettings,
-) -> Result<(), String> {
-    let on = particles.depth_collision && particles.dispatches();
-    renderer.set_particle_depth_capture(on);
-    if !on {
-        return Ok(());
-    }
-    if let Some((width, height, samples)) = renderer.take_particle_depth()? {
-        renderer.set_particle_depth(width, height, &samples);
-    }
-    Ok(())
 }
 
 fn loading_world() -> World {

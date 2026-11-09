@@ -2,6 +2,13 @@
 #![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::too_many_lines, reason = "the lavapipe agreement, the cap, and the negative control share one device"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "the sync child is this test binary; the parent selects the mode with an env var so it can inject the validation layer"
+    )
+)]
 
 //! Stage-1 compute on lavapipe against the f64 mirror.
 //!
@@ -9,7 +16,7 @@
 //! must miss that gate. Skipping the indirect count draws nothing.
 
 use genos_render::{
-    CpuParticles, ParticleFault, Renderer, StepInput, World, LOW_VRAM_BYTES,
+    CpuParticles, ParticleFault, Reflector, Renderer, StepInput, World, LOW_VRAM_BYTES,
 };
 use genos_scene::{
     view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3,
@@ -270,6 +277,16 @@ fn gpu_matches_the_cpu_mirror_and_the_cap_holds() {
         life.device.particle_stats().alive, 0,
         "a particle in front of the camera is behind depth 0"
     );
+    let depth_bytes = u64::from(width).saturating_mul(u64::from(height)) * 8;
+    let vram = life.device.particle_stats().vram_bytes;
+    assert!(
+        vram >= depth_bytes,
+        "vram {vram} omitted the two retained depth images ({depth_bytes})"
+    );
+    eprintln!(
+        "vram_bytes {vram} vram_mb {:.3} depth_images {depth_bytes}",
+        vram as f64 / 1_000_000.0
+    );
 }
 
 #[test]
@@ -333,6 +350,29 @@ fn a_different_dt_and_a_skipped_dead_ring_match_on_device() {
     assert_eq!(gpu, before, "a non-finite dt moved the device sim");
     let peak = agree(&gpu, nan_cpu.positions());
     assert!(peak <= POS_ABS, "nan dt drifted {peak}");
+
+    life.device.set_particle_dt(f32::INFINITY);
+    let mut inf_cpu = nan_cpu.clone();
+    for _ in 0..3 {
+        let _ = life.window.pump();
+        life.device
+            .draw(&world(settings.clone()), &camera, true)
+            .expect("inf draw")
+            .expect("readback");
+        let input = StepInput::from_settings(
+            &settings,
+            f32::INFINITY,
+            view_proj(&camera, aspect),
+            0,
+            0,
+            Vec::new(),
+        );
+        inf_cpu.step(&input);
+    }
+    let gpu = life.device.particle_positions().expect("inf");
+    assert_eq!(gpu, before, "+inf dt moved the device sim");
+    let peak = agree(&gpu, inf_cpu.positions());
+    assert!(peak <= POS_ABS, "+inf dt drifted {peak}");
 
     let mut leak = emitter(2, 2);
     leak.seed = DEFAULT_SEED.wrapping_add(4);
@@ -405,5 +445,155 @@ fn frames_without_readback_match_the_mirror() {
     let peak = agree(&gpu, cpu.positions());
     assert!(peak <= POS_ABS, "unread frames drifted {peak}");
     assert_eq!(life.device.particle_stats().alive, cpu.alive());
+    assert!(life.device.particle_stats().sim_ms > 0.0, "completed flight had no sim stamp");
     assert!(cpu.alive() > 0);
+}
+
+/// Submits back to back. `draw_with_overlay` waits only the slot it reuses, so
+/// frame N+1 is recorded while frame N can still be on the GPU.
+fn overlap(life: &mut Lifecycle<Renderer>, settings: &ParticleSettings, camera: &Camera, frames: u32) {
+    for _ in 0..frames {
+        let _ = life.window.pump();
+        life.device.set_particle_dt(DT);
+        life.device
+            .draw_with_overlay(&world(settings.clone()), camera, &[], false, false)
+            .expect("submit");
+    }
+    life.device.finish_particles().expect("finish");
+}
+
+#[test]
+fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
+    if std::env::var_os("GENOS_FX_SYNC_CHILD").is_none() {
+        let clean = sync_child("clean");
+        assert!(
+            !clean.contains("vkCmdFillBuffer"),
+            "the flight barrier still left a canary hazard:\n{clean}"
+        );
+        let skipped = sync_child("skip");
+        assert!(
+            skipped.contains("vkCmdFillBuffer") && skipped.contains("SYNC-HAZARD"),
+            "removing the flight barrier did not trip synchronization validation:\n{skipped}"
+        );
+        let reflected = sync_child("reflect");
+        assert!(
+            !reflected.contains("SHADER_READ_ONLY_OPTIMAL"),
+            "depth collision left the scene depth in shader-read layout:\n{reflected}"
+        );
+        return;
+    }
+    match std::env::var("GENOS_FX_SYNC_CHILD").expect("child mode").as_str() {
+        "skip" => {
+            let (_w, _h, mut life) = open();
+            let camera = Camera::new(0.0, 2.0, 0.0);
+            life.device.suspend_lighting();
+            life.device.set_particle_fault(ParticleFault::SkipFlightBarrier);
+            overlap(&mut life, &emitter(8, 4), &camera, 4);
+        }
+        "reflect" => {
+            let (_w, _h, mut life) = open();
+            let camera = Camera::new(0.0, 2.0, -2.0);
+            let mut settings = emitter(8, 4);
+            settings.depth_collision = true;
+            let mut drawn = world(settings);
+            drawn.scene.reflections.enabled = true;
+            drawn.reflectors.push(Reflector {
+                origin: [0.0, 1.5, 1.0],
+                normal: [0.0, 0.0, 1.0],
+                tangent: [1.0, 0.0, 0.0],
+                bitangent: [0.0, 1.0, 0.0],
+                ..Reflector::default()
+            });
+            for _ in 0..4 {
+                let _ = life.window.pump();
+                life.device.set_particle_dt(DT);
+                life.device
+                    .draw_with_overlay(&drawn, &camera, &[], false, false)
+                    .expect("reflect submit");
+            }
+            life.device.finish_particles().expect("finish");
+        }
+        _ => {
+            let (_w, _h, mut life) = open();
+            let camera = Camera::new(0.0, 2.0, 0.0);
+            life.device.suspend_lighting();
+            overlap(&mut life, &emitter(8, 4), &camera, 4);
+        }
+    }
+}
+
+fn sync_child(mode: &str) -> String {
+    let exe = std::env::current_exe().expect("test exe");
+    let output = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "overlapping_flights_stay_valid_and_the_missing_barrier_does_not",
+            "--nocapture",
+        ])
+        .env("GENOS_FX_SYNC_CHILD", mode)
+        .env("VK_INSTANCE_LAYERS", "VK_LAYER_KHRONOS_validation")
+        .env(
+            "VK_LAYER_ENABLES",
+            "VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT",
+        )
+        .env("VK_KHRONOS_VALIDATION_VALIDATE_SYNC", "true")
+        .output()
+        .expect("sync child");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() && !text.contains("Validation Error") {
+        use std::fmt::Write as _;
+        let _ = write!(text, "\nchild exit status: {}", output.status);
+    }
+    text
+}
+
+#[test]
+fn lavapipe_cpu_frame_time_with_the_fence_and_without_it() {
+    let (_w, _h, mut life) = open();
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let on = emitter(256, 64);
+    let mut off = on.clone();
+    off.enabled = false;
+    // One dispatch creates the pass, so the old fence has something to wait.
+    life.device.set_particle_dt(DT);
+    life.device
+        .draw(&world(on.clone()), &camera, true)
+        .expect("warm")
+        .expect("readback");
+    let off_new = cpu_frame_ms(&mut life, &world(off.clone()), &camera, false);
+    let off_old = cpu_frame_ms(&mut life, &world(off), &camera, true);
+    let on_new = cpu_frame_ms(&mut life, &world(on.clone()), &camera, false);
+    let on_old = cpu_frame_ms(&mut life, &world(on), &camera, true);
+    life.device.set_particle_cpu_fence(false);
+    eprintln!(
+        "lavapipe cpu ms/frame emitter_off new={off_new:.3} old_fence={off_old:.3} emitter_on new={on_new:.3} old_fence={on_old:.3}"
+    );
+    assert!(off_new > 0.0 && on_new > 0.0);
+}
+
+fn cpu_frame_ms(
+    life: &mut Lifecycle<Renderer>,
+    world: &World,
+    camera: &Camera,
+    fence: bool,
+) -> f64 {
+    life.device.set_particle_cpu_fence(fence);
+    life.device.set_particle_dt(DT);
+    for _ in 0..2 {
+        let _ = life.window.pump();
+        life.device
+            .draw_with_overlay(world, camera, &[], false, false)
+            .expect("warmup");
+    }
+    let start = std::time::Instant::now();
+    let frames = 8u32;
+    for _ in 0..frames {
+        let _ = life.window.pump();
+        life.device
+            .draw_with_overlay(world, camera, &[], false, false)
+            .expect("timed submit");
+    }
+    life.device.finish_particles().expect("finish");
+    start.elapsed().as_secs_f64() * 1.0e3 / f64::from(frames)
 }

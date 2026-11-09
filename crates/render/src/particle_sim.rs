@@ -94,6 +94,11 @@ pub enum ParticleFault {
     SkipDeadPush,
     /// Leave the indirect instance count at zero.
     SkipIndirect,
+    /// Record the step without the cross-submit flight barrier.
+    ///
+    /// The shader is unchanged. Synchronization validation should report the
+    /// ring hazard. The shipping path does not set this.
+    SkipFlightBarrier,
 }
 
 impl ParticleFault {
@@ -101,7 +106,7 @@ impl ParticleFault {
     #[must_use]
     pub fn bits(self) -> u32 {
         match self {
-            Self::None => 0,
+            Self::None | Self::SkipFlightBarrier => 0,
             Self::SkipDeadPush => 2,
             Self::SkipIndirect => 4,
         }

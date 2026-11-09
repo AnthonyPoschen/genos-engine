@@ -1636,14 +1636,16 @@ struct Gpu {
     particle_drawn: bool,
     /// Flight whose compute was recorded into the command buffer just submitted.
     particle_submitted: usize,
-    /// Copy this frame's scene depth so the next step can collide with it.
-    capture_particle_depth: bool,
-    /// Per-flight D32 copy of the scene depth. Read after that flight's fence.
-    particle_depth_readback: [Option<Buffer>; 2],
-    /// That flight's copy has been recorded at least once.
-    particle_depth_copied: [bool; 2],
-    /// Width and height of the copied depth.
-    particle_depth_extent: [(u32, u32); 2],
+    /// This slot's timestamp queries belong to a submission whose fence has been waited.
+    particle_query_ready: [bool; 2],
+    /// View-projection used by the flight that stored scene depth.
+    particle_view_proj: [[f32; 16]; 2],
+    /// That flight stored the scene depth image for a later sample.
+    particle_depth_retained: [bool; 2],
+    /// This frame's scene pass stores depth instead of discarding it.
+    store_scene_depth: bool,
+    /// Measurement hook. Waits the other flight on the CPU before particle recording.
+    particle_cpu_fence: bool,
     /// Froxel targets, pipelines, and the standalone command buffer.
     froxel: Option<fog::Targets>,
     /// What the next frame's froxel pass runs. None skips the pass.
@@ -1694,6 +1696,10 @@ struct Gpu {
     /// Last known layout of each flight's color image. `0` is undefined. `6` is transfer source.
     color_layout: [u32; 2],
     keep_pass: Handle,
+    /// Scene pass that stores depth for the next frame's particle collision.
+    render_pass_store: Handle,
+    /// Keep pass that loads and stores that depth. The default keep pass discards it.
+    keep_pass_store: Handle,
     aa_src: [Buffer; 2],
     aa_dst: [Buffer; 2],
     aa_desc_layout: Handle,
@@ -2537,10 +2543,11 @@ impl Gpu {
                 particle_stamped: false,
                 particle_drawn: false,
                 particle_submitted: 0,
-                capture_particle_depth: false,
-                particle_depth_readback: [None, None],
-                particle_depth_copied: [false, false],
-                particle_depth_extent: [(0, 0), (0, 0)],
+                particle_query_ready: [false, false],
+                particle_view_proj: [[0.0; 16]; 2],
+                particle_depth_retained: [false, false],
+                store_scene_depth: false,
+                particle_cpu_fence: false,
                 froxel: None,
                 froxel_frame: None,
                 froxel_pass_ms: 0.0,
@@ -2587,6 +2594,8 @@ impl Gpu {
                 antialias: Antialias::Off,
                 color_layout: [0, 0],
                 keep_pass: std::ptr::null_mut(),
+                render_pass_store: std::ptr::null_mut(),
+                keep_pass_store: std::ptr::null_mut(),
                 aa_src: [Buffer::empty(), Buffer::empty()],
                 aa_dst: [Buffer::empty(), Buffer::empty()],
                 aa_desc_layout: std::ptr::null_mut(),
@@ -2651,8 +2660,10 @@ impl Gpu {
 
     fn create_static_objects(&mut self) -> Result<(), String> {
         unsafe {
-            self.render_pass = self.make_render_pass(false)?;
-            self.keep_pass = self.make_render_pass(true)?;
+            self.render_pass = self.make_render_pass(false, false)?;
+            self.keep_pass = self.make_render_pass(true, false)?;
+            self.render_pass_store = self.make_render_pass(false, true)?;
+            self.keep_pass_store = self.make_render_pass(true, true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
             let start = Instant::now();
@@ -2935,8 +2946,11 @@ impl Gpu {
         self.format = format;
         self.color_space = space;
         self.hdr_output = mode;
-        self.render_pass = self.make_render_pass(false)?;
-        self.keep_pass = self.make_render_pass(true)?;
+        self.destroy_particle_pass();
+        self.render_pass = self.make_render_pass(false, false)?;
+        self.keep_pass = self.make_render_pass(true, false)?;
+        self.render_pass_store = self.make_render_pass(false, true)?;
+        self.keep_pass_store = self.make_render_pass(true, true)?;
         self.pipeline = block(|| self.make_pipeline(true, true, false))?;
         self.depth_pipeline = block(|| self.make_depth_pipeline())?;
         self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
@@ -2966,6 +2980,18 @@ impl Gpu {
             if !self.keep_pass.is_null() {
                 (self.fns.destroy_render_pass)(self.device, self.keep_pass, std::ptr::null());
                 self.keep_pass = std::ptr::null_mut();
+            }
+            if !self.render_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(
+                    self.device,
+                    self.render_pass_store,
+                    std::ptr::null(),
+                );
+                self.render_pass_store = std::ptr::null_mut();
+            }
+            if !self.keep_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass_store, std::ptr::null());
+                self.keep_pass_store = std::ptr::null_mut();
             }
         }
     }
@@ -3184,8 +3210,9 @@ impl Gpu {
                     self.extent_w,
                     self.extent_h,
                 )?;
+                // Sampled as well as attached: the next frame's particle compute reads it.
                 self.depths[slot] =
-                    self.make_image(126, 0x20 | 0x1, 2, self.extent_w, self.extent_h)?;
+                    self.make_image(126, 0x20 | 0x1 | 0x4, 2, self.extent_w, self.extent_h)?;
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
@@ -3582,14 +3609,20 @@ impl Gpu {
         let slot = self.flight;
         self.wait_fence(self.fence, "wait fence")?;
         self.flight_live[slot] = false;
-        // The sim buffers are one set. Wait the other flight before this frame
-        // reads or writes them. Params, depth, and queries are already per flight.
-        if self.particle_job.is_some() || self.particle_pass.is_some() {
+        // The other flight stays on the GPU. Particle compute waits its writes
+        // with a pipeline barrier, not this fence. The hook below times the old fence.
+        if self.particle_cpu_fence && self.particle_pass.is_some() {
             let other = 1 - slot;
             if self.flight_live[other] {
                 self.wait_flight(other)?;
                 self.flight_live[other] = false;
             }
+        }
+        self.store_scene_depth = self.particle_job.is_some_and(|job| job.depth_collision);
+        if self.store_scene_depth {
+            self.particle_view_proj[slot] = *matrix;
+        } else {
+            self.particle_depth_retained[slot] = false;
         }
         let fences = [self.fence];
         unsafe {
@@ -3649,7 +3682,6 @@ impl Gpu {
                     !filtering && !lighting,
                 );
                 self.color_layout[slot] = 6;
-                self.copy_scene_depth_for_particles(slot)?;
                 self.frame_stamp(slot, FrameStamp::Gbuffer);
                 self.froxel_wrote = false;
                 self.record_froxel()?;
@@ -3694,6 +3726,7 @@ impl Gpu {
                 // The value is device ticks, not the CPU time spent in submit.
                 self.write_stamp(slot, 1, 0x2000);
             }
+            self.signal_particle_depth(slot);
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
 
             let mut wait_stage = [0x400u32, 0x80];
@@ -3739,6 +3772,9 @@ impl Gpu {
                 "submit",
             )?;
             self.flight_live[slot] = true;
+            if self.particle_stamped {
+                self.particle_query_ready[slot] = true;
+            }
             self.present_index = index;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
@@ -4252,7 +4288,10 @@ impl Gpu {
         let submitted = 1 - self.flight.min(1);
         self.flight_live[submitted] = false;
         self.collect_froxel_time();
-        if submitted == self.particle_submitted {
+        // This fence is the submission just recorded. Its stamps are done.
+        // The slot still in flight is not read.
+        if submitted == self.particle_submitted && self.particle_stamped {
+            self.particle_query_ready[submitted] = true;
             self.collect_particle_stats_slot(submitted);
         }
         Ok(())
@@ -5858,7 +5897,7 @@ impl Gpu {
         Ok(layout)
     }
 
-    fn make_render_pass(&mut self, keep: bool) -> Result<Handle, String> {
+    fn make_render_pass(&mut self, keep: bool, store_depth: bool) -> Result<Handle, String> {
         #[repr(C)]
         struct Att {
             flags: u32,
@@ -5913,8 +5952,19 @@ impl Gpu {
         }
         let color_load = if keep { 0 } else { 1 };
         let color_initial = if keep { 6 } else { 0 };
-        let depth_load = if keep { 2 } else { 1 };
-        // Final layout cannot be undefined. The overlay pass discards depth.
+        // Default frames discard depth, matching the pre-particle pass. A
+        // depth-collision frame stores it and the keep pass loads it back.
+        let (depth_load, depth_store, depth_initial) = if store_depth && keep {
+            (0, 0, 3)
+        } else if store_depth {
+            (1, 0, 0)
+        } else if keep {
+            (2, 1, 0)
+        } else {
+            (1, 1, 0)
+        };
+        // Final layout cannot be undefined. The overlay pass discards depth
+        // unless this frame is keeping it for the next particle step.
         let depth_final = 3;
         // Both variants share one external dependency so the keep and clear
         // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
@@ -5942,12 +5992,10 @@ impl Gpu {
                 format: 126,
                 samples: 1,
                 load: depth_load,
-                // The main pass stores depth so a later copy can feed particle collision.
-                // The keep pass discards it.
-                store: u32::from(keep),
+                store: depth_store,
                 stencil_load: 1,
                 stencil_store: 1,
-                initial: 0,
+                initial: depth_initial,
                 final_layout: depth_final,
             },
         ];
@@ -8445,6 +8493,7 @@ impl Gpu {
             self.color = Image::empty();
             self.depth = Image::empty();
             self.host = Buffer::empty();
+            self.particle_depth_retained = [false, false];
         }
     }
 
@@ -8987,6 +9036,16 @@ impl Gpu {
             }
             if !self.render_pass.is_null() {
                 (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null());
+            }
+            if !self.keep_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass_store, std::ptr::null());
+            }
+            if !self.render_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(
+                    self.device,
+                    self.render_pass_store,
+                    std::ptr::null(),
+                );
             }
             if !self.aa_fxaa.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.aa_fxaa, std::ptr::null());

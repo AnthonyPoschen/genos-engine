@@ -1330,7 +1330,6 @@ fn run() -> Result<i32, String> {
         }
         let draw_start = Instant::now();
         renderer.set_particle_dt(dt);
-        feed_particle_depth(renderer, &stage.world.scene.particles)?;
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if opts.step && dt > 0.0 {
@@ -1477,21 +1476,6 @@ fn bake_gltf(
         );
     }
     Ok(world)
-}
-
-fn feed_particle_depth(
-    renderer: &mut Renderer,
-    particles: &ParticleSettings,
-) -> Result<(), String> {
-    let on = particles.depth_collision && particles.dispatches();
-    renderer.set_particle_depth_capture(on);
-    if !on {
-        return Ok(());
-    }
-    if let Some((width, height, samples)) = renderer.take_particle_depth()? {
-        renderer.set_particle_depth(width, height, &samples);
-    }
-    Ok(())
 }
 
 fn load_gltf_pumped(

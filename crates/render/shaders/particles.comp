@@ -54,10 +54,15 @@ layout(std430, set = 0, binding = 6) readonly buffer DepthBuf {
     float samples[];
 } depth_buf;
 
+// Previous frame's scene depth. The matrix in `params.view_proj` is the one
+// that frame used. Moving geometry is one frame late; the camera is not.
+layout(set = 0, binding = 7) uniform sampler2D depth_image;
+
 const uint FREEZE = 1u;
 const uint SKIP_DEAD = 2u;
 const uint SKIP_INDIRECT = 4u;
 const uint DEPTH = 8u;
+const uint DEPTH_IMAGE = 16u;
 const uint DEFAULT_SEED = 0xA341316Cu;
 const float UNIT_SCALE = 16777216.0;
 const float HALF = 0.5;
@@ -87,10 +92,10 @@ void push_dead(uint budget, uint index) {
     state.words[3] += 1u;
 }
 
-float depth_fade(vec3 position) {
+float depth_fade(vec3 position, bool image) {
     uint depth_w = params.generation_depth.y;
     uint depth_h = params.generation_depth.z;
-    if (depth_w == 0u || depth_h == 0u) {
+    if (!image && (depth_w == 0u || depth_h == 0u)) {
         return 1.0;
     }
     vec4 clip = params.view_proj * vec4(position, 1.0);
@@ -102,10 +107,21 @@ float depth_fade(vec3 position) {
     if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) {
         return 1.0;
     }
-    uint x = min(uint(floor(uv.x * float(depth_w))), depth_w - 1u);
-    uint y = min(uint(floor(uv.y * float(depth_h))), depth_h - 1u);
-    float sample_z = depth_buf.samples[y * depth_w + x];
-    float delta = sample_z - ndc.z;
+    float sample_z;
+    float particle_z;
+    if (image) {
+        ivec2 size = textureSize(depth_image, 0);
+        ivec2 coord = ivec2(floor(uv * vec2(size)));
+        coord = clamp(coord, ivec2(0), size - ivec2(1));
+        sample_z = texelFetch(depth_image, coord, 0).r;
+        particle_z = ndc.z * HALF + HALF;
+    } else {
+        uint x = min(uint(floor(uv.x * float(depth_w))), depth_w - 1u);
+        uint y = min(uint(floor(uv.y * float(depth_h))), depth_h - 1u);
+        sample_z = depth_buf.samples[y * depth_w + x];
+        particle_z = ndc.z;
+    }
+    float delta = sample_z - particle_z;
     if (delta < 0.0) {
         return -1.0;
     }
@@ -150,6 +166,7 @@ void main() {
     // NaN and infinity match the CPU mirror: neither integrates nor emits.
     bool moving = !isnan(dt) && !isinf(dt) && dt > 0.0 && (flags & FREEZE) == 0u;
     bool depth_on = (flags & DEPTH) != 0u;
+    bool depth_image_on = (flags & DEPTH_IMAGE) != 0u;
     bool skip_dead = (flags & SKIP_DEAD) != 0u;
     if (moving) {
         for (uint index = 0u; index < budget; index++) {
@@ -161,7 +178,7 @@ void main() {
             vec3 position = slots.slots[index].position_age.xyz
                 + slots.slots[index].velocity_life.xyz * dt;
             slots.slots[index].position_age = vec4(position, age);
-            float fade = depth_fade(position);
+            float fade = depth_fade(position, depth_image_on);
             if (age >= life || (depth_on && fade < 0.0)) {
                 slots.slots[index].velocity_life.w = 0.0;
                 state.words[4] -= 1u;
@@ -216,7 +233,7 @@ void main() {
             continue;
         }
         vec3 position = slots.slots[index].position_age.xyz;
-        float fade = depth_fade(position);
+        float fade = depth_fade(position, depth_image_on);
         if (fade < 0.0) {
             fade = 0.0;
         }
