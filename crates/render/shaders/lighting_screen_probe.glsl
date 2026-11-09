@@ -23,6 +23,7 @@
 // filter still run unless surface_cache.sh_probe_retire is on and that
 // probe's bilinear footprint has no uncovered surface.
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
+    lighting_compose_find_begin();
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;
     lighting_px_world_w = 0.0;
@@ -92,11 +93,11 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         vec4 world = lighting_world_irradiance(pos, n);
         lighting_px_world_w = world.w;
         lighting_sc_display = false;
-        if (covered) {
-            return world.rgb;
-        }
-        return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+        vec3 shown = covered ? world.rgb : mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+        lighting_compose_find_end();
+        return shown;
     }
     lighting_sc_display = false;
+    lighting_compose_find_end();
     return probes;
 }

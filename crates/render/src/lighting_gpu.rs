@@ -4904,7 +4904,8 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_SPV, SUN_COMPOSE_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -4998,6 +4999,86 @@ mod sun_step {
             SUN_COMPOSE_SPV.len()
         );
     }
+
+    /// The neighbour walk stays in its own functions. glslc leaves Function
+    /// Control at None, and the NVIDIA compiler then inlines the walk into the
+    /// pixel. DontInline is the request that keeps those registers out.
+    #[test]
+    fn compose_neighbour_walk_is_dont_inline() {
+        for (name, words) in [
+            ("compose", LIGHTING_COMPOSE_SPV),
+            ("compose maint", LIGHTING_COMPOSE_MAINT_SPV),
+            ("compose hdr", LIGHTING_COMPOSE_HDR_SPV),
+            ("sun compose", SUN_COMPOSE_SPV),
+            ("sun compose hdr", SUN_COMPOSE_HDR_SPV),
+        ] {
+            assert!(words.len() >= 8, "{name} is not SPIR-V");
+            let version = u32::from_le_bytes([words[4], words[5], words[6], words[7]]);
+            assert_eq!(version, 0x0001_0000, "{name} SPIR-V {version:#x}");
+            let marked = dont_inline_names(words);
+            for prefix in [
+                "lighting_sh_gather(",
+                "lighting_sh_read(",
+                "lighting_sh_texel_detail_covers(",
+                "lighting_world_irradiance_in(",
+                "lighting_sc_shown(",
+                "lighting_screen_probe_indirect(",
+            ] {
+                assert!(
+                    marked.iter().any(|got| got.starts_with(prefix)),
+                    "{name} is missing DontInline on {prefix}"
+                );
+            }
+        }
+    }
+
+fn dont_inline_names(bytes: &[u8]) -> Vec<String> {
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    let mut names = std::collections::HashMap::<u32, String>::new();
+    let mut i = 5usize;
+    while i < words.len() {
+        let word = words[i];
+        let count = (word >> 16) as usize;
+        let op = word & 0xffff;
+        if count == 0 || i + count > words.len() {
+            break;
+        }
+        if op == 5 {
+            let mut raw = Vec::new();
+            for piece in &words[i + 2..i + count] {
+                raw.extend_from_slice(&piece.to_le_bytes());
+            }
+            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+            if let Ok(name) = std::str::from_utf8(&raw[..end]) {
+                names.insert(words[i + 1], name.to_string());
+            }
+        }
+        i += count;
+    }
+    let mut marked = Vec::new();
+    i = 5;
+    while i < words.len() {
+        let word = words[i];
+        let count = (word >> 16) as usize;
+        let op = word & 0xffff;
+        if count == 0 || i + count > words.len() {
+            break;
+        }
+        if op == 54 {
+            let control = words[i + 3];
+            if control & 2 != 0 {
+                if let Some(name) = names.get(&words[i + 2]) {
+                    marked.push(name.clone());
+                }
+            }
+        }
+        i += count;
+    }
+    marked
+}
 }
 
 include!("lighting_dispatch.rs");

@@ -933,4 +933,8 @@ void main() {
     prod_u(2u, gstats.diag[LIGHTING_DIAG_PROBE_SKIP]);
     prod_u(3u, gstats.diag[LIGHTING_DIAG_PROBE_EVAL]);
     prod_u(4u, gstats.diag[LIGHTING_DIAG_PROBE_READS]);
+    // Max neighbour gathers and hash steps in one lighting_screen_probe_indirect.
+    // pad2 / pad3, not diag: those words are already taken.
+    prod_u(PROD_TRAILER_AT + PROD_TRAILER, gstats.pad2);
+    prod_u(PROD_TRAILER_AT + PROD_TRAILER + 1u, gstats.pad3);
 }
