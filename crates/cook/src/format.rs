@@ -15,7 +15,8 @@ use genos_load::{sha256, GltfMesh, MeshInstance, Primitive};
 use crate::{CookError, Cooked, CookedMesh};
 
 pub const MAGIC: &[u8; 4] = b"GCK1";
-pub const FORMAT_VERSION: u32 = 2;
+/// The one `.gcook` version. Defined on the loader; the cook writes the same word.
+pub use genos_load::GCOOK_VERSION as FORMAT_VERSION;
 const NONE: u32 = u32::MAX;
 
 /// One file the cook read. The source itself has an empty `uri`.

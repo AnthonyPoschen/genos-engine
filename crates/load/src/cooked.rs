@@ -10,8 +10,8 @@ use crate::lod::MeshLod;
 use crate::{hex, object_path, sha256, GltfMesh, MeshInstance, Primitive};
 
 const GCOOK_MAGIC: &[u8; 4] = b"GCK1";
-/// Same number as `genos_cook::FORMAT_VERSION`. A mismatch is a corrupt record.
-const GCOOK_VERSION: u32 = 2;
+/// `.gcook` format. The cook writes this same constant (`FORMAT_VERSION` is a re-export).
+pub const GCOOK_VERSION: u32 = 2;
 const GTEX_MAGIC: &[u8; 4] = b"GTX1";
 const GTEX_VERSION: u32 = 1;
 const NONE: u32 = u32::MAX;

@@ -4,8 +4,8 @@
 )]
 
 //! Stage 1 discrete LOD chain (geometry-lod design): cook determinism, monotone
-//! triangle counts, the object-space error bound, selector hysteresis, and a
-//! negative control that drops the distance term.
+//! triangle counts, the two-sided object-space error bound, locked borders,
+//! selector hysteresis, and a planted selector that drops the depth term.
 
 use genos_bake::{BakeMode, BakeSettings};
 use genos_cook::{cook, encode, lod_chain};
@@ -79,26 +79,76 @@ fn settings(dir: &std::path::Path) -> BakeSettings {
     }
 }
 
-/// Object-space distance from every level-0 vertex to the level's triangles.
-fn max_vertex_deviation(source: &Primitive, level: &Primitive) -> f32 {
+/// Vertices, edge midpoints, and face interiors of `from`, measured onto `onto`.
+fn max_surface_deviation(from: &Primitive, onto: &Primitive) -> f32 {
     let mut worst = 0.0_f32;
-    for p in &source.positions {
-        let mut best = f32::MAX;
-        for tri in level.indices.as_chunks::<3>().0 {
-            let Some(a) = vertex(level, tri[0]) else {
-                continue;
-            };
-            let Some(b) = vertex(level, tri[1]) else {
-                continue;
-            };
-            let Some(c) = vertex(level, tri[2]) else {
-                continue;
-            };
-            best = best.min(dist_point_triangle(*p, a, b, c));
-        }
-        worst = worst.max(best);
+    for point in surface_points(from) {
+        worst = worst.max(min_distance(point, onto));
     }
     worst
+}
+
+fn two_sided(source: &Primitive, level: &Primitive) -> f32 {
+    max_surface_deviation(source, level).max(max_surface_deviation(level, source))
+}
+
+fn surface_points(prim: &Primitive) -> Vec<[f32; 3]> {
+    let interiors = [
+        [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+        [0.5, 0.25, 0.25],
+        [0.25, 0.5, 0.25],
+        [0.25, 0.25, 0.5],
+    ];
+    let mut out = Vec::new();
+    for tri in prim.indices.as_chunks::<3>().0 {
+        let Some(a) = vertex(prim, tri[0]) else {
+            continue;
+        };
+        let Some(b) = vertex(prim, tri[1]) else {
+            continue;
+        };
+        let Some(c) = vertex(prim, tri[2]) else {
+            continue;
+        };
+        out.extend([a, b, c, mid(a, b), mid(b, c), mid(c, a)]);
+        for weights in interiors {
+            out.push(bary(a, b, c, weights));
+        }
+    }
+    out
+}
+
+fn min_distance(point: [f32; 3], prim: &Primitive) -> f32 {
+    let mut best = f32::MAX;
+    for tri in prim.indices.as_chunks::<3>().0 {
+        let Some(a) = vertex(prim, tri[0]) else {
+            continue;
+        };
+        let Some(b) = vertex(prim, tri[1]) else {
+            continue;
+        };
+        let Some(c) = vertex(prim, tri[2]) else {
+            continue;
+        };
+        best = best.min(dist_point_triangle(point, a, b, c));
+    }
+    best
+}
+
+fn mid(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        f32::midpoint(a[0], b[0]),
+        f32::midpoint(a[1], b[1]),
+        f32::midpoint(a[2], b[2]),
+    ]
+}
+
+fn bary(a: [f32; 3], b: [f32; 3], c: [f32; 3], w: [f32; 3]) -> [f32; 3] {
+    [
+        a[0] * w[0] + b[0] * w[1] + c[0] * w[2],
+        a[1] * w[0] + b[1] * w[1] + c[1] * w[2],
+        a[2] * w[0] + b[2] * w[1] + c[2] * w[2],
+    ]
 }
 
 fn vertex(prim: &Primitive, index: u32) -> Option<[f32; 3]> {
@@ -170,9 +220,10 @@ fn len(a: [f32; 3]) -> f32 {
     dot(a, a).sqrt()
 }
 
-fn view_at(distance_m: f32, error_px: f32, bias: i32) -> LodView {
+fn view_at(depth_m: f32, error_px: f32, bias: i32) -> LodView {
     LodView {
-        distance_m,
+        depth_m,
+        scale: 1.0,
         height_px: 1000.0,
         fov_y_rad: std::f32::consts::FRAC_PI_2,
         error_px,
@@ -181,8 +232,8 @@ fn view_at(distance_m: f32, error_px: f32, bias: i32) -> LodView {
 }
 
 /// `e * H / (2 d tan(fov/2))`, written out so it does not call the selector.
-fn projected(error_m: f32, distance_m: f32) -> f32 {
-    error_m * 1000.0 / (2.0 * distance_m)
+fn projected(error_m: f32, depth_m: f32, fov_y_rad: f32) -> f32 {
+    error_m * 1000.0 / (2.0 * depth_m * (fov_y_rad * 0.5).tan())
 }
 
 #[test]
@@ -239,17 +290,23 @@ fn stored_error_bounds_the_deviation_and_is_monotone() {
     let mut previous = 0.0_f32;
     for (i, level) in chain.iter().enumerate() {
         assert!(level.error_m.is_finite() && level.error_m >= previous);
-        let measured = max_vertex_deviation(source, &level.primitives[0]);
-        let slack = 1.0e-4_f32.max(level.error_m * 1.0e-3);
-        assert!(
-            measured <= level.error_m + slack,
-            "level {i}: deviation {measured} exceeds stored {} + {slack}",
-            level.error_m
-        );
+        let measured = two_sided(source, &level.primitives[0]);
+        if i == 0 {
+            // The imported surface against itself. Closest-point noise only.
+            assert!(measured <= 1.0e-5, "level 0 self deviation {measured}");
+        } else {
+            assert!(
+                measured <= level.error_m,
+                "level {i}: surface deviation {measured} ({}) exceeds stored {} ({})",
+                measured.to_bits(),
+                level.error_m,
+                level.error_m.to_bits()
+            );
+        }
         previous = level.error_m;
     }
     let coarsest = chain.last().unwrap();
-    let measured = max_vertex_deviation(source, &coarsest.primitives[0]);
+    let measured = two_sided(source, &coarsest.primitives[0]);
     assert!(
         measured > 1.0e-4 && coarsest.error_m > 0.0,
         "coarsest error {} deviation {measured} should be a real bound",
@@ -262,8 +319,9 @@ fn selection_holds_across_the_boundary_and_switches_past_the_band() {
     // screen = e * 1000 / (2 d) with fov 90°. Level 2 (error 2) crosses τ = 1 at d = 1000.
     let errors = [0.0, 0.5, 2.0];
     let tau = 1.0;
+    let fov = std::f32::consts::FRAC_PI_2;
     let at_boundary = view_at(1000.0, tau, 0);
-    assert!(projected(2.0, 1000.0) - tau < 1.0e-4);
+    assert!(projected(2.0, 1000.0, fov) - tau < 1.0e-4);
     assert_eq!(select_lod(&errors, at_boundary, None), 1);
     assert_eq!(select_lod(&errors, at_boundary, Some(1)), 1);
     assert_eq!(select_lod(&errors, at_boundary, Some(2)), 2);
@@ -293,8 +351,8 @@ fn selection_holds_across_the_boundary_and_switches_past_the_band() {
 
     // Low preset bias is one level coarser than the error pick.
     // At d = 400, level 1 is under τ and level 2 is not.
-    assert!(projected(0.5, 400.0) < tau);
-    assert!(projected(2.0, 400.0) > tau);
+    assert!(projected(0.5, 400.0, fov) < tau);
+    assert!(projected(2.0, 400.0, fov) > tau);
     assert_eq!(select_lod(&errors, view_at(400.0, tau, 0), None), 1);
     assert_eq!(select_lod(&errors, view_at(400.0, tau, 1), None), 2);
 }
@@ -314,9 +372,130 @@ fn negative_control_dropping_the_distance_term_fails_the_far_triangle_oracle() {
         "far level {chosen} tris {:?} should be under {lod0}",
         counts.get(chosen)
     );
-    let mutant = 0;
+    let mutant = select_lod_without_distance(&errors, far);
+    let chosen_tris = counts.get(chosen).copied().unwrap();
+    let mutant_tris = counts.get(mutant).copied().unwrap();
     assert!(
-        !fewer(mutant),
-        "dropping the distance term stays on LOD0 and must fail the far-triangle oracle"
+        chosen_tris < mutant_tris,
+        "far level {chosen} ({chosen_tris} tris) must be coarser than the depth-dropped mutant level {mutant} ({mutant_tris} tris)"
     );
+}
+
+/// The screen-error formula with the depth term removed. A positive error no
+/// longer shrinks as the instance moves away, so the far pick stays finer.
+fn select_lod_without_distance(errors_m: &[f32], view: LodView) -> usize {
+    let mut best = 0;
+    for (index, error) in errors_m.iter().copied().enumerate() {
+        let screen = if error <= 0.0 || view.scale <= 0.0 {
+            0.0
+        } else {
+            let denom = 2.0 * (view.fov_y_rad * 0.5).tan();
+            if !error.is_finite() || !denom.is_finite() || denom <= 0.0 {
+                f32::INFINITY
+            } else {
+                error * view.scale * view.height_px / denom
+            }
+        };
+        if screen < view.error_px {
+            best = index;
+        }
+    }
+    best
+}
+
+/// Two grids of one continuous sheet, split at x = 1. The shared edge is a
+/// ridge of the sine, not a crease, so an unlocked border can move it.
+fn shared_edge(cells: usize) -> GltfMesh {
+    GltfMesh {
+        name: Some(String::from("pair")),
+        primitives: vec![sheet(cells, 0.0, 1.0), sheet(cells, 1.0, 2.0)],
+    }
+}
+
+fn sheet(cells: usize, x0: f32, x1: f32) -> Primitive {
+    let n = cells + 1;
+    let mut positions = Vec::with_capacity(n * n);
+    let span = unit(cells);
+    for y in 0..n {
+        for x in 0..n {
+            let fx = unit(x) / span;
+            let fy = unit(y) / span;
+            let world_x = x0 + (x1 - x0) * fx;
+            let z = (world_x * std::f32::consts::FRAC_PI_2).sin()
+                * (fy * std::f32::consts::PI).sin()
+                * 0.25;
+            positions.push([world_x, fy, z]);
+        }
+    }
+    let mut indices = Vec::with_capacity(cells * cells * 6);
+    for y in 0..cells {
+        for x in 0..cells {
+            let i = u32::try_from(y * n + x).unwrap();
+            let row = u32::try_from(n).unwrap();
+            indices.extend([i, i + 1, i + row, i + 1, i + row + 1, i + row]);
+        }
+    }
+    Primitive {
+        positions,
+        indices,
+        ..Primitive::default()
+    }
+}
+
+fn seam_vertices(prim: &Primitive) -> Vec<[f32; 3]> {
+    let max_x = prim
+        .positions
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max);
+    prim.positions
+        .iter()
+        .copied()
+        .filter(|point| point[0].to_bits() == max_x.to_bits())
+        .collect()
+}
+
+#[test]
+fn locked_borders_leave_no_gap_along_a_shared_edge() {
+    let mesh = shared_edge(16);
+    let chain = lod_chain(&mesh);
+    let seam = seam_vertices(&mesh.primitives[0]);
+    assert!(seam.len() > 2, "shared edge has {} vertices", seam.len());
+    assert_eq!(chain[0].primitives.len(), 2);
+    for (level_index, level) in chain.iter().enumerate() {
+        let mut gap = 0.0_f32;
+        for point in &seam {
+            gap = gap
+                .max(min_distance(*point, &level.primitives[0]))
+                .max(min_distance(*point, &level.primitives[1]));
+        }
+        assert_eq!(
+            gap.to_bits(),
+            0.0_f32.to_bits(),
+            "level {level_index} seam gap {gap} m"
+        );
+    }
+}
+
+/// Body is `GCK1` plus a little-endian version word of 1. The trailer is the
+/// SHA-256 of that body, so the reader gets past the hash and rejects the version.
+fn version_one_record() -> Vec<u8> {
+    let mut body = b"GCK1".to_vec();
+    body.extend_from_slice(&1u32.to_le_bytes());
+    let trailer = genos_load::sha256(&body);
+    body.extend_from_slice(&trailer);
+    body
+}
+
+#[test]
+fn a_version_1_record_is_rejected() {
+    let bytes = version_one_record();
+    assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+    let load_err = genos_load::decode_geometry(&bytes).unwrap_err();
+    assert!(
+        load_err.to_string().contains("version"),
+        "loader: {load_err}"
+    );
+    let cook_err = genos_cook::decode(&bytes).unwrap_err();
+    assert!(cook_err.to_string().contains("version"), "cook: {cook_err}");
 }

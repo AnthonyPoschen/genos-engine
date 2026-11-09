@@ -37,7 +37,7 @@ pub use animation::{Animation, Transform, TransformKey};
 pub use cache::{object_path, store_import, store_object, write_atomic};
 pub use cooked::{
     cooked_path, decode_geometry, decode_images, textures_path, CookedError, CookedGeometry,
-    CookedImage, CookedImages, Package,
+    CookedImage, CookedImages, Package, GCOOK_VERSION,
 };
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
@@ -50,8 +50,9 @@ pub use gltf::{
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use lod::{
-    screen_error_px, select_lod, LodView, MeshLod, LOD_BIAS_LOW, LOD_ERROR_PX_HIGH,
-    LOD_ERROR_PX_LOW, LOD_ERROR_PX_MED, LOD_HYSTERESIS,
+    max_axis_scale, nearest_view_depth, screen_error_px, select_lod, view_for_instance,
+    LodInstance, LodView, MeshLod, LOD_BIAS_LOW, LOD_ERROR_PX_HIGH, LOD_ERROR_PX_LOW,
+    LOD_ERROR_PX_MED, LOD_HYSTERESIS,
 };
 pub use material::Material;
 pub use mesh::{Mesh, Triangle};
