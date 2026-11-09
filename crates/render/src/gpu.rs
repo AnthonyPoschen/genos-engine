@@ -3872,7 +3872,8 @@ impl Gpu {
             format!(
                 " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
                  hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
-                 hit_near_tests={} px_lamps={} hit_lamps={}",
+                 hit_near_tests={} px_lamps={} hit_lamps={} \
+                 restir_hist_accept={} restir_hist_reject={} restir_point_adds={}",
                 c.pixels,
                 c.kept,
                 c.fills,
@@ -3885,7 +3886,10 @@ impl Gpu {
                 c.fill_shade,
                 c.near_tests,
                 c.px_lamps,
-                c.hit_lamps
+                c.hit_lamps,
+                c.history_accepts,
+                c.history_rejects,
+                c.restir_point_adds
             )
         } else {
             String::new()

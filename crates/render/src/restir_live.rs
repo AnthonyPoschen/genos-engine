@@ -27,6 +27,19 @@ pub const M_CAP: u32 = 20 * CANDIDATES;
 pub const CHANGED_AT_WORD: usize = 38;
 /// 1 when any point lamp changed since the history frame (bitset non-zero).
 pub const ANY_CHANGED_WORD: usize = 39;
+/// Live history counters. Three consecutive header words the host copies to
+/// the stats readback tail. The cache already uses `gstats.diag` 43, 44, and
+/// 45 when `LIGHTING_DIAG` is on; these header words are a different buffer.
+/// Compact keeps diag 5, 6, and 13. Diag 8, 38, and 39 stay on that layout.
+pub const HIST_ACCEPT_WORD: usize = 43;
+/// Surfaced pixels whose temporal reprojection rejected history.
+pub const HIST_REJECT_WORD: usize = 44;
+/// Near point lamps the direct loop added on a `ReSTIR` pixel.
+pub const POINT_ADD_WORD: usize = 45;
+const _: () = assert!(HIST_ACCEPT_WORD == ANY_CHANGED_WORD + 4);
+const _: () = assert!(HIST_REJECT_WORD == HIST_ACCEPT_WORD + 1);
+const _: () = assert!(POINT_ADD_WORD == HIST_ACCEPT_WORD + 2);
+const _: () = assert!(POINT_ADD_WORD < HEADER_WORDS);
 /// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
 /// and the changed-lamp bitset.
 pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 / 32;
@@ -331,6 +344,23 @@ mod tests {
         assert!(!packed.layout_changed);
         let changed = usize::try_from(at(&packed.words, 38)).unwrap_or(0);
         assert_eq!(packed.words.get(changed).copied(), Some(0), "nothing moved");
+        assert_eq!(packed.words.get(super::HIST_ACCEPT_WORD).copied().unwrap_or(0), 0);
+        assert_eq!(packed.words.get(super::HIST_REJECT_WORD).copied().unwrap_or(0), 0);
+        assert_eq!(packed.words.get(super::POINT_ADD_WORD).copied().unwrap_or(0), 0);
+        let live = include_str!("../shaders/restir_live.comp");
+        let direct = include_str!("../shaders/lighting_direct.comp");
+        assert!(live.contains(&format!(
+            "const uint RESTIR_DIAG_HIST_ACCEPT = {}u;",
+            super::HIST_ACCEPT_WORD
+        )));
+        assert!(live.contains(&format!(
+            "const uint RESTIR_DIAG_HIST_REJECT = {}u;",
+            super::HIST_REJECT_WORD
+        )));
+        assert!(direct.contains(&format!(
+            "const uint RESTIR_DIAG_POINT_ADD = {}u;",
+            super::POINT_ADD_WORD
+        )));
     }
 
     #[test]

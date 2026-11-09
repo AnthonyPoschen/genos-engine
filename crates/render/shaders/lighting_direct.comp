@@ -17,6 +17,10 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
+// Near point lamps actually added on a ReSTIR pixel. Header word, same slot
+// the history counts use. Compact keeps gstats.diag[13] for an on-screen
+// surface-cache entry when LIGHTING_DIAG is on.
+const uint RESTIR_DIAG_POINT_ADD = 45u;
 #endif
 
 const bool LIGHTING_KEPT_SHOULD = true;
@@ -891,6 +895,14 @@ void main() {
         if (shadow_lit) {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
+#ifdef GENOS_RESTIR_DI
+            // Near point lamp actually added on a ReSTIR pixel. The skip at the
+            // top of this loop keeps the count at 0. Sun and flame stay out of
+            // this word.
+            if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y && lamp_pick_diag()) {
+                atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);
+            }
+#endif
             if (lobe) {
                 vec3 ldir = target - origin;
                 float llen = length(ldir);

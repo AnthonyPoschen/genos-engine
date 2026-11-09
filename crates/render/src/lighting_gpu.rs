@@ -398,6 +398,12 @@ pub struct LightingAtrousStats {
 /// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
 /// sum, `restir` shaded one pairwise sample or one ReSTIR DI sample. Counts stay zero unless the diag
 /// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
+/// `history_accepts` / `history_rejects` are restir header words 43 and 44:
+/// the live temporal reprojection kept or rejected a surfaced pixel. A history
+/// reset counts neither. `restir_point_adds` is header word 45: near point
+/// lamps the direct loop added on a ReSTIR pixel. It stays 0 while that loop
+/// skips them. The host reads a copy at the tail of the stats readback. Compact
+/// keeps `gstats.diag` 5, 6, and 13 when `LIGHTING_DIAG` is on.
 /// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
 /// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
 /// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
@@ -424,6 +430,12 @@ pub struct LampPickCounts {
     pub near_tests: u32,
     pub px_lamps: u32,
     pub hit_lamps: u32,
+    /// Surfaced pixels whose live temporal reprojection kept history.
+    pub history_accepts: u32,
+    /// Surfaced pixels whose live temporal reprojection rejected history.
+    pub history_rejects: u32,
+    /// Near point lamps added by the direct loop on a ReSTIR pixel.
+    pub restir_point_adds: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -1452,6 +1464,7 @@ impl Gpu {
     pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.idle_device();
         let slot = self.lighting.last_slot;
+        let restir_diag = self.read_restir_diag(self.lighting.stats[slot].memory);
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
@@ -1470,6 +1483,9 @@ impl Gpu {
                 near_tests: w[LAMP_PICK_DIAG_WORD - 14],
                 px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
                 hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
+                history_accepts: restir_diag[0],
+                history_rejects: restir_diag[1],
+                restir_point_adds: restir_diag[2],
             })
             .unwrap_or_default()
     }
@@ -2249,6 +2265,36 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// Header words 43, 44, and 45, copied to the tail of this slot's stats
+    /// readback. Three zeros when the copy did not run.
+    fn read_restir_diag(&self, memory: Handle) -> [u32; 3] {
+        if memory.is_null() {
+            return [0; 3];
+        }
+        let mut words = [0u32; 3];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    restir_diag_tail_offset(),
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
+                    &mut mapped,
+                ),
+                "map restir diag",
+            )
+            .is_err()
+            {
+                return [0; 3];
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), words.as_mut_ptr(), 3);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        words
     }
 
     /// One word of a stats ring buffer whose fence was already waited.
@@ -3859,6 +3905,34 @@ impl Gpu {
                 1,
                 &region as *const Region as *const u8,
             );
+            // History counters live in the restir header, past the prefix fields.
+            // The tail sits after the unfilled mask so diag[], chg[], and the
+            // mask keep their words. A frame that did not run ReSTIR stores zeros.
+            let tail = Region {
+                src: (crate::restir_live::HIST_ACCEPT_WORD as u64).saturating_mul(4),
+                dst: restir_diag_tail_offset(),
+                size: RESTIR_DIAG_TAIL_BYTES,
+            };
+            let restir_ready = self.lighting.restir_frame
+                && self.lighting.restir_buf.size
+                    >= tail.src.saturating_add(RESTIR_DIAG_TAIL_BYTES);
+            if restir_ready {
+                (self.fns.cmd_copy_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    self.lighting.stats[slot].buffer,
+                    1,
+                    &tail as *const Region as *const u8,
+                );
+            } else {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.stats[slot].buffer,
+                    tail.dst,
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
+                );
+            }
         }
         if hdr_compose {
             if let Err(err) = self.ensure_meter_pipe() {
@@ -4185,12 +4259,15 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
 /// control block at word 124 (16 words), then the unfilled-pixel count and the
 /// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
 /// mask follows, one bit per composed pixel, and is not part of this header.
-/// The change-counter enable word stays chg[31] (word 119).
+/// The change-counter enable word stays chg[31] (word 119). Sixteen bytes
+/// after the mask cap hold the restir history counters. They are not diag words.
 const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+/// Three header words plus one pad, after the unfilled mask.
+const RESTIR_DIAG_TAIL_BYTES: u64 = 16;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
 const LIGHTING_SHADED_WORD: usize = 141;
@@ -4232,8 +4309,12 @@ fn unfilled_mask_bytes(width: u32, height: u32) -> u64 {
     u64::from(unfilled_mask_words(width, height)) * 4
 }
 
-fn lighting_stats_storage_bytes() -> u64 {
+fn restir_diag_tail_offset() -> u64 {
     LIGHTING_STATS_BYTES + u64::from(LIGHTING_UNFILLED_MASK_CAP) * 4
+}
+
+fn lighting_stats_storage_bytes() -> u64 {
+    restir_diag_tail_offset() + RESTIR_DIAG_TAIL_BYTES
 }
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
