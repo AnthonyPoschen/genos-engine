@@ -7,7 +7,7 @@
 //! heuristic (Bitterli et al., "Generalized Resampled Importance Sampling",
 //! SIGGRAPH 2022). Two reservoirs use the same threshold as
 //! `genos_render::lamp_pick::pairwise_merge`. The live direct pass can run
-//! the same draws behind `LightingSettings::restir_di`, which stays off.
+//! the same draws behind `LightingSettings::restir_di`, which stays on.
 //! This checker is unchanged.
 //!
 //! Departures from those papers:

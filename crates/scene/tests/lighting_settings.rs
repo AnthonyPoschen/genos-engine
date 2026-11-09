@@ -254,17 +254,20 @@ fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
 }
 
 #[test]
-fn gi_presets_sample_pixels_from_a_reservoir() {
+fn gi_presets_shade_pixels_with_restir() {
     let low = LightingSettings::preset(LightingPreset::Low);
+    assert!(low.restir_di);
     assert_eq!(low.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(low.lamp_pick.candidates, LAMP_PICK_CANDIDATES_LOW);
     assert_eq!(low.lamp_pick.radius, 0, "low is temporal only");
     assert!(low.lamp_pick.unbiased);
     let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert!(medium.restir_di);
     assert_eq!(medium.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(medium.lamp_pick.candidates, LAMP_PICK_CANDIDATES_MEDIUM);
     assert_eq!(medium.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
     let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.restir_di);
     assert_eq!(high.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(high.lamp_pick.candidates, LAMP_PICK_CANDIDATES_HIGH);
     assert_eq!(high.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);

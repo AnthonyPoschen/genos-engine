@@ -116,8 +116,6 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
-    /// Pre-reservoir direct shade. Bound when reuse would only sum a few lamps.
-    direct_plain: Handle,
     screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
@@ -350,8 +348,6 @@ pub(crate) struct Lighting {
     restir_w: u32,
     restir_h: u32,
     restir_clear: bool,
-    /// Positive point lamps in the uploaded scene. The sun is not counted.
-    point_lamps: u32,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -481,7 +477,6 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
-            direct_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
@@ -608,7 +603,6 @@ impl Default for Lighting {
             restir_w: 0,
             restir_h: 0,
             restir_clear: false,
-            point_lamps: 0,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -884,13 +878,6 @@ impl Gpu {
             "atrous-plain",
         )?;
         self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.direct_plain = self.make_compute_pipe(
-            LIGHTING_DIRECT_PLAIN_SPV,
-            self.lighting.layout,
-            "direct-plain",
-        )?;
-        self.note_pipeline_time("direct-plain", start);
         let start = Instant::now();
         self.lighting.screen_pipe = self.make_compute_pipe(
             LIGHTING_SCREEN_SPV,
@@ -1594,10 +1581,6 @@ impl Gpu {
     /// arms the corner catch-up for the frame the lamps stop.
     pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
         self.lighting.view_content_key = lighting_view_content_key(pack);
-        self.lighting.point_lamps = u32::try_from(
-            pack.lamps.iter().filter(|lamp| !lamp.directional).count(),
-        )
-        .unwrap_or(u32::MAX);
         let (dir, light, n) = lighting_sun_live(pack);
         self.lighting.sun_live_dir = dir;
         self.lighting.sun_live_light = light;
@@ -2025,20 +2008,12 @@ impl Gpu {
         }
     }
 
-    /// Reservoir shade, the ReSTIR module, or the pre-reservoir sum.
+    /// ReSTIR product shade, or the module that still holds the exact reference.
     fn direct_pipe(&self) -> Handle {
         if self.lighting.restir_frame && !self.lighting.restir_direct.is_null() {
             return self.lighting.restir_direct;
         }
-        if direct_shade_plain(
-            self.lighting.settings.lamp_pick.mode,
-            self.lighting.point_lamps,
-            self.lighting.shade_gate,
-        ) {
-            self.lighting.direct_plain
-        } else {
-            self.lighting.pipes[3]
-        }
+        self.lighting.pipes[3]
     }
 
     /// Record and submit one light cache round on the async compute queue: list
@@ -3387,6 +3362,13 @@ impl Gpu {
         };
         let mut lamp = lamp_pick_push(&self.lighting.settings);
         lamp[1] |= lamp_shade_bits(self.lighting.shade_gate);
+        if restir_off_is_exact(
+            self.lighting.settings.restir_di,
+            self.lighting.settings.lamp_pick.mode,
+            self.lighting.shade_gate,
+        ) {
+            lamp[1] |= 1 << 19;
+        }
         // The existing diag bit counts fresh shadow rays. It does not change
         // the shade. It is set only while GI metrics are recording.
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
@@ -4141,7 +4123,6 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
-                .chain(std::iter::once(&mut self.lighting.direct_plain))
                 .chain(std::iter::once(&mut self.lighting.restir_pipe))
                 .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))

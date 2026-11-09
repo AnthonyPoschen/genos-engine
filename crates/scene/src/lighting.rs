@@ -690,12 +690,11 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
-    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
-    /// Potato and day-cycle trace every lamp.
+    /// Weighted lamp picking for hits and for the noise-gate sample.
+    /// Production screen pixels use [`Self::restir_di`].
     pub lamp_pick: LampPickSettings,
-    /// Screen-pixel ReSTIR DI. Off until a frame asks for it. The product
-    /// exact sum stays the shade while this is off.
+    /// Screen-pixel ReSTIR DI. On in every preset. Off is the labelled exact
+    /// sum for a pixel mode that used to sample. Mode off already sums.
     pub restir_di: bool,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
@@ -884,7 +883,7 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
-            restir_di: false,
+            restir_di: true,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }

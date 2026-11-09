@@ -3,7 +3,8 @@
 
 //! Live ReSTIR DI (ADR 0022 stage C5) against brute direct on the gate scenes.
 //!
-//! The flag stays off for every other test. This file turns it on and grades
+//! The brute rows keep `restir_di` off, which is the labelled exact sum.
+//! This file turns it on and grades
 //! `ref_err_near` the way `docs/systems/lighting/restir-di-plan.md` defines it:
 //! `sum(w |Y-Yref|) / sum(w Yref)` with `w = 1 / max(distance, 0.5)`.
 

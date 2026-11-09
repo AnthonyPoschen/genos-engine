@@ -215,7 +215,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
-  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). Off by default.
+  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). On by default. Off is the exact sum.
                             The argument wins. The picture stays the raw sample.
   --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
   --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)

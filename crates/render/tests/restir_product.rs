@@ -159,24 +159,30 @@ fn assert_quiet(counts: &LampPickCounts, what: &str) {
 }
 
 fn assert_flag_off(window: &mut Window, renderer: &mut Renderer, camera: &Camera) {
-    let dark = hall(0);
+    let lit = hall(4);
     renderer.set_lighting_settings(product(false));
-    draw(window, renderer, &dark, camera);
+    draw(window, renderer, &lit, camera);
+    let turned = pose(0.35);
+    draw(window, renderer, &lit, &turned);
     let off = names(renderer);
     assert!(
         off.iter().all(|name| !name.contains("restir")),
-        "flag off built a ReSTIR pipeline: {off:?}"
+        "the exact reference built a ReSTIR pipeline: {off:?}"
     );
     let off_counts = renderer.lighting_lamp_pick_counts();
+    assert!(
+        off_counts.exact > 0,
+        "restir_di off did not shade the exact sum ({off_counts:?})"
+    );
     assert_eq!(
         (
-            off_counts.exact,
+            off_counts.restir,
             off_counts.restir_point_adds,
             off_counts.history_accepts,
             off_counts.history_rejects
         ),
         (0, 0, 0, 0),
-        "flag off counted a ReSTIR shade ({off_counts:?})"
+        "restir_di off counted a ReSTIR shade ({off_counts:?})"
     );
 }
 
@@ -364,7 +370,8 @@ fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, 
     );
 }
 
-/// Flag off builds no ReSTIR pipeline. Flag on, product shade, every lamp
+/// `restir_di` off is the labelled exact sum and builds no ReSTIR pipeline.
+/// Flag on, product shade, every lamp
 /// count leaves `exact` at 0 and adds no near point lamp in the direct loop.
 /// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
 /// sample. The labelled exact gate still sums and does not take that loop.

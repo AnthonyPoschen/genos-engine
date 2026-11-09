@@ -10,7 +10,7 @@
 //! balance weight over that list. History stays the post-temporal reservoir.
 //! `--reverse-neighbours` is the order fault and must fail `restir-ref diff`.
 //! The live lighting pass includes these shaders. It does not call this crate.
-//! The live flag is `restir_di` on the renderer and stays off. Each checker path is off unless
+//! The live flag is `restir_di` on the renderer and stays on. Each checker path is off unless
 //! the flag or its mirror is set, so a bare invocation writes nothing.
 //!
 //! Departures are the CPU reference's departures (`crates/restir-ref/src/lib.rs`).

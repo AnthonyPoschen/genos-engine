@@ -144,7 +144,6 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
 struct DenoiseModules {
     screen: PathBuf,
     atrous_plain: PathBuf,
-    direct_plain: PathBuf,
 }
 
 fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
@@ -167,19 +166,9 @@ fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
         &out.join("lighting_atrous_plain.comp.spv"),
         "LIGHTING_DENOISE_PLAIN",
     );
-    // glslc forwards -D. The plain direct module is the pre-reservoir shade:
-    // the reservoir block is not in the SPIR-V, so a quiet few-lamp view holds
-    // at the same cost as the shade before ReSTIR. glslangValidator is not used
-    // here; that path emitted a newer SPIR-V for another kernel and faulted.
-    let direct_plain = compile_glslc_define(
-        "shaders/lighting_direct.comp",
-        &out.join("lighting_direct_plain.comp.spv"),
-        "LIGHTING_DIRECT_PLAIN",
-    );
     DenoiseModules {
         screen,
         atrous_plain,
-        direct_plain,
     }
 }
 
@@ -253,10 +242,6 @@ fn write_shader_glue(
     glue_text.push_str(&format!(
         "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         denoise.atrous_plain.display()
-    ));
-    glue_text.push_str(&format!(
-        "pub static LIGHTING_DIRECT_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        denoise.direct_plain.display()
     ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
