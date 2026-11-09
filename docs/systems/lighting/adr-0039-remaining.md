@@ -37,7 +37,7 @@ The six axis copies are still separate entries. The thin-wall reject uses that: 
 |---|---|---|
 | Cache-only room blotch above 0.014. 4070 means were about 0.193 and 0.228 / 0.158 against 0.014 | accuracy | Cell convergence and the spatial read. Not another old-cell probe before the replacement path is in |
 | Cell energy, linger, and lag (ADR stage 1) | accuracy | The same cells, after the path exists. Thresholds stay |
-| Turn and slant absolute gates (0.403, probes-on slant) | accuracy | Stage 2 picture gates. Relative r15 is not those gates |
+| Turn and slant absolute gates (0.403, probes-on slant) | accuracy | Stage 2 picture gates. Relative r15 is not those gates. On lavapipe the turn miss against the oracle's 3-bounce trace is the unlimited cache versus that hop cap, not an SH scale. The note is [adr-0039-turn-bounce-depth.md](adr-0039-turn-bounce-depth.md). The 0.403 number stays |
 | Texel ray cut picture (contact, corner, and thin wall no worse than no-skip) and the millisecond saving | accuracy / performance | The skip is wired and default off. Those gates stay. Lavapipe is not the millisecond number |
 | Probe dispatch retirement, the global delete (ADR stage 5) | performance | The conditional slice is `surface_cache.sh_probe_retire`, default off. Deletion of the passes, a smaller CPU launch, and bit-exact filter parity stay parked until the picture A/B. Low keeps probes |
 | GI-on lamp-ray cost (ADR D1) and reservoir memory (ADR D2) | performance | Those stages. The ~200 MB figure is a soft preference, not a hard gate. D2 is the existing ReSTIR path, not a second reservoir |
