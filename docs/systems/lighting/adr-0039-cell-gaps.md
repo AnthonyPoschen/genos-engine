@@ -12,13 +12,13 @@ The thin-wall reject uses the six copies: the other side is a different entry, a
 
 ## Recommendation
 
-Pack every live face of one spatial cell into a side pool (a **face pack**). The world-cell hash keeps today's half-cell inset, so a wall on a grid plane stays in one cell, and it loses the axis salt (`lighting_axis` no longer goes into the hash). Each face keeps the hemisphere rays, the exact cosine mean, and the fp16 SH-L1 it already stores. A query gathers each dominant axis whose dot with the normal is positive (one lattice on a flat wall, two on the cone, three on a corner) and weights that face by `max(dot, 0)`. At a pure axis the other dots are zero, so the value is that face's mean and the gather is today's eight corners. On the cone the adjacent faces both contribute. The opposite face stays a different record and drops out.
+Pack every live face of one spatial cell into a side pool (a **face pack**). The world-cell hash keeps today's half-cell inset, so a wall on a grid plane stays in one cell, and the world-cell branch of `lighting_cache_key_sized` stops hashing the axis. Texel keys share that function and keep the salt. Each face keeps its uniform-hemisphere rays, the exact cosine mean, the fp16 SH-L1, the sun share and sun baseline, and the relight frame. A query gathers each dominant axis whose dot with the normal is positive (one lattice on a flat wall, two on the cone, three on a corner). The face weight is `max(dot, 0)` times a sample-count ramp inside the gather. At a pure axis the other dots are zero, so the value is that face's mean. On the cone the adjacent faces both contribute. The opposite face stays a different record and drops out. A face that has just been relit once does not enter a two-face blend at full weight.
 
-Same-facing surfaces inside that face are **cell residents**, split by plane offset (High default two residents, 5 cm sheet). The read picks the closest resident inside half a sheet. It does not blend two residents. A full face refuses the new surface and the query misses, which keeps the probes and the texel rays. It does not show the other surface.
+Same-facing surfaces inside that face are **cell residents**. The offset is the cell-relative signed distance to the geometric plane, not the dominant-axis coordinate. The query picks one winning resident. Every other resident's corners are dropped before the trilinear sum. A full face refuses the new surface and the query misses, which keeps the probes and the texel rays.
 
 A body-centred lattice is a later A/B against this cubic pack. It is not the store. Plain L1, a full-sphere trace from a surface point, a smoothstep across the old keys, a tighter plane test alone, and camera-distance cell bands are not the fix.
 
-High pool estimate: 262144 records × 48 B ≈ 12 MB, inside ADR 0039's 12–48 MB SH envelope. The 392 MiB slot table does not grow. Low keeps probes, a zero pool, one resident, and a 50 cm cell.
+High pool: 262144 records × 64 B = 16 MiB, inside ADR 0039's SH envelope (the ADR text says 12–48 MB; 1,048,576 × 24 B is 24 MiB). The fat table stays 1,048,576 × 368 B (ADR 0036) plus 1,048,576 × 24 B of SH (ADR 0039), which is 392 MiB. This pool does not grow that table. Low keeps probes, a zero pool, one resident, and a 50 cm cell.
 
 ## What the code does now
 
@@ -32,11 +32,11 @@ World mode 3. `LIGHTING_SH_CELL` is `LIGHTING_SC_HIT`, the literal 0.25 m (`ligh
 - `floor(pos / size - inset)`;
 - a hash of that cell, the axis, and the size.
 
-Two orientations at one place are two hash keys. Each key is a full cache entry: position, normal, mean, estimator, sun share, and 24 B of fp16 SH-L1 (`lighting_sh_put`, `LIGHTING_SH_HALF`). The table is 1,048,576 slots × 392 B = 392 MiB (368 B entry + 24 B SH, ADR 0036). Six copies do not multiply that allocation. They multiply live entries. A thin wall is two entries. A corner is up to three. Six is the cap, not the average. ADR 0036 records no occupancy split by axis.
+Two orientations at one place are two hash keys. Each key is a full cache entry. ADR 0036's entry is 368 B. ADR 0039 adds the 24 B fp16 SH-L1 (`lighting_sh_put`, `LIGHTING_SH_HALF`) on top of that entry. The table is 1,048,576 × 392 B = 392 MiB. The sun share and sun baseline live in `LIGHTING_SC_SUN_AT` (`x` share, `y` baseline; shown = value × ((1 − x) + x × now / y)). The estimator pair at `LIGHTING_SC_EST_AT` is per slot and is not on the world-cell path. Six copies do not multiply the allocation. They multiply live entries. A thin wall is two entries. A corner is up to three. Six is the cap, not the average. ADR 0036 records no occupancy split by axis.
 
-A 25 cm relight (`lighting_cache.comp`, the `wrc_cell` arm) traces `LIGHTING_CACHE_RAYS` (16) cosine-hemisphere rays about the stored normal. The mean is the cosine-weighted irradiance. The SH sums the same rays, unweighted by cosine: `L` and `L * dir`. The harmonics never see the back hemisphere.
+A 25 cm relight (`lighting_cache.comp`, the `wrc_cell` arm, `cache.v[3 * slot + 1].w > 0.2`) traces `LIGHTING_CACHE_RAYS` (16) rays about the stored normal. `lighting_dir` places them on a `round(sqrt(count))` grid of (cos θ, turn), uniform over the hemisphere (`lighting_hemi_dir`: `u` is the cosine). The cosine is the irradiance weight (`e += L * cos`), not the distribution. The SH sums the same rays, unweighted by cosine: `L` and `L * dir`. The harmonics never see the back hemisphere. The blend weight `wa` is `add / (t + add)`, then the dark-fill cube while `t` is under half the cap (`1 - (t / (t + add))^3`), then a floor while the light is not quiet or a mover is local, then `wa = 1` while a lamp change is settling. The arm writes the mean, the SH, and the sun word, and `return`s. It does not reach the texel estimator. `LIGHTING_CACHE_RAYS` is also the batch stride, the dispatch multiple, and the texel quarter (`LIGHTING_SC_QUARTERS = 64 / 16`). It is not only a ray count.
 
-`lighting_sh_gather` looks up eight corners on **one** axis, the query's dominant axis. The tilt (`ShL1::tilt`, `lighting_sh_tilt`) is the stored mean plus the band-1 change from that axis to the true normal. At the axis it is the mean. `plain_l1_loses_a_quarter_of_a_narrow_source_so_the_read_keeps_the_mean` shows why: plain L1 irradiance of a narrow source straight down the normal is 0.75 of the cosine mean. The read clamps at zero. A corner is left out when it is missing, empty, stale, back-facing (`dot <= 0`), or more than half a cell off the query plane (`plane > LIGHTING_CELL_HALF * cs`, half of 0.25 m = 0.125 m). Left-out corners add no weight. `lighting_sh.rs` `neighbour_corner_weight` is the CPU twin. The rejected four-cell lattice stays off. An axis-aligned ray hit still tilts the one owning cell.
+`lighting_sh_gather` looks up eight corners on **one** axis, the query's dominant axis. The tilt (`ShL1::tilt`, `lighting_sh_tilt`) is the stored mean plus the band-1 change from that axis to the true normal. At the axis it is the mean. `plain_l1_loses_a_quarter_of_a_narrow_source_so_the_read_keeps_the_mean` shows why: plain L1 irradiance of a narrow source straight down the normal is 0.75 of the cosine mean. The read clamps at zero. A corner is left out when it is missing, empty, stale, back-facing (`dot <= 0`), or more than half a cell off the query plane (`plane > LIGHTING_CELL_HALF * cs`, half of 0.25 m = 0.125 m). The sample gate is `v.w < LIGHTING_CACHE_HAS_W` (0.5). The first world-cell relight stores `t + add` with `t = 0`, and `add` is the run count, so a one-batch relight stores 1 and passes 0.5 on that frame. The corner then takes full `tri * facing`. `lighting_sc_shown`'s handover (`n / (n + K)`, `LIGHTING_SC_HANDOVER` 16, `LIGHTING_SC_HANDOVER_K` 2) is the texel display blend. The gather does not call it. Left-out corners add no weight. `lighting_sh.rs` `neighbour_corner_weight` is the CPU twin. The rejected four-cell lattice stays off. An axis-aligned ray hit still tilts the one owning cell.
 
 `lighting_sc_wrc_now` is the detail-off bilinear read. It has the same half-cell plane test and the same axis key.
 
@@ -73,7 +73,7 @@ From ADR 0039, ADR 0012, ADR 0036, S57, and this review:
 - No pop and no flicker. A normal jittering across 45° stays continuous. A claim does not depend on camera order for its value once both surfaces exist.
 - Stored light does not depend on the camera (ADR 0012). The camera may decide residency and update order. It does not decide cell size, sheet, or which lattice is read.
 - Near-camera error matters most. The oracle weight is `ref_err_near` (`1 / max(distance, 0.5 m)`).
-- Lighting VRAM soft budget is about 200 MB. SH was estimated at 12–48 MB and must stay inside that envelope. The 392 MiB table is ADR 0036's problem; this note does not grow it.
+- Lighting VRAM soft budget is about 200 MB. ADR 0039 estimated the SH payload at 12–48 MB; 1,048,576 × 24 B is 24 MiB, and this pool is 16 MiB. The fat table is ADR 0036's 368 B entry plus that 24 B. This note does not grow it.
 - Memory may be spent to save rays or to keep a second surface. Lookup cost is recorded and does not reject an option.
 - Body-centred layouts and tight packing are candidates.
 - Pool size, cell size, resident count, sheet, and ray count are settings (public value, MCP through the existing lighting commands, debug menu). Low is the coarse end. Low keeps screen probes until a GTX 1060 measurement exists (ADR 0039 open question 2).
@@ -116,20 +116,44 @@ The hash key for a world cell stays `floor(pos / size - inset)` with `inset = 0.
 
 A 5 cm wall can already land both sides in one index once the salt is gone (front `z = 0.13` insets to 0, back `z = 0.08` insets to 0). The face record is what keeps those sides apart. Removing the salt without the pack would merge them.
 
-The fat hash slot stays the header so compact and the relight list keep walking slots. The header stores the pool indices of its faces (at most six). It is not a stand-in mean. `lighting_sc_wrc_now` on the pack-on path loads the face whose axis is `lighting_axis(n)` and reads that face's mean. Detail-off bilinear stays per axis. One writer updates the face mean and the SH together, including the sun/sky rescale (`sh_ls`).
+The fat hash slot stays the header so compact and the relight list keep walking slots. It is not a stand-in mean. When the pack is on, the 24 B fp16 SH region on that slot (`LIGHTING_SH_AT` plus the paired half at `LIGHTING_SH_B_AT`) is not harmonics. Harmonics live only on the resident. Those 192 bits hold the six face heads: a presence bit and an 18-bit pool index each (114 bits). 262144 is 2^18, so an index needs 18 bits and has no spare pattern for "empty". The presence bit is the empty mark. The remaining bits stay unused.
 
-A face record is the exact cosine mean (fp32, 12 B, same range as `cache.v[3 * slot + 2]`), the sample count (4 B), the plane offset (fp16, 2 B), and the fp16 SH-L1 (24 B). Aligned 48 B. The lit-from point stays `lighting_sc_centre` on that face's plane. Empty faces take no record.
+`lighting_sc_wrc_now` on the pack-on path stays single-axis. It loads the one face whose axis is `lighting_axis(n)` and reads that face's mean. It does not run the multi-axis gather. Detail-off bilinear stays per axis. One writer updates that face's mean, SH, sun share, and sun baseline together (`sh_ls` scales the mean and the harmonics, and the sun word, the way the slot path does today).
 
-Rays: 16 cosine-hemisphere rays about that face's axis, from that face's point. Same rays as today, no new sample domain. The SH blend alpha stays the mean's alpha, including the settling arm that takes the round whole. The scheduler walks the header's index list and runs the existing relight arm once per face.
+A resident record is 54 B, stored aligned to 64 B:
 
-Read: for each dominant axis with `dot(axis, n) > 0`, the eight corners of **that axis's inset lattice**. A corner contributes `max(dot(axis, n), 0) * trilinear * that face's tilt` when the face is present. Weights renormalize. A missing face adds nothing and does not darken. At a pure axis every other dot is 0, the other walks are skipped, and the value is that face's mean (`assert_eq!(sh.tilt(e, axis, axis), e)`). On the cone, `normalize(0, 1, 1)` gives +Y and +Z `dot = 0.707`. The tie itself is classified +Y, because `|y| == |z|` takes the `a.y >= a.z` arm. A hair toward +Z classifies +Z. The sweep is that neighbourhood. The opposite face is `dot <= 0` and stays out.
+| Field | Bytes | Why |
+|---|---|---|
+| Cosine mean, fp32 RGB | 12 | Same range as `cache.v[3 * slot + 2]` |
+| Sample count | 4 | The `w` the gather ramps on |
+| Cell-relative plane offset, fp16 | 2 | Signed distance from the cell centre to the geometric plane. An absolute fp16 plane is a 3 cm ulp at 32 m (fp16 ulp at 2^5 is 2^-5) |
+| SH-L1, fp16 | 24 | The ADR 0039 payload, per resident |
+| Sun share and sun baseline, fp32 × 2 | 8 | `LIGHTING_SC_SUN_AT` `x` and `y`. Two faces do not share one share |
+| Relight frame | 4 | The stamp `lighting_sc_stale` uses. One header stamp cannot stale one face and not the other |
+
+54 B aligns to 64 B. The 10 B pad holds the next-resident link: a has-next bit and an 18-bit index. The link is not in the fat slot. Six heads plus six second indices would be 216 bits and do not fit the 192-bit SH region. 262144 × 64 B = 16 MiB.
+
+The lit-from point stays `lighting_sc_centre` on that resident's plane. Empty faces take no record.
+
+Rays stay uniform on the face's hemisphere, from that resident's point. The cosine remains the irradiance weight. The sample domain does not become a sphere. The `wa` path is the world-cell arm's path, copied onto the resident: plain `add / (t + add)`, dark fill, the change floor, and `wa = 1` while settling. The ray loop (direction, cosine weight, SH sums in registers) is the part that is reused. The stores are not. `lighting_tex_put`, `lighting_sh_put`, the sun word, and the relight frame index a slot in the fat table. A pool index is not a slot. Those four writes are retargeted at the resident. The estimator arrays stay per fat slot. The world-cell arm returns before them, so a face does not grow an estimator pair. There is no second relight shader. There is a retargeted store.
+
+Read: for each dominant axis with `dot(axis, n) > 0`, the eight corners of **that axis's inset lattice**. The query has already chosen one winning resident (below). Corners of any other resident are dropped before the sum. A kept corner contributes
+
+`max(dot(axis, n), 0) * trilinear * ramp(n) * that resident's tilt`.
+
+`ramp` is inside this gather. It is not `lighting_sc_shown`.
+
+- One positive-dot face with `n >= 1`: `ramp = 1`. A lone wall still shows its mean on the first relight, which is today's `w = 1` accept.
+- Two or more such faces: `ramp(n) = clamp((n - 1) / LIGHTING_SC_HANDOVER, 0, 1)` with `LIGHTING_SC_HANDOVER = 16`. The frame a second face first stores `n = 1`, its ramp is 0, and the blend equals the one-face gather. Each later sample raises that face by 1/16 of its dot weight. It reaches full weight at `n = 17`.
+
+Weights renormalize. A missing face, a stale face (its own relight frame), and a ramp of 0 add nothing and do not darken. At a pure axis every other dot is 0, the other walks are skipped, and the value is that face's mean (`assert_eq!(sh.tilt(e, axis, axis), e)`). On the cone, `normalize(0, 1, 1)` gives +Y and +Z `dot = 0.707`. The tie itself is classified +Y, because `|y| == |z|` takes the `a.y >= a.z` arm. A hair toward +Z classifies +Z. The sweep is that neighbourhood. The opposite face is `dot <= 0` and stays out. The pack-on gather does not apply `abs(dot(stored - p, n)) > 0.5 * cell`. That test drops a bevel corner whose stored point has walked more than half a cell off the query plane, which is a step in the sweep. The pack-off path keeps the test. Stage 2's resident match is what separates same-facing surfaces.
 
 | | |
 |---|---|
-| Memory | Pool, not a ×6 stripe on the 1M table. Six always-on SH copies would be 6 × 24 B × 1M ≈ 144 MB and would miss the 12–48 MB envelope. A pool of live faces does not. High default 262144 × 48 B ≈ 12 MB **est**. See the knob table. The fat slot stays a header (pool indices only). Extra faces cost 48 B instead of another 392 B slot. |
+| Memory | Pool, not a ×6 stripe on the 1M table. Six always-on SH copies would be 6 × 24 B × 1,048,576 = 144 MiB, past the ADR 0039 envelope. A pool of live residents does not. High default 262144 × 64 B = 16 MiB. The fat slot stays a header. Its 24 B SH region holds the six 18-bit heads when the pack is on. An extra face is 64 B, not another 392 B slot. |
 | Compute | Relight count matches live faces, which is today's live axis copies. A flat wall is eight hash lookups, the same as today. The cone walks a second lattice (16) and a corner a third (24), each probe up to `LIGHTING_CACHE_SEARCH` (16). That cost is listed and does not reject the option. A cell that already holds both faces still needs the second walk when the other face was claimed on the other inset. |
 | Accuracy | Axis-aligned surfaces keep today's mean, so the energy gate has the same estimator it has now. Slanted surfaces use the tilt they already use, from the face that actually sampled that hemisphere. Thin walls stay two records. |
-| Failure | A seventh orientation in one cell cannot happen: there are six axes. Pool exhaustion refuses the claim. The query misses (probes, texel rays). It does not alias onto another face. A young face (under the existing sample gate, `LIGHTING_CACHE_HAS_W`) stays out of the blend and fades in with the sample-count handover already in `lighting_sc_shown`, so the first samples do not pop the cone from one colour to another. |
+| Failure | A seventh orientation in one cell cannot happen: there are six axes. Pool exhaustion refuses the claim. The query misses (probes, texel rays). It does not alias onto another face. A second face with `n = 1` has ramp 0 in a two-face blend, so the arrival frame does not step. Leaving that face at full `tri * facing` once `w >= 0.5` is the pop this ramp exists to remove. |
 
 This is the recommendation. It is the ADR 0039 store: SH-L1 per sampled hemisphere, faces packed instead of six fat entries, texels still downstream.
 
@@ -163,7 +187,7 @@ Keep today's six keys. `lighting_sh_gather` repeats the eight-corner walk for ea
 | Memory | None. The six copies stay. |
 | Compute | Up to 24 hash lookups (3 × 8) where three axes meet, each walking `LIGHTING_CACHE_SEARCH` (16). A flat wall stays at 8. Listed, not a veto. |
 | Accuracy | Continuous across the cone if both axes have samples. Exact at the axis. The weight is the same facing dot the neighbour read already uses, not a band glued over the step. Each contribution is that face's tilt, which is the ADR reconstruction. |
-| Failure | The two copies converge on different frames. A young side is left out (same rule as an empty corner) and fades in by sample count, otherwise the cone shimmers as the two means catch up at different rates. The inset lattices still differ, so this blends two grids. It does not delete the six copies, and gap 3 is untouched. Shipping it and then packing deletes it. |
+| Failure | The two copies converge on different frames. Without the gather ramp, the young side enters at full weight on its first relight (`w = 1`). The ramp above is what keeps that frame still. The inset lattices still differ, so this blends two grids. It does not delete the six copies, and gap 3 is untouched. Shipping it and then packing deletes it. |
 
 Useful as a fallback experiment if the pack's key change fails the thin-wall gate. Not the recommended build.
 
@@ -177,7 +201,7 @@ The inset stays in the key. Dropping it would put a grid-plane wall on a cell bo
 |---|---|
 | Memory | The A3 pool. |
 | Compute | Eight lookups on a flat wall. Sixteen on the cone, twenty-four on a three-axis corner. Same figure as B1. A shared inset cell stores both faces on one header instead of a second fat entry. |
-| Accuracy | Exact at the axis, because the other weights are zero and the tilt-at-axis identity holds. Continuous across the cone when both faces have samples. A young face stays out and fades in by sample count. |
+| Accuracy | Exact at the axis, because the other weights are zero and the tilt-at-axis identity holds. Across the cone, a second face contributes only through `ramp`. The frame it first stores a sample, the ramp is 0. |
 | Failure | A read does not allocate (`claim` false stays false). A lattice with no face leaves that weight out and does not darken the other. A miss of every face leaves the probes, as today. |
 
 Recommended. It is the read half of A3, not a second design.
@@ -223,7 +247,7 @@ Replace `0.5 * cell` with a smaller constant, for example 2 cm.
 | Accuracy | Splits the 2 mm neighbour case when the gap exceeds the new constant. Does nothing for the same-slot case (`z = 0` and `z = 0.10` are one entry). |
 | Failure | A bevel or a displacement larger than the constant rejects the corner and falls through to the probes: a dark step on a surface that is one surface. The stored point of a flat wall is on the plane (`lighting_sc_centre`), so flat walls survive. The shared slot does not. |
 
-Not the fix. The constant stops being a blend permission once residents exist. Until then it stays `0.5 * cell`.
+Not the fix. The pack-off gather keeps `0.5 * cell`. The pack-on gather drops that test in stage 1, because a bevel corner fails it. Shrinking the constant still does not split a shared slot.
 
 ### Option C2. Put a plane quantum in the hash key
 
@@ -231,7 +255,7 @@ Add `floor(pos[axis] / sheet)` to the key. High sheet 5 cm. A 10 cm gap becomes 
 
 | | |
 |---|---|
-| Memory | One extra fat slot per sheet crossing. A bookcase in one column is several full entries, not 48 B records. That fights the packing in A3. |
+| Memory | One extra fat slot per sheet crossing. A bookcase in one column is several full entries, not 64 B residents. That fights the packing in A3. |
 | Compute | Same eight lookups. |
 | Accuracy | Parallel axis-aligned gaps larger than a sheet split correctly. |
 | Failure | A ramp's axis coordinate changes by about `cell * sin(tilt)` across the cell. At 45° and 25 cm that is about 18 cm, several 5 cm sheets, so one ramp seams and stores duplicate samples. A key that depends on the shading normal seams a smooth cylinder the same way. Hysteresis on the sheet index sticks, then pops when it lets go. |
@@ -240,20 +264,24 @@ Rejected as a hash salt. The sheet belongs inside the cell, as C3.
 
 ### Option C3. Residents inside the face (recommended)
 
-Each face holds up to `R` residents. High default `R = 2`. A resident is claimed when a hit's plane offset along the face axis is farther than half the sheet from every resident on that face. High sheet default 0.05 m. The offset is `dot(pos, face axis)` from the geometric normal's dominant axis, so a shading normal or a normal map does not move it. Hits inside the radius attach. There is no temporal hysteresis.
+Each face holds up to `R` residents, linked by the next-resident field. High default `R = 2`. High sheet default 0.05 m, so the attach radius is 0.025 m.
 
-The read, after the face weight, keeps the resident whose offset is closest to the query and within half a sheet. Two residents are never averaged. A query outside every radius misses. Left-out residents add no weight and do not darken the ones that remain.
+The stored offset is the signed distance from the cell centre to the geometric plane: `dot(pos - cell_centre, geometric_normal)`. A shading normal and a normal map do not move it. A flat plane, including a 45° ramp, has one constant. The ~18 cm figure (`0.25 * sin(45°)`) is how far the dominant-axis coordinate walks across the cell. That coordinate is not the offset. Storing it would make one ramp miss two 2.5 cm radii (they cover at most 10 cm) and either seam or attach the wrong resident, which is the C2 failure. An absolute world distance in fp16 is the wrong unit as well: at 32 m the ulp is about 3 cm, coarser than the sheet.
 
-Relight origin is that resident's `lighting_sc_centre`. Hemisphere about the face axis. The scheduler visits residents with the same per-slot relight it has; a resident is a pool index the existing `lighting_cache.comp` arm can address. No second relight shader.
+A hit attaches to the resident within the radius. A hit outside every radius claims a new resident when the face is under `R`. There is no temporal hysteresis. An exact tie (two residents at the same distance) keeps the lower offset. It does not average, and it does not follow which resident was claimed first.
 
-Ray cut: `lighting_compact_hold_texel_rays` does not hold when the gather sees a second live resident on the query's face inside the gathered cells, even if the colours match. The cell is not a complete description of that texel. One resident and an agreeing field still hold, which is today's cut.
+The winning resident is chosen once per query: the closest resident on that face, inside the radius, lower offset on a tie. Corners that hold any other resident are dropped before the trilinear sum. If each corner picked its own winner, the 2 mm pair would still blend. A query outside every radius misses. Dropped corners add no weight and do not darken the winner.
+
+Relight origin is that resident's `lighting_sc_centre`. Rays stay uniform on the face hemisphere. The cosine is the irradiance weight. The scheduler walks the resident list. The ray loop is the world-cell loop. The mean, SH, sun word, and relight frame are stored on the resident, not through the slot-indexed writes.
+
+Ray cut: `lighting_compact_hold_texel_rays` does not hold when the gather's face has a second live resident, even if the colours match. The cell is not a complete description of that texel. One resident and an agreeing field still hold, which is today's cut.
 
 | | |
 |---|---|
-| Memory | `R` scales the pool, not the 392 MiB table. High `R = 2`, 262144 records, ≈ 12 MB **est** if the pool is the cap. Typical rooms use one resident per face; the second is the leak case. Average occupancy has to be measured (the stage 0 counter). The cap is the budget, not the average. |
-| Compute | A few offset compares per corner. Extra rays only for a live extra resident: the rays that surface needs and does not get today. Ray count per resident is the cell-ray setting, default 16. |
-| Accuracy | The 10 cm pair and the 2 mm pair each keep a mean. A single flat wall stays one resident because every hit falls in one radius. Bounce rays read the resident, so the leak does not survive into the next bounce. Near the camera a miss still has texel rays and probes. Far from the camera, `R` full and a miss is the coarse answer; `ref_err_near` weights that down. |
-| Failure | A third surface with `R = 2` is refused. The picture misses. It does not show resident 1's light on surface 3. A surface that jitters around the radius boundary can open two residents and split samples. The radius is a Voronoi attach, and the offset comes from the geometric plane, so a stable triangle stays put. The fixture for one wall must show a resident count of 1. A moving panel is already a mover: detail-on reads the pack at the current pose, `claim` false, and does not allocate. Object-local texel keys stay salted and are not residents. |
+| Memory | `R` scales how many of the 262144 records are live, not the 392 MiB table. The cap is 16 MiB either way. Typical rooms use one resident per face; the second is the leak case. Average occupancy is the stage 0 counter. The cap is the budget, not the average. |
+| Compute | One offset compare per resident per query, then a corner keep-or-drop. Extra rays only for a live extra resident. Ray count per resident is `surface_cache.cell_rays`, High 16. |
+| Accuracy | The 10 cm pair and the 2 mm pair each keep a mean, and the trilinear sum sees only the winner. A single flat wall, and a 45° ramp, stay one resident. Bounce rays read that resident, so the leak does not survive into the next bounce. Near the camera a miss still has texel rays and probes. Far from the camera, `R` full and a miss is the coarse answer; `ref_err_near` weights that down. |
+| Failure | A third surface with `R = 2` is refused. The picture misses. It does not show resident 1's light on surface 3. A surface that jitters around the radius boundary can open two residents. The tie break is the lower offset, so the two do not swap. The one-wall fixture and the ramp fixture expect a resident count of 1. A moving panel is already a mover: detail-on reads the pack at the current pose, `claim` false, and does not allocate. Object-local texel keys stay salted and are not residents. |
 
 Recommended.
 
@@ -307,12 +335,22 @@ All of these are `LightingSettings` fields, `set_key` names, MCP through `get_li
 | Pool records | `surface_cache.cell_pool` | 262144 | 0 (pack stays off) | `GENOS_LIGHTING_SURFACE_CACHE_CELL_POOL` |
 | Residents per face | `surface_cache.residents` | 2 | 1 | `GENOS_LIGHTING_SURFACE_CACHE_RESIDENTS` |
 | Sheet | `surface_cache.sheet_metres` | 0.05 | ignored at 1 resident | `GENOS_LIGHTING_SURFACE_CACHE_SHEET_METRES` |
-| Cell rays | `surface_cache.cell_rays` | 16 (`LIGHTING_CACHE_RAYS`) | 8 | `GENOS_LIGHTING_SURFACE_CACHE_CELL_RAYS` |
+| Cell rays | `surface_cache.cell_rays` | 16 (4×4) | 9 (3×3) | `GENOS_LIGHTING_SURFACE_CACHE_CELL_RAYS` |
 | Body-centred lattice | `surface_cache.sh_bcc` | off | off | `GENOS_LIGHTING_SURFACE_CACHE_SH_BCC` |
 
 The High column is the stage-5 end state. Until that stage, `sh_face_pack` stays off and `residents` stays 1, including on High.
 
-`surface_cache.ray_budget` stays the dispatch cap. `cell_rays` is the rays per resident per relight. `cell_pool` is a power of two. Zero pool forces the pack off. `residents` clamps to 1..6. `sheet_metres` clamps to 0.01..cell size. `cell_rays` clamps to 1..64 and stays a square so the existing stratified pattern still applies; 16 and 8 are the preset values.
+`surface_cache.ray_budget` stays the dispatch cap. `cell_pool` is a power of two. Zero pool forces the pack off. `residents` clamps to 1..6. `sheet_metres` clamps to 0.01..cell size.
+
+`surface_cache.cell_rays` is the ray count of one world-cell resident relight. It is a perfect square in 1..64. High is 16. Low is 9. 4 is the coarser square Low may use. 8 is rejected: `lighting_dir` sets the grid side to `uint(sqrt(count) + 0.5)`, which is 3 for 8, and the loop only traces 8 of those 9 cells.
+
+The constant `LIGHTING_CACHE_RAYS` (16) keeps three other jobs, and the knob does not take them:
+
+- batch stride (`j * LIGHTING_CACHE_RAYS`, and the ray index in `lighting_cache.comp`);
+- dispatch size (`(entries * LIGHTING_CACHE_RAYS + 63) / 64`, and the same multiple on the grad cap);
+- texel quarters (`LIGHTING_SC_SET_RAYS` 64 divided by 16).
+
+End to end, the knob is a `LightingSettings` field, a `set_key` name, MCP through the existing lighting commands, a debug-menu control, `--cell-rays` (the argument wins), and `GENOS_LIGHTING_SURFACE_CACHE_CELL_RAYS` only when the argument was omitted. The world-cell arm loops `cell_rays` times and calls `lighting_dir` with that count. The world-cell list's ray product uses `cell_rays`. Texel lists, the batch stride, and `LIGHTING_SC_QUARTERS` stay on 16. A resident relight that is not a multiple of the batch stride is dispatched as its own group sized from `cell_rays`, not by pretending the resident is a fat slot of 16.
 
 Launch arguments on the lighting debug binary, each documented in `--help`: `--face-pack`, `--cell-pool`, `--residents`, `--sheet-metres`, `--cell-rays`, `--sh-bcc`. `--cell` already mirrors `world_cell` if the binary has that argument; if it does not, the implementing stage adds `--cell` with the same rule (argument wins, env is the mirror).
 
@@ -343,7 +381,7 @@ Every failure mode and every knob above is readable. The implementing stage adds
 | One wall split into two residents | resident count in the GI dump. The one-wall fixture expects 1. |
 | Cone seam | the cone-sweep fixture: max step between 0.5° samples across 45°. |
 | Same-facing leak | the 10 cm fixture and the 2 mm fixture, two colours, each surface reads its own. |
-| Young face left out | existing sample-count debug (`lighting_sc_debug_size`). The handover is the sample count, not a switch. |
+| Young face enters a two-face blend at full weight | the gather ramp. The arrival fixture (stage 1) expects a zero step on the frame `n` first hits 1. `lighting_sc_debug_size` still shows the count. `lighting_sc_shown` is not this ramp. |
 | Ray cut held a second resident | `diag[38]` / `diag[39]` stay the hold counters. The new case expects hold false. |
 | Cell size, pool, residents, sheet, rays, pack, BCC | the settings themselves, MCP and the debug menu. |
 | Face mean and SH disagree | one writer, and the dump flags a face whose mean and SH were stored on different frames. It is a bug if it fires. |
@@ -371,11 +409,11 @@ Existing proofs that must stay green at every stage, pack and residents off:
 - `cargo test -p genos-render --test probe_retire`
 - `cargo test -p genos-render --lib lighting_sh` (the CPU tilt, the 0.75 plain-L1 guard, `neighbour_read`)
 
-`room-blotch` stays parked on its 0.014 gate. This note does not retune it. `cells_only` keeps meaning "25 cm cells, no texels, no probes".
+`cell_gaps` is not in that list. It does not exist until stage 0 adds it. `room-blotch` stays parked on its 0.014 gate. This note does not retune it. `cells_only` keeps meaning "25 cm cells, no texels, no probes".
 
 ### Stage 0 — fixtures and occupancy, no behaviour change
 
-Plant the gaps in a new `cell_gaps` test beside `texel_detail_prod`. The dispatch is the production gather (`lighting_sh_gather` / `lighting_screen_probe_indirect`), writing compile plants slots, read checks colours. Same rules as `texel_detail_prod`: no swapchain image, not a frame time.
+There is no `cell_gaps` test today. This stage adds one beside `texel_detail_prod`. The dispatch is the production gather (`lighting_sh_gather` / `lighting_screen_probe_indirect`), writing compile plants slots, read checks colours. Same rules as `texel_detail_prod`: no swapchain image, not a frame time.
 
 Cases, setting off, asserting **today's** behaviour so the bug is pinned:
 
@@ -386,12 +424,12 @@ Cases, setting off, asserting **today's** behaviour so the bug is pinned:
 
 CPU twins in `lighting_sh.rs` for the face weight and the resident pick, graded the way `neighbour_read` is graded. They are called by the later stages. Stage 0 adds them and does not wire them to the shader.
 
-Occupancy counter for axis copies, printed in the GI dump, so stage 4's pool cap replaces the 12 MB estimate.
+Occupancy counter for axis copies, printed in the GI dump, so stage 4's pool cap replaces the 262144-record estimate. The record stays 64 B. 16 MiB is 262144 × 64 B, not a measured occupancy.
 
-Oracle scenes added to `examples/stress/scripts/lighting_oracle.rhai`, scored by the existing `ref_err_near` / `slant_mid_err` path. They do not change old scenarios:
+Oracle scenes added to `examples/stress/scripts/lighting_oracle.rhai`. They do not change old scenarios. `slant_mid_err` is not their grade. That metric crops the middle half of `slant` / `slant-day`. Most of those pixels are the axis-aligned floor; `scripts/lighting/slant_mid_split.py` classes a wall as `other` and treats a floor-only reading of the gate as a failed premise, which is a different claim from "the crop covers a ramp". It does not. The new scenes carry a mask, and the score is `ref_err_near` on the mask:
 
-- `bevel`: a 45° strip between a floor and a wall, camera close, path-traced reference.
-- `gap`: two +Z planes 10 cm apart, camera close, and a far repeat.
+- `bevel`: a 45° strip between a floor and a wall, camera close, path-traced reference. The mask is the pixels whose geometric normal lies within 10° of the cone (`||n_y| - |n_z||` small, and both larger than `|n_x|`). The floor outside that band is not in the mask.
+- `gap`: two +Z planes 10 cm apart, camera close, and a far repeat. The mask is the pixels on those two planes, split so each plane is scored on its own. A blend of the two colours fails the near plane.
 
 Gate: old tests green. New tests show the three gaps. No shader behaviour change.
 
@@ -401,15 +439,17 @@ Deletes: nothing.
 
 Setting `surface_cache.sh_face_pack`, default off. Requires `surface_cache.sh_cells`. Residents stay 1. Sheet is unused.
 
-World-cell claims with the pack on keep the inset and drop the axis salt. A face that shares that inset cell is another pool record on the header. Reads use the A3/B2 weight. `claim` false still does not allocate. Seed, coverage, slants, and movers stay claim false. `lighting_sc_wrc_now` on this path loads the face for `lighting_axis(n)`. The face mean and the SH have one writer, and the sun/sky rescale (`sh_ls`) hits both.
+World-cell claims with the pack on keep the inset. The world-cell branch of `lighting_cache_key_sized` stops hashing the axis. The texel branch of that function still hashes it. A face that shares that inset cell is another resident on the header. Reads use the A3/B2 weight, including `ramp`. The pack-on gather does not apply the half-cell plane test. `claim` false still does not allocate. Seed, coverage, slants, and movers stay claim false. `lighting_sc_wrc_now` on this path stays single-axis: the face for `lighting_axis(n)`, not the weighted gather. One writer updates that face's mean, SH, sun share, and sun baseline (`sh_ls`).
 
-Lavapipe gate:
+Lavapipe gate, on the stage 0 `cell_gaps` test once it exists:
 
-- Axis-aligned gather equals the old per-axis mean (the tilt-at-axis identity).
-- Cone sweep, 0.5° steps: the max step is within the Lipschitz of the two tilts (the band-1 term is linear in the normal), not a step the size of the other room's colour. A wall planted on a grid plane stays on one face through the sweep. A miss of that wall fails the stage.
-- Thin wall: each side reads its own face. The back face's dot is ≤ 0.
+- Axis-aligned gather equals the old per-axis mean (the tilt-at-axis identity), including a lone face with `n = 1` (`ramp = 1`).
+- Cone sweep, 0.5° steps, both faces already mature: the max step is within the Lipschitz of the two tilts (the band-1 term is linear in the normal), not a step the size of the other room's colour. A wall planted on a grid plane stays on one face through the sweep. A miss of that wall fails the stage.
+- The half-cell plane test is off on this gather. A bevel corner whose stored point sits more than 0.125 m off the query plane stays in the sum. If that corner drops, the stage fails. The pack-off gather still drops it. Taking the test off does not close gap 3: the stage 1 bevel is one surface, and a second same-facing plane is the stage 2 fixture.
+- Arrival: on the 45° bevel, the second face's count goes from 0 to 1 in one relight during the sweep. That frame's gather equals the one-face gather. The next relight moves the colour by at most one step of `ramp` (1/16 of that face's dot weight), not the whole colour difference.
+- Thin wall: each side reads its own face. The back face's dot is ≤ 0. Sun share and the relight frame are per face: a stale face is left out while the other face still contributes.
 - `texel_detail_prod`, `texel_ray_cut`, `probe_retire` green with the pack off, and green with the pack on for the cases they already plant (one face, one plane).
-- Oracle, pack on against pack off: `slant`, `slant-day` `slant_mid_err` no worse; `turn` `ref_err_near` no worse; `bevel` `ref_err_near` lower than pack off. Energy, linger, and lag stay the ADR stage 1/2 gates when `cache_energy` is run (`cargo test --release -p genos-stress --test cache_energy -- --ignored --nocapture --test-threads=1`). That command is the owner's machine. A lavapipe miss of the picture is a fail; a lavapipe time is not.
+- Oracle, pack on against pack off: `slant` and `slant-day` `slant_mid_err` no worse (that crop is not the seam); `turn` `ref_err_near` no worse; `bevel` masked `ref_err_near` lower than pack off; `gap` is not this stage's leak gate. Energy, linger, and lag stay the ADR stage 1/2 gates when `cache_energy` is run (`cargo test --release -p genos-stress --test cache_energy -- --ignored --nocapture --test-threads=1`). That command is the owner's machine. A lavapipe miss of the picture is a fail; a lavapipe time is not. Merging this stage before those three gates is the exception in "Order against ADR 0039".
 
 Deletes, after that gate, in its own commit: nothing that the off setting still runs. The axis salt and `lighting_sh_gather`'s single-axis `an` stay for pack off.
 
@@ -421,31 +461,32 @@ Lavapipe gate:
 
 - Planted 10 cm pair: each plane reads its own colour. Planted 2 mm pair across the lattice split: the same.
 - One flat wall, including a wall on a grid plane: one resident, sample count matches a single-resident run.
-- A ramp in `slant` does not gain a sheet seam: `slant_mid_err` no worse than stage 1.
-- `bevel` still beats pack-off.
-- `gap` `ref_err_near` lower than stage 1, near camera. The far repeat may tie.
+- A 45° ramp: one resident. The masked bevel crop does not gain a sheet seam. `slant_mid_err` is not this check.
+- The 2 mm pair: one query, one winner, and the other resident's corners are absent from the sum. An equal-distance tie keeps the lower offset on every corner.
+- `bevel` masked `ref_err_near` still beats pack-off.
+- `gap` masked `ref_err_near` on the near plane is lower than stage 1. The far repeat may tie.
 - Ray cut: a second live resident on that face does not hold. The existing hold cases in `texel_ray_cut` still hold. Cell words stay unwritten.
 - Thin wall still splits by face, not by resident.
 - A third surface with `R = 2` misses and does not take resident 1's colour. `resident_refused` increments.
 - Mover, detail on: still `lighting_sh_read` at the current pose, claim false, no new resident.
 
-Deletes, after that gate: the blend permission `plane > LIGHTING_CELL_HALF * cs` inside `lighting_sh_gather` and the same test in `lighting_sc_wrc_now`, **on the residents-on path only**. The off path keeps the test. `neighbour_corner_weight`'s half-cell reject gains the resident twin and keeps the old reject for the off path.
+Deletes, after that gate: nothing further in `lighting_sh_gather`. Stage 1 already removed `plane > LIGHTING_CELL_HALF * cs` from the pack-on gather. `lighting_sc_wrc_now` keeps that test. It is the single-axis detail-off read, and it is not the seam grade. `neighbour_corner_weight` gains the one-winner resident pick and keeps the old half-cell reject for the pack-off path.
 
 ### Stage 3 — BCC A/B
 
 Setting `surface_cache.sh_bcc`, default off. Requires the pack. Four tetrahedral taps, same face and resident rules. Spacing set so the nearest neighbour is `world_cell` (cube edge `world_cell * 2 / sqrt(3)`).
 
-Gate: `bevel` and `turn` `ref_err_near`, and `slant_mid_err`, strictly better than the cubic pack on the oracle, with no thin-wall or `gap` regression. If they are not better, the deletion commit removes the BCC key and the tetrahedral loop, and the setting is rejected in this note. If they are better, the deletion commit removes the cubic eight-corner loop **inside the pack read only**. `lighting_sc_wrc_now` is not that loop.
+Gate: masked `bevel` `ref_err_near` and `turn` `ref_err_near` strictly better than the cubic pack, with no thin-wall or masked `gap` regression. `slant_mid_err` is reported and is not the decision. If the masked gates are not better, the deletion commit removes the BCC key and the tetrahedral loop, and the setting is rejected in this note. If they are better, the deletion commit removes the cubic eight-corner loop **inside the pack read only**. `lighting_sc_wrc_now` is not that loop.
 
 ### Stage 4 — knobs, presets, measured pool
 
-Wire `LIGHTING_SH_CELL` to `world_cache.cell_metres` (High stays 0.25). Replace the `LIGHTING_CACHE_RAYS` literal on the world-cell arm with `surface_cache.cell_rays`. Preset Low: pack off, pool 0, residents 1, cell 0.50 m, cell rays 8, probes unchanged. `crates/scene/tests/lighting_settings.rs` round-trips the new keys, including "argument wins over env".
+Wire the gather's cell size to `world_cache.cell_metres` (High stays 0.25). That size is the `cs = LIGHTING_SH_CELL` constant, and `LIGHTING_SH_CELL` is `LIGHTING_SC_HIT` (0.25). Preset Low: pack off, pool 0, residents 1, cell 0.50 m, `cell_rays` 9, probes unchanged. `crates/scene/tests/lighting_settings.rs` round-trips the new keys, including "argument wins over env", and rejects a `cell_rays` that is not a square.
 
-The occupancy counter from stage 0 sets the High pool: peak live faces × 1.5, rounded up to a power of two, and the bytes stay inside 48 MB. If the measured peak does not fit, High residents drop to 1 before the fat table grows. The 12 MB figure is an estimate until this stage replaces it.
+The occupancy counter from stage 0 sets the High pool: peak live residents × 1.5, rounded up to a power of two, and the bytes (count × 64) stay inside 48 MiB. If the measured peak does not fit, High residents drop to 1 before the fat table grows. 16 MiB is the default cap (262144 × 64 B) until this stage replaces the count.
 
 Gate: settings tests. A pool of 0 matches stage 0's pictures on the planted fixtures. Overflow increments `cell_pool_overflow` and misses. `lighting_settings` preset Low still has `world_cache.enabled = false` and does not allocate the pool.
 
-Deletes: the world-mode-3 path that ignores `world_cache.cell_metres` for the SH cell size. The 0.25 m literal remains the High default of the setting, not a second size in the shader.
+Deletes: the gather's `cs = LIGHTING_SH_CELL` / `LIGHTING_SH_CELL = LIGHTING_SC_HIT` literal. The 0.25 m value remains the High default of `world_cell`. `lighting_cell_size_d` returning `LIGHTING_SC_TEXEL` (0.125) stays. That return is the texel size.
 
 ### Stage 5 — default on, then delete the old world-cell key
 
@@ -453,7 +494,7 @@ Medium and High default the pack on and residents to 2. Low stays off. One relea
 
 After that is the default and the oracle gates still hold, one commit deletes:
 
-- the axis salt inside `lighting_cache_key_sized` for world cells (the half-cell inset stays);
+- the axis salt on the world-cell branch of `lighting_cache_key_sized` (the half-cell inset stays; the texel branch of that function still hashes `lighting_axis`);
 - `lighting_sh_gather`'s single-axis `an` lookup;
 - the off-path plane blend in `lighting_sh_gather` and `lighting_sc_wrc_now`;
 - the CPU half-cell reject in `neighbour_corner_weight` once every caller uses the resident pick;
@@ -463,11 +504,18 @@ Does not delete: `lighting_axis` (texel keys, debug views, and detail-off biline
 
 ## Order against ADR 0039
 
-ADR 0039 stage 1 (convergence, energy, linger, lag) is still the accuracy gate in front of picture claims. The pack does not retune that estimator. It stores the same mean and the same SH with the same blend alpha. Stages here can land behind a default-off setting before that gate is green. They do not become the default, and they do not delete the axis key, until energy, linger, and lag pass.
+ADR 0039 decision 4: stage 2 (SH-L1 cells) may be prototyped in parallel, and it merges only after stage 1 passes energy ≥ 0.9, linger ≤ 5 % at 120 frames, and lag ≥ 90 % at 300 frames.
+
+This note's stages are default-off and would merge before that gate. That is an exception to decision 4. Anthony accepts it or drops it.
+
+- Accept: the default-off commits may merge. They still do not become the Medium/High default, and they still do not delete the world-cell axis branch, until `cache_energy` passes those three numbers.
+- Drop: the commits stay off the branch that ADR 0039 stage 1 has to land on. Nothing in this note merges until that gate is green.
+
+The pack does not retune the estimator. It stores the same mean and the same SH with the same `wa`, including dark fill, the change floor, and `wa = 1` while settling.
 
 ## What this note does not do
 
 - No engine code, no shader, no settings field in this change.
-- It does not reopen direction bins, radiance cascades, cached direct light, or a texel→cell feedback path.
+- It does not reopen direction bins, cached direct light, or a texel→cell feedback path.
 - It does not claim a 4070 millisecond number.
 - It does not move the room-blotch 0.014 gate.
