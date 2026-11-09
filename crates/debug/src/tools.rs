@@ -3708,23 +3708,21 @@ mod tests {
         genos_mcp::command::reply(cmd.id, reply);
     }
 
-    /// The checked-in room script, through `run_script`'s engine. Earlier
-    /// harness tests read that file as text or drove a Rust helper, so a
-    /// name the function cannot see stayed green. Rhai functions do not
-    /// close over an outer `let` or a bare `const`.
-    #[test]
-    fn the_checked_in_room_script_runs_both_poses_through_the_host() {
+    struct HostRoomScript {
+        ok: bool,
+        result: String,
+        report: String,
+        seen: Vec<(String, Value)>,
+        dir: std::path::PathBuf,
+    }
+
+    /// The checked-in script through `run_script` and the commands it registers.
+    /// The settle job is the production one. Its saved byte is a fixture present,
+    /// not a room photograph and not a blotch grade.
+    fn run_room_script_on_host(label: &str, script: &std::path::Path) -> HostRoomScript {
         let _queue = script_queue();
-        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/stress/scripts/room_blotch.rhai");
-        let script = script.canonicalize().unwrap();
-        assert!(
-            script.ends_with("examples/stress/scripts/room_blotch.rhai"),
-            "{}",
-            script.display()
-        );
         let dir = std::env::temp_dir().join(format!(
-            "genos-room-script-{}",
+            "genos-room-script-{label}-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -3734,15 +3732,14 @@ mod tests {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let fixture_seen = std::sync::Arc::clone(&seen);
         let fixture_stop = std::sync::Arc::clone(&stop);
-        let fixture_text = settings_text.clone();
+        let fixture_text = settings_text;
         let fixture_dir = dir.clone();
         let fixture = std::thread::spawn(move || {
             let mut tools = Tools::new();
             tools.out_dir = fixture_dir;
             let mut camera = genos_scene::Camera::new(0.0, 0.0, 0.0);
             while !fixture_stop.load(std::sync::atomic::Ordering::SeqCst) {
-                for cmd in genos_mcp::command::take_wait(std::time::Duration::from_millis(20))
-                {
+                for cmd in genos_mcp::command::take_wait(std::time::Duration::from_millis(20)) {
                     match fixture_seen.lock() {
                         Ok(mut seen) => seen.push((cmd.name.clone(), cmd.args.clone())),
                         Err(poison) => poison
@@ -3754,19 +3751,86 @@ mod tests {
             }
         });
         let ok = crate::script::run_script(&crate::script::ScriptRun {
-            script,
+            script: script.to_path_buf(),
             report_dir: dir.clone(),
             trace: false,
         });
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         fixture.join().unwrap();
         let result = std::fs::read_to_string(dir.join("result.json")).unwrap();
-        assert!(ok, "{result}");
+        let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
         let seen = match seen.lock() {
             Ok(seen) => seen.clone(),
             Err(poison) => poison.into_inner().clone(),
         };
-        let names: Vec<&str> = seen.iter().map(|(name, _)| name.as_str()).collect();
+        HostRoomScript {
+            ok,
+            result,
+            report,
+            seen,
+            dir,
+        }
+    }
+
+    fn room_blotch_path() -> std::path::PathBuf {
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/stress/scripts/room_blotch.rhai");
+        let script = script.canonicalize().unwrap();
+        assert!(
+            script.ends_with("examples/stress/scripts/room_blotch.rhai"),
+            "{}",
+            script.display()
+        );
+        script
+    }
+
+    fn replace_once(text: &str, from: &str, to: &str) -> String {
+        assert_eq!(
+            text.matches(from).count(),
+            1,
+            "expected one occurrence of {from}"
+        );
+        text.replacen(from, to, 1)
+    }
+
+    fn write_room_script(label: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "genos-room-script-src-{label}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("script.rhai");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn assert_room_eye(args: &Value, yaw: f64) {
+        let eyes = [0.664_f64, 1.699, 9.629];
+        let position = args.get("position").and_then(Value::as_array).unwrap();
+        for (got, want) in position.iter().zip(eyes) {
+            let got = got.as_f64().unwrap();
+            assert!((got - want).abs() < 1.0e-9, "eye {got} {want}");
+        }
+        let got_yaw = args.get("yaw").and_then(Value::as_f64).unwrap();
+        let got_pitch = args.get("pitch").and_then(Value::as_f64).unwrap();
+        assert!((got_yaw - yaw).abs() < 1.0e-9, "yaw {got_yaw} {yaw}");
+        assert!((got_pitch - -0.12).abs() < 1.0e-9, "pitch {got_pitch}");
+    }
+
+    /// The checked-in room script, through `run_script`'s engine. Earlier
+    /// harness tests read that file as text or drove a Rust helper, so a
+    /// name the function cannot see stayed green. Rhai functions do not
+    /// close over an outer `let` or a bare `const`.
+    ///
+    /// Both poses request the capture the script requires: a path, two frames
+    /// after settle, and `captured=true`. The saved file is the fixture present.
+    #[test]
+    fn the_checked_in_room_script_runs_both_poses_through_the_host() {
+        let script = room_blotch_path();
+        let run = run_room_script_on_host("checked-in", &script);
+        assert!(run.ok, "{}", run.result);
+        let names: Vec<&str> = run.seen.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(
             names,
             [
@@ -3781,50 +3845,127 @@ mod tests {
                 "get_lighting_settings",
             ]
         );
-        let cameras: Vec<&Value> = seen
+        let cameras: Vec<&Value> = run
+            .seen
             .iter()
             .filter(|(name, _)| name == "camera")
             .map(|(_, args)| args)
             .collect();
-        let eyes = [0.664_f64, 1.699, 9.629];
         let yaws = [-0.679_f64, -36.0 * 0.017_453_3];
         for (args, yaw) in cameras.iter().zip(yaws) {
-            let position = args.get("position").and_then(Value::as_array).unwrap();
-            for (got, want) in position.iter().zip(eyes) {
-                let got = got.as_f64().unwrap();
-                assert!((got - want).abs() < 1.0e-9, "eye {got} {want}");
-            }
-            let got_yaw = args.get("yaw").and_then(Value::as_f64).unwrap();
-            let got_pitch = args.get("pitch").and_then(Value::as_f64).unwrap();
-            assert!((got_yaw - yaw).abs() < 1.0e-9, "yaw {got_yaw} {yaw}");
-            assert!((got_pitch - -0.12).abs() < 1.0e-9, "pitch {got_pitch}");
+            assert_room_eye(args, yaw);
         }
-        for (name, args) in seen
-            .iter()
-            .filter(|(name, _)| name == "wait_settled")
-        {
-            let _ = name;
+        for (_, args) in run.seen.iter().filter(|(name, _)| name == "wait_settled") {
             assert_eq!(args.get("timeout_frames").and_then(Value::as_i64), Some(900));
             assert_eq!(args.get("then_frames").and_then(Value::as_i64), Some(2));
             assert_eq!(args.get("width").and_then(Value::as_i64), Some(320));
             assert_eq!(args.get("height").and_then(Value::as_i64), Some(180));
         }
-        let paths: Vec<&str> = seen
+        let paths: Vec<&str> = run
+            .seen
             .iter()
             .filter(|(name, _)| name == "wait_settled")
             .filter_map(|(_, args)| args.get("path").and_then(Value::as_str))
             .collect();
         assert_eq!(paths, ["room-a-live.png", "room-b-live.png"]);
+        let settings_text = capture_settings_text();
         for name in ["room-a", "room-b"] {
-            let resolved = std::fs::read_to_string(dir.join(format!("resolved-{name}.txt"))).unwrap();
+            let resolved =
+                std::fs::read_to_string(run.dir.join(format!("resolved-{name}.txt"))).unwrap();
             assert_eq!(resolved, settings_text);
             assert!(resolved.contains("sc_settle=0"));
-            assert!(dir.join(format!("{name}-live.png")).is_file());
+            assert!(run.dir.join(format!("{name}-live.png")).is_file());
         }
-        let report = std::fs::read_to_string(dir.join("report.md")).unwrap();
-        assert!(report.contains("schedule pose=room-a"));
-        assert!(report.contains("schedule pose=room-b"));
-        assert!(report.contains("captured=true"));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(run.report.contains("schedule pose=room-a"));
+        assert!(run.report.contains("schedule pose=room-b"));
+        assert!(run.report.contains("captured=true"));
+        let _ = std::fs::remove_dir_all(&run.dir);
+    }
+
+    /// `shoot` still names `eye`, and the outer `let eye` is still there.
+    /// The parameter and the call argument are gone, which is the miss that
+    /// reached a device as `Variable not found: eye`.
+    #[test]
+    fn an_undeclared_eye_inside_shoot_fails_the_room_script() {
+        let text = std::fs::read_to_string(room_blotch_path()).unwrap();
+        let text = replace_once(
+            &text,
+            "fn shoot(name, yaw, eye, pitch)",
+            "fn shoot(name, yaw, pitch)",
+        );
+        let text = replace_once(
+            &text,
+            "shoot(\"room-a\", -0.679, eye, pitch);",
+            "shoot(\"room-a\", -0.679, pitch);",
+        );
+        let text = replace_once(
+            &text,
+            "shoot(\"room-b\", -36.0 * 0.0174533, eye, pitch);",
+            "shoot(\"room-b\", -36.0 * 0.0174533, pitch);",
+        );
+        assert!(text.contains("let eye = [0.664, 1.699, 9.629];"));
+        assert!(text.contains("position: eye"));
+        let script = write_room_script("undeclared-eye", &text);
+        let run = run_room_script_on_host("undeclared-eye", &script);
+        assert!(!run.ok, "{}", run.result);
+        assert!(
+            run.result.contains("Variable not found: eye"),
+            "{}",
+            run.result
+        );
+        let names: Vec<&str> = run.seen.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["status", "time", "view"]);
+        assert!(!run.dir.join("room-a-live.png").is_file());
+        assert!(!run.report.contains("captured=true"));
+        let _ = std::fs::remove_dir_all(&run.dir);
+        let _ = std::fs::remove_dir_all(script.parent().unwrap());
+    }
+
+    /// The tail and the size stay. The path the contract saves is gone, so
+    /// the registered `wait_settled` rejects the call before any present is saved.
+    #[test]
+    fn a_room_script_without_its_capture_path_fails() {
+        let text = std::fs::read_to_string(room_blotch_path()).unwrap();
+        let text = replace_once(
+            &text,
+            "timeout_frames: 900,\n        then_frames: 2,\n        path: `${name}-live.png`,\n        width: 320,\n        height: 180",
+            "timeout_frames: 900,\n        then_frames: 2,\n        width: 320,\n        height: 180",
+        );
+        assert!(text.contains("require(settled.captured == true, `missing-capture ${name}`)"));
+        assert!(!text.contains("path: `${name}-live.png`"));
+        let script = write_room_script("missing-capture", &text);
+        let run = run_room_script_on_host("missing-capture", &script);
+        assert!(!run.ok, "{}", run.result);
+        assert!(
+            run.result.contains("wait_settled capture needs a path"),
+            "{}",
+            run.result
+        );
+        let names: Vec<&str> = run.seen.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["status", "time", "view", "camera", "wait_settled"]
+        );
+        let camera = run
+            .seen
+            .iter()
+            .find(|(name, _)| name == "camera")
+            .map(|(_, args)| args)
+            .unwrap();
+        assert_room_eye(camera, -0.679);
+        let settle = run
+            .seen
+            .iter()
+            .find(|(name, _)| name == "wait_settled")
+            .map(|(_, args)| args)
+            .unwrap();
+        assert!(settle.get("path").is_none());
+        assert_eq!(settle.get("then_frames").and_then(Value::as_i64), Some(2));
+        assert_eq!(settle.get("width").and_then(Value::as_i64), Some(320));
+        assert_eq!(settle.get("height").and_then(Value::as_i64), Some(180));
+        assert!(!run.dir.join("room-a-live.png").is_file());
+        assert!(!run.report.contains("captured=true"));
+        let _ = std::fs::remove_dir_all(&run.dir);
+        let _ = std::fs::remove_dir_all(script.parent().unwrap());
     }
 }
