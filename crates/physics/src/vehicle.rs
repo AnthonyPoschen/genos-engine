@@ -1,10 +1,13 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper and the space thrusters.
-//! Aircraft lift is a later stage and is not applied here. Sea is not a field.
+//! This stage applies the wheeled ground spring-damper, the space thrusters, and
+//! the wide orbit on that space payload. Aircraft lift is a later stage and is
+//! not applied here. Sea is not a field.
 //! A thruster writes force and torque through [`integrate_wrench`]. The existing
-//! gyroscopic step then consumes that angular velocity. There is no second integrator.
+//! gyroscopic step then consumes that angular velocity. An orbit integrates its
+//! own wide position and replaces the chassis linear pose. It does not replace
+//! the gyroscopic step, and it does not pull a body that has no orbit.
 
 use genos_math::{Quat, Vec3};
 
@@ -70,12 +73,73 @@ pub struct Thruster {
     pub throttle: f32,
 }
 
+/// Metres stored in `f64`. This is not a [`genos_math::Vec3`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WidePos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+impl WidePos {
+    /// The origin frame. [`World::new`](crate::World::new) starts here.
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+
+    #[must_use]
+    pub const fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
+    fn is_finite(self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+
+    fn length_squared(self) -> f64 {
+        self.x * self.x + self.y * self.y + self.z * self.z
+    }
+
+    fn translate(self, other: Self) -> Self {
+        Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
+    }
+
+    fn offset(self, other: Self) -> Self {
+        Self::new(self.x - other.x, self.y - other.y, self.z - other.z)
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        Self::new(self.x * factor, self.y * factor, self.z * factor)
+    }
+}
+
+/// Wide orbit on one chassis. The step does not read [`Body::position`](crate::Body::position)
+/// as this state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Orbit {
+    pub position: WidePos,
+    pub velocity: WidePos,
+    /// Gravitational parameter, m³/s². Zero coasts.
+    pub gm: f64,
+}
+
 /// A short thruster list. `count` is how many entries are live.
+///
+/// `orbit` is the S2 wide state. `None` leaves linear motion on the thruster path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpaceCraft {
     pub thrusters: [Thruster; 8],
     pub count: u8,
+    pub orbit: Option<Orbit>,
 }
+
+/// Gravitational parameter of the S2 fixture, m³/s².
+pub const ORBIT_GM: f64 = 3.986e14;
+
+/// Circular radius of the S2 fixture, metres.
+pub const ORBIT_RADIUS_M: f64 = 1.0e7;
 
 /// The G1 fixture: a 1 200 kg chassis over a static plane.
 ///
@@ -133,6 +197,61 @@ pub fn thruster_world() -> World {
         space: Some(SpaceCraft {
             thrusters,
             count: 1,
+            orbit: None,
+        }),
+    });
+    world
+}
+
+/// The S2 fixture: a circular orbit at [`ORBIT_RADIUS_M`], gravity zero.
+///
+/// The chassis integrates `WidePos` with velocity Verlet. A second body sits
+/// 1 000 m further along +X and has no orbit, so the helper does not pull it.
+/// `sleep_time` of 10 keeps a calm body awake for a few seconds. The 200 s
+/// radius check outlasts that, and a calm body stays where it is.
+#[must_use]
+pub fn circular_orbit_world() -> World {
+    let mut world = World::new(Vec3::ZERO);
+    world.sleep_time = 10.0;
+    let speed = (ORBIT_GM / ORBIT_RADIUS_M).sqrt();
+    let position = WidePos::new(ORBIT_RADIUS_M, 0.0, 0.0);
+    let velocity = WidePos::new(0.0, speed, 0.0);
+    let mut body = Body::cuboid(
+        pose_of(position).unwrap_or(Vec3::ZERO),
+        1_000.0,
+        Vec3::new(1.0, 1.0, 1.0),
+    );
+    body.velocity = pose_of(velocity).unwrap_or(Vec3::ZERO);
+    body.friction = 0.0;
+    body.restitution = 0.0;
+    body.motion = MotionQuality::Discrete;
+    let index = world.insert(body);
+    let mut nearby = Body::cuboid(
+        pose_of(WidePos::new(ORBIT_RADIUS_M + 1_000.0, 0.0, 0.0)).unwrap_or(Vec3::ZERO),
+        1_000.0,
+        Vec3::new(1.0, 1.0, 1.0),
+    );
+    nearby.friction = 0.0;
+    nearby.restitution = 0.0;
+    nearby.motion = MotionQuality::Discrete;
+    world.insert(nearby);
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: None,
+        aircraft: None,
+        space: Some(SpaceCraft {
+            thrusters: [Thruster {
+                local_position: Vec3::ZERO,
+                local_direction: Vec3::X,
+                max_force: 0.0,
+                throttle: 0.0,
+            }; 8],
+            count: 0,
+            orbit: Some(Orbit {
+                position,
+                velocity,
+                gm: ORBIT_GM,
+            }),
         }),
     });
     world
@@ -308,6 +427,222 @@ fn integrate_wrench(body: &mut Body, force: Vec3, arm: Vec3, dt: f32) {
 
 fn finite_vec(value: Vec3) -> bool {
     value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
+}
+
+/// Integrate each wide orbit and write the chassis linear pose.
+///
+/// Runs after [`integrate_body`](crate::integrate_body), so the `f32` step does
+/// not keep a second copy of the same translation. A sleeping chassis is left
+/// alone. A non-finite parameter leaves the stored wide state unchanged.
+pub(crate) fn sync_orbits(world: &mut World, dt: f32) {
+    if world.vehicles.is_empty() || !(dt > 0.0) {
+        return;
+    }
+    if !world.vehicles.iter().any(has_orbit) {
+        return;
+    }
+    let dt64 = f64::from(dt);
+    let origin = world.origin;
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(mut craft) = vehicle.space else {
+            continue;
+        };
+        let Some(mut orbit) = craft.orbit else {
+            continue;
+        };
+        let Some(body) = world.bodies.get(vehicle.chassis).copied() else {
+            continue;
+        };
+        if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
+            continue;
+        }
+        if !advance_orbit(&mut orbit, dt64) {
+            continue;
+        }
+        let Some(position) = pose_of(orbit.position.offset(origin)) else {
+            continue;
+        };
+        let Some(velocity) = pose_of(orbit.velocity) else {
+            continue;
+        };
+        craft.orbit = Some(orbit);
+        if let Some(stored) = world.vehicles.get_mut(index) {
+            stored.space = Some(craft);
+        }
+        if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
+            stored.position = position;
+            stored.velocity = velocity;
+        }
+    }
+}
+
+/// Move the `f32` poses into `origin`. Wide positions stay absolute.
+pub(crate) fn shift_origin(world: &mut World, origin: WidePos) {
+    if !origin.is_finite() || same_wide(world.origin, origin) {
+        return;
+    }
+    let delta = origin.offset(world.origin);
+    world.origin = origin;
+    for body in &mut world.bodies {
+        body.position = Vec3::new(
+            rebase_axis(body.position.x, delta.x),
+            rebase_axis(body.position.y, delta.y),
+            rebase_axis(body.position.z, delta.z),
+        );
+    }
+    write_orbit_poses(world);
+    world.refit();
+}
+
+fn has_orbit(vehicle: &Vehicle) -> bool {
+    vehicle.space.is_some_and(|craft| craft.orbit.is_some())
+}
+
+fn write_orbit_poses(world: &mut World) {
+    let origin = world.origin;
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(orbit) = vehicle.space.and_then(|craft| craft.orbit) else {
+            continue;
+        };
+        let Some(position) = pose_of(orbit.position.offset(origin)) else {
+            continue;
+        };
+        if let Some(body) = world.bodies.get_mut(vehicle.chassis) {
+            body.position = position;
+        }
+    }
+}
+
+/// Velocity Verlet. `a = -GM * r / |r|³`.
+fn advance_orbit(orbit: &mut Orbit, dt: f64) -> bool {
+    if !dt.is_finite() || dt <= 0.0 {
+        return false;
+    }
+    if !orbit.gm.is_finite() || !orbit.position.is_finite() || !orbit.velocity.is_finite() {
+        return false;
+    }
+    let Some(kick) = pull(orbit.position, orbit.gm) else {
+        return false;
+    };
+    let half = dt * 0.5;
+    let midway = orbit.velocity.translate(kick.scale(half));
+    let next = orbit.position.translate(midway.scale(dt));
+    let Some(land) = pull(next, orbit.gm) else {
+        return false;
+    };
+    let velocity = midway.translate(land.scale(half));
+    if !next.is_finite() || !velocity.is_finite() {
+        return false;
+    }
+    orbit.position = next;
+    orbit.velocity = velocity;
+    true
+}
+
+fn pull(position: WidePos, gm: f64) -> Option<WidePos> {
+    let r2 = position.length_squared();
+    if !(r2 > 0.0) || !r2.is_finite() {
+        return None;
+    }
+    let radius = r2.sqrt();
+    let cube = r2 * radius;
+    if !(cube > 0.0) || !cube.is_finite() {
+        return None;
+    }
+    let accel = position.scale(-gm / cube);
+    accel.is_finite().then_some(accel)
+}
+
+fn same_wide(left: WidePos, right: WidePos) -> bool {
+    left.x.to_bits() == right.x.to_bits()
+        && left.y.to_bits() == right.y.to_bits()
+        && left.z.to_bits() == right.z.to_bits()
+}
+
+fn rebase_axis(current: f32, delta: f64) -> f32 {
+    let next = pose_axis(f64::from(current) - delta);
+    if next.is_finite() {
+        next
+    } else {
+        current
+    }
+}
+
+fn pose_of(value: WidePos) -> Option<Vec3> {
+    if !value.is_finite() {
+        return None;
+    }
+    let pose = Vec3::new(pose_axis(value.x), pose_axis(value.y), pose_axis(value.z));
+    finite_vec(pose).then_some(pose)
+}
+
+/// Chassis pose is `f32`. A subnormal metre becomes zero; the wide state stays `f64`.
+fn pose_axis(value: f64) -> f32 {
+    if !value.is_finite() {
+        if value.is_nan() {
+            return f32::NAN;
+        }
+        return if value.is_sign_negative() {
+            f32::NEG_INFINITY
+        } else {
+            f32::INFINITY
+        };
+    }
+    let bits = value.to_bits();
+    let sign = bits >> 63;
+    let exp64 = (bits >> 52) & 0x7ff;
+    let mant = bits & 0x000f_ffff_ffff_ffff;
+    if exp64 < 897 {
+        return signed_zero(sign);
+    }
+    if exp64 > 1150 {
+        return signed_infinity(sign);
+    }
+    let mut exp = exp64 - 896;
+    let mut frac = mant >> 29;
+    let round = (mant >> 28) & 1;
+    let sticky = mant & 0x0fff_ffff;
+    let odd = (frac & 1) == 1;
+    let tie_up = sticky != 0 || odd;
+    if round == 1 && tie_up {
+        frac += 1;
+        if frac == 0x80_0000 {
+            frac = 0;
+            exp += 1;
+            if exp >= 255 {
+                return signed_infinity(sign);
+            }
+        }
+    }
+    let packed = (sign << 31) | (exp << 23) | frac;
+    let Ok(narrow) = u32::try_from(packed) else {
+        return signed_infinity(sign);
+    };
+    f32::from_bits(narrow)
+}
+
+fn signed_zero(sign: u64) -> f32 {
+    if sign == 0 {
+        0.0
+    } else {
+        -0.0
+    }
+}
+
+fn signed_infinity(sign: u64) -> f32 {
+    if sign == 0 {
+        f32::INFINITY
+    } else {
+        f32::NEG_INFINITY
+    }
 }
 
 fn apply_ground(world: &mut World, index: usize, dt: f32) -> u32 {
@@ -530,4 +865,25 @@ fn conjugate(orientation: Quat) -> Quat {
         -orientation.z,
         orientation.w,
     )
+}
+
+#[cfg(test)]
+mod pose_tests {
+    use super::pose_axis;
+
+    #[test]
+    fn a_finite_metre_narrows_to_the_chassis_pose() {
+        assert_eq!(pose_axis(0.0).to_bits(), 0);
+        assert_eq!(pose_axis(-0.0).to_bits(), 0x8000_0000);
+        assert_eq!(pose_axis(1.0).to_bits(), 0x3f80_0000);
+        assert_eq!(pose_axis(-1.0).to_bits(), 0xbf80_0000);
+        assert_eq!(pose_axis(0.5).to_bits(), 0x3f00_0000);
+        assert_eq!(pose_axis(-2.5).to_bits(), 0xc020_0000);
+        assert_eq!(pose_axis(1.0e7).to_bits(), 0x4b18_9680);
+        assert_eq!(pose_axis(6_313.477_647_065_839).to_bits(), 0x45c5_4bd2);
+        assert!(pose_axis(f64::NAN).is_nan());
+        assert_eq!(pose_axis(f64::INFINITY), f32::INFINITY);
+        assert_eq!(pose_axis(f64::NEG_INFINITY), f32::NEG_INFINITY);
+        assert_eq!(pose_axis(1.0e-40).to_bits(), 0);
+    }
 }

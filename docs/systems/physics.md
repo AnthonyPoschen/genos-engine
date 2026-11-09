@@ -27,7 +27,7 @@ A capsule is a segment along local Y plus a radius. `half_height` is the segment
 The crate is `crates/physics`, package `genos-physics`.
 
 - `Body`, `World`, `Spring`, `Shape`, `MotionQuality`, `Presence`, and `step` are in `src/lib.rs`.
-- A vehicle is in `src/vehicle.rs`: `Vehicle`, `GroundContact`, `Wheel`, `WheeledGround`, `Thruster`, `SpaceCraft`. `Aircraft` is stored and is not forced. `chassis_rest_world` builds the G1 fixture. `thruster_world` builds the S1 fixture.
+- A vehicle is in `src/vehicle.rs`: `Vehicle`, `GroundContact`, `Wheel`, `WheeledGround`, `Thruster`, `SpaceCraft`, `WidePos`, `Orbit`. `Aircraft` is stored and is not forced. `chassis_rest_world` builds the G1 fixture. `thruster_world` builds the S1 fixture. `circular_orbit_world` builds the S2 fixture.
 - Contact is in `src/contact.rs`. The pair list comes from `src/broadphase.rs`. Debris-debris pairs are dropped by the layer table.
 - Islands and sleep are in `src/island.rs`.
 - Speculative contacts, the GJK gap, and swept time of impact are in `src/ccd.rs`.
@@ -48,7 +48,9 @@ For a bullet whose gap at the start of the step is inside the margin, set `motio
 
 For a wheeled chassis, insert one dynamic body and push a `Vehicle` whose `chassis` is that index. Set `ground` to `GroundContact::Wheeled` with four `Wheel` rays. `direction` is in the chassis frame. `step` casts each ray against a plane or a box, excluding the chassis, and pushes a spring-damper along the ray. It does not set `Body.spring` or `Body.motor`. `step_stats.wheel_rays` is the cast count. A sleeping chassis casts 0. `chassis_rest_world` is the 1 200 kg fixture. Aircraft can be stored. This step does not apply it.
 
-For a spacecraft, set `space` to a `SpaceCraft` with `count` live `Thruster`s. Force is `throttle * max_force` along the chassis-frame direction, rotated into the world. Torque is `r × F` at the chassis origin. The chassis integrates that wrench, then the existing gyroscopic step runs. Gravity stays `World.gravity`. The S1 fixture sets gravity to zero. A thruster with `throttle > 0` keeps the chassis awake the way a motor does, and it does not set `Body.motor`. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. The wake runs before gravity and before the wrench, so that step integrates both. A closed, zero, or non-finite thruster leaves the sleeper asleep. `thruster_world` is the 1 000 kg offset fixture. There is no orbit and no wide position.
+For a spacecraft, set `space` to a `SpaceCraft` with `count` live `Thruster`s. Force is `throttle * max_force` along the chassis-frame direction, rotated into the world. Torque is `r × F` at the chassis origin. The chassis integrates that wrench, then the existing gyroscopic step runs. Gravity stays `World.gravity`. The S1 fixture sets gravity to zero. A thruster with `throttle > 0` keeps the chassis awake the way a motor does, and it does not set `Body.motor`. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. The wake runs before gravity and before the wrench, so that step integrates both. A closed, zero, or non-finite thruster leaves the sleeper asleep. `thruster_world` is the 1 000 kg offset fixture.
+
+For an orbit, set `SpaceCraft.orbit` to an `Orbit`. The wide position and velocity are `f64` metres. `gm` is m³/s². The step integrates `v += a dt / 2`, `x += v dt`, `a = -gm * r / |r|³`, `v += a dt / 2`. It does not read `Body.position` as that state. After the gyroscopic step the chassis linear pose is the wide position minus `World.origin`, as `f32`. A subnormal metre becomes zero. `World::shift_origin` rebases every `f32` pose and refits the trees. The wide state stays absolute. A body with no orbit is not pulled, and it still takes `World.gravity`. An orbiting chassis does not add `World.gravity` onto `gm`. A sleeping chassis is not integrated. A non-finite `gm` leaves the wide state unchanged. Thruster force is not added into the wide velocity. `circular_orbit_world` is the 1 000 kg fixture at `1e7` m, `gm = 3.986e14`, with a second body 1 000 m further along +X and no orbit.
 
 For a breakable, cook the asset, then `spawn_breakable(&mut world, asset, debris_budget)`. `apply_damage(&mut world, breakable, bond, amount)` subtracts health and swaps when the bond reaches 0. `destruction_report` returns `bonds_broken`, `debris_alive`, `debris_asleep`, and `floor_penetration_m`. `allows_slice` stays false. `intact_body` and `chunk_body` are the body indices.
 
@@ -56,7 +58,7 @@ After `step`, `change_records` holds this tick's chunk records in `(breakable, c
 
 ## Limits
 
-There is no island solver and no air drag. G1 is the wheeled ground payload from [ADR 0040](../adr/0040-vehicle-domains.md): four rays and an explicit spring-damper on one chassis. S1 is the space payload on that same chassis: at most eight thrusters, force and torque, and no orbit. The ADR stays proposed. Aircraft forces, the landing stage, wide positions, tyre slip, gearbox, steering, and sea buoyancy are not in this step. A mesh or a hull is a miss for a wheel ray. A miss stores `max_length` and applies no force. An empty vehicle list does no vehicle work and does not allocate. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
+There is no island solver and no air drag. G1 is the wheeled ground payload from [ADR 0040](../adr/0040-vehicle-domains.md): four rays and an explicit spring-damper on one chassis. S1 is the thruster list on that same chassis: at most eight thrusters, force and torque. S2 is one wide orbit on that space payload. It is not a gravity source, and `genos-math` stays `f32`. The ADR stays proposed. Aircraft forces, the landing stage, tyre slip, gearbox, steering, and sea buoyancy are not in this step. A mesh or a hull is a miss for a wheel ray. A miss stores `max_length` and applies no force. An empty vehicle list does no vehicle work and does not allocate. A large `dt` drifts from `½gt²`. A sleeping body is not integrated. A hull's inertia is the volume integral of its tetrahedra about the local origin. Position correction does not rotate.
 
 `Discrete` still tunnels when the travel is longer than the body. `Speculative` does not cover a gap larger than the margin, so a ship at 3 000 m/s has to be `Swept`. With protection on, the metrics fixture marks the bullet speculative and both ships swept, and `tunnel_count` is 0. With protection off, the same speeds still tunnel and store no ship contact. A pair that hits the 16-advance cap counts in `toi_failed` and in `tunnel_count`. A pair past the cap counts in `toi_deferred` and can still tunnel. The knobs are `World.speculative_margin` and `World.swept_pair_cap`. The probe is `cargo test -p genos-physics --test metrics -- --fixture good` and `--fixture bad`. `ccd_in_step` is true when a body asked for speculative or swept collision. `--fixture spin` is one step of a long thin box, half extents `(0.02, 1.5, 0.02)` m, spinning a quarter turn about Z beside a block. `tunnel_count` is 1 when that block is still at rest. The closing bound's `|ω| r` term is what strikes it. `--fixture wide` is the same swept ships with centres 40 m apart, one step and no gravity. The 36 m gap needs more than one radius slice, so a time-of-impact cap of 1 counts in `tunnel_count`. `--fixture rotor` flies a 3 kg cube, half extents 1 m, at 2 rad/s about Z with no gravity. `rotational_energy_j` is `1/2 Izz ωz²` from that size and mass, 4 J.
 
@@ -64,7 +66,7 @@ A mesh collider is a few convex pieces, not the source triangles. Two concave me
 
 The camera calls this step from the scene crate. Lights have no collider.
 
-`debug/physics` (`genos-physics`) is the debug binary: headless, stats only, with the ship lanes, hull edge contacts, resting pile, 10k static grid, `chassis_rest`, and `thruster` scenes, per-step JSON stats, bitwise replay, checkpoint restore, and the `physics_*` MCP commands. See [debug/physics/README.md](../../debug/physics/README.md). The destruction metrics probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
+`debug/physics` (`genos-physics`) is the debug binary: headless, stats only, with the ship lanes, hull edge contacts, resting pile, 10k static grid, `chassis_rest`, `thruster`, and `orbit` scenes, per-step JSON stats, bitwise replay, checkpoint restore, and the `physics_*` MCP commands. See [debug/physics/README.md](../../debug/physics/README.md). The destruction metrics probe is `cargo test -p genos-physics --test metrics`. `--fixture broken` is the overhang: seam broken at step 30, 90 steps, `debris_budget` 8. `--fixture budget` is that overhang with 12 children per chunk and `debris_budget` 1. After it settles, `debris_alive` is at most 1 and `debris_asleep` is at least 1. The ship fixtures do not print the destruction rows.
 
 | Failure | Tunable | Probe |
 |---|---|---|
@@ -98,10 +100,18 @@ The camera calls this step from the scene crate. Lights have no collider.
 | A sub-threshold thrust stays asleep | 0.25 m/s speed wake, `sleep_linear` 0.12 | `a_thrust_under_the_speed_wake_still_wakes` |
 | A closed thruster wakes a sleeper | `throttle`, `max_force` | `a_thruster_that_cannot_push_leaves_the_sleeper_asleep` |
 | Space clears gravity | `World.gravity` | `space_thrust_keeps_world_gravity` |
+| An orbit leaves its radius | `GM`, wide position | `a_circular_orbit_at_1e7_metres_keeps_its_radius`, `debug/physics --scene orbit` `orbit_radius_m` |
+| A coast is counted as circular | `GM = 0` | `a_zero_gm_coast_leaves_the_circular_radius` |
+| The helper pulls another body | no orbit on that body | the second body in `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
+| The `f32` pose is the orbit state | `World::shift_origin` | unshifted pose error above 0.05 m, then the chassis within 1 m of the origin |
+| Uniform gravity is cleared for a bystander | `World.gravity` | `an_orbit_leaves_uniform_gravity_on_a_body_with_no_orbit` |
+| A sleeping orbit still falls | `Body.sleeping` | `a_sleeping_orbit_does_not_move` |
+| A non-finite `GM` poisons the wide state | `Orbit.gm` | `a_non_finite_gm_leaves_the_wide_position` |
+| The orbit step allocates | inline `WidePos` | `orbit_allocs=0` in `cargo test -p genos-physics --test bench` |
 
 ## Plan
 
-The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. G1 is the wheeled trial in this step. S1 thruster force is in this step. The orbit box still waits. [ADR 0040](../adr/0040-vehicle-domains.md) stays proposed.
+The next pipeline is [physics/plan.md](physics/plan.md). That file is a plan. G1 is the wheeled trial in this step. S1 thruster force is in this step. S2 is the private orbit helper in this step. It is not the gravity field. [ADR 0040](../adr/0040-vehicle-domains.md) stays proposed.
 
 Continuous collision and destruction are decided in [physics-ccd-destruction-design.md](physics-ccd-destruction-design.md) and [ADR 0016](../adr/0016-physics-ccd-destruction.md). That decision is accepted. Speculative contacts, swept time of impact, and the fracture hot-swap are in this step. `slice_chunk` is not.
 
@@ -117,7 +127,7 @@ The step does not replicate. Gameplay networking waits ([Architecture](../archit
 
 Vehicle contract, copied from ADR 0040. The codec is not in this step. Gameplay networking still waits.
 
-- Replicated state: the chassis uses the same quantized pose and velocity as any dynamic body. G1 adds each wheel's suspension length as `i16`. A1 adds throttle as `i16`. S1 adds each thruster throttle as `i16`. Contact scratch, slip, the lift sample, and the thruster force stay local. Sea is absent, so draft and drag are not on the wire.
+- Replicated state: the chassis uses the same quantized pose and velocity as any dynamic body. G1 adds each wheel's suspension length as `i16`. A1 adds throttle as `i16`. S1 adds each thruster throttle as `i16`. S2 keeps the wide position, the wide velocity, `GM`, and the origin local. Contact scratch, slip, the lift sample, and the thruster force stay local. Sea is absent, so draft and drag are not on the wire.
 - Authority: the server runs `step` and owns the chassis pose. The owning client sends input. Clients do not accept one another's vehicle state.
 - Prediction / rollback: none. A driven chassis is interpolated. Predicting it would roll back contacts with the world.
 - Determinism: one process, `step` on one thread, fixed `1/60` s, aircraft then space then ground. Two runs match bits. The wire compares quantized values. Cross-platform bit identity is not required.
@@ -128,5 +138,5 @@ Vehicle contract, copied from ADR 0040. The codec is not in this step. Gameplay 
 - [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps this step in the repository. There is no physics middleware crate.
 - [ADR 0033](../adr/0033-physics-scale-broadphase-and-sleep.md) is the layered broadphase and island sleep. Departures from the AABB-tree paper and from Box2D's rotations are in that ADR.
 - [ADR 0034](../adr/0034-rotational-contact-solver.md) is the rotational contact solver. Joints, rolling friction, and a full island solver stay out of that decision. It does not define a vehicle.
-- [ADR 0040](../adr/0040-vehicle-domains.md) is the vehicle proposal: ground, aircraft, and space payloads on one chassis body. Status is proposed. G1, the wheeled ground payload, and S1, the thruster force, are in this step as trials. Aircraft forces, the orbit, and sea buoyancy are not.
+- [ADR 0040](../adr/0040-vehicle-domains.md) is the vehicle proposal: ground, aircraft, and space payloads on one chassis body. Status is proposed. G1, the wheeled ground payload, S1, the thruster force, and S2, the wide orbit, are in this step as trials. Aircraft forces and sea buoyancy are not.
 - [ADR 0016](../adr/0016-physics-ccd-destruction.md) is the continuous-collision and destruction decision. The departures from that design's papers are named in [the design](physics-ccd-destruction-design.md). This step adds these: supported chunks stay in the intact static body, culled debris are tombstoned, the intact contact impulse hits the largest seam, and a world bond's health is `health_per_area * 10`.

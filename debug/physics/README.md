@@ -27,6 +27,7 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
 | `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
 | `thruster` | 1 000 kg cube, one offset thruster, gravity zero, 60 steps. | `a_thruster_in_zero_gravity_matches_force_and_torque` |
+| `orbit` | Circular orbit at 1e7 m, gravity zero, a second body with no orbit, 200 steps of 1/60 s. | `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -37,10 +38,12 @@ files describe lighting geometry and have no bodies, masses or velocities.
 `pair_slices`, `dynamic_pair_impulses`, `linear_energy`, `rotational_energy`,
 `max_speed`, `min_y`, `hash`, `contact_points`, `sleeping_bodies`,
 `pair_tests`, `broadphase_builds`, `tree_nodes`, `islands`, `awake_bodies`,
-`solver_bodies`, `wheel_rays`, and `vehicle_count`. `hash` is FNV-1a over
-every body's pose and velocities, then each stored wheel length, bit for bit.
-Equal hashes at a step mean equal state. A world with no vehicle hashes the
-bodies only.
+`solver_bodies`, `wheel_rays`, `vehicle_count`, and `orbit_radius_m`. `hash`
+is FNV-1a over every body's pose and velocities, then each stored wheel length,
+bit for bit. An orbit also mixes its wide position, wide velocity, and
+gravitational parameter. Equal hashes at a step mean equal state. A world with
+no vehicle hashes the bodies only. `orbit_radius_m` is 0 when the scene has no
+orbit.
 
 ## MCP and `POST /cmd/<name>`
 
@@ -54,9 +57,10 @@ bodies only.
 A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
-`chassis_rest` is the G1 trial and `thruster` is the S1 trial from
-[ADR 0040](../../docs/adr/0040-vehicle-domains.md). The scene starts awake.
-A chassis that begins that scene asleep, with the thruster already open,
-wakes on the first step. The ADR stays proposed.
-A1 would add `aero_trim` on this same headless path. That scene is not here.
-Sea has no scene. S1 does not add an orbit scene.
+`chassis_rest` is the G1 trial, `thruster` is the S1 trial, and `orbit` is
+the S2 trial from [ADR 0040](../../docs/adr/0040-vehicle-domains.md). The
+thruster scene starts awake. A chassis that begins that scene asleep, with the
+thruster already open, wakes on the first step. The orbit scene steps at 1/60 s.
+The 200 steps of 1 s radius gate is the physics test, not this harness. The ADR
+stays proposed. A1 would add `aero_trim` on this same headless path. That scene
+is not here. Sea has no scene.

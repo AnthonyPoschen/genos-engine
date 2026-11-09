@@ -148,6 +148,14 @@ _Avoid_: Speculative contact, time of impact
 A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
 _Avoid_: Rocket body, orbit
 
+**Wide position**:
+The `f64` metres of an orbit's integration state. The chassis pose is that position minus the world origin, stored as `f32`. Math positions stay `f32`.
+_Avoid_: f32 position, double vector
+
+**Orbit**:
+The wide position, wide velocity, and gravitational parameter on a space payload. The step integrates them with velocity Verlet. A body with no orbit is not pulled.
+_Avoid_: Thruster, gravity field
+
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 _Avoid_: Joint, spring

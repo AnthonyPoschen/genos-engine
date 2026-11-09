@@ -109,4 +109,13 @@ fn timed_math_and_physics_batch_does_not_allocate() {
     let velocity = thruster.bodies[0].velocity;
     assert!(velocity.x.is_finite() && velocity.y.is_finite() && velocity.z.is_finite());
     assert_eq!(ground.step_stats.wheel_rays, 4);
+
+    let mut orbit = genos_physics::circular_orbit_world();
+    step(&mut orbit, 1.0);
+    let before_orbit = ALLOCS.load(Ordering::Relaxed);
+    step(&mut orbit, 1.0);
+    let orbit_allocs = ALLOCS.load(Ordering::Relaxed) - before_orbit;
+    println!("orbit_allocs={orbit_allocs}");
+    assert_eq!(orbit_allocs, 0, "orbit step allocated {orbit_allocs} times");
+    assert!(orbit.bodies[0].velocity.x.is_finite());
 }

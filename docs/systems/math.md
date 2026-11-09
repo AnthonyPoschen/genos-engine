@@ -36,7 +36,7 @@ The display pass calls `genos_math::tonemap` for EV100, exposure, the Karis weig
 
 ## Limits
 
-Positions, directions, and rotations stay `f32`. This crate does not build the Vulkan projection. The camera owns that matrix. Lighting probes and mesh vertices stay raw floats.
+Positions, directions, and rotations stay `f32`. Physics wide positions are `f64` in the physics crate. They are not this crate. This crate does not build the Vulkan projection. The camera owns that matrix. Lighting probes and mesh vertices stay raw floats.
 
 The medium closed forms are `f64` so the grade matches the analytic expression. The renderer calls the `f32` wrappers. A horizontal height-fog ray is `|cos θ| < 1e-4` (`HEIGHT_FOG_HORIZONTAL_COS`).
 

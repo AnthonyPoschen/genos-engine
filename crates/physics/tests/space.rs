@@ -1,7 +1,7 @@
 //! S1 thruster force and torque on one chassis body.
 //!
-//! The space payload does not add a body, an orbit, or a second integrator.
-//! Gravity stays `World.gravity`. This fixture sets it to zero.
+//! This fixture does not store an orbit. Gravity stays `World.gravity`. The
+//! fixture sets it to zero. The wide orbit is `tests/orbit.rs`.
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{step, Body, MotionQuality, Presence, SpaceCraft, Thruster, Vehicle, World};
@@ -616,6 +616,7 @@ fn listed(count: usize, thrusters: &[Thruster]) -> SpaceCraft {
     SpaceCraft {
         thrusters: slots,
         count: u8::try_from(count).unwrap_or(0),
+        orbit: None,
     }
 }
 
