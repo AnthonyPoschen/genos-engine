@@ -287,7 +287,18 @@ fn gi_presets_shade_pixels_with_restir() {
         );
     }
     let potato = LightingSettings::preset(LightingPreset::Potato);
-    assert_eq!(potato.direct.max_lights, 8);
+    // The reservoir samples every lamp. The old 8 was a production cap.
+    assert_eq!(potato.direct.max_lights, 0);
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Low).direct.max_lights,
+        0
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Medium)
+            .direct
+            .max_lights,
+        0
+    );
     assert!(!potato.gi.enabled);
 }
 

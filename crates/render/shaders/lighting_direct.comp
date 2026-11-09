@@ -296,12 +296,17 @@ void main() {
             // Mode 4 holds only an exact sum (kind 2) once the view is still.
             // The record goes into this frame's slot only. Writing the other slot
             // races the pixel that owns it. The next frame reads this slot.
-            // The pre-reservoir module is gone. Mode off still holds on a
-            // matching signature. Reuse holds only the labelled exact sum.
-            bool hold = pc.lamp.x != 4u;
+            // Bit 21 with bits 18-20 clear is the production reservoir, including
+            // mode off and mode hits. A quiet view must not return last frame's
+            // colour and skip that sample. The labelled exact sum (bit 19) and
+            // restir-off keep the hold. A stored exact record cannot survive
+            // into a frame that binds the reservoir.
+            bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
+                && ((pc.lamp.y >> 18u) & 7u) == 0u;
+            bool hold = !restir_product && pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
-            if (pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
+            if (!restir_product && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
                 LampReservoir held = lamp_res_load(idx, lamp_res_slot_prev());
                 uvec4 geo = lamp_geo_load(idx, lamp_res_slot_prev());
                 hold = geo.z == LAMP_GEO_EXACT && lamp_res_frames(held) >= LIGHTING_DIRECT_HOLD;
@@ -481,6 +486,13 @@ void main() {
     if ((scene.grid_at.w & 255u) == 6u) {
         view_only = (scene.grid_at.w >> 8u) & 0xFFFFu;
     }
+#ifdef GENOS_RESTIR_DI
+    // light:I shades that one scene lamp. The reservoir is not that view.
+    if (view_only != LAMP_ALL) {
+        restir_pix = false;
+        lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
+    }
+#endif
     uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
     float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
     uint chosen_n = 0u;
@@ -649,7 +661,13 @@ void main() {
         gbuf_material(idx, base, rough, metal);
     }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+        // The reservoir samples every point lamp. The cap stays on the labelled
+        // exact walk and the hit picker, which do not set restir_pix.
+        bool cap_lamps = true;
+#ifdef GENOS_RESTIR_DI
+        cap_lamps = !restir_pix;
+#endif
+        if (cap_lamps && gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
             break;
         }
         Lamp sun_lamp_l = lamp_list_get(list, k);
@@ -828,6 +846,27 @@ void main() {
             if (rvis) {
                 e_restir = rlight * restir_w;
                 e += e_restir;
+                // The lobe picture is `spec`. The raw sample is irradiance, so
+                // the same Appendix B mix as the shade loop has to land in spec
+                // or a specular product frame drops the reservoir.
+                if (lobe) {
+                    vec3 ldir = rt - origin;
+                    float llen = length(ldir);
+                    ldir = llen > LAMP_PICK_DEPTH_FLOOR ? ldir / llen : ns;
+                    if (two_sided && dot(ns, ldir) < 0.0) {
+                        ldir = -ldir;
+                    }
+                    float ndl = max(dot(ns, ldir), 0.0);
+                    float ndv = max(dot(ns, view), 0.0);
+                    vec3 halfv = ldir + view;
+                    float hlen = length(halfv);
+                    halfv = hlen > DIRECT_DIR_EPS ? halfv / hlen : ns;
+                    float ndh = dot(ns, halfv);
+                    vec3 cx = cross(ns, halfv);
+                    float ncross = dot(cx, cx);
+                    float vdh = dot(view, halfv);
+                    spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * e_restir;
+                }
             }
         }
     }

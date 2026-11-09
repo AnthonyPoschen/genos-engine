@@ -208,16 +208,20 @@ pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
 
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
-/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
-/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
-/// stay [`Off`](Self::Off).
+/// The sun is never a sample. It is traced on its own. With `restir_di` on,
+/// every preset shades screen pixels from the ReSTIR reservoir, including
+/// [`Hits`](Self::Hits) (`gi-1bounce`) and [`Off`](Self::Off) (potato and
+/// day-cycle). A quiet view does not hold those pixels off the reservoir.
+/// `gi-1bounce` still samples bounce hits. The labelled exact path is
+/// `restir_di` off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Every lamp. Potato and day-cycle.
+    /// Every lamp on the labelled exact path. Potato and day-cycle. With
+    /// `restir_di` on, screen pixels still shade the reservoir.
     Off = 0,
-    /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
+    /// Bounce hits, probe fills, and cache-ray hits. `gi-1bounce`. With
+    /// `restir_di` on, screen pixels shade the reservoir, not the full sum.
     Hits = 1,
     /// Primary pixels only. No previous frame. Diagnostic.
     Pixels = 2,
@@ -255,7 +259,8 @@ impl LampPickMode {
 ///
 /// `rays` is the shadow-ray count (samples per shaded point). `candidates` is
 /// the unshadowed reservoir fill. They are not the same knob: a candidate is
-/// not a ray. `direct.max_lights` stays a hard cap and does not read these.
+/// not a ray. `direct.max_lights` caps the labelled exact walk and the hit
+/// picker. The production reservoir does not read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LampPickSettings {
     pub mode: LampPickMode,
@@ -310,7 +315,9 @@ impl LampPickSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectSettings {
     pub enabled: bool,
-    /// Lamps shaded per pixel. 0 means every lamp that reaches the point.
+    /// Lamps walked on the labelled exact path and the hit picker. 0 means
+    /// every lamp that reaches the point. Production ReSTIR samples the
+    /// reservoir and does not read this.
     pub max_lights: u32,
     /// Recompute every Nth frame. 1 is every frame. Older frames reuse the stored direct.
     pub refresh_frames: u32,
@@ -751,7 +758,6 @@ impl LightingSettings {
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
-                s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -766,7 +772,6 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
-                s.direct.max_lights = 4;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
                 s.probes.rays = 16;
@@ -785,7 +790,6 @@ impl LightingSettings {
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
-                s.direct.max_lights = 8;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;

@@ -348,6 +348,10 @@ pub(crate) struct Lighting {
     restir_w: u32,
     restir_h: u32,
     restir_clear: bool,
+    /// Product frames whose reservoir upload failed and shaded the labelled sum.
+    restir_prepare_failures: u32,
+    /// Test hook. The next product prepare returns the labelled exact path.
+    restir_force_fail: bool,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -388,12 +392,14 @@ pub struct LightingAtrousStats {
     pub changed_pixels: u32,
 }
 
-/// Shadow rays traced last frame, spatial reservoir merges, and how pixels shaded.
+/// Shadow rays traced last frame, and how pixels shaded.
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
-/// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
-/// sum, `restir` shaded one pairwise sample or one ReSTIR DI sample. Counts stay zero unless the diag
-/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
+/// light-cache rays. `exact` shaded the labelled sum, `restir` shaded one
+/// ReSTIR DI sample. Counts stay zero unless the diag push bit was set.
+/// `exact` / `restir` are `diag[58]` and `diag[59]`. `diag[52]` and `diag[57]`
+/// are unused: the pairwise spatial merge and the trusted-colour copy are gone,
+/// and the later words are not shifted.
 /// `history_accepts` / `history_rejects` are restir header words 43 and 44:
 /// the live temporal reprojection kept or rejected a surfaced pixel. A history
 /// reset counts neither. `restir_point_adds` is header word 45: near point
@@ -414,8 +420,6 @@ pub struct LampPickCounts {
     pub kept: u32,
     pub fills: u32,
     pub cache: u32,
-    pub spatial: u32,
-    pub copied: u32,
     pub exact: u32,
     pub restir: u32,
     pub kept_live: u32,
@@ -603,6 +607,8 @@ impl Default for Lighting {
             restir_w: 0,
             restir_h: 0,
             restir_clear: false,
+            restir_prepare_failures: 0,
+            restir_force_fail: false,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -1445,9 +1451,8 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
-    /// Shadow rays the last frame actually traced, by consumer, plus spatial
-    /// merges. Zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame.
-    /// Waits for that frame.
+    /// Shadow rays the last frame actually traced, by consumer. Zero unless
+    /// `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame. Waits for that frame.
     pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.idle_device();
         let slot = self.lighting.last_slot;
@@ -1458,8 +1463,6 @@ impl Gpu {
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
                 cache: w[LAMP_PICK_DIAG_WORD + 3],
-                spatial: w[LAMP_PICK_DIAG_WORD + 4],
-                copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
                 kept_live: w[LAMP_PICK_DIAG_WORD + 5],
@@ -1475,6 +1478,16 @@ impl Gpu {
                 restir_point_adds: restir_diag[2],
             })
             .unwrap_or_default()
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub(crate) fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.lighting.restir_prepare_failures
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub(crate) fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.lighting.restir_force_fail = on;
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -2907,7 +2920,13 @@ impl Gpu {
             }
             return false;
         }
+        if self.lighting.restir_force_fail {
+            self.lighting.restir_have_prev = false;
+            eprintln!("lighting: restir prepare failed: the reservoir upload was forced off");
+            return false;
+        }
         let Ok(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))) else {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
             return false;
         };
         if self.lighting.restir_pipe.is_null() {
@@ -2915,7 +2934,7 @@ impl Gpu {
             match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
                 Ok(pipe) => self.lighting.restir_pipe = pipe,
                 Err(err) => {
-                    eprintln!("lighting: restir di off: {err}");
+                    eprintln!("lighting: restir prepare failed: restir-di pipeline: {err}");
                     return false;
                 }
             }
@@ -2930,7 +2949,7 @@ impl Gpu {
             ) {
                 Ok(pipe) => self.lighting.restir_direct = pipe,
                 Err(err) => {
-                    eprintln!("lighting: restir direct off: {err}");
+                    eprintln!("lighting: restir prepare failed: restir-direct pipeline: {err}");
                     return false;
                 }
             }
@@ -2941,6 +2960,13 @@ impl Gpu {
             || self.lighting.restir_w != width
             || self.lighting.restir_h != height
         {
+            eprintln!(
+                "lighting: restir prepare failed: reservoir {} bytes at {}x{} does not cover {} bytes at {width}x{height}",
+                self.lighting.restir_buf.size,
+                self.lighting.restir_w,
+                self.lighting.restir_h,
+                need
+            );
             self.lighting.restir_have_prev = false;
             return false;
         }
@@ -2959,7 +2985,7 @@ impl Gpu {
             self.lighting.frame,
             self.lighting.restir_slot,
         ) else {
-            eprintln!("lighting: restir prefix does not fit");
+            eprintln!("lighting: restir prepare failed: the reservoir prefix does not fit");
             return false;
         };
         let reset = geom_reset || prefix.layout_changed || !self.lighting.restir_have_prev;
@@ -3585,11 +3611,27 @@ impl Gpu {
             // indirect read needs the draw-indirect stage
             // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
             self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
+            let restir_wanted = restir_product_shade(
+                self.lighting.settings.restir_di,
+                self.lighting.shade_gate,
+            );
             let restir_on = self.prepare_restir_di(w, h, changes.as_ref());
             if restir_on {
                 pc[9] |= 1 << 21;
             } else {
                 self.lighting.restir_query[slot] = u32::MAX;
+                if restir_wanted {
+                    // Labelled exact. The next frame that binds the reservoir
+                    // clears this bit, and that frame does not keep the hold.
+                    pc[9] |= 1 << 19;
+                    self.lighting.restir_prepare_failures = self
+                        .lighting
+                        .restir_prepare_failures
+                        .saturating_add(1);
+                    eprintln!(
+                        "lighting: restir prepare failed; this frame shades the labelled exact sum"
+                    );
+                }
             }
             (self.fns.cmd_bind_set)(
                 self.cmd,

@@ -497,6 +497,20 @@ fn lighting_moving_camera_keeps_its_brightness() {
     }
 }
 
+/// Largest RGB channel gap between two pictures, in bytes.
+fn max_channel(a: &[u8], b: &[u8]) -> u8 {
+    let n = a.len().min(b.len()) / 4;
+    let mut worst = 0u8;
+    for i in 0..n {
+        let p = i * 4;
+        worst = worst
+            .max(a[p].abs_diff(b[p]))
+            .max(a[p + 1].abs_diff(b[p + 1]))
+            .max(a[p + 2].abs_diff(b[p + 2]));
+    }
+    worst
+}
+
 /// Mean absolute difference of two pictures' RGB bytes (0..255).
 fn mean_abs(a: &[u8], b: &[u8]) -> f64 {
     let n = (a.len().min(b.len()) / 4).max(1);
@@ -2147,6 +2161,37 @@ fn preset_direct_scales_with_samples_not_lamps() {
     assert!(
         high12 * 2 < sum12,
         "high did not stay under the exact sum ({high12} vs {sum12})"
+    );
+}
+
+/// `restir_di` off, bounce 0: Hits and Off both walk every lamp.
+///
+/// The pairwise sample is gone. This is the coverage that stayed: the full
+/// walk matches, and one bounce-0 frame is enough. The old gap was one byte.
+#[test]
+fn restir_off_hits_match_the_full_walk_on_bounce_zero() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let world = white_lamps(3);
+    let camera = lamp_camera();
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
+    let off = draw(window, renderer, &world, &camera);
+    assert!(
+        mean_byte(&off) > 1.0,
+        "the full sum is black ({})",
+        mean_byte(&off)
+    );
+    renderer.set_lighting_settings(direct_pick(LampPickMode::Hits, 1));
+    let hits = draw(window, renderer, &world, &camera);
+    let gap = max_channel(&off, &hits);
+    assert!(
+        gap <= 1,
+        "hits on bounce 0 changed a pixel by {gap}"
     );
 }
 

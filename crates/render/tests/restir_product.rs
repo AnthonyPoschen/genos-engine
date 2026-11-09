@@ -402,3 +402,119 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     assert_wall(window, renderer, &mismatch);
     assert_exact_gate(window, renderer, &lit, &still);
 }
+
+/// GI on and probes on, so the quiet-view hold is armed. Rays stay small.
+fn quiet_restir(mode: LampPickMode) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::Gi1Bounce);
+    settings.lamp_pick.mode = mode;
+    settings.probes.rays = 4;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.restir_di = true;
+    settings.direct.max_lights = 4;
+    settings
+}
+
+/// `gi-1bounce` is mode Hits. A quiet frame used to return before the reservoir.
+#[test]
+fn gi_1bounce_quiet_frames_read_the_reservoir() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));
+    draw(window, renderer, &world, &camera);
+    let first = renderer.lighting_lamp_pick_counts();
+    assert!(
+        first.restir > 0,
+        "the first gi-1bounce frame did not read the reservoir ({first:?})"
+    );
+    draw(window, renderer, &world, &camera);
+    draw(window, renderer, &world, &camera);
+    let quiet = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "gi-1bounce quiet exact {} restir {}",
+        quiet.exact, quiet.restir
+    );
+    assert_eq!(
+        quiet.exact, 0,
+        "a quiet gi-1bounce frame shaded the exact sum ({quiet:?})"
+    );
+    assert!(
+        quiet.restir > 0,
+        "a quiet gi-1bounce frame skipped the reservoir ({quiet:?})"
+    );
+}
+
+/// A forced prepare failure is the labelled exact sum. The next reservoir
+/// frame does not keep that hold.
+#[test]
+fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    // Mode reuse writes the 32-frame exact record. GI and probes arm the hold.
+    renderer.set_lighting_settings(quiet_restir(LampPickMode::Reuse));
+    draw(window, renderer, &world, &camera);
+    draw(window, renderer, &world, &camera);
+    let live = renderer.lighting_lamp_pick_counts();
+    assert!(live.restir > 0, "the reservoir did not shade ({live:?})");
+    assert_eq!(
+        renderer.lighting_restir_prepare_failures(),
+        0,
+        "a live frame counted a prepare failure"
+    );
+    renderer.force_restir_prepare_failure(true);
+    draw(window, renderer, &world, &camera);
+    let failed = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "restir prepare fail exact {} restir {} failures {}",
+        failed.exact,
+        failed.restir,
+        renderer.lighting_restir_prepare_failures()
+    );
+    assert!(
+        renderer.lighting_restir_prepare_failures() >= 1,
+        "the forced failure was not counted"
+    );
+    assert!(
+        failed.exact > 0,
+        "the failed frame did not shade the labelled exact sum ({failed:?})"
+    );
+    assert_eq!(
+        failed.restir, 0,
+        "the failed frame still counted a reservoir sample ({failed:?})"
+    );
+    renderer.force_restir_prepare_failure(false);
+    draw(window, renderer, &world, &camera);
+    let again = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "restir after fail exact {} restir {}",
+        again.exact, again.restir
+    );
+    assert_eq!(
+        again.exact, 0,
+        "the exact hold survived into a restir frame ({again:?})"
+    );
+    assert!(
+        again.restir > 0,
+        "the frame after the failure did not read the reservoir ({again:?})"
+    );
+}

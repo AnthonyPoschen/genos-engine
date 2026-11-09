@@ -1316,6 +1316,16 @@ impl Renderer {
         self.gpu.lighting_lamp_pick_counts()
     }
 
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.gpu.lighting_restir_prepare_failures()
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.gpu.force_restir_prepare_failure(on);
+    }
+
     /// Sun-step mark from the last submitted frame. Waits for that frame.
     /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
     /// the small-sun path.
@@ -3870,7 +3880,7 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} \
                  hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
                  hit_near_tests={} px_lamps={} hit_lamps={} \
                  restir_hist_accept={} restir_hist_reject={} restir_point_adds={}",
@@ -3878,7 +3888,6 @@ impl Gpu {
                 c.kept,
                 c.fills,
                 c.cache,
-                c.spatial,
                 c.kept_live,
                 c.kept_due,
                 c.kept_shade,
