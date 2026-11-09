@@ -26,6 +26,17 @@ const DEPTH_STAGE: u32 = 0x100 | 0x200;
 const DEPTH_ACCESS: u32 = 0x200 | 0x400;
 /// Shader read and write.
 const SHADER_ACCESS: u32 = 0x20 | 0x40;
+/// `VK_PIPELINE_STAGE_TRANSFER_BIT`.
+const TRANSFER_STAGE: u32 = 0x1000;
+/// `VK_ACCESS_TRANSFER_WRITE_BIT`.
+const TRANSFER_WRITE: u32 = 0x1000;
+/// Shipping per-flight ring barrier. Compute is in both stage masks and both
+/// access masks: the validation witness only orders a fill inside one recording
+/// and cannot see the cross-submit dependency.
+const RING_SRC_STAGE: u32 = COMPUTE_STAGE | TRANSFER_STAGE;
+const RING_DST_STAGE: u32 = COMPUTE_STAGE;
+const RING_SRC_ACCESS: u32 = SHADER_ACCESS | TRANSFER_WRITE;
+const RING_DST_ACCESS: u32 = SHADER_ACCESS;
 
 /// One frame's emitter, camera axes, and the matrix the depth test uses.
 #[derive(Clone, Copy, Debug)]
@@ -76,9 +87,9 @@ pub(super) struct Pass {
     /// Four bytes filled every dispatch. Its own transfer barrier orders it.
     /// The ring barrier is the compute memory barrier.
     canary: Buffer,
-    /// Filled after this flight's read. The next flight's read waits on that
-    /// fill through the ring barrier. This layer records a storage-buffer
-    /// shader access as a read, so a shader store is not a write it can check.
+    /// Filled in the same recording, before the read. This layer records a
+    /// storage-buffer shader access as a read, so the fill is the write it
+    /// can check, and it reports that hazard against this recording.
     touch: Buffer,
     /// Destination of the read, so the load is not dropped.
     sink: Buffer,
@@ -202,10 +213,10 @@ impl Gpu {
             if !skip_compute {
                 memory_barrier(
                     self,
-                    COMPUTE_STAGE | 0x1000,
-                    COMPUTE_STAGE,
-                    SHADER_ACCESS | 0x1000,
-                    SHADER_ACCESS,
+                    RING_SRC_STAGE,
+                    RING_DST_STAGE,
+                    RING_SRC_ACCESS,
+                    RING_DST_ACCESS,
                 );
             }
             if !queries.is_null() {
@@ -777,6 +788,41 @@ impl Gpu {
         Ok(())
     }
 
+    /// Pipelines, layouts, descriptor sets, and buffers this pass owns.
+    pub(super) fn particle_validation_handles(&self) -> Vec<u64> {
+        let Some(pass) = self.particle_pass.as_ref() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        push_handle(&mut out, pass.state.buffer);
+        push_handle(&mut out, pass.slots.buffer);
+        push_handle(&mut out, pass.dead.buffer);
+        push_handle(&mut out, pass.canary.buffer);
+        push_handle(&mut out, pass.touch.buffer);
+        push_handle(&mut out, pass.sink.buffer);
+        push_handle(&mut out, pass.dummy.image);
+        push_handle(&mut out, pass.compute_desc_layout);
+        push_handle(&mut out, pass.compute_layout);
+        push_handle(&mut out, pass.compute_pipe);
+        push_handle(&mut out, pass.read_desc_layout);
+        push_handle(&mut out, pass.read_layout);
+        push_handle(&mut out, pass.read_pipe);
+        push_handle(&mut out, pass.read_set);
+        push_handle(&mut out, pass.draw_desc_layout);
+        push_handle(&mut out, pass.draw_layout);
+        push_handle(&mut out, pass.draw_pipe);
+        for flight in &pass.flights {
+            push_handle(&mut out, flight.params.buffer);
+            push_handle(&mut out, flight.depth.buffer);
+            push_handle(&mut out, flight.compact.buffer);
+            push_handle(&mut out, flight.indirect.buffer);
+            push_handle(&mut out, flight.stats.buffer);
+            push_handle(&mut out, flight.compute_set);
+            push_handle(&mut out, flight.draw_set);
+        }
+        out
+    }
+
     /// Bytes of the stage-1 buffers plus the scene depth retained for collision.
     fn accounted_particle_bytes(&self) -> u64 {
         let Some(pass) = self.particle_pass.as_ref() else {
@@ -1004,6 +1050,15 @@ impl super::Renderer {
     /// Returns an error when a fence wait fails.
     pub fn finish_particles(&mut self) -> Result<(), String> {
         self.gpu.finish_particles()
+    }
+
+    /// Pipelines, layouts, sets, and buffers the particle pass owns.
+    ///
+    /// The reflect sync child prints these so a validation line can be tied to
+    /// a particle object. Handles are the values Vulkan returns.
+    #[must_use]
+    pub fn particle_validation_handles(&self) -> Vec<u64> {
+        self.gpu.particle_validation_handles()
     }
 
     /// Compacted positions from the last waited frame, metres.
@@ -1956,6 +2011,15 @@ fn zero_bytes(bytes: u64) -> Result<Vec<u8>, String> {
     Ok(vec![0u8; len])
 }
 
+fn push_handle(out: &mut Vec<u64>, handle: Handle) {
+    if handle.is_null() {
+        return;
+    }
+    if let Ok(value) = u64::try_from(handle.addr()) {
+        out.push(value);
+    }
+}
+
 fn copy_buffer_handle(buffer: &Buffer) -> Buffer {
     Buffer {
         buffer: buffer.buffer,
@@ -1991,4 +2055,28 @@ fn read_range(gpu: &Gpu, buffer: &Buffer, offset: u64, count: usize) -> Result<V
         (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
     }
     Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        COMPUTE_STAGE, RING_DST_ACCESS, RING_DST_STAGE, RING_SRC_ACCESS, RING_SRC_STAGE,
+        SHADER_ACCESS,
+    };
+
+    #[test]
+    fn the_particle_ring_barrier_keeps_compute_in_both_masks() {
+        assert_ne!(RING_SRC_STAGE & COMPUTE_STAGE, 0, "src stage dropped compute");
+        assert_ne!(RING_DST_STAGE & COMPUTE_STAGE, 0, "dst stage dropped compute");
+        assert_eq!(
+            RING_SRC_ACCESS & SHADER_ACCESS,
+            SHADER_ACCESS,
+            "src access dropped shader read or write"
+        );
+        assert_eq!(
+            RING_DST_ACCESS & SHADER_ACCESS,
+            SHADER_ACCESS,
+            "dst access dropped shader read or write"
+        );
+    }
 }

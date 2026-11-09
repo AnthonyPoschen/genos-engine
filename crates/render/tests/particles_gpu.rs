@@ -551,6 +551,17 @@ fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
             !reflected.contains("SHADER_READ_ONLY_OPTIMAL"),
             "depth collision left the scene depth in shader-read layout:\n{reflected}"
         );
+        let handles = particle_handles(&reflected);
+        assert!(
+            !handles.is_empty(),
+            "reflect child printed no particle handles:\n{reflected}"
+        );
+        let faults = reflect_particle_faults(&reflected, &handles);
+        assert!(
+            faults.is_empty(),
+            "reflection frames reported a particle hazard:\n{}\n{reflected}",
+            faults.join("\n")
+        );
         return;
     }
     match std::env::var("GENOS_FX_SYNC_CHILD").expect("child mode").as_str() {
@@ -581,6 +592,9 @@ fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
                 life.device
                     .draw_with_overlay(&drawn, &camera, &[], false, false)
                     .expect("reflect submit");
+            }
+            for handle in life.device.particle_validation_handles() {
+                eprintln!("fx_particle_handle {handle:#x}");
             }
             life.device.finish_particles().expect("finish");
         }
@@ -622,6 +636,154 @@ fn sync_child(mode: &str) -> String {
 
 fn layer_loaded(text: &str) -> bool {
     text.contains("Insert instance layer \"VK_LAYER_KHRONOS_validation\"")
+}
+
+fn particle_handles(text: &str) -> Vec<u64> {
+    text.lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("fx_particle_handle ")?;
+            let hex = rest.trim().trim_start_matches("0x");
+            u64::from_str_radix(hex, 16).ok()
+        })
+        .collect()
+}
+
+fn handle_in_line(line: &str, handle: u64) -> bool {
+    if handle == 0 {
+        return false;
+    }
+    let needle = format!("{handle:#x}");
+    let mut rest = line;
+    while let Some(pos) = rest.find(&needle) {
+        let after = &rest[pos + needle.len()..];
+        let continues = after.chars().next().is_some_and(|ch| ch.is_ascii_hexdigit());
+        if !continues {
+            return true;
+        }
+        rest = &rest[pos + needle.len()..];
+    }
+    false
+}
+
+fn line_mentions_particle(line: &str, handles: &[u64]) -> bool {
+    handles.iter().any(|handle| handle_in_line(line, *handle))
+}
+
+/// Lighting's fill read. Binding 0 against a fill is also the particle touch
+/// witness, so the pipeline and buffer have to be outside the particle set.
+fn lighting_fill_read_after_write(line: &str) -> bool {
+    line.contains("SYNC-HAZARD-READ-AFTER-WRITE")
+        && line.contains("vkCmdDispatch()")
+        && line.contains("Hazard READ_AFTER_WRITE")
+        && line.contains("VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding #0 index 0")
+        && line.contains("usage: SYNC_COMPUTE_SHADER_SHADER_STORAGE_READ")
+        && line.contains("prior_usage: SYNC_COPY_TRANSFER_WRITE")
+        && line.contains("command: vkCmdFillBuffer")
+}
+
+/// Scene and reflection push ranges. A particle layout that hits the same VUID
+/// is a different pipeline and stays a failure.
+fn known_push_constant_range(line: &str) -> bool {
+    if !line.contains("VUID-vkCmdPushConstants-offset-01796") {
+        return false;
+    }
+    let overlap = "overlapping VkPushConstantRange stageFlags (VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT), offset (0), and size (80)";
+    if !line.contains(overlap) {
+        return false;
+    }
+    line.contains("stageFlags (VK_SHADER_STAGE_VERTEX_BIT, offset (0), and size (64)")
+        || line.contains("stageFlags (VK_SHADER_STAGE_FRAGMENT_BIT, offset (64), and size (16)")
+}
+
+fn reflect_error_allowlisted(line: &str, handles: &[u64]) -> bool {
+    if line_mentions_particle(line, handles) {
+        return false;
+    }
+    lighting_fill_read_after_write(line) || known_push_constant_range(line)
+}
+
+fn reflect_particle_faults(text: &str, handles: &[u64]) -> Vec<String> {
+    text.lines()
+        .filter(|line| line.contains("Validation Error") || line.contains("SYNC-HAZARD"))
+        .filter(|line| !reflect_error_allowlisted(line, handles))
+        .filter(|line| line_mentions_particle(line, handles))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+fn lighting_raw(pipeline: u64, buffer: u64) -> String {
+    format!(
+        "Validation Error: [ SYNC-HAZARD-READ-AFTER-WRITE ] vkCmdDispatch():  Hazard READ_AFTER_WRITE for VkBuffer {buffer:#x}[] in VkCommandBuffer 0x7f[], VkPipeline {pipeline:#x}[], and VkDescriptorSet 0x1210000000121[], type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding #0 index 0. Access info (usage: SYNC_COMPUTE_SHADER_SHADER_STORAGE_READ, prior_usage: SYNC_COPY_TRANSFER_WRITE, write_barriers: SYNC_COMPUTE_SHADER_SHADER_STORAGE_WRITE, command: vkCmdFillBuffer, seq_no: 80, reset_no: 2)."
+    )
+}
+
+fn push_range(stage: &str, layout: u64) -> String {
+    format!(
+        "Validation Error: [ VUID-vkCmdPushConstants-offset-01796 ] vkCmdPushConstants():  stageFlags ({stage},  must contain all stages in overlapping VkPushConstantRange stageFlags (VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT), offset (0), and size (80) in VkPipelineLayout {layout:#x}[]."
+    )
+}
+
+fn hex(text: &str) -> u64 {
+    u64::from_str_radix(text, 16).expect("hex handle")
+}
+
+fn assert_no_particle_fault(text: &str, handles: &[u64]) {
+    assert_eq!(reflect_particle_faults(text, handles), Vec::<String>::new());
+}
+
+#[test]
+fn the_reflect_allowlist_is_the_lighting_fill_and_the_push_range() {
+    let particle = [hex("aa00000000aa"), hex("bb00000000bb"), hex("cc00000000cc")];
+    let lighting = lighting_raw(hex("11f000000011f"), hex("1120000000112"));
+    assert!(reflect_error_allowlisted(&lighting, &particle), "lighting fill read");
+    assert_no_particle_fault(&lighting, &particle);
+
+    let on_pipe = lighting_raw(hex("aa00000000aa"), hex("1120000000112"));
+    assert!(!reflect_error_allowlisted(&on_pipe, &particle));
+    assert_eq!(reflect_particle_faults(&on_pipe, &particle).len(), 1);
+
+    let on_buffer = lighting_raw(hex("11f000000011f"), hex("bb00000000bb"));
+    assert_eq!(reflect_particle_faults(&on_buffer, &particle).len(), 1);
+
+    let other_binding = lighting.replace("binding #0 index 0", "binding #1 index 0");
+    assert!(!reflect_error_allowlisted(&other_binding, &particle));
+    assert_no_particle_fault(&other_binding, &particle);
+    let other_binding_on_pipe = other_binding.replace("0x11f000000011f", "0xaa00000000aa");
+    assert_eq!(reflect_particle_faults(&other_binding_on_pipe, &particle).len(), 1);
+
+    let vert = push_range(
+        "VK_SHADER_STAGE_VERTEX_BIT, offset (0), and size (64)",
+        hex("12a000000012a"),
+    );
+    let frag = push_range(
+        "VK_SHADER_STAGE_FRAGMENT_BIT, offset (64), and size (16)",
+        hex("12a000000012a"),
+    );
+    assert!(reflect_error_allowlisted(&vert, &particle));
+    assert!(reflect_error_allowlisted(&frag, &particle));
+    assert_no_particle_fault(&format!("{vert}\n{frag}"), &particle);
+
+    let on_layout = push_range(
+        "VK_SHADER_STAGE_VERTEX_BIT, offset (0), and size (64)",
+        hex("cc00000000cc"),
+    );
+    assert_eq!(reflect_particle_faults(&on_layout, &particle).len(), 1);
+
+    let other_size = push_range(
+        "VK_SHADER_STAGE_VERTEX_BIT, offset (0), and size (32)",
+        hex("12a000000012a"),
+    );
+    assert!(!reflect_error_allowlisted(&other_size, &particle));
+
+    let cache = "Validation Error: [ VUID-VkWriteDescriptorSet-descriptorType-00333 ] Object 0: handle = 0xa100000000a1, type = VK_OBJECT_TYPE_BUFFER";
+    assert_no_particle_fault(cache, &particle);
+    let cache_on_particle = "Validation Error: [ VUID-VkWriteDescriptorSet-descriptorType-00333 ] Object 0: handle = 0xbb00000000bb, type = VK_OBJECT_TYPE_BUFFER";
+    assert_eq!(reflect_particle_faults(cache_on_particle, &particle).len(), 1);
+
+    let prefix = "Validation Error: [ SYNC-HAZARD-WRITE-AFTER-READ ] VkBuffer 0xaa00000000a[]";
+    assert_no_particle_fault(prefix, &particle);
+    let exact = "Validation Error: [ SYNC-HAZARD-WRITE-AFTER-READ ] VkBuffer 0xaa00000000aa[]";
+    assert_eq!(reflect_particle_faults(exact, &particle).len(), 1);
 }
 
 fn sync_log_clean(text: &str) -> bool {
