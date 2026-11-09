@@ -27,6 +27,7 @@ Pipeline | - | - | open | lighting_denoise_adaptive
 Pipeline | - | - | open | lighting_compose_reuse
 Pipeline | - | - | open | lighting_lamp_pick_reuse
 Pipeline | - | - | open | lighting_lamp_pick_unbiased
+Pipeline | - | - | open | lighting_restir_di
 Lamps | direct | Lamps | open | lighting_direct_lights
 Lamps | direct | Lamps | open | lighting_direct_refresh
 Lamps | direct | Lamps | open | lighting_direct_scale
