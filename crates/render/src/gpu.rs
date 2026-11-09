@@ -8920,6 +8920,11 @@ impl Gpu {
             return;
         }
         self.lifecycle_release = true;
+        // Finish the queues before freeing what they still reference. An
+        // in-flight particle dispatch (the other flight) otherwise keeps the
+        // device busy after its buffers are gone, and vkDeviceWaitIdle at the
+        // end of teardown does not return.
+        self.idle_device();
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
         teardown_phase("drop_stages", || self.drop_stages());

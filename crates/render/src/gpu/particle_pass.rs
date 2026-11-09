@@ -37,6 +37,26 @@ const RING_SRC_STAGE: u32 = COMPUTE_STAGE | TRANSFER_STAGE;
 const RING_DST_STAGE: u32 = COMPUTE_STAGE;
 const RING_SRC_ACCESS: u32 = SHADER_ACCESS | TRANSFER_WRITE;
 const RING_DST_ACCESS: u32 = SHADER_ACCESS;
+/// Threads per sim workgroup. Matches `particles.comp` `local_size_x`.
+const SIM_GROUP: u32 = 64;
+const MODE_INIT: u32 = 0;
+const MODE_INIT_HEADER: u32 = 9;
+const MODE_INTEGRATE: u32 = 1;
+const MODE_REDUCE_FLAGS: u32 = 2;
+const MODE_SCAN_BLOCKS: u32 = 3;
+const MODE_APPLY_DEAD: u32 = 4;
+const MODE_EMIT_PREP: u32 = 5;
+const MODE_EMIT_BODY: u32 = 6;
+const MODE_REDUCE_ALIVE: u32 = 7;
+const MODE_SCATTER: u32 = 8;
+
+fn sim_groups(budget: u32) -> u32 {
+    if budget == 0 {
+        0
+    } else {
+        budget.div_ceil(SIM_GROUP)
+    }
+}
 
 /// One frame's emitter, camera axes, and the matrix the depth test uses.
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +129,11 @@ pub(super) struct Pass {
     draw_desc_layout: Handle,
     draw_layout: Handle,
     draw_pipe: Handle,
+    /// Depth-tested twin of `draw_pipe`, used when the keep pass loaded scene depth.
+    draw_pipe_depth: Handle,
+    /// Flags, prefix, and block sums for the ordered compact. One copy: compute
+    /// does not overlap the other flight's compute.
+    scan: Buffer,
     bytes: u64,
 }
 
@@ -226,7 +251,7 @@ impl Gpu {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
             (self.fns.cmd_bind_set)(self.cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
             write_particle_stamp(self, 0, COMPUTE_STAGE);
-            (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+            self.dispatch_particle_sim(layout, job.budget, job.count);
             (self.fns.cmd_bind_pipe)(self.cmd, 1, read_pipe);
             (self.fns.cmd_bind_set)(
                 self.cmd,
@@ -287,6 +312,69 @@ impl Gpu {
         Ok(())
     }
 
+
+    /// One thread per slot for integrate and compact. Emit jumps the rng so
+    /// the spawn writes are parallel and still match the mirror's order.
+    fn dispatch_particle_sim(&mut self, layout: Handle, budget: u32, count: u32) {
+        let wide = sim_groups(budget).max(1);
+        let emit = sim_groups(count.max(1)).max(1);
+        self.sim_pass(layout, MODE_INIT, wide, wide);
+        self.sim_pass_barrier();
+        self.sim_pass(layout, MODE_INIT_HEADER, wide, 1);
+        self.sim_pass_barrier();
+        if self.particle_moving() {
+            self.sim_pass(layout, MODE_INTEGRATE, wide, wide);
+            self.sim_pass_barrier();
+            self.sim_pass(layout, MODE_REDUCE_FLAGS, wide, wide);
+            self.sim_pass_barrier();
+            self.sim_pass(layout, MODE_SCAN_BLOCKS, wide, 1);
+            self.sim_pass_barrier();
+            self.sim_pass(layout, MODE_APPLY_DEAD, wide, wide);
+            self.sim_pass_barrier();
+        }
+        self.sim_pass(layout, MODE_EMIT_PREP, wide, 1);
+        self.sim_pass_barrier();
+        self.sim_pass(layout, MODE_EMIT_BODY, wide, emit);
+        self.sim_pass_barrier();
+        self.sim_pass(layout, MODE_REDUCE_ALIVE, wide, wide);
+        self.sim_pass_barrier();
+        self.sim_pass(layout, MODE_SCAN_BLOCKS, wide, 1);
+        self.sim_pass_barrier();
+        self.sim_pass(layout, MODE_SCATTER, wide, wide);
+    }
+
+    fn particle_moving(&self) -> bool {
+        let Some(job) = self.particle_job else {
+            return false;
+        };
+        self.particle_dt.is_finite() && self.particle_dt > 0.0 && !job.freeze
+    }
+
+    fn sim_pass(&mut self, layout: Handle, mode: u32, wide: u32, dispatch: u32) {
+        let words = [mode, wide, 0u32, 0u32];
+        unsafe {
+            (self.fns.cmd_push)(
+                self.cmd,
+                layout,
+                0x20,
+                0,
+                16,
+                words.as_ptr().cast(),
+            );
+            (self.fns.cmd_dispatch)(self.cmd, dispatch.max(1), 1, 1);
+        }
+    }
+
+    fn sim_pass_barrier(&mut self) {
+        memory_barrier(
+            self,
+            COMPUTE_STAGE,
+            COMPUTE_STAGE,
+            SHADER_ACCESS,
+            SHADER_ACCESS,
+        );
+    }
+
     pub(super) fn record_particle_draw(&mut self) {
         if !self.particle_stamped || self.particle_drawn || self.keep_pass.is_null() {
             return;
@@ -297,7 +385,11 @@ impl Gpu {
             };
             let flight = &pass.flights[self.flight.min(1)];
             (
-                pass.draw_pipe,
+                if self.store_scene_depth && !pass.draw_pipe_depth.is_null() {
+                    pass.draw_pipe_depth
+                } else {
+                    pass.draw_pipe
+                },
                 pass.draw_layout,
                 flight.draw_set,
                 flight.indirect.buffer,
@@ -359,7 +451,6 @@ impl Gpu {
         write_f32(&mut push, 64, &job.right);
         write_f32(&mut push, 80, &job.up);
         unsafe {
-            write_particle_stamp(self, 2, 0x2);
             (self.fns.cmd_begin_rp)(self.cmd, &rp as *const RpBegin as *const u8, 0);
             (self.fns.cmd_bind_pipe)(self.cmd, 0, pipe);
             (self.fns.cmd_bind_set)(self.cmd, 0, layout, 0, 1, &set, 0, std::ptr::null());
@@ -375,9 +466,12 @@ impl Gpu {
                 96,
                 push.as_ptr() as *const c_void,
             );
+            // Bracket the indirect draw. The render-pass external dependency
+            // is outside this span, so draw_ms is the draw itself.
+            write_particle_stamp(self, 2, 0x8);
             (self.fns.cmd_draw_indirect)(self.cmd, indirect, 0, 1, 16);
-            (self.fns.cmd_end_rp)(self.cmd);
             write_particle_stamp(self, 3, 0x400);
+            (self.fns.cmd_end_rp)(self.cmd);
         }
     }
 
@@ -423,6 +517,17 @@ impl Gpu {
             count,
             draw_instances,
         };
+    }
+
+    /// `(workgroup size, group count)` the wide sim dispatch wrote into state.
+    pub(super) fn particle_sim_launch(&self) -> Result<(u32, u32), String> {
+        let Some(pass) = self.particle_pass.as_ref() else {
+            return Err("particle pass missing".into());
+        };
+        let state = copy_buffer_handle(&pass.state);
+        let size = read_u32_at(self, &state, 56)?;
+        let groups = read_u32_at(self, &state, 60)?;
+        Ok((size, groups))
     }
 
     pub(super) fn particle_positions(&self) -> Result<Vec<[f32; 3]>, String> {
@@ -480,6 +585,11 @@ impl Gpu {
                 (self.fns.destroy_desc_pool)(self.device, pass.flights[1].draw_pool, std::ptr::null());
             }
         }
+        if !pass.draw_pipe_depth.is_null() {
+            unsafe {
+                (self.fns.destroy_pipeline)(self.device, pass.draw_pipe_depth, std::ptr::null());
+            }
+        }
         destroy_pipe(
             self,
             std::ptr::null_mut(),
@@ -501,6 +611,7 @@ impl Gpu {
             pass.canary,
             pass.touch,
             pass.sink,
+            pass.scan,
             flight0.stats,
             flight1.stats,
             flight0.params,
@@ -619,11 +730,14 @@ impl Gpu {
     fn create_particle_pass(&mut self, budget: u32, depth_bytes: u64) -> Result<Pass, String> {
         let slots = u64::from(budget);
         let state = self.make_buffer(STATE_BYTES, 0x20 | 0x1, Memory::Readback)?;
+        zero_host_buffer(self, &state)?;
         let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, Memory::Readback)?;
         let dead = self.make_buffer(slots * 4, 0x20, Memory::Readback)?;
         let canary = self.make_buffer(4, 0x2, Memory::Device)?;
         let touch = self.make_buffer(4, 0x20 | 0x2, Memory::Device)?;
         let sink = self.make_buffer(4, 0x20, Memory::Device)?;
+        let scan_groups = u64::from(sim_groups(budget).max(1));
+        let scan = self.make_buffer(slots * 8 + scan_groups * 8, 0x20, Memory::Device)?;
         self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
         let depth_bytes = depth_bytes.max(4);
         let mut built = Vec::with_capacity(2);
@@ -646,15 +760,18 @@ impl Gpu {
         let (params1, depth1, compact1, indirect1, stats1, queries1) = built.remove(0);
         let sampler = self.make_sampler()?;
         let dummy = self.make_image(126, 0x20 | 0x4, 2, 1, 1)?;
-        let compute = self.particle_compute_pipeline(&[
-            params0.buffer,
-            state.buffer,
-            slot_buf.buffer,
-            dead.buffer,
-            compact0.buffer,
-            indirect0.buffer,
-            depth0.buffer,
-        ])?;
+        let compute = self.particle_compute_pipeline(
+            &[
+                params0.buffer,
+                state.buffer,
+                slot_buf.buffer,
+                dead.buffer,
+                compact0.buffer,
+                indirect0.buffer,
+                depth0.buffer,
+            ],
+            scan.buffer,
+        )?;
         let (pool1, set1) = alloc_compute_set(self, compute.0)?;
         write_storage_bindings(
             self,
@@ -669,6 +786,7 @@ impl Gpu {
                 depth1.buffer,
             ],
         )?;
+        write_storage_bindings_from(self, set1, 8, &[scan.buffer])?;
         write_depth_image(self, set1, dummy.view, sampler);
         write_depth_image(self, compute.2, dummy.view, sampler);
         let read_pipe = self.particle_touch_read_pipeline(touch.buffer, sink.buffer)?;
@@ -734,6 +852,8 @@ impl Gpu {
             draw_desc_layout: draw.0,
             draw_layout: draw.3,
             draw_pipe: draw.4,
+            draw_pipe_depth: draw.5,
+            scan,
             bytes,
         })
     }
@@ -800,6 +920,8 @@ impl Gpu {
         push_handle(&mut out, pass.canary.buffer);
         push_handle(&mut out, pass.touch.buffer);
         push_handle(&mut out, pass.sink.buffer);
+        push_handle(&mut out, pass.scan.buffer);
+        push_handle(&mut out, pass.draw_pipe_depth);
         push_handle(&mut out, pass.dummy.image);
         push_handle(&mut out, pass.compute_desc_layout);
         push_handle(&mut out, pass.compute_layout);
@@ -939,6 +1061,7 @@ impl Gpu {
     fn particle_compute_pipeline(
         &mut self,
         buffers: &[Handle; 7],
+        scan: Handle,
     ) -> Result<(Handle, Handle, Handle, Handle, Handle), String> {
         let mut bindings = storage_bindings(7, 0x20);
         bindings.push(Binding {
@@ -948,10 +1071,12 @@ impl Gpu {
             stages: 0x20,
             samplers: std::ptr::null(),
         });
+        bindings.push(storage_binding(8, 0x20));
         let desc_layout = create_desc_layout(self, &bindings)?;
         let (pool, set) = alloc_compute_set(self, desc_layout)?;
         write_storage_bindings(self, set, buffers)?;
-        let pipe_layout = create_pipe_layout(self, desc_layout, 0)?;
+        write_storage_bindings_from(self, set, 8, &[scan])?;
+        let pipe_layout = create_pipe_layout(self, desc_layout, 16, 0x20)?;
         let module = self.shader(super::PARTICLES_COMP_SPV)?;
         let pipe = create_compute_pipe(self, module, pipe_layout)?;
         unsafe {
@@ -969,7 +1094,7 @@ impl Gpu {
         let desc_layout = create_desc_layout(self, &bindings)?;
         let (pool, set) = alloc_set(self, desc_layout, 2)?;
         write_storage_bindings(self, set, &[touch, sink])?;
-        let pipe_layout = create_pipe_layout(self, desc_layout, 0)?;
+        let pipe_layout = create_pipe_layout(self, desc_layout, 0, 0)?;
         let module = self.shader(super::PARTICLES_TOUCH_READ_SPV)?;
         let pipe = create_compute_pipe(self, module, pipe_layout)?;
         unsafe {
@@ -981,20 +1106,21 @@ impl Gpu {
     fn particle_draw_pipeline(
         &mut self,
         compact: Handle,
-    ) -> Result<(Handle, Handle, Handle, Handle, Handle), String> {
+    ) -> Result<(Handle, Handle, Handle, Handle, Handle, Handle), String> {
         let bindings = [storage_binding(0, 0x1)];
         let desc_layout = create_desc_layout(self, &bindings)?;
         let (pool, set) = alloc_set(self, desc_layout, 1)?;
         write_storage_bindings(self, set, &[compact])?;
-        let pipe_layout = create_pipe_layout(self, desc_layout, 96)?;
+        let pipe_layout = create_pipe_layout(self, desc_layout, 96, 1)?;
         let vert = self.shader(super::PARTICLES_VERT_SPV)?;
         let frag = self.shader(super::PARTICLES_FRAG_SPV)?;
-        let pipe = create_draw_pipe(self, vert, frag, pipe_layout)?;
+        let pipe = create_draw_pipe(self, vert, frag, pipe_layout, false)?;
+        let pipe_depth = create_draw_pipe(self, vert, frag, pipe_layout, true)?;
         unsafe {
             (self.fns.destroy_shader)(self.device, vert, std::ptr::null());
             (self.fns.destroy_shader)(self.device, frag, std::ptr::null());
         }
-        Ok((desc_layout, pool, set, pipe_layout, pipe))
+        Ok((desc_layout, pool, set, pipe_layout, pipe, pipe_depth))
     }
 }
 
@@ -1059,6 +1185,15 @@ impl super::Renderer {
     #[must_use]
     pub fn particle_validation_handles(&self) -> Vec<u64> {
         self.gpu.particle_validation_handles()
+    }
+
+    /// Workgroup size and group count of the sim dispatch the shader ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state buffer cannot be mapped.
+    pub fn particle_sim_launch(&self) -> Result<(u32, u32), String> {
+        self.gpu.particle_sim_launch()
     }
 
     /// Compacted positions from the last waited frame, metres.
@@ -1550,7 +1685,12 @@ fn write_depth_image(gpu: &Gpu, set: Handle, view: Handle, sampler: Handle) {
     }
 }
 
-fn create_pipe_layout(gpu: &Gpu, set_layout: Handle, push_size: u32) -> Result<Handle, String> {
+fn create_pipe_layout(
+    gpu: &Gpu,
+    set_layout: Handle,
+    push_size: u32,
+    push_stage: u32,
+) -> Result<Handle, String> {
     #[repr(C)]
     struct Range {
         stage: u32,
@@ -1568,7 +1708,7 @@ fn create_pipe_layout(gpu: &Gpu, set_layout: Handle, push_size: u32) -> Result<H
         push: *const Range,
     }
     let range = Range {
-        stage: 1,
+        stage: push_stage,
         offset: 0,
         size: push_size,
     };
@@ -1660,6 +1800,7 @@ fn create_draw_pipe(
     vert: Handle,
     frag: Handle,
     layout: Handle,
+    depth_test: bool,
 ) -> Result<Handle, String> {
     if gpu.keep_pass.is_null() {
         return Err("particle draw has no keep pass".into());
@@ -1833,7 +1974,7 @@ fn create_draw_pipe(
         s_type: 25,
         next: std::ptr::null(),
         flags: 0,
-        test: 0,
+        test: u32::from(depth_test),
         write: 0,
         compare: 3,
         bounds: 0,
@@ -2026,6 +2167,27 @@ fn copy_buffer_handle(buffer: &Buffer) -> Buffer {
         memory: buffer.memory,
         size: buffer.size,
     }
+}
+
+fn zero_host_buffer(gpu: &Gpu, buffer: &Buffer) -> Result<(), String> {
+    let count = usize::try_from(buffer.size).unwrap_or(0);
+    unsafe {
+        let mut mapped = std::ptr::null_mut();
+        check(
+            (gpu.fns.map_mem)(
+                gpu.device,
+                buffer.memory,
+                0,
+                buffer.size,
+                0,
+                &mut mapped,
+            ),
+            "map particle state",
+        )?;
+        std::ptr::write_bytes(mapped.cast::<u8>(), 0u8, count);
+        (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
+    }
+    Ok(())
 }
 
 fn read_u32_at(gpu: &Gpu, buffer: &Buffer, offset: u64) -> Result<u32, String> {

@@ -290,6 +290,35 @@ fn gpu_matches_the_cpu_mirror_and_the_cap_holds() {
 }
 
 #[test]
+fn the_sim_dispatch_is_wider_than_one_invocation() {
+    let (width, height, mut life) = open();
+    let aspect = width as f32 / height.max(1) as f32;
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let mut settings = emitter(1024, 32);
+    settings.rate = 32.0 / DT;
+    let mut cpu = CpuParticles::new();
+    for _ in 0..3 {
+        draw(&mut life, &world(settings.clone()), &camera);
+        step_cpu(&mut cpu, &settings, aspect, &camera, 0, 0, Vec::new());
+        let gpu = life.device.particle_positions().expect("positions");
+        let peak = agree(&gpu, cpu.positions());
+        assert!(
+            peak <= POS_ABS,
+            "gpu drifted {peak} m from the f64 mirror"
+        );
+        assert_eq!(life.device.particle_stats().alive, cpu.alive());
+    }
+    assert!(cpu.alive() > 1, "the burst never spawned");
+    let (size, groups) = life.device.particle_sim_launch().expect("launch");
+    assert!(size > 1, "sim workgroup was a single thread");
+    assert!(groups > 1, "sim dispatch was a single group");
+    assert!(
+        u64::from(size) * u64::from(groups) >= u64::from(settings.max_particles),
+        "sim launch {size}x{groups} does not cover the budget"
+    );
+}
+
+#[test]
 fn a_different_dt_and_a_skipped_dead_ring_match_on_device() {
     let (width, height, mut life) = open();
     let aspect = width as f32 / height.max(1) as f32;

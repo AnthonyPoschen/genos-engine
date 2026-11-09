@@ -34,12 +34,19 @@ pub const LOW_VRAM_BYTES: u64 = 16_000_000;
 #[must_use]
 pub fn buffer_bytes(max_particles: u32) -> u64 {
     let slots = u64::from(max_particles);
+    let groups = u64::from(max_particles.div_ceil(64).max(1));
+    // Death flags, exclusive prefix, block sums, block exclusive prefix.
+    let scan = slots
+        .saturating_mul(2)
+        .saturating_add(groups.saturating_mul(2))
+        .saturating_mul(4);
     PARAMS_BYTES
         .saturating_add(STATE_BYTES)
         .saturating_add(INDIRECT_BYTES)
         .saturating_add(slots.saturating_mul(SLOT_STRIDE))
         .saturating_add(slots.saturating_mul(4))
         .saturating_add(slots.saturating_mul(COMPACT_STRIDE))
+        .saturating_add(scan)
 }
 
 /// Decimal megabytes of [`buffer_bytes`].
