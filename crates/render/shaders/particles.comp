@@ -107,21 +107,21 @@ float depth_fade(vec3 position, bool image) {
     if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) {
         return 1.0;
     }
+    // `view_proj` is the Vulkan projection: ndc.z is already the 0..1 depth
+    // the attachment stores. Remapping it again puts every in-frustum particle
+    // behind the surface.
     float sample_z;
-    float particle_z;
     if (image) {
         ivec2 size = textureSize(depth_image, 0);
         ivec2 coord = ivec2(floor(uv * vec2(size)));
         coord = clamp(coord, ivec2(0), size - ivec2(1));
         sample_z = texelFetch(depth_image, coord, 0).r;
-        particle_z = ndc.z * HALF + HALF;
     } else {
         uint x = min(uint(floor(uv.x * float(depth_w))), depth_w - 1u);
         uint y = min(uint(floor(uv.y * float(depth_h))), depth_h - 1u);
         sample_z = depth_buf.samples[y * depth_w + x];
-        particle_z = ndc.z;
     }
-    float delta = sample_z - particle_z;
+    float delta = sample_z - ndc.z;
     if (delta < 0.0) {
         return -1.0;
     }

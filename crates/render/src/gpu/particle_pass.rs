@@ -61,6 +61,8 @@ struct Flight {
     compute_set: Handle,
     compact: Buffer,
     indirect: Buffer,
+    /// Alive and spawned, copied at the end of this flight's compute.
+    stats: Buffer,
     draw_pool: Handle,
     draw_set: Handle,
 }
@@ -71,10 +73,15 @@ pub(super) struct Pass {
     state: Buffer,
     slots: Buffer,
     dead: Buffer,
-    /// Four bytes filled every dispatch. The flight barrier orders it. Sync
-    /// validation does not report this shader's storage writes, so the fill is
-    /// the hazard the missing-barrier test can see.
+    /// Four bytes filled every dispatch. Its own transfer barrier orders it.
+    /// The ring barrier is the compute memory barrier.
     canary: Buffer,
+    /// Filled after this flight's read. The next flight's read waits on that
+    /// fill through the ring barrier. This layer records a storage-buffer
+    /// shader access as a read, so a shader store is not a write it can check.
+    touch: Buffer,
+    /// Destination of the read, so the load is not dropped.
+    sink: Buffer,
     flights: [Flight; 2],
     /// 1x1 depth image kept in shader-read layout when this frame does not sample.
     dummy: Image,
@@ -83,6 +90,11 @@ pub(super) struct Pass {
     compute_desc_layout: Handle,
     compute_layout: Handle,
     compute_pipe: Handle,
+    read_desc_layout: Handle,
+    read_layout: Handle,
+    read_pipe: Handle,
+    read_pool: Handle,
+    read_set: Handle,
     draw_desc_layout: Handle,
     draw_layout: Handle,
     draw_pipe: Handle,
@@ -163,21 +175,39 @@ impl Gpu {
         self.write_depth_binding(set, sampled.view)?;
         self.particle_query_ready[slot] = false;
         self.particle_submitted = slot;
-        let skip = self.particle_fault == crate::particle_sim::ParticleFault::SkipFlightBarrier;
-        let canary = {
+        let skip_compute =
+            self.particle_fault == crate::particle_sim::ParticleFault::SkipFlightBarrier;
+        let (canary, state, stats, touch, read_pipe, read_layout, read_set) = {
             let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
-            pass.canary.buffer
+            (
+                pass.canary.buffer,
+                pass.state.buffer,
+                pass.flights[slot].stats.buffer,
+                pass.touch.buffer,
+                pass.read_pipe,
+                pass.read_layout,
+                pass.read_set,
+            )
         };
-        // Same queue, previous submission. Compute covers the ring. The canary
-        // fill is a buffer barrier: the lighting header barrier also waits for
-        // compute, and it would hide a missing ring barrier. The other flight's
-        // draw is not in this scope.
-        if !skip {
-            memory_barrier(self, COMPUTE_STAGE, COMPUTE_STAGE, SHADER_ACCESS, SHADER_ACCESS);
-            self.buffer_barrier(canary, 0x1000, 0x1000, 0x1000, 0x1000);
-        }
+        // The canary fill keeps this barrier. It is not the ring dependency.
+        self.buffer_barrier(canary, 0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
             (self.fns.cmd_fill_buffer)(self.cmd, canary, 0, 4, 1);
+            // This fill is the write synchronization validation can see. The
+            // layer records a storage-buffer shader access as a read, and it
+            // treats a later queue submit as already ordered with this one, so
+            // a cross-submit race never shows up. The read below is in this
+            // recording, and only the ring barrier orders the fill to it.
+            (self.fns.cmd_fill_buffer)(self.cmd, touch, 0, 4, 1);
+            if !skip_compute {
+                memory_barrier(
+                    self,
+                    COMPUTE_STAGE | 0x1000,
+                    COMPUTE_STAGE,
+                    SHADER_ACCESS | 0x1000,
+                    SHADER_ACCESS,
+                );
+            }
             if !queries.is_null() {
                 (self.fns.cmd_reset_query)(self.cmd, queries, 0, 4);
             }
@@ -185,6 +215,18 @@ impl Gpu {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
             (self.fns.cmd_bind_set)(self.cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
             write_particle_stamp(self, 0, COMPUTE_STAGE);
+            (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, read_pipe);
+            (self.fns.cmd_bind_set)(
+                self.cmd,
+                1,
+                read_layout,
+                0,
+                1,
+                &read_set,
+                0,
+                std::ptr::null(),
+            );
             (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
             write_particle_stamp(self, 1, COMPUTE_STAGE);
         }
@@ -202,7 +244,34 @@ impl Gpu {
                 DEPTH_ACCESS,
             );
         }
-        memory_barrier(self, COMPUTE_STAGE, 0x8 | 0x2 | 0x4000, 0x40, 0x20 | 0x1 | 0x2000);
+        // Vertex and indirect for this flight's draw. Transfer for the stats
+        // copy. The fence, not a host stage here, publishes that copy: a host
+        // destination would chain into the next flight's host-to-compute
+        // barrier and hide a missing ring barrier.
+        memory_barrier(self, COMPUTE_STAGE, 0x8 | 0x2 | 0x1000, 0x40, 0x20 | 0x1 | 0x800);
+        // The previous visit of this flight copied the same bytes. The fence
+        // orders it; this barrier is the one synchronization validation sees.
+        self.buffer_barrier(stats, 0x1000, 0x1000, 0x1000, 0x1000);
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region {
+            src: 16,
+            dst: 0,
+            size: 8,
+        };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                self.cmd,
+                state,
+                stats,
+                1,
+                &region as *const Region as *const u8,
+            );
+        }
         self.particle_stamped = true;
         Ok(())
     }
@@ -318,15 +387,17 @@ impl Gpu {
         };
         let slot = slot.min(1);
         let queries = pass.flights[slot].queries;
-        let state = copy_buffer_handle(&pass.state);
+        let stats = copy_buffer_handle(&pass.flights[slot].stats);
         let indirect = copy_buffer_handle(&pass.flights[slot].indirect);
         let bytes = self.accounted_particle_bytes();
         let budget = pass.budget;
         let count = self.particle_job.map_or(0, |job| job.count);
         let sim_ms = self.particle_span_ms(queries, 0, 1);
         let draw_ms = self.particle_span_ms(queries, 2, 3);
-        let alive = read_u32_at(self, &state, 16).unwrap_or(0);
-        let spawned = read_u32_at(self, &state, 20).unwrap_or(0);
+        // The shared ring may still be written by the other flight. These two
+        // words were copied at the end of this flight's compute.
+        let alive = read_u32_at(self, &stats, 0).unwrap_or(0);
+        let spawned = read_u32_at(self, &stats, 4).unwrap_or(0);
         let draw_instances = read_u32_at(self, &indirect, 4).unwrap_or(0);
         self.particle_stats = ParticleStats {
             sim_ms,
@@ -398,6 +469,14 @@ impl Gpu {
                 (self.fns.destroy_desc_pool)(self.device, pass.flights[1].draw_pool, std::ptr::null());
             }
         }
+        destroy_pipe(
+            self,
+            std::ptr::null_mut(),
+            pass.read_pipe,
+            pass.read_layout,
+            pass.read_pool,
+            pass.read_desc_layout,
+        );
         let [flight0, flight1] = pass.flights;
         if !pass.sampler.is_null() {
             unsafe {
@@ -409,6 +488,10 @@ impl Gpu {
             pass.slots,
             pass.dead,
             pass.canary,
+            pass.touch,
+            pass.sink,
+            flight0.stats,
+            flight1.stats,
             flight0.params,
             flight0.depth,
             flight0.compact,
@@ -524,10 +607,12 @@ impl Gpu {
 
     fn create_particle_pass(&mut self, budget: u32, depth_bytes: u64) -> Result<Pass, String> {
         let slots = u64::from(budget);
-        let state = self.make_buffer(STATE_BYTES, 0x20, Memory::Readback)?;
+        let state = self.make_buffer(STATE_BYTES, 0x20 | 0x1, Memory::Readback)?;
         let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, Memory::Readback)?;
         let dead = self.make_buffer(slots * 4, 0x20, Memory::Readback)?;
         let canary = self.make_buffer(4, 0x2, Memory::Device)?;
+        let touch = self.make_buffer(4, 0x20 | 0x2, Memory::Device)?;
+        let sink = self.make_buffer(4, 0x20, Memory::Device)?;
         self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
         let depth_bytes = depth_bytes.max(4);
         let mut built = Vec::with_capacity(2);
@@ -536,16 +621,18 @@ impl Gpu {
             let depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
             let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20, Memory::Readback)?;
             let indirect = self.make_buffer(INDIRECT_BYTES, 0x20 | 0x100, Memory::Readback)?;
+            let stats = self.make_buffer(8, 0x2, Memory::Readback)?;
             self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
+            self.write_buffer(&stats, &zero_bytes(8)?)?;
             let queries = if self.timestamp_period > 0.0 {
                 self.make_query_pool_n(4).unwrap_or(std::ptr::null_mut())
             } else {
                 std::ptr::null_mut()
             };
-            built.push((params, depth, compact, indirect, queries));
+            built.push((params, depth, compact, indirect, stats, queries));
         }
-        let (params0, depth0, compact0, indirect0, queries0) = built.remove(0);
-        let (params1, depth1, compact1, indirect1, queries1) = built.remove(0);
+        let (params0, depth0, compact0, indirect0, stats0, queries0) = built.remove(0);
+        let (params1, depth1, compact1, indirect1, stats1, queries1) = built.remove(0);
         let sampler = self.make_sampler()?;
         let dummy = self.make_image(126, 0x20 | 0x4, 2, 1, 1)?;
         let compute = self.particle_compute_pipeline(&[
@@ -573,6 +660,7 @@ impl Gpu {
         )?;
         write_depth_image(self, set1, dummy.view, sampler);
         write_depth_image(self, compute.2, dummy.view, sampler);
+        let read_pipe = self.particle_touch_read_pipeline(touch.buffer, sink.buffer)?;
         let draw = self.particle_draw_pipeline(compact0.buffer)?;
         let (draw_pool1, draw_set1) = alloc_set(self, draw.0, 1)?;
         write_storage_bindings(self, draw_set1, &[compact1.buffer])?;
@@ -582,13 +670,19 @@ impl Gpu {
             .saturating_add(INDIRECT_BYTES)
             .saturating_add(depth0.size)
             .saturating_add(depth1.size)
-            .saturating_add(4);
+            .saturating_add(4)
+            .saturating_add(touch.size)
+            .saturating_add(sink.size)
+            .saturating_add(stats0.size)
+            .saturating_add(stats1.size);
         Ok(Pass {
             budget,
             state,
             slots: slot_buf,
             dead,
             canary,
+            touch,
+            sink,
             flights: [
                 Flight {
                     params: params0,
@@ -598,6 +692,7 @@ impl Gpu {
                     compute_set: compute.2,
                     compact: compact0,
                     indirect: indirect0,
+                    stats: stats0,
                     draw_pool: draw.1,
                     draw_set: draw.2,
                 },
@@ -609,6 +704,7 @@ impl Gpu {
                     compute_set: set1,
                     compact: compact1,
                     indirect: indirect1,
+                    stats: stats1,
                     draw_pool: draw_pool1,
                     draw_set: draw_set1,
                 },
@@ -619,6 +715,11 @@ impl Gpu {
             compute_desc_layout: compute.0,
             compute_layout: compute.3,
             compute_pipe: compute.4,
+            read_desc_layout: read_pipe.0,
+            read_layout: read_pipe.3,
+            read_pipe: read_pipe.4,
+            read_pool: read_pipe.1,
+            read_set: read_pipe.2,
             draw_desc_layout: draw.0,
             draw_layout: draw.3,
             draw_pipe: draw.4,
@@ -663,9 +764,15 @@ impl Gpu {
                 self.flight_live[slot] = false;
             }
         }
-        if self.particle_stamped {
-            self.particle_query_ready[self.particle_submitted.min(1)] = true;
-            self.collect_particle_stats_slot(self.particle_submitted);
+        for slot in 0..2 {
+            if self.particle_stamps_pending[slot] {
+                self.particle_query_ready[slot] = true;
+                self.particle_stamps_pending[slot] = false;
+            }
+        }
+        let submitted = self.particle_submitted.min(1);
+        if self.particle_query_ready[submitted] {
+            self.collect_particle_stats_slot(submitted);
         }
         Ok(())
     }
@@ -800,6 +907,24 @@ impl Gpu {
         write_storage_bindings(self, set, buffers)?;
         let pipe_layout = create_pipe_layout(self, desc_layout, 0)?;
         let module = self.shader(super::PARTICLES_COMP_SPV)?;
+        let pipe = create_compute_pipe(self, module, pipe_layout)?;
+        unsafe {
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+        }
+        Ok((desc_layout, pool, set, pipe_layout, pipe))
+    }
+
+    fn particle_touch_read_pipeline(
+        &mut self,
+        touch: Handle,
+        sink: Handle,
+    ) -> Result<(Handle, Handle, Handle, Handle, Handle), String> {
+        let bindings = [storage_binding(0, 0x20), storage_binding(1, 0x20)];
+        let desc_layout = create_desc_layout(self, &bindings)?;
+        let (pool, set) = alloc_set(self, desc_layout, 2)?;
+        write_storage_bindings(self, set, &[touch, sink])?;
+        let pipe_layout = create_pipe_layout(self, desc_layout, 0)?;
+        let module = self.shader(super::PARTICLES_TOUCH_READ_SPV)?;
         let pipe = create_compute_pipe(self, module, pipe_layout)?;
         unsafe {
             (self.fns.destroy_shader)(self.device, module, std::ptr::null());
@@ -956,6 +1081,10 @@ fn flight_buffer_bytes(pass: &Pass) -> u64 {
         .saturating_add(INDIRECT_BYTES)
         .saturating_add(pass.flights[0].depth.size)
         .saturating_add(pass.flights[1].depth.size)
+        .saturating_add(pass.flights[0].stats.size)
+        .saturating_add(pass.flights[1].stats.size)
+        .saturating_add(pass.touch.size)
+        .saturating_add(pass.sink.size)
         .saturating_add(4)
 }
 
@@ -1195,6 +1324,15 @@ fn alloc_set(gpu: &Gpu, layout: Handle, storage_count: u32) -> Result<(Handle, H
 }
 
 fn write_storage_bindings(gpu: &Gpu, set: Handle, buffers: &[Handle]) -> Result<(), String> {
+    write_storage_bindings_from(gpu, set, 0, buffers)
+}
+
+fn write_storage_bindings_from(
+    gpu: &Gpu,
+    set: Handle,
+    first: u32,
+    buffers: &[Handle],
+) -> Result<(), String> {
     #[repr(C)]
     struct BufInfo {
         buffer: Handle,
@@ -1229,7 +1367,7 @@ fn write_storage_bindings(gpu: &Gpu, set: Handle, buffers: &[Handle]) -> Result<
             s_type: 35,
             next: std::ptr::null(),
             set,
-            binding: u32::try_from(binding).unwrap_or(0),
+            binding: first + u32::try_from(binding).unwrap_or(0),
             element: 0,
             count: 1,
             kind: 7,
@@ -1265,7 +1403,7 @@ fn alloc_compute_set(gpu: &Gpu, layout: Handle) -> Result<(Handle, Handle), Stri
         size_count: u32,
         sizes: *const Size,
     }
-    let sizes = [Size { kind: 7, count: 7 }, Size { kind: 1, count: 1 }];
+    let sizes = [Size { kind: 7, count: 8 }, Size { kind: 1, count: 1 }];
     let pool_info = PoolInfo {
         s_type: 33,
         next: std::ptr::null(),

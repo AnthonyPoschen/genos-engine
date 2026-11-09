@@ -1361,6 +1361,11 @@ kind = "test"
 detail = "particles_gpu overlap child: clean, skip, or reflect"
 
 [[var]]
+name = "GENOS_FX_SYNC_SKIP"
+kind = "test"
+detail = "non-empty reason to skip the particle sync test when the validation layer cannot run"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"

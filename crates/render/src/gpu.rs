@@ -1638,6 +1638,8 @@ struct Gpu {
     particle_submitted: usize,
     /// This slot's timestamp queries belong to a submission whose fence has been waited.
     particle_query_ready: [bool; 2],
+    /// This slot's compute wrote timestamps that no fence wait has collected yet.
+    particle_stamps_pending: [bool; 2],
     /// View-projection used by the flight that stored scene depth.
     particle_view_proj: [[f32; 16]; 2],
     /// That flight stored the scene depth image for a later sample.
@@ -2544,6 +2546,7 @@ impl Gpu {
                 particle_drawn: false,
                 particle_submitted: 0,
                 particle_query_ready: [false, false],
+                particle_stamps_pending: [false, false],
                 particle_view_proj: [[0.0; 16]; 2],
                 particle_depth_retained: [false, false],
                 store_scene_depth: false,
@@ -3578,7 +3581,10 @@ impl Gpu {
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, count);
         }
-        self.barrier_on(cmd, 0x4000, 0x1000, 0x4000, 0x800);
+        // Host write makes the staging bytes visible. Transfer write orders the
+        // previous copy of this destination: another flight may still be
+        // uploading it, and two copies in one recording share no other barrier.
+        self.barrier_on(cmd, 0x4000 | 0x1000, 0x1000, 0x4000 | 0x1000, 0x800 | 0x1000);
         #[repr(C)]
         struct Region {
             src: u64,
@@ -3632,6 +3638,10 @@ impl Gpu {
             }
             self.collect_hdr_time(slot);
             self.collect_froxel_time();
+            if self.particle_stamps_pending[slot] {
+                self.particle_query_ready[slot] = true;
+                self.particle_stamps_pending[slot] = false;
+            }
             self.collect_particle_stats();
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
@@ -3665,7 +3675,9 @@ impl Gpu {
             self.update_resident_scene()?;
             self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
-            self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
+            // Wait stage for the acquire semaphore is color output. A top-of-pipe
+            // source races that acquire under synchronization validation.
+            self.image_barrier(swap, 0, 7, 0x400, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
@@ -3772,9 +3784,8 @@ impl Gpu {
                 "submit",
             )?;
             self.flight_live[slot] = true;
-            if self.particle_stamped {
-                self.particle_query_ready[slot] = true;
-            }
+            self.particle_stamps_pending[slot] = self.particle_stamped;
+            self.particle_query_ready[slot] = false;
             self.present_index = index;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
@@ -4290,8 +4301,9 @@ impl Gpu {
         self.collect_froxel_time();
         // This fence is the submission just recorded. Its stamps are done.
         // The slot still in flight is not read.
-        if submitted == self.particle_submitted && self.particle_stamped {
+        if self.particle_stamps_pending[submitted] {
             self.particle_query_ready[submitted] = true;
+            self.particle_stamps_pending[submitted] = false;
             self.collect_particle_stats_slot(submitted);
         }
         Ok(())
@@ -5520,7 +5532,9 @@ impl Gpu {
         }
         let mut ranges = std::mem::take(&mut self.mesh_field_dirty);
         ranges.sort_unstable();
-        self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+        // Transfer is in the source: the other flight may still be copying this
+        // buffer. Queue order is not a memory dependency.
+        self.memory_barrier(0x10000 | 0x1000, 0x1000, 0x20 | 0x8 | 0x1000, 0x1000);
         let mut sent = 0usize;
         for &(start, stop) in &ranges {
             let stop = stop.min(self.mesh_field_shadow.len());
@@ -5605,8 +5619,9 @@ impl Gpu {
             at = end;
         }
         if !runs.is_empty() {
-            // The last frame's reads are done before the writes (in queue order).
-            self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+            // The other flight may still be copying this buffer. Transfer is in
+            // the source because queue order is not a memory dependency.
+            self.memory_barrier(0x10000 | 0x1000, 0x1000, 0x20 | 0x8 | 0x1000, 0x1000);
             for &(start, stop) in &runs {
                 let cmd = self.cmd;
                 let dst = self.frame_scene[0].buffer;
@@ -5959,7 +5974,9 @@ impl Gpu {
         } else if store_depth {
             (1, 0, 0)
         } else if keep {
-            (2, 1, 0)
+            // The scene pass ends in depth-attachment layout. Matching it here
+            // keeps the keep pass from transitioning the image out of nowhere.
+            (2, 1, 3)
         } else {
             (1, 1, 0)
         };
@@ -5969,12 +5986,18 @@ impl Gpu {
         // Both variants share one external dependency so the keep and clear
         // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
         // VUID-vkCmdDraw-renderPass-02684): framebuffers and pipelines are made
-        // against one variant and used with the other. The filter leaves the
-        // color image visible to a transfer read; the clear pass waits on the
-        // previous frame's color output.
-        let in_stage = 0x1000 | 0x400;
-        let in_access = 0x800 | 0x100;
-        let in_dst = 0x180;
+        // against one variant and used with the other. The reflection composite
+        // pass uses this framebuffer, so its masks are these same values.
+        // Late-fragment depth writes are in the source scope: the keep pass's
+        // depth load otherwise races the scene pass when depth is discarded.
+        let in_stage = 0x1000 | 0x400 | 0x200 | 0x100;
+        let in_access = 0x800 | 0x100 | 0x400 | 0x200;
+        let in_dst_stage = 0x400 | 0x100;
+        let in_dst = 0x80 | 0x100 | 0x200 | 0x400;
+        let out_src_stage = 0x400 | 0x200;
+        let out_src_access = 0x100 | 0x400;
+        let out_dst_stage = 0x1000 | 0x100 | 0x400;
+        let out_dst_access = 0x800 | 0x400 | 0x100;
         let atts = [
             Att {
                 flags: 0,
@@ -6024,7 +6047,7 @@ impl Gpu {
                 src: u32::MAX,
                 dst: 0,
                 src_stage: in_stage,
-                dst_stage: 0x400,
+                dst_stage: in_dst_stage,
                 src_access: in_access,
                 dst_access: in_dst,
                 flags: 0,
@@ -6032,10 +6055,10 @@ impl Gpu {
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: 0x400,
-                dst_stage: 0x1000,
-                src_access: 0x100,
-                dst_access: 0x800,
+                src_stage: out_src_stage,
+                dst_stage: out_dst_stage,
+                src_access: out_src_access,
+                dst_access: out_dst_access,
                 flags: 0,
             },
         ];

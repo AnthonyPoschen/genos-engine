@@ -238,11 +238,19 @@ fn write_shader_glue(
 
 fn append_particles(glue_text: &mut String, out: &std::path::Path) {
     let comp = compile("shaders/particles.comp", &out.join("particles.comp.spv"));
+    let touch_read = compile(
+        "shaders/particles_touch_read.comp",
+        &out.join("particles_touch_read.comp.spv"),
+    );
     let vert = compile("shaders/particles.vert", &out.join("particles.vert.spv"));
     let frag = compile("shaders/particles.frag", &out.join("particles.frag.spv"));
     glue_text.push_str(&format!(
         "pub static PARTICLES_COMP_SPV: &[u8] = include_bytes!(\"{}\");\n",
         comp.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_TOUCH_READ_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        touch_read.display()
     ));
     glue_text.push_str(&format!(
         "pub static PARTICLES_VERT_SPV: &[u8] = include_bytes!(\"{}\");\n",
@@ -317,6 +325,7 @@ fn rerun_shader_pieces() {
         "transmit.comp",
         "fxaa.comp",
         "particles.comp",
+        "particles_touch_read.comp",
         "particles.vert",
         "particles.frag",
     ] {

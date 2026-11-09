@@ -94,10 +94,11 @@ pub enum ParticleFault {
     SkipDeadPush,
     /// Leave the indirect instance count at zero.
     SkipIndirect,
-    /// Record the step without the cross-submit flight barrier.
+    /// Record the step without the cross-submit compute barrier.
     ///
-    /// The shader is unchanged. Synchronization validation should report the
-    /// ring hazard. The shipping path does not set this.
+    /// The canary fill keeps its transfer barrier. Synchronization validation
+    /// should report the compute read of the touch fill, which this barrier
+    /// orders. The shipping path does not set this.
     SkipFlightBarrier,
 }
 

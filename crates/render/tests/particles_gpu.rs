@@ -19,7 +19,7 @@ use genos_render::{
     CpuParticles, ParticleFault, Reflector, Renderer, StepInput, World, LOW_VRAM_BYTES,
 };
 use genos_scene::{
-    view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3,
+    view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3, Wall,
     DEFAULT_SEED,
 };
 use genos_window::{Lifecycle, Window};
@@ -463,19 +463,90 @@ fn overlap(life: &mut Lifecycle<Renderer>, settings: &ParticleSettings, camera: 
 }
 
 #[test]
+fn the_depth_image_keeps_a_particle_in_front_and_retires_one_behind() {
+    let (_w, _h, mut life) = open();
+    let mut camera = Camera::new(0.0, 2.0, 0.0);
+    camera.set_pose(Vec3::new(0.0, 1.7, 2.0), 0.0, -std::f32::consts::FRAC_PI_2);
+    life.device.suspend_lighting();
+    let mut settings = emitter(4, 2);
+    settings.spread = 0.0;
+    settings.rise = 0.0;
+    settings.rate = 60.0;
+    settings.life = 10.0;
+    settings.depth_collision = true;
+    // Straight down. This point sits between the eye and the floor.
+    settings.origin = [0.0, 0.8, 2.0];
+    let mut drawn = world(settings.clone());
+    drawn.scene.walls.push(Wall {
+        position: Vec3::new(0.0, 0.0, 1.2),
+        half_x: 2.0,
+        half_z: 0.2,
+        height: 3.0,
+        base: 0.0,
+        color: [0.8, 0.8, 0.8],
+        absorption: 0.0,
+        reflectance: -1.0,
+        color_mix: -1.0,
+    });
+    // No `set_particle_depth`: this is the scene-depth image, not the upload.
+    draw(&mut life, &drawn, &camera);
+    assert_eq!(
+        life.device.particle_stats().alive,
+        1,
+        "the particle between the eye and the floor did not spawn"
+    );
+    settings.origin = [0.0, -0.4, 2.0];
+    drawn.scene.particles = settings.clone();
+    draw(&mut life, &drawn, &camera);
+    settings.rate = 0.0;
+    drawn.scene.particles = settings;
+    draw(&mut life, &drawn, &camera);
+    let gpu = life.device.particle_positions().expect("positions");
+    assert_eq!(
+        gpu.len(),
+        1,
+        "image depth retired the wrong set: {gpu:?}"
+    );
+    assert!(
+        gpu[0][1] > 0.0,
+        "the survivor is not the particle in front of the floor: {gpu:?}"
+    );
+}
+
+#[test]
 fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
+    if let Ok(reason) = std::env::var("GENOS_FX_SYNC_SKIP") {
+        assert!(
+            !reason.is_empty(),
+            "GENOS_FX_SYNC_SKIP needs the reason the validation layer cannot run"
+        );
+        eprintln!("particle sync test skipped: {reason}");
+        return;
+    }
     if std::env::var_os("GENOS_FX_SYNC_CHILD").is_none() {
         let clean = sync_child("clean");
         assert!(
-            !clean.contains("vkCmdFillBuffer"),
-            "the flight barrier still left a canary hazard:\n{clean}"
+            layer_loaded(&clean),
+            "validation layer did not load:\n{clean}"
+        );
+        assert!(
+            sync_log_clean(&clean),
+            "clean overlapped flights reported a hazard or VUID:\n{clean}"
         );
         let skipped = sync_child("skip");
         assert!(
-            skipped.contains("vkCmdFillBuffer") && skipped.contains("SYNC-HAZARD"),
-            "removing the flight barrier did not trip synchronization validation:\n{skipped}"
+            layer_loaded(&skipped),
+            "validation layer did not load for the barrier child:\n{skipped}"
+        );
+        assert!(
+            skipped.contains("SYNC-HAZARD") && skipped.contains("vkCmdDispatch"),
+            "removing only the compute barrier did not trip synchronization validation:\n{skipped}"
         );
         let reflected = sync_child("reflect");
+        assert!(
+            !reflected.contains("VUID-VkRenderPassBeginInfo-renderPass-00904"),
+            "reflection pass is incompatible with the framebuffer:\n{reflected}"
+        );
         assert!(
             !reflected.contains("SHADER_READ_ONLY_OPTIMAL"),
             "depth collision left the scene depth in shader-read layout:\n{reflected}"
@@ -537,6 +608,7 @@ fn sync_child(mode: &str) -> String {
             "VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT",
         )
         .env("VK_KHRONOS_VALIDATION_VALIDATE_SYNC", "true")
+        .env("VK_LOADER_DEBUG", "error,warn,layer")
         .output()
         .expect("sync child");
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -546,6 +618,23 @@ fn sync_child(mode: &str) -> String {
         let _ = write!(text, "\nchild exit status: {}", output.status);
     }
     text
+}
+
+fn layer_loaded(text: &str) -> bool {
+    text.contains("Insert instance layer \"VK_LAYER_KHRONOS_validation\"")
+}
+
+fn sync_log_clean(text: &str) -> bool {
+    if text.contains("SYNC-HAZARD") {
+        return false;
+    }
+    // Lavapipe's maxStorageBufferRange is 128MB. The lighting cache descriptor
+    // is larger, so this VUID fires at device init even with lighting suspended.
+    // It is the device-limit entry in lint/vk-device-limits.txt, not a particle hazard.
+    text.lines().all(|line| {
+        !line.contains("Validation Error")
+            || line.contains("VUID-VkWriteDescriptorSet-descriptorType-00333")
+    })
 }
 
 #[test]
