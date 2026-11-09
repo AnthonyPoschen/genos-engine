@@ -44,10 +44,34 @@ fn a_circular_orbit_at_1e7_metres_keeps_its_radius() {
     assert_eq!(world.gravity, Vec3::ZERO);
 
     world.shift_origin(orbit.position);
-    let shifted = f32_radius(world.bodies[0].position);
-    assert!(
-        shifted < 1.0,
-        "origin shift left the chassis {shifted} m from the origin"
+    let shifted = copied_orbit(&world);
+    let pose = world.bodies[0].position;
+    assert_eq!(
+        (shifted.position.x - world.origin.x).to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        (shifted.position.y - world.origin.y).to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        (shifted.position.z - world.origin.z).to_bits(),
+        0.0_f64.to_bits()
+    );
+    assert_eq!(
+        pose.x.to_bits(),
+        0.0_f32.to_bits(),
+        "pose x is not narrow(wide - origin)"
+    );
+    assert_eq!(
+        pose.y.to_bits(),
+        0.0_f32.to_bits(),
+        "pose y is not narrow(wide - origin)"
+    );
+    assert_eq!(
+        pose.z.to_bits(),
+        0.0_f32.to_bits(),
+        "pose z is not narrow(wide - origin)"
     );
 }
 
@@ -90,18 +114,18 @@ fn a_zero_gm_coast_leaves_the_circular_radius() {
 fn an_orbit_leaves_uniform_gravity_on_a_body_with_no_orbit() {
     let mut world = circular_orbit_world();
     world.gravity = genos_physics::GRAVITY;
-    let start = copied_orbit(&world).position;
-    step(&mut world, 1.0 / 60.0);
+    let start = copied_orbit(&world);
     let dt = 1.0_f32 / 60.0;
+    step(&mut world, dt);
     let expected = genos_physics::GRAVITY.y * dt;
     assert_eq!(world.bodies[1].velocity.y.to_bits(), expected.to_bits());
     assert_eq!(world.bodies[1].velocity.x.to_bits(), 0.0_f32.to_bits());
     assert_eq!(world.gravity, genos_physics::GRAVITY);
-    let error = (radius(copied_orbit(&world).position) - radius(start)).abs();
-    assert!(
-        error < 1.0,
-        "one gravity step moved the wide radius by {error}"
-    );
+    let (position, velocity) =
+        independent_verlet(start.position, start.velocity, start.gm, f64::from(dt));
+    let got = copied_orbit(&world);
+    assert_wide_bits(got.position, position);
+    assert_wide_bits(got.velocity, velocity);
 }
 
 #[test]
@@ -192,6 +216,48 @@ fn same_orbit(left: &World, right: &World) -> bool {
         && a.gm.to_bits() == b.gm.to_bits()
         && left.bodies[0].position == right.bodies[0].position
         && left.bodies[0].velocity == right.bodies[0].velocity
+}
+
+/// Velocity Verlet with `a = -GM * r / |r|³` and no uniform gravity.
+fn independent_verlet(
+    position: WidePos,
+    velocity: WidePos,
+    gm: f64,
+    dt: f64,
+) -> (WidePos, WidePos) {
+    let kick = point_pull(position, gm);
+    let half = dt * 0.5;
+    let midway = WidePos::new(
+        velocity.x + kick.x * half,
+        velocity.y + kick.y * half,
+        velocity.z + kick.z * half,
+    );
+    let next = WidePos::new(
+        position.x + midway.x * dt,
+        position.y + midway.y * dt,
+        position.z + midway.z * dt,
+    );
+    let land = point_pull(next, gm);
+    let velocity = WidePos::new(
+        midway.x + land.x * half,
+        midway.y + land.y * half,
+        midway.z + land.z * half,
+    );
+    (next, velocity)
+}
+
+fn point_pull(position: WidePos, gm: f64) -> WidePos {
+    let r2 = position.x * position.x + position.y * position.y + position.z * position.z;
+    let radius = r2.sqrt();
+    let cube = r2 * radius;
+    let scale = -gm / cube;
+    WidePos::new(position.x * scale, position.y * scale, position.z * scale)
+}
+
+fn assert_wide_bits(got: WidePos, want: WidePos) {
+    assert_eq!(got.x.to_bits(), want.x.to_bits(), "wide x");
+    assert_eq!(got.y.to_bits(), want.y.to_bits(), "wide y");
+    assert_eq!(got.z.to_bits(), want.z.to_bits(), "wide z");
 }
 
 fn radius(position: WidePos) -> f64 {
