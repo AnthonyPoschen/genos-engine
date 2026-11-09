@@ -519,20 +519,16 @@ fn depth_fade(input: &StepInput, position: [f64; 3]) -> f64 {
     (delta / band).clamp(0.0, 1.0)
 }
 
-#[allow(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "the texel index is the floor of a uv in 0..1 times the depth size"
-)]
 fn floor_index(value: f64, limit: u32) -> u32 {
     if !value.is_finite() || value <= 0.0 || limit == 0 {
         return 0;
     }
-    let whole = value.floor() as u64;
-    u32::try_from(whole)
-        .unwrap_or(u32::MAX)
-        .min(limit.saturating_sub(1))
+    let last = limit - 1;
+    let mut index = 0u32;
+    while index < last && f64::from(index) + 1.0 <= value {
+        index += 1;
+    }
+    index
 }
 
 fn project(matrix: &[f32; 16], position: [f64; 3]) -> Option<[f64; 3]> {

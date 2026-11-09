@@ -195,7 +195,7 @@ impl Gpu {
             (self.fns.cmd_bind_set)(self.cmd, 0, layout, 0, 1, &set, 0, std::ptr::null());
             let viewport = [0.0f32, 0.0, width as f32, height as f32, 0.0, 1.0];
             (self.fns.cmd_viewport)(self.cmd, 0, 1, viewport.as_ptr());
-            let scissor = [0i32, 0, width as i32, height as i32];
+            let scissor = [0i32, 0, extent_i32(width), extent_i32(height)];
             (self.fns.cmd_scissor)(self.cmd, 0, 1, scissor.as_ptr());
             (self.fns.cmd_push)(
                 self.cmd,
@@ -374,8 +374,8 @@ impl Gpu {
         let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20, Memory::Readback)?;
         let indirect = self.make_buffer(INDIRECT_BYTES, 0x20 | 0x100, Memory::Readback)?;
         let depth = self.make_buffer(depth_bytes.max(4), 0x20, Memory::Upload)?;
-        self.write_buffer(&state, &[0u8; STATE_BYTES as usize])?;
-        self.write_buffer(&indirect, &[0u8; INDIRECT_BYTES as usize])?;
+        self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
+        self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
         let compute = self.particle_compute_pipeline(&[
             params.buffer, state.buffer, slot_buf.buffer, dead.buffer, compact.buffer,
             indirect.buffer, depth.buffer,
@@ -1257,6 +1257,17 @@ fn destroy_pipe(
             (gpu.fns.destroy_desc_layout)(gpu.device, desc_layout, std::ptr::null());
         }
     }
+}
+
+fn extent_i32(value: u32) -> i32 {
+    i32::try_from(value).unwrap_or(i32::MAX)
+}
+
+fn zero_bytes(bytes: u64) -> Result<Vec<u8>, String> {
+    let len = usize::try_from(bytes).map_err(|_| {
+        "particle clear is larger than addressable memory".to_string()
+    })?;
+    Ok(vec![0u8; len])
 }
 
 fn copy_buffer_handle(buffer: &Buffer) -> Buffer {
