@@ -36,6 +36,7 @@ pub enum GlyphSet {
     PlayStation,
     SteamDeck,
     GenericGamepad,
+    Touch,
 }
 
 impl GlyphSet {
@@ -47,6 +48,7 @@ impl GlyphSet {
             Self::PlayStation => "playstation",
             Self::SteamDeck => "steam_deck",
             Self::GenericGamepad => "generic_gamepad",
+            Self::Touch => "touch",
         }
     }
 }
@@ -110,6 +112,7 @@ pub enum DeviceKind {
     Keyboard,
     Mouse,
     Gamepad,
+    Touch,
 }
 
 #[derive(Clone, Debug)]

@@ -24,7 +24,7 @@ On an Xbox pad, axis 0 and axis 1 are the left stick and axis 3 and axis 4 are t
 
 joydev numbers the buttons that are set, from `BTN_JOYSTICK` upward and then the codes below it, so the index depends on the family. `JSIOCGBTNMAP` and `JSIOCGAXMAP`, read once when the pad opens, override that guess: select, start, home, and the stick clicks stay on `BTN_SELECT`, `BTN_START`, `BTN_MODE`, and `BTN_THUMBL` / `BTN_THUMBR` even when the pad also sets `BTN_TL2` / `BTN_TR2`. When the ioctl fails, the family table is the fallback. Xbox (`xpad`) reports the labeled X button, the west face, as `BTN_X` (`0x133`) and Y, the north face, as `BTN_Y` (`0x134`). The ioctl map uses that same pair for Xbox and Steam Deck. PlayStation and a generic pad use the Linux names, so `BTN_X` is north and `BTN_Y` is west. The xpad fallback, used when the ioctl fails, still puts the west face at index 2 and the stick clicks at 9 and 10. PlayStation (`hid-playstation`, DualShock, DualSense) reports north at index 2, the trigger buttons at 6 and 7, and the stick clicks at 11 and 12. A generic pad without those trigger buttons keeps select at 6. A Steam Deck follows `hid-steam`: index 0 is the left pad touch, 1 is the right pad touch, 2 is the quick-access button, 3 is south, 5 is west (`BTN_X`), 6 is north (`BTN_Y`), 9 and 10 are the digital triggers, and 11 is View. Pad touches and grips are not bound. Buttons past 10 are kept.
 
-The picture family is a glyph set: keyboard and mouse, Xbox, PlayStation, Steam Deck, or a generic gamepad. The name on the slot picks the family, once, when the pad connects or the name changes. `Steam Deck` is checked before Xbox. A Deck that reports an Xbox name gets Xbox pictures, because that is the device it is emulating. `active_glyphs` is the family to draw. `active_id` is the device that selected it. `take_device_changes` returns connections and changes of family or active id since the last take. A stick that is already outside the deadzone does not select the family again. A stick selects it when it crosses out of the deadzone. A button or a trigger selects it on the press. A key or a mouse button selects keyboard and mouse on the press. A mouse delta selects it while the pointer is moving. A second pad of the same family still emits a `DeviceChange` when it becomes the active slot. Disconnecting the active pad selects another connected pad, or the keyboard.
+The picture family is a glyph set: keyboard and mouse, Xbox, PlayStation, Steam Deck, a generic gamepad, or touch. The name on the slot picks the pad family, once, when the pad connects or the name changes. `Steam Deck` is checked before Xbox. A Deck that reports an Xbox name gets Xbox pictures, because that is the device it is emulating. A finger that begins selects touch. `active_glyphs` is the family to draw. `active_id` is the device that selected it. `take_device_changes` returns connections and changes of family or active id since the last take. A stick that is already outside the deadzone does not select the family again. A stick selects it when it crosses out of the deadzone. A button or a trigger selects it on the press. A key or a mouse button selects keyboard and mouse on the press. A mouse delta selects it while the pointer is moving. A second pad of the same family still emits a `DeviceChange` when it becomes the active slot. Disconnecting the active pad selects another connected pad, or the keyboard.
 
 `InputSettings` is the settings value. `to_text` and `parse` round-trip it. `parse` of `key=value` lines starts from the character-controller map, so a file that only sets `stick_deadzone` keeps WASD. `set_key` overlays one line. A sensitivity line may come before the binding line. On a name that does not exist yet, that line creates an axis action, so `camera.sensitivity` can be followed by `camera.vectors`. An enabled line stays in force when the binding line follows it. A binding's sensitivity is not a public field; the text and JSON paths clamp it to `-8..=8`. `save` and `load` read that text from a file. A file that starts with `{` is the action-map JSON. The JSON reader accepts a space after `:` and a `sensitivity` field that precedes `code`. `stick_deadzone` and `mouse_sensitivity` are keys. An action name replaces button bindings (`release=key_b mouse_right`). `move.left` replaces one side. `code*2` sets that binding's sensitivity. `look.sensitivity` sets every binding on that action. `dump` on the settings is the binding text. `InputSystem::dump` lists the devices and, after `InputSettings::apply`, the same bindings.
 
@@ -36,6 +36,10 @@ Headless server: the map and the settings file load with no devices. `poll_gamep
 
 The input crate does not depend on the window or the renderer.
 
+A touch point is one finger sample: an id, a position, and a phase (`began`, `moved`, `ended`, `cancelled`). The window writes them with `set_touch_points`. This crate recognizes a tap, a swipe, and a pinch. A lift that travels at most `TAP_SLOP` (`16`) is a tap. A lift that travels at least `SWIPE_MIN` (`48`) is a swipe, stored as a unit vector in the point's coordinates. A two-finger span that changes by at least a tenth is a pinch. `scale` is the new span divided by the previous span, and the bound axis adds `scale - 1` on Y, clamped to `-1..=1`. The first sample only records the span. Gestures clear in `begin_frame`. A drag between the tap slop and the swipe minimum is neither. A cancelled finger drops the contact and makes no gesture.
+
+`name.gesture` is `tap`, `swipe`, `pinch`, or `off`. A tap sets `down`. A swipe or a pinch adds to `axis_2d`. A missing action is created with no keys. The character-controller map does not bind a gesture until a settings line does.
+
 ## Code
 
 The crate is `crates/input`, package `genos-input`.
@@ -44,6 +48,8 @@ The crate is `crates/input`, package `genos-input`.
 - `InputCode` in `src/code.rs` owns the names and the values.
 - `character_controller` in `src/action.rs` owns the first action map. `InputSettings` in `src/settings.rs` owns the settings file.
 - `GamepadDevice` in `src/device.rs` owns the stick deadzone. `glyph_set_from_name` owns the picture family.
+- `TouchSurface` in `src/touch.rs` owns the points and the gestures.
+- `debug/input` (`genos-input`) prints the live view and serves `get_input`, `set_input`, and `get_glyphs` on `127.0.0.1:8768`.
 
 ## Game use
 
@@ -58,9 +64,17 @@ Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone befo
 
 ## Limits
 
-Windows, macOS, and X11 device reads are not in this crate yet. The behavior source for those reads is `input-zig`, listed in [Architecture](../architecture.md). Those platforms call `set_key`, `add_mouse_delta`, and `connect_gamepad`. They do not grow a second map.
+Windows, macOS, and X11 device reads are not in this crate. Agent bc-da635bf1 owns those window backends. When they land, they call the same writes and they do not own a second action map or recognize gestures:
 
-Touch is not a device. `input-zig` has no touch code, and this crate does not add one.
+- `begin_frame`, then the writes, then the game reads the action map.
+- `set_key` or `apply_evdev_keys` for the keyboard.
+- `set_mouse_button` and `add_mouse_delta` for the pointer.
+- `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux already does this inside `poll_gamepads` from `/dev/input/jsN`.
+- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch.
+
+The behavior source for the key and pointer reads is `input-zig`, listed in [Architecture](../architecture.md). The UI reads `take_device_changes` and `active_glyphs` after those writes.
+
+`input-zig` has no touch code. Touch points are a write from the window, not an operating-system read in this crate. The touch device id is `2`. The keyboard is `0` and the mouse is `1`.
 
 `gilrs` is not a dependency. [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps the joystick read in this crate.
 
