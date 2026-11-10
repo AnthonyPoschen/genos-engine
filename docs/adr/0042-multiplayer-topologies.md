@@ -36,7 +36,13 @@ Players, NPCs, and props have to appear on every joined runtime. The authority t
 5. **The wire names `AssetId`, not mesh bytes.** `MeshRef` replicates the source SHA-256 and a mesh index. The `.gcook` body, the vertex buffer, and the cook trailer stay off the gameplay datagram.
 6. **Transport stays the standard library.** [ADR 0007](0007-native-calls-go-to-the-system-and-vulkan.md) is not amended. `quinn`, `tokio`, `renet`, and Steam Networking Sockets are sources. They do not own the socket. Reliable notices and unreliable snapshots are channels this repository writes on `std::net::UdpSocket`.
 
-The rates, the interest rule, the pawn prediction, and the interpolation delay are the ones PR #14 locked. They are restated in the design so a session commit does not have to re-derive them. D1–D54 stay open. This ADR does not start N1.
+7. **Predict locally. Send what a client cannot derive.** These four rules outrank a wider snapshot. The tick, the 20 Hz opportunity, the 32-deep ring, and the 100 ms interpolation delay stay as PR #14 locked them. The byte budget, the far rate, the correction deadband, and which entities predict are this decision.
+   - A client computes derived continuous state itself. Locomotion blend comes from velocity. Clip phase comes from the synced tick and the event's start tick. Joint transforms, blend weights, and phase are not fields.
+   - A changed quantized pose is a packed residual against the last acked snapshot, and it is sent only when that residual leaves the deadband. An unchanged component is omitted. The per-component change tick is that test. A hash such as `AssetId` stays absolute. There is no Huffman stage.
+   - Each connection has an interest set and a priority accumulator under a byte budget. Distant entities in that set are eligible less often. Entities past the far radius are omitted.
+   - An owned entity is predicted and rolled back. A remote entity is interpolated, and extrapolated for a short gap, then held. A correction inside the deadband does not snap.
+
+   The worked crowd is 1000 visible characters at about 3.6 KiB/s per client. The design records the arithmetic. D1–D54 stay open. This ADR does not start N1.
 
 ## What the ECS implementation provides
 
@@ -59,7 +65,8 @@ The registration table is hand-written `write` and `read` functions and a stable
 - **`quinn` or any QUIC crate.** The crate would own the socket, and the maintained runtime is `tokio`, which ADR 0007 rejects. QUIC does not punch NAT.
 - **Steam Networking Sockets, `renet`, `lightyear`, `bevy_replicon`.** Each owns reliability and the socket. Steam also owns the relay. The datagram would be that library's.
 - **Shared per-object state authority, and lockstep.** Stated in the option table. Input authority still moves. State authority does not.
-- **Huffman or xor-deltas on the first codec.** PR #14 already omits unchanged fields and writes absolute values. That is the compression.
+- **Huffman, or a general compressor, on the snapshot.** The steady pose is a packed residual of the quantized value against the last ack. That is the compression. A library stream would hide the layout the tests check.
+- **Replicating clip phase, blend weights, or joint transforms.** [PR #163](https://github.com/AnthonyPoschen/genos-engine/pull/163) Addition B's 36-byte record is that continuous state. This decision replaces it with a discrete event (emote, attack) carrying a start tick, plus `MeshRef` for an outfit. PR #163 is being revised to match.
 - **Spending PR #14's flag bit 128 on `MeshRef`.** That bit is reserved for the cause word. The record grows a component list instead. The list is in the design.
 
 ## Consequences
@@ -72,8 +79,8 @@ The registration table is hand-written `write` and `read` functions and a stable
 
 ## Five lines
 
-- Replicated state: opted-in columns on scene objects, named by the generational scene handle. Launch columns include the quantized pose, input authority, and `MeshRef` as a source `AssetId` plus a mesh index. The dirty signal is that component's change tick. Mesh bytes, residency, lighting caches, and menu settings stay local.
+- Replicated state: opted-in columns on scene objects, named by the generational scene handle. The steady pose is a packed residual, sent when it leaves the deadband. `MeshRef` is the source `AssetId`. An emote or an attack is a start tick and an id. Phase, blend weights, and joint transforms stay local. The dirty signal is that component's change tick.
 - Authority: one writer. Dedicated or listen-server. Guests send commands and notices. `competitive` is dedicated only. Input authority moves at a tick boundary. State authority does not move until a later migration, and not in `competitive`.
-- Prediction / rollback: the owned body only, restore and replay of `step`. Other objects, including other players, NPCs, props, and a driven vehicle, interpolate. `MeshRef` is not in the replay. A local outfit preview is corrected by the snapshot.
+- Prediction / rollback: every owned entity, restore and replay of `step`, including the driven chassis. A correction inside the deadband does not replay. Remote entities interpolate, extrapolate for a short gap, then hold. `MeshRef` is not in the replay. A local outfit preview is corrected by the snapshot.
 - Determinism: one process, serial tick, `step` at `1/60`. The wire compares quantized poses and `AssetId` bytes. Cross-machine `f32` identity is not required. Clients do not run the tyre solver.
 - Headless server: the dedicated process links no window, no Vulkan, and no audio. It still stores `MeshRef` so a snapshot can name the outfit. It does not upload a texture. A listen-server is the player process and is not this headless build.

@@ -38,9 +38,9 @@ Stage 1: glTF skins+clips import, CPU sampling (SoA, fixed 60 Hz sim tick), 1D/2
 
 ## 6. Determinism for networking
 - Sim tick fixed; pose time = tick × dt, never wall time. Fixed-point-free but order-stable f32 math, no SIMD reassociation in the gameplay pose path.
-- Replicate state-machine state id, clip ids, normalized time and blend weights (quantized 16-bit), not bone transforms.
-- Server evaluates only gameplay bones (root, hit-boxes) on `LoadProfile::Sim`; clients evaluate the full skeleton. Root motion is server-authoritative, predicted on the owning client, reconciled with rollback of state-machine time.
-- Rubric lines: replicated = anim state; authority = server; prediction = owner client; determinism = tick-based; headless = gameplay bones only.
+- Replicate discrete events only. An emote or an attack is a kind, an id, and a start tick (`AnimEvent` in [ADR 0042](../adr/0042-multiplayer-topologies.md)). An outfit change is `MeshRef`, the source `AssetId`. Clip phase is `(tick - start_tick) / duration` on the synced tick. Locomotion blend comes from velocity. Joint transforms, phase, and blend weights are not fields. [PR #163](https://github.com/AnthonyPoschen/genos-engine/pull/163) is being revised to this. Its 36-byte phase and weight record is not the snapshot.
+- Server evaluates only gameplay bones (root, hit-boxes) on `LoadProfile::Sim`; clients evaluate the full skeleton. Root motion is server-authoritative, predicted on the owning client, reconciled with rollback of the body when the error leaves the deadband.
+- Rubric lines: replicated = the event and the outfit id; authority = server; prediction = owner, remote characters derive the pose; determinism = tick-based; headless = gameplay bones only.
 
 ## 7. Data and settings
 `settings.animation`: `max_skinned` (Low 32 / Med 96 / High 256), `update_rate_far_hz` (Low 15, distance-based throttling), `dqs` (off), `ik` (on High/Med). Assets: `.ganim` graph (states, transitions, blend spaces, masks), clips from glTF.
