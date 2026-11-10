@@ -6,7 +6,8 @@
 //! glTF skins, joint influences, and skeletal clips.
 
 use genos_load::{
-    load_gltf, sample_channel, ChannelPath, Interpolation, MemorySource, Support, IDENTITY_BIND,
+    load_gltf, rest_model, sample_channel, ChannelPath, Interpolation, MemorySource, Support,
+    IDENTITY_BIND,
 };
 
 fn no_files(_: &str) -> Result<Vec<u8>, genos_load::LoadError> {
@@ -182,6 +183,8 @@ fn a_skin_keeps_joints_influences_and_linear_and_step_clips() {
     assert_eq!(joints[0].parent, -1);
     assert_eq!(joints[0].translation, [0.0, 1.0, 0.0]);
     assert_eq!(joints[0].inverse_bind, IDENTITY_BIND);
+    assert_eq!(joints[0].ancestor, IDENTITY_BIND);
+    assert_eq!(joints[1].ancestor, IDENTITY_BIND);
     assert_eq!(joints[1].name, "knee");
     assert_eq!(joints[1].parent, 0);
     assert_eq!(joints[1].node, 1);
@@ -190,7 +193,7 @@ fn a_skin_keeps_joints_influences_and_linear_and_step_clips() {
 
     let primitive = &scene.meshes[0].primitives[0];
     assert_eq!(primitive.joints.len(), 4);
-    assert_eq!(primitive.joints[0], [0, 1, 0, 0]);
+    assert_eq!(primitive.joints[0], [0, 0, 0, 0]);
     assert_eq!(primitive.weights[0], [1.0, 0.0, 0.0, 0.0]);
     assert_eq!(primitive.weights[1], [0.25, 0.75, 0.0, 0.0]);
     assert_eq!(primitive.joints[2], [0, 1, 0, 1]);
@@ -218,6 +221,7 @@ fn a_skin_keeps_joints_influences_and_linear_and_step_clips() {
         .any(|note| note.contains("not in a skin")));
 
     let move_clip = scene.clips.iter().find(|clip| clip.name == "move").unwrap();
+    assert_eq!(move_clip.animation, 0);
     assert_eq!(move_clip.channels.len(), 1);
     assert_eq!(move_clip.channels[0].path, ChannelPath::Translation);
     assert_eq!(move_clip.channels[0].interpolation, Interpolation::Linear);
@@ -226,6 +230,7 @@ fn a_skin_keeps_joints_influences_and_linear_and_step_clips() {
     assert_eq!(mid, [1.0, 1.0, 0.0]);
 
     let hold = scene.clips.iter().find(|clip| clip.name == "hold").unwrap();
+    assert_eq!(hold.animation, 1);
     assert_eq!(hold.channels[0].interpolation, Interpolation::Step);
     let mut before = [0.0; 4];
     let mut at_key = [0.0; 4];
@@ -275,4 +280,219 @@ fn a_matrix_joint_keeps_its_translation_and_scale() {
     assert!((joint.scale[2] - 2.0).abs() < 1.0e-5);
     assert!((joint.rotation[3] - 1.0).abs() < 1.0e-5);
     assert!(joint.rotation[0].abs() < 1.0e-5);
+}
+
+#[test]
+fn a_non_joint_ancestor_stays_outside_the_local_rest() {
+    let json = r#"{
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 3]}],
+        "nodes": [
+            {"name": "up", "children": [1]},
+            {"name": "mid", "translation": [0, 5, 0], "children": [2]},
+            {"name": "bone", "translation": [0, 1, 0]},
+            {"name": "root", "translation": [0, 5, 0], "children": [4]},
+            {"name": "bone2", "translation": [0, 1, 0]}
+        ],
+        "skins": [{"joints": [0, 2, 4]}]
+    }"#;
+    let scene = load_gltf(&MemorySource::new(json.as_bytes()), &no_files).unwrap();
+    let joints = &scene.skins[0].joints;
+    assert_eq!(joints[1].parent, 0);
+    assert_eq!(joints[1].translation, [0.0, 1.0, 0.0]);
+    assert!((joints[1].ancestor[13] - 5.0).abs() < 1.0e-5);
+    assert_eq!(joints[2].parent, -1);
+    assert_eq!(joints[2].translation, [0.0, 1.0, 0.0]);
+    assert!((joints[2].ancestor[13] - 5.0).abs() < 1.0e-5);
+    let posed = rest_model(joints, 1).unwrap();
+    let rooted = rest_model(joints, 2).unwrap();
+    assert!((posed[13] - 6.0).abs() < 1.0e-5);
+    assert!((rooted[13] - 6.0).abs() < 1.0e-5);
+}
+
+#[test]
+fn an_extra_inverse_bind_is_ignored_and_a_short_one_is_refused() {
+    let mut bin = Bin(Vec::new());
+    let inverse = bin.f32s(&[
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]);
+    let json = format!(
+        r#"{{
+            "asset": {{"version": "2.0"}},
+            "nodes": [{{"name": "bone"}}],
+            "skins": [{{"joints": [0], "inverseBindMatrices": 0}}],
+            "buffers": [{{"byteLength": {len}}}],
+            "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+            "accessors": [{{"bufferView": 0, "byteOffset": {inverse}, "componentType": 5126, "count": 2, "type": "MAT4"}}]
+        }}"#,
+        len = bin.0.len(),
+    );
+    let scene = load_gltf(&MemorySource::new(&glb(&json, &bin.0)), &no_files).unwrap();
+    assert_eq!(scene.skins[0].joints[0].inverse_bind[12], 4.0);
+    assert!(scene.skins[0]
+        .notes
+        .iter()
+        .any(|note| note.contains("extra")));
+    let short = json.replace("\"count\": 2", "\"count\": 0");
+    assert!(load_gltf(&MemorySource::new(&glb(&short, &bin.0)), &no_files).is_err());
+}
+
+#[test]
+fn a_joint_index_outside_the_skin_is_refused() {
+    let mut bin = Bin(Vec::new());
+    let positions = bin.f32s(&[0.0, 0.0, 0.0]);
+    let joints = bin.u16s(&[9, 0, 0, 0]);
+    let weights = bin.f32s(&[1.0, 0.0, 0.0, 0.0]);
+    let json = format!(
+        r#"{{
+            "asset": {{"version": "2.0"}},
+            "scene": 0,
+            "scenes": [{{"nodes": [0]}}],
+            "nodes": [{{"name": "bone", "mesh": 0, "skin": 0}}],
+            "skins": [{{"joints": [0]}}],
+            "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2}}}}]}}],
+            "buffers": [{{"byteLength": {len}}}],
+            "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+            "accessors": [
+                {pos},
+                {joints},
+                {weights}
+            ]
+        }}"#,
+        len = bin.0.len(),
+        pos = accessor(positions, 1, "5126", "VEC3"),
+        joints = accessor(joints, 1, "5123", "VEC4"),
+        weights = accessor(weights, 1, "5126", "VEC4"),
+    );
+    assert!(load_gltf(&MemorySource::new(&glb(&json, &bin.0)), &no_files).is_err());
+}
+
+#[test]
+fn joints_2_is_noted_and_duplicate_joints_are_refused() {
+    let mut bin = Bin(Vec::new());
+    let positions = bin.f32s(&[0.0, 0.0, 0.0]);
+    let joints = bin.u16s(&[0, 0, 0, 0]);
+    let weights = bin.f32s(&[1.0, 0.0, 0.0, 0.0]);
+    let json = format!(
+        r#"{{
+            "asset": {{"version": "2.0"}},
+            "scene": 0,
+            "scenes": [{{"nodes": [0]}}],
+            "nodes": [{{"name": "bone", "mesh": 0, "skin": 0}}],
+            "skins": [{{"joints": [0]}}],
+            "meshes": [{{"primitives": [{{"attributes": {{"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2, "JOINTS_2": 1, "WEIGHTS_2": 2}}}}]}}],
+            "buffers": [{{"byteLength": {len}}}],
+            "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+            "accessors": [{pos}, {joints}, {weights}]
+        }}"#,
+        len = bin.0.len(),
+        pos = accessor(positions, 1, "5126", "VEC3"),
+        joints = accessor(joints, 1, "5123", "VEC4"),
+        weights = accessor(weights, 1, "5126", "VEC4"),
+    );
+    let scene = load_gltf(&MemorySource::new(&glb(&json, &bin.0)), &no_files).unwrap();
+    assert!(scene
+        .skin_notes
+        .iter()
+        .any(|note| note.contains("JOINTS_2")));
+    assert!(scene
+        .skin_notes
+        .iter()
+        .any(|note| note.contains("WEIGHTS_2")));
+    let duplicated =
+        r#"{"asset":{"version":"2.0"},"nodes":[{"name":"bone"}],"skins":[{"joints":[0,0]}]}"#;
+    assert!(load_gltf(&MemorySource::new(duplicated.as_bytes()), &no_files).is_err());
+}
+
+#[test]
+fn a_hostile_accessor_count_is_an_error() {
+    let json = r#"{
+        "asset": {"version": "2.0"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+        "buffers": [{"byteLength": 4}],
+        "bufferViews": [{"buffer": 0, "byteLength": 4}],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 1152921504606846976, "type": "VEC3"}]
+    }"#;
+    assert!(load_gltf(&MemorySource::new(&glb(json, &[0, 0, 0, 0])), &no_files).is_err());
+}
+
+#[test]
+fn a_missing_target_node_is_omitted_and_a_nan_time_is_refused() {
+    let mut bin = Bin(Vec::new());
+    let times = bin.f32s(&[0.0, 1.0]);
+    let values = bin.f32s(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let json = format!(
+        r#"{{
+            "asset": {{"version": "2.0"}},
+            "nodes": [{{"name": "bone"}}],
+            "skins": [{{"joints": [0]}}],
+            "animations": [{{
+                "samplers": [{{"input": 0, "output": 1}}],
+                "channels": [
+                    {{"sampler": 0, "target": {{"path": "translation"}}}},
+                    {{"sampler": 0, "target": {{"node": 0, "path": "translation"}}}}
+                ]
+            }}],
+            "buffers": [{{"byteLength": {len}}}],
+            "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+            "accessors": [{times}, {values}]
+        }}"#,
+        len = bin.0.len(),
+        times = accessor(times, 2, "5126", "SCALAR"),
+        values = accessor(values, 2, "5126", "VEC3"),
+    );
+    let scene = load_gltf(&MemorySource::new(&glb(&json, &bin.0)), &no_files).unwrap();
+    assert_eq!(scene.clips.len(), 1);
+    assert!(scene
+        .skin_notes
+        .iter()
+        .any(|note| note.contains("missing target node")));
+    let mut nan = bin.0.clone();
+    let nan_bits = f32::NAN.to_le_bytes();
+    nan[times..times + 4].copy_from_slice(&nan_bits);
+    assert!(load_gltf(&MemorySource::new(&glb(&json, &nan)), &no_files).is_err());
+}
+
+#[test]
+fn an_omitted_first_animation_does_not_renumber_the_next() {
+    let mut bin = Bin(Vec::new());
+    let times = bin.f32s(&[0.0, 1.0]);
+    let values = bin.f32s(&[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let json = format!(
+        r#"{{
+            "asset": {{"version": "2.0"}},
+            "nodes": [{{"name": "bone"}}],
+            "skins": [{{"joints": [0]}}],
+            "animations": [
+                {{
+                    "name": "cubic",
+                    "samplers": [{{"input": 0, "output": 1, "interpolation": "CUBICSPLINE"}}],
+                    "channels": [{{"sampler": 0, "target": {{"node": 0, "path": "translation"}}}}]
+                }},
+                {{
+                    "name": "linear",
+                    "samplers": [{{"input": 0, "output": 1, "interpolation": "LINEAR"}}],
+                    "channels": [{{"sampler": 0, "target": {{"node": 0, "path": "translation"}}}}]
+                }}
+            ],
+            "buffers": [{{"byteLength": {len}}}],
+            "bufferViews": [{{"buffer": 0, "byteLength": {len}}}],
+            "accessors": [{times}, {values}]
+        }}"#,
+        len = bin.0.len(),
+        times = accessor(times, 2, "5126", "SCALAR"),
+        values = accessor(values, 2, "5126", "VEC3"),
+    );
+    let bytes = glb(&json, &bin.0);
+    let doc = genos_load::import_bytes(&bytes, &no_files).unwrap();
+    let scene = doc.scene.as_ref().unwrap();
+    assert_eq!(scene.clips.len(), 1);
+    assert_eq!(scene.clips[0].animation, 1);
+    assert!(doc.notes.iter().any(|note| note.path == "animations[1]"));
+    assert!(!doc.notes.iter().any(|note| note.path == "animations[0]"));
 }

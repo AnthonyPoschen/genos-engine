@@ -71,7 +71,7 @@ use crate::mips::{mip_chain, Mip, MipSpace};
 use crate::pages::miss_colour;
 use crate::png::Image;
 use crate::skin::{
-    pack_influences, Channel, ChannelPath, Clip, InfluenceFlags, Interpolation, Joint,
+    joint_index, pack_influences, Channel, ChannelPath, Clip, InfluenceFlags, Interpolation, Joint,
     PackedInfluences, Skin, IDENTITY_BIND,
 };
 
@@ -478,6 +478,20 @@ pub(crate) fn decode_gltf_phased(
         for c in list(node, "children").iter().rev() {
             stack.push((index(c)?, world, depth + 1));
         }
+    }
+    for instance in &instances {
+        let mesh = &meshes[instance.mesh];
+        let has_joints = mesh
+            .primitives
+            .iter()
+            .any(|primitive| !primitive.joints.is_empty());
+        let Some(skin) = instance.skin else {
+            if has_joints {
+                return Err(LoadError::Unrecognized);
+            }
+            continue;
+        };
+        reader.joint_indices_fit(instance.mesh, skins[skin].joints.len())?;
     }
     let (clips, clip_notes) = reader.clips(&skins)?;
     skin_notes.extend(clip_notes);
@@ -926,7 +940,29 @@ impl Reader<'_> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let size = component_size(ctype)?;
-        let mut out = vec![0.0f64; count * comps];
+        let row_bytes = size.checked_mul(comps).ok_or(LoadError::Unrecognized)?;
+        let elements = count.checked_mul(comps).ok_or(LoadError::Unrecognized)?;
+        if let Some(view) = opt_usize(a, "bufferView")? {
+            let v = list(self.doc, "bufferViews")
+                .get(view)
+                .ok_or(LoadError::Unrecognized)?;
+            let stride = opt_usize(v, "byteStride")?.unwrap_or(0).max(row_bytes);
+            let data = self.view(view)?;
+            let base = opt_usize(a, "byteOffset")?.unwrap_or(0);
+            if count > 0 {
+                let end = (count - 1)
+                    .checked_mul(stride)
+                    .and_then(|start| start.checked_add(base))
+                    .and_then(|start| start.checked_add(row_bytes))
+                    .ok_or(LoadError::Unrecognized)?;
+                if end > data.len() {
+                    return Err(LoadError::Truncated);
+                }
+            }
+        } else if elements > (1 << 20) {
+            return Err(LoadError::Unrecognized);
+        }
+        let mut out = vec![0.0f64; elements];
         if let Some(view) = opt_usize(a, "bufferView")? {
             let v = list(self.doc, "bufferViews")
                 .get(view)
@@ -950,6 +986,18 @@ impl Reader<'_> {
             let itype = usize_of(idx, "componentType")?;
             let vdata = self.view(usize_of(val, "bufferView")?)?;
             let voff = opt_usize(val, "byteOffset")?.unwrap_or(0);
+            let index_size = component_size(itype)?;
+            let index_end = n
+                .checked_mul(index_size)
+                .and_then(|bytes| bytes.checked_add(ioff))
+                .ok_or(LoadError::Unrecognized)?;
+            let value_end = n
+                .checked_mul(row_bytes)
+                .and_then(|bytes| bytes.checked_add(voff))
+                .ok_or(LoadError::Unrecognized)?;
+            if index_end > idata.len() || value_end > vdata.len() {
+                return Err(LoadError::Truncated);
+            }
             for k in 0..n {
                 let row =
                     component(idata, ioff + k * component_size(itype)?, itype, false)? as usize;
@@ -1070,6 +1118,18 @@ impl Reader<'_> {
         path: &str,
         notes: &mut Vec<String>,
     ) -> Result<PackedInfluences, LoadError> {
+        if let Value::Object(pairs) = attrs {
+            for (key, _) in pairs {
+                let later = (key.starts_with("JOINTS_") || key.starts_with("WEIGHTS_"))
+                    && !matches!(
+                        key.as_str(),
+                        "JOINTS_0" | "WEIGHTS_0" | "JOINTS_1" | "WEIGHTS_1"
+                    );
+                if later {
+                    notes.push(format!("{path} omitted {key}"));
+                }
+            }
+        }
         let Some(joints_0) = opt_usize(attrs, "JOINTS_0")? else {
             if opt_usize(attrs, "WEIGHTS_0")?.is_some() {
                 return Err(LoadError::Unrecognized);
@@ -1109,6 +1169,31 @@ impl Reader<'_> {
         Ok(packed)
     }
 
+    fn joint_indices_fit(&self, mesh: usize, limit: usize) -> Result<(), LoadError> {
+        let mesh = list(self.doc, "meshes")
+            .get(mesh)
+            .ok_or(LoadError::Unrecognized)?;
+        for primitive in list(mesh, "primitives") {
+            let Some(attrs) = primitive.get("attributes") else {
+                continue;
+            };
+            for key in ["JOINTS_0", "JOINTS_1", "JOINTS_2", "JOINTS_3"] {
+                let Some(accessor) = opt_usize(attrs, key)? else {
+                    continue;
+                };
+                let rows: Vec<[f32; 4]> = self.floats(accessor)?;
+                for row in &rows {
+                    for joint in row {
+                        if usize::from(joint_index(*joint)?) >= limit {
+                            return Err(LoadError::Unrecognized);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn skins(&self) -> Result<Vec<Skin>, LoadError> {
         let nodes = list(self.doc, "nodes");
         let mut parent_of = vec![None; nodes.len()];
@@ -1129,12 +1214,26 @@ impl Reader<'_> {
             if joint_nodes.iter().any(|node| *node >= nodes.len()) {
                 return Err(LoadError::Unrecognized);
             }
+            let mut seen = vec![false; nodes.len()];
+            for node in &joint_nodes {
+                if seen[*node] {
+                    return Err(LoadError::Unrecognized);
+                }
+                seen[*node] = true;
+            }
             let mut repairs = Vec::new();
             let inverse = match opt_usize(skin, "inverseBindMatrices")? {
                 Some(accessor) => {
-                    let matrices: Vec<[f32; 16]> = self.floats(accessor)?;
-                    if matrices.len() != joint_nodes.len() {
+                    let mut matrices: Vec<[f32; 16]> = self.floats(accessor)?;
+                    if matrices.len() < joint_nodes.len() {
                         return Err(LoadError::Unrecognized);
+                    }
+                    if matrices.len() > joint_nodes.len() {
+                        let extra = matrices.len() - joint_nodes.len();
+                        repairs.push(format!(
+                            "skins[{skin_index}] inverse bind ignored {extra} extra matrices"
+                        ));
+                        matrices.truncate(joint_nodes.len());
                     }
                     matrices
                 }
@@ -1147,23 +1246,18 @@ impl Reader<'_> {
             for (joint_index, &node_index) in joint_nodes.iter().enumerate() {
                 let node = &nodes[node_index];
                 let pose = node_trs(node)?;
-                let parent = parent_of[node_index].and_then(|parent_node| {
-                    joint_nodes
-                        .iter()
-                        .position(|joint| *joint == parent_node)
-                        .and_then(|found| i32::try_from(found).ok())
-                });
                 joints.push(Joint {
                     name: node
                         .get("name")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string(),
-                    parent: parent.unwrap_or(-1),
+                    parent: joint_parent(&parent_of, &joint_nodes, node_index)?,
                     inverse_bind: inverse[joint_index],
                     translation: pose.translation,
                     rotation: pose.rotation,
                     scale: pose.scale,
+                    ancestor: ancestor_matrix(nodes, &parent_of, &joint_nodes, node_index)?,
                     node: node_index,
                 });
             }
@@ -1197,12 +1291,15 @@ impl Reader<'_> {
                 let sampler_index = usize_of(channel, "sampler")?;
                 let sampler = samplers.get(sampler_index).ok_or(LoadError::Unrecognized)?;
                 let target = channel.get("target").ok_or(LoadError::Unrecognized)?;
-                let node = usize_of(target, "node")?;
                 let path_name = target
                     .get("path")
                     .and_then(Value::as_str)
                     .ok_or(LoadError::Unrecognized)?;
                 let where_ = format!("animations[{anim_index}].channels[{channel_index}]");
+                let Some(node) = opt_usize(target, "node")? else {
+                    notes.push(format!("{where_} omitted missing target node"));
+                    continue;
+                };
                 let Some(path) = channel_path(path_name) else {
                     notes.push(format!("{where_} omitted path {path_name}"));
                     continue;
@@ -1236,6 +1333,9 @@ impl Reader<'_> {
                 if times.is_empty() || values.len() != times.len() * stride {
                     return Err(LoadError::Unrecognized);
                 }
+                if times.iter().any(|time| !time.is_finite()) {
+                    return Err(LoadError::Unrecognized);
+                }
                 if times
                     .windows(2)
                     .any(|pair| pair[1].total_cmp(&pair[0]) != std::cmp::Ordering::Greater)
@@ -1263,6 +1363,7 @@ impl Reader<'_> {
                     name: name.clone(),
                     duration,
                     skin,
+                    animation: anim_index,
                     channels,
                 });
             }
@@ -1278,6 +1379,55 @@ fn channel_path(name: &str) -> Option<ChannelPath> {
         "scale" => Some(ChannelPath::Scale),
         _ => None,
     }
+}
+
+fn joint_parent(
+    parent_of: &[Option<usize>],
+    joint_nodes: &[usize],
+    node: usize,
+) -> Result<i32, LoadError> {
+    let mut cursor = parent_of.get(node).copied().flatten();
+    let mut guard = 0usize;
+    while let Some(current) = cursor {
+        if let Some(found) = joint_nodes.iter().position(|joint| *joint == current) {
+            return i32::try_from(found).map_err(|_| LoadError::Unrecognized);
+        }
+        cursor = parent_of.get(current).copied().flatten();
+        guard += 1;
+        if guard > parent_of.len() {
+            return Err(LoadError::Unrecognized);
+        }
+    }
+    Ok(-1)
+}
+
+fn ancestor_matrix(
+    nodes: &[Value],
+    parent_of: &[Option<usize>],
+    joint_nodes: &[usize],
+    node: usize,
+) -> Result<[f32; 16], LoadError> {
+    let mut chain = Vec::new();
+    let mut cursor = parent_of.get(node).copied().flatten();
+    let mut guard = 0usize;
+    while let Some(current) = cursor {
+        if joint_nodes.contains(&current) {
+            break;
+        }
+        chain.push(local_matrix(
+            nodes.get(current).ok_or(LoadError::Unrecognized)?,
+        )?);
+        cursor = parent_of.get(current).copied().flatten();
+        guard += 1;
+        if guard > nodes.len() {
+            return Err(LoadError::Unrecognized);
+        }
+    }
+    let mut composed = IDENTITY;
+    for local in chain.iter().rev() {
+        composed = mul(&composed, local);
+    }
+    Ok(composed)
 }
 
 fn joint_in(skins: &[Skin], node: usize) -> Option<(usize, usize)> {
