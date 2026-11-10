@@ -2,40 +2,26 @@
 #![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_is_multiple_of, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_return, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
 
-//! Device backends. Each one writes an already mixed stereo buffer.
+//! Held device outputs. Each one stays open and writes an already mixed buffer.
 
-/// Submit interleaved 16-bit stereo PCM. The return value is frames the device consumed.
-pub fn submit(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
-    if device_rate == 0 || interleaved.len() % 2 != 0 {
-        return Err("audio submit needs a stereo buffer and a device rate".into());
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return alsa::play(interleaved, device_rate);
-    }
-    #[cfg(target_os = "windows")]
-    {
-        return wasapi::play(interleaved, device_rate);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return core_audio::play(interleaved, device_rate);
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    {
-        let _ = interleaved;
-        Err("this operating system has no audio device backend".into())
-    }
-}
+#[cfg(target_os = "linux")]
+pub use alsa::AlsaDevice;
+#[cfg(target_os = "windows")]
+pub use wasapi::WasapiDevice;
+#[cfg(target_os = "macos")]
+pub use core_audio::CoreAudioDevice;
+
+const PERIOD_FRAMES: u32 = 480;
+const DEVICE_RATE: u32 = 48_000;
 
 #[cfg(target_os = "linux")]
 mod alsa {
     use std::ffi::c_void;
     use std::os::raw::c_char;
+
+    use crate::path::{DevicePath, OpenedDevice};
 
     const PLAYBACK: i32 = 0;
     const RW_INTERLEAVED: i32 = 3;
@@ -60,49 +46,100 @@ mod alsa {
         fn snd_strerror(err: i32) -> *const c_char;
     }
 
-    pub fn play(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
-        unsafe {
-            let name = b"default\0";
-            let mut pcm = std::ptr::null_mut();
-            let opened = snd_pcm_open(
-                std::ptr::addr_of_mut!(pcm),
-                name.as_ptr().cast(),
-                PLAYBACK,
-                0,
-            );
-            if opened < 0 {
-                return Err(format!("ALSA open failed: {}", error_text(opened)));
+    pub struct AlsaDevice {
+        pcm: *mut c_void,
+    }
+
+    // SAFETY: the handle is used only on the `genos-audio` thread that calls `open`.
+    unsafe impl Send for AlsaDevice {}
+
+    impl AlsaDevice {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                pcm: std::ptr::null_mut(),
             }
-            let params =
-                snd_pcm_set_params(pcm, S16_LE, RW_INTERLEAVED, 2, device_rate, 0, 200_000);
-            if params < 0 {
-                snd_pcm_close(pcm);
-                return Err(format!("ALSA params failed: {}", error_text(params)));
+        }
+    }
+
+    impl Default for AlsaDevice {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DevicePath for AlsaDevice {
+        fn open(&mut self) -> Result<OpenedDevice, String> {
+            unsafe {
+                let name = b"default\0";
+                let mut pcm = std::ptr::null_mut();
+                let opened = snd_pcm_open(
+                    std::ptr::addr_of_mut!(pcm),
+                    name.as_ptr().cast(),
+                    PLAYBACK,
+                    0,
+                );
+                if opened < 0 {
+                    return Err(format!("ALSA open failed: {}", error_text(opened)));
+                }
+                let latency_us = super::PERIOD_FRAMES.saturating_mul(1_000_000) / super::DEVICE_RATE;
+                let params = snd_pcm_set_params(
+                    pcm,
+                    S16_LE,
+                    RW_INTERLEAVED,
+                    2,
+                    super::DEVICE_RATE,
+                    0,
+                    latency_us,
+                );
+                if params < 0 {
+                    snd_pcm_close(pcm);
+                    return Err(format!("ALSA params failed: {}", error_text(params)));
+                }
+                self.pcm = pcm;
+                Ok(OpenedDevice {
+                    rate: super::DEVICE_RATE,
+                    period_frames: super::PERIOD_FRAMES,
+                    channels: 2,
+                })
+            }
+        }
+
+        fn write(&mut self, interleaved: &[i16]) -> Result<(), &'static str> {
+            if self.pcm.is_null() || interleaved.len() % 2 != 0 {
+                return Err("xrun");
             }
             let frames = interleaved.len() / 2;
             let mut done = 0usize;
             while done < frames {
-                let wrote = snd_pcm_writei(
-                    pcm,
-                    interleaved[done * 2..].as_ptr().cast(),
-                    (frames - done) as u64,
-                );
+                let wrote = unsafe {
+                    snd_pcm_writei(
+                        self.pcm,
+                        interleaved[done * 2..].as_ptr().cast(),
+                        (frames - done) as u64,
+                    )
+                };
                 if wrote < 0 {
-                    let recovered = snd_pcm_recover(pcm, wrote as i32, 1);
+                    let recovered = unsafe { snd_pcm_recover(self.pcm, wrote as i32, 1) };
                     if recovered < 0 {
-                        snd_pcm_close(pcm);
-                        return Err(format!("ALSA write failed: {}", error_text(wrote as i32)));
+                        return Err("xrun");
                     }
-                    continue;
+                    return Err("xrun");
                 }
                 done += wrote as usize;
             }
-            let drained = snd_pcm_drain(pcm);
-            snd_pcm_close(pcm);
-            if drained < 0 {
-                return Err(format!("ALSA drain failed: {}", error_text(drained)));
+            Ok(())
+        }
+
+        fn close(&mut self) {
+            if self.pcm.is_null() {
+                return;
             }
-            Ok(done as u64)
+            unsafe {
+                let _ = snd_pcm_drain(self.pcm);
+                snd_pcm_close(self.pcm);
+            }
+            self.pcm = std::ptr::null_mut();
         }
     }
 
@@ -120,6 +157,8 @@ mod alsa {
 #[cfg(target_os = "windows")]
 mod wasapi {
     use std::ffi::c_void;
+
+    use crate::path::{DevicePath, OpenedDevice};
 
     #[repr(C)]
     struct Guid {
@@ -178,197 +217,212 @@ mod wasapi {
         data4: [0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2],
     };
 
-    pub fn play(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
-        unsafe {
-            let start = CoInitializeEx(std::ptr::null_mut(), 0);
-            if start < 0 {
-                return Err(format!("CoInitializeEx failed: {start}"));
+    pub struct WasapiDevice {
+        enumerator: *mut c_void,
+        endpoint: *mut c_void,
+        client: *mut c_void,
+        render: *mut c_void,
+        capacity: u32,
+        com: bool,
+    }
+
+    // SAFETY: the COM pointers are used only on the thread that calls `open`.
+    unsafe impl Send for WasapiDevice {}
+
+    impl WasapiDevice {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                enumerator: std::ptr::null_mut(),
+                endpoint: std::ptr::null_mut(),
+                client: std::ptr::null_mut(),
+                render: std::ptr::null_mut(),
+                capacity: 0,
+                com: false,
             }
-            let result = play_inner(interleaved, device_rate);
-            CoUninitialize();
-            result
+        }
+
+        fn fail(&mut self, err: String) -> Result<OpenedDevice, String> {
+            self.close();
+            Err(err)
         }
     }
 
-    unsafe fn play_inner(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
-        let mut enumerator = std::ptr::null_mut();
-        let created = CoCreateInstance(
-            &CLSID_ENUMERATOR,
-            std::ptr::null_mut(),
-            23,
-            &IID_ENUMERATOR,
-            std::ptr::addr_of_mut!(enumerator),
-        );
-        if created < 0 {
-            return Err(format!("CoCreateInstance failed: {created}"));
+    impl Default for WasapiDevice {
+        fn default() -> Self {
+            Self::new()
         }
-        let mut device = std::ptr::null_mut();
-        let endpoint: unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> i32 =
-            vcall(enumerator, 4);
-        let got = endpoint(enumerator, 0, 0, std::ptr::addr_of_mut!(device));
-        if got < 0 {
-            release(enumerator);
-            return Err(format!("GetDefaultAudioEndpoint failed: {got}"));
-        }
-        let mut client = std::ptr::null_mut();
-        let activate: unsafe extern "system" fn(
-            *mut c_void,
-            *const Guid,
-            u32,
-            *mut c_void,
-            *mut *mut c_void,
-        ) -> i32 = vcall(device, 3);
-        let activated = activate(
-            device,
-            &IID_AUDIO_CLIENT,
-            23,
-            std::ptr::null_mut(),
-            std::ptr::addr_of_mut!(client),
-        );
-        if activated < 0 {
-            release(device);
-            release(enumerator);
-            return Err(format!("Activate IAudioClient failed: {activated}"));
-        }
-        let frames = interleaved.len() / 2;
-        let align = 4u32;
-        let format = WaveFormat {
-            tag: 1,
-            channels: 2,
-            rate: device_rate,
-            byte_rate: device_rate * align,
-            align: align as u16,
-            bits: 16,
-            extra: 0,
-        };
-        let duration = i64::from(frames as u32) * 10_000_000 / i64::from(device_rate);
-        let init: unsafe extern "system" fn(
-            *mut c_void,
-            u32,
-            u32,
-            i64,
-            i64,
-            *const WaveFormat,
-            *const Guid,
-        ) -> i32 = vcall(client, 3);
-        let initialized = init(
-            client,
-            0,
-            0,
-            duration.max(10_000_000),
-            0,
-            &format,
-            std::ptr::null(),
-        );
-        if initialized < 0 {
-            release(client);
-            release(device);
-            release(enumerator);
-            return Err(format!("IAudioClient::Initialize failed: {initialized}"));
-        }
-        let mut capacity = 0u32;
-        let buffer_size: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = vcall(client, 4);
-        let sized = buffer_size(client, std::ptr::addr_of_mut!(capacity));
-        if sized < 0 || capacity == 0 {
-            release(client);
-            release(device);
-            release(enumerator);
-            return Err(format!("GetBufferSize failed: {sized}"));
-        }
-        let mut render = std::ptr::null_mut();
-        let service: unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32 =
-            vcall(client, 14);
-        let served = service(client, &IID_RENDER_CLIENT, std::ptr::addr_of_mut!(render));
-        if served < 0 {
-            release(client);
-            release(device);
-            release(enumerator);
-            return Err(format!("GetService IAudioRenderClient failed: {served}"));
-        }
-        let written = fill(client, render, interleaved, capacity)?;
-        let start: unsafe extern "system" fn(*mut c_void) -> i32 = vcall(client, 10);
-        let started = start(client);
-        if started < 0 {
-            release(render);
-            release(client);
-            release(device);
-            release(enumerator);
-            return Err(format!("IAudioClient::Start failed: {started}"));
-        }
-        let drained = wait_until_empty(client, capacity);
-        let stop: unsafe extern "system" fn(*mut c_void) -> i32 = vcall(client, 11);
-        let _ = stop(client);
-        release(render);
-        release(client);
-        release(device);
-        release(enumerator);
-        drained?;
-        Ok(written)
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
-    )]
-    unsafe fn fill(
+    impl DevicePath for WasapiDevice {
+        fn open(&mut self) -> Result<OpenedDevice, String> {
+            unsafe {
+                let start = CoInitializeEx(std::ptr::null_mut(), 0);
+                if start < 0 {
+                    return Err(format!("CoInitializeEx failed: {start}"));
+                }
+                self.com = true;
+                let created = CoCreateInstance(
+                    &CLSID_ENUMERATOR,
+                    std::ptr::null_mut(),
+                    23,
+                    &IID_ENUMERATOR,
+                    std::ptr::addr_of_mut!(self.enumerator),
+                );
+                if created < 0 {
+                    return self.fail(format!("CoCreateInstance failed: {created}"));
+                }
+                let endpoint: unsafe extern "system" fn(
+                    *mut c_void,
+                    i32,
+                    i32,
+                    *mut *mut c_void,
+                ) -> i32 = vcall(self.enumerator, 4);
+                let got = endpoint(self.enumerator, 0, 0, std::ptr::addr_of_mut!(self.endpoint));
+                if got < 0 {
+                    return self.fail(format!("GetDefaultAudioEndpoint failed: {got}"));
+                }
+                let activate: unsafe extern "system" fn(
+                    *mut c_void,
+                    *const Guid,
+                    u32,
+                    *mut c_void,
+                    *mut *mut c_void,
+                ) -> i32 = vcall(self.endpoint, 3);
+                let activated = activate(
+                    self.endpoint,
+                    &IID_AUDIO_CLIENT,
+                    23,
+                    std::ptr::null_mut(),
+                    std::ptr::addr_of_mut!(self.client),
+                );
+                if activated < 0 {
+                    return self.fail(format!("Activate IAudioClient failed: {activated}"));
+                }
+                let align = 4u32;
+                let format = WaveFormat {
+                    tag: 1,
+                    channels: 2,
+                    rate: super::DEVICE_RATE,
+                    byte_rate: super::DEVICE_RATE * align,
+                    align: align as u16,
+                    bits: 16,
+                    extra: 0,
+                };
+                let duration = i64::from(super::PERIOD_FRAMES) * 10_000_000
+                    / i64::from(super::DEVICE_RATE);
+                let init: unsafe extern "system" fn(
+                    *mut c_void,
+                    u32,
+                    u32,
+                    i64,
+                    i64,
+                    *const WaveFormat,
+                    *const Guid,
+                ) -> i32 = vcall(self.client, 3);
+                let initialized = init(
+                    self.client,
+                    0,
+                    0,
+                    duration,
+                    0,
+                    &format,
+                    std::ptr::null(),
+                );
+                if initialized < 0 {
+                    return self.fail(format!("IAudioClient::Initialize failed: {initialized}"));
+                }
+                let buffer_size: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 =
+                    vcall(self.client, 4);
+                let sized = buffer_size(self.client, std::ptr::addr_of_mut!(self.capacity));
+                if sized < 0 || self.capacity == 0 {
+                    return self.fail(format!("GetBufferSize failed: {sized}"));
+                }
+                let service: unsafe extern "system" fn(
+                    *mut c_void,
+                    *const Guid,
+                    *mut *mut c_void,
+                ) -> i32 = vcall(self.client, 14);
+                let served = service(
+                    self.client,
+                    &IID_RENDER_CLIENT,
+                    std::ptr::addr_of_mut!(self.render),
+                );
+                if served < 0 {
+                    return self.fail(format!("GetService IAudioRenderClient failed: {served}"));
+                }
+                let start: unsafe extern "system" fn(*mut c_void) -> i32 = vcall(self.client, 10);
+                let started = start(self.client);
+                if started < 0 {
+                    return self.fail(format!("IAudioClient::Start failed: {started}"));
+                }
+                Ok(OpenedDevice {
+                    rate: super::DEVICE_RATE,
+                    period_frames: super::PERIOD_FRAMES,
+                    channels: 2,
+                })
+            }
+        }
+
+        fn write(&mut self, interleaved: &[i16]) -> Result<(), &'static str> {
+            if self.client.is_null() || self.render.is_null() {
+                return Err("xrun");
+            }
+            unsafe { write_quantum(self.client, self.render, interleaved, self.capacity) }
+        }
+
+        fn close(&mut self) {
+            unsafe {
+                if !self.client.is_null() {
+                    let stop: unsafe extern "system" fn(*mut c_void) -> i32 = vcall(self.client, 11);
+                    let _ = stop(self.client);
+                }
+                release(self.render);
+                release(self.client);
+                release(self.endpoint);
+                release(self.enumerator);
+                if self.com {
+                    CoUninitialize();
+                }
+            }
+            self.render = std::ptr::null_mut();
+            self.client = std::ptr::null_mut();
+            self.endpoint = std::ptr::null_mut();
+            self.enumerator = std::ptr::null_mut();
+            self.com = false;
+        }
+    }
+
+    unsafe fn write_quantum(
         client: *mut c_void,
         render: *mut c_void,
         interleaved: &[i16],
         capacity: u32,
-    ) -> Result<u64, String> {
+    ) -> Result<(), &'static str> {
         let frames = interleaved.len() / 2;
-        let mut done = 0usize;
         let padding: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = vcall(client, 6);
+        let mut pad = 0u32;
+        if padding(client, std::ptr::addr_of_mut!(pad)) < 0 {
+            return Err("xrun");
+        }
+        let room = capacity.saturating_sub(pad);
+        if usize::try_from(room).unwrap_or(0) < frames {
+            return Err("xrun");
+        }
         let get_buffer: unsafe extern "system" fn(*mut c_void, u32, *mut *mut i16) -> i32 =
             vcall(render, 3);
         let release_buffer: unsafe extern "system" fn(*mut c_void, u32, u32) -> i32 =
             vcall(render, 4);
-        while done < frames {
-            let mut pad = 0u32;
-            let padded = padding(client, std::ptr::addr_of_mut!(pad));
-            if padded < 0 {
-                return Err(format!("GetCurrentPadding failed: {padded}"));
-            }
-            let room = capacity.saturating_sub(pad) as usize;
-            if room == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-                continue;
-            }
-            let count = room.min(frames - done);
-            let mut dest = std::ptr::null_mut();
-            let got = get_buffer(render, count as u32, std::ptr::addr_of_mut!(dest));
-            if got < 0 || dest.is_null() {
-                return Err(format!("IAudioRenderClient::GetBuffer failed: {got}"));
-            }
-            std::ptr::copy_nonoverlapping(interleaved[done * 2..].as_ptr(), dest, count * 2);
-            let released = release_buffer(render, count as u32, 0);
-            if released < 0 {
-                return Err(format!("ReleaseBuffer failed: {released}"));
-            }
-            done += count;
+        let mut dest = std::ptr::null_mut();
+        let count = u32::try_from(frames).unwrap_or(0);
+        if get_buffer(render, count, std::ptr::addr_of_mut!(dest)) < 0 || dest.is_null() {
+            return Err("xrun");
         }
-        Ok(done as u64)
-    }
-
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
-    )]
-    unsafe fn wait_until_empty(client: *mut c_void, capacity: u32) -> Result<(), String> {
-        let padding: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32 = vcall(client, 6);
-        for _ in 0..400 {
-            let mut pad = 0u32;
-            let padded = padding(client, std::ptr::addr_of_mut!(pad));
-            if padded < 0 {
-                return Err(format!("GetCurrentPadding failed: {padded}"));
-            }
-            if pad == 0 {
-                return Ok(());
-            }
-            let _ = capacity;
-            std::thread::sleep(std::time::Duration::from_millis(10));
+        std::ptr::copy_nonoverlapping(interleaved.as_ptr(), dest, frames * 2);
+        if release_buffer(render, count, 0) < 0 {
+            return Err("xrun");
         }
-        Err("WASAPI did not consume the buffer".into())
+        Ok(())
     }
 
     unsafe fn vcall<T>(this: *mut c_void, index: usize) -> T {
@@ -388,7 +442,9 @@ mod wasapi {
 #[cfg(target_os = "macos")]
 mod core_audio {
     use std::ffi::c_void;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use crate::path::{DevicePath, OpenedDevice};
 
     #[repr(C)]
     struct StreamDesc {
@@ -440,84 +496,131 @@ mod core_audio {
         fn AudioQueueDispose(queue: *mut c_void, immediate: u8) -> i32;
     }
 
-    extern "C" fn finished(user: *mut c_void, _queue: *mut c_void, buffer: *mut QueueBuffer) {
-        if user.is_null() || buffer.is_null() {
+    extern "C" fn finished(user: *mut c_void, _queue: *mut c_void, _buffer: *mut QueueBuffer) {
+        if user.is_null() {
             return;
         }
         unsafe {
-            let frames = (*buffer).size / 4;
-            let slot = &*(user as *const AtomicU32);
-            slot.store(frames, Ordering::Release);
+            let slot = &*(user as *const AtomicBool);
+            slot.store(true, Ordering::Release);
         }
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): fixed sleep. Wait on an event or a deadline. docs/LINT_RULES.md"
-    )]
-    pub fn play(interleaved: &[i16], device_rate: u32) -> Result<u64, String> {
-        unsafe {
-            let format = StreamDesc {
-                sample_rate: f64::from(device_rate),
-                format_id: 0x6c70_636d,
-                format_flags: 4 | 8,
-                bytes_per_packet: 4,
-                frames_per_packet: 1,
-                bytes_per_frame: 4,
-                channels: 2,
-                bits: 16,
-                reserved: 0,
-            };
-            let done = AtomicU32::new(u32::MAX);
-            let mut queue = std::ptr::null_mut();
-            let made = AudioQueueNewOutput(
-                &format,
-                finished,
-                std::ptr::addr_of!(done) as *mut c_void,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                0,
-                std::ptr::addr_of_mut!(queue),
-            );
-            if made != 0 {
-                return Err(format!("AudioQueueNewOutput failed: {made}"));
+    pub struct CoreAudioDevice {
+        queue: *mut c_void,
+        buffer: *mut QueueBuffer,
+        free: AtomicBool,
+    }
+
+    // SAFETY: the queue is used only on the thread that calls `open`.
+    unsafe impl Send for CoreAudioDevice {}
+
+    impl CoreAudioDevice {
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                queue: std::ptr::null_mut(),
+                buffer: std::ptr::null_mut(),
+                free: AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl Default for CoreAudioDevice {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl DevicePath for CoreAudioDevice {
+        fn open(&mut self) -> Result<OpenedDevice, String> {
+            unsafe {
+                let format = StreamDesc {
+                    sample_rate: f64::from(super::DEVICE_RATE),
+                    format_id: 0x6c70_636d,
+                    format_flags: 4 | 8,
+                    bytes_per_packet: 4,
+                    frames_per_packet: 1,
+                    bytes_per_frame: 4,
+                    channels: 2,
+                    bits: 16,
+                    reserved: 0,
+                };
+                let made = AudioQueueNewOutput(
+                    &format,
+                    finished,
+                    std::ptr::addr_of!(self.free) as *mut c_void,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::addr_of_mut!(self.queue),
+                );
+                if made != 0 {
+                    return Err(format!("AudioQueueNewOutput failed: {made}"));
+                }
+                let bytes = super::PERIOD_FRAMES.saturating_mul(4);
+                let allocated = AudioQueueAllocateBuffer(
+                    self.queue,
+                    bytes,
+                    std::ptr::addr_of_mut!(self.buffer),
+                );
+                if allocated != 0 || self.buffer.is_null() {
+                    AudioQueueDispose(self.queue, 1);
+                    self.queue = std::ptr::null_mut();
+                    return Err(format!("AudioQueueAllocateBuffer failed: {allocated}"));
+                }
+                let started = AudioQueueStart(self.queue, std::ptr::null());
+                if started != 0 {
+                    AudioQueueDispose(self.queue, 1);
+                    self.queue = std::ptr::null_mut();
+                    return Err(format!("AudioQueueStart failed: {started}"));
+                }
+                Ok(OpenedDevice {
+                    rate: super::DEVICE_RATE,
+                    period_frames: super::PERIOD_FRAMES,
+                    channels: 2,
+                })
+            }
+        }
+
+        fn write(&mut self, interleaved: &[i16]) -> Result<(), &'static str> {
+            if self.queue.is_null() || self.buffer.is_null() {
+                return Err("xrun");
+            }
+            if !self.free.swap(false, Ordering::AcqRel) {
+                return Err("xrun");
             }
             let bytes = interleaved.len() * 2;
-            let mut buffer = std::ptr::null_mut();
-            let allocated =
-                AudioQueueAllocateBuffer(queue, bytes as u32, std::ptr::addr_of_mut!(buffer));
-            if allocated != 0 || buffer.is_null() {
-                AudioQueueDispose(queue, 1);
-                return Err(format!("AudioQueueAllocateBuffer failed: {allocated}"));
-            }
-            std::ptr::copy_nonoverlapping(interleaved.as_ptr() as *const u8, (*buffer).data, bytes);
-            (*buffer).size = bytes as u32;
-            let queued = AudioQueueEnqueueBuffer(queue, buffer, 0, std::ptr::null());
-            if queued != 0 {
-                AudioQueueDispose(queue, 1);
-                return Err(format!("AudioQueueEnqueueBuffer failed: {queued}"));
-            }
-            let started = AudioQueueStart(queue, std::ptr::null());
-            if started != 0 {
-                AudioQueueDispose(queue, 1);
-                return Err(format!("AudioQueueStart failed: {started}"));
-            }
-            let frames = interleaved.len() / 2;
-            let wait_ms = (u64::from(frames) * 1000 / u64::from(device_rate)).saturating_add(500);
-            let mut saw = u32::MAX;
-            for _ in 0..wait_ms / 10 {
-                saw = done.load(Ordering::Acquire);
-                if saw != u32::MAX {
-                    break;
+            unsafe {
+                let buffer = &mut *self.buffer;
+                if buffer.data.is_null() || usize::try_from(buffer.capacity).unwrap_or(0) < bytes {
+                    self.free.store(true, Ordering::Release);
+                    return Err("xrun");
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                std::ptr::copy_nonoverlapping(
+                    interleaved.as_ptr() as *const u8,
+                    buffer.data,
+                    bytes,
+                );
+                buffer.size = u32::try_from(bytes).unwrap_or(0);
+                let queued = AudioQueueEnqueueBuffer(self.queue, self.buffer, 0, std::ptr::null());
+                if queued != 0 {
+                    self.free.store(true, Ordering::Release);
+                    return Err("xrun");
+                }
             }
-            let _ = AudioQueueStop(queue, 0);
-            AudioQueueDispose(queue, 1);
-            if saw == u32::MAX {
-                return Err("CoreAudio did not consume the buffer".into());
+            Ok(())
+        }
+
+        fn close(&mut self) {
+            unsafe {
+                if !self.queue.is_null() {
+                    let _ = AudioQueueStop(self.queue, 1);
+                    AudioQueueDispose(self.queue, 1);
+                }
             }
-            Ok(u64::from(saw))
+            self.queue = std::ptr::null_mut();
+            self.buffer = std::ptr::null_mut();
         }
     }
 }

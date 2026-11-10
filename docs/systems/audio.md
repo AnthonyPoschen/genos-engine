@@ -25,7 +25,7 @@ The crate is `crates/audio`, package `genos-audio`.
 - `mix` and `mix_into` are in `src/mix.rs`. `mix_into` sums into a caller-owned buffer and does not allocate. `mix` quantizes that sum into the returned buffer.
 - Sine, cosine, and the barrier exponential are the Cephes `sinf`, `cosf`, and `expf` polynomials in `src/poly.rs`, with range reduction. The mix does not call the platform math library for those and does not use a fused multiply-add.
 - Doppler, balance, distance, and transmission are in `src/space.rs`.
-- `submit` is in `src/device.rs`. ALSA, WASAPI, and CoreAudio are compiled only on their own operating system.
+- `start_with` in `src/engine.rs` runs the `genos-audio` thread. It mixes one quantum and writes a `DevicePath`. ALSA, WASAPI, and CoreAudio stay open. The command ring holds 256 commands. A full ring drops the newest and counts `audio_command_drop`. The listener is a latest-wins slot.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
 
 `crates/audio-check` calls `mix`. It does not copy the mixer.
@@ -36,7 +36,7 @@ Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `
 
 Set `positional` to false for music and UI. Set `looping` to keep a clip playing. Set `transmission` when `Renderer::transmission_gains` already computed that source.
 
-Call `submit` with the interleaved buffer. Open one `Renderer`. Call `retain_scene` when the solids change and the frame will not draw. A draw also refreshes that same resident scene when the light data changes. Call `transmission_gains` with the listener and the source positions.
+A running game calls `start_with` and `Stream::push`. It does not open the device per buffer. Open one `Renderer`. Call `retain_scene` when the solids change and the frame will not draw. A draw also refreshes that same resident scene when the light data changes. Call `transmission_gains` with the listener and the source positions.
 
 ## Limits
 
