@@ -39,15 +39,17 @@ Stage 1: glTF skins and clips through the cook (ADR 0038 Addition A), CPU sampli
 
 ## 6. Determinism for networking
 
-The tick is `1/60` s. Pose time is tick × dt, never wall time. Gameplay-joint math is order-stable `f32` with no SIMD reassociation. The bytes, the 20 Hz snapshot, and the rollback rules are [ADR 0038](../adr/0038-animation-adopts-design-and-fills-gaps.md) Addition B. The record is 36 bytes: `NetId`, skin hash, state id, two clip slots, four blend parameters. Joint matrices stay local. Root motion writes the body, and the body uses the physics snapshot.
+The tick is `1/60` s. Pose time is tick × dt, never wall time. Gameplay-joint math is order-stable `f32` with no SIMD reassociation. The wire rules are [ADR 0038](../adr/0038-animation-adopts-design-and-fills-gaps.md) Addition B, and they use the generational scene handle and the per-component change tick from the approved scene store ([PR #131](https://github.com/AnthonyPoschen/genos-engine/pull/131), as [PR #214](https://github.com/AnthonyPoschen/genos-engine/pull/214) applies them).
 
-- Replicated state: that 36-byte record, in `NetId` order, and only when it changed. Foot IK and notifies are not fields.
-- Authority: the server.
-- Prediction / rollback: the owning client restores the record with the body and replays. Remote phase snaps to the snapshot. A clip of at least 50 ms may interpolate phase for the drawn mesh only.
-- Determinism: two worlds, same `.gskin`, same inputs, bit-identical gameplay joints over 10 000 ticks. Cross-platform `f32` bit identity is not a gate. The wire compares the record.
-- Headless server: no Vulkan device. Gameplay joints and root motion run. Vertices are not skinned. There is no `LoadProfile` type.
+Locomotion is derived. Speed and strafe buckets come from the quantized velocity and facing the pose column already carries. Phase is `(T + salt) mod cycle_ticks` on the shared tick. Foot IK is the local plant. None of those are fields. A periodic 36-byte pose is refused: `36 × 20 × 1000 = 720000` bytes/s.
 
-Far characters still advance gameplay joints every tick. The 15 Hz rate is the drawn mesh past `far_distance_m`.
+- Replicated state: an `AnimCue` column (emote, attack, hit, montage, or a rare correction), bit-packed to 5 or 7 field bytes, sent when its change tick is newer than the acked baseline. An outfit writes `MeshRef`, not this column. Joint matrices, phase, and blend weights stay local.
+- Authority: the authority runtime. A client request does not write the column.
+- Prediction / rollback: the owning client restores `AnimCue` with the body and replays. Other characters keep the interpolated body and play a cue from `start_tick` on the shared clock.
+- Determinism: two worlds, same handles, same quantized velocities, same tick, same locomotion phase and buckets over 10 000 ticks, with zero cue bytes while nobody starts a cue. Cross-platform `f32` bit identity is not a gate.
+- Headless server: no Vulkan device. Gameplay joints, root motion, and `AnimCue` run. Vertices are not skinned. There is no `LoadProfile` type.
+
+Inside the session's 32 m neighbourhood, characters past `far_distance_m` replicate state only. The 15 Hz rate is the local mesh sample, not a network rate. Gameplay joints still advance every tick. Outside that neighbourhood a character is absent.
 
 ## 7. Data and settings
 
@@ -68,13 +70,13 @@ Far characters still advance gameplay joints every tick. The 15 Hz rate is the d
 `anim.sample_ms` (stage wall time), `anim.skin_ms` (GPU skin dispatch), `anim.skinned_count`, `anim.bones`, `anim.vram_mb`, `anim.clip_mb`. Low is the GTX 1060 6 GB at 1080p, inside the 16.6 ms frame: 32 characters × 60 joints, sampling ≤ 1.0 ms, skinning ≤ 0.5 ms, GPU skin buffers ≤ 64 MB. The byte split, the 25 m far distance, and the probes are ADR 0038 Addition C. `anim.clip_mb` is CPU and is not part of the 64 MB. Vulkan 1.3 compute only. Skinned meshes keep the GI proxy.
 
 ## 9. Verification harness and mutation tests
-`crates/load/tests/gltf_skin.rs`, `crates/cook/tests/skin.rs`, `crates/load/tests/anim_snapshot.rs`, `crates/scene/tests/animation_settings.rs`, `crates/render/tests/skinning.rs`, `scripts/anim-walk.rhai`. Gate A is the cook bytes, Gate B is the 36-byte record, and Gate C is the Low table and the 64 MB sum (ADR 0038). The snapshot test stays in `genos-load` until the scene crate owns the component. The render test waits until the compute skin pass exists.
+`crates/load/tests/gltf_skin.rs`, `crates/cook/tests/skin.rs`, `crates/load/tests/anim_cue.rs`, `crates/scene/tests/animation_settings.rs`, `crates/render/tests/skinning.rs`, `scripts/anim-walk.rhai`. Gate A is the cook bytes, Gate B is derived locomotion plus the cue budget, and Gate C is the Low table and the 64 MB sum (ADR 0038). The cue test stays in `genos-load` until the scene crate owns the column. The render test waits until the compute skin pass exists.
 - **Reference oracle**: Khronos glTF-Sample-Assets (RiggedSimple, CesiumMan, Fox) — CPU reference skinning in f64 vs GPU buffer, max vertex error ≤ 1e-4 m.
 - **Picture oracle**: rendered pose vs reference render, ≤ 2/255 mean.
 - **Blend continuity**: crossfade has no joint jump > threshold between frames.
-- **Determinism**: two worlds in one process, gameplay joints bit-identical over 10 000 ticks. The wire compares the quantized record, not raw `f32` across machines.
+- **Determinism**: two worlds in one process, derived locomotion phase and buckets match over 10 000 ticks, and a walking second sends no cue bytes. The wire compares cue bits and the quantized body, not raw `f32` across machines.
 - **Root motion**: displacement matches clip root track integral.
-Mutations (must fail): ignore `inverseBindMatrices`, drop the 4th weight, swap slerp for nlerp without sign fix, wall-clock time, put a joint matrix in the snapshot, count clip bytes inside the 64 MB, wrong joint parent order.
+Mutations (must fail): ignore `inverseBindMatrices`, drop the 4th weight, swap slerp for nlerp without sign fix, wall-clock time, put a joint matrix or a per-snapshot phase in the snapshot, count clip bytes inside the 64 MB, wrong joint parent order.
 
 ## 10. Agent control and verification
 CLI `--anim-play <handle> <clip>`, `--anim-speed`, `--anim-freeze-tick N`. MCP `anim.set_param`, `anim.state` (returns state, clip times, weights for the selected scene handle), `anim.stats`, `view skin-weights|bones`. An agent changes a `.ganim` file, hot-reloads it, plays a scripted sequence and compares bone dumps plus screenshots.

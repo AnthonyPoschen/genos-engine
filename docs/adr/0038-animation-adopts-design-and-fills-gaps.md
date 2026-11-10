@@ -85,7 +85,7 @@ A joint is one entry in a glTF skin. [animation.md](../systems/animation.md) cal
 | Blend spaces, state machine, root motion, IK, events | animation.md §4–§5 and decisions 2 and 5. The graph format, the server joint set, and the IK-versus-state-machine order stay open questions. | None of these run. |
 | GPU skinning | animation.md §4. Vulkan 1.3 compute, after the CPU pose. | `Primitive` (`crates/load/src/gltf.rs:74`) has positions, normals, texcoords, tangents, indices, and a material. No joint attribute is uploaded. |
 | Cook, in outline | Decision 3. | The outline said `.gcook` and a pending ADR 0035. Both are corrected below. |
-| Replication, in outline | animation.md §6: state id, clip ids, normalized time, 16-bit weights, no joint matrices. | No snapshot type. |
+| Replication, in outline | The 5 Nov design: state id, clip ids, normalized time, 16-bit weights, no joint matrices. The 10 Nov draft turned that into 36 bytes at 20 Hz. Addition B below replaces both. | No snapshot type. |
 | Low ceilings, in outline | Decision 6 and animation.md §8: 32 characters, 60 joints, ≤ 1.0 ms sample, ≤ 0.5 ms skin, ≤ 64 MB. | No `AnimationSettings`. |
 
 ### Addition A — glTF skin and clips through the cook
@@ -125,46 +125,82 @@ What the pipeline does today:
 
 Decision 7 step 1 grades this decode against the f64 reference once that reference exists. Gate A is the byte-level gate and can land first.
 
-### Addition B — replicated animation state
+### Addition B — derived locomotion, cues on the change tick
 
-animation.md §6 already refuses to send joint matrices, and it names the server, the owning client, and the tick. It does not record the bytes, the snapshot rate, or how that sits next to the physics plan. Gameplay networking still waits. There is no `docs/systems/core-networking/plan.md` in the tree. The physics plan is the co-design this record matches: the server is the authority, the tick is `1/60` s (`crates/scene/src/camera.rs:413`), snapshots go out at 20 Hz, the owning client predicts, everyone else takes the snapshot, same-process determinism is required, and cross-platform bit identity of `f32` is not a gate (`docs/systems/physics/plan.md`, Networking).
+The 10 Nov record was 36 bytes per dirty character at 20 Hz. For 1000 visible characters that is `36 × 20 × 1000 = 720000` bytes/s on each client, about 720 KB/s. Phase, blend weights, and clip ids were in every snapshot. Those three are functions of data the session already sends. This section replaces that record. Joint matrices stay local, root motion writes the body, and foot IK stays off the checksum.
 
-The session codec stays in that future plan. Animation defines the record, the way physics defines a replicated body and does not open a socket.
+The session this follows is [PR #214](https://github.com/AnthonyPoschen/genos-engine/pull/214) (ADR 0042) on top of [PR #14](https://github.com/AnthonyPoschen/genos-engine/pull/14) and the approved scene store in [PR #131](https://github.com/AnthonyPoschen/genos-engine/pull/131). Those three are not merged here. Where they name a rate, an id, or a budget, animation uses that name.
 
-**Record.** One dirty character, little-endian, 36 bytes. Order on the wire is `NetId` order.
+- The wire id is the generational scene handle `{ index: u32, generation: u32 }`. There is no `NetId` column and no second tick.
+- A component is dirty when its change tick is newer than the connection's acked baseline. A reader does not bump the tick.
+- Snapshots are unreliable deltas at 20 Hz (every third `1/60` tick). The tick is `crates/scene/src/camera.rs:413`.
+- Interest is the 3×3 block of 32 m cells around the view, plus always-relevant objects, plus the object this connection has input authority for.
+- The pose budget is 1024 bytes of component fields per snapshot per connection. Spawns sit outside that budget. A record header is 13 bytes (index, generation, structural, count, component id, mask), as ADR 0042's outfit example counts it. Field bytes are what the 1024 counts.
+- Priority starts at 0, gains 1 each snapshot opportunity, and gains 1 more for the owned object. Selection sorts by priority, then by snapshots skipped, then by handle index. A written object resets both counters.
+- The owning client predicts and rolls back. Everyone else interpolates the body from snapshots 100 ms back. Cross-platform `f32` bit identity is not a gate.
 
-| Field | Width | Meaning |
+**Derived, and not a field.** Every peer runs this from the quantized pose the physics plan already replicates (millimetre position, smallest-three quaternion, linear velocity in cm/s as `i16`) and from the authority tick `T`.
+
+- Horizontal speed is `vx * vx + vz * vz` on the stored `i16` cm/s samples, computed in `i32`. The speed bucket is the largest `k` in `0..15` with `(25 * k) * (25 * k) <= speed_sq`. That is the same 0.25 m/s step as dividing the square root by 25, and it does not call a square root. Facing is the XZ forward of the quaternion, scaled to integers. `cross = facing_x * vz - facing_z * vx` and `dot = facing_x * vx + facing_z * vz`. The strafe bucket is the sign of `cross` and whether `abs(cross) > abs(dot)`, four values. An equal magnitude takes the `dot` side. The `.ganim` locomotion space maps those two buckets to clip weights. The weights are not on the wire. No `atan2`.
+- Locomotion phase at tick `T` is `(T + salt) mod cycle_ticks` on each blended clip. `cycle_ticks` is that clip's cooked length at 60 Hz, at least 1. `salt = (index * 17 + generation) mod cycle_ticks`. Two peers with the same handle, the same tick, and the same velocity sample produce the same phase and the same weights. They do not integrate phase, so a missed snapshot does not accumulate error. Speed changes the blend, not a stored phase.
+- Foot IK is the visual plant in decision 5. It reads the local physics query. It is not a field and it is not in the checksum.
+- Root motion writes the body. The body is the pose column. Animation does not send a second root.
+- A notify whose time is a fraction of a locomotion clip fires when the derived phase crosses it. Both peers cross it on the same tick when the inputs match. The crossing is not a message.
+
+**Sent: `AnimCue` only.** One column. Its change tick is the dirty signal. The component id is the next free `u16` in ADR 0042's registration table. `MeshRef` is 6 there. `AnimCue` is not 6. An outfit or a skeleton swap writes `MeshRef` (the source SHA-256, 32 field bytes). `AnimCue` does not repeat that hash. A toast that a late joiner does not need may stay the emote notice ADR 0042 already names. Anything still playing when a peer's baseline is 0 is this component, because a notice is not in the baseline.
+
+The authority writes the column when the transition cannot be derived from velocity and facing: an emote, an attack, a hit reaction, or a montage. A write sets the change tick to `T`. The field is absolute, bit-packed, and omitted entirely once the baseline has that tick. That is the delta. There is no xor against the previous cue.
+
+| Bits | Width | Meaning |
 |---|---|---|
-| `net_id` | `u32` | Server-assigned. For a shared scene file it is that file's scene handle (`docs/systems/ecs-scene.md`). |
-| `skin_hash` | `u64` | First eight bytes of the `.gskin` SHA-256, little-endian. A mismatch drops the snapshot for that id. |
-| `state_id` | `u16` | State-machine state. `0` until the graph exists. |
-| `flags` | `u16` | Zero. Pads the header to 16 bytes. A non-zero value fails Gate B. |
-| clip 0, clip 1 | `u16` id, `u16` phase, `u16` weight, each | Phase `0` is the start and `65535` is just before the next loop. A live pair of weights sums to `65535`. An unused slot has weight `0`. |
-| `params` | `4 × u16` | Blend-space inputs, mapped from the range stored in `.ganim`. |
+| kind | 3 | 0 correction, 1 emote, 2 attack, 3 hit, 4 montage. Other values fail the test. |
+| state | 12 | State in `.ganim`. 4096 states. |
+| start_low | 24 | Low 24 bits of the authority tick the cue began. |
+| pad | 1 | Zero. A 1 fails the test. |
+| phase | 16 | Present only for kind 0. Quantized phase at `start_low`, `0` at the start and `65535` just before the next loop. |
 
-An unchanged record sends nothing. The first time a peer sees the id, it sends the full record.
+Kind 1–4 pack to 5 field bytes. A correction packs to 7. The receiver rebuilds the full tick as `(snapshot_tick & 0xFF00_0000) | start_low`, then subtracts `2^24` if that value lies more than `2^23` ticks ahead of the snapshot tick. Playback phase is `(T - start_tick) mod cycle_ticks` from the shared clock. The phase bits exist only so a correction can place the cycle when the clock function is the thing that diverged.
 
-**What stays local.** Joint matrices, the sampled pose, the skinned vertex buffer, the retarget scratch, foot IK, and notify lists. Root motion writes the body. The body then replicates as the physics plan already quantizes it (millimetre position, smallest-three quaternion). The animation record does not carry a second position.
+**Correction.** Every 15 ticks the authority compares gameplay-joint positions from the derived pose with the pose it simulated for the owning client. A joint more than 50 mm away writes kind 0 and bumps the tick. One write. The following snapshots omit it after the ack. Peers apply that phase at `start_tick` and then advance with the clock. Locomotion with no cue keeps a clean tick, including across a speed-bucket change.
 
-**Foot IK and events.** The physics plan already leaves foot plant off the checksum and runs it on the pose that will be drawn. Decision 5 does not put IK on the wire. A notify is a named tick on the `.ganim` graph. The server runs a gameplay notify when the phase crosses it. The client may run a cosmetic notify from the same phase. The record has no event list.
+**Interest bands.** The session's 32 m neighbourhood is the outer cut. Inside it, `animation.far_distance_m` (25 m at Low) splits the animation dirty set:
 
-**Authority.** The server. Clients do not accept one another's animation records.
+| Band | `AnimCue` |
+|---|---|
+| ≤ 25 m, in the neighbourhood, owned, or always-relevant | Cues and corrections enter the priority sort. |
+| In the neighbourhood and past 25 m | State only. A cue bumps the tick. A correction is not written for that connection. The drawn mesh uses the derived locomotion, sampled at `update_rate_far_hz`. |
+| Outside the neighbourhood, not owned, not always-relevant | Absent. Entering the neighbourhood is a spawn. The spawn carries the current cue when one is active, the same way a spawn carries `MeshRef`. |
+| `competitive` and occluded | Absent, with the pose. |
 
-**Prediction and rollback.** The owning client steps the same graph on the `1/60` tick and keeps the record beside the predicted body. On a snapshot for tick T, a mismatch of the quantized body or of this record restores both for that `NetId` and replays later inputs. Other characters are not resimulated. Remote phase snaps to the latest snapshot. A clip of at least 50 ms may interpolate phase for the drawn mesh only, taking the short way around the `u16` wrap. A shorter clip snaps. Gameplay joints on a remote character are not a client hit test. Question 2 stays open. The record is the same if the server evaluates every joint, because the matrices are still local.
+Animation does not keep a second accumulator or a second budget. Field bytes of `AnimCue` count against the 1024. A snapshot that would pass 1024 leaves the rest dirty, priority intact, for the next opportunity. Spawns still go out.
 
-**Determinism.** Pose time is tick × `1/60`, never wall time. Two worlds in one process, given the same `.gskin` bytes and the same inputs, produce the same gameplay-joint positions for 10 000 ticks. Job splits are allowed only when the reduce is in joint-index order (decision 4). A Windows server and a Linux client compare this record and the quantized body, not raw `f32` bits.
+**Bandwidth.** Field bytes are the 5 or the 7. Record bytes add the 13-byte header when the cue is the only dirty component on that object. The scripted crowd is one neighbourhood, so the 32 m cut does not drop anyone: 2% of characters begin a cue each second (`max(1, N / 50)`), and 0.5% need a correction (`max(1, N / 200)`). Each is sent once.
 
-**Headless server.** No window and no Vulkan device. It evaluates gameplay joints and applies root motion to the body. It does not build a skinned vertex buffer. `LoadProfile` is not a type in the tree.
+| Visible characters | Cues/s | Corrections/s | Field bytes/s | Record bytes/s | Rejected 36-byte design |
+|---|---|---|---|---|---|
+| 32 | 1 | 1 | 12 | 38 | `36 × 20 × 32 = 23040` |
+| 200 | 4 | 1 | 27 | 92 | `36 × 20 × 200 = 144000` |
+| 1000 | 20 | 5 | 135 | 460 | `36 × 20 × 1000 = 720000` |
 
-**Gate B.** In-process, no socket, beside decision 7 step 3. `cargo test -p genos-load --test anim_snapshot`. The test moves with the component when the scene crate owns it.
+A walking crowd with a clean `AnimCue` tick sends 0 animation bytes at every size. The 460 record bytes/s at 1000 characters is the few KB/s target. A burst of 1000 cues in one snapshot is `1000 × 5 = 5000` field bytes, and the 1024 cap admits 204 of them. The other 796 wait on the accumulator.
 
-- 10 000 ticks, two worlds, bit-identical gameplay-joint positions.
-- The encoded record is 36 bytes and contains no `f32` and no matrix.
-- An owned-client mismatch at tick T restores the record and replays. A remote id is not stepped.
-- Running a foot-IK pose does not change the checksum.
-- A notify on the graph fires once on the crossing tick and adds no bytes to the record.
+**Authority.** The authority runtime is the only writer. A player enqueues a request. It does not write the column.
 
-`state_id` stays `0` until decision 7 step 5. The IK checksum assertion lands with step 6.
+**Prediction and rollback.** The owning client runs the same graph from its inputs and from the same derived locomotion. On a snapshot for tick `T`, a mismatch of the quantized body or of `AnimCue` restores both for that handle and replays later inputs. Other characters are not resimulated. They draw the interpolated body and the cue phase from the clock. Question 2 stays open. Neither choice puts joint matrices, phase, or blend weights on the wire.
+
+**Determinism.** Two worlds in one process, same handles, same `.ganim`, same quantized velocities, same tick, produce the same locomotion buckets and the same phase for 10 000 ticks, with zero `AnimCue` bytes while nobody starts a cue. Job splits are allowed only when the reduce is in joint-index order (decision 4). Wall time is not an input. A Windows authority and a Linux guest compare the cue bits and the quantized body, not raw `f32`.
+
+**Headless server.** No window and no Vulkan device. It evaluates gameplay joints, applies root motion to the body, and writes `AnimCue`. It does not build a skinned vertex buffer. `LoadProfile` is not a type in the tree.
+
+**Gate B.** In-process, no socket. `cargo test -p genos-load --test anim_cue` until `genos-scene` owns the column, then the test moves with it.
+
+- Locomotion, 10 000 ticks, two worlds: phase and both buckets match, and `AnimCue` field bytes stay 0.
+- The scripted rates above, for 32, 200, and 1000 characters, stay at or under 48, 128, and 512 field bytes/s per client. The 36-byte snapshot planted on every character fails the 1000-character cap.
+- A packed cue is 5 field bytes, a correction is 7, the pad bit is 0, and the payload contains no `f32` and no joint matrix.
+- Sixty-four near characters cue on one tick. The snapshot's `AnimCue` fields stay ≤ 1024 bytes, the unsent cues ship on a later snapshot, and a spawn in the same datagram is still present.
+- A character at 30 m inside the neighbourhood sends a cue and does not send a correction. A character outside the 32 m neighbourhood sends neither.
+- An owned-client mismatch at tick `T` restores `AnimCue` with the body and replays. A remote handle is not stepped.
+- Foot IK does not change the checksum. A locomotion notify fires on the derived crossing and adds no bytes.
 
 ### Addition C — Low preset budget
 
@@ -199,7 +235,7 @@ The vertical field of view is 60° (`crates/scene/src/camera.rs:430`). At 25 m a
 
 - Putting joints inside `GCK1` version 1. The trailer covers the whole file, and another version is rejected, so every current record would fail decode.
 - Waiting on PR #178. That draft is the material record.
-- Sending joint matrices, root-motion deltas, IK targets, or notify lists. The body snapshot and the phase already carry the gameplay result.
+- A 36-byte animation snapshot at 20 Hz. `36 × 20 × 1000 = 720000` bytes/s per client. Locomotion phase and blend weights are derived. `AnimCue` carries only the transitions that derivation cannot see.
 - A second character budget for the Steam Deck. Low is one table.
 - A cross-platform `f32` bit-identity gate. The physics plan already refuses that for the same `genos-math`.
 
@@ -207,4 +243,4 @@ The vertical field of view is 60° (`crates/scene/src/camera.rs:430`). At 25 m a
 
 - Decision 7 is unchanged in order. Gate A can land before its f64 oracle as a byte check. Gate C lands with the settings struct. Gate B lands with the CPU evaluator.
 - The asset plan's row that skins are `loaded, unsupported` changes in the commit that writes `GSK1`, not in this one.
-- Question 1, question 2, question 3, and question 4 stay open. None of them changes the 36-byte record or the `.gskin` section list.
+- Question 1, question 2, question 3, and question 4 stay open. None of them puts phase or blend weights on the wire, and none of them changes the `.gskin` section list.
