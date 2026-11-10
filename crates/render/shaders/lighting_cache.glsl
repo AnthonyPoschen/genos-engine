@@ -4189,6 +4189,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     float wsum = 0.0;
     float trust = 0.0;
     float path_best = -1.0;
+    // A corner under a full set count. Display trust can be 1 for a short
+    // lit texel; this flag stays on the count, so that trust does not hide it.
+    bool under_full = false;
     // Finished sets, weighted like the bilinear corners. A missing corner counts
     // as zero finished sets. Only the compose display path tallies.
     float unfilled_cov = 0.0;
@@ -4205,7 +4208,13 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         uint slot = lighting_cache_find_sized(q, n, mode != 2u, size, pos);
         if (slot == ~0u) {
+            if (mode == 3u && bil > 0.0) {
+                under_full = true;
+            }
             continue;
+        }
+        if (mode == 3u && bil > 0.0 && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - 0.5) {
+            under_full = true;
         }
         // Last frame's winning pixel stores the seed before this frame publishes.
         lighting_sc_seed_commit(slot, k);
@@ -4369,12 +4378,13 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 // A full count, including a real zero, is the texel.
                 sc_trust = 1.0;
             } else if (sets >= 0.5) {
-                // A short count of a lit texel is the emitter blotch. A short
-                // black count, including eight zeros, is not populated, so
-                // the coarse cell shows. sets/64 used to dilute that blotch
-                // for the whole warmup.
-                float y_fine = dot(max(v.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
-                sc_trust = y_fine > 1.0e-3 ? 1.0 : 0.0;
+                // Own samples, not the shown field. The field can be a
+                // neighbour filter while the samples are black. A zero-set
+                // corner never reaches here, so an unclaimed centre stays
+                // on the coarse cell.
+                vec3 own_rgb = max(cache.v[3u * slot + 2u].rgb, vec3(0.0)) * lighting_sc_sun_gain(slot);
+                float y_own = dot(own_rgb, vec3(0.2126, 0.7152, 0.0722));
+                sc_trust = y_own > 1.0e-3 ? 1.0 : 0.0;
             }
         }
         if ((lighting_sc_flags() & 32u) != 0u) {
@@ -4403,7 +4413,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
     }
 #ifndef GENOS_COMPOSE_MAINT
-    if (lighting_sc_display && mode == 3u && trust < 1.0) {
+    if (lighting_sc_display && mode == 3u && under_full) {
         atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);
     }
 #endif
@@ -5242,9 +5252,13 @@ void lighting_svgf_push(uint slot) {
         float y_target = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
         // A full count of a black field is dark. Below that, a black field
         // with a dark target is not evidence, so the coarser cell is still
-        // the prior. A bright target is the filter's blotch: the prior would
-        // hold the black field and the edge snap below would never run.
-        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0))) && !(y_target > 1.0e-3)) {
+        // the prior. No own samples stays on that prior too: a bright target
+        // there is the neighbours, and the 8,012 unclaimed centres have no
+        // slot to snap. A short count with a bright target is the filter's
+        // blotch, and the prior would hold the black field so the edge snap
+        // below would never run.
+        bool no_samples = sets < 0.5;
+        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0))) && (no_samples || !(y_target > 1.0e-3))) {
 #ifdef GENOS_COMPOSE_NO_WALK
             vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
 #else

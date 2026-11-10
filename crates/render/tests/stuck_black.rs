@@ -83,8 +83,16 @@ fn eight_zero_sets_are_not_resolved() {
     assert!(cache.contains("atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);"));
     assert!(cache.contains("clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0)"));
     assert!(
-        cache.contains("y_fine > 1.0e-3"),
-        "a short lit texel is trust 1; a short black texel is not sets/64"
+        cache.contains("y_own > 1.0e-3"),
+        "a short lit texel is trust 1 from its own samples, not the shown field"
+    );
+    assert!(
+        cache.contains("under_full"),
+        "a short lit count stays in the under-full probe"
+    );
+    assert!(
+        !cache.contains("&& trust < 1.0"),
+        "display trust must not decide the under-full count"
     );
     assert!(
         cache.contains("!(y_target > 1.0e-3)"),
