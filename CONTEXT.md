@@ -235,3 +235,47 @@ _Avoid_: Sleep group, simulation island
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline
+
+**Clip**:
+Cooked or decoded PCM a sound source plays.
+_Avoid_: Sample bank, cue
+
+**Sound source**:
+One playing clip. The mix type is `Source`.
+_Avoid_: Channel
+
+**Voice**:
+The pool slot that keeps one sound source playing across quanta. `VoiceId` names it.
+_Avoid_: Channel, track
+
+**Listener**:
+The pose the mix hears from. The camera supplies the position, the facing, and the velocity.
+_Avoid_: Ear, audio listener object
+
+**Audio bus**:
+A named sum of sound sources. World, music, and UI sum into the master output.
+_Avoid_: Mixer group, channel group
+
+**Transmission**:
+The gain along the straight path through occluders, `exp(-absorption * thickness)`.
+_Avoid_: Occlusion ray, obstruction
+
+**Sound device**:
+The operating-system playback endpoint. Linux writes ALSA, Windows writes WASAPI, and macOS writes CoreAudio. A console adds an endpoint that writes the same finished buffer.
+_Avoid_: Audio backend, audio engine
+
+**Resident clip**:
+A clip decoded before it plays.
+_Avoid_: In-memory bank
+
+**Disk-fed clip**:
+A clip whose samples are read from the cooked file ahead of the playhead.
+_Avoid_: Stream, streaming buffer
+
+**Reverb zone**:
+A world box that sets the listener's reverb send. Transmission is what changes the straight-path gain.
+_Avoid_: Reverb volume, audio volume
+
+**Command tape**:
+The timed mix commands an offline render plays. The cross-platform test hashes that render.
+_Avoid_: Event list, sound script

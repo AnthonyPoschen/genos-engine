@@ -46,6 +46,16 @@ The transmission pass reads the resident occluder bounds and absorption. The cam
 
 WASAPI and CoreAudio are not run from this Linux machine.
 
+Buses, a held device, disk-fed clips, reverb zones, a console write, and a cross-platform buffer hash are the plan in [the audio design](audio-design.md). This record stays the description of the code until a stage in that design lands.
+
+## Networking
+
+- **Replicated state.** None. The mixed buffer stays in the process that called `mix`.
+- **Authority.** That process.
+- **Prediction / rollback.** None. `mix` does not rewind.
+- **Determinism.** `mix` is a pure function of its arguments. A stored hash of that buffer is stage 2 of the audio design. Today's tests check relationships.
+- **Headless server.** No sound device. The server does not call `submit`. The design's play-command lines replace this section in the commit that sends them.
+
 ## Decisions
 
-[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. Loading stays decode-only. See [Loading](loading.md).
+[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. [ADR 0040](../adr/0040-one-audio-mix-device-outputs-only.md) (proposed) keeps this mix and these device outputs. Loading stays decode-only. See [Loading](loading.md).

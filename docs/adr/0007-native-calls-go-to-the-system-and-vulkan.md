@@ -7,3 +7,5 @@ The link line is the system library for that native call. Window and input use t
 Vulkan calls use the Vulkan loader. macOS links MoltenVK. [ADR 0003](0003-one-vulkan-renderer-moltenvk-on-macos.md) records that choice. Declarations and the Objective-C shim live in this repository. The declarations follow the `extern` style of `input-zig`.
 
 **Rejected:** `winit`, SDL, GLFW, `wgpu`, `ash`, `vulkano`, `x11rb`, `cpal`, `rodio`, and `tokio`.
+
+The proposed audio plan keeps the mix in this repository and keeps ALSA, WASAPI, and CoreAudio as writes of that mix. See [ADR 0040](0040-one-audio-mix-device-outputs-only.md).

@@ -33,7 +33,7 @@ Each record uses these headings:
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
-- [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
+- [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission. The plan for one mix and device-output-only writes is [audio-design.md](audio-design.md) ([ADR 0040](../adr/0040-one-audio-mix-device-outputs-only.md), proposed).
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the probes, the commands, the scripts, the captures, and the ground-truth reference.
 
@@ -52,5 +52,6 @@ These are plans. They are not system records. A step edits the matching record w
 - [Fog and volumetric lighting](fog-and-volumetric-lighting-design.md): a budgeted froxel volume, height fog, local volumes, shadowed shafts, and a world-cache read. [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md) is accepted. The froxel holds height fog and local volumes. Sun and point-lamp shafts use traced shadows. The world-cache read waits for lighting phase 3. `fog-check` grades the closed forms and each live renderer row. `debug/lighting` exposes the Fog page and `get_fog_settings`, `set_fog_settings`, and `get_fog_stats`.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 - [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
+- [Audio design](audio-design.md): one mix in `genos-audio`, device outputs that only write that mix, disk-fed clips, reverb zones, and a bit-identical offline hash ([ADR 0040](../adr/0040-one-audio-mix-device-outputs-only.md), proposed).
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
