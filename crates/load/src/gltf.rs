@@ -71,8 +71,8 @@ use crate::mips::{mip_chain, Mip, MipSpace};
 use crate::pages::miss_colour;
 use crate::png::Image;
 use crate::skin::{
-    joint_index, pack_influences, Channel, ChannelPath, Clip, InfluenceFlags, Interpolation, Joint,
-    PackedInfluences, Skin, IDENTITY_BIND,
+    joint_index, pack_influences, Channel, ChannelPath, Clip, InfluenceFlags, InfluenceSet,
+    Interpolation, Joint, PackedInfluences, Skin, IDENTITY_BIND,
 };
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
@@ -1123,7 +1123,14 @@ impl Reader<'_> {
                 let later = (key.starts_with("JOINTS_") || key.starts_with("WEIGHTS_"))
                     && !matches!(
                         key.as_str(),
-                        "JOINTS_0" | "WEIGHTS_0" | "JOINTS_1" | "WEIGHTS_1"
+                        "JOINTS_0"
+                            | "WEIGHTS_0"
+                            | "JOINTS_1"
+                            | "WEIGHTS_1"
+                            | "JOINTS_2"
+                            | "WEIGHTS_2"
+                            | "JOINTS_3"
+                            | "WEIGHTS_3"
                     );
                 if later {
                     notes.push(format!("{path} omitted {key}"));
@@ -1157,11 +1164,37 @@ impl Reader<'_> {
         if extra_j.is_some() != extra_w.is_some() {
             return Err(LoadError::Unrecognized);
         }
-        let packed = pack_influences(&joints, &weights, extra_j.as_deref(), extra_w.as_deref())?;
+        let mut further_j = Vec::new();
+        let mut further_w = Vec::new();
+        for (joints_key, weights_key) in [("JOINTS_2", "WEIGHTS_2"), ("JOINTS_3", "WEIGHTS_3")] {
+            let joints_acc = opt_usize(attrs, joints_key)?;
+            let weights_acc = opt_usize(attrs, weights_key)?;
+            if joints_acc.is_some() != weights_acc.is_some() {
+                return Err(LoadError::Unrecognized);
+            }
+            if let (Some(joints_acc), Some(weights_acc)) = (joints_acc, weights_acc) {
+                further_j.push(self.floats::<4>(joints_acc)?);
+                further_w.push(self.floats::<4>(weights_acc)?);
+            }
+        }
+        let further: Vec<InfluenceSet> = further_j
+            .iter()
+            .zip(further_w.iter())
+            .map(|(joints, weights)| (joints.as_slice(), weights.as_slice()))
+            .collect();
+        let packed = pack_influences(
+            &joints,
+            &weights,
+            extra_j.as_deref(),
+            extra_w.as_deref(),
+            &further,
+        )?;
         if packed.flags.reduced {
             notes.push(format!(
                 "{path} kept the four largest influences and renormalized"
             ));
+        } else if packed.flags.renormalized {
+            notes.push(format!("{path} renormalized influence weights"));
         }
         if packed.flags.zero_sum {
             notes.push(format!("{path} zero weight sum wrote weight 1 on joint 0"));
