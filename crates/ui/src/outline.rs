@@ -6,9 +6,7 @@
 //! grid of `px` by `px` covering the em square. Y in the atlas grows down.
 
 #![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 
 use std::collections::BTreeMap;
 
@@ -328,10 +326,17 @@ fn grid_side(px: f32) -> u32 {
     if !side.is_finite() || side < 1.0 {
         return 1;
     }
-    if side > 256.0 {
-        return 256;
+    whole_units(side, 256)
+}
+
+fn whole_units(value: f32, limit: u32) -> u32 {
+    let mut count = 0u32;
+    let mut cursor = 0.0_f32;
+    while count < limit && cursor + 1.0 <= value {
+        cursor += 1.0;
+        count = count.saturating_add(1);
     }
-    side as u32
+    count.max(1)
 }
 
 #[derive(Clone, Copy)]
