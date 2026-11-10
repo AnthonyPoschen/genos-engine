@@ -7,8 +7,12 @@
 // texel whose neighbour read has a corner. A slant has no fine texel: flag
 // 2048 returns that same read, and the skip is that read having a corner.
 // Own samples, a parent, a resample, a miss, and a trust gate that hands the
-// pixel back to the probes are not this. Trust is not the test. A mover is
-// this when the world-cell read at its current position and true normal
+// pixel back to the probes are not this. While a lamp is settling, compose
+// makes that exception itself (`lighting_settle_own_covered`): a texel that
+// already has samples still skips the probe evaluate. The picture stays the
+// filtered field. The exception stays out of `lighting_sh_texel_detail_covers`.
+// Place inlines that function, and the ring walk there overflowed lavapipe's
+// shader stack. Trust is not the test. A mover is this when the world-cell read at its current position and true normal
 // accepts a corner: that read is what the pixel shows, and it does not seed.
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
@@ -22,13 +26,86 @@
 // whose read is empty still read the probes. Place, trace, gather, and
 // filter still run unless surface_cache.sh_probe_retire is on and that
 // probe's bilinear footprint has no uncovered surface.
+// Same gates as lighting_sh_texel_detail_covers, except a fine texel that
+// already has samples still skips the probe read while a lamp is settling.
+// The colour is still the filtered field. Compose is the only caller. Place
+// keeps the strict function, so this loop is not inlined into that shader.
+bool lighting_settle_own_covered(vec3 pos, vec3 n, vec3 wpos, bool obj) {
+    if (lighting_world_mode() != 3u || !lighting_lamp_settling()) {
+        return false;
+    }
+    if (obj) {
+        float salt = lighting_obj_salt;
+        lighting_obj_salt = 0.0;
+        bool hit = lighting_sh_texel_detail_on()
+            && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+        lighting_obj_salt = salt;
+        return hit;
+    }
+    if (lighting_sc_slanted(n)) {
+        return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+    }
+    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
+        return false;
+    }
+    if ((lighting_sc_flags() & (32u | 512u)) != 0u) {
+        return false;
+    }
+    if (!lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u) {
+        return false;
+    }
+    if (!LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) {
+        return false;
+    }
+    float size = lighting_cell_size(wpos);
+    if (size > LIGHTING_WRC_CELL_SIZE) {
+        return false;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - LIGHTING_CELL_HALF;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    bool any = false;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (bil <= 0.0) {
+            continue;
+        }
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + LIGHTING_CELL_HALF;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint slot = lighting_cache_find_sized(q, n, false, size, pos);
+        if (slot == ~0u || lighting_sc_stale(slot)) {
+            return false;
+        }
+        if (lighting_sh_read(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
+            return false;
+        }
+        any = true;
+    }
+    return any;
+}
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;
     lighting_px_world_w = 0.0;
+    lighting_px_shade = 8u;
+    lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    bool covered = mode != 0u && lighting_sh_texel_detail_covers(pos, n, pos, om != ~0u);
+    bool covered = false;
+    if (mode != 0u) {
+        // Settling uses the compose-only read so a texel with samples can
+        // still skip the probe evaluate. Quiet frames stay on the strict test.
+        if (lighting_sh_texel_detail_on() && lighting_lamp_settling()) {
+            covered = lighting_settle_own_covered(pos, n, pos, om != ~0u);
+        } else {
+            covered = lighting_sh_texel_detail_covers(pos, n, pos, om != ~0u);
+        }
+    }
     float tile = float(pc.params.y);
     vec2 g = (vec2(p) + 0.5) / tile - 0.5;
     ivec2 g0 = ivec2(floor(g));
@@ -95,8 +172,15 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         if (covered) {
             return world.rgb;
         }
+        // Trust under a half means the probes own the pixel. A higher trust
+        // still shows the world colour; the path view's green channel marks
+        // the mix.
+        if (world.w < LIGHTING_CACHE_HAS_W) {
+            lighting_px_shade = 3u;
+        }
         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
     lighting_sc_display = false;
+    lighting_px_shade = 3u;
     return probes;
 }

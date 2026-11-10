@@ -119,7 +119,8 @@ impl Host for Stage {
                 "Lamp power",
                 self.power as f64,
                 (0.0, 4.0),
-                0.05,
+                // A 1.5% dim (0.985) has to land on a step. 0.05 snapped it back to 1.
+                0.005,
                 "",
             ),
             Knob::choice(

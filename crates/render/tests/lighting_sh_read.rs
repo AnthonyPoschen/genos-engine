@@ -748,7 +748,14 @@ fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
         "the unused axis-skip constant is gone"
     );
     assert!(screen.contains("if (detail_kept)"));
+    assert!(
+        !screen.contains("lighting_sc_parent_bilerp") && !screen.contains("lighting_sc_parent("),
+        "the compose parent walk ran only with texel detail off"
+    );
     let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
     assert!(shown.contains("lighting_sh_texel_detail_on()"));
-    assert!(shown.contains("!lighting_sh_texel_detail_on()"));
+    assert!(
+        !shown.contains("lighting_sc_wrc_now"),
+        "the stale-field per-axis read ran only with texel detail off"
+    );
 }

@@ -21,7 +21,7 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
-use genos_math::f32_from_f64;
+use genos_restir_ref::reservoir::f32_from_f64;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_initial.spv"));
 const SPV_TEMPORAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_temporal.spv"));

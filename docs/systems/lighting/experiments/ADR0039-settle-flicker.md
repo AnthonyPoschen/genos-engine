@@ -1,7 +1,7 @@
 # ADR 0039: static settle flicker and the camera-step snap
 
 - **Date:** 2026-11-09
-- **Result:** measured. No shader change. The flicker is the legacy screen-probe display and the surface-cache relight while the drain is open. SH texel detail, SH texel ray cut, and SH probe retire stay out of that window by the accepted predicate. The camera-step luminance jump is small on both paths at 160×90 on lavapipe.
+- **Result:** the tables below are the legacy baseline, measured before the cell path was allowed into the drain. This branch turns the four High and Medium bits on and, while `lighting_lamp_settling()` is true, shows the live cell (including a texel that already has samples), skips the screen-probe evaluate for that pixel, and cuts fine-texel rays when that read agrees. settle0 max and popped are compared with the legacy column. Step and snap must be no worse. Thresholds are unchanged.
 - **Commit:** this change
 
 ## What was asked
@@ -63,8 +63,39 @@ SH texel detail covers an empty fine texel whose neighbour read is lit, and only
 
 A camera step clears the freeze (`still` goes to 0) and the probe evaluate returns. In these two scenes the returned estimate matches the frozen picture within the numbers above. The field is not dropped.
 
+## This branch
+
+Lavapipe, same scripts, same size, High with the four bits on. The picture is one estimate the whole time. An empty texel, and a texel that has samples but no stored field yet, shows the neighbour read. The push starts a stored field from that read and moves it toward the filter target. There is no hold. A lamp change that reaches a texel since it was sampled retraces it. Ring expiry does not switch sources. The hall rows below were measured on this commit at 160×90. Legacy numbers are the table above. The room rows are the previous measurement and were not re-run after the hold was removed.
+
+Room, full view:
+
+| Window | Legacy | This branch |
+|---|---|---|
+| settle0 mean / max / popped | 0.00337 / 0.06079 / 0.561 | 0.00066 / 0.03388 / 0.11556 |
+| settle2 | 0.00342 / 0.13868 / 0.526 | 0.00054 / 0.01870 / 0.13083 |
+| settle11 | 0.00011 / 0.01815 / 0.00882 | 0.00004 / 0.00511 / 0.00028 |
+| held, after settle | 0 / 0 / 0, mean 0.14488 | 0 / 0 / 0, mean 0.14377 |
+| step, first frames mean / max | 0 / 0.00399 | 0 / 0.00397 |
+| snap mean abs / max abs / mean luminance delta | 0.451 / 8 / −0.00014 | 0.24181 / 4 / −0.00009 |
+
+`picture_settled` was frame 305. The path trace stopped at 16 spp, noise 0.479. `mean_rel` was 0.116 settled and 0.116 on the step, reference mean 0.530.
+
+Hall, bounce view:
+
+| Window | Legacy | This branch |
+|---|---|---|
+| settle0 mean / max / popped | 0.00491 / 0.172 / 0.860 | 0.00082 / 0.06338 / 0.03701 |
+| ring, frame 122 mean / max / popped | (the old script did not grade this window) | 0.00056 / 0.00475 / 0.00493 |
+| held, after the wait | 0 / 0 / 0 | 0.00003 / 0.00427 / 0.00021 |
+| step, first frames mean / max / popped | 0.00007 / 0.028 / 0.0078 | 0.00009 / 0.00932 / 0.00250 |
+| snap mean abs / max abs / over 8 / mean luminance delta | 0.947 / 29 / 0.014 / −0.00090 | 1.989 / 72 / 0.00917 / −0.00495 |
+
+The hall ring window at frame 122, which is the lamp-ring expiry, stays inside the legacy settle ceiling. The old failure was a popped share of 0.932 and a max of 0.204 in that window. The hall step is inside the legacy step ceiling. The hall snap max is 72 against the legacy 29. The pixels are the column the yaw uncovers: the step frame shows the neighbour read and the settled frame shows the filtered field. Pose B did settle. Pose A's wait returned with `settled` false and `still_frames` 303.
+
 ## What this leaves
 
-The flicker sits in the legacy relight and the screen-probe display for the frames the accepted predicate leaves on that path. This change does not patch that path. Widening coverage or the ray cut so the cell is the picture while the lamp is still settling would change that predicate: the ray-cut proof treats a settling lamp as not held, and coverage requires a quiet light and an empty texel. That is a later design, with its own picture check against the path trace. It is not a threshold change and it is not a look hack.
+The baseline flicker sits in the legacy relight and the screen-probe display for the frames the old predicate left on that path. This branch changes that predicate. The cell mean keeps its ordinary blend while a lamp is settling. A lamp hint no longer replaces a fine texel's mean with the current set when texel detail is on; the mean still moves, at most by the world-cell change floor. Compose's `lighting_settle_own_covered` still skips the probe evaluate for a covered texel that already has samples. `lighting_compact_hold_texel_rays` returns false when a lamp change reaches the texel since it was sampled, so the sparse ratio does not freeze a small dim. `lighting_sh_texel_detail_covers` stays strict so place does not inline the ring walk. A disagreeing texel, a stale texel, a nearby move, and an object-local texel still keep their rays. Quiet frames still show own samples and still read probes. The ray-cut proof's lamp row is a miss. The numeric gates (blotch 0.014, cell energy 0.9, linger 0.05, lag 0.9, turn 0.403) are unchanged.
 
-The big camera-step snap is not reproduced at 160×90 on lavapipe for this room or this hall pose. A 1080p run on the owner's machine can repeat the same two scripts; lavapipe frame time is not that measurement.
+A texel with no stored field shows the neighbour read. The push starts the stored field from that read, halfway to the filter target, and later pushes move by a sixteenth. There is no hold. Detail off writes the filter straight through. `lighting_sh_texel_detail_covers` stays strict.
+
+The hall snap at 160×90 is reproduced: max 72 against the legacy 29, on the column the yaw uncovers. The room snap in the table above is the previous measurement. A 1080p run on the owner's machine can repeat the same two scripts; lavapipe frame time is not that measurement.

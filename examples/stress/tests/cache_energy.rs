@@ -2651,11 +2651,12 @@ fn a_preset_env_clears_a_struct_sh_flag_and_acceptance_refuses_it() {
     let _preset = EnvSet::set("GENOS_LIGHTING_PRESET", Some("high"));
     let cleared = EnvSet::set("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", None);
     let mut settings = LightingSettings::preset(LightingPreset::High);
-    settings.surface_cache.sh_cells = true;
+    settings.surface_cache.sh_cells = false;
+    settings.surface_cache.sh_texel_detail = false;
     settings.apply_env().expect("apply_env");
     assert!(
-        !settings.surface_cache.sh_cells,
-        "GENOS_LIGHTING_PRESET replaces the struct and clears sh_cells when the key is unset"
+        settings.surface_cache.sh_cells && settings.surface_cache.sh_texel_detail,
+        "GENOS_LIGHTING_PRESET replaces the struct with High, which stores the directional product"
     );
     drop(cleared);
     let _sh_on = EnvSet::set("GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS", Some("1"));

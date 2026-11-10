@@ -31,6 +31,7 @@ const float RAY_OFF = 0.2;
 const float RAY_COARSE_SIZE = 0.5;
 const float RAY_MOVE_R = 4.0;
 const float RAY_OBJ = 2.0;
+const float RAY_LAMP_RANGE = 1.0e6;
 const vec3 RAY_UP = vec3(0.0, 1.0, 0.0);
 const vec3 RAY_DOWN = vec3(0.0, -1.0, 0.0);
 const uint RAY_STABLE = 0u;
@@ -231,7 +232,20 @@ void main() {
                 cache.v[LIGHTING_SC_OBJ_AT + texel].x = RAY_OBJ;
             }
             if (mode == RAY_LAMP) {
-                ckeys.key[LIGHTING_WRC_RING_AT + 8u] = lighting_frame();
+                // The lamp changed after this texel was sampled, and the ring
+                // reaches it. The sparse ratio would still hold. The rays stay.
+                cache.v[LIGHTING_SC_OBJ_AT + texel].y = uintBitsToFloat(0u);
+                uint ra = LIGHTING_WRC_RING_AT;
+                ckeys.key[ra] = floatBitsToUint(p.x);
+                ckeys.key[ra + 1u] = floatBitsToUint(p.y);
+                ckeys.key[ra + 2u] = floatBitsToUint(p.z);
+                ckeys.key[ra + 3u] = floatBitsToUint(p.x);
+                ckeys.key[ra + 4u] = floatBitsToUint(p.y);
+                ckeys.key[ra + 5u] = floatBitsToUint(p.z);
+                ckeys.key[ra + 6u] = floatBitsToUint(RAY_LAMP_RANGE);
+                ckeys.key[ra + 7u] = floatBitsToUint(1.0);
+                ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
+                ckeys.key[ra + 9u] = floatBitsToUint(1.0);
             }
             if (mode == RAY_MOVE) {
                 uint at = lighting_change_at();
