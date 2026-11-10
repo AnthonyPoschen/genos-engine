@@ -1533,6 +1533,8 @@ const float LIGHTING_DN_MIN_SETS = 8.0;
 // Sets before a cell may count as resolved. The perceptual stop and the
 // A-SVGF resolved test both used to fire at LIGHTING_DN_MIN_SETS.
 const float LIGHTING_SC_FULL_SETS = 64.0;
+// Half a count. `t < N - LIGHTING_SC_HALF` is fewer than N whole sets.
+const float LIGHTING_SC_HALF = 0.5;
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -3474,7 +3476,7 @@ bool lighting_sc_settled(uint slot, float t) {
     // Below a full set count the cell stays due. The perceptual stop used to
     // fire at LIGHTING_DN_MIN_SETS when the relative error looked small, which
     // a zero mean always does.
-    if (floor(t) < reach - 0.5) {
+    if (floor(t) < reach - LIGHTING_SC_HALF) {
         return false;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
@@ -3727,7 +3729,7 @@ bool lighting_compact_hold_texel_rays(uint slot) {
     // the rays, so a texel whose first sets were zero never reached a full
     // count. Hold only once this texel and the live cell both have
     // LIGHTING_SC_FULL_SETS. A full count of a real zero may then hold.
-    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - 0.5) {
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - LIGHTING_SC_HALF) {
         return false;
     }
     if (lighting_sh_blend_trust < 1.0) {
@@ -4106,14 +4108,17 @@ vec4 lighting_sc_debug_population(vec3 pos, vec3 n) {
     }
     vec3 tp;
     vec3 tn;
-    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * 0.02)) {
+    // 2 cm along the stored normal, the cache-ray origin offset.
+    const float origin_m = 0.02;
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * origin_m)) {
         size += 1.0;
     }
     float gain = lighting_sc_sun_gain(s);
     vec3 own = max(cache.v[3u * s + 2u].rgb, vec3(0.0)) * gain;
-    float own_l = dot(own, vec3(0.2126, 0.7152, 0.0722));
+    float own_l = dot(own, lw);
     vec4 seed = lighting_sc_seed(s);
-    float seed_l = dot(max(seed.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+    float seed_l = dot(max(seed.rgb, vec3(0.0)), lw);
     float sets = floor(max(cache.v[3u * s + 2u].w, 0.0));
     return vec4(size, sets, own_l, seed_l);
 }
@@ -5186,7 +5191,7 @@ void lighting_svgf_push(uint slot) {
         float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
         // A full count of a black field is dark. Below that, a black field
         // is not evidence, so the coarser cell is still the prior.
-        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0)))) {
+        if (sets < LIGHTING_SC_FULL_SETS - LIGHTING_SC_HALF && !any(greaterThan(prev, vec3(0.0)))) {
 #ifdef GENOS_COMPOSE_NO_WALK
             vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
 #else
