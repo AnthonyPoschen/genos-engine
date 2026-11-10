@@ -1,7 +1,28 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Calls the public `genos-load` API from a second package.
 //!
@@ -10,8 +31,8 @@
 use std::path::{Path, PathBuf};
 
 use genos_load::{
-    load_animation, load_font, load_image, load_material, load_mesh, load_pcm, load_texture,
-    load_texture_map, FileSource, MemorySource,
+    load_font, load_image, load_material, load_mesh, load_pcm, load_texture, load_texture_map,
+    sample_channel, Channel, ChannelPath, FileSource, Interpolation, MemorySource,
 };
 
 const QUAD: [u8; 16] = [
@@ -46,11 +67,6 @@ color 0.25 0.5 0.75
 texture stone.png
 ";
 
-const ANIMATION: &str = "\
-key 0 0 0 0 0 0 0 1 1 1 1
-key 2 4 6 8 0 0.70710677 0 0.70710677 3 5 7
-";
-
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../load/fixtures")
@@ -58,7 +74,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn loads_png_texture_map_mesh_material_animation_wav_and_font() {
+fn loads_png_texture_map_mesh_material_clip_wav_and_font() {
     let png = std::fs::read(fixture("quad.png")).expect("png fixture");
     let from_memory = load_image(&MemorySource::new(&png)).expect("memory png");
     let from_path = load_image(&FileSource::new(fixture("quad.png"))).expect("path png");
@@ -119,11 +135,16 @@ fn loads_png_texture_map_mesh_material_animation_wav_and_font() {
     assert_eq!(material.color, [0.25, 0.5, 0.75]);
     assert_eq!(material.texture.as_deref(), Some("stone.png"));
 
-    let animation = load_animation(&MemorySource::new(ANIMATION.as_bytes())).expect("animation");
-    let pose = animation.sample(1.0).expect("halfway");
-    assert_eq!(pose.translation, [2.0, 3.0, 4.0]);
-    assert_eq!(pose.scale, [2.0, 3.0, 4.0]);
-    assert_ne!(pose.rotation, animation.keys[0].pose.rotation);
+    let channel = Channel {
+        joint: 0,
+        path: ChannelPath::Translation,
+        interpolation: Interpolation::Linear,
+        times: vec![0.0, 2.0],
+        values: vec![0.0, 0.0, 0.0, 4.0, 6.0, 8.0],
+    };
+    let mut mid = [0.0; 3];
+    assert!(sample_channel(&channel, 1.0, &mut mid));
+    assert_eq!(mid, [2.0, 3.0, 4.0]);
 
     let wav_bytes = wav(22050, 2, &[0, 1000, -1000, 32767]);
     let pcm = load_pcm(&MemorySource::new(&wav_bytes)).expect("wav");
