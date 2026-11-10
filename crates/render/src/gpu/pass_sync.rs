@@ -101,13 +101,40 @@ pub(crate) fn reflect_pass_out() -> DepMasks {
 #[cfg(test)]
 mod tests {
     use super::{
-        reflect_pass_in, scene_pass_in, COLOR_ATTACHMENT_OUTPUT, DEPTH_WRITE, EARLY_FRAGMENT_TESTS,
-        LATE_FRAGMENT_TESTS,
+        reflect_pass_in, reflect_pass_out, scene_pass_in, scene_pass_out, COLOR_ATTACHMENT_OUTPUT,
+        DEPTH_WRITE, EARLY_FRAGMENT_TESTS, LATE_FRAGMENT_TESTS,
     };
+
+    fn body_calls(source: &str, func: &str, helper: &str) -> bool {
+        let Some(start) = source.find(func) else {
+            return false;
+        };
+        let rest = &source[start + func.len()..];
+        let end = rest.find("\n    fn ").unwrap_or(rest.len());
+        rest[..end].contains(helper)
+    }
 
     #[test]
     fn depth_clear_waits_for_the_layout_transition() {
         for dep in [scene_pass_in(), reflect_pass_in()] {
+            assert_eq!(
+                dep.src_stage & EARLY_FRAGMENT_TESTS,
+                EARLY_FRAGMENT_TESTS,
+                "src stage {:#x}",
+                dep.src_stage
+            );
+            assert_eq!(
+                dep.src_stage & LATE_FRAGMENT_TESTS,
+                LATE_FRAGMENT_TESTS,
+                "src stage {:#x}",
+                dep.src_stage
+            );
+            assert_eq!(
+                dep.src_access & DEPTH_WRITE,
+                DEPTH_WRITE,
+                "src access {:#x}",
+                dep.src_access
+            );
             assert_eq!(
                 dep.dst_stage & EARLY_FRAGMENT_TESTS,
                 EARLY_FRAGMENT_TESTS,
@@ -133,5 +160,51 @@ mod tests {
                 dep.dst_access
             );
         }
+        for dep in [scene_pass_out(), reflect_pass_out()] {
+            assert_eq!(
+                dep.src_stage & EARLY_FRAGMENT_TESTS,
+                EARLY_FRAGMENT_TESTS,
+                "out src stage {:#x}",
+                dep.src_stage
+            );
+            assert_eq!(
+                dep.src_stage & LATE_FRAGMENT_TESTS,
+                LATE_FRAGMENT_TESTS,
+                "out src stage {:#x}",
+                dep.src_stage
+            );
+            assert_eq!(
+                dep.src_access & DEPTH_WRITE,
+                DEPTH_WRITE,
+                "out src access {:#x}",
+                dep.src_access
+            );
+        }
+        let scene = include_str!("../gpu.rs");
+        assert!(
+            body_calls(scene, "fn make_render_pass", "pass_sync::scene_pass_in()"),
+            "make_render_pass external dependency"
+        );
+        assert!(
+            body_calls(scene, "fn make_render_pass", "pass_sync::scene_pass_out()"),
+            "make_render_pass outgoing dependency"
+        );
+        let reflect = include_str!("../reflections_frame.rs");
+        assert!(
+            body_calls(
+                reflect,
+                "fn make_reflect_pass",
+                "pass_sync::reflect_pass_in()"
+            ),
+            "make_reflect_pass external dependency"
+        );
+        assert!(
+            body_calls(
+                reflect,
+                "fn make_reflect_pass",
+                "pass_sync::reflect_pass_out()"
+            ),
+            "make_reflect_pass outgoing dependency"
+        );
     }
 }

@@ -489,7 +489,8 @@ impl Renderer {
             .saturating_add(lighting.hdr_encode.size)
             .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
-            .saturating_add(lighting.meter_dev.size)
+            .saturating_add(lighting.meter_dev[0].size)
+            .saturating_add(lighting.meter_dev[1].size)
             .saturating_add(lighting.meter_host[0].size)
             .saturating_add(lighting.meter_host[1].size);
         bytes as f64
