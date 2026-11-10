@@ -111,43 +111,70 @@ impl Package {
     ///
     /// A missing file is I/O. A hash that differs is corrupt.
     pub fn verify(&self, dir: &Path) -> Result<usize, CookedError> {
+        self.verify_parts(dir, true)
+    }
+
+    /// Geometry, textures, and source objects. A `skin=` token is recognized and
+    /// not checked, so a bad `.gskin` can keep the rigid mesh.
+    ///
+    /// # Errors
+    ///
+    /// A missing geometry file is I/O. A hash that differs is corrupt.
+    pub fn verify_geometry(&self, dir: &Path) -> Result<usize, CookedError> {
+        self.verify_parts(dir, false)
+    }
+
+    fn verify_parts(&self, dir: &Path, check_skin: bool) -> Result<usize, CookedError> {
         for line in &self.lines {
-            let mut parts = line.split(' ');
-            let asset = parts.next().ok_or(CookedError::Corrupt("manifest line"))?;
-            let cook = parts
-                .next()
-                .and_then(|p| p.strip_prefix("cook="))
-                .ok_or(CookedError::Corrupt("manifest line"))?;
-            let inputs = parts
-                .next()
-                .and_then(|p| p.strip_prefix("inputs="))
-                .ok_or(CookedError::Corrupt("manifest line"))?;
-            let id = unhex(asset)?;
-            if hex(&sha256(&std::fs::read(cooked_path(dir, &id))?)) != cook {
-                return Err(CookedError::Corrupt(
-                    "record hash differs from the manifest",
-                ));
-            }
-            if let Some(gtex) = parts.next() {
-                let gtex = gtex
-                    .strip_prefix("gtex=")
-                    .ok_or(CookedError::Corrupt("manifest line"))?;
-                if hex(&sha256(&std::fs::read(textures_path(dir, &id))?)) != gtex {
-                    return Err(CookedError::Corrupt(
-                        "texture hash differs from the manifest",
-                    ));
-                }
-            }
-            for input in inputs.split(',') {
-                let bytes = std::fs::read(object_path(dir, &unhex(input)?))?;
-                if hex(&sha256(&bytes)) != input {
-                    return Err(CookedError::Corrupt("object hash differs from its name"));
-                }
-            }
+            verify_line(dir, line, check_skin)?;
         }
         Ok(self.lines.len())
     }
+}
 
+fn verify_line(dir: &Path, line: &str, check_skin: bool) -> Result<(), CookedError> {
+    let mut parts = line.split(' ');
+    let asset = parts.next().ok_or(CookedError::Corrupt("manifest line"))?;
+    let cook = parts
+        .next()
+        .and_then(|p| p.strip_prefix("cook="))
+        .ok_or(CookedError::Corrupt("manifest line"))?;
+    let inputs = parts
+        .next()
+        .and_then(|p| p.strip_prefix("inputs="))
+        .ok_or(CookedError::Corrupt("manifest line"))?;
+    let id = unhex(asset)?;
+    if hex(&sha256(&std::fs::read(cooked_path(dir, &id))?)) != cook {
+        return Err(CookedError::Corrupt(
+            "record hash differs from the manifest",
+        ));
+    }
+    let (gtex, skin) = side_files(parts)?;
+    if let Some(gtex) = gtex {
+        if hex(&sha256(&std::fs::read(textures_path(dir, &id))?)) != gtex {
+            return Err(CookedError::Corrupt(
+                "texture hash differs from the manifest",
+            ));
+        }
+    }
+    if let Some(skin) = skin.filter(|_| check_skin) {
+        let path = crate::skin_path(dir, &id);
+        let bytes = std::fs::read(&path)?;
+        if hex(&sha256(&bytes)) != skin {
+            return Err(CookedError::Corrupt("skin hash differs from the manifest"));
+        }
+        crate::decode_skin(&bytes)?;
+    }
+    for input in inputs.split(',') {
+        let bytes = std::fs::read(object_path(dir, &unhex(input)?))?;
+        if hex(&sha256(&bytes)) != input {
+            return Err(CookedError::Corrupt("object hash differs from its name"));
+        }
+    }
+    Ok(())
+}
+
+impl Package {
     /// The manifest line whose asset id is `id`, if the package lists it.
     #[must_use]
     pub fn line_for(&self, id: &[u8; 32]) -> Option<&str> {
@@ -356,6 +383,27 @@ fn checked_body(bytes: &[u8]) -> Result<&[u8], CookedError> {
         return Err(CookedError::Corrupt("content hash mismatch"));
     }
     Ok(body)
+}
+
+fn side_files<'a>(
+    parts: impl Iterator<Item = &'a str>,
+) -> Result<(Option<&'a str>, Option<&'a str>), CookedError> {
+    let mut gtex = None;
+    let mut skin = None;
+    for token in parts {
+        if let Some(hash) = token.strip_prefix("gtex=") {
+            if gtex.replace(hash).is_some() {
+                return Err(CookedError::Corrupt("manifest line"));
+            }
+        } else if let Some(hash) = token.strip_prefix("skin=") {
+            if skin.replace(hash).is_some() {
+                return Err(CookedError::Corrupt("manifest line"));
+            }
+        } else {
+            return Err(CookedError::Corrupt("manifest line"));
+        }
+    }
+    Ok((gtex, skin))
 }
 
 fn unhex(s: &str) -> Result<[u8; 32], CookedError> {
