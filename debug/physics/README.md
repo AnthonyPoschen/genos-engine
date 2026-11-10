@@ -26,6 +26,7 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `layer_filter` | Two overlapping debris spheres. | `pair_tests` stays 0 |
 | `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
 | `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
+| `thruster` | 1 000 kg cube, one offset thruster, gravity zero, 60 steps. | `a_thruster_in_zero_gravity_matches_force_and_torque` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -53,6 +54,9 @@ bodies only.
 A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
-`chassis_rest` is the G1 trial from [ADR 0040](../../docs/adr/0040-vehicle-domains.md).
-The ADR stays proposed. A1 would add `aero_trim` and S1 would add `thruster`
-on this same headless path. Those scenes are not here. Sea has no scene.
+`chassis_rest` is the G1 trial and `thruster` is the S1 trial from
+[ADR 0040](../../docs/adr/0040-vehicle-domains.md). The scene starts awake.
+A chassis that begins that scene asleep, with the thruster already open,
+wakes on the first step. The ADR stays proposed.
+A1 would add `aero_trim` on this same headless path. That scene is not here.
+Sea has no scene. S1 does not add an orbit scene.
