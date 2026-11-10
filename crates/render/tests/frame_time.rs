@@ -90,6 +90,7 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mouse = Actions {

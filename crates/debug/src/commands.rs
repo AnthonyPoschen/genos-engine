@@ -115,6 +115,7 @@ pub fn specs() -> Vec<CommandSpec> {
     .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
+    .chain(particle_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
@@ -167,6 +168,55 @@ fn fog_specs() -> Vec<CommandSpec> {
         spec(
             "get_fog_stats",
             "Fog counters: dispatches, samples_used, samples_capped, grid_width, grid_height, grid_slices, dispatched_width, dispatched_height, dispatched_slices, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. samples_used is the samples setting (0 keeps every cell). The dispatched_* fields are the grid the frame runs. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not graded against an RTX 4070 ceiling.",
+        ),
+    ]
+}
+
+fn particle_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_particle_settings",
+            "Stage-1 particle settings in text form: preset, enabled, max_particles, count, sort, lit, depth_collision, freeze, seed, origin, rate, life, rise, spread, size, albedo, soft_band. --fx-max, --fx-count, --fx-freeze, --fx-preset, and --fx-spawn win over GENOS_FX_MAX, GENOS_FX_COUNT, GENOS_FX_FREEZE, and GENOS_FX_PRESET, which win over the scene value. sort and lit are stored. Stage 1 does not sort or light. half_res is a deprecated alias and the draw is full resolution. max_particles is clamped to 4194240.",
+        ),
+        spec(
+            "set_particle_settings",
+            "Partial particle update. Keys match the settings text. A text field overlays key=value lines. Writes the scene. Launch flags and their mirrors overlay the fields they set on the next frame.",
+        ),
+        spec(
+            "get_particle_stats",
+            "Last particle step: fx.sim_ms, fx.sim_init_ms, fx.sim_death_ms, fx.sim_emit_ms, fx.sim_compact_ms, fx.sort_ms, fx.draw_ms, fx.alive, fx.spawned, fx.overdraw_px, fx.vram_mb, plus max_particles, count, and draw_instances. sim_ms and draw_ms are timestamps, or 0 before a frame. The four sim_* pieces sit inside sim_ms. sort_ms and overdraw_px stay 0. They are not a desktop-GPU score. vram_mb is decimal megabytes of the stage-1 buffers.",
+        ),
+        spec(
+            "fx.stats",
+            "Same counters as get_particle_stats. The design's name for the probe.",
+        ),
+        spec(
+            "fx.set",
+            "Set one stage-1 key. param is the settings key, value is the text. emitter may be stage1. A .gfx path is not parsed.",
+        ),
+        spec(
+            "fx.list",
+            "The one stage-1 emitter, named stage1. Curve files are a later stage.",
+        ),
+        spec(
+            "fx.spawn",
+            "Place the stage-1 emitter at x, y, z and turn it on. count is optional. Omitted, a count of 0 becomes 64 so the step dispatches. A file path is accepted and ignored: stage 1 has no .gfx parser.",
+        ),
+        spec(
+            "fx_stats",
+            "Same counters as get_particle_stats. Rhai name for fx.stats.",
+        ),
+        spec(
+            "fx_set",
+            "Same as fx.set. Rhai name: param is the settings key, value is the text.",
+        ),
+        spec(
+            "fx_list",
+            "Same as fx.list. Rhai name for the stage-1 emitter list.",
+        ),
+        spec(
+            "fx_spawn",
+            "Same as fx.spawn. Rhai name. Omitted count on a zero emitter becomes 64.",
         ),
     ]
 }
