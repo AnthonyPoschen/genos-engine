@@ -10,6 +10,7 @@ mod event_loop;
 mod fog;
 mod fps_counter;
 mod hdr;
+mod hierarchy;
 mod lighting;
 mod menu;
 mod objects;
@@ -37,6 +38,7 @@ pub use hdr::{
     hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings, OutputMode,
     HDR_ENV_MIRRORS,
 };
+pub use hierarchy::{set_parent, world_point, world_yaw, HierarchyError, Parent};
 pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
     lighting_flag_needs_value, parse_lighting_toggles, AmbientMode, AmbientSettings,
