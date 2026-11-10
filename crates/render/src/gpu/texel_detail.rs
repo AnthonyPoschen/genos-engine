@@ -154,8 +154,8 @@ impl Gpu {
         drop(plant);
         release_compiler_heap();
         // A few rows at a time. Counts accumulate in the output and in gstats.
-        // The reader process alone, with DontInline on large functions, was
-        // killed at anon-rss 14711896 kB. Splitting the rows is not a pass.
+        // The read-only module is folded in build.rs; these chunks are the
+        // dispatch the assertions count.
         for begin in (0u32..12).step_by(2) {
             self.submit_texel(false, 0, begin, 2)?;
             release_compiler_heap();

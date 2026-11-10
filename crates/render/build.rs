@@ -94,10 +94,10 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             true,
         ),
         // Same production function, compose's read-only specialization.
-        // PROD_READONLY drops the writing rows. Large functions get DontInline.
-        // A fresh reader process with that module was still killed on a 16 GiB
-        // lavapipe cgroup: anon-rss 14711896 kB, total-vm 21216604 kB. The
-        // planter had exited. That is not a pass.
+        // PROD_READONLY drops the writing rows and folds the fixture's one head
+        // to literals. Dead arms are then removed, and large functions get
+        // DontInline. Without that fold the reader was killed on a 16 GiB
+        // lavapipe cgroup (anon-rss 14711896 kB) before its assertions.
         texel_detail_ro: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
@@ -369,6 +369,9 @@ fn compile_texel_detail(
     dont_inline: bool,
 ) -> PathBuf {
     let path = compile_args(src, dest, extra);
+    if extra.iter().any(|flag| flag.contains("PROD_READONLY")) {
+        fold_readonly_module(&path);
+    }
     if !dont_inline {
         return path;
     }
@@ -405,6 +408,176 @@ fn compile_texel_detail(
     }
     std::fs::write(&path, &bytes).expect("write texel detail spirv");
     path
+}
+
+const OP_CONSTANT_TRUE: u32 = 41;
+const OP_CONSTANT_FALSE: u32 = 42;
+const OP_CONSTANT: u32 = 43;
+const OP_CONSTANT_NULL: u32 = 46;
+const OP_FUNCTION: u32 = 54;
+const OP_FUNCTION_END: u32 = 56;
+const OP_FUNCTION_CALL: u32 = 57;
+const OP_LOAD: u32 = 61;
+const OP_STORE: u32 = 62;
+const OP_ACCESS_CHAIN: u32 = 65;
+const OP_COPY_OBJECT: u32 = 83;
+const OP_RETURN: u32 = 253;
+const OP_RETURN_VALUE: u32 = 254;
+
+fn spirv_words(bytes: &[u8]) -> Vec<u32> {
+    if !bytes.len().is_multiple_of(4) {
+        panic!("spirv length {} is not a multiple of 4", bytes.len());
+    }
+    let (chunks, _) = bytes.as_chunks::<4>();
+    chunks
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
+        .collect()
+}
+
+fn spirv_bytes(words: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(words.len() * 4);
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+fn spirv_instruction(words: &[u32], index: usize) -> (usize, u32) {
+    let word = words.get(index).copied().expect("spirv word");
+    let count = usize::try_from(word >> 16).expect("spirv word count");
+    if count == 0 || index + count > words.len() {
+        panic!("readonly spirv is truncated");
+    }
+    (count, word & 0xffff)
+}
+
+fn module_constants(words: &[u32]) -> std::collections::BTreeSet<u32> {
+    let mut constants = std::collections::BTreeSet::new();
+    let mut index = 5usize;
+    while index < words.len() {
+        let (count, op) = spirv_instruction(words, index);
+        if op == OP_FUNCTION {
+            break;
+        }
+        if matches!(
+            op,
+            OP_CONSTANT | OP_CONSTANT_TRUE | OP_CONSTANT_FALSE | OP_CONSTANT_NULL
+        ) && count >= 3
+        {
+            constants.insert(words[index + 2]);
+        }
+        index += count;
+    }
+    constants
+}
+
+/// Functions whose body only returns one module-scope constant. A call to one
+/// of these is the constant: both arms of the caller's branch stay in the
+/// module until that call is a copy.
+fn trivial_returns(
+    words: &[u32],
+    constants: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeMap<u32, u32> {
+    let mut found = std::collections::BTreeMap::new();
+    let mut index = 5usize;
+    while index < words.len() {
+        let (count, op) = spirv_instruction(words, index);
+        if op != OP_FUNCTION || count < 3 {
+            index += count;
+            continue;
+        }
+        let id = words[index + 2];
+        index += count;
+        let mut returned: Option<u32> = None;
+        let mut rejected = false;
+        let mut ended = false;
+        while index < words.len() {
+            let (inner, inner_op) = spirv_instruction(words, index);
+            if matches!(
+                inner_op,
+                OP_LOAD | OP_STORE | OP_ACCESS_CHAIN | OP_FUNCTION_CALL | OP_RETURN
+            ) {
+                rejected = true;
+            }
+            if inner_op == OP_RETURN_VALUE {
+                if returned.is_some() {
+                    rejected = true;
+                }
+                returned = Some(words[index + 1]);
+            }
+            index += inner;
+            if inner_op == OP_FUNCTION_END {
+                ended = true;
+                break;
+            }
+        }
+        if ended && !rejected {
+            if let Some(value) = returned {
+                if constants.contains(&value) {
+                    found.insert(id, value);
+                }
+            }
+        }
+    }
+    found
+}
+
+fn inline_constant_returns(words: &mut [u32]) -> usize {
+    let constants = module_constants(words);
+    let trivial = trivial_returns(words, &constants);
+    let mut replaced = 0usize;
+    let mut index = 5usize;
+    while index < words.len() {
+        let (count, op) = spirv_instruction(words, index);
+        if op == OP_FUNCTION_CALL && count == 4 {
+            let callee = words[index + 3];
+            if let Some(constant) = trivial.get(&callee) {
+                words[index] = (4 << 16) | OP_COPY_OBJECT;
+                words[index + 3] = *constant;
+                replaced += 1;
+            }
+        }
+        index += count;
+    }
+    replaced
+}
+
+/// The read-only fixture uses one head. The shader macros turn that head into
+/// literals, but glslc still leaves the helpers that *call* those literals as
+/// real functions, so both arms survive. Copy the constant returns, then let
+/// spirv-opt drop the dead arms. `simplify-instructions` stays off: it can
+/// reassociate floats, and the fixture's thresholds are frozen.
+fn fold_readonly_module(path: &std::path::Path) {
+    let folded = path.with_extension("fold.spv");
+    let mut bytes = std::fs::read(path).expect("read readonly spirv");
+    for _ in 0..8 {
+        let mut words = spirv_words(&bytes);
+        let replaced = inline_constant_returns(&mut words);
+        bytes = spirv_bytes(&words);
+        std::fs::write(path, &bytes).expect("write readonly spirv");
+        let status = Command::new("spirv-opt")
+            .args([
+                "--ccp",
+                "--eliminate-dead-code-aggressive",
+                "--eliminate-dead-functions",
+                "--eliminate-dead-branches",
+                path.to_str().unwrap(),
+                "-o",
+                folded.to_str().unwrap(),
+            ])
+            .status()
+            .expect("spirv-opt (package spirv-tools)");
+        if !status.success() {
+            panic!("spirv-opt failed for {}", path.display());
+        }
+        bytes = std::fs::read(&folded).expect("read folded spirv");
+        if replaced == 0 {
+            break;
+        }
+    }
+    let _ = std::fs::remove_file(&folded);
+    std::fs::write(path, &bytes).expect("write folded spirv");
 }
 
 fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {

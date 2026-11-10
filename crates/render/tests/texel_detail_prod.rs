@@ -143,6 +143,20 @@ fn the_settings_path_sets_head_bit_17_only_when_texel_detail_is_on() {
 }
 
 #[test]
+fn readonly_fixture_head_matches_the_folded_shader_constant() {
+    // lighting_cache.glsl `lighting_sc_flags` under PROD_READONLY. The read-only
+    // rows all copy head 0: High, sh_cells, texel detail, no isolate toggles.
+    // The shader reconstructs the full flag word from the low 23 bits and
+    // head 3.w bits 0-8. If this number moves, change that macro in the same edit.
+    let head = lighting_change_head(&settings(true, false));
+    let sc_flags = head.flags | ((head.head_hi & 511) << 23);
+    assert_eq!(head.mode_cap, 3 * 1000 + 64, "high, cap 64");
+    assert_eq!((head.head_hi >> 12) & 31, 0, "no isolate toggles");
+    assert_ne!(head.head_hi & DETAIL_BIT, 0, "detail on");
+    assert_eq!(sc_flags, 14_395_658);
+}
+
+#[test]
 fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
@@ -933,10 +947,9 @@ fn readonly_supervise() {
 )]
 fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     // Default High compose is this specialization (COMPOSE_SC_WRITES false).
-    // The planter exits before the reader starts. On this 16 GiB lavapipe
-    // cgroup the reader alone was killed (anon-rss 14711896 kB, total-vm
-    // 21216604 kB, DontInline on every function over 1000 words). That is
-    // not a pass. The assertions below are what a finished reader checks.
+    // The planter exits before the reader starts. The read-only module folds
+    // this fixture's one head to literals so lavapipe's JIT fits in the 16 GiB
+    // cgroup. The assertions below are what that reader checks.
     let role = std::env::var("GENOS_TEXEL_RO_ROLE").ok();
     if role.is_none() {
         readonly_supervise();
