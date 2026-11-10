@@ -198,7 +198,8 @@ fn step_axis(item: &Item, items: &[Item], state: &mut State, events: &mut Vec<Ev
                     | Kind::Checkbox { .. }
                     | Kind::Radio { .. }
                     | Kind::Slider { .. }
-                    | Kind::Progress { .. } => None,
+                    | Kind::Progress { .. }
+                    | Kind::TextField { .. } => None,
                 })
                 .collect();
             if ids.is_empty() {
@@ -218,7 +219,8 @@ fn step_axis(item: &Item, items: &[Item], state: &mut State, events: &mut Vec<Ev
         | Kind::Button { .. }
         | Kind::Toggle { .. }
         | Kind::Checkbox { .. }
-        | Kind::Progress { .. } => false,
+        | Kind::Progress { .. }
+        | Kind::TextField { .. } => false,
     }
 }
 
@@ -253,6 +255,7 @@ fn activate_item(item: &Item, items: &[Item], events: &mut Vec<Event>) -> bool {
         | Kind::Box
         | Kind::Label
         | Kind::Slider { .. }
-        | Kind::Progress { .. } => false,
+        | Kind::Progress { .. }
+        | Kind::TextField { .. } => false,
     }
 }

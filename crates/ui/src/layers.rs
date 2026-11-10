@@ -106,9 +106,11 @@ pub(crate) fn first_focusable(node: &Node) -> Option<u32> {
 pub(crate) fn focusable_kind(kind: &Kind) -> bool {
     match kind {
         Kind::Button { enabled } => *enabled,
-        Kind::Toggle { .. } | Kind::Checkbox { .. } | Kind::Radio { .. } | Kind::Slider { .. } => {
-            true
-        }
+        Kind::Toggle { .. }
+        | Kind::Checkbox { .. }
+        | Kind::Radio { .. }
+        | Kind::Slider { .. }
+        | Kind::TextField { .. } => true,
         Kind::Box | Kind::Label | Kind::Progress { .. } => false,
     }
 }

@@ -30,6 +30,11 @@ pub enum Kind {
         value: f32,
         radial: bool,
     },
+    /// Single-line when `multiline` is false. The game copies `text` from [`Event::Text`].
+    TextField {
+        text: String,
+        multiline: bool,
+    },
 }
 
 /// A change a kind emits. `Action` stays the lighting-panel enum.
@@ -53,5 +58,10 @@ pub enum Event {
     /// The open popup or dialog closed. `id` is the layer root.
     Dismiss {
         id: u32,
+    },
+    /// The text field's next string. The game copies it onto `Kind::TextField` next frame.
+    Text {
+        id: u32,
+        text: String,
     },
 }

@@ -13,6 +13,7 @@
 mod arc;
 mod controls;
 mod dropdown;
+mod edit;
 mod focus;
 mod fps;
 mod interact;
@@ -83,6 +84,7 @@ pub enum Action {
 
 pub use arc::arc_segments;
 pub use focus::{Consumed, FocusManager, InputKind, InputPolicy};
+pub use edit::Caret;
 pub use interact::frame;
 pub use kind::{Event, Kind};
 pub use layers::LayerRole;

@@ -167,6 +167,8 @@ pub struct State {
     pub(crate) drag_id: Option<u32>,
     /// Pixels added to `drag_id` after layout.
     pub(crate) drag_offset: [f32; 2],
+    /// Caret for each text field, keyed by element id. Missing means `0, 0`.
+    pub(crate) carets: BTreeMap<u32, crate::Caret>,
 }
 
 impl Default for State {
@@ -202,6 +204,7 @@ impl Default for State {
             tooltip_secs: 0.0,
             drag_id: None,
             drag_offset: [0.0, 0.0],
+            carets: BTreeMap::new(),
         }
     }
 }
