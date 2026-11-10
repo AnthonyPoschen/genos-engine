@@ -40,7 +40,7 @@ fn cube_imports_with_no_unsupported_notes() {
 }
 
 #[test]
-fn skin_and_morph_target_are_kept_as_unsupported() {
+fn a_skin_is_loaded_and_a_morph_target_stays_unsupported() {
     let text = std::fs::read_to_string(fixture("cube.gltf")).unwrap();
     let text = text
         .replacen("\"asset\"", "\"skins\": [{\"joints\": [0]}], \"asset\"", 1)
@@ -50,17 +50,25 @@ fn skin_and_morph_target_are_kept_as_unsupported() {
             1,
         );
     let doc = import_bytes(text.as_bytes(), &no_files).unwrap();
-    let triangles = doc.scene.as_ref().unwrap().meshes[0].primitives[0]
-        .indices
-        .len()
-        / 3;
+    let scene = doc.scene.as_ref().unwrap();
+    let triangles = scene.meshes[0].primitives[0].indices.len() / 3;
     assert_eq!(triangles, 12);
-    assert_eq!(doc.unsupported(), 2);
-    assert_eq!(doc.kept.len(), 2);
+    assert_eq!(doc.unsupported(), 1);
+    assert_eq!(doc.kept.len(), 1);
+    assert!(doc.kept.iter().any(|(path, _)| path.contains("targets")));
     assert!(doc
-        .kept
+        .notes
         .iter()
-        .any(|(p, raw)| p == "skins[0]" && raw.contains("joints")));
+        .any(|note| note.path == "skins[0]" && note.support == Support::Used));
+    assert_eq!(scene.skins.len(), 1);
+    assert_eq!(scene.skins[0].joints.len(), 1);
+    assert_eq!(scene.skins[0].joints[0].name, "parent");
+    assert_eq!(scene.skins[0].joints[0].parent, -1);
+    assert!(scene.skins[0]
+        .notes
+        .iter()
+        .any(|note| note.contains("inverse bind missing")));
+    assert_eq!(scene.meshes[0].primitives[0].joints, Vec::<[u16; 4]>::new());
 }
 
 #[test]

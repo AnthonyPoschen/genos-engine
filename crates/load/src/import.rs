@@ -114,11 +114,7 @@ pub fn import_bytes(
             unsupported(format!("extensionsRequired[{i}]"), name, ext);
         }
     }
-    for (key, feature) in [
-        ("skins", "skin"),
-        ("animations", "animation"),
-        ("cameras", "camera"),
-    ] {
+    for (key, feature) in [("cameras", "camera")] {
         for (i, v) in list(&doc, key).iter().enumerate() {
             unsupported(format!("{key}[{i}]"), feature, v);
         }
@@ -148,6 +144,16 @@ pub fn import_bytes(
                     support: Support::Used,
                 }));
             }
+            notes.extend(scene.skins.iter().enumerate().map(|(i, _)| Note {
+                path: format!("skins[{i}]"),
+                feature: "skin".to_string(),
+                support: Support::Used,
+            }));
+            notes.extend(scene.clips.iter().enumerate().map(|(i, _)| Note {
+                path: format!("animations[{i}]"),
+                feature: "animation".to_string(),
+                support: Support::Used,
+            }));
             Some(scene)
         }
         Err(LoadError::Unrecognized) if blocked => None,

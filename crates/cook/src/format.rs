@@ -117,6 +117,7 @@ pub fn decode(bytes: &[u8]) -> Result<Cooked, CookError> {
             mesh,
             node_name,
             transform,
+            skin: None,
         });
     }
     let mut unsupported = Vec::new();
@@ -281,6 +282,8 @@ impl R<'_> {
             material: (material != NONE)
                 .then(|| usize::try_from(material).ok())
                 .flatten(),
+            joints: Vec::new(),
+            weights: Vec::new(),
         })
     }
     fn floats<const N: usize>(&mut self) -> Result<Vec<[f32; N]>, CookError> {
