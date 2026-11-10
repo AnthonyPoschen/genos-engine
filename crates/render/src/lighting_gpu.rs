@@ -1119,6 +1119,7 @@ impl Gpu {
                 // LIGHTING_SCREEN_OWNER_AT. Another SLOTS plus a 3-word header:
                 // the screen launch's tap-list dedup (LIGHTING_SCREEN_LIST_AT).
                 // Two more SLOTS: the lit-from offer word and the probe-seed election.
+                // Eight words per pixel: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
                     (lighting_atrous_ppm_at()
                         + LIGHTING_ATROUS_META_WORDS
@@ -1127,7 +1128,8 @@ impl Gpu {
                         + 3
                         + LIGHTING_CACHE_SLOTS
                         + LIGHTING_CACHE_SLOTS
-                        + LIGHTING_CACHE_SLOTS)
+                        + LIGHTING_CACHE_SLOTS
+                        + pixels * 8)
                         * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
