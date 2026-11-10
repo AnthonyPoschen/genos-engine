@@ -4985,8 +4985,11 @@ mod sun_step {
     /// plus the sun words, not an occluder walk copied into both.
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {
+        // The missing-field read (the push target, else the cell) and the
+        // path debug view sit in this pass. 236_000 still rejects a second
+        // occluder walk.
         assert!(
-            LIGHTING_COMPOSE_SPV.len() < 220_000,
+            LIGHTING_COMPOSE_SPV.len() < 236_000,
             "compose SPIR-V is {} bytes",
             LIGHTING_COMPOSE_SPV.len()
         );

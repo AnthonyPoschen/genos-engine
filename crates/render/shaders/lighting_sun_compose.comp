@@ -104,7 +104,7 @@ void main() {
         n = -n;
     }
     // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels.
+    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 path.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
     if (mode == 3u || mode == 4u || mode == 5u) {
@@ -132,6 +132,24 @@ void main() {
     vec3 bounce = vec3(0.0);
     bool gi = (gstats.ctrl_bits & 4u) != 0u;
     bool want = gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u);
+    if (mode == 9u) {
+        // Same codes as lighting_compose.comp. Walk this pixel even when the
+        // sun slice already stored a bounce, and do not store the codes.
+        if (want) {
+            indirect(p, pos, n);
+        }
+        const float PATH_MIXED_W = 0.99;
+        const float PATH_PROBES_READ = 0.5;
+        const float PATH_SHADE_SCALE = 1.0 / 8.0;
+        float pg = 0.0;
+        if (lighting_px_probe_skipped == 0u) {
+            bool mixed = lighting_px_world_w < PATH_MIXED_W || lighting_px_shade == 3u || lighting_px_shade == 8u;
+            pg = mixed ? 1.0 : PATH_PROBES_READ;
+        }
+        shown = vec3(float(lighting_px_shade) * PATH_SHADE_SCALE, pg, float(lighting_px_parent));
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
     // 0 means the slice has no bounce yet (cleared on entry). A real black
     // bounce is stored as pack + 1, so it is not walked again.
     uint stored = outc.px[lighting_bounce_word(index)];

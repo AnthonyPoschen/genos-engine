@@ -148,8 +148,8 @@ fn ray_cut_bit_is_packed_only_from_the_setting() {
     assert_eq!(low.head_hi & RAY_CUT_BIT, RAY_CUT_BIT);
     assert_eq!(low.mode_cap / 1000, 0, "Low stays probe GI");
     assert_eq!(on.mode_cap / 1000, 3);
-    assert_eq!(plain.head_hi & RAY_CUT_BIT, 0, "the preset default is off");
-    assert_eq!(plain.head_hi & DETAIL_BIT, 0);
+    assert_eq!(plain.head_hi & RAY_CUT_BIT, RAY_CUT_BIT, "High defaults the ray cut on");
+    assert_eq!(plain.head_hi & DETAIL_BIT, DETAIL_BIT, "High defaults texel detail on");
 }
 
 #[test]
@@ -226,6 +226,8 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
         assert_eq!(row.seed_same, 1, "row {id} wrote the seed");
         assert_eq!(row.mean_same, 1, "row {id} wrote the texel mean");
     }
+    // A ring entry that reaches the texel is a lamp change. The live cell still
+    // agrees within the sparse ratio. The rays are not cut.
     let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK];
     for id in held_rows {
         let row = &rows[id];
@@ -241,6 +243,11 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     assert_eq!(disagree.rays, 0);
     assert_eq!(disagree.looked, 8);
     assert_eq!(disagree.accepted, 8);
+    let lamp = &rows[LAMP];
+    assert_eq!(lamp.held, 0, "a lamp change that reaches the texel keeps its rays");
+    assert_eq!(lamp.rays, 0);
+    assert_eq!(lamp.looked, 8, "lamp row looked {}", lamp.looked);
+    assert_eq!(lamp.accepted, 8, "lamp row accepted {}", lamp.accepted);
     let future = &rows[FUTURE];
     assert_eq!(future.held, 0, "a later cell colour is not frozen on old samples");
     assert_eq!(future.rays, 0);
@@ -264,7 +271,7 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
             row.looked
         );
     }
-    for id in [STALE_TEXEL, LAMP, MOVE, DETAIL_OFF, CUT_OFF, LOW, COARSE, MOVER] {
+    for id in [STALE_TEXEL, MOVE, DETAIL_OFF, CUT_OFF, LOW, COARSE, MOVER] {
         let row = &rows[id];
         assert_eq!(row.held, 0, "row {id} must keep its rays");
         assert_eq!(row.rays, 0, "row {id} cut {}", row.rays);

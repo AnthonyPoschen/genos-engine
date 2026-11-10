@@ -21,17 +21,7 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
-#[allow(
-    clippy::as_conversions,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
-fn f32_from_f64(value: f64) -> f32 {
-    value as f32
-}
+use genos_restir_ref::reservoir::f32_from_f64;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_initial.spv"));
 const SPV_TEMPORAL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/restir_temporal.spv"));

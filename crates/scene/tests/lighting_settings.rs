@@ -56,8 +56,10 @@ fn surface_cache_attach_movers_round_trips() {
 
 #[test]
 fn surface_cache_sh_probe_retire_round_trips() {
-    let mut settings = LightingSettings::preset(LightingPreset::High);
-    assert!(!settings.surface_cache.sh_probe_retire);
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.surface_cache.sh_probe_retire);
+    let mut settings = high;
+    settings.set_key("surface_cache.sh_texel_detail", "off").unwrap();
     settings
         .set_key("surface_cache.sh_probe_retire", "on")
         .unwrap();
@@ -79,8 +81,10 @@ fn surface_cache_sh_probe_retire_round_trips() {
 
 #[test]
 fn surface_cache_sh_texel_ray_cut_round_trips() {
-    let mut settings = LightingSettings::preset(LightingPreset::High);
-    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.surface_cache.sh_texel_ray_cut);
+    let mut settings = high;
+    settings.set_key("surface_cache.sh_texel_detail", "off").unwrap();
     settings
         .set_key("surface_cache.sh_texel_ray_cut", "on")
         .unwrap();
@@ -103,7 +107,8 @@ fn surface_cache_sh_texel_ray_cut_round_trips() {
 #[test]
 fn surface_cache_sh_texel_detail_round_trips() {
     let mut settings = LightingSettings::default();
-    assert!(!settings.surface_cache.sh_texel_detail);
+    assert!(settings.surface_cache.sh_texel_detail);
+    settings.set_key("surface_cache.sh_cells", "off").unwrap();
     settings
         .set_key("surface_cache.sh_texel_detail", "on")
         .unwrap();
@@ -126,14 +131,14 @@ fn surface_cache_sh_texel_detail_round_trips() {
 #[test]
 fn surface_cache_sh_cells_round_trips() {
     let mut settings = LightingSettings::default();
-    assert!(!settings.surface_cache.sh_cells);
-    settings.set_key("surface_cache.sh_cells", "on").unwrap();
     assert!(settings.surface_cache.sh_cells);
-    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
-    assert!(parsed.surface_cache.sh_cells);
-    assert_eq!(parsed.preset_label(), "custom");
     settings.set_key("surface_cache.sh_cells", "off").unwrap();
     assert!(!settings.surface_cache.sh_cells);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.surface_cache.sh_cells);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings.set_key("surface_cache.sh_cells", "on").unwrap();
+    assert!(settings.surface_cache.sh_cells);
     assert!(settings.set_key("surface_cache.sh_cells", "maybe").is_err());
 }
 
@@ -406,6 +411,10 @@ fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
     assert_eq!(one.probe_rays(), 64);
     assert!(one.probes_this_frame(1));
     assert!(!one.cache_rays_this_frame(1));
+    assert!(!one.surface_cache.sh_texel_detail && !one.surface_cache.sh_probe_retire);
+    let potato = LightingSettings::preset(LightingPreset::Potato);
+    assert!(!potato.surface_cache.sh_cells && !day.surface_cache.sh_cells);
+    assert!(!day.surface_cache.sh_texel_detail && !potato.surface_cache.sh_probe_retire);
     let high = LightingSettings::preset(LightingPreset::High);
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
@@ -434,6 +443,12 @@ fn high_is_the_tuned_path() {
     assert_eq!(low.denoiser.iterations, 1);
     assert!(!low.denoiser.adaptive);
     assert!(low.denoiser.plain());
+    assert!(high.surface_cache.sh_cells && high.surface_cache.sh_texel_detail);
+    assert!(high.surface_cache.sh_texel_ray_cut && high.surface_cache.sh_probe_retire);
+    assert!(medium.surface_cache.sh_cells && medium.surface_cache.sh_texel_detail);
+    assert!(medium.surface_cache.sh_texel_ray_cut && medium.surface_cache.sh_probe_retire);
+    assert!(!low.surface_cache.sh_cells && !low.surface_cache.sh_texel_detail);
+    assert!(!low.surface_cache.sh_texel_ray_cut && !low.surface_cache.sh_probe_retire);
     assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());
