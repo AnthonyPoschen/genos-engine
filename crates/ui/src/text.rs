@@ -1,5 +1,11 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Fixed-cell labels. Measure and draw use the same cell, so a wrapped line
 //! changes the fit size the layout sees.
@@ -40,6 +46,70 @@ pub(crate) fn measure(text: &str, max_width: Option<f32>) -> (f32, f32) {
         .fold(0.0_f32, f32::max);
     let width = max_width.map_or(width, |limit| width.min(limit));
     (width, lines.len() as f32 * CELL_H)
+}
+
+/// One ASCII line, clipped to the box. No wrap string.
+pub(crate) fn paint_ascii_line(
+    out: &mut Vec<crate::Paint>,
+    text: &str,
+    x: f32,
+    y: f32,
+    clip: [f32; 4],
+    color: [f32; 3],
+) {
+    let mut column = 0u16;
+    for ch in text.chars() {
+        let left = x + f32::from(column) * CELL_W;
+        column = column.saturating_add(1);
+        if left >= clip[0] + clip[2] {
+            break;
+        }
+        if left + CELL_W <= clip[0] || y >= clip[1] + clip[3] || y + CELL_H <= clip[1] {
+            continue;
+        }
+        stamp_clipped(out, ch, left, y, clip, color);
+    }
+}
+
+fn stamp_clipped(
+    out: &mut Vec<crate::Paint>,
+    ch: char,
+    x: f32,
+    y: f32,
+    clip: [f32; 4],
+    color: [f32; 3],
+) {
+    for (row, bits) in glyph(ch).into_iter().enumerate() {
+        for col in 0..5 {
+            if bits & (0x10 >> col) == 0 {
+                continue;
+            }
+            let blot_x = x + col as f32 * PIXEL;
+            let blot_y = y + row as f32 * PIXEL;
+            if let Some((px, py, pw, ph)) = overlap(blot_x, blot_y, PIXEL, PIXEL, clip) {
+                out.push(crate::Paint {
+                    x: px,
+                    y: py,
+                    w: pw,
+                    h: ph,
+                    color,
+                    alpha: 1.0,
+                });
+            }
+        }
+    }
+}
+
+fn overlap(x: f32, y: f32, w: f32, h: f32, clip: [f32; 4]) -> Option<(f32, f32, f32, f32)> {
+    let x0 = x.max(clip[0]);
+    let y0 = y.max(clip[1]);
+    let x1 = (x + w).min(clip[0] + clip[2]);
+    let y1 = (y + h).min(clip[1] + clip[3]);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some((x0, y0, x1 - x0, y1 - y0))
+    }
 }
 
 pub(crate) fn blots(text: &str, x: f32, y: f32, max_width: f32) -> Vec<Blot> {
@@ -202,8 +272,15 @@ mod tests {
     fn printable_ascii_has_its_own_glyph() {
         for code in 32u8..=126 {
             let ch = char::from(code);
-            assert_ne!(glyph(ch), BOX, "U+{code:02X} {ch:?} fell through to the box");
-            assert_eq!(glyph(ch.to_ascii_lowercase()), glyph(ch.to_ascii_uppercase()));
+            assert_ne!(
+                glyph(ch),
+                BOX,
+                "U+{code:02X} {ch:?} fell through to the box"
+            );
+            assert_eq!(
+                glyph(ch.to_ascii_lowercase()),
+                glyph(ch.to_ascii_uppercase())
+            );
         }
         assert_ne!(glyph('\''), [0, 0, 0, 0, 0, 0, 0]);
         assert_ne!(glyph(','), [0, 0, 0, 0, 0, 0, 0]);

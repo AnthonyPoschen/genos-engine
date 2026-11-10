@@ -7,7 +7,7 @@
 use genos_input::{InputCode, InputSystem};
 
 use crate::kind::{Event, Kind};
-use crate::layout::Item;
+use crate::layout::{self, Item, Rect};
 use crate::panel::State;
 use crate::text::{self, TextFace};
 use crate::theme::Theme;
@@ -46,33 +46,42 @@ pub(crate) fn apply(
     if *multiline {
         return false;
     }
-    let key = edit_key(input);
-    let Some(key) = key else {
+    let (held, pressed) = consumed(input);
+    if !held {
         return false;
-    };
+    }
     if !text.is_ascii() {
         return true;
     }
-    let mut caret = clamp(state.caret(item.id), text.len());
+    let Some(key) = pressed else {
+        return true;
+    };
+    if control(input) {
+        return true;
+    }
+    let before = clamp(state.caret(item.id), text.len());
+    let mut caret = before;
+    let shift = shifted(input);
     let edited = match key {
         Key::Left => {
-            step(&mut caret, text.len(), -1, shifted(input));
+            step(&mut caret, text.len(), -1, shift);
             None
         }
         Key::Right => {
-            step(&mut caret, text.len(), 1, shifted(input));
+            step(&mut caret, text.len(), 1, shift);
             None
         }
+        Key::Up | Key::Down => None,
         Key::Home => {
             caret.head = 0;
-            if !shifted(input) {
+            if !shift {
                 caret.anchor = 0;
             }
             None
         }
         Key::End => {
             caret.head = text.len();
-            if !shifted(input) {
+            if !shift {
                 caret.anchor = caret.head;
             }
             None
@@ -81,7 +90,9 @@ pub(crate) fn apply(
         Key::Delete => delete_after(text, &mut caret),
         Key::Char(ch) => Some(insert(text, &mut caret, ch)),
     };
-    state.carets.insert(item.id, caret);
+    if caret != before {
+        state.carets.insert(item.id, caret);
+    }
     if let Some(next) = edited {
         events.push(Event::Text {
             id: item.id,
@@ -91,12 +102,7 @@ pub(crate) fn apply(
     true
 }
 
-pub(crate) fn paint(
-    out: &mut Vec<Paint>,
-    item: &Item,
-    caret: Option<Caret>,
-    theme: &Theme,
-) {
+pub(crate) fn paint(out: &mut Vec<Paint>, item: &Item, caret: Option<Caret>, theme: &Theme) {
     let Kind::TextField {
         text,
         multiline: false,
@@ -104,41 +110,62 @@ pub(crate) fn paint(
     else {
         return;
     };
-    let caret = caret.filter(|_| text.is_ascii()).map(|caret| clamp(caret, text.len()));
+    let clip = item.content;
+    let caret = caret
+        .filter(|_| text.is_ascii())
+        .map(|caret| clamp(caret, text.len()));
     if let Some(caret) = caret {
         let (lo, hi) = ends(caret);
         if hi > lo {
-            out.push(Paint {
-                x: item.content.x + cells(lo),
-                y: item.content.y,
-                w: cells(hi - lo),
-                h: text::CELL_H,
-                color: theme.accent,
-                alpha: 1.0,
-            });
+            push_clipped(
+                out,
+                Rect {
+                    x: clip.x + cells(lo),
+                    y: clip.y,
+                    w: cells(hi - lo),
+                    h: text::CELL_H,
+                },
+                clip,
+                theme.accent,
+            );
         }
     }
     if text.is_ascii() && item.face == TextFace::Bitmap {
-        for blot in text::blots(text, item.content.x, item.content.y, item.content.w.max(1.0)) {
-            out.push(Paint {
-                x: blot.x,
-                y: blot.y,
-                w: blot.w,
-                h: blot.h,
-                color: theme.text,
-                alpha: 1.0,
-            });
-        }
+        text::paint_ascii_line(
+            out,
+            text,
+            clip.x,
+            clip.y,
+            [clip.x, clip.y, clip.w, clip.h],
+            theme.text,
+        );
     }
     let Some(caret) = caret else {
         return;
     };
+    push_clipped(
+        out,
+        Rect {
+            x: clip.x + cells(caret.head),
+            y: clip.y,
+            w: 2.0,
+            h: text::CELL_H,
+        },
+        clip,
+        theme.text,
+    );
+}
+
+fn push_clipped(out: &mut Vec<Paint>, rect: Rect, clip: Rect, color: [f32; 3]) {
+    let Some(rect) = layout::intersect(rect, clip) else {
+        return;
+    };
     out.push(Paint {
-        x: item.content.x + cells(caret.head),
-        y: item.content.y,
-        w: 2.0,
-        h: text::CELL_H,
-        color: theme.text,
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+        color,
         alpha: 1.0,
     });
 }
@@ -147,6 +174,8 @@ pub(crate) fn paint(
 enum Key {
     Left,
     Right,
+    Up,
+    Down,
     Home,
     End,
     Backspace,
@@ -154,68 +183,51 @@ enum Key {
     Char(char),
 }
 
-fn edit_key(input: &InputSystem) -> Option<Key> {
-    if input.keyboard.down(InputCode::key_control_left) {
-        return None;
+fn consumed(input: &InputSystem) -> (bool, Option<Key>) {
+    let mut held = false;
+    let mut pressed = None;
+    for (code, key) in COMMANDS {
+        note(input, code, key, &mut held, &mut pressed);
     }
-    let key = input.keyboard.pressed(InputCode::key_left).then_some(Key::Left);
-    let key = key.or(input.keyboard.pressed(InputCode::key_right).then_some(Key::Right));
-    let key = key.or(input.keyboard.pressed(InputCode::key_home).then_some(Key::Home));
-    let key = key.or(input.keyboard.pressed(InputCode::key_end).then_some(Key::End));
-    let key = key.or(input
-        .keyboard
-        .pressed(InputCode::key_backspace)
-        .then_some(Key::Backspace));
-    let key = key.or(input.keyboard.pressed(InputCode::key_delete).then_some(Key::Delete));
-    key.or(letter(input).map(Key::Char))
+    let shift = shifted(input);
+    for (code, plain, shifted_ch) in PRINTABLE {
+        let ch = if shift { shifted_ch } else { plain };
+        note(input, code, Key::Char(ch), &mut held, &mut pressed);
+    }
+    (held, pressed)
 }
 
-fn letter(input: &InputSystem) -> Option<char> {
-    const LETTERS: [(InputCode, char); 26] = [
-        (InputCode::key_a, 'a'),
-        (InputCode::key_b, 'b'),
-        (InputCode::key_c, 'c'),
-        (InputCode::key_d, 'd'),
-        (InputCode::key_e, 'e'),
-        (InputCode::key_f, 'f'),
-        (InputCode::key_g, 'g'),
-        (InputCode::key_h, 'h'),
-        (InputCode::key_i, 'i'),
-        (InputCode::key_j, 'j'),
-        (InputCode::key_k, 'k'),
-        (InputCode::key_l, 'l'),
-        (InputCode::key_m, 'm'),
-        (InputCode::key_n, 'n'),
-        (InputCode::key_o, 'o'),
-        (InputCode::key_p, 'p'),
-        (InputCode::key_q, 'q'),
-        (InputCode::key_r, 'r'),
-        (InputCode::key_s, 's'),
-        (InputCode::key_t, 't'),
-        (InputCode::key_u, 'u'),
-        (InputCode::key_v, 'v'),
-        (InputCode::key_w, 'w'),
-        (InputCode::key_x, 'x'),
-        (InputCode::key_y, 'y'),
-        (InputCode::key_z, 'z'),
-    ];
-    let shift = shifted(input);
-    LETTERS.into_iter().find_map(|(code, ch)| {
-        if input.keyboard.pressed(code) {
-            Some(if shift { ch.to_ascii_uppercase() } else { ch })
-        } else {
-            None
-        }
-    })
+fn note(
+    input: &InputSystem,
+    code: InputCode,
+    key: Key,
+    held: &mut bool,
+    pressed: &mut Option<Key>,
+) {
+    if !input.keyboard.down(code) {
+        return;
+    }
+    *held = true;
+    if pressed.is_none() && input.keyboard.pressed(code) {
+        *pressed = Some(key);
+    }
+}
+
+fn control(input: &InputSystem) -> bool {
+    input.keyboard.down(InputCode::key_control_left)
+        || input.keyboard.down(InputCode::key_control_right)
 }
 
 fn shifted(input: &InputSystem) -> bool {
-    input.keyboard.down(InputCode::key_shift_left) || input.keyboard.down(InputCode::key_shift_right)
+    input.keyboard.down(InputCode::key_shift_left)
+        || input.keyboard.down(InputCode::key_shift_right)
 }
 
 fn focused_field(items: &[Item], id: Option<u32>) -> Option<&Item> {
     let id = id?;
-    items.iter().find(|item| item.id == id && matches!(item.kind, Kind::TextField { .. }))
+    items
+        .iter()
+        .find(|item| item.id == id && matches!(item.kind, Kind::TextField { .. }))
 }
 
 fn clamp(caret: Caret, len: usize) -> Caret {
@@ -230,6 +242,13 @@ fn ends(caret: Caret) -> (usize, usize) {
 }
 
 fn step(caret: &mut Caret, len: usize, dir: i32, keep_anchor: bool) {
+    let (lo, hi) = ends(*caret);
+    if !keep_anchor && lo != hi {
+        let edge = if dir < 0 { lo } else { hi };
+        caret.anchor = edge;
+        caret.head = edge;
+        return;
+    }
     if dir < 0 {
         caret.head = caret.head.saturating_sub(1);
     } else if caret.head < len {
@@ -290,3 +309,58 @@ fn cells(count: usize) -> f32 {
     let count = u16::try_from(count).unwrap_or(u16::MAX);
     f32::from(count) * text::CELL_W
 }
+
+const COMMANDS: [(InputCode, Key); 8] = [
+    (InputCode::key_left, Key::Left),
+    (InputCode::key_right, Key::Right),
+    (InputCode::key_up, Key::Up),
+    (InputCode::key_down, Key::Down),
+    (InputCode::key_home, Key::Home),
+    (InputCode::key_end, Key::End),
+    (InputCode::key_backspace, Key::Backspace),
+    (InputCode::key_delete, Key::Delete),
+];
+
+/// Unshifted character, then the shifted one. Space stays a space.
+const PRINTABLE: [(InputCode, char, char); 40] = [
+    (InputCode::key_space, ' ', ' '),
+    (InputCode::key_0, '0', ')'),
+    (InputCode::key_1, '1', '!'),
+    (InputCode::key_2, '2', '@'),
+    (InputCode::key_3, '3', '#'),
+    (InputCode::key_4, '4', '$'),
+    (InputCode::key_5, '5', '%'),
+    (InputCode::key_6, '6', '^'),
+    (InputCode::key_7, '7', '&'),
+    (InputCode::key_8, '8', '*'),
+    (InputCode::key_9, '9', '('),
+    (InputCode::key_a, 'a', 'A'),
+    (InputCode::key_b, 'b', 'B'),
+    (InputCode::key_c, 'c', 'C'),
+    (InputCode::key_d, 'd', 'D'),
+    (InputCode::key_e, 'e', 'E'),
+    (InputCode::key_f, 'f', 'F'),
+    (InputCode::key_g, 'g', 'G'),
+    (InputCode::key_h, 'h', 'H'),
+    (InputCode::key_i, 'i', 'I'),
+    (InputCode::key_j, 'j', 'J'),
+    (InputCode::key_k, 'k', 'K'),
+    (InputCode::key_l, 'l', 'L'),
+    (InputCode::key_m, 'm', 'M'),
+    (InputCode::key_n, 'n', 'N'),
+    (InputCode::key_o, 'o', 'O'),
+    (InputCode::key_p, 'p', 'P'),
+    (InputCode::key_q, 'q', 'Q'),
+    (InputCode::key_r, 'r', 'R'),
+    (InputCode::key_s, 's', 'S'),
+    (InputCode::key_t, 't', 'T'),
+    (InputCode::key_u, 'u', 'U'),
+    (InputCode::key_v, 'v', 'V'),
+    (InputCode::key_w, 'w', 'W'),
+    (InputCode::key_x, 'x', 'X'),
+    (InputCode::key_y, 'y', 'Y'),
+    (InputCode::key_z, 'z', 'Z'),
+    (InputCode::key_grave, '`', '~'),
+    (InputCode::key_left_bracket, '[', '{'),
+    (InputCode::key_right_bracket, ']', '}'),
+];
