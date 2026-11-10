@@ -92,7 +92,7 @@ The raster draws the opaque shapes' depth first, then shades with an equal-or-ne
 
 The picture modes are `off` and FXAA. The draw does not run MSAA, SMAA, or TAA. The filter does not change the lighting. The filter does not change the overlay.
 
-The swapchain uses mailbox when the surface lists mailbox. The next choice is immediate mode. The last choice is FIFO. Each in-flight frame has its own dynamic patch. The shape pool is one shared buffer.
+The swapchain uses mailbox when the surface lists mailbox. The next choice is immediate mode. The last choice is FIFO. `vkAcquireNextImageKHR` returning `VK_ERROR_OUT_OF_DATE_KHR` rebuilds the swapchain and tries once more. A second out-of-date result skips that frame instead of ending the process. A minimized window does not acquire. Each in-flight frame has its own dynamic patch. The shape pool is one shared buffer.
 
 A write into a live pool block waits until both frames are done. A new block at the end of the pool does not wait. An unused block can be reused after those frames finish.
 

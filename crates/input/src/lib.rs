@@ -41,6 +41,13 @@ mod settings;
         reason = "the Linux joystick decoder still runs in the Windows tests"
     )
 )]
+#[cfg_attr(
+    target_os = "windows",
+    allow(
+        unfulfilled_lint_expectations,
+        reason = "the Linux joystick code those expects cover is not compiled on Windows"
+    )
+)]
 mod system;
 mod touch;
 mod xinput;

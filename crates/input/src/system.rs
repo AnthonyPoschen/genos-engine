@@ -550,6 +550,7 @@ impl InputSystem {
 
     /// Copy one polled pad. A stick that was already outside the deadzone, and a
     /// button that was already down, do not select the family again.
+    #[cfg(not(target_os = "windows"))]
     fn absorb_joystick(&mut self, slot: usize) {
         let Some(state) = self.joysticks[slot].as_ref().map(|stick| stick.state) else {
             return;

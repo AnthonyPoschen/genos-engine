@@ -1187,6 +1187,10 @@ fn run() -> Result<i32, String> {
                 tools.quit_code().unwrap_or(0),
             ));
         }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
@@ -1492,7 +1496,9 @@ fn load_gltf_pumped(
             if frame.closing {
                 return genos_window::PumpStep::Close;
             }
-            let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            if !frame.minimized {
+                let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            }
             genos_window::PumpStep::Continue
         },
         move || bake_gltf(heavy, &models, cooked.as_deref(), bc),

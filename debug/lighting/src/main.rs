@@ -558,6 +558,10 @@ fn run() -> Result<i32, String> {
             let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
             return Ok(code);
         }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
@@ -836,8 +840,10 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         }
         let mut spins = 0u32;
         while app.loading() {
-            let _ = window.pump();
-            let _ = renderer.draw(&load_world, &camera, false);
+            let frame = window.pump();
+            if !frame.minimized {
+                let _ = renderer.draw(&load_world, &camera, false);
+            }
             if let Err(err) = app.take_load() {
                 if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
                     let line = skip_line(name, &err);

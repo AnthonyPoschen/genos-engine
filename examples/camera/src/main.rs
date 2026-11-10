@@ -423,6 +423,10 @@ fn run() -> Result<i32, String> {
         if frame.closing {
             break;
         }
+        if frame.minimized {
+            std::thread::sleep(Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
@@ -881,7 +885,9 @@ fn load_scene_pumped(
         if frame.closing {
             return Err("window closed during load".into());
         }
-        let _ = renderer.draw(&load_world, &camera, false);
+        if !frame.minimized {
+            let _ = renderer.draw(&load_world, &camera, false);
+        }
         match take_scene_load(&mut job)? {
             LoadPace::Ready => {
                 meter.mark();

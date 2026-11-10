@@ -35,6 +35,7 @@ struct GenosPump {
     void *display;
     void *surface;
     double wheel_y;
+    int minimized;
 };
 
 /* 1 Wayland, 2 X11, 3 Win32, 4 Metal. The renderer reads this when it creates the surface. */

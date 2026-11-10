@@ -766,6 +766,7 @@ void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
     out->display = win->display;
     out->surface = win->surface;
     out->wheel_y = win->wheel_y;
+    out->minimized = 0;
     win->wheel_y = 0;
     win->wheel_axis = 0;
     win->wheel_120 = 0;

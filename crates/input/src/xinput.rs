@@ -173,7 +173,7 @@ fn read_user(system: &mut InputSystem, slot: usize) {
     };
     let user = u32::try_from(slot).unwrap_or(0);
     // SAFETY: `state` is a valid XINPUT_STATE. A non-zero code means the slot is empty.
-    let code = unsafe { XInputGetState(user, &mut state) };
+    let code = unsafe { XInputGetState(user, &raw mut state) };
     if code != 0 {
         apply(system, slot, false, 0, 0, 0, 0, 0, 0, 0);
         return;
@@ -237,5 +237,21 @@ mod tests {
         assert!(!input.gamepads[0].view.connected);
         assert_eq!(input.gamepads[0].left_stick.y, 0.0);
         assert!(!input.gamepads[0].down(InputCode::gamepad_face_south));
+    }
+
+    #[test]
+    fn a_steady_xinput_poll_does_not_allocate() {
+        let mut input = InputSystem::new();
+        apply(&mut input, 0, true, 0x1000, 0, 32767, 0, 0, 255, 0);
+        let _ = input.take_device_changes();
+        let ((), bytes) = crate::alloc_guard(|| {
+            for _ in 0..8 {
+                apply(&mut input, 0, true, 0x1000, 0, 32767, 0, 0, 255, 0);
+                for slot in 1..crate::device::MAX_GAMEPADS {
+                    apply(&mut input, slot, false, 0, 0, 0, 0, 0, 0, 0);
+                }
+            }
+        });
+        assert_eq!(bytes, 0, "steady XInput poll allocated {bytes} bytes");
     }
 }

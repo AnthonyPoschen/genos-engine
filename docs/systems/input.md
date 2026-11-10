@@ -64,7 +64,7 @@ Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone befo
 
 ## Limits
 
-macOS and X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read.
+macOS and X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
 
 The Win32 window writes the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
 

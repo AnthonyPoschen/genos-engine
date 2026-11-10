@@ -999,7 +999,9 @@ impl Renderer {
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
-        self.gpu.record_and_submit(&matrix)?;
+        if !self.gpu.record_and_submit(&matrix)? {
+            return Ok(None);
+        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
             Some(self.gpu.read_color()?)
@@ -3500,7 +3502,23 @@ impl Gpu {
         Ok(())
     }
 
-    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+    /// One swapchain image, or `VK_ERROR_OUT_OF_DATE_KHR` when the surface moved.
+    fn acquire_index(&self) -> (i32, u32) {
+        let mut index = 0u32;
+        let result = unsafe {
+            (self.fns.acquire)(
+                self.device,
+                self.swapchain,
+                u64::MAX,
+                self.image_ready,
+                std::ptr::null_mut(),
+                &mut index,
+            )
+        };
+        (result, index)
+    }
+
+    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<bool, String> {
         if self.unfilled.dump_pct.is_some() {
             self.copy_picture = true;
         }
@@ -3513,6 +3531,22 @@ impl Gpu {
         let slot = self.flight;
         self.wait_fence(self.fence, "wait fence")?;
         self.flight_live[slot] = false;
+        let (mut acquire, mut index) = self.acquire_index();
+        if acquire == OUT_OF_DATE {
+            if self.extent_w == 0 || self.extent_h == 0 {
+                return Ok(false);
+            }
+            self.recreate(self.extent_w, self.extent_h)?;
+            let again = self.acquire_index();
+            acquire = again.0;
+            index = again.1;
+        }
+        if acquire == OUT_OF_DATE {
+            return Ok(false);
+        }
+        if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
+            check(acquire, "acquire")?;
+        }
         let fences = [self.fence];
         unsafe {
             self.collect_slot_after_wait(slot)?;
@@ -3527,19 +3561,6 @@ impl Gpu {
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
             )?;
-            let mut index = 0u32;
-            let acquire = (self.fns.acquire)(
-                self.device,
-                self.swapchain,
-                u64::MAX,
-                self.image_ready,
-                std::ptr::null_mut(),
-                &mut index,
-            );
-            if acquire == OUT_OF_DATE {
-                return Err("out of date".into());
-            }
-            check(acquire, "acquire")?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             if profiled {
@@ -3664,7 +3685,7 @@ impl Gpu {
             }
             self.flight = 1 - self.flight;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn make_query_pool(&mut self) -> Result<Handle, String> {

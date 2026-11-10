@@ -19,6 +19,7 @@
 mod events;
 mod lifecycle;
 mod stall;
+mod win32_keys;
 
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
@@ -63,6 +64,7 @@ struct RawPump {
     display: *mut c_void,
     surface: *mut c_void,
     wheel_y: f64,
+    minimized: i32,
 }
 
 #[repr(C)]
@@ -126,6 +128,8 @@ pub struct Frame {
     pub pointer_y: f32,
     /// Vertical wheel this pump, in notches. Positive is wheel up. Cleared each pump.
     pub wheel_y: f32,
+    /// The Win32 window is minimized. The frame skips the draw until it returns.
+    pub minimized: bool,
 }
 
 pub struct Window {
@@ -387,7 +391,7 @@ impl Drop for Window {
 fn open_failed() -> String {
     #[cfg(target_os = "windows")]
     {
-        return "Win32 window failed to open".to_string();
+        "Win32 window failed to open".to_string()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -417,6 +421,7 @@ fn decode(raw: &RawPump) -> Frame {
         pointer_x: raw.pointer_x as f32,
         pointer_y: raw.pointer_y as f32,
         wheel_y: raw.wheel_y as f32,
+        minimized: raw.minimized != 0,
         mode: if raw.fullscreen != 0 {
             WindowMode::Fullscreen
         } else {
@@ -561,6 +566,7 @@ mod tests {
             pointer_x: 0.0,
             pointer_y: 0.0,
             wheel_y: 0.0,
+            minimized: false,
         }
     }
 

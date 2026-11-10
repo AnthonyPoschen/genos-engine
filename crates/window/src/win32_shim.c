@@ -1,7 +1,8 @@
 /* Win32 window. The Rust `Window` API is unchanged.
  * `display` is the HINSTANCE. `surface` is the HWND.
  * The renderer creates the VkSurface with VK_KHR_win32_surface.
- * Keys in `keys_down` are Linux evdev codes, the same index the Wayland seat writes. */
+ * Keys in `keys_down` are Linux evdev codes from the set-1 scan code
+ * (`genos_evdev_from_set1`), so left and right modifiers stay distinct. */
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -52,6 +53,14 @@ struct GenosWin32 {
     double wheel_y;
     int cursor_hidden;
     int raw_on;
+    int want_capture;
+    int minimized;
+    int buttons_held;
+    int abs_ready;
+    int abs_x;
+    int abs_y;
+    unsigned char *raw_buf;
+    UINT raw_cap;
     DWORD thread;
     LONG_PTR saved_style;
     RECT saved_rect;
@@ -59,8 +68,13 @@ struct GenosWin32 {
 };
 
 static void release_capture(struct GenosWin32 *win);
+static void suspend_grab(struct GenosWin32 *win);
 static int engage_capture(struct GenosWin32 *win);
 static void clip_client(struct GenosWin32 *win);
+
+extern int genos_evdev_from_set1(unsigned scan, int extended);
+extern int genos_absolute_pixel(int norm, int origin, int span);
+extern int genos_absolute_delta(int ready, int prev, int next);
 static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
 /* Copy a `GetProcAddress` result without a function-pointer cast. */
@@ -127,54 +141,10 @@ static int to_wide(const char *utf8, wchar_t *out, int cap) {
     return wrote > 0;
 }
 
-static int evdev_from_vk(WPARAM vk) {
-    if (vk >= 'A' && vk <= 'Z') {
-        static const int letter[26] = {
-            30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50,
-            49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44
-        };
-        return letter[vk - 'A'];
-    }
-    if (vk >= '1' && vk <= '9') {
-        return 2 + (int)(vk - '1');
-    }
-    switch (vk) {
-    case '0': return 11;
-    case VK_ESCAPE: return 1;
-    case VK_OEM_4: return 26;
-    case VK_OEM_6: return 27;
-    case VK_OEM_3: return 41;
-    case VK_BACK: return 14;
-    case VK_TAB: return 15;
-    case VK_RETURN: return 28;
-    case VK_SPACE: return 57;
-    case VK_SHIFT:
-    case VK_LSHIFT: return 42;
-    case VK_RSHIFT: return 54;
-    case VK_CONTROL:
-    case VK_LCONTROL: return 29;
-    case VK_RCONTROL: return 97;
-    case VK_MENU:
-    case VK_LMENU: return 56;
-    case VK_RMENU: return 100;
-    case VK_UP: return 103;
-    case VK_DOWN: return 108;
-    case VK_LEFT: return 105;
-    case VK_RIGHT: return 106;
-    case VK_F1: return 59;
-    case VK_F2: return 60;
-    case VK_F3: return 61;
-    case VK_F4: return 62;
-    case VK_F5: return 63;
-    case VK_F6: return 64;
-    case VK_F7: return 65;
-    case VK_F8: return 66;
-    case VK_F9: return 67;
-    case VK_F10: return 68;
-    case VK_F11: return 87;
-    case VK_F12: return 88;
-    default: return -1;
-    }
+static int evdev_from_lparam(LPARAM lp) {
+    unsigned scan = (unsigned)((lp >> 16) & 0xFF);
+    int extended = (lp & 0x01000000) != 0;
+    return genos_evdev_from_set1(scan, extended);
 }
 
 static void set_evdev(struct GenosWin32 *win, int evdev, int down) {
@@ -299,7 +269,7 @@ static void clip_client(struct GenosWin32 *win) {
     ClipCursor(&rect);
 }
 
-static void release_capture(struct GenosWin32 *win) {
+static void suspend_grab(struct GenosWin32 *win) {
     RAWINPUTDEVICE raw;
     if (!win) {
         return;
@@ -319,6 +289,15 @@ static void release_capture(struct GenosWin32 *win) {
         win->raw_on = 0;
     }
     win->pointer_locked = 0;
+    win->abs_ready = 0;
+}
+
+static void release_capture(struct GenosWin32 *win) {
+    if (!win) {
+        return;
+    }
+    win->want_capture = 0;
+    suspend_grab(win);
 }
 
 static int engage_capture(struct GenosWin32 *win) {
@@ -345,13 +324,91 @@ static int engage_capture(struct GenosWin32 *win) {
     return 0;
 }
 
-static void note_button(struct GenosWin32 *win, int down) {
-    win->mouse_left = down;
-    if (down) {
-        win->capture_click = 1;
-        /* The click hit this window. Capture even if keyboard focus is late. */
-        win->clicked_while_focused = 1;
+static void note_mouse_button(struct GenosWin32 *win, int which, int down) {
+    int *flag;
+    if (!win) {
+        return;
     }
+    if (which == 0) {
+        flag = &win->mouse_left;
+    } else if (which == 1) {
+        flag = &win->mouse_right;
+    } else {
+        flag = &win->mouse_middle;
+    }
+    if (down) {
+        if (!*flag) {
+            if (win->buttons_held == 0 && win->hwnd) {
+                SetCapture(win->hwnd);
+            }
+            win->buttons_held += 1;
+        }
+        *flag = 1;
+        if (which == 0) {
+            win->capture_click = 1;
+            /* The click hit this window. Capture even if keyboard focus is late. */
+            win->clicked_while_focused = 1;
+        }
+        return;
+    }
+    if (*flag && win->buttons_held > 0) {
+        win->buttons_held -= 1;
+        if (win->buttons_held == 0) {
+            ReleaseCapture();
+        }
+    }
+    *flag = 0;
+}
+
+static void read_raw_mouse(struct GenosWin32 *win, LPARAM lp) {
+    UINT size = 0;
+    RAWINPUT *raw;
+    USHORT flags;
+    if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, NULL, &size, sizeof(RAWINPUTHEADER)) != 0
+        || size < sizeof(RAWINPUTHEADER)) {
+        return;
+    }
+    if (size > win->raw_cap) {
+        unsigned char *grown = (unsigned char *)realloc(win->raw_buf, size);
+        if (!grown) {
+            return;
+        }
+        win->raw_buf = grown;
+        win->raw_cap = size;
+    }
+    if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, win->raw_buf, &size, sizeof(RAWINPUTHEADER))
+        == (UINT)-1) {
+        return;
+    }
+    raw = (RAWINPUT *)win->raw_buf;
+    if (raw->header.dwType != RIM_TYPEMOUSE) {
+        return;
+    }
+    flags = raw->data.mouse.usFlags;
+    if (flags & MOUSE_MOVE_ABSOLUTE) {
+        int origin_x = 0;
+        int origin_y = 0;
+        int span_x = GetSystemMetrics(SM_CXSCREEN);
+        int span_y = GetSystemMetrics(SM_CYSCREEN);
+        int x;
+        int y;
+        if (flags & MOUSE_VIRTUAL_DESKTOP) {
+            origin_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            origin_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            span_x = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            span_y = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        }
+        x = genos_absolute_pixel((int)raw->data.mouse.lLastX, origin_x, span_x);
+        y = genos_absolute_pixel((int)raw->data.mouse.lLastY, origin_y, span_y);
+        win->mouse_dx += genos_absolute_delta(win->abs_ready, win->abs_x, x);
+        win->mouse_dy += genos_absolute_delta(win->abs_ready, win->abs_y, y);
+        win->abs_x = x;
+        win->abs_y = y;
+        win->abs_ready = 1;
+        return;
+    }
+    win->mouse_dx += (int)raw->data.mouse.lLastX;
+    win->mouse_dy += (int)raw->data.mouse.lLastY;
 }
 
 static void note_move(struct GenosWin32 *win, int x, int y) {
@@ -385,14 +442,33 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_SETFOCUS:
         win->focused = 1;
+        if (win->want_capture && !win->pointer_locked && !win->minimized) {
+            engage_capture(win);
+        }
         return 0;
     case WM_KILLFOCUS:
         win->focused = 0;
         clear_keys(win);
         cancel_touch(win);
+        win->buttons_held = 0;
+        ReleaseCapture();
+        /* Drop the clip and show the cursor. `want_capture` stays so focus can re-grab. */
+        suspend_grab(win);
         return 0;
     case WM_SIZE:
-        if (wp != SIZE_MINIMIZED) {
+        if (wp == SIZE_MINIMIZED) {
+            win->minimized = 1;
+            suspend_grab(win);
+            return 0;
+        }
+        if (win->minimized) {
+            win->minimized = 0;
+            win->resized = 1;
+            if (win->want_capture && win->focused) {
+                engage_capture(win);
+            }
+        }
+        {
             int width = LOWORD(lp);
             int height = HIWORD(lp);
             if (width > 0 && height > 0 && (width != win->width || height != win->height)) {
@@ -424,22 +500,27 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         note_move(win, (int)(short)LOWORD(lp), (int)(short)HIWORD(lp));
         return 0;
     case WM_LBUTTONDOWN:
-        note_button(win, 1);
+        note_mouse_button(win, 0, 1);
         return 0;
     case WM_LBUTTONUP:
-        note_button(win, 0);
+        note_mouse_button(win, 0, 0);
         return 0;
     case WM_RBUTTONDOWN:
-        win->mouse_right = 1;
+        note_mouse_button(win, 1, 1);
         return 0;
     case WM_RBUTTONUP:
-        win->mouse_right = 0;
+        note_mouse_button(win, 1, 0);
         return 0;
     case WM_MBUTTONDOWN:
-        win->mouse_middle = 1;
+        note_mouse_button(win, 2, 1);
         return 0;
     case WM_MBUTTONUP:
-        win->mouse_middle = 0;
+        note_mouse_button(win, 2, 0);
+        return 0;
+    case WM_CAPTURECHANGED:
+        if ((HWND)lp != hwnd) {
+            win->buttons_held = 0;
+        }
         return 0;
 #ifdef WM_POINTERDOWN
     case WM_POINTERDOWN:
@@ -455,22 +536,15 @@ static LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        set_evdev(win, evdev_from_vk(wp), 1);
+        set_evdev(win, evdev_from_lparam(lp), 1);
         return 0;
     case WM_KEYUP:
     case WM_SYSKEYUP:
-        set_evdev(win, evdev_from_vk(wp), 0);
+        set_evdev(win, evdev_from_lparam(lp), 0);
         return 0;
     case WM_INPUT:
         if (win->pointer_locked) {
-            UINT size = sizeof(RAWINPUT);
-            RAWINPUT raw;
-            memset(&raw, 0, sizeof(raw));
-            if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) != (UINT)-1
-                && raw.header.dwType == RIM_TYPEMOUSE) {
-                win->mouse_dx += raw.data.mouse.lLastX;
-                win->mouse_dy += raw.data.mouse.lLastY;
-            }
+            read_raw_mouse(win, lp);
         }
         return 0;
     default:
@@ -514,6 +588,7 @@ static void copy_out(struct GenosWin32 *win, struct GenosPump *out) {
     out->display = win->instance;
     out->surface = win->hwnd;
     out->wheel_y = win->wheel_y;
+    out->minimized = win->minimized;
     win->wheel_y = 0;
     win->mouse_dx = 0;
     win->mouse_dy = 0;
@@ -740,6 +815,10 @@ int genos_window_set_pointer_capture(struct GenosWin32 *win, int capture) {
         release_capture(win);
         return 0;
     }
+    win->want_capture = 1;
+    if (win->minimized) {
+        return 0;
+    }
     return engage_capture(win);
 }
 
@@ -752,6 +831,7 @@ void genos_window_destroy(struct GenosWin32 *win) {
         DestroyWindow(win->hwnd);
         win->hwnd = NULL;
     }
+    free(win->raw_buf);
     free(win);
 }
 
