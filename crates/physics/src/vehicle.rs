@@ -1,8 +1,8 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper and the space thrusters.
-//! Aircraft lift is a later stage and is not applied here. Sea is not a field.
+//! This stage applies the wheeled ground spring-damper, steady aircraft lift,
+//! drag, and thrust, and the space thrusters. Sea is not a field.
 //! A thruster writes force and torque through [`integrate_wrench`]. The existing
 //! gyroscopic step then consumes that angular velocity. There is no second integrator.
 
@@ -49,7 +49,9 @@ pub struct WheeledGround {
     pub lengths: [f32; 4],
 }
 
-/// Steady wing. Stored for a later stage. This stage does not apply it.
+/// Steady lift, drag, and thrust through the centre of mass.
+///
+/// `cl` is a stored constant. Angle of attack is not read. Torque is zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Aircraft {
     pub wing_area: f32,
@@ -165,6 +167,80 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
     }
 }
 
+/// The A1 fixture: a trimmed 1 000 kg aircraft. No ground and no plane.
+///
+/// `cl` and `thrust_max` come from the f32 trim association in ADR 0040, so
+/// lift equals weight and thrust equals drag at 50 m/s.
+#[must_use]
+pub fn aero_trim_world() -> World {
+    let mut world = World::new(GRAVITY);
+    let mut body = Body::cuboid(
+        Vec3::new(0.0, 100.0, 0.0),
+        1_000.0,
+        Vec3::new(1.0, 0.2, 3.0),
+    );
+    body.velocity = Vec3::new(50.0, 0.0, 0.0);
+    body.motion = MotionQuality::Discrete;
+    let index = world.insert(body);
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: None,
+        aircraft: Some(trim_aircraft(1_000.0, world.gravity)),
+        space: None,
+    });
+    world
+}
+
+fn trim_aircraft(mass: f32, gravity: Vec3) -> Aircraft {
+    let speed = 50.0_f32;
+    let wing_area = 10.0_f32;
+    let air_density = 1.225_f32;
+    let cd0 = 0.02_f32;
+    let induced = 0.05_f32;
+    let weight = mass * -gravity.y;
+    let q = 0.5 * air_density * (speed * speed);
+    let cl = weight / (q * wing_area);
+    let cd = cd0 + induced * (cl * cl);
+    let thrust_max = (q * wing_area) * cd;
+    Aircraft {
+        wing_area,
+        cl,
+        cd0,
+        induced,
+        thrust_max,
+        throttle: 1.0,
+        air_density,
+    }
+}
+
+/// Wake a sleeping chassis, and the rest of its island, when aircraft thrust
+/// would write a finite non-zero force.
+///
+/// Runs before gravity and before that force, so the ignition step integrates
+/// both. A closed, zero, negative, or non-finite throttle does not wake. A
+/// non-finite coefficient, including `induced`, does not wake. This does not
+/// set `Body.motor`.
+pub(crate) fn wake_sleeping_aircraft(world: &mut World) {
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(aircraft) = vehicle.aircraft else {
+            continue;
+        };
+        let armed = world.bodies.get(vehicle.chassis).is_some_and(|body| {
+            body.presence == Presence::Live
+                && body.inverse_mass != 0.0
+                && body.sleeping
+                && aircraft_can_thrust(&aircraft, body)
+        });
+        if armed {
+            world.wake(vehicle.chassis);
+        }
+    }
+}
+
 /// Wake a sleeping chassis, and the rest of its island, when a live thruster
 /// would write a finite non-zero force.
 ///
@@ -194,24 +270,109 @@ pub(crate) fn wake_sleeping_thrusters(world: &mut World) {
 
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
-/// Order is aircraft, then space, then ground. Aircraft is not applied in
-/// this stage. [`integrate_wrench`] is the one velocity update those stages share.
+/// Order is aircraft, then space, then ground. [`integrate_wrench`] is the
+/// velocity update the thruster uses. Aircraft force acts at the centre of mass.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
     let count = world.vehicles.len();
     for index in 0..count {
+        apply_aircraft(world, index, dt);
         apply_space(world, index, dt);
         rays = rays.saturating_add(apply_ground(world, index, dt));
     }
     world.step_stats.wheel_rays = rays;
 }
 
+/// True when this chassis must stay awake the way a motor does.
+///
+/// A1 holds for a finite positive throttle whose thrust is a finite non-zero
+/// force. The same check is what [`wake_sleeping_aircraft`] uses. A thruster
+/// hold is [`actuator_holds_awake`]. This does not set `Body.motor`.
+pub(crate) fn holds_awake(vehicles: &[Vehicle], body: &Body, chassis: usize) -> bool {
+    vehicles.iter().any(|vehicle| {
+        vehicle.chassis == chassis
+            && vehicle
+                .aircraft
+                .is_some_and(|aircraft| aircraft_can_thrust(&aircraft, body))
+    })
+}
+
+/// Finite aircraft fields and a positive throttle with a finite non-zero thrust.
+///
+/// Negative throttle is reverse thrust. The force still applies when the
+/// chassis is already awake. It does not wake and it does not hold.
+fn aircraft_can_thrust(aircraft: &Aircraft, body: &Body) -> bool {
+    if !finite_aircraft(aircraft) || !(aircraft.throttle > 0.0) {
+        return false;
+    }
+    let thrust = aircraft.throttle * aircraft.thrust_max;
+    if !thrust.is_finite() || thrust == 0.0 {
+        return false;
+    }
+    let force = body.orientation.rotate(Vec3::X) * thrust;
+    finite_vec(force) && force.length_squared() > 0.0
+}
+
+fn apply_aircraft(world: &mut World, index: usize, dt: f32) {
+    let Some(vehicle) = world.vehicles.get(index).copied() else {
+        return;
+    };
+    let Some(aircraft) = vehicle.aircraft else {
+        return;
+    };
+    let Some(body) = world.bodies.get(vehicle.chassis).copied() else {
+        return;
+    };
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
+        return;
+    }
+    let Some(force) = aircraft_force(&aircraft, &body, world.gravity, dt) else {
+        return;
+    };
+    if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
+        stored.velocity += (force * stored.inverse_mass) * dt;
+    }
+}
+
+/// Lift, drag, and thrust. `None` means the input cannot produce a finite force.
+fn aircraft_force(aircraft: &Aircraft, body: &Body, gravity: Vec3, dt: f32) -> Option<Vec3> {
+    // `apply_forces` has already added `gravity * dt`. Dynamic pressure uses the
+    // velocity from before that increment: that is the speed in the trim
+    // association, and drag is zero when that speed is zero. A spring increment
+    // on the same body is outside this stage.
+    let air = body.velocity - gravity * dt;
+    if !finite_aircraft(aircraft) || !finite_vec(air) {
+        return None;
+    }
+    let speed = air.length();
+    let q = 0.5 * aircraft.air_density * (speed * speed);
+    let lift = aircraft.cl * q * aircraft.wing_area;
+    let cd = aircraft.cd0 + aircraft.induced * (aircraft.cl * aircraft.cl);
+    let drag_mag = cd * q * aircraft.wing_area;
+    let thrust = aircraft.throttle * aircraft.thrust_max;
+    let mut force = Vec3::Y * lift + body.orientation.rotate(Vec3::X) * thrust;
+    if speed > 0.0 {
+        force += air * (-drag_mag / speed);
+    }
+    finite_vec(force).then_some(force)
+}
+
+fn finite_aircraft(aircraft: &Aircraft) -> bool {
+    aircraft.wing_area.is_finite()
+        && aircraft.cl.is_finite()
+        && aircraft.cd0.is_finite()
+        && aircraft.induced.is_finite()
+        && aircraft.thrust_max.is_finite()
+        && aircraft.throttle.is_finite()
+        && aircraft.air_density.is_finite()
+}
+
 /// A thruster with `throttle > 0` holds the chassis awake the way `Body.motor` does.
 ///
 /// This does not wake a sleeper. `wake_sleeping_thrusters` does that, and only
-/// for a finite non-zero force. Aircraft throttle joins this check in its
-/// stage. The function does not set `Body.motor`.
+/// for a finite non-zero force. Aircraft wake and hold stay on [`holds_awake`].
+/// The function does not set `Body.motor`.
 pub(crate) fn actuator_holds_awake(vehicles: &[Vehicle], chassis: usize) -> bool {
     vehicles
         .iter()

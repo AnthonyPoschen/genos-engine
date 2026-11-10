@@ -1,6 +1,6 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, and S1, the thruster force, are in the step as trials. Aircraft forces, the landing stage, the orbit, and sea are not in those trials.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, A1, steady aircraft lift, drag, and thrust, and S1, the thruster force, are in the step as trials. The landing stage, the orbit, and sea are not in those trials.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
@@ -105,21 +105,21 @@ That field is not part of `Vehicle` under this proposal.
 - A wheel ray is a segment from the attach point along `direction`, from `min_length` to `max_length`, excluding the chassis index. It is not a speculative contact and it is not a time of impact. G1 resolves a plane (`normal · point = offset`) and an axis-aligned box (slab test in the box frame). A mesh or a hull is a miss in G1. Hull SAT in `contact.rs` stays as it is.
 - Suspension pushes only. With `direction` pointing from the chassis toward the surface, `length` is the hit distance. `compression = rest_length - length`. Force is zero when the ray misses, when `length` is outside `[min_length, max_length]`, or when `compression <= 0`. Otherwise `magnitude = k * compression - c * compression_rate`, with `compression_rate = -(direction · v_attach)` and `v_attach = v + ω × r`. The push is `force = -direction * magnitude` at the hit point. The vehicle code integrates it itself: `velocity += force * inverse_mass * dt`, and `angular_velocity += I⁻¹_world (r × force) * dt`, where `I⁻¹_world` is the ADR 0034 world inverse inertia. `integrate_body` then runs the gyroscopic step. The contact solver is not the suspension path.
 - Suspended mass is `chassis_mass / wheels.len()`. `k = m_s * (2π hz)²`. `c = 2 * damping_ratio * m_s * (2π hz)`.
-- Aircraft forward is local +X. `q = 0.5 * air_density * speed * speed`, `speed = |v|`. `lift = cl * q * wing_area` along world +Y. `cd = cd0 + induced * cl * cl`. `drag_force = cd * q * wing_area` along `-v` (zero when speed is zero). `thrust = throttle * thrust_max` along local +X. All three act at the centre of mass, so aircraft torque is zero in A1.
+- Aircraft forward is local +X. `q = 0.5 * air_density * speed * speed`, `speed = |v|`. `|v|` is the chassis velocity from before this step's gravity increment. `apply_forces` has already added `gravity * dt` when the aircraft sample runs, so the code subtracts that increment. The trim association uses that speed. A spring increment on the same body is outside A1. `lift = cl * q * wing_area` along world +Y. `cd = cd0 + induced * cl * cl`. `drag_force = cd * q * wing_area` along `-v` (zero when speed is zero). `thrust = throttle * thrust_max` along local +X. All three act at the centre of mass, so aircraft torque is zero in A1.
 - A thruster's world force is `orientation * normalize(local_direction) * throttle * max_force`. World torque is `(orientation * local_position) × force`. The same `velocity` and `angular_velocity` update as the suspension force consumes it. Gravity is `World.gravity`. The space payload does not zero it. The S1 fixture sets gravity to zero. Aircraft lift, drag, and thrust use that linear update with zero torque.
-- Domain code does not set `Body.spring` or `Body.motor`. A parked chassis can sleep under the existing rule. While it sleeps, the wheel-ray count is 0 and suspension force is 0. An aircraft with `throttle > 0`, or a thruster with `throttle > 0`, holds the chassis awake the way a motor does. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. That wake runs before gravity and before the wrench, so the ignition step integrates both. A closed, zero, or non-finite thruster does not wake it.
+- Domain code does not set `Body.spring` or `Body.motor`. A parked chassis can sleep under the existing rule. While it sleeps, the wheel-ray count is 0 and suspension force is 0. An aircraft with finite fields and `throttle > 0`, whose `throttle * thrust_max` is a finite non-zero force, wakes a sleeping chassis and the rest of its island before gravity and before the aircraft force. The same check holds it awake. A closed, zero, negative, or non-finite throttle does not wake and does not hold. A thruster with `throttle > 0` holds the chassis awake the way a motor does. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. That wake runs before gravity and before the wrench, so the ignition step integrates both. A closed, zero, or non-finite thruster does not wake it.
 - Force order in the existing dynamic loop, after `apply_forces` and before `integrate_body`: aircraft, space, ground. Torque is added to `angular_velocity` before `implicit_gyroscopic`. Swept motion still integrates inside `ccd.rs`.
 - Wheel index order and thruster index order are the only orders. No `atan2` and no hash-map walk. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
 - A world with no vehicles does no vehicle work. The allocation bench stays green.
 
 ## Stages and fixtures
 
-G1 and S1 are in the tree as trials. This ADR stays proposed. A1 and T1 are not implemented. S2, the orbit, is not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
+G1, A1, and S1 are in the tree as trials. This ADR stays proposed. T1 is not implemented. S2, the orbit, is not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
 
 | Stage | Payload | Waits on | Fixture |
 | --- | --- | --- | --- |
 | G1 | `Wheeled` only | in the step as a trial | `a_chassis_rests_on_four_springs`, `a_parked_chassis_sleeps_and_stops_casting` |
-| A1 | `Aircraft` only | acceptance | `a_trimmed_aircraft_holds_altitude_and_speed` |
+| A1 | `Aircraft` only | in the step as a trial | `a_trimmed_aircraft_holds_altitude_and_speed` |
 | S1 | `SpaceCraft` only | in the step as a trial | `a_thruster_in_zero_gravity_matches_force_and_torque` |
 | T1 | aircraft and wheeled ground | G1 and A1 | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
 | S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |

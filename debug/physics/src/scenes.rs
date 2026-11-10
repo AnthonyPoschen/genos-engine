@@ -11,7 +11,9 @@
 //! lighting geometry, not bodies.
 
 use genos_math::{Quat, Vec3};
-use genos_physics::{chassis_rest_world, thruster_world, Body, MotionQuality, World};
+use genos_physics::{
+    aero_trim_world, chassis_rest_world, thruster_world, Body, MotionQuality, World,
+};
 
 /// One entry in the scene picker.
 pub struct SceneInfo {
@@ -29,7 +31,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 9] = [
+pub const SCENES: [SceneInfo; 10] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -77,6 +79,12 @@ pub const SCENES: [SceneInfo; 9] = [
         summary: "1 200 kg chassis on four wheel rays over a static plane (ADR 0040 G1)",
         steps: 180,
         build: chassis_rest,
+    },
+    SceneInfo {
+        name: "aero_trim",
+        summary: "1 000 kg aircraft trimmed at 50 m/s and 100 m, lift equals weight (ADR 0040 A1)",
+        steps: 120,
+        build: aero_trim,
     },
     SceneInfo {
         name: "thruster",
@@ -281,6 +289,10 @@ fn layer_filter() -> World {
 
 fn chassis_rest() -> World {
     chassis_rest_world(10.0)
+}
+
+fn aero_trim() -> World {
+    aero_trim_world()
 }
 
 fn thruster() -> World {
