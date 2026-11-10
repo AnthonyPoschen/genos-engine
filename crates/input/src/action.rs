@@ -53,6 +53,8 @@ enum ActionKind {
 struct Action {
     name: String,
     enabled: bool,
+    /// Scale remembered so a sensitivity line can precede the binding line.
+    sensitivity: f32,
     kind: ActionKind,
 }
 
@@ -104,6 +106,7 @@ impl ActionMap {
             .iter_mut()
             .find(|action| action.name == name)
             .ok_or_else(|| format!("unknown action {name}"))?;
+        let scale = action.sensitivity;
         let ActionKind::Axis2d(binding) = &mut action.kind else {
             return Err(format!("{name} is a button action"));
         };
@@ -116,6 +119,7 @@ impl ActionMap {
             _ => return Err(format!("unknown axis side {side}")),
         };
         *slot = codes;
+        stamp_unset(slot, scale);
         Ok(())
     }
 
@@ -126,11 +130,15 @@ impl ActionMap {
     /// Returns an error when the action is missing or the value is not finite.
     pub fn set_sensitivity(&mut self, name: &str, sensitivity: f32) -> Result<(), String> {
         let sensitivity = finite_sensitivity(sensitivity)?;
+        if !self.actions.iter().any(|action| action.name == name) {
+            self.set(name, Vec::new());
+        }
         let action = self
             .actions
             .iter_mut()
             .find(|action| action.name == name)
             .ok_or_else(|| format!("unknown action {name}"))?;
+        action.sensitivity = sensitivity;
         match &mut action.kind {
             ActionKind::Codes(codes) => {
                 for code in codes {
@@ -160,6 +168,9 @@ impl ActionMap {
     ///
     /// Returns an error when the action is missing.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        if !self.actions.iter().any(|action| action.name == name) {
+            self.set(name, Vec::new());
+        }
         let action = self
             .actions
             .iter_mut()
@@ -339,7 +350,7 @@ impl ActionMap {
         let mut map = Self::new();
         for chunk in text.split("{\"name\":\"").skip(1) {
             let name = chunk.split('"').next().ok_or("missing name")?;
-            let enabled = chunk.contains("\"enabled\":true");
+            let enabled = json_bool(chunk, "enabled");
             if chunk.contains("\"kind\":\"codes\"") {
                 let codes = codes_after(chunk, "\"codes\":")?;
                 map.set(name, codes);
@@ -356,7 +367,9 @@ impl ActionMap {
                 );
             }
             if let Some(action) = map.actions.iter_mut().find(|action| action.name == name) {
-                action.enabled = enabled;
+                if let Some(enabled) = enabled {
+                    action.enabled = enabled;
+                }
             }
         }
         if map.actions.is_empty() {
@@ -367,12 +380,29 @@ impl ActionMap {
 
     fn insert(&mut self, name: &str, kind: ActionKind) {
         if let Some(existing) = self.actions.iter_mut().find(|action| action.name == name) {
+            let scale = existing.sensitivity;
             existing.kind = kind;
-            existing.enabled = true;
+            if (scale - 1.0).abs() > 1.0e-4 {
+                match &mut existing.kind {
+                    ActionKind::Codes(codes) => stamp_unset(codes, scale),
+                    ActionKind::Axis2d(binding) => {
+                        for codes in [
+                            &mut binding.left,
+                            &mut binding.right,
+                            &mut binding.up,
+                            &mut binding.down,
+                            &mut binding.vectors,
+                        ] {
+                            stamp_unset(codes, scale);
+                        }
+                    }
+                }
+            }
         } else {
             self.actions.push(Action {
                 name: name.to_string(),
                 enabled: true,
+                sensitivity: 1.0,
                 kind,
             });
         }
@@ -482,30 +512,67 @@ fn write_codes(out: &mut String, codes: &[BoundInput]) {
     }
 }
 
+fn stamp_unset(codes: &mut [BoundInput], sensitivity: f32) {
+    for code in codes {
+        if (code.sensitivity - 1.0).abs() <= 1.0e-4 {
+            code.sensitivity = sensitivity;
+        }
+    }
+}
+
 fn codes_after(chunk: &str, label: &str) -> Result<Vec<BoundInput>, String> {
-    let rest = chunk.split(label).nth(1).ok_or("missing code list")?;
+    let Some(rest) = chunk.split(label).nth(1) else {
+        return Ok(Vec::new());
+    };
     let list = rest.split(']').next().unwrap_or("");
     let mut codes = Vec::new();
-    for part in list.split("\"code\":\"") {
-        if part.starts_with('[') || part.is_empty() {
-            continue;
-        }
-        let name = part.split('"').next().unwrap_or("");
-        if name.is_empty() {
-            continue;
-        }
-        let code = crate::code::parse(name).ok_or_else(|| format!("unknown code {name}"))?;
-        let mut item = bound(code);
-        if let Some(after) = part.split("\"sensitivity\":").nth(1) {
-            let number = after.split([',', '}']).next().unwrap_or("").trim();
-            item.sensitivity = number
-                .parse::<f32>()
-                .map_err(|_| format!("bad sensitivity {number}"))
-                .and_then(finite_sensitivity)?;
-        }
-        codes.push(item);
+    for object in list.split('{').skip(1) {
+        let body = object.split('}').next().unwrap_or("");
+        codes.push(binding_from_object(body)?);
     }
     Ok(codes)
+}
+
+fn binding_from_object(body: &str) -> Result<BoundInput, String> {
+    let name = json_string(body, "code").ok_or("missing code")?;
+    let code = crate::code::parse(name).ok_or_else(|| format!("unknown code {name}"))?;
+    let mut item = bound(code);
+    if let Some(number) = json_number(body, "sensitivity") {
+        item.sensitivity = finite_sensitivity(number)?;
+    }
+    Ok(item)
+}
+
+fn value_after<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("\"{key}\"");
+    let index = text.find(&marker)?;
+    let after = text[index + marker.len()..].trim_start();
+    Some(after.strip_prefix(':')?.trim_start())
+}
+
+fn json_string<'a>(text: &'a str, key: &str) -> Option<&'a str> {
+    let after = value_after(text, key)?.strip_prefix('"')?;
+    let end = after.find('"')?;
+    Some(&after[..end])
+}
+
+fn json_number(text: &str, key: &str) -> Option<f32> {
+    let after = value_after(text, key)?;
+    let end = after
+        .find([',', '}', ']', ' ', '\n', '\t'])
+        .unwrap_or(after.len());
+    after[..end].trim().parse().ok()
+}
+
+fn json_bool(text: &str, key: &str) -> Option<bool> {
+    let after = value_after(text, key)?;
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 fn format_code_list(codes: &[BoundInput]) -> String {

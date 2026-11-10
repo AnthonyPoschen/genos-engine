@@ -54,27 +54,43 @@ impl GlyphSet {
 /// Classify a gamepad name. Steam Deck is checked before Xbox so a Deck that
 /// reports both still keeps Deck pictures. An Xbox-emulated Deck reports an
 /// Xbox name and gets Xbox pictures, which match that emulation.
+///
+/// The compare does not allocate. A poll of a pad whose name is already stored
+/// does not call this.
 #[must_use]
 pub fn glyph_set_from_name(name: &str) -> GlyphSet {
-    let n = name.to_ascii_lowercase();
-    if n.contains("steam deck") || n.contains("steamdeck") || n.contains("jupiter") {
+    if has_lower(name, "steam deck") || has_lower(name, "steamdeck") || has_lower(name, "jupiter") {
         GlyphSet::SteamDeck
-    } else if n.contains("xbox")
-        || n.contains("x-box")
-        || n.contains("xinput")
-        || n.contains("microsoft")
+    } else if has_lower(name, "xbox")
+        || has_lower(name, "x-box")
+        || has_lower(name, "xinput")
+        || has_lower(name, "microsoft")
     {
         GlyphSet::Xbox
-    } else if n.contains("dualshock")
-        || n.contains("dualsense")
-        || n.contains("playstation")
-        || n.contains("sony")
-        || n.contains("wireless controller")
+    } else if has_lower(name, "dualshock")
+        || has_lower(name, "dualsense")
+        || has_lower(name, "playstation")
+        || has_lower(name, "sony")
+        || has_lower(name, "wireless controller")
     {
         GlyphSet::PlayStation
     } else {
         GlyphSet::GenericGamepad
     }
+}
+
+fn has_lower(name: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    let bytes = name.as_bytes();
+    if needle.is_empty() || bytes.len() < needle.len() {
+        return false;
+    }
+    bytes.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle.iter())
+            .all(|(hay, pat)| hay.to_ascii_lowercase() == *pat)
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

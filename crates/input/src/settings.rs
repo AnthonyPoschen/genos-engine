@@ -32,6 +32,7 @@ impl InputSettings {
     pub fn apply(&self, input: &mut InputSystem) {
         input.set_stick_deadzone(self.stick_deadzone);
         input.set_mouse_sensitivity(self.mouse_sensitivity);
+        input.set_actions(&self.map);
     }
 
     /// The settings file text.
@@ -65,11 +66,7 @@ impl InputSettings {
                 map: ActionMap::from_json(text)?,
             });
         }
-        let mut settings = Self {
-            stick_deadzone: DEFAULT_STICK_DEADZONE,
-            mouse_sensitivity: 1.0,
-            map: ActionMap::new(),
-        };
+        let mut settings = Self::character_controller();
         for raw in text.split(['\n', ';']) {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -234,6 +231,54 @@ mod tests {
         assert!((input.mouse.dx - 3.0).abs() < 1.0e-4);
         assert!((input.mouse.dy + 0.5).abs() < 1.0e-4);
         assert!((input.mouse_sensitivity() - 2.0).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_partial_file_keeps_wasd_and_accepts_sensitivity_first() {
+        let loaded = InputSettings::parse(
+            "stick_deadzone=0.2\nlook.sensitivity=2\njump.sensitivity=3\njump=key_space\nrelease.enabled=0\nrelease=key_b",
+        )
+        .unwrap();
+        let mut input = InputSystem::new();
+        loaded.apply(&mut input);
+        input.set_key(InputCode::key_w, true);
+        assert!(loaded.map.axis_2d(&input, "move").y > 0.5);
+        input.set_key(InputCode::key_w, false);
+
+        let pad = input.gamepad_mut(0).unwrap();
+        pad.view.connected = true;
+        pad.right_stick.x = 0.3;
+        let look = loaded.map.axis_2d(&input, "look");
+        assert!(
+            (look.x - 0.6).abs() < 1.0e-3,
+            "0.3 times the sensitivity that preceded any rebind, got {look:?}"
+        );
+
+        input.set_key(InputCode::key_space, true);
+        assert!(loaded.map.down(&input, "jump"));
+        assert!(loaded.dump().contains("key_space*3"));
+        input.set_key(InputCode::key_b, true);
+        assert!(!loaded.map.down(&input, "release"));
+        let probe = input.dump();
+        assert!(probe.contains("bindings"));
+        assert!(probe.contains("key_w"), "{probe}");
+    }
+
+    #[test]
+    fn sensitivity_clamps_a_scaled_stick_at_one() {
+        let mut settings = InputSettings::character_controller();
+        settings
+            .set_key("look.vectors", "gamepad_right_stick*2")
+            .unwrap();
+        let mut input = InputSystem::new();
+        let pad = input.gamepad_mut(0).unwrap();
+        pad.view.connected = true;
+        pad.right_stick.x = 0.8;
+        let look = settings.map.axis_2d(&input, "look");
+        assert!(
+            (look.x - 1.0).abs() < 1.0e-4,
+            "0.8 times 2 clamps at 1, got {look:?}"
+        );
     }
 
     #[test]

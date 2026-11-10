@@ -47,6 +47,62 @@ pub use settings::InputSettings;
 pub use system::{DeviceChange, InputSystem};
 
 #[cfg(test)]
+mod alloc_count {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    thread_local! {
+        static ARMED: Cell<bool> = const { Cell::new(false) };
+        static BYTES: Cell<usize> = const { Cell::new(0) };
+        static BUSY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct Guard;
+
+    // SAFETY: every request is forwarded to the system allocator. The counter
+    // only touches const thread-local cells, and `BUSY` stops re-entry.
+    unsafe impl GlobalAlloc for Guard {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note(layout.size());
+            // SAFETY: `layout` is valid. The system allocator owns the block.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from this allocator's `alloc`.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    fn note(size: usize) {
+        let busy = BUSY.with(|flag| flag.replace(true));
+        if busy {
+            return;
+        }
+        if ARMED.with(Cell::get) {
+            BYTES.with(|bytes| bytes.set(bytes.get() + size));
+        }
+        BUSY.with(|flag| flag.set(false));
+    }
+
+    #[global_allocator]
+    static GUARD: Guard = Guard;
+
+    pub(crate) fn alloc_guard<T>(body: impl FnOnce() -> T) -> (T, usize) {
+        let _ = ARMED.with(Cell::get);
+        BYTES.with(|bytes| bytes.set(0));
+        ARMED.with(|flag| flag.set(true));
+        let value = body();
+        let bytes = BYTES.with(Cell::get);
+        ARMED.with(|flag| flag.set(false));
+        (value, bytes)
+    }
+}
+
+#[cfg(test)]
+pub(crate) use alloc_count::alloc_guard;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -203,5 +259,27 @@ mod tests {
         assert!(loaded.down(&input, "release") == false);
         input.set_key(InputCode::key_escape, true);
         assert!(loaded.down(&input, "release"));
+    }
+
+    #[test]
+    fn legacy_json_accepts_field_order_and_spaces() {
+        let text = concat!(
+            "{\"actions\":[{\"name\":\"look\",\"enabled\": true,\"kind\":\"axis_2d\",",
+            "\"vectors\":[{\"sensitivity\": 2.5,\"code\":\"gamepad_right_stick\"}]},",
+            "{\"name\":\"release\",\"enabled\": false,\"kind\":\"codes\",",
+            "\"codes\":[{\"code\":\"key_escape\"}]}]}"
+        );
+        let map = ActionMap::from_json(text).unwrap();
+        let mut input = InputSystem::new();
+        let pad = input.gamepad_mut(0).unwrap();
+        pad.view.connected = true;
+        pad.right_stick.y = 0.2;
+        let look = map.axis_2d(&input, "look");
+        assert!(
+            (look.y - 0.5).abs() < 1.0e-3,
+            "sensitivity before code, with a space, got {look:?}"
+        );
+        input.set_key(InputCode::key_escape, true);
+        assert!(!map.down(&input, "release"));
     }
 }
