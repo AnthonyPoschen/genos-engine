@@ -22,7 +22,10 @@
 //!
 //! [`Lifecycle`] is the only owner of that sequence. The frame calls [`Lifecycle::quit`]
 //! or drops the lifecycle. Either way the state machine runs on this thread:
-//! stop producers, poll GPU fences, destroy resources, unmap, then exit.
+//! stop producers, poll GPU fences, destroy our resources, unmap, then exit.
+//! [`Lifecycle::quit`] does not call `vkDestroyDevice` or `vkDestroyInstance`.
+//! Those two driver calls wait on one shared lavapipe lock, and the wait lands
+//! on whichever call takes it. The process exit reclaims that driver state.
 //! [`Lifecycle::pump`] is not required. The machine itself dispatches the seat
 //! between steps, so the gap between dispatches stays inside [`PUMP_BUDGET`].
 //!
@@ -32,11 +35,23 @@
 
 use std::io::Write;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::{Window, PUMP_BUDGET};
+
+/// The process is about to `_exit`. A [`Lifecycle`] drop then skips
+/// `vkDestroyDevice` and `vkDestroyInstance`, same as [`Lifecycle::quit`].
+static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Arm every later lifecycle drop in this process to leave the driver
+/// teardown for process exit. Call this from a binary whose `main` ends in
+/// [`exit`]. In-process tests do not, so a drop there still destroys the device.
+pub fn release_driver_on_process_exit() {
+    RELEASE_DRIVER_ON_EXIT.store(true, Ordering::Relaxed);
+}
 
 /// Printed on stdout when shutdown finishes. The quit-gap test reads it.
 pub const QUIT_GAP_PREFIX: &str = "lifecycle_quit_gap_ms=";
@@ -50,6 +65,14 @@ pub const PRESENTED_PREFIX: &str = "lifecycle_frames_presented=";
 /// Printed immediately before the process image is replaced. Wall time from
 /// the quit request through every drop after the window unmaps.
 pub const QUIT_TOTAL_PREFIX: &str = "lifecycle_quit_total_ms=";
+
+/// Wall time from the window unmap to process exit. This is the quit the
+/// player sees: the window is gone, then the process is gone.
+pub const VISIBLE_QUIT_PREFIX: &str = "lifecycle_visible_quit_ms=";
+
+/// Printed when quit leaves `vkDestroyDevice` and `vkDestroyInstance` to
+/// process exit instead of waiting on the driver lock.
+pub const DRIVER_RELEASE_LINE: &str = "lifecycle_driver_release=process_exit";
 
 /// How long a producer may stay unfinished before shutdown detaches it.
 const PRODUCER_LIMIT: Duration = Duration::from_secs(2);
@@ -119,6 +142,16 @@ pub trait ShutdownDevice {
     fn frames_presented(&self) -> u64 {
         0
     }
+
+    /// The following quit calls [`exit`] and will not wait for driver teardown.
+    ///
+    /// `vkDestroyDevice` and `vkDestroyInstance` share one lavapipe wait (the
+    /// submit thread, the raster thread pool, or the shader-cache queue). The
+    /// wait is tens to about 150 ms and shows up on whichever call takes the
+    /// lock. A player quit unmaps the window and leaves, so that wait is not
+    /// on the path the player sees. A drop that returns to the caller does
+    /// not use this and still destroys the driver objects.
+    fn release_driver_at_exit(&mut self) {}
 }
 
 /// A worker the lifecycle joins without blocking the seat.
@@ -339,10 +372,12 @@ impl<D: ShutdownDevice> Lifecycle<D> {
 
     /// Run shutdown, then [`exit`] with `code`.
     ///
-    /// Producers registered with [`Self::add_stop`] run first. The device is
-    /// destroyed while the window is still mapped. The window is unmapped only
-    /// after that. `_exit` does not run destructors, so this drops the
-    /// device and the window first.
+    /// Producers registered with [`Self::add_stop`] run first. Our GPU objects
+    /// are destroyed while the window is still mapped, with the seat dispatched
+    /// between steps. The window is then unmapped. `vkDestroyDevice` and
+    /// `vkDestroyInstance` are not called: `_exit` reclaims them, and waiting
+    /// would keep the process up after the window is gone. The device is left
+    /// in place on purpose. `_exit` does not run its destructor.
     pub fn quit(mut self, code: i32) -> ! {
         if !self.quit {
             self.exit_code = code;
@@ -351,6 +386,7 @@ impl<D: ShutdownDevice> Lifecycle<D> {
             self.exit_code = code;
         }
         let code = self.exit_code;
+        self.device.release_driver_at_exit();
         self.shutdown();
         unsafe {
             if self.window_alive {
@@ -358,7 +394,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 self.window_alive = false;
             }
         }
-        self.drop_device();
+        // The driver device stays alive until process exit. Dropping it here
+        // is the vkDestroyDevice / vkDestroyInstance wait.
+        self.device_dropped = true;
         std::mem::forget(self);
         exit(code);
     }
@@ -396,6 +434,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 }
             }
             SeatOp::Unmap => {
+                // The player-visible quit starts as the window goes away,
+                // before the drop, so a slow disconnect is part of that span.
+                mark_visible_quit();
                 if *alive {
                     window.clear_seat_pump();
                     // SAFETY: `window` was created in `new` and this flag is the
@@ -434,6 +475,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
 
 impl<D: ShutdownDevice> Drop for Lifecycle<D> {
     fn drop(&mut self) {
+        if RELEASE_DRIVER_ON_EXIT.load(Ordering::Relaxed) {
+            self.device.release_driver_at_exit();
+        }
         if !self.released {
             self.shutdown();
         }
@@ -498,6 +542,11 @@ pub fn parse_frames_presented(text: &str) -> Option<u64> {
 /// Read [`QUIT_TOTAL_PREFIX`] from a child's stdout or stderr.
 pub fn parse_quit_total(text: &str) -> Option<f64> {
     prefixed_f64(text, QUIT_TOTAL_PREFIX)
+}
+
+/// Read [`VISIBLE_QUIT_PREFIX`] from a child's stdout or stderr.
+pub fn parse_visible_quit(text: &str) -> Option<f64> {
+    prefixed_f64(text, VISIBLE_QUIT_PREFIX)
 }
 
 /// `true` when every phase and the total stay inside the seat budget.
@@ -607,7 +656,10 @@ extern "C" {
 /// multi-second tail after the quit lines.
 pub fn exit(code: i32) -> ! {
     if let Some(tail) = take_quit_tail() {
+        let ms = duration_ms(tail);
         phase_end("exit_tail", tail);
+        // Same span as `exit_tail`: the window is already gone.
+        println!("{VISIBLE_QUIT_PREFIX}{ms:.3}");
     }
     if let Some(total) = quit_total() {
         println!("{QUIT_TOTAL_PREFIX}{:.3}", duration_ms(total));
@@ -764,6 +816,15 @@ fn begin_quit_clock() {
 }
 
 fn mark_quit_tail() {
+    let mut clock = quit_clock();
+    if clock.tail.is_none() {
+        clock.tail = Some(Instant::now());
+    }
+}
+
+/// Start the player-visible quit clock, and the exit tail, at the unmap.
+fn mark_visible_quit() {
+    // Replaces any earlier tail. The player-visible span starts at the unmap.
     quit_clock().tail = Some(Instant::now());
 }
 
@@ -938,6 +999,10 @@ mod tests {
         let text = "noise\nlifecycle_phase_begin=drain_gpu\nlifecycle_phase=drain_gpu ms=4.000\nlifecycle_phase=destroy_swapchain ms=80.500\nlifecycle_quit_gap_ms=12.500\nlifecycle_quit_total_ms=90.250\n";
         assert_eq!(parse_quit_gap(text), Some(12.5));
         assert_eq!(parse_quit_total(text), Some(90.25));
+        assert_eq!(
+            parse_visible_quit("lifecycle_visible_quit_ms=1.250\n"),
+            Some(1.25)
+        );
         let phases = parse_quit_phases(text);
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[0].name, "drain_gpu");
