@@ -5138,9 +5138,6 @@ void lighting_svgf_push(uint slot) {
                 float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
                 catch_up = (1.0 - lam) * catch_up + lam;
             }
-            if (gstats.chg[31] != 0u && gstats.chg[27] == slot + 1u) {
-                gstats.chg[25] = floatBitsToUint(catch_up);
-            }
             outc = mix(prev, outc, catch_up);
         }
     }
@@ -5399,15 +5396,10 @@ void lighting_sc_grad_take(uint slot, float l_now) {
     float n2 = clamp(g2.w, 0.0, LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
     float lam = max(0.0, d - 2.0 * sqrt(n2));
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+    // checks and changed are pad4 and pad5 (lightingsc words 22 and 23).
+    // chg[30] is the SH lookup count (CHG_SH_LOOKUPS).
     atomicAdd(gstats.pad4, 1u);
     atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
-    // GENOS_LIGHTING_SC_TRACE: one check this frame (l_then, l_now, λ) in chg[28..30].
-    if (gstats.chg[31] != 0u && atomicAdd(gstats.chg[26], 1u) == 0u) {
-        gstats.chg[27] = slot + 1u;
-        gstats.chg[28] = floatBitsToUint(g.y);
-        gstats.chg[29] = floatBitsToUint(l_now);
-        gstats.chg[30] = floatBitsToUint(lam);
-    }
     if (lam < LIGHTING_ASVGF_EPS) {
         // Confirmed: defer the next check (doubling).
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
