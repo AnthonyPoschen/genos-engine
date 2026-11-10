@@ -1,7 +1,10 @@
 #version 450
-// Same-frame bloom pyramid. Karis on the first downsample, the 13-tap on the
-// rest, then the 3x3 tent back up. The chain matches bloom_pyramid: bloom only,
-// not scene + bloom. Mips live past the full-resolution image in this buffer.
+// Same-frame bloom pyramid. Karis on the first downsample. Four levels average
+// four of those samples into a quarter-resolution mip. Every other count is
+// one Karis sample at half resolution, which matches bloom_pyramid. The 13-tap
+// follows, then the 3x3 tent. Bloom only, not scene + bloom. The finest mip is
+// RGBA16F so the full-resolution tent is two aligned loads. Later mips are
+// RGB16F, two texels in 12 bytes.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant) uniform Push {
@@ -11,12 +14,60 @@ layout(push_constant) uniform Push {
 } pc;
 
 layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
-    vec4 px[];
+    uint words[];
 } scene_lin;
 
 layout(std430, set = 0, binding = 16) buffer BloomChain {
-    vec4 px[];
+    uint words[];
 } bloom;
+
+vec3 load_scene(uint i) {
+    vec2 rg = unpackHalf2x16(scene_lin.words[i * 2u]);
+    vec2 ba = unpackHalf2x16(scene_lin.words[i * 2u + 1u]);
+    return vec3(rg, ba.x);
+}
+
+const float HALF_MAX = 65504.0;
+
+vec2 finite_half2(vec2 v) {
+    return clamp(v, vec2(-HALF_MAX), vec2(HALF_MAX));
+}
+
+// Word 0 is the finest mip: RGBA16F, one texel in two uints.
+vec3 load_rgba(uint local) {
+    vec2 rg = unpackHalf2x16(bloom.words[local * 2u]);
+    vec2 ba = unpackHalf2x16(bloom.words[local * 2u + 1u]);
+    return vec3(rg, ba.x);
+}
+
+void store_rgba(uint local, vec3 c) {
+    bloom.words[local * 2u] = packHalf2x16(finite_half2(c.rg));
+    bloom.words[local * 2u + 1u] = packHalf2x16(finite_half2(vec2(c.b, 0.0)));
+}
+
+// Later mips: `word` is the mip's first uint. Two RGB16F texels occupy three uints.
+vec3 load_bloom(uint word, uint local) {
+    if (word == 0u) {
+        return load_rgba(local);
+    }
+    uint pair = local >> 1u;
+    uint w = word + pair * 3u;
+    vec2 a_rg = unpackHalf2x16(bloom.words[w]);
+    vec2 mid = unpackHalf2x16(bloom.words[w + 1u]);
+    vec2 b_gb = unpackHalf2x16(bloom.words[w + 2u]);
+    if ((local & 1u) == 0u) {
+        return vec3(a_rg, mid.x);
+    }
+    return vec3(mid.y, b_gb);
+}
+
+void store_pair(uint word, uint local0, vec3 c0, vec3 c1) {
+    uint pair = local0 >> 1u;
+    uint w = word + pair * 3u;
+    bloom.words[w] = packHalf2x16(finite_half2(c0.rg));
+    bloom.words[w + 1u] = packHalf2x16(finite_half2(vec2(c0.b, c1.r)));
+    bloom.words[w + 2u] = packHalf2x16(finite_half2(c1.gb));
+}
 
 const float REC709_R = 0.2126;
 const float REC709_G = 0.7152;
@@ -40,7 +91,7 @@ vec3 at_scene(uint w, uint h, uint x, uint y) {
     if (x >= w || y >= h) {
         return vec3(0.0);
     }
-    return scene_lin.px[y * w + x].rgb;
+    return load_scene(y * w + x);
 }
 
 vec3 box2_scene(uint w, uint h, uint x, uint y) {
@@ -85,7 +136,7 @@ vec3 at_bloom(uint base, uint w, uint h, int x, int y) {
     if (uint(x) >= w || uint(y) >= h) {
         return vec3(0.0);
     }
-    return bloom.px[base + uint(y) * w + uint(x)].rgb;
+    return load_bloom(base, uint(y) * w + uint(x));
 }
 
 vec3 bilinear(uint base, uint w, uint h, float u, float v) {
@@ -128,6 +179,15 @@ vec3 downsample13(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint d
     return acc;
 }
 
+// Quarter-resolution first step. Four half-resolution Karis samples, averaged.
+vec3 karis4(uint src_w, uint src_h, uvec2 p) {
+    vec3 acc = karis_at(src_w, src_h, p * 2u);
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 0u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(0u, 1u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 1u));
+    return acc * BOX_SCALE;
+}
+
 float tent(int dx, int dy) {
     if (dx == 0 && dy == 0) {
         return TENT_CENTRE;
@@ -152,28 +212,64 @@ vec3 upsample3(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint dst_
     return acc;
 }
 
-void main() {
-    uvec2 p = gl_GlobalInvocationID.xy;
-    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
-        return;
+vec3 shade(uvec2 p, uint dst_w, uint dst_h, uint src_w, uint src_h, uint src, uint mode) {
+    if (mode == 0u) {
+        return karis_at(src_w, src_h, p);
     }
+    if (mode == 4u) {
+        return karis4(src_w, src_h, p);
+    }
+    if (mode == 1u) {
+        return downsample13(src, src_w, src_h, p, dst_w, dst_h);
+    }
+    return upsample3(src, src_w, src_h, p, dst_w, dst_h);
+}
+
+void main() {
     uint dst_w = pc.dims.x;
     uint dst_h = pc.dims.y;
+    if (dst_w == 0u) {
+        return;
+    }
     uint src_w = pc.dims.z;
     uint src_h = pc.dims.w;
     uint src = pc.params.x;
-    uint dst = pc.params.y + p.y * dst_w + p.x;
+    uint dst = pc.params.y;
     uint mode = pc.params.z;
-    vec3 color;
-    if (mode == 0u) {
-        color = karis_at(src_w, src_h, p);
-    } else if (mode == 1u) {
-        color = downsample13(src, src_w, src_h, p, dst_w, dst_h);
-    } else {
-        color = upsample3(src, src_w, src_h, p, dst_w, dst_h);
+    // The finest mip is the one the display tent samples. One thread per texel.
+    if (dst == 0u) {
+        uvec2 p = gl_GlobalInvocationID.xy;
+        if (p.x >= dst_w || p.y >= dst_h) {
+            return;
+        }
+        uint local = p.y * dst_w + p.x;
+        vec3 c = shade(p, dst_w, dst_h, src_w, src_h, src, mode);
         if (mode == 2u) {
-            color += bloom.px[pc.params.w + p.y * dst_w + p.x].rgb;
+            c += load_bloom(pc.params.w, local);
+        }
+        store_rgba(local, c);
+        return;
+    }
+    uint count = dst_w * dst_h;
+    uint pairs = (count + 1u) / 2u;
+    uint pair = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    if (pair >= pairs) {
+        return;
+    }
+    uint local0 = pair * 2u;
+    uvec2 p0 = uvec2(local0 % dst_w, local0 / dst_w);
+    vec3 c0 = shade(p0, dst_w, dst_h, src_w, src_h, src, mode);
+    vec3 c1 = vec3(0.0);
+    uint local1 = local0 + 1u;
+    if (local1 < count) {
+        uvec2 p1 = uvec2(local1 % dst_w, local1 / dst_w);
+        c1 = shade(p1, dst_w, dst_h, src_w, src_h, src, mode);
+    }
+    if (mode == 2u) {
+        c0 += load_bloom(pc.params.w, local0);
+        if (local1 < count) {
+            c1 += load_bloom(pc.params.w, local1);
         }
     }
-    bloom.px[dst] = vec4(color, 0.0);
+    store_pair(dst, local0, c0, c1);
 }

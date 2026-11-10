@@ -6,7 +6,7 @@ pub mod scenes;
 
 use std::time::Instant;
 
-use genos_physics::{step, Body, World};
+use genos_physics::{step, World};
 
 pub use scenes::{find, SceneInfo, SCENES};
 
@@ -36,13 +36,15 @@ pub struct StepRecord {
     pub islands: u32,
     pub awake_bodies: u32,
     pub solver_bodies: u32,
+    pub wheel_rays: u32,
+    pub vehicle_count: u32,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{}}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -64,15 +66,17 @@ impl StepRecord {
             self.islands,
             self.awake_bodies,
             self.solver_bodies,
+            self.wheel_rays,
+            self.vehicle_count,
         )
     }
 }
 
-/// FNV-1a over every body's pose and velocities, bit for bit.
+/// FNV-1a over every body's pose and velocities, then each wheel length.
 #[must_use]
-pub fn state_hash(bodies: &[Body]) -> u64 {
+pub fn state_hash(world: &World) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for body in bodies {
+    for body in &world.bodies {
         let o = body.orientation;
         for value in [
             body.position.x,
@@ -89,13 +93,25 @@ pub fn state_hash(bodies: &[Body]) -> u64 {
             body.angular_velocity.y,
             body.angular_velocity.z,
         ] {
-            for byte in value.to_bits().to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0100_0000_01b3);
-            }
+            mix_f32(&mut hash, value);
+        }
+    }
+    for vehicle in &world.vehicles {
+        let Some(genos_physics::GroundContact::Wheeled(ground)) = vehicle.ground else {
+            continue;
+        };
+        for length in ground.lengths {
+            mix_f32(&mut hash, length);
         }
     }
     hash
+}
+
+fn mix_f32(hash: &mut u64, value: f32) {
+    for byte in value.to_bits().to_le_bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
 }
 
 /// One loaded scene stepping on a fixed step from step 0.
@@ -140,7 +156,9 @@ impl Session {
             rotational_energy: 0.0,
             max_speed: 0.0,
             min_y: f32::INFINITY,
-            hash: state_hash(&self.world.bodies),
+            hash: state_hash(&self.world),
+            wheel_rays: stats.wheel_rays,
+            vehicle_count: stats.vehicle_count,
             contact_points: stats.contact_points,
             sleeping_bodies: stats.sleeping_bodies,
             pair_tests: stats.pair_tests,
@@ -225,7 +243,7 @@ pub fn checkpoint(scene: &'static SceneInfo, at: u32, steps: u32) -> Result<u64,
     Ok(straight
         .last()
         .copied()
-        .unwrap_or_else(|| state_hash(&restored.world.bodies)))
+        .unwrap_or_else(|| state_hash(&restored.world)))
 }
 
 #[cfg(test)]
@@ -369,6 +387,75 @@ mod tests {
             .filter(|b| b.inverse_mass == 0.0)
             .count();
         assert_eq!(statics, 10_000);
+    }
+
+    #[test]
+    fn thruster_scene_spins_and_replays() {
+        let scene = find("thruster").unwrap_or(&SCENES[0]);
+        assert_eq!(scene.name, "thruster");
+        assert_eq!(scene.steps, 60);
+        let mut session = Session::load(scene);
+        session.run(60);
+        assert_eq!(session.steps, 60);
+        let record = session.records[59];
+        assert_eq!(record.wheel_rays, 0);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("thruster");
+        assert!(line.contains("\"wheel_rays\":0"));
+        assert!(line.contains("\"vehicle_count\":1"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        let spin = session.world.bodies[0].angular_velocity.z;
+        assert!((spin + 3.0).abs() / 3.0 <= 0.01, "offset spin {spin}");
+        assert!(replay(scene, 60).is_ok(), "thruster replay diverged");
+    }
+
+    #[test]
+    fn an_asleep_thruster_wakes_on_the_debug_scene() {
+        let scene = find("thruster").unwrap_or(&SCENES[0]);
+        assert_eq!(scene.name, "thruster");
+        let mut session = Session::load(scene);
+        session.world.bodies[0].sleeping = true;
+        session.world.bodies[0].sleep_time = 0.5;
+        session.run(5);
+        assert_eq!(session.steps, 5);
+        let body = session.world.bodies[0];
+        let record = session.records[4];
+        assert!(!body.sleeping, "the thruster scene stayed asleep");
+        assert!(
+            body.angular_velocity.z < 0.0,
+            "offset spin {}",
+            body.angular_velocity.z
+        );
+        assert!(!body.motor);
+        assert_eq!(record.wheel_rays, 0);
+        assert_eq!(record.sleeping_bodies, 0);
+        assert_eq!(record.vehicle_count, 1);
+        assert!(
+            checkpoint(scene, 10, 25).is_ok(),
+            "thruster checkpoint diverged"
+        );
+    }
+
+    #[test]
+    fn chassis_rest_casts_four_rays_and_the_hash_covers_lengths() {
+        let mut session = Session::load(find("chassis_rest").unwrap_or(&SCENES[0]));
+        assert_eq!(session.scene.name, "chassis_rest");
+        let record = session.step();
+        assert_eq!(record.wheel_rays, 4);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("chassis_rest");
+        assert!(line.contains("\"wheel_rays\":4"));
+        assert!(line.contains("\"vehicle_count\":1"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        let before = record.hash;
+        let Some(genos_physics::GroundContact::Wheeled(ref mut ground)) =
+            session.world.vehicles[0].ground
+        else {
+            assert!(session.world.vehicles[0].ground.is_some());
+            return;
+        };
+        ground.lengths[0] += 0.01;
+        assert_ne!(state_hash(&session.world), before);
     }
 
     #[test]

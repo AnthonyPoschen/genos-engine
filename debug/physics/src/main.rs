@@ -30,7 +30,7 @@ A plain run prints one JSON line per step: step, step_us, bodies, ccd_applied,
 toi_failed, toi_deferred, pair_slices, dynamic_pair_impulses, linear_energy,
 rotational_energy, max_speed, min_y, a bitwise state hash, contact_points,
 sleeping_bodies, pair_tests, broadphase_builds, tree_nodes, islands,
-awake_bodies and solver_bodies.";
+awake_bodies, solver_bodies, wheel_rays and vehicle_count.";
 
 struct Options {
     list: bool,

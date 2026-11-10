@@ -149,7 +149,7 @@ fn hdr_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_hdr",
-            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms and 96 MiB ceilings are the 4070 budget, not a lavapipe score.",
+            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms and 96 MiB ceilings are the 4070 budget, not a lavapipe score. ADR 0027's per-preset ceilings (High 37.50 MiB) are the table in the HDR pipeline record; the gate checks those bytes at 1440p against ceiling × 1024², for SDR, HDR10, and scRGB.",
         ),
     ]
 }
