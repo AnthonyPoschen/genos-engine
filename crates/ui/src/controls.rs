@@ -77,11 +77,6 @@ fn paint_text(
         return painted;
     }
     if let Some(text) = &item.text {
-=======
-    edit::paint(&mut paints, item, caret, theme);
-    let field = matches!(item.kind, Kind::TextField { .. });
-    if let Some(text) = item.text.as_ref().filter(|_| !field) {
->>>>>>> 6f647ec5 (ui: single-line text field with selection)
         let color = text_color(item, theme);
         match item.face {
             TextFace::Bitmap => {
