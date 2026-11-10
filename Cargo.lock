@@ -223,6 +223,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-jobs"
+version = "0.1.0"
+
+[[package]]
+name = "genos-jobs-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-jobs",
+]
+
+[[package]]
 name = "genos-json"
 version = "0.1.0"
 
