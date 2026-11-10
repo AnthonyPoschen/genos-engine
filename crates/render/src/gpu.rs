@@ -181,6 +181,7 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 mod fog;
 mod media_check;
+mod pass_sync;
 mod stage;
 mod texel_detail;
 mod texel_ray_cut;
@@ -507,8 +508,10 @@ impl Renderer {
             .saturating_add(lighting.hdr_encode.size)
             .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
-            .saturating_add(lighting.meter_dev.size)
-            .saturating_add(lighting.meter_host.size);
+            .saturating_add(lighting.meter_dev[0].size)
+            .saturating_add(lighting.meter_dev[1].size)
+            .saturating_add(lighting.meter_host[0].size)
+            .saturating_add(lighting.meter_host[1].size);
         bytes as f64
     }
 
@@ -1597,7 +1600,12 @@ struct Gpu {
     cmds: [Handle; 2],
     fences: [Handle; 2],
     image_readies: [Handle; 2],
-    render_dones: [Handle; 2],
+    /// Present-wait semaphores, one per swapchain image, indexed by the image
+    /// `vkAcquireNextImageKHR` returns. The submit fence does not prove the
+    /// presentation engine has finished waiting, so a frames-in-flight semaphore
+    /// is still in use when the next submit signals it. `vkDestroySwapchainKHR`
+    /// then waits for a present that cannot complete.
+    present_sems: Vec<Handle>,
     colors: [Image; 2],
     depths: [Image; 2],
     framebuffers: [Handle; 2],
@@ -2392,16 +2400,20 @@ impl Gpu {
                 None
             };
             // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
-            // G-buffer, and textureCompressionBC (22) when the device has it.
+            // G-buffer, textureCompressionBC (22) when the device has it, and
+            // shaderInt64 (40) only when the device reports it. A SPIR-V module
+            // that declares OpCapability Int64 is illegal without the feature.
             type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
             let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
             let mut have = [0u32; 55];
             get_features(physical, have.as_mut_ptr());
-            let bc_textures = have[22] != 0;
             let mut features = [0u32; 55];
             features[26] = 1;
-            if bc_textures {
+            if have[22] != 0 {
                 features[22] = 1;
+            }
+            if have[40] != 0 {
+                features[40] = 1;
             }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
@@ -2522,7 +2534,7 @@ impl Gpu {
                 cmds: [std::ptr::null_mut(); 2],
                 fences: [std::ptr::null_mut(); 2],
                 image_readies: [std::ptr::null_mut(); 2],
-                render_dones: [std::ptr::null_mut(); 2],
+                present_sems: Vec::new(),
                 colors: [Image::empty(), Image::empty()],
                 depths: [Image::empty(), Image::empty()],
                 framebuffers: [std::ptr::null_mut(); 2],
@@ -2766,7 +2778,6 @@ impl Gpu {
             };
             for slot in 0..2 {
                 self.image_readies[slot] = self.make_sem()?;
-                self.render_dones[slot] = self.make_sem()?;
                 check(
                     (self.fns.create_fence)(
                         self.device,
@@ -2778,7 +2789,6 @@ impl Gpu {
                 )?;
             }
             self.image_ready = self.image_readies[0];
-            self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
             let transfer_pool = PoolInfo {
                 s_type: 39,
@@ -3215,6 +3225,7 @@ impl Gpu {
                 ),
                 "image list",
             )?;
+            self.make_present_sems()?;
 
             let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
                 8
@@ -3373,6 +3384,8 @@ impl Gpu {
         };
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
+            // Both raster sets are rewritten. The other flight may still be executing.
+            self.wait_all_inflight()?;
             let share = self.light_families();
             let next = self.make_buffer_queues(
                 (bytes.len() as u64).max(5120),
@@ -3393,7 +3406,6 @@ impl Gpu {
         self.cmd = self.cmds[slot];
         self.fence = self.fences[slot];
         self.image_ready = self.image_readies[slot];
-        self.render_done = self.render_dones[slot];
         self.color = copy_image(&self.colors[slot]);
         self.depth = copy_image(&self.depths[slot]);
         self.framebuffer = self.framebuffers[slot];
@@ -3657,6 +3669,15 @@ impl Gpu {
                 return Err("out of date".into());
             }
             check(acquire, "acquire")?;
+            let image = usize::try_from(index).unwrap_or(usize::MAX);
+            let Some(present_sem) = self.present_sems.get(image).copied() else {
+                return Err(format!(
+                    "swapchain image {index} has no present semaphore"
+                ));
+            };
+            // This image was reacquired, so the presentation engine has released
+            // the semaphore it waited on for the previous present of this image.
+            self.render_done = present_sem;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             if profiled {
@@ -3670,7 +3691,10 @@ impl Gpu {
             self.update_resident_scene()?;
             self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
-            self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
+            // The acquire semaphore is waited in color output. The layout
+            // transition has to happen in that stage, or it races the
+            // presentation engine's read of this image.
+            self.image_barrier(swap, 0, 7, 0x400, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
@@ -4566,6 +4590,36 @@ impl Gpu {
             self.extent_h,
             &values,
         ))
+    }
+
+    /// One binary semaphore per current swapchain image. Replaces any previous set.
+    fn make_present_sems(&mut self) -> Result<(), String> {
+        self.destroy_present_sems();
+        let count = self.swap_images.len();
+        self.present_sems.reserve(count);
+        for _ in 0..count {
+            let sem = self.make_sem()?;
+            self.present_sems.push(sem);
+        }
+        if let Some(sem) = self.present_sems.first().copied() {
+            self.render_done = sem;
+        }
+        Ok(())
+    }
+
+    fn destroy_present_sems(&mut self) {
+        if self.device.is_null() {
+            self.present_sems.clear();
+            return;
+        }
+        let sems = std::mem::take(&mut self.present_sems);
+        for sem in sems {
+            if !sem.is_null() {
+                unsafe {
+                    (self.fns.destroy_sem)(self.device, sem, std::ptr::null());
+                }
+            }
+        }
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -5602,6 +5656,7 @@ impl Gpu {
                     break;
                 };
                 self.write_device(cmd, dst, offset, &chunk)?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
                 sent += end - at;
                 at = end;
             }
@@ -5677,6 +5732,7 @@ impl Gpu {
                     continue;
                 };
                 self.write_device(cmd, dst, offset, &bytes[start..stop])?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -6024,9 +6080,8 @@ impl Gpu {
         // against one variant and used with the other. The filter leaves the
         // color image visible to a transfer read; the clear pass waits on the
         // previous frame's color output.
-        let in_stage = 0x1000 | 0x400;
-        let in_access = 0x800 | 0x100;
-        let in_dst = 0x180;
+        let into = pass_sync::scene_pass_in();
+        let out = pass_sync::scene_pass_out();
         let atts = [
             Att {
                 flags: 0,
@@ -6075,19 +6130,19 @@ impl Gpu {
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: in_stage,
-                dst_stage: 0x400,
-                src_access: in_access,
-                dst_access: in_dst,
+                src_stage: into.src_stage,
+                dst_stage: into.dst_stage,
+                src_access: into.src_access,
+                dst_access: into.dst_access,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: 0x400,
-                dst_stage: 0x1000,
-                src_access: 0x100,
-                dst_access: 0x800,
+                src_stage: out.src_stage,
+                dst_stage: out.dst_stage,
+                src_access: out.src_access,
+                dst_access: out.dst_access,
                 flags: 0,
             },
         ];
@@ -7239,8 +7294,17 @@ impl Gpu {
         self.prepare_atlas_draw(true);
         self.prepare_atlas_draw(false);
         let show = self.ready_to_show();
+        let mut last_page = None;
         for (index, level) in &show {
-            self.record_mip_blit(*index, *level);
+            if let Some(image) = self.record_mip_blit(*index, *level) {
+                last_page = Some(image);
+            }
+        }
+        // One readback for the submit. Copying every page into the same
+        // 4-byte buffer was a WRITE_AFTER_WRITE (the allocation is often 16
+        // bytes). The host reads the last page.
+        if let Some(image) = last_page {
+            self.copy_page_texel(image);
         }
         for (index, level) in show {
             if let Some(source) = self
@@ -7488,24 +7552,18 @@ impl Gpu {
         self.copy_image_texel(image, 6, &self.page_readback);
     }
 
-    fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self
-            .stream_sources
-            .iter()
-            .find(|source| source.index == index)
-        else {
-            return;
-        };
-        let Some(slot) = usize::try_from(level).ok() else {
-            return;
-        };
-        let Some(mip) = source.chain.levels.get(slot) else {
-            return;
-        };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
-            return;
-        };
-        self.publish_resident(&page, source.color, level);
+    /// Blit one resident page. Returns the page image when it is a colour page
+    /// the host can read, so the submit copies that texel once.
+    fn record_mip_blit(&self, index: usize, level: u32) -> Option<Handle> {
+        let source = self.stream_sources.iter().find(|source| source.index == index)?;
+        let slot = usize::try_from(level).ok()?;
+        let mip = source.chain.levels.get(slot)?;
+        let page = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))?;
+        let color = source.color;
+        self.publish_resident(&page, color, level);
+        let atlas_slot = usize::from(!color);
+        let readable = color && !block_texel(self.sampled_format[atlas_slot]);
+        readable.then_some(page.image)
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
@@ -7546,9 +7604,6 @@ impl Gpu {
                 atlas_w.max(1),
                 atlas_h.max(1),
             );
-        }
-        if color && !block_texel(self.sampled_format[slot]) {
-            self.copy_page_texel(page.image);
         }
     }
 
@@ -8518,11 +8573,6 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
-            if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-                self.destroy_aa_targets();
-                self.destroy_reflection_targets();
-                return;
-            }
             self.destroy_aa_targets();
             self.destroy_reflection_targets();
             for slot in 0..2 {
@@ -8546,6 +8596,9 @@ impl Gpu {
             self.depth = Image::empty();
             self.host = Buffer::empty();
         }
+        // After the swapchain: a present may still be finishing, and
+        // vkDestroySwapchainKHR is what waits for it. The semaphore goes after.
+        self.destroy_present_sems();
     }
 
     /// Presentation images. The seat is dispatched around this call: the
@@ -9049,10 +9102,8 @@ impl Gpu {
                 if !self.image_readies[slot].is_null() {
                     (self.fns.destroy_sem)(self.device, self.image_readies[slot], std::ptr::null());
                 }
-                if !self.render_dones[slot].is_null() {
-                    (self.fns.destroy_sem)(self.device, self.render_dones[slot], std::ptr::null());
-                }
             }
+            self.destroy_present_sems();
             if !self.desc_pool.is_null() {
                 (self.fns.destroy_desc_pool)(self.device, self.desc_pool, std::ptr::null());
             }
