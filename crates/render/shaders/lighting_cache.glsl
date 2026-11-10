@@ -3761,6 +3761,30 @@ float lighting_lamp_keep(vec3 p, uint updated) {
     }
     return keep;
 }
+// The lamp buffer already holds this frame's lamps. The snapshot still holds
+// last frame's until lighting_wrc_note_lamps runs. Read-only, so a relight
+// in that same pass can see the change before the ring write is visible.
+bool lighting_lamps_pending() {
+    uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
+    uint had = ckeys.key[LIGHTING_WRC_LAMPS_AT];
+    if (n != had) {
+        return n > 0u;
+    }
+    for (uint i = 0u; i < n; i++) {
+        Lamp l = scene_lamp(i);
+        uint at = LIGHTING_WRC_SNAP_AT + 4u * i;
+        vec3 o = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        float ow = uintBitsToFloat(ckeys.key[at + 3u]);
+        uint col = lighting_hash(floatBitsToUint(l.color.r) ^ lighting_hash(floatBitsToUint(l.color.g) ^ lighting_hash(floatBitsToUint(l.color.b)))) | 1u;
+        bool moved = ckeys.key[LIGHTING_WRC_SNAP_COL_AT + i] != col
+            || length(o - l.pos.xyz) > LIGHTING_LAMP_STILL
+            || abs(ow - l.color.w) > 1.0e-3;
+        if (moved && (l.color.w > 0.0 || ow > 0.0)) {
+            return true;
+        }
+    }
+    return false;
+}
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
 void lighting_wrc_note_lamps() {
@@ -5114,6 +5138,9 @@ void lighting_svgf_push(uint slot) {
                 float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
                 catch_up = (1.0 - lam) * catch_up + lam;
             }
+            if (gstats.chg[31] != 0u && gstats.chg[27] == slot + 1u) {
+                gstats.chg[25] = floatBitsToUint(catch_up);
+            }
             outc = mix(prev, outc, catch_up);
         }
     }
@@ -5194,6 +5221,17 @@ const uint LIGHTING_ASVGF_AGE = 900u;
 uint lighting_grad_count() {
     uint cap = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
     return LIGHTING_GRAD_CHECKS_ON ? min(ckeys.key[LIGHTING_GRAD_COUNT_AT], cap) : 0u;
+}
+// A same-seed check. It shades the live lamps. The texel direct cache still
+// holds the light from before a change (three frames in four keep it), so a
+// check that read it would compare the old light with itself.
+bool lighting_grad_check_ray(uint ray) {
+    if (ray < lighting_probe_rays()) {
+        return false;
+    }
+    uint r = ray - lighting_probe_rays();
+    uint ent = r / LIGHTING_CACHE_RAYS;
+    return lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES;
 }
 bool lighting_sc_grad_stored(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z) != 0u;
@@ -5304,6 +5342,55 @@ void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);
     cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
 }
+// One check per block. The pick when it has a stored ray, otherwise the
+// lowest stored texel. A never-checked texel is "due", and enqueueing every
+// one would skip the relights that replace the mean.
+bool lighting_sc_settle_pick(uint slot) {
+    if (!lighting_sc_grad_stored(slot)) {
+        return false;
+    }
+    vec2 c = lighting_sc_true_cell(slot);
+    ivec2 b = ivec2(floor(c / 3.0));
+    ivec2 m = ivec2(c) - 3 * b;
+    uint h = hash_cell3(ivec3(b, 0), lighting_round());
+    uint rep = h % 9u;
+    ivec2 rm = ivec2(int(rep % 3u), int(rep / 3u));
+    uint rs = lighting_sc_cell_slot(slot, rm - m);
+    if (rs != ~0u && lighting_sc_grad_stored(rs)) {
+        return uint(m.y * 3 + m.x) == rep;
+    }
+    uint mine = uint(m.y * 3 + m.x);
+    for (uint k = 0u; k < mine; k++) {
+        ivec2 km = ivec2(int(k % 3u), int(k / 3u));
+        uint ns = lighting_sc_cell_slot(slot, km - m);
+        if (ns != ~0u && lighting_sc_grad_stored(ns)) {
+            return false;
+        }
+    }
+    return true;
+}
+// A lamp settle used to return before the same-seed check, so λ stayed 0
+// for the whole change. True means skip this texel's relight: the check
+// reads its stored ray.
+bool lighting_sc_settle_lambda(uint slot, bool pending) {
+    if (!LIGHTING_GRAD_CHECKS_ON || !lighting_sc_settle_pick(slot)) {
+        return false;
+    }
+    // A fresh λ is this block's last check. A change the snapshot has not
+    // noted yet is not that check: the stored ray is still the old light.
+    if (!pending && lighting_sc_lambda(slot) >= LIGHTING_ASVGF_EPS && lighting_sc_lambda_fresh(slot)) {
+        return false;
+    }
+    if (!lighting_sc_check_turn(slot)) {
+        return false;
+    }
+    uint cap = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
+    uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
+    if (at < cap) {
+        ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
+    }
+    return at < cap;
+}
 void lighting_sc_grad_take(uint slot, float l_now) {
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
     vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
@@ -5314,6 +5401,13 @@ void lighting_sc_grad_take(uint slot, float l_now) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
     atomicAdd(gstats.pad4, 1u);
     atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
+    // GENOS_LIGHTING_SC_TRACE: one check this frame (l_then, l_now, λ) in chg[28..30].
+    if (gstats.chg[31] != 0u && atomicAdd(gstats.chg[26], 1u) == 0u) {
+        gstats.chg[27] = slot + 1u;
+        gstats.chg[28] = floatBitsToUint(g.y);
+        gstats.chg[29] = floatBitsToUint(l_now);
+        gstats.chg[30] = floatBitsToUint(lam);
+    }
     if (lam < LIGHTING_ASVGF_EPS) {
         // Confirmed: defer the next check (doubling).
         uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;

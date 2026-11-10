@@ -175,7 +175,7 @@ void main() {
     uint tdl = ~0u;
     uint tdl_sig = 0u;
     vec3 n_hit = n;
-    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u) {
+    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u && !lighting_grad_check_ray(ray)) {
         uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
         // A hit off screen has no pixel texel, only the hit patch its bounce
         // lookup claimed (lighting_cache_irradiance). Its direct light is held
