@@ -1,7 +1,7 @@
 # Integration perf and the static-hall speckles
 
 - **Date:** 2026-11-11
-- **Result:** finding. No renderer change in this note.
+- **Result:** finding. The default High picture is unchanged. `coverage_first` and `cap_fill` default off; they exist so the pictures below could be shot.
 - **Heads:** `origin/lighting-v3` `34cc80cb`, `cursor/lighting-integration` `30c47bb1`. The sample-count rule is #255 (`6a057068`), kept. The texels-view population record used for the traces is `f710e4cf` on that branch.
 - **Machine for the pictures:** lavapipe, 640×360, Weston headless. Absolute milliseconds are ratios only. Anthony's RTX 4070 at 1440p is the absolute clock.
 
@@ -116,3 +116,51 @@ Each is one sentence. This note does not implement them. No blur.
 4. Compact walks 1,048,576 slots every cache round (`lighting_dispatch.rs` 451); a still scene does not need that walk once the slots are settled.
 5. Maintenance pass 9 is a second full-picture compose (`push_picture`, 386–390) and it is missing from `LIGHTING_MS` (`gpu.rs` 4017); one compose covers the picture.
 6. Keep the #255 count rule. It is what stops a zero-mean texel from looking resolved, and the histogram shows the claimed set does arrive at 64.
+
+## Set cap, steady cost, and coverage-first
+
+Anthony's cutoff: about 10% less detail is acceptable if the picture still looks good and the cost is about half. These shots are the integration scheduler (this branch), not #255. `cap_fill` (default off) makes `world_cap` the settle point: the 8-set perceptual stop does not fire, and a texel at the cap goes to the trickle list instead of taking a new whole set. `world_cap` 0 with `cap_fill` off is still 64 sets and the perceptual stop, which is High. The pictures use `cap_fill` on.
+
+Static hall, Anthony's pose (eye 14.5, 1.7, 23.5, yaw −0.3554, pitch 0.08), 640×360, High, boxes still, lamps still, sun frozen, dynamic 0. The shot is after 200 frames (240 for the 64-set cap), past the lamp ring. Through that ring the cache sits near 613k rays, then spikes to the 1.40M batch ceiling, and only then falls to the steady count below. Lavapipe. Ray counts are `lightingsc` `rays`. The lighting-total milliseconds are `GPU_MS` `lighting=`. The per-pass `LIGHTING_MS` line printed only on the opening frame, so it is not the steady split.
+
+The path trace of that pose is `img/hall-path-reference.png`: 640×360, 72 spp, 254 s, noise 0.138. It did not reach the 0.06 noise target. Error below is near-weighted and unweighted relative luminance against that PNG, sky pixels `(28, 36, 48)` masked. Near weight is the depth view (white is the eye, black is 50 m). The reference noise is large enough that caps 8 through 64 land on the same error. The difference from the 64-set picture is the number that still separates them.
+
+| Cap | Cache rays | Lighting ms | Near error | Flat error | Error vs the 64-set error | Near difference from the 64-set picture | Frame-to-frame luma |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 28,517 | 376 | 0.0995 | 0.1027 | +19% | 0.082 | 3.35 |
+| 8 | 28,008 | 351 | 0.0833 | 0.0858 | 0% | 0.031 | 2.95 |
+| 16 | 26,600 | 605 | 0.0837 | 0.0862 | 0% | 0.026 | 2.92 |
+| 32 | 1,574 | 551 | 0.0837 | 0.0862 | 0% | 0.026 | 2.90 |
+| 64 | 104 | 595 | 0.0835 | 0.0860 | baseline | 0 | 2.87 |
+
+Steady cache rays fall as the cap rises. A 4-set cap is about 274× the 64-set ray count, an 8-set cap about 269×, 16 about 256×, 32 about 15×. The 64-set texel is the cheap one: once it is full it leaves the trickle list (about 100 rays a frame, plus a 4,096-ray scout every eighth frame). A texel parked at 4, 8, or 16 sets stays noisy, so it stays due, and the trickle list stays full at about 27–28k rays. The lighting-total timestamp does not follow that. It sits between 350 and 600 ms at every cap, because on lavapipe the wavelet and compact dominate the clock. Do not read the 376 ms at 4 sets as a saving.
+
+Cap 4 is the one that looks worse: the back wall and the pillar are blotchy, and the near-weighted error is 19% above the 64-set picture's error. Caps 8, 16, and 32 are inside the reference noise of the 64-set picture. Against that picture itself they still differ (3.1% of the near-weighted light at 8 sets, 2.6% at 16 and 32). The floor speckle is in every cap, including 64, at about 3 codes of frame-to-frame luma. That is the direct term, which this sweep does not touch. No cap pops. Cap 4 blotches.
+
+No cap meets the 10%-for-half-cost line. The caps that look close to 64 cost more rays in the steady hall, not fewer. Leave the 64-set bar. Leave `LIGHTING_DN_MIN_SETS` at 8: a floor of 4 is the blotchy picture, and it does not save rays.
+
+Full frames: `img/hall-cap-4.png`, `img/hall-cap-8.png`, `img/hall-cap-16.png`, `img/hall-cap-32.png`, `img/hall-cap-64.png`, `img/hall-path-reference.png`.
+
+Contact sheets, 2× nearest, one region each. The label is the cap and the steady ray count against the 64-set baseline.
+
+- `img/hall-sets-floor.png`
+- `img/hall-sets-back-wall.png`
+- `img/hall-sets-pillar.png`
+
+### Coverage-first, one yaw frame
+
+`coverage_first` (default off) waits until the near-camera-weighted mean of on-screen fine texels reaches 16. While any on-screen fine texel is under 8, those texels are listed ahead of refinement and each takes one 16-ray quarter, not a whole 64-ray set. Refinement of texels already at 8 waits.
+
+Same hall, 80 frames still, then a yaw of 0.03 rad per frame for 40 frames. Both schedulers sit on the batch ceiling, 1,404,928 rays, through the turn. The peak is not cut, and the lighting total stays near 1.0 s on both. The saved frame is the end of that yaw. Current (frame 181) is still at 1,404,928 rays. Coverage-first (frame 177) has fallen to 69,248 rays, 95% fewer on that frame. The floor of that frame is still speckled on both.
+
+- `img/hall-yaw-current.png`
+- `img/hall-yaw-coverage-first.png`
+- `img/hall-yaw-floor.png`
+- `img/hall-yaw-back-wall.png`
+- `img/hall-yaw-pillar.png`
+
+The yaw sheets are that turned frame. The camera has moved about 1.2 rad, so the near floor, the far wall, and the pillar are not the same pixels as the still sheets.
+
+Leave `coverage_first` off. It shortens the tail after a turn. It does not stop the frame-time spike while the new texels are arriving. A moving lamp plus moving boxes was not part of this shoot.
+
+The two flags are local. Nothing is replicated. The client that has the flag is the authority for its own cache. There is no prediction or rollback. The scheduler is not deterministic across the flag. A headless server does not run this cache.
