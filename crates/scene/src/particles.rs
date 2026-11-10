@@ -18,6 +18,12 @@ pub const MEDIUM_MAX_PARTICLES: u32 = 262_144;
 /// Particles the stage-1 buffer can hold.
 pub const HIGH_MAX_PARTICLES: u32 = 1_048_576;
 
+/// Vulkan 1.3 `maxComputeWorkGroupCount[0]` is at least 65535. The sim
+/// dispatches one group per 64 slots, so a budget above this is not a legal
+/// dispatch. The scan's top level is one workgroup of 64 and would go wrong
+/// above 16,777,216; the dispatch limit is tighter.
+pub const MAX_PARTICLE_SLOTS: u32 = 65_535 * 64;
+
 /// Seed the step uses when the setting is zero. A zero xorshift stays zero.
 pub const DEFAULT_SEED: u32 = 0xA341_316C;
 
@@ -96,8 +102,9 @@ impl ParticleLight {
 /// Stage-1 particle settings. A public [`EngineSettings`] value on the scene.
 ///
 /// Keys: `preset`, `enabled`, `max_particles`, `count`, `sort`, `lit`,
-/// `half_res`, `depth_collision`, `freeze`, `seed`, `origin`, `rate`, `life`,
-/// `rise`, `spread`, `size`, `albedo`, `soft_band`.
+/// `depth_collision`, `freeze`, `seed`, `origin`, `rate`, `life`,
+/// `rise`, `spread`, `size`, `albedo`, `soft_band`. `half_res` is a deprecated
+/// alias and is ignored.
 #[allow(clippy::struct_excessive_bools, reason = "the design lists each knob")]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParticleSettings {
@@ -113,8 +120,6 @@ pub struct ParticleSettings {
     pub sort: bool,
     /// Stored for the later lighting stage.
     pub lit: ParticleLight,
-    /// Stored for a later half-resolution draw. Stage 1 draws in the existing pass.
-    pub half_res: bool,
     /// Retire a particle that is behind the depth buffer.
     pub depth_collision: bool,
     /// Keep the positions and skip integrate and emit.
@@ -149,24 +154,17 @@ impl ParticleSettings {
     /// Quality knobs for `preset`. The emitter starts disabled with `count` 0.
     #[must_use]
     pub fn preset(preset: ParticlePreset) -> Self {
-        let (max_particles, sort, lit, half_res, depth_collision) = match preset {
+        let (max_particles, sort, lit, depth_collision) = match preset {
             ParticlePreset::Low | ParticlePreset::Custom => {
-                (LOW_MAX_PARTICLES, false, ParticleLight::Vertex, true, false)
+                (LOW_MAX_PARTICLES, false, ParticleLight::Vertex, false)
             }
             ParticlePreset::Medium => (
                 MEDIUM_MAX_PARTICLES,
                 true,
                 ParticleLight::Vertex,
-                false,
                 true,
             ),
-            ParticlePreset::High => (
-                HIGH_MAX_PARTICLES,
-                true,
-                ParticleLight::Froxel,
-                false,
-                true,
-            ),
+            ParticlePreset::High => (HIGH_MAX_PARTICLES, true, ParticleLight::Froxel, true),
         };
         Self {
             preset,
@@ -175,7 +173,6 @@ impl ParticleSettings {
             count: 0,
             sort,
             lit,
-            half_res,
             depth_collision,
             freeze: false,
             seed: DEFAULT_SEED,
@@ -196,10 +193,16 @@ impl ParticleSettings {
         self.enabled && self.max_particles > 0 && self.count > 0
     }
 
-    /// Slots the step will fill. Never above the budget.
+    /// Budget the dispatch and the scan will accept.
+    #[must_use]
+    pub fn clamped_budget(&self) -> u32 {
+        self.max_particles.min(MAX_PARTICLE_SLOTS)
+    }
+
+    /// Slots the step will fill. Never above the clamped budget.
     #[must_use]
     pub fn live_cap(&self) -> u32 {
-        self.count.min(self.max_particles)
+        self.count.min(self.clamped_budget())
     }
 
     /// Seed the shader and the CPU mirror share. Zero becomes [`DEFAULT_SEED`].
@@ -222,7 +225,6 @@ impl ParticleSettings {
         let _ = writeln!(out, "count={}", self.count);
         let _ = writeln!(out, "sort={}", on_off(self.sort));
         let _ = writeln!(out, "lit={}", self.lit.name());
-        let _ = writeln!(out, "half_res={}", on_off(self.half_res));
         let _ = writeln!(out, "depth_collision={}", on_off(self.depth_collision));
         let _ = writeln!(out, "freeze={}", on_off(self.freeze));
         let _ = writeln!(out, "seed={}", self.seed);
@@ -281,7 +283,7 @@ impl ParticleSettings {
             "preset" => self.apply_preset_name(value)?,
             "enabled" => self.enabled = parse_on(value)?,
             "max_particles" | "max" => {
-                self.max_particles = parse_u32("max_particles", value)?;
+                self.max_particles = parse_u32("max_particles", value)?.min(MAX_PARTICLE_SLOTS);
                 self.preset = ParticlePreset::Custom;
             }
             "count" => self.count = parse_u32("count", value)?,
@@ -290,7 +292,12 @@ impl ParticleSettings {
                 self.lit = ParticleLight::parse(value)
                     .ok_or_else(|| format!("lit is vertex or froxel, got {value}"))?;
             }
-            "half_res" => self.half_res = parse_on(value)?,
+            "half_res" => {
+                let _ = parse_on(value)?;
+                eprintln!(
+                    "warning: half_res is deprecated; stage 1 draws at full resolution (alias kept for one release)"
+                );
+            }
             "depth_collision" => self.depth_collision = parse_on(value)?,
             "freeze" => self.freeze = parse_on(value)?,
             "seed" => self.seed = parse_u32("seed", value)?,
@@ -318,7 +325,7 @@ impl ParticleSettings {
             out.apply_named(preset);
         }
         if let Some(max_particles) = cli.max_particles.or(env.max_particles) {
-            out.max_particles = max_particles;
+            out.max_particles = max_particles.min(MAX_PARTICLE_SLOTS);
             out.preset = ParticlePreset::Custom;
         }
         if let Some(count) = cli.count.or(env.count) {
@@ -354,7 +361,6 @@ impl ParticleSettings {
         self.max_particles = fresh.max_particles;
         self.sort = fresh.sort;
         self.lit = fresh.lit;
-        self.half_res = fresh.half_res;
         self.depth_collision = fresh.depth_collision;
     }
 }
@@ -532,8 +538,6 @@ mod tests {
         assert!(medium.sort && high.sort);
         assert_eq!(low.lit, ParticleLight::Vertex);
         assert_eq!(high.lit, ParticleLight::Froxel);
-        assert!(low.half_res);
-        assert!(!high.half_res);
         assert!(!low.depth_collision);
         assert!(medium.depth_collision && high.depth_collision);
         assert!(!low.dispatches());
@@ -588,5 +592,27 @@ mod tests {
         let held = scene.resolve(&counted, &ParticleEnv::default());
         assert_eq!(held.count, 0);
         assert!(!held.dispatches());
+    }
+
+    #[test]
+    fn max_particles_clamps_to_the_dispatch_limit() {
+        let mut settings = ParticleSettings::preset(ParticlePreset::Low);
+        settings.set_key("max_particles", "50000000").unwrap();
+        assert_eq!(settings.max_particles, MAX_PARTICLE_SLOTS);
+        settings.max_particles = u32::MAX;
+        assert_eq!(settings.clamped_budget(), MAX_PARTICLE_SLOTS);
+        settings.count = 8;
+        assert_eq!(settings.live_cap(), 8);
+        settings.count = u32::MAX;
+        assert_eq!(settings.live_cap(), MAX_PARTICLE_SLOTS);
+        let resolved = ParticleSettings::default().resolve(
+            &ParticleCli {
+                max_particles: Some(u32::MAX),
+                ..ParticleCli::default()
+            },
+            &ParticleEnv::default(),
+        );
+        assert_eq!(resolved.max_particles, MAX_PARTICLE_SLOTS);
+        settings.set_key("half_res", "on").unwrap();
     }
 }

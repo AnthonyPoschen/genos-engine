@@ -1,4 +1,8 @@
-//! Stage-1 particle compute and the indirect draw in the keep pass.
+//! Stage-1 particle compute and the indirect draw.
+//!
+//! When `legacy_bytes` is off the cards are drawn into an RGBA16F image and
+//! blended into `scene_lin` before bloom and AgX. The legacy shoulder still
+//! uses the keep pass.
 //!
 //! Slots, the dead ring, and the compact are device memory. A host-cached
 //! store made every particle walk cross the bus: that is the linear death
@@ -126,10 +130,10 @@ pub(super) struct Pass {
     /// Device memory. Host-cached slots are the linear death cost.
     slots: Buffer,
     dead: Buffer,
-    /// Slots, the dead ring, and both compacts were allocated in device memory.
-    device_stores: bool,
-    /// Four bytes filled every dispatch. Its own transfer barrier orders it.
-    /// The ring barrier is the compute memory barrier.
+    /// `VkMemoryPropertyFlags` of the slot buffer, the dead ring, and a compact.
+    store_flags: [u32; 3],
+    /// Four bytes filled when a test asks for the sync witness. Its own
+    /// transfer barrier orders it. The ring barrier is the compute barrier.
     canary: Buffer,
     /// Filled in the same recording, before the read. This layer records a
     /// storage-buffer shader access as a read, so the fill is the write it
@@ -161,6 +165,40 @@ pub(super) struct Pass {
     /// does not overlap the other flight's compute.
     scan: Buffer,
     bytes: u64,
+    /// RGBA16F card targets, one per flight, composited into `scene_lin`.
+    hdr: HdrCards,
+}
+
+struct HdrCards {
+    images: [Image; 2],
+    width: u32,
+    height: u32,
+    pass: Handle,
+    framebuffers: [Handle; 2],
+    pipe: Handle,
+    comp_desc_layout: Handle,
+    comp_layout: Handle,
+    comp_pools: [Handle; 2],
+    comp_sets: [Handle; 2],
+    comp_pipe: Handle,
+}
+
+impl HdrCards {
+    fn empty() -> Self {
+        Self {
+            images: [Image::empty(), Image::empty()],
+            width: 0,
+            height: 0,
+            pass: std::ptr::null_mut(),
+            framebuffers: [std::ptr::null_mut(), std::ptr::null_mut()],
+            pipe: std::ptr::null_mut(),
+            comp_desc_layout: std::ptr::null_mut(),
+            comp_layout: std::ptr::null_mut(),
+            comp_pools: [std::ptr::null_mut(), std::ptr::null_mut()],
+            comp_sets: [std::ptr::null_mut(), std::ptr::null_mut()],
+            comp_pipe: std::ptr::null_mut(),
+        }
+    }
 }
 
 impl Gpu {
@@ -187,12 +225,12 @@ impl Gpu {
             size: settings.size,
             albedo: settings.albedo,
             seed: settings.rng_seed(),
-            budget: settings.max_particles,
+            budget: settings.clamped_budget(),
             count: settings.live_cap(),
             freeze: settings.freeze,
             depth_collision: settings.depth_collision,
             soft_band: settings.soft_band,
-            generation: sim_generation(settings.rng_seed(), settings.max_particles),
+            generation: sim_generation(settings.rng_seed(), settings.clamped_budget()),
             view_proj: genos_scene::view_proj(camera, aspect),
             right: [right[0], right[1], right[2], settings.size],
             up: [up[0], up[1], up[2], 0.0],
@@ -262,15 +300,21 @@ impl Gpu {
             )
         };
         // The canary fill keeps this barrier. It is not the ring dependency.
-        self.buffer_barrier(canary, 0x1000, 0x1000, 0x1000, 0x1000);
+        // Shipping recordings leave it out. A sync test turns the witness on.
+        if self.particle_sync_witness {
+            self.buffer_barrier(canary, 0x1000, 0x1000, 0x1000, 0x1000);
+            unsafe {
+                (self.fns.cmd_fill_buffer)(self.cmd, canary, 0, 4, 1);
+                // This fill is the write synchronization validation can see.
+                // The layer records a storage-buffer shader access as a read,
+                // and it treats a later queue submit as already ordered with
+                // this one, so a cross-submit race never shows up. The read
+                // below is in this recording, and only the ring barrier orders
+                // the fill to it.
+                (self.fns.cmd_fill_buffer)(self.cmd, touch, 0, 4, 1);
+            }
+        }
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, canary, 0, 4, 1);
-            // This fill is the write synchronization validation can see. The
-            // layer records a storage-buffer shader access as a read, and it
-            // treats a later queue submit as already ordered with this one, so
-            // a cross-submit race never shows up. The read below is in this
-            // recording, and only the ring barrier orders the fill to it.
-            (self.fns.cmd_fill_buffer)(self.cmd, touch, 0, 4, 1);
             if !skip_compute {
                 memory_barrier(
                     self,
@@ -288,21 +332,23 @@ impl Gpu {
             (self.fns.cmd_bind_set)(self.cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
             write_particle_stamp(self, 0, COMPUTE_STAGE);
             self.dispatch_particle_sim(layout, job.budget, job.count, pipe, emit_pipe);
-            // The 4-byte witness is not the sim. It stays in this recording,
-            // after the ring barrier, so the sync child still sees the fill.
+            // The 4-byte witness is not the sim. A test asks for it. The stamp
+            // stays so sim_ms does not include that dispatch.
             write_particle_stamp(self, 1, COMPUTE_STAGE);
-            (self.fns.cmd_bind_pipe)(self.cmd, 1, read_pipe);
-            (self.fns.cmd_bind_set)(
-                self.cmd,
-                1,
-                read_layout,
-                0,
-                1,
-                &read_set,
-                0,
-                std::ptr::null(),
-            );
-            (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+            if self.particle_sync_witness {
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, read_pipe);
+                (self.fns.cmd_bind_set)(
+                    self.cmd,
+                    1,
+                    read_layout,
+                    0,
+                    1,
+                    &read_set,
+                    0,
+                    std::ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+            }
         }
         if sample_image {
             // The sampled image belongs to the other flight. Put it back in
@@ -737,8 +783,41 @@ impl Gpu {
         };
         self.particle_drawn = true;
         self.prepare_kept_depth();
-        let width = self.extent_w;
-        let height = self.extent_h;
+        let pass = if self.store_scene_depth && !self.keep_pass_store.is_null() {
+            self.keep_pass_store
+        } else {
+            self.keep_pass
+        };
+        self.record_card_draw(
+            pass,
+            self.framebuffer,
+            pipe,
+            layout,
+            set,
+            indirect,
+            self.extent_w,
+            self.extent_h,
+            &job,
+            false,
+        );
+    }
+
+    /// Draw the compact into `pass`. `clear` clears the colour attachment.
+    ///
+    /// The HDR target is cleared. The keep pass loads the picture.
+    fn record_card_draw(
+        &self,
+        pass: Handle,
+        fb: Handle,
+        pipe: Handle,
+        layout: Handle,
+        set: Handle,
+        indirect: Handle,
+        width: u32,
+        height: u32,
+        job: &Job,
+        clear: bool,
+    ) {
         #[repr(C)]
         struct Offset {
             x: i32,
@@ -764,15 +843,12 @@ impl Gpu {
             clear_count: u32,
             clears: *const f32,
         }
+        let clear_value = [0.0f32; 4];
         let rp = RpBegin {
             s_type: 43,
             next: std::ptr::null(),
-            pass: if self.store_scene_depth && !self.keep_pass_store.is_null() {
-                self.keep_pass_store
-            } else {
-                self.keep_pass
-            },
-            fb: self.framebuffer,
+            pass,
+            fb,
             area: Rect {
                 offset: Offset { x: 0, y: 0 },
                 extent: Extent {
@@ -780,8 +856,12 @@ impl Gpu {
                     h: height,
                 },
             },
-            clear_count: 0,
-            clears: std::ptr::null(),
+            clear_count: u32::from(clear),
+            clears: if clear {
+                clear_value.as_ptr()
+            } else {
+                std::ptr::null()
+            },
         };
         let mut push = [0u8; 96];
         write_f32(&mut push, 0, &job.view_proj);
@@ -809,6 +889,236 @@ impl Gpu {
             (self.fns.cmd_draw_indirect)(self.cmd, indirect, 0, 1, 16);
             write_particle_stamp(self, 3, 0x400);
             (self.fns.cmd_end_rp)(self.cmd);
+        }
+    }
+
+    /// Draw cards into an RGBA16F image and fold them into `scene_lin`.
+    ///
+    /// Runs after compose and before bloom, so the cards take exposure and
+    /// bloom. Sets `particle_drawn` so the keep pass does not blend them again
+    /// in display space. The card pass does not depth-test: the sim already
+    /// retired particles behind the depth image, and the centre fade is in
+    /// the compact colour.
+    pub(crate) fn composite_particles_into_scene(
+        &mut self,
+        width: u32,
+        height: u32,
+        scene_lin: Handle,
+    ) -> Result<(), String> {
+        if !self.particle_stamped
+            || self.particle_drawn
+            || scene_lin.is_null()
+            || width == 0
+            || height == 0
+            || self.particle_job.is_none()
+        {
+            return Ok(());
+        }
+        self.ensure_particle_hdr(width, height)?;
+        let slot = self.flight.min(1);
+        let (draw_pipe, draw_layout, draw_set, indirect, comp_pipe, comp_layout, comp_set, fb, image) = {
+            let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
+            let flight = &pass.flights[slot];
+            (
+                pass.hdr.pipe,
+                pass.draw_layout,
+                flight.draw_set,
+                flight.indirect.buffer,
+                pass.hdr.comp_pipe,
+                pass.hdr.comp_layout,
+                pass.hdr.comp_sets[slot],
+                pass.hdr.framebuffers[slot],
+                pass.hdr.images[slot].image,
+            )
+        };
+        let hdr_pass = self
+            .particle_pass
+            .as_ref()
+            .map(|pass| pass.hdr.pass)
+            .ok_or("particle pass missing")?;
+        write_storage_bindings_from(self, comp_set, 1, &[scene_lin])?;
+        let job = self.particle_job.ok_or("particle job missing")?;
+        self.record_card_draw(
+            hdr_pass,
+            fb,
+            draw_pipe,
+            draw_layout,
+            draw_set,
+            indirect,
+            width,
+            height,
+            &job,
+            true,
+        );
+        // The pass ends in shader-read. The composite samples that image.
+        self.image_barrier(image, 5, 5, 0x400, 0x800, 0x100, 0x20);
+        let mut push = [0u8; 8];
+        push[..4].copy_from_slice(&width.to_ne_bytes());
+        push[4..].copy_from_slice(&height.to_ne_bytes());
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, comp_pipe);
+            (self.fns.cmd_bind_set)(
+                self.cmd,
+                1,
+                comp_layout,
+                0,
+                1,
+                &comp_set,
+                0,
+                std::ptr::null(),
+            );
+            (self.fns.cmd_push)(
+                self.cmd,
+                comp_layout,
+                0x20,
+                0,
+                8,
+                push.as_ptr() as *const c_void,
+            );
+            (self.fns.cmd_dispatch)(
+                self.cmd,
+                width.div_ceil(8).max(1),
+                height.div_ceil(8).max(1),
+                1,
+            );
+        }
+        self.particle_drawn = true;
+        Ok(())
+    }
+
+    fn ensure_particle_hdr(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let missing = self
+            .particle_pass
+            .as_ref()
+            .is_some_and(|pass| pass.hdr.pass.is_null());
+        if missing {
+            self.create_particle_hdr()?;
+        }
+        let size_ok = self.particle_pass.as_ref().is_some_and(|pass| {
+            pass.hdr.width == width
+                && pass.hdr.height == height
+                && !pass.hdr.images[0].image.is_null()
+        });
+        if size_ok {
+            return Ok(());
+        }
+        self.resize_particle_hdr(width, height)
+    }
+
+    fn create_particle_hdr(&mut self) -> Result<(), String> {
+        let hdr_pass = make_hdr_pass(self)?;
+        let draw_layout = self
+            .particle_pass
+            .as_ref()
+            .map(|pass| pass.draw_layout)
+            .ok_or("particle pass missing")?;
+        let vert = self.shader(super::PARTICLES_VERT_SPV)?;
+        let frag = self.shader(super::PARTICLES_FRAG_SPV)?;
+        let pipe = create_draw_pipe(self, vert, frag, draw_layout, hdr_pass, false)?;
+        unsafe {
+            (self.fns.destroy_shader)(self.device, vert, std::ptr::null());
+            (self.fns.destroy_shader)(self.device, frag, std::ptr::null());
+        }
+        let bindings = [
+            Binding {
+                binding: 0,
+                kind: 1,
+                count: 1,
+                stages: 0x20,
+                samplers: std::ptr::null(),
+            },
+            storage_binding(1, 0x20),
+        ];
+        let comp_desc_layout = create_desc_layout(self, &bindings)?;
+        let (pool0, set0) = alloc_hdr_set(self, comp_desc_layout)?;
+        let (pool1, set1) = alloc_hdr_set(self, comp_desc_layout)?;
+        let comp_layout = create_pipe_layout(self, comp_desc_layout, 8, 0x20)?;
+        let module = self.shader(super::PARTICLES_HDR_SPV)?;
+        let comp_pipe = create_compute_pipe(self, module, comp_layout)?;
+        unsafe {
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+        }
+        let pass = self.particle_pass.as_mut().ok_or("particle pass missing")?;
+        pass.hdr.pass = hdr_pass;
+        pass.hdr.pipe = pipe;
+        pass.hdr.comp_desc_layout = comp_desc_layout;
+        pass.hdr.comp_layout = comp_layout;
+        pass.hdr.comp_pools = [pool0, pool1];
+        pass.hdr.comp_sets = [set0, set1];
+        pass.hdr.comp_pipe = comp_pipe;
+        Ok(())
+    }
+
+    fn resize_particle_hdr(&mut self, width: u32, height: u32) -> Result<(), String> {
+        let (sampler, sets) = {
+            let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
+            (pass.sampler, pass.hdr.comp_sets)
+        };
+        let hdr_pass = self
+            .particle_pass
+            .as_ref()
+            .map(|pass| pass.hdr.pass)
+            .ok_or("particle hdr pass missing")?;
+        let mut images = [Image::empty(), Image::empty()];
+        let mut framebuffers = [std::ptr::null_mut(), std::ptr::null_mut()];
+        for slot in 0..2 {
+            images[slot] = self.make_image(97, 0x10 | 0x4, 1, width, height)?;
+            framebuffers[slot] =
+                self.make_framebuffer_for(hdr_pass, &[images[slot].view], width, height)?;
+            write_card_image(self, sets[slot], images[slot].view, sampler);
+        }
+        let (mut old_images, old_fbs) = {
+            let pass = self.particle_pass.as_mut().ok_or("particle pass missing")?;
+            pass.hdr.width = width;
+            pass.hdr.height = height;
+            (
+                std::mem::replace(&mut pass.hdr.images, images),
+                std::mem::replace(&mut pass.hdr.framebuffers, framebuffers),
+            )
+        };
+        for fb in old_fbs {
+            if !fb.is_null() {
+                unsafe {
+                    (self.fns.destroy_framebuffer)(self.device, fb, std::ptr::null());
+                }
+            }
+        }
+        for image in &mut old_images {
+            self.destroy_image(image);
+        }
+        Ok(())
+    }
+
+    fn destroy_hdr_cards(&mut self, hdr: &mut HdrCards) {
+        unsafe {
+            for fb in hdr.framebuffers {
+                if !fb.is_null() {
+                    (self.fns.destroy_framebuffer)(self.device, fb, std::ptr::null());
+                }
+            }
+            if !hdr.pipe.is_null() {
+                (self.fns.destroy_pipeline)(self.device, hdr.pipe, std::ptr::null());
+            }
+            if !hdr.comp_pipe.is_null() {
+                (self.fns.destroy_pipeline)(self.device, hdr.comp_pipe, std::ptr::null());
+            }
+            if !hdr.comp_layout.is_null() {
+                (self.fns.destroy_layout)(self.device, hdr.comp_layout, std::ptr::null());
+            }
+            for pool in hdr.comp_pools {
+                if !pool.is_null() {
+                    (self.fns.destroy_desc_pool)(self.device, pool, std::ptr::null());
+                }
+            }
+            if !hdr.comp_desc_layout.is_null() {
+                (self.fns.destroy_desc_layout)(self.device, hdr.comp_desc_layout, std::ptr::null());
+            }
+            if !hdr.pass.is_null() {
+                (self.fns.destroy_render_pass)(self.device, hdr.pass, std::ptr::null());
+            }
+        }
+        for image in &mut hdr.images {
+            self.destroy_image(image);
         }
     }
 
@@ -918,10 +1228,10 @@ impl Gpu {
             / 1.0e6
     }
 
-    pub(super) fn particle_stores_are_device_local(&self) -> bool {
+    pub(super) fn particle_store_memory_flags(&self) -> [u32; 3] {
         self.particle_pass
             .as_ref()
-            .is_some_and(|pass| pass.device_stores)
+            .map_or([0, 0, 0], |pass| pass.store_flags)
     }
 
     pub(super) fn particle_positions(&self) -> Result<Vec<[f32; 3]>, String> {
@@ -1032,6 +1342,8 @@ impl Gpu {
         }
         let mut dummy = pass.dummy;
         self.destroy_image(&mut dummy);
+        let mut hdr = pass.hdr;
+        self.destroy_hdr_cards(&mut hdr);
     }
 
     fn particle_depth_bytes(&self) -> u64 {
@@ -1136,7 +1448,9 @@ impl Gpu {
         let state = self.make_buffer(STATE_BYTES, 0x20 | 0x1, Memory::Readback)?;
         zero_host_buffer(self, &state)?;
         let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, SIM_STORE)?;
+        let slot_flags = self.last_memory_flags.get();
         let dead = self.make_buffer(slots * 4, 0x20, SIM_STORE)?;
+        let dead_flags = self.last_memory_flags.get();
         let canary = self.make_buffer(4, 0x2, Memory::Device)?;
         let touch = self.make_buffer(4, 0x20 | 0x2, Memory::Device)?;
         let sink = self.make_buffer(4, 0x20, Memory::Device)?;
@@ -1144,10 +1458,14 @@ impl Gpu {
         self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
         let depth_bytes = depth_bytes.max(4);
         let mut built = Vec::with_capacity(2);
+        let mut compact_flags = 0u32;
         for _ in 0..2 {
             let params = self.make_buffer(PARAMS_BYTES, 0x20, Memory::Upload)?;
             let depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
             let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20 | 0x1, SIM_STORE)?;
+            if compact_flags == 0 {
+                compact_flags = self.last_memory_flags.get();
+            }
             let indirect = self.make_buffer(INDIRECT_BYTES, 0x20 | 0x100, Memory::Readback)?;
             let stats = self.make_buffer(8, 0x2, Memory::Readback)?;
             self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
@@ -1213,7 +1531,7 @@ impl Gpu {
             state,
             slots: slot_buf,
             dead,
-            device_stores: SIM_STORE == Memory::Device,
+            store_flags: [slot_flags, dead_flags, compact_flags],
             canary,
             touch,
             sink,
@@ -1263,6 +1581,7 @@ impl Gpu {
             draw_pipe_depth: draw.5,
             scan,
             bytes,
+            hdr: HdrCards::empty(),
         })
     }
 
@@ -1674,8 +1993,8 @@ impl Gpu {
         let pipe_layout = create_pipe_layout(self, desc_layout, 96, 1)?;
         let vert = self.shader(super::PARTICLES_VERT_SPV)?;
         let frag = self.shader(super::PARTICLES_FRAG_SPV)?;
-        let pipe = create_draw_pipe(self, vert, frag, pipe_layout, false)?;
-        let pipe_depth = create_draw_pipe(self, vert, frag, pipe_layout, true)?;
+        let pipe = create_draw_pipe(self, vert, frag, pipe_layout, self.keep_pass, false)?;
+        let pipe_depth = create_draw_pipe(self, vert, frag, pipe_layout, self.keep_pass, true)?;
         unsafe {
             (self.fns.destroy_shader)(self.device, vert, std::ptr::null());
             (self.fns.destroy_shader)(self.device, frag, std::ptr::null());
@@ -1815,10 +2134,21 @@ impl super::Renderer {
         self.gpu.particle_positions()
     }
 
-    /// Slots, the dead ring, and the compact were allocated in device memory.
+    /// `VkMemoryPropertyFlags` for the slot buffer, the dead ring, and a compact.
+    ///
+    /// Bit 1 is `VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT`. The value is the type
+    /// the allocation bound, not the request.
     #[must_use]
-    pub fn particle_stores_are_device_local(&self) -> bool {
-        self.gpu.particle_stores_are_device_local()
+    pub fn particle_store_memory_flags(&self) -> [u32; 3] {
+        self.gpu.particle_store_memory_flags()
+    }
+
+    /// Record the 4-byte touch-read witness in the next compute recording.
+    ///
+    /// Shipping frames leave it off. The sync test turns it on so the layer
+    /// can see a same-recording hazard when the ring barrier is missing.
+    pub fn set_particle_sync_witness(&mut self, on: bool) {
+        self.gpu.particle_sync_witness = on;
     }
 }
 
@@ -2413,15 +2743,244 @@ fn create_compute_pipe(gpu: &Gpu, module: Handle, layout: Handle) -> Result<Hand
     Ok(pipe)
 }
 
+fn alloc_hdr_set(gpu: &Gpu, layout: Handle) -> Result<(Handle, Handle), String> {
+    #[repr(C)]
+    struct Size {
+        kind: u32,
+        count: u32,
+    }
+    #[repr(C)]
+    struct PoolInfo {
+        s_type: i32,
+        next: *const c_void,
+        flags: u32,
+        max_sets: u32,
+        size_count: u32,
+        sizes: *const Size,
+    }
+    let sizes = [Size { kind: 1, count: 1 }, Size { kind: 7, count: 1 }];
+    let pool_info = PoolInfo {
+        s_type: 33,
+        next: std::ptr::null(),
+        flags: 0,
+        max_sets: 1,
+        size_count: 2,
+        sizes: sizes.as_ptr(),
+    };
+    let mut pool = std::ptr::null_mut();
+    let mut set = std::ptr::null_mut();
+    unsafe {
+        check(
+            (gpu.fns.create_desc_pool)(
+                gpu.device,
+                &pool_info as *const PoolInfo as *const u8,
+                std::ptr::null(),
+                &mut pool,
+            ),
+            "particle hdr descriptor pool",
+        )?;
+        #[repr(C)]
+        struct Alloc {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            count: u32,
+            layouts: *const Handle,
+        }
+        let alloc = Alloc {
+            s_type: 34,
+            next: std::ptr::null(),
+            pool,
+            count: 1,
+            layouts: &layout,
+        };
+        check(
+            (gpu.fns.alloc_desc)(gpu.device, &alloc as *const Alloc as *const u8, &mut set),
+            "particle hdr descriptor set",
+        )?;
+    }
+    Ok((pool, set))
+}
+
+fn write_card_image(gpu: &Gpu, set: Handle, view: Handle, sampler: Handle) {
+    #[repr(C)]
+    struct Img {
+        sampler: Handle,
+        view: Handle,
+        layout: u32,
+    }
+    #[repr(C)]
+    struct Write {
+        s_type: i32,
+        next: *const c_void,
+        set: Handle,
+        binding: u32,
+        element: u32,
+        count: u32,
+        kind: u32,
+        image: *const Img,
+        buffer: *const c_void,
+        texel: *const c_void,
+    }
+    let info = Img {
+        sampler,
+        view,
+        layout: 5,
+    };
+    let write = Write {
+        s_type: 35,
+        next: std::ptr::null(),
+        set,
+        binding: 0,
+        element: 0,
+        count: 1,
+        kind: 1,
+        image: &info,
+        buffer: std::ptr::null(),
+        texel: std::ptr::null(),
+    };
+    unsafe {
+        (gpu.fns.update_desc)(gpu.device, 1, &write as *const Write as *const u8, 0, std::ptr::null());
+    }
+}
+
+fn make_hdr_pass(gpu: &Gpu) -> Result<Handle, String> {
+    #[repr(C)]
+    struct Att {
+        flags: u32,
+        format: i32,
+        samples: u32,
+        load: u32,
+        store: u32,
+        stencil_load: u32,
+        stencil_store: u32,
+        initial: u32,
+        final_layout: u32,
+    }
+    #[repr(C)]
+    struct Ref {
+        attachment: u32,
+        layout: u32,
+    }
+    #[repr(C)]
+    struct Subpass {
+        flags: u32,
+        pipeline: u32,
+        input_count: u32,
+        input: *const Ref,
+        color_count: u32,
+        color: *const Ref,
+        resolve: *const Ref,
+        depth: *const Ref,
+        preserve_count: u32,
+        preserve: *const u32,
+    }
+    #[repr(C)]
+    struct Dep {
+        src: u32,
+        dst: u32,
+        src_stage: u32,
+        dst_stage: u32,
+        src_access: u32,
+        dst_access: u32,
+        flags: u32,
+    }
+    #[repr(C)]
+    struct Info {
+        s_type: i32,
+        next: *const c_void,
+        flags: u32,
+        att_count: u32,
+        atts: *const Att,
+        sub_count: u32,
+        subs: *const Subpass,
+        dep_count: u32,
+        deps: *const Dep,
+    }
+    // RGBA16F. Cleared, then left in shader-read for the composite.
+    let att = Att {
+        flags: 0,
+        format: 97,
+        samples: 1,
+        load: 1,
+        store: 0,
+        stencil_load: 1,
+        stencil_store: 1,
+        initial: 0,
+        final_layout: 5,
+    };
+    let color = Ref {
+        attachment: 0,
+        layout: 2,
+    };
+    let sub = Subpass {
+        flags: 0,
+        pipeline: 0,
+        input_count: 0,
+        input: std::ptr::null(),
+        color_count: 1,
+        color: &color,
+        resolve: std::ptr::null(),
+        depth: std::ptr::null(),
+        preserve_count: 0,
+        preserve: std::ptr::null(),
+    };
+    let deps = [
+        Dep {
+            src: u32::MAX,
+            dst: 0,
+            src_stage: 0x800 | 0x400,
+            dst_stage: 0x400,
+            src_access: 0x20,
+            dst_access: 0x100,
+            flags: 0,
+        },
+        Dep {
+            src: 0,
+            dst: u32::MAX,
+            src_stage: 0x400,
+            dst_stage: 0x800,
+            src_access: 0x100,
+            dst_access: 0x20,
+            flags: 0,
+        },
+    ];
+    let info = Info {
+        s_type: 38,
+        next: std::ptr::null(),
+        flags: 0,
+        att_count: 1,
+        atts: &att,
+        sub_count: 1,
+        subs: &sub,
+        dep_count: 2,
+        deps: deps.as_ptr(),
+    };
+    let mut pass = std::ptr::null_mut();
+    unsafe {
+        check(
+            (gpu.fns.create_render_pass)(
+                gpu.device,
+                &info as *const Info as *const u8,
+                std::ptr::null(),
+                &mut pass,
+            ),
+            "particle hdr pass",
+        )?;
+    }
+    Ok(pass)
+}
+
 fn create_draw_pipe(
     gpu: &Gpu,
     vert: Handle,
     frag: Handle,
     layout: Handle,
+    pass: Handle,
     depth_test: bool,
 ) -> Result<Handle, String> {
-    if gpu.keep_pass.is_null() {
-        return Err("particle draw has no keep pass".into());
+    if pass.is_null() {
+        return Err("particle draw has no render pass".into());
     }
     #[repr(C)]
     struct Stage {
@@ -2710,7 +3269,7 @@ fn create_draw_pipe(
         blend: &blend,
         dynamic: &dynamic,
         layout,
-        pass: gpu.keep_pass,
+        pass,
         subpass: 0,
         base: std::ptr::null_mut(),
         base_index: -1,

@@ -59,7 +59,7 @@ The branch list is in the asset plan. For this plan the extra findings are:
 | Shader programs | partial | No custom SPIR-V. `DrawKind::Shader` does not load a file. |
 | Lamp shadows outside the GI rays | missing | There is no shadow map. The GI rays are the lamp shadows for anything in the G-buffer. `shadow.rs` on `master` is the removed floor projection. |
 | Cascades, virtual shadow maps | missing | Named below. Not started, on purpose, until a caster cannot be traced. |
-| GPU particle simulation | missing | The step is CPU. Cards are rebuilt on the CPU and the dynamic vertex range is uploaded. |
+| GPU particle simulation | stage 1 | Device-local slots, dead ring, and compact. One thread per slot (workgroup 64) plus a multi-level scan. `vkCmdDrawIndirect` reads the compact. The CPU mirror is a host copy after the sim stamps, and only when the frame reads the picture. |
 | TAA, upscaling, bloom, exposure, DOF, motion blur | missing | Picture modes are `off` and FXAA (`aa.rs`). SSAA left with GI v1. |
 | Terrain | missing | The displacement grid is the closest hook. It has no LOD and no texels of its own beyond the triangles it emits. |
 | Foliage and instancing | partial | One instance per draw. No instance buffer of many copies. No wind. |
@@ -91,11 +91,11 @@ A later map is allowed only for a caster that is not in the tracer. The first ca
 
 ### Particles
 
-The CPU emitter, the card builder, the resident image, and the single fire term stay (`particles.rs`). A GPU particle step is a compute dispatch that writes the positions and ages the dynamic vertex buffer already uploads. The dispatch runs when an emitter is enabled and its count is non-zero. A disabled emitter does not dispatch. The CPU keeps the emitter record so the scene key can hash it without a readback. Ages advance on the GPU. The CPU does not read the positions back.
+The CPU emitter, the card builder, the resident image, and the single fire term stay (`particles.rs`). The stage-1 GPU step is a compute dispatch over a device-local slot buffer. It runs when an emitter is enabled, its count is non-zero, and its budget is non-zero. A disabled emitter does not dispatch. The CPU keeps the emitter record so the scene key can hash it without a readback. Ages advance on the GPU. The CPU reads positions only from a host mirror copied after the sim timestamps, and only when the frame copied the picture or the caller finished the flights.
 
 Cards stay out of the G-buffer. An emitter that must bounce uses a proxy mesh (a baked SDF and texels), which is the GI rule for anything that is not a stable surface. The fire term stays one lamp, as `renderer.md` says. One lamp per ember is not added.
 
-The published reference for the GPU step is a persistent particle buffer updated in compute, the same structure as the crowd and particle sections of the SIGGRAPH 2015 GPU-driven pipelines talk (Haar and Aaltonen). **Deviation.** That talk uses parallel dead lists. Stage 1 walks one invocation so the CPU mirror matches order. The draw is a vertex-pulled quad and `vkCmdDrawIndirect` in the keep pass, not an expansion into the dynamic vertex buffer: six vertices times 48 bytes at the Low budget would pass the 16 MB ceiling. The CPU card builder remains the expander for an emitter that is not this path, including the camera flame.
+The published reference for the GPU step is a persistent particle buffer updated in compute, the same structure as the crowd and particle sections of the SIGGRAPH 2015 GPU-driven pipelines talk (Haar and Aaltonen). Stage 1 dispatches one thread per slot, workgroup 64, `ceil(budget / 64)` groups. Integrate, emit, and the compact each run that wide. Block sums are scanned in workgroups of 64, and those totals are scanned the same way, so no thread walks the group list. The scan keeps dead-ring pushes and the compact in slot order, which is the order the CPU mirror walks. Emit is its own pipeline. The compact, the dead ring, and the slots are device-local. The draw is one `vkCmdDrawIndirect` of a vertex-pulled quad (`particles.vert`, `particles.frag`), not an expansion into the dynamic vertex buffer: six vertices times 48 bytes at the Low budget would pass the 16 MB ceiling. When `legacy_bytes` is off, that draw targets an RGBA16F image and a compute pass blends it into the scene-linear buffer before bloom and AgX, so the cards take exposure and bloom. The legacy shoulder still draws in the keep pass after the picture. The CPU card builder remains the expander for an emitter that is not this path, including the camera flame.
 
 ### Post
 
@@ -117,7 +117,7 @@ Sources:
 - Exposure: a CPU value on the camera, plus an optional average of the histogram the GPU writes. The histogram is read after the fence, not in the submit. The default exposure is the one that keeps `tone_channel` looking as it does now (exposure 1). Auto exposure does not move the picture in a still scene once the histogram has been applied.
 - DOF and motion blur: Jimenez's circle-of-confusion and tile-dilated velocity in that same 2014 course. Both are off when the aperture is zero and when no object and no camera moved. The velocity buffer is written by the raster from the previous model matrix the CPU already uploaded. No readback.
 
-The overlay stays after the display pass, as FXAA is before the overlay today (`renderer.md`).
+The overlay stays after the display pass, as FXAA is before the overlay today (`renderer.md`). When `legacy_bytes` is off, particle cards are in the scene-linear image before bloom and AgX. The legacy shoulder draws them in the keep pass after that picture.
 
 ### Terrain
 
@@ -162,7 +162,7 @@ Mesh shaders are not used. The indirect draw uses the hardware rasterizer and th
 | Textured materials | Texel albedo becomes the shaded albedo. Claim path unchanged. | Material and image generation, already in the key once images bump `image_gen`. | A mesh with no texture keeps the mean colour. |
 | Traced shadows | Unchanged. | Unchanged. | No extra pass. |
 | Sun cascade for untraced casters | The cascade is not a GI result. GI rays ignore it. | Caster bounds and the sun direction. | No untraced caster in view: no cascade dispatch. |
-| GPU particles | Out of the G-buffer unless a proxy mesh is baked. | Emitter record and the dynamic vertex generation. | No enabled emitter: no dispatch. |
+| GPU particles | Out of the G-buffer unless a proxy mesh is baked. | Emitter record. The compact stays on the device. | No enabled emitter: no dispatch. |
 | Post | Reads the lit image. Does not write texels. | Picture mode, exposure, aperture, shutter. | Mode `off`, or a reused frame: the display pass is skipped and the held picture is shown. |
 | Terrain, foliage meshes, decals | They are triangles. They claim texels. | Their pool generation and poses. | Resident and still: no upload. |
 | Water surface | Transparent pass does not claim. A proxy card does. | Time, only when the displacement is on. | Frozen time: key stable. |

@@ -1,7 +1,6 @@
 #version 450
 // Six vertices, one instance per compacted particle. The card faces the camera.
 // right.w is the card width in metres.
-layout(location = 0) out vec3 v_pos;
 layout(location = 1) out vec3 v_albedo;
 layout(location = 3) out float v_shade;
 
@@ -33,7 +32,6 @@ void main() {
         + pc.right.xyz * (x * size * HALF)
         + pc.up.xyz * (y * size * HALF);
     gl_Position = pc.view_proj * vec4(world, 1.0);
-    v_pos = world;
     v_albedo = item.albedo_fade.rgb;
     v_shade = item.albedo_fade.a;
 }

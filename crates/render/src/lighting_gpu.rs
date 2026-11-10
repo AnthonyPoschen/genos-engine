@@ -3137,7 +3137,8 @@ impl Gpu {
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
-            || blocks > LIGHTING_COMPOSE_CAP;
+            || blocks > LIGHTING_COMPOSE_CAP
+            || (self.particle_stamped && !self.lighting.hdr.legacy_bytes);
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
         if compose_full {
@@ -3531,6 +3532,24 @@ impl Gpu {
             // Compose stored scene radiance. Bloom runs on that image, then this
             // pass replaces the 8-bit picture. The lattice sample is not in the GI shader.
             self.stamp_hdr_time(slot, true);
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            // Cards go into scene_lin before bloom and AgX. A display-space
+            // blend after this pass misses exposure and the halo.
+            let scene = self.lighting.scene_lin.buffer;
+            self.composite_particles_into_scene(w, h, scene)?;
+            // The card composite binds its own set. Bloom and AgX use this one.
+            unsafe {
+                (self.fns.cmd_bind_set)(
+                    self.cmd,
+                    1,
+                    self.lighting.layout,
+                    0,
+                    1,
+                    &set,
+                    0,
+                    std::ptr::null(),
+                );
+            }
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
             if gpu_bloom {
                 self.record_gpu_bloom(w, h)?;

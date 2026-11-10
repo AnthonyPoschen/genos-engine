@@ -79,7 +79,8 @@ pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS}
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
 pub use particle_sim::{
-    buffer_bytes, CpuParticles, ParticleFault, ParticleStats, StepInput, LOW_VRAM_BYTES,
+    buffer_bytes, two_flight_buffer_bytes, CpuParticles, ParticleFault, ParticleStats, StepInput,
+    LOW_VRAM_BYTES,
 };
 pub use particles::{
     card_quad, compose_fog, fire_radiance, fog_along, frame_at, height_fog_along, image_from_map,

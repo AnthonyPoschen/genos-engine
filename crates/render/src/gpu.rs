@@ -1634,6 +1634,8 @@ struct Gpu {
     particle_dt: f32,
     /// Skip-dead or skip-indirect mutation. None is the specified step.
     particle_fault: crate::particle_sim::ParticleFault,
+    /// The 4-byte sync witness. Off in a shipping recording. Tests turn it on.
+    particle_sync_witness: bool,
     /// Depth samples uploaded for the next step. Empty skips collision.
     particle_depth: Vec<f32>,
     /// Width and height of `particle_depth`.
@@ -1736,6 +1738,8 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// `VkMemoryPropertyFlags` of the type the last `alloc` bound.
+    last_memory_flags: std::cell::Cell<u32>,
     /// Device allocations to fail with out-of-device-memory before the driver.
     fail_device_allocs: std::cell::Cell<u32>,
     /// Device bytes allocated minus the bytes passed to the free that calls
@@ -2559,6 +2563,7 @@ impl Gpu {
                 particle_job: None,
                 particle_dt: 0.0,
                 particle_fault: crate::particle_sim::ParticleFault::None,
+                particle_sync_witness: false,
                 particle_depth: Vec::new(),
                 particle_depth_size: (0, 0),
                 particle_stats: crate::particle_sim::ParticleStats::default(),
@@ -2646,6 +2651,7 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                last_memory_flags: std::cell::Cell::new(0),
                 fail_device_allocs: std::cell::Cell::new(0),
                 device_bytes: std::cell::Cell::new(0),
                 transfer_queue,
@@ -7004,6 +7010,7 @@ impl Gpu {
         if let Some(want) = first {
             if let Some(index) = self.memory_index(type_bits, want) {
                 if let Ok(handle) = self.alloc_index(size, index) {
+                    self.note_memory_type(index);
                     if memory == Memory::Upload {
                         let [local, all] = self.upload_local.get();
                         self.upload_local.set([local + 1, all]);
@@ -7027,11 +7034,20 @@ impl Gpu {
             return Err("no memory type".into());
         };
         let handle = self.alloc_index(size, index)?;
+        self.note_memory_type(index);
         if memory == Memory::Device {
             self.device_bytes
                 .set(self.device_bytes.get().saturating_add(size));
         }
         Ok(handle)
+    }
+
+    fn note_memory_type(&self, index: u32) {
+        let flags = usize::try_from(index)
+            .ok()
+            .and_then(|slot| self.memory_props.types.get(slot).copied())
+            .unwrap_or(0);
+        self.last_memory_flags.set(flags);
     }
 
     /// The first memory type allowed by `type_bits` with every flag in `want`.

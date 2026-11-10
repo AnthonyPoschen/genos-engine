@@ -245,6 +245,7 @@ fn append_particles(glue_text: &mut String, out: &std::path::Path) {
     );
     let vert = compile("shaders/particles.vert", &out.join("particles.vert.spv"));
     let frag = compile("shaders/particles.frag", &out.join("particles.frag.spv"));
+    let hdr = compile("shaders/particles_hdr.comp", &out.join("particles_hdr.comp.spv"));
     glue_text.push_str(&format!(
         "pub static PARTICLES_COMP_SPV: &[u8] = include_bytes!(\"{}\");\n",
         comp.display()
@@ -264,6 +265,10 @@ fn append_particles(glue_text: &mut String, out: &std::path::Path) {
     glue_text.push_str(&format!(
         "pub static PARTICLES_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\n",
         frag.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        hdr.display()
     ));
 }
 
@@ -333,6 +338,7 @@ fn rerun_shader_pieces() {
         "particles_touch_read.comp",
         "particles.vert",
         "particles.frag",
+        "particles_hdr.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

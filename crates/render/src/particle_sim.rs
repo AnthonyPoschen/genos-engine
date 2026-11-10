@@ -63,6 +63,26 @@ pub fn buffer_bytes(max_particles: u32) -> u64 {
         .saturating_add(scan)
 }
 
+/// Both flights, including the two host compact mirrors, for `max_particles`.
+///
+/// [`buffer_bytes`] is one params block, one compact, and one indirect command.
+/// The second flight adds another of each, two 4-byte depth stand-ins, two
+/// 8-byte stat copies, and the 4-byte canary, touch, and sink. Each flight can
+/// also hold a host mirror of the compact (`slots * 48`).
+#[must_use]
+pub fn two_flight_buffer_bytes(max_particles: u32) -> u64 {
+    let slots = u64::from(max_particles);
+    let mirror = slots.saturating_mul(COMPACT_STRIDE);
+    buffer_bytes(max_particles)
+        .saturating_add(PARAMS_BYTES)
+        .saturating_add(mirror)
+        .saturating_add(INDIRECT_BYTES)
+        .saturating_add(8)
+        .saturating_add(16)
+        .saturating_add(12)
+        .saturating_add(mirror.saturating_mul(2))
+}
+
 /// Decimal megabytes of [`buffer_bytes`].
 #[allow(
     clippy::as_conversions,
@@ -204,7 +224,7 @@ impl StepInput {
             size: settings.size,
             albedo: settings.albedo,
             seed: settings.rng_seed(),
-            budget: settings.max_particles,
+            budget: settings.clamped_budget(),
             count: settings.live_cap(),
             dt,
             freeze: settings.freeze,
@@ -733,8 +753,10 @@ mod tests {
 
     #[test]
     fn the_low_budget_stays_under_sixteen_megabytes() {
-        assert!(buffer_bytes(65_536) <= LOW_VRAM_BYTES);
-        assert!(buffer_bytes(genos_scene::LOW_MAX_PARTICLES) <= LOW_VRAM_BYTES);
+        assert_eq!(buffer_bytes(65_536), 6_037_992);
+        assert_eq!(two_flight_buffer_bytes(65_536), 15_475_484);
+        assert!(two_flight_buffer_bytes(65_536) <= LOW_VRAM_BYTES);
+        assert!(two_flight_buffer_bytes(genos_scene::LOW_MAX_PARTICLES) <= LOW_VRAM_BYTES);
     }
 
     #[test]

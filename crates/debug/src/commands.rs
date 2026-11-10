@@ -176,7 +176,7 @@ fn particle_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_particle_settings",
-            "Stage-1 particle settings in text form: preset, enabled, max_particles, count, sort, lit, half_res, depth_collision, freeze, seed, origin, rate, life, rise, spread, size, albedo, soft_band. --fx-max, --fx-count, --fx-freeze, --fx-preset, and --fx-spawn win over GENOS_FX_MAX, GENOS_FX_COUNT, GENOS_FX_FREEZE, and GENOS_FX_PRESET, which win over the scene value. sort, lit, and half_res are stored. Stage 1 does not sort, light, or draw at half resolution.",
+            "Stage-1 particle settings in text form: preset, enabled, max_particles, count, sort, lit, depth_collision, freeze, seed, origin, rate, life, rise, spread, size, albedo, soft_band. --fx-max, --fx-count, --fx-freeze, --fx-preset, and --fx-spawn win over GENOS_FX_MAX, GENOS_FX_COUNT, GENOS_FX_FREEZE, and GENOS_FX_PRESET, which win over the scene value. sort and lit are stored. Stage 1 does not sort or light. half_res is a deprecated alias and the draw is full resolution. max_particles is clamped to 4194240.",
         ),
         spec(
             "set_particle_settings",

@@ -19,8 +19,8 @@ use genos_render::{
     CpuParticles, ParticleFault, Reflector, Renderer, StepInput, World, LOW_VRAM_BYTES,
 };
 use genos_scene::{
-    view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3, Wall,
-    DEFAULT_SEED,
+    view_proj, AmbientMode, Camera, ExposureMode, Floor, HdrSettings, LightingPreset, LightingSettings,
+    ParticleSettings, Scene, Vec3, Wall, DEFAULT_SEED,
 };
 use genos_window::{Lifecycle, ShutdownDevice, Window};
 
@@ -124,6 +124,44 @@ fn draw(
         .draw(world, camera, true)
         .expect("draw")
         .expect("readback")
+}
+
+fn changed_pixels(on: &[u8], off: &[u8], width: u32, height: u32, radius: i32) -> (u32, u32) {
+    let Ok(cx) = i32::try_from(width / 2) else {
+        return (0, 0);
+    };
+    let Ok(cy) = i32::try_from(height / 2) else {
+        return (0, 0);
+    };
+    let mut inside = 0u32;
+    let mut outside = 0u32;
+    let stride = 4usize;
+    let count = on.len().min(off.len()) / stride;
+    for index in 0..count {
+        let base = index * stride;
+        let diff = (i32::from(on[base]) - i32::from(off[base])).abs()
+            + (i32::from(on[base + 1]) - i32::from(off[base + 1])).abs()
+            + (i32::from(on[base + 2]) - i32::from(off[base + 2])).abs();
+        if diff < 12 {
+            continue;
+        }
+        let Ok(slot) = u32::try_from(index) else {
+            continue;
+        };
+        let Ok(x) = i32::try_from(slot % width.max(1)) else {
+            continue;
+        };
+        let Ok(y) = i32::try_from(slot / width.max(1)) else {
+            continue;
+        };
+        let dist = (x - cx).abs().max((y - cy).abs());
+        if dist > radius {
+            outside += 1;
+        } else {
+            inside += 1;
+        }
+    }
+    (inside, outside)
 }
 
 fn center_blue(pixels: &[u8], width: u32, height: u32) -> u8 {
@@ -399,14 +437,67 @@ fn the_sim_stores_are_device_memory() {
     for _ in 0..3 {
         draw(&mut life, &world, &camera);
     }
-    assert!(
-        life.device.particle_stores_are_device_local(),
-        "slots, the dead ring, and the compact are host memory"
-    );
+    let flags = life.device.particle_store_memory_flags();
+    for flag in flags {
+        assert_ne!(
+            flag & 1,
+            0,
+            "slots, the dead ring, or the compact missed DEVICE_LOCAL: {flags:?}"
+        );
+    }
     let positions = life.device.particle_positions().expect("positions");
     assert!(
         !positions.is_empty(),
         "the device compact was not copied back"
+    );
+}
+
+#[test]
+fn hdr_cards_bloom_outside_the_card() {
+    let (width, height, mut life) = open();
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let mut settings = emitter(32, 8);
+    settings.albedo = [16.0, 16.0, 16.0];
+    settings.size = 0.12;
+    settings.rate = 80.0;
+    settings.life = 4.0;
+    let mut drawn = world(settings);
+    drawn.scene.lighting = LightingSettings::preset(LightingPreset::Low);
+    drawn.scene.lighting.gi.enabled = false;
+    drawn.scene.lighting.bounce.count = 0;
+    drawn.scene.lighting.probes.enabled = false;
+    drawn.scene.lighting.world_cache.enabled = false;
+    drawn.scene.lighting.denoiser.enabled = false;
+    drawn.scene.lighting.compose_reuse = false;
+    drawn.scene.lighting.sky = false;
+    drawn.scene.lighting.ambient.mode = AmbientMode::Constant;
+    drawn.scene.lighting.ambient.color = [0.01, 0.01, 0.01];
+    drawn.scene.lighting.ambient.intensity = 0.02;
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Low);
+    hdr.exposure_mode = ExposureMode::Fixed;
+    hdr.ev100 = 0.0;
+    hdr.bloom = true;
+    hdr.bloom_intensity = 2.0;
+    hdr.bloom_levels = 4;
+    hdr.legacy_bytes = false;
+    drawn.scene.hdr = hdr;
+    assert!(!drawn.scene.hdr.legacy_bytes);
+    let mut bright = Vec::new();
+    for _ in 0..8 {
+        bright = draw(&mut life, &drawn, &camera);
+    }
+    drawn.scene.particles.enabled = false;
+    let mut dark = Vec::new();
+    for _ in 0..4 {
+        dark = draw(&mut life, &drawn, &camera);
+    }
+    // A display-space blend only moves the card. Bloom before AgX changes
+    // pixels outside that footprint. On this 64x64 window the halo is wide.
+    let (inside, outside) = changed_pixels(&bright, &dark, width, height, 6);
+    assert!(inside > 0, "the card did not change the centre");
+    assert!(
+        outside > 32,
+        "cards blended after AgX leave no halo: {outside} pixels outside the card, {inside} inside, {width}x{height}"
     );
 }
 
@@ -796,12 +887,14 @@ fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
         "skip" => {
             let (_w, _h, mut life) = open();
             let camera = Camera::new(0.0, 2.0, 0.0);
+            life.device.set_particle_sync_witness(true);
             life.device.suspend_lighting();
             life.device.set_particle_fault(ParticleFault::SkipFlightBarrier);
             overlap(&mut life, &emitter(8, 4), &camera, 4);
         }
         "reflect" => {
             let (_w, _h, mut life) = open();
+            life.device.set_particle_sync_witness(true);
             let camera = Camera::new(0.0, 2.0, -2.0);
             let mut settings = emitter(8, 4);
             settings.depth_collision = true;
@@ -829,6 +922,7 @@ fn overlapping_flights_stay_valid_and_the_missing_barrier_does_not() {
         _ => {
             let (_w, _h, mut life) = open();
             let camera = Camera::new(0.0, 2.0, 0.0);
+            life.device.set_particle_sync_witness(true);
             life.device.suspend_lighting();
             overlap(&mut life, &emitter(8, 4), &camera, 4);
         }

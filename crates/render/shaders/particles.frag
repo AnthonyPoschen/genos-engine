@@ -1,8 +1,7 @@
 #version 450
-// Unlit card in the keep pass. Fade is the centre depth sample, not a
-// per-pixel soft-particle test (Lorach 2007). Premultiplied so the keep-pass
-// blend darkens toward the picture behind the card.
-layout(location = 0) in vec3 v_pos;
+// Unlit card. Fade is the centre depth sample, not a per-pixel soft-particle
+// test (Lorach 2007). Premultiplied. The keep pass blends this over the
+// display picture. The HDR path draws the same shader into RGBA16F.
 layout(location = 1) in vec3 v_albedo;
 layout(location = 3) in float v_shade;
 layout(location = 0) out vec4 out_color;
