@@ -114,7 +114,7 @@ The graph draws one point per 250 ms average, joined by 2 px lines (`ProfileView
 
 `FpsOverlay` is the small frame-rate plate. `genos-lighting` draws it at the bottom right when `Scene.fps_counter` is on. The plate shows frames per second and the average frame time in milliseconds. The number changes at `rate_hz`. The default is 4 Hz. A disabled overlay does not keep a window and does not build text.
 
-The expansion into a full set of UI elements is planned in [plan.md](ui/plan.md). This record stays the behavior that is in the crate today. The crate does not open a socket. Dirty rectangles are not in this tree. PR #5 adds `DamageTracker`, and the plan marks every step that reads it with **requires #5**.
+The expansion into a full set of UI elements is planned in [plan.md](ui/plan.md). The gap against that set is [feature-gap.md](ui/feature-gap.md). This record stays the behavior that is in the crate today. The crate does not open a socket. Dirty rectangles are not in this tree. PR #5 adds `DamageTracker`, and the plan marks every step that reads it with **requires #5**.
 
 The plan's networking contract, stated here for the rubric:
 
