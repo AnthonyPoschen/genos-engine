@@ -94,7 +94,7 @@ pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
     agreement, direct_light, direct_light_in, first_outgoing, lamps_in, linear_from_display,
     luminance, radiance, radiance_hits, ray_land, samples_toward, sees, solid_contains,
-    trace as trace_ray, Hit as TraceHit, Surfaces,
+    solid_contains_at, trace as trace_ray, Hit as TraceHit, Surfaces,
 };
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
 pub use world::{

@@ -1614,27 +1614,45 @@ fn sun_and_lamps(scene: &Scene) -> (DirectSun, Vec<FogPointLamp>) {
     let mut sun = default_frame_sun();
     let mut lamps = Vec::new();
     let mut sun_set = false;
-    for light in scene.lights() {
-        let span = light.direction.x * light.direction.x
-            + light.direction.y * light.direction.y
-            + light.direction.z * light.direction.z;
+    for index in 0..scene.light_len() {
+        let color = scene.light(index).color;
+        let direction = scene.light(index).direction;
+        let yaw = scene.light_yaw(index);
+        let direction = if yaw == 0.0 {
+            direction
+        } else {
+            let (sin, cos) = yaw.sin_cos();
+            genos_scene::Vec3::new(
+                direction.x * cos + direction.z * sin,
+                direction.y,
+                -direction.x * sin + direction.z * cos,
+            )
+        };
+        let span =
+            direction.x * direction.x + direction.y * direction.y + direction.z * direction.z;
         if span > 1.0e-8 {
             if !sun_set {
                 let len = span.sqrt();
                 sun = DirectSun {
-                    toward: [
-                        -light.direction.x / len,
-                        -light.direction.y / len,
-                        -light.direction.z / len,
-                    ],
-                    color: light.color,
+                    toward: [-direction.x / len, -direction.y / len, -direction.z / len],
+                    color,
                 };
                 sun_set = true;
             }
         } else if lamps.len() < MAX_LAMPS {
+            let position = scene.light(index).position;
+            let place = scene.light_translation(index);
+            let at = if place.x.to_bits() == position.x.to_bits()
+                && place.y.to_bits() == position.y.to_bits()
+                && place.z.to_bits() == position.z.to_bits()
+            {
+                position
+            } else {
+                place
+            };
             lamps.push(FogPointLamp {
-                position: [light.position.x, light.position.y, light.position.z],
-                color: light.color,
+                position: [at.x, at.y, at.z],
+                color,
             });
         }
     }

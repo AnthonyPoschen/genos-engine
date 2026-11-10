@@ -417,6 +417,45 @@ pub(crate) fn turned(mut model: [f32; 16], yaw: f32) -> [f32; 16] {
     model
 }
 
+/// Translation, turned about +Y when `yaw` is not zero. A zero yaw keeps the
+/// translation matrix, including its positive zeros.
+fn yaw_model(x: f32, y: f32, z: f32, yaw: f32) -> [f32; 16] {
+    let model = translation(x, y, z);
+    if yaw == 0.0 {
+        model
+    } else {
+        turned(model, yaw)
+    }
+}
+
+fn spin_y(direction: Vec3, yaw: f32) -> Vec3 {
+    if yaw == 0.0 {
+        return direction;
+    }
+    let (sin, cos) = yaw.sin_cos();
+    Vec3::new(
+        direction.x * cos + direction.z * sin,
+        direction.y,
+        -direction.x * sin + direction.z * cos,
+    )
+}
+
+fn same_point(world: Vec3, local: Vec3) -> bool {
+    world.x.to_bits() == local.x.to_bits()
+        && world.y.to_bits() == local.y.to_bits()
+        && world.z.to_bits() == local.z.to_bits()
+}
+
+fn floor_center_of(scene: &genos_scene::Scene) -> [f32; 3] {
+    let position = scene.floor.position;
+    let place = scene.floor_translation();
+    if same_point(place, position) {
+        [position.x, position.y, position.z]
+    } else {
+        [place.x, place.y, place.z]
+    }
+}
+
 pub(crate) fn translation(x: f32, y: f32, z: f32) -> [f32; 16] {
     let mut model = crate::world::identity_pose();
     model[12] = x;
@@ -518,11 +557,7 @@ pub fn pack_frame(
         lamps,
         occs,
         eye,
-        floor_center: [
-            world.scene.floor.position.x,
-            world.scene.floor.position.y,
-            world.scene.floor.position.z,
-        ],
+        floor_center: floor_center_of(&world.scene),
         floor_half_x: world.scene.floor.half_x,
         floor_half_z: world.scene.floor.half_z,
         floor_color: world.scene.floor.color,
@@ -571,11 +606,10 @@ fn pack_draw(
 ) -> Option<PackedDraw> {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) => {
-            let floor = &world.scene.floor;
-            let place = world
-                .scene
-                .world_point(world.scene.floor_handle(), floor.position);
-            let key = shape_key(1, &[floor.half_x, floor.half_z]);
+            let half_x = world.scene.floor.half_x;
+            let half_z = world.scene.floor.half_z;
+            let place = world.scene.floor_translation();
+            let key = shape_key(1, &[half_x, half_z]);
             Some(PackedDraw::Shape {
                 key,
                 model: translation(place.x, place.y, place.z),
@@ -587,22 +621,18 @@ fn pack_draw(
                 roughness: 1.0,
                 metallic: 0.0,
                 material_flags: 0,
-                source: ShapeSource::Floor {
-                    half_x: floor.half_x,
-                    half_z: floor.half_z,
-                },
+                source: ShapeSource::Floor { half_x, half_z },
             })
         }
         DrawKind::Fixed(FixedPart::Ceiling) => {
-            let floor = &world.scene.floor;
-            let place = world
-                .scene
-                .world_point(world.scene.floor_handle(), floor.position);
-            let ceiling = world.scene.ceiling.as_ref()?;
-            let key = shape_key(6, &[floor.half_x, floor.half_z]);
+            let half_x = world.scene.floor.half_x;
+            let half_z = world.scene.floor.half_z;
+            let height = world.scene.ceiling.as_ref()?.height;
+            let place = world.scene.floor_translation();
+            let key = shape_key(6, &[half_x, half_z]);
             Some(PackedDraw::Shape {
                 key,
-                model: translation(place.x, ceiling.height, place.z),
+                model: translation(place.x, height, place.z),
                 color,
                 emission: [0.0; 3],
                 color_rect: [0.0; 4],
@@ -611,23 +641,20 @@ fn pack_draw(
                 roughness: 1.0,
                 metallic: 0.0,
                 material_flags: 0,
-                source: ShapeSource::Ceiling {
-                    half_x: floor.half_x,
-                    half_z: floor.half_z,
-                },
+                source: ShapeSource::Ceiling { half_x, half_z },
             })
         }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
-            let handle = world.scene.wall_handle(*index)?;
-            let wall = world.scene.wall_at(*index)?;
-            let place = world.scene.world_point(
-                handle,
+            let wall = world.scene.wall_at(*index).cloned()?;
+            let place = world.scene.wall_point(
+                *index,
                 Vec3::new(
                     wall.position.x,
                     wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
             );
+            let yaw = world.scene.wall_yaw(*index);
             let half = [wall.half_x, wall.height * 0.5, wall.half_z];
             // A wall lower than the eye shows its top; a raised one (lintel, sill, roof
             // slab) shows its underside too. The fourth key value names the faces.
@@ -638,7 +665,7 @@ fn pack_draw(
             );
             Some(PackedDraw::Shape {
                 key,
-                model: translation(place.x, place.y, place.z),
+                model: yaw_model(place.x, place.y, place.z, yaw),
                 color,
                 emission: [0.0; 3],
                 color_rect: [0.0; 4],
@@ -655,14 +682,13 @@ fn pack_draw(
             })
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            let handle = world.scene.solid_handle(*index)?;
-            let solid = world.scene.solid_at(*index)?;
+            let solid = world.scene.solid_at(*index).cloned()?;
             match solid.shape {
                 Shape::Square => {
                     let half = solid.size * 0.5;
                     let extent = [half, solid.height * 0.5, half];
-                    let place = world.scene.world_point(
-                        handle,
+                    let place = world.scene.solid_point(
+                        *index,
                         Vec3::new(
                             solid.position.x,
                             solid.position.y + solid.height * 0.5,
@@ -674,7 +700,7 @@ fn pack_draw(
                         key,
                         model: turned(
                             translation(place.x, place.y, place.z),
-                            world.scene.world_yaw(handle),
+                            world.scene.solid_yaw(*index),
                         ),
                         color,
                         emission: [0.0; 3],
@@ -694,7 +720,7 @@ fn pack_draw(
                 Shape::Circle => {
                     let radius = solid.size * 0.5;
                     let key = shape_key(3, &[radius, solid.height]);
-                    let place = world.scene.world_point(handle, solid.position);
+                    let place = world.scene.solid_translation(*index);
                     Some(PackedDraw::Shape {
                         key,
                         model: translation(place.x, place.y, place.z),
@@ -1075,52 +1101,57 @@ pub fn overlay_vertex(pos: [f32; 3], color: [f32; 3]) -> GpuVertex {
 }
 
 fn lamps_of(world: &World) -> Vec<GpuLamp> {
-    world
-        .scene
-        .lights()
-        .take(MAX_LAMPS)
-        .map(|light| {
-            let span = light.direction.x * light.direction.x
-                + light.direction.y * light.direction.y
-                + light.direction.z * light.direction.z;
-            if span > 1.0e-8 {
-                let len = span.sqrt();
-                GpuLamp {
-                    pos: [
-                        light.direction.x / len,
-                        light.direction.y / len,
-                        light.direction.z / len,
-                    ],
-                    color: light.color,
-                    directional: true,
-                    range: 0.0,
-                }
+    let count = world.scene.light_len().min(MAX_LAMPS);
+    let mut lamps = Vec::with_capacity(count);
+    for index in 0..count {
+        let color = world.scene.light(index).color;
+        let direction = spin_y(
+            world.scene.light(index).direction,
+            world.scene.light_yaw(index),
+        );
+        let span =
+            direction.x * direction.x + direction.y * direction.y + direction.z * direction.z;
+        if span > 1.0e-8 {
+            let len = span.sqrt();
+            lamps.push(GpuLamp {
+                pos: [direction.x / len, direction.y / len, direction.z / len],
+                color,
+                directional: true,
+                range: 0.0,
+            });
+        } else {
+            let position = world.scene.light(index).position;
+            let place = world.scene.light_translation(index);
+            let pos = if same_point(place, position) {
+                [position.x, position.y, position.z]
             } else {
-                GpuLamp {
-                    pos: [light.position.x, light.position.y, light.position.z],
-                    color: light.color,
-                    directional: false,
-                    range: lamp_range(light.color),
-                }
-            }
-        })
-        .collect()
+                [place.x, place.y, place.z]
+            };
+            lamps.push(GpuLamp {
+                pos,
+                color,
+                directional: false,
+                range: lamp_range(color),
+            });
+        }
+    }
+    lamps
 }
 
 fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) | DrawKind::Fixed(FixedPart::Ceiling) => None,
         DrawKind::Fixed(FixedPart::Wall(index)) => {
-            let handle = world.scene.wall_handle(*index)?;
-            let wall = world.scene.wall_at(*index)?;
-            let place = world.scene.world_point(
-                handle,
+            let wall = world.scene.wall_at(*index).cloned()?;
+            let place = world.scene.wall_point(
+                *index,
                 Vec3::new(
                     wall.position.x,
                     wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
             );
+            let yaw = world.scene.wall_yaw(*index);
             Some(GpuOcc {
                 center: [place.x, place.y, place.z],
                 shape: 0.0,
@@ -1132,15 +1163,14 @@ fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
                 absorption: wall.absorption,
                 reflectance: wall.reflectance,
                 color_mix: wall.color_mix,
-                yaw: 0.0,
+                yaw,
             })
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            let handle = world.scene.solid_handle(*index)?;
-            let solid = world.scene.solid_at(*index)?;
-            let mut occ = solid_occ(solid);
-            let place = world.scene.world_point(
-                handle,
+            let solid = world.scene.solid_at(*index).cloned()?;
+            let mut occ = solid_occ(&solid);
+            let place = world.scene.solid_point(
+                *index,
                 Vec3::new(
                     solid.position.x,
                     solid.position.y + solid.height * 0.5,
@@ -1148,7 +1178,7 @@ fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
                 ),
             );
             occ.center = [place.x, place.y, place.z];
-            occ.yaw = world.scene.world_yaw(handle);
+            occ.yaw = world.scene.solid_yaw(*index);
             Some(occ)
         }
         _ => Some(GpuOcc {
@@ -1225,52 +1255,96 @@ fn push_object(
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) => push_floor(out, world),
         DrawKind::Fixed(FixedPart::Ceiling) => {
-            if let Some(ceiling) = &world.scene.ceiling {
-                let floor = &world.scene.floor;
+            if let Some(ceiling) = world.scene.ceiling.clone() {
+                let position = world.scene.floor.position;
+                let half_x = world.scene.floor.half_x;
+                let half_z = world.scene.floor.half_z;
+                let place = world.scene.floor_translation();
+                let (x, y, z) = if same_point(place, position) {
+                    (position.x, ceiling.height, position.z)
+                } else {
+                    (place.x, ceiling.height + (place.y - position.y), place.z)
+                };
                 let mut local = Vec::new();
-                push_ceiling_local(&mut local, floor.half_x, floor.half_z, ceiling.color);
+                push_ceiling_local(&mut local, half_x, half_z, ceiling.color);
                 for mut vertex in local {
-                    vertex.pos[0] += floor.position.x;
-                    vertex.pos[1] += ceiling.height;
-                    vertex.pos[2] += floor.position.z;
+                    vertex.pos[0] += x;
+                    vertex.pos[1] += y;
+                    vertex.pos[2] += z;
                     out.push(vertex);
                 }
             }
         }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
-            if let Some(wall) = world.scene.wall_at(*index) {
-                push_box(
-                    out,
-                    wall.color,
+            if let Some(wall) = world.scene.wall_at(*index).cloned() {
+                let anchor = world.scene.wall_translation(*index);
+                let yaw = world.scene.wall_yaw(*index);
+                let rooted = yaw == 0.0 && same_point(anchor, wall.position);
+                let center = if rooted {
                     [
                         wall.position.x,
                         wall.base + wall.height * 0.5,
                         wall.position.z,
-                    ],
+                    ]
+                } else {
+                    let place = world.scene.wall_point(
+                        *index,
+                        Vec3::new(
+                            wall.position.x,
+                            wall.position.y + wall.base + wall.height * 0.5,
+                            wall.position.z,
+                        ),
+                    );
+                    [place.x, place.y, place.z]
+                };
+                let first = out.len();
+                push_box(
+                    out,
+                    wall.color,
+                    center,
                     [wall.half_x, wall.height * 0.5, wall.half_z],
                     true,
                     wall.base > 0.0,
                 );
+                if !rooted {
+                    spin_vertices(out, first, center, yaw);
+                }
             }
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            if let Some(solid) = world.scene.solid_at(*index) {
+            if let Some(solid) = world.scene.solid_at(*index).cloned() {
                 match solid.shape {
                     Shape::Square => {
                         let half = solid.size * 0.5;
+                        let anchor = world.scene.solid_translation(*index);
+                        let yaw = world.scene.solid_yaw(*index);
+                        let rooted = yaw.to_bits() == solid.yaw.to_bits()
+                            && same_point(anchor, solid.position);
+                        let (x, box_y, z, turn) = if rooted {
+                            (
+                                solid.position.x,
+                                solid.height * 0.5,
+                                solid.position.z,
+                                solid.yaw,
+                            )
+                        } else {
+                            (
+                                anchor.x,
+                                solid.height * 0.5 + (anchor.y - solid.position.y),
+                                anchor.z,
+                                yaw,
+                            )
+                        };
                         let first = out.len();
                         push_box(
                             out,
                             solid.color,
-                            [0.0, solid.height * 0.5, 0.0],
+                            [0.0, box_y, 0.0],
                             [half, solid.height * 0.5, half],
                             true,
                             false,
                         );
-                        let model = turned(
-                            translation(solid.position.x, 0.0, solid.position.z),
-                            solid.yaw,
-                        );
+                        let model = turned(translation(x, 0.0, z), turn);
                         for vert in &mut out[first..] {
                             let [x, y, z] = vert.pos;
                             vert.pos = [
@@ -1286,14 +1360,21 @@ fn push_object(
                             ];
                         }
                     }
-                    Shape::Circle => push_cylinder(
-                        out,
-                        solid.color,
-                        solid.position.x,
-                        solid.position.z,
-                        solid.size * 0.5,
-                        solid.height,
-                    ),
+                    Shape::Circle => {
+                        let anchor = world.scene.solid_translation(*index);
+                        let (x, z, y_shift) = if same_point(anchor, solid.position) {
+                            (solid.position.x, solid.position.z, 0.0)
+                        } else {
+                            (anchor.x, anchor.z, anchor.y - solid.position.y)
+                        };
+                        let first = out.len();
+                        push_cylinder(out, solid.color, x, z, solid.size * 0.5, solid.height);
+                        if y_shift != 0.0 {
+                            for vert in &mut out[first..] {
+                                vert.pos[1] += y_shift;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1336,15 +1417,40 @@ fn push_object(
 }
 
 fn push_floor(out: &mut Vec<GpuVertex>, world: &World) {
-    let floor = &world.scene.floor;
-    let x0 = floor.position.x - floor.half_x;
-    let x1 = floor.position.x + floor.half_x;
-    let z0 = floor.position.z - floor.half_z;
-    let z1 = floor.position.z + floor.half_z;
-    let color = floor.color;
+    let position = world.scene.floor.position;
+    let half_x = world.scene.floor.half_x;
+    let half_z = world.scene.floor.half_z;
+    let color = world.scene.floor.color;
+    let place = world.scene.floor_translation();
+    let (x, y, z) = if same_point(place, position) {
+        (position.x, 0.0, position.z)
+    } else {
+        (place.x, place.y - position.y, place.z)
+    };
+    let x0 = x - half_x;
+    let x1 = x + half_x;
+    let z0 = z - half_z;
+    let z1 = z + half_z;
     let n = [0.0, 1.0, 0.0];
-    push_tri(out, [x0, 0.0, z0], [x1, 0.0, z0], [x1, 0.0, z1], n, color);
-    push_tri(out, [x0, 0.0, z0], [x1, 0.0, z1], [x0, 0.0, z1], n, color);
+    push_tri(out, [x0, y, z0], [x1, y, z0], [x1, y, z1], n, color);
+    push_tri(out, [x0, y, z0], [x1, y, z1], [x0, y, z1], n, color);
+}
+
+fn spin_vertices(out: &mut [GpuVertex], first: usize, center: [f32; 3], yaw: f32) {
+    if yaw == 0.0 {
+        return;
+    }
+    let (sin, cos) = yaw.sin_cos();
+    for vert in &mut out[first..] {
+        let x = vert.pos[0] - center[0];
+        let z = vert.pos[2] - center[2];
+        vert.pos[0] = center[0] + x * cos + z * sin;
+        vert.pos[2] = center[2] - x * sin + z * cos;
+        let nx = vert.normal[0];
+        let nz = vert.normal[2];
+        vert.normal[0] = nx * cos + nz * sin;
+        vert.normal[2] = -nx * sin + nz * cos;
+    }
 }
 
 fn push_box(
@@ -2079,6 +2185,90 @@ mod tests {
         assert_ne!(
             model[12],
             moved_model.expect("the moved solid keeps the same block")[12]
+        );
+    }
+
+    #[test]
+    fn a_parented_lamp_and_wall_match_the_tracer() {
+        use crate::world::{DrawKind, FixedPart};
+        use genos_scene::set_parent;
+        let parent = Solid {
+            yaw: std::f32::consts::FRAC_PI_2,
+            shape: Shape::Square,
+            position: Vec3::new(10.0, 0.0, 0.0),
+            size: 1.0,
+            height: 2.0,
+            color: [0.2, 0.2, 0.2],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        };
+        let wall = Wall {
+            base: 0.0,
+            position: Vec3::new(0.0, 0.0, 3.0),
+            half_x: 2.0,
+            half_z: 0.25,
+            height: 2.0,
+            color: [0.8, 0.8, 0.8],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        };
+        let lamp = Light {
+            position: Vec3::new(4.0, 2.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        };
+        let mut scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 30.0,
+                half_z: 30.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            vec![wall],
+            vec![parent],
+            vec![lamp],
+        );
+        let parent = scene.solid_handle(0).expect("parent");
+        let wall = scene.wall_handle(0).expect("wall");
+        let lamp = scene.light_handle(0).expect("lamp");
+        set_parent(&mut scene, wall, parent).expect("wall link");
+        set_parent(&mut scene, lamp, parent).expect("lamp link");
+        let place = scene.light_translation(0);
+        let drawn = World::from_scene(scene.clone());
+        let lamps = lamps_of(&drawn);
+        assert_eq!(lamps.len(), 1);
+        assert!(
+            (lamps[0].pos[0] - place.x).abs() < 1.0e-4
+                && (lamps[0].pos[1] - place.y).abs() < 1.0e-4
+                && (lamps[0].pos[2] - place.z).abs() < 1.0e-4,
+            "lamp {:?} world {place:?}",
+            lamps[0].pos
+        );
+        let (_, _, target) = crate::trace::lamp_toward(&scene, 0, [0.0, 0.0, 0.0]);
+        assert!(
+            (target[0] - place.x).abs() < 1.0e-4
+                && (target[1] - place.y).abs() < 1.0e-4
+                && (target[2] - place.z).abs() < 1.0e-4,
+            "tracer {target:?} world {place:?}"
+        );
+        let mut verts = Vec::new();
+        for object in &drawn.objects {
+            if let DrawKind::Fixed(FixedPart::Wall(0)) = object.kind {
+                push_object(&mut verts, &drawn, object, [0.0, 0.0, 0.0], None);
+            }
+        }
+        let max_z = verts
+            .iter()
+            .map(|vert| vert.pos[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_z - 2.0).abs() < 1.0e-3, "wall mesh z {max_z}");
+        let hit = crate::trace::ray_land(&scene, [13.0, 1.0, 5.0], [13.0, 1.0, 0.0]).expect("hit");
+        assert!(
+            (hit.0[0] - 13.0).abs() < 1.0e-2 && (hit.0[2] - 2.0).abs() < 1.0e-2,
+            "tracer hit {:?}",
+            hit.0
         );
     }
 }

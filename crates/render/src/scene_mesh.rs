@@ -85,30 +85,60 @@ impl SceneMesh {
             });
             (materials.len() - 1) as u32
         };
-        let f = &scene.floor;
-        let (x0, x1) = (
-            f.position.x - f.half_x - FLOOR_MARGIN,
-            f.position.x + f.half_x + FLOOR_MARGIN,
-        );
-        let (z0, z1) = (
-            f.position.z - f.half_z - FLOOR_MARGIN,
-            f.position.z + f.half_z + FLOOR_MARGIN,
-        );
-        let m = material(ShapeRef::Floor, f.color);
-        plane(&mut triangles, 0.0, [x0, z0, x1, z1], m);
-        if let Some(c) = &scene.ceiling {
-            let m = material(ShapeRef::Ceiling, c.color);
-            plane(&mut triangles, c.height, [x0, z0, x1, z1], m);
+        let position = scene.floor.position;
+        let half_x = scene.floor.half_x;
+        let half_z = scene.floor.half_z;
+        let floor_color = scene.floor.color;
+        let place = scene.floor_translation();
+        let (x, z, y) = if same_point(place, position) {
+            (position.x, position.z, 0.0)
+        } else {
+            (place.x, place.z, place.y - position.y)
+        };
+        let (x0, x1) = (x - half_x - FLOOR_MARGIN, x + half_x + FLOOR_MARGIN);
+        let (z0, z1) = (z - half_z - FLOOR_MARGIN, z + half_z + FLOOR_MARGIN);
+        let m = material(ShapeRef::Floor, floor_color);
+        plane(&mut triangles, y, [x0, z0, x1, z1], m);
+        if let Some(ceiling) = scene.ceiling.clone() {
+            let m = material(ShapeRef::Ceiling, ceiling.color);
+            plane(&mut triangles, ceiling.height + y, [x0, z0, x1, z1], m);
         }
-        for (i, wall) in scene.walls().enumerate() {
-            let m = material(ShapeRef::Wall(i), wall.color);
-            wall_box(&mut triangles, wall, m);
+        for i in 0..scene.wall_len() {
+            let color = scene.wall(i).color;
+            let m = material(ShapeRef::Wall(i), color);
+            let anchor = scene.wall_translation(i);
+            let yaw = scene.wall_yaw(i);
+            let wall = scene.wall(i).clone();
+            if yaw == 0.0 && same_point(anchor, wall.position) {
+                wall_box(&mut triangles, &wall, m);
+            } else {
+                wall_box_world(&mut triangles, &wall, anchor, yaw, m);
+            }
         }
-        for (i, solid) in scene.solids().enumerate() {
-            let m = material(ShapeRef::Solid(i), solid.color);
-            match solid.shape {
-                Shape::Square => square_solid(&mut triangles, solid, m),
-                Shape::Circle => round_solid(&mut triangles, solid, m),
+        for i in 0..scene.solid_len() {
+            let color = scene.solid(i).color;
+            let m = material(ShapeRef::Solid(i), color);
+            let anchor = scene.solid_translation(i);
+            let yaw = scene.solid_yaw(i);
+            let solid = scene.solid(i).clone();
+            let rooted = same_point(anchor, solid.position)
+                && (solid.shape == Shape::Circle || yaw.to_bits() == solid.yaw.to_bits());
+            if rooted {
+                match solid.shape {
+                    Shape::Square => square_solid(&mut triangles, &solid, m),
+                    Shape::Circle => round_solid(&mut triangles, &solid, m),
+                }
+            } else {
+                let mut posed = solid.clone();
+                posed.position = anchor;
+                if solid.shape == Shape::Square {
+                    posed.yaw = yaw;
+                }
+                let y_shift = anchor.y - solid.position.y;
+                match posed.shape {
+                    Shape::Square => square_solid_at(&mut triangles, &posed, y_shift, m),
+                    Shape::Circle => round_solid_at(&mut triangles, &posed, y_shift, m),
+                }
             }
         }
         let bvh = Bvh::build(&triangles);
@@ -170,6 +200,69 @@ fn closed_box(out: &mut Vec<MeshTriangle>, corner: impl Fn(usize) -> [f32; 3], m
         let [a, b, c, d] = f.map(&corner);
         out.push(MeshTriangle::flat([a, b, c], m, false));
         out.push(MeshTriangle::flat([a, c, d], m, false));
+    }
+}
+
+fn same_point(world: genos_scene::Vec3, local: genos_scene::Vec3) -> bool {
+    world.x.to_bits() == local.x.to_bits()
+        && world.y.to_bits() == local.y.to_bits()
+        && world.z.to_bits() == local.z.to_bits()
+}
+
+fn wall_box_world(
+    out: &mut Vec<MeshTriangle>,
+    w: &Wall,
+    anchor: genos_scene::Vec3,
+    yaw: f32,
+    m: u32,
+) {
+    let y_shift = anchor.y - w.position.y;
+    let (sin, cos) = yaw.sin_cos();
+    closed_box(
+        out,
+        |i| {
+            let lx = if i & 1 == 1 { w.half_x } else { -w.half_x };
+            let y = if i & 2 == 2 {
+                w.base + w.height + y_shift
+            } else {
+                w.base + y_shift
+            };
+            let lz = if i & 4 == 4 { w.half_z } else { -w.half_z };
+            [
+                anchor.x + lx * cos + lz * sin,
+                y,
+                anchor.z - lx * sin + lz * cos,
+            ]
+        },
+        m,
+    );
+}
+
+fn square_solid_at(out: &mut Vec<MeshTriangle>, s: &Solid, y_shift: f32, m: u32) {
+    let h = s.size * 0.5;
+    closed_box(
+        out,
+        |i| {
+            let lx = if i & 1 == 1 { h } else { -h };
+            let y = if i & 2 == 2 { s.height } else { 0.0 };
+            let lz = if i & 4 == 4 { h } else { -h };
+            let mut point = solid_point(s, lx, y, lz);
+            point[1] += y_shift;
+            point
+        },
+        m,
+    );
+}
+
+fn round_solid_at(out: &mut Vec<MeshTriangle>, s: &Solid, y_shift: f32, m: u32) {
+    let first = out.len();
+    round_solid(out, s, m);
+    if y_shift != 0.0 {
+        for tri in &mut out[first..] {
+            for vert in &mut tri.positions {
+                vert[1] += y_shift;
+            }
+        }
     }
 }
 

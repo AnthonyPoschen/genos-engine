@@ -1,12 +1,39 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_continue, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::neg_cmp_op_on_partial_ord, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_continue,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_range_loop,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::neg_cmp_op_on_partial_ord,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Seeded particles and the smoke a fire gives off.
 //!
@@ -216,18 +243,42 @@ impl Simulation {
     /// Embers on the top of the red solid, plus the smoke those embers leave.
     /// No red solid keeps the simulation empty.
     pub fn from_scene(scene: &Scene) -> Self {
-        let Some(solid) = scene.solid_by_color([1.0, 0.0, 0.0]) else {
+        let flame_size = 1.2;
+        let mut found = None;
+        for index in 0..scene.solid_len() {
+            let color = scene.solid(index).color;
+            let red =
+                (color[0] - 1.0).abs() < 0.01 && color[1].abs() < 0.01 && color[2].abs() < 0.01;
+            if !red {
+                continue;
+            }
+            let place = scene.solid_translation(index);
+            let height = scene.solid(index).height;
+            let position = scene.solid(index).position;
+            let y = if place.y.to_bits() == position.y.to_bits() {
+                height + flame_size * 0.5
+            } else {
+                height + flame_size * 0.5 + (place.y - position.y)
+            };
+            let x = if place.x.to_bits() == position.x.to_bits() {
+                position.x
+            } else {
+                place.x
+            };
+            let z = if place.z.to_bits() == position.z.to_bits() {
+                position.z
+            } else {
+                place.z
+            };
+            found = Some(([x, y, z], scene.solid(index).size));
+            break;
+        }
+        let Some((origin, size)) = found else {
             let mut emitter = Emitter::at([0.0, 0.0, 0.0]);
             emitter.enabled = false;
             return Self::fresh(emitter);
         };
-        let flame_size = 1.2;
         // The card is centered on this point, so the light sits in the flame, not on the box top.
-        let origin = [
-            solid.position.x,
-            solid.height + flame_size * 0.5,
-            solid.position.z,
-        ];
         let mut flame = Emitter::at(origin);
         flame.face_camera = true;
         flame.lit = false;
@@ -240,7 +291,7 @@ impl Simulation {
         flame.capacity = 3;
         flame.image = bundled_image(EMBER_PNG, EMBER_MAP, "burn");
         let mut ember = Emitter::at(origin);
-        ember.spawn_radius = (solid.size * 0.16).max(0.05);
+        ember.spawn_radius = (size * 0.16).max(0.05);
         ember.face_camera = true;
         ember.lit = false;
         ember.albedo = [1.0, 0.55, 0.12];

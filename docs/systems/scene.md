@@ -92,7 +92,7 @@ A new room is a new script. Register a new function on the Rhai host before a sc
 
 ## Limits
 
-The capsule does not jump or crouch. The step does not turn it. There is one room script. A placed object may name a parent handle. The world translation is the parent's world transform times the local position. Scale stays `(1, 1, 1)`. The scene types have no entity id. The agent endpoint assigns a handle, and that handle stays until removal.
+The capsule does not jump or crouch. The step does not turn it. There is one room script. A placed object may name a parent handle. The world translation is the parent's world transform times the local position. Scale stays `(1, 1, 1)`. Removing an object writes each direct child's world translation into that child's local position, and a square's world yaw into its yaw, then drops parent links that named the removed object. World poses are one scratch in list order, read by index, and rebuilt when the store clock or the floor position changes. The scene types have no entity id. The agent endpoint assigns a handle, and that handle stays until removal.
 
 The endpoint listens on `127.0.0.1` only. The endpoint stops when that camera process exits. An edit is not written to the script.
 

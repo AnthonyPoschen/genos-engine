@@ -167,39 +167,48 @@ impl Camera {
     pub fn attach_scene(&mut self, scene: &Scene) {
         let mut physics = World::new(GRAVITY);
         let floor = &scene.floor;
+        let place = scene.floor_translation();
+        let floor_center = if same_point(place, floor.position) {
+            Vec3::new(floor.position.x, -FLOOR_HALF_Y, floor.position.z)
+        } else {
+            Vec3::new(
+                place.x,
+                -FLOOR_HALF_Y + (place.y - floor.position.y),
+                place.z,
+            )
+        };
         physics.insert(Body::cuboid(
-            Vec3::new(floor.position.x, -FLOOR_HALF_Y, floor.position.z),
+            floor_center,
             0.0,
             Vec3::new(floor.half_x, FLOOR_HALF_Y, floor.half_z),
         ));
         for index in 0..scene.wall_len() {
-            let Some(handle) = scene.wall_handle(index) else {
-                continue;
-            };
             let wall = scene.wall(index);
-            let center = scene.world_point(
-                handle,
+            let center = scene.wall_point(
+                index,
                 Vec3::new(
                     wall.position.x,
                     wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
             );
-            physics.insert(Body::cuboid(
+            let mut body = Body::cuboid(
                 center,
                 0.0,
                 Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
-            ));
+            );
+            let yaw = scene.wall_yaw(index);
+            if yaw != 0.0 {
+                body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
+            }
+            physics.insert(body);
         }
         for index in 0..scene.solid_len() {
-            let Some(handle) = scene.solid_handle(index) else {
-                continue;
-            };
             let solid = scene.solid(index);
             physics.insert(solid_collider_at(
                 solid,
-                scene.world_point(handle, solid.position),
-                scene.world_yaw(handle),
+                scene.solid_point(index, solid.position),
+                scene.solid_yaw(index),
             ));
         }
         self.view = physics.insert(view_capsule(self.position));
@@ -310,6 +319,33 @@ pub fn look_direction(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(sy * cp, sp, -cy * cp)
 }
 
+fn same_point(world: Vec3, local: Vec3) -> bool {
+    world.x.to_bits() == local.x.to_bits()
+        && world.y.to_bits() == local.y.to_bits()
+        && world.z.to_bits() == local.z.to_bits()
+}
+
+/// A path sample is parent-local. A root's sample is already the body position.
+fn path_world(scene: &Scene, solid_index: usize, local: Vec3) -> Vec3 {
+    let Some(handle) = scene.solid_handle(solid_index) else {
+        return local;
+    };
+    let Some((origin, yaw)) = crate::hierarchy::parent_basis(scene, handle) else {
+        return local;
+    };
+    origin + Quat::from_axis_angle(Vec3::Y, yaw).rotate(local)
+}
+
+fn path_local(scene: &Scene, solid_index: usize, world: Vec3) -> Vec3 {
+    let Some(handle) = scene.solid_handle(solid_index) else {
+        return world;
+    };
+    let Some((origin, yaw)) = crate::hierarchy::parent_basis(scene, handle) else {
+        return world;
+    };
+    Quat::from_axis_angle(Vec3::Y, -yaw).rotate(world - origin)
+}
+
 /// Vertical distance from a solid's scene position to its collider center.
 fn center_lift(solid: &Solid) -> f32 {
     match solid.shape {
@@ -357,7 +393,8 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
         }
         let before = camera.codimations[index].motion.sample();
         camera.codimations[index].motion.advance(dt);
-        let after = camera.codimations[index].motion.sample();
+        let after_local = camera.codimations[index].motion.sample();
+        let after = path_world(scene, solid_index, after_local);
         let woke = {
             let body = &mut camera.physics.bodies[body_index];
             let woke = body.inverse_mass == 0.0;
@@ -373,7 +410,7 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
         let body = &mut camera.physics.bodies[body_index];
         let current = body.position - Vec3::Y * lift;
         let mut delta = after - current;
-        let path_step = (after - before).length();
+        let path_step = (after_local - before).length();
         let distance = delta.length();
         if distance > path_step && distance > 1.0e-8 {
             delta = delta * (path_step / distance);
@@ -398,10 +435,14 @@ fn write_codimations(camera: &Camera, scene: &mut Scene) {
             continue;
         };
         let position = body.position;
+        let Some(lift) = scene.solid_at(slot.solid).map(center_lift) else {
+            continue;
+        };
+        let local = path_local(scene, slot.solid, position - Vec3::Y * lift);
         let Some(solid) = scene.solid_at_mut(slot.solid) else {
             continue;
         };
-        solid.position = position - Vec3::Y * center_lift(solid);
+        solid.position = local;
     }
 }
 

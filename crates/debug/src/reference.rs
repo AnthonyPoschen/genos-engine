@@ -96,8 +96,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use genos_load::ShadeSample;
 use genos_render::{
-    direct_light_in, lamps_in, linear_from_display, pack_f32, rec709_y, scene_luma, solid_contains,
-    SceneMesh, SceneRead, Surfaces, TraceHit,
+    direct_light_in, lamps_in, linear_from_display, pack_f32, rec709_y, scene_luma,
+    solid_contains_at, SceneMesh, SceneRead, Surfaces, TraceHit,
 };
 use genos_scene::{look_direction, Camera, Scene};
 
@@ -409,8 +409,10 @@ fn material_at(setup: &RefSetup, first: &TraceHit) -> Option<SolidMaterial> {
     setup
         .materials
         .iter()
-        .zip(setup.scene.solids())
-        .find_map(|(m, solid)| m.filter(|_| solid_contains(solid, inward)))
+        .enumerate()
+        .find_map(|(index, material)| {
+            (*material).filter(|_| solid_contains_at(&setup.scene, index, inward))
+        })
 }
 
 /// Smith-GGX masking for one direction (height-correlated form left out).
