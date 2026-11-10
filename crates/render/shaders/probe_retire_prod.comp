@@ -1,0 +1,555 @@
+#version 450
+// ADR 0039 stage 5 slice. One thread plants a screen and the world cells, then
+// the command buffer runs lighting_place.comp, lighting_trace.comp,
+// lighting_gather.comp, and lighting_filter.comp. A second phase reads the
+// probe records, the hit slots, pad1, and the filter stamp those passes wrote.
+// This shader does not trace. It does not write diag[8], diag[38], or diag[39].
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 1) in;
+#include "lighting_common.glsl"
+
+const uint RETIRE_ROWS = 22u;
+const uint RETIRE_STRIDE = 16u;
+const uint RETIRE_HEAD = 8u;
+const uint RETIRE_SLOT_AT = 8u + 22u * 16u;
+const uint RETIRE_SLOT_MAX = 16u;
+const uint RETIRE_HEAD_SRC = 384u;
+const uint RETIRE_PARTIAL = 0u;
+const uint RETIRE_FULL = 1u;
+const uint RETIRE_OFF = 2u;
+const uint RETIRE_DETAIL_OFF = 3u;
+const uint RETIRE_LOW = 4u;
+const uint RETIRE_STALE = 5u;
+const uint RETIRE_EMPTY = 6u;
+const uint RETIRE_OWN = 7u;
+const uint RETIRE_MISSING = 8u;
+const uint RETIRE_SPLIT = 9u;
+const uint RETIRE_SLANT = 10u;
+const uint RETIRE_SLANT_EMPTY = 11u;
+const uint RETIRE_BACK = 12u;
+const uint RETIRE_PLANE = 13u;
+const uint RETIRE_REAPPEAR = 14u;
+const uint RETIRE_MOVER = 15u;
+const uint RETIRE_MOVER_MISS = 16u;
+const uint RETIRE_SKY = 17u;
+const uint RETIRE_KEPT_DEAD = 18u;
+const uint RETIRE_KEPT_OFF = 19u;
+const uint RETIRE_KEPT_HOLE = 20u;
+const uint RETIRE_KEPT_BACK = 21u;
+// Frame 100 is stratum 4. Stratum 0 is an older one.
+const uint RETIRE_OLD_S = 0u;
+const float RETIRE_GAP = 80.0;
+const vec3 RETIRE_RED = vec3(8.0, 0.0, 0.0);
+const vec3 RETIRE_SPLIT_RGB = vec3(12.0, 0.0, 0.0);
+const float RETIRE_SAMPLES = 4.0;
+const float RETIRE_COVER = 4.0;
+const float RETIRE_HOLE_STEP = 40.0;
+const float RETIRE_HALF = 0.5;
+const float RETIRE_MOVER_MARK = 300000.0;
+const float RETIRE_MOVER_R = 2.0;
+const float RETIRE_SENTINEL = 42.0;
+// Farther than half a 25 cm cell, from either side of the surface.
+const float RETIRE_SHIFT = 1.0;
+const vec3 RETIRE_UP = vec3(0.0, 1.0, 0.0);
+const float RETIRE_RAY_LIFT = 0.02;
+const float RETIRE_SPHERE = 1.0;
+const float RETIRE_SH_MARK = 7.0;
+const float RETIRE_EMPTY_DEPTH = -1.0;
+
+uint retire_nslot;
+
+void retire_u(uint i, uint v) {
+    outc.px[i] = v;
+}
+
+uint retire_row_at(uint row) {
+    return RETIRE_HEAD + row * RETIRE_STRIDE;
+}
+
+void retire_zero_row(uint row) {
+    uint at = retire_row_at(row);
+    for (uint i = 0u; i < RETIRE_STRIDE; i++) {
+        outc.px[at + i] = 0u;
+    }
+}
+
+uint retire_variant(uint row) {
+    if (row == RETIRE_OFF) {
+        return 1u;
+    }
+    if (row == RETIRE_DETAIL_OFF) {
+        return 2u;
+    }
+    if (row == RETIRE_LOW) {
+        return 3u;
+    }
+    if (row == RETIRE_KEPT_OFF) {
+        return 1u;
+    }
+    return 0u;
+}
+
+bool retire_lifecycle(uint row) {
+    return row == RETIRE_KEPT_DEAD || row == RETIRE_KEPT_OFF
+        || row == RETIRE_KEPT_HOLE || row == RETIRE_KEPT_BACK;
+}
+
+float retire_cover_dist(uint row) {
+    return RETIRE_COVER + float(row) * RETIRE_GAP;
+}
+
+float retire_hole_dist(uint row) {
+    return retire_cover_dist(row) + RETIRE_HOLE_STEP;
+}
+
+vec3 retire_normal(uint row) {
+    if (row == RETIRE_SLANT || row == RETIRE_SLANT_EMPTY) {
+        return normalize(vec3(1.0, 1.0, 0.0));
+    }
+    return RETIRE_UP;
+}
+
+bool retire_hole(uint row, uvec2 p, bool poked) {
+    if (p.x < 6u) {
+        return false;
+    }
+    return row == RETIRE_PARTIAL || row == RETIRE_KEPT_HOLE
+        || (poked && (row == RETIRE_REAPPEAR || row == RETIRE_KEPT_BACK));
+}
+
+void retire_head(uint variant) {
+    uint src = RETIRE_HEAD_SRC + variant * 8u;
+    uint at = lighting_change_at();
+    work.v[at] = vec4(
+        uintBitsToFloat(outc.px[src]),
+        uintBitsToFloat(outc.px[src + 1u]),
+        uintBitsToFloat(outc.px[src + 2u]),
+        uintBitsToFloat(outc.px[src + 3u]));
+    work.v[at + 1u] = vec4(0.0);
+    work.v[at + 2u] = vec4(0.0);
+    work.v[at + 3u] = vec4(
+        uintBitsToFloat(outc.px[src + 4u]),
+        uintBitsToFloat(outc.px[src + 5u]),
+        uintBitsToFloat(outc.px[src + 6u]),
+        uintBitsToFloat(outc.px[src + 7u]));
+    work.v[at + 4u] = vec4(0.0);
+    work.v[at + LIGHTING_CHANGE_HEAD] = vec4(0.0);
+    ckeys.key[LIGHTING_WRC_RING_AT + 8u] = 0u;
+    ckeys.key[LIGHTING_LS_RISE_AT] = 0u;
+}
+
+void retire_pixel(uvec2 p, float dist, vec3 n) {
+    uint pixel = p.y * pc.dims.x + p.x;
+    gbuf.words[pixel * 5u] = floatBitsToUint(dist);
+    gbuf.words[pixel * 5u + 1u] = lighting_pack_normal(n);
+    gbuf.words[pixel * 5u + 2u] = 0u;
+    gbuf.words[pixel * 5u + 3u] = 0u;
+    gbuf.words[pixel * 5u + 4u] = 0u;
+}
+
+void retire_screen(uint row, bool poked) {
+    vec3 n = retire_normal(row);
+    for (uint y = 0u; y < pc.dims.y; y++) {
+        for (uint x = 0u; x < pc.dims.x; x++) {
+            uvec2 p = uvec2(x, y);
+            gbuf_clear_pixel(p.y * pc.dims.x + p.x);
+            if (row == RETIRE_SKY) {
+                continue;
+            }
+            bool hole = retire_hole(row, p, poked);
+            float dist = hole ? retire_hole_dist(row) : retire_cover_dist(row);
+            retire_pixel(p, dist, n);
+        }
+    }
+}
+
+void retire_remember(uint s) {
+    if (s == ~0u || retire_nslot >= RETIRE_SLOT_MAX) {
+        retire_nslot = RETIRE_SLOT_MAX + 1u;
+        return;
+    }
+    outc.px[RETIRE_SLOT_AT + 1u + retire_nslot] = s;
+    retire_nslot += 1u;
+}
+
+uint retire_claim(vec3 centre, vec3 n, float size, vec3 rgb, float samples) {
+    uint s = lighting_cache_find_sized(centre, n, true, size, centre);
+    if (s == ~0u) {
+        return s;
+    }
+    cache.v[3u * s] = vec4(centre, 0.0);
+    cache.v[3u * s + 1u] = vec4(n, size);
+    cache.v[3u * s + 2u] = vec4(rgb, samples);
+    cache.v[LIGHTING_SC_OBJ_AT + s] = vec4(0.0);
+    cache.v[LIGHTING_SC_SPARSE_AT + s] = vec4(0.0);
+    retire_remember(s);
+    return s;
+}
+
+uint retire_words(uint s) {
+    uvec4 a = floatBitsToUint(cache.v[3u * s]);
+    uvec4 b = floatBitsToUint(cache.v[3u * s + 1u]);
+    uvec4 c = floatBitsToUint(cache.v[3u * s + 2u]);
+    uvec4 d = floatBitsToUint(cache.v[LIGHTING_SC_SPARSE_AT + s]);
+    uvec4 e = floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + s]);
+    return a.x ^ a.y ^ a.z ^ a.w ^ b.x ^ b.y ^ b.z ^ b.w ^ c.x ^ c.y ^ c.z ^ c.w
+        ^ d.x ^ d.y ^ d.z ^ d.w ^ e.x ^ e.y ^ e.z ^ e.w;
+}
+
+uint retire_hash() {
+    uint n = min(outc.px[RETIRE_SLOT_AT], RETIRE_SLOT_MAX);
+    uint h = 0u;
+    for (uint i = 0u; i < n; i++) {
+        h ^= retire_words(outc.px[RETIRE_SLOT_AT + 1u + i]);
+    }
+    return h;
+}
+
+bool retire_plant_cells(vec3 p, vec3 n, uint row) {
+    const float cs = LIGHTING_SH_CELL;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 an = vec3(0.0);
+    an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
+    vec3 inset = LIGHTING_CELL_HALF * lighting_axis_vec(lighting_axis(n));
+    vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
+    vec3 g0 = floor(uv);
+    uint before = retire_nslot;
+    for (uint k = 0u; k < 8u; k++) {
+        uint dx = k & 1u;
+        uint dy = (k >> 1u) & 1u;
+        uint dz = k >> 2u;
+        vec3 idx = g0 + vec3(float(dx), float(dy), float(dz));
+        vec3 centre = (idx + vec3(LIGHTING_CELL_HALF) + inset) * cs;
+        float samples = (row == RETIRE_EMPTY || row == RETIRE_MOVER_MISS) ? 0.0 : RETIRE_SAMPLES;
+        vec3 rgb = RETIRE_RED;
+        if (row == RETIRE_SPLIT && (k & 1u) == 1u) {
+            rgb = RETIRE_SPLIT_RGB;
+        }
+        if (retire_claim(centre, an, cs, rgb, samples) == ~0u) {
+            return false;
+        }
+    }
+    if (row == RETIRE_STALE) {
+        for (uint i = before; i < retire_nslot; i++) {
+            uint s = outc.px[RETIRE_SLOT_AT + 1u + i];
+            cache.v[LIGHTING_SC_OBJ_AT + s].y = uintBitsToFloat(lighting_frame());
+        }
+        ckeys.key[LIGHTING_LS_RISE_AT] = lighting_frame();
+    }
+    if (row == RETIRE_BACK) {
+        for (uint i = before; i < retire_nslot; i++) {
+            uint s = outc.px[RETIRE_SLOT_AT + 1u + i];
+            cache.v[3u * s + 1u].xyz = -an;
+        }
+    }
+    if (row == RETIRE_PLANE) {
+        for (uint i = before; i < retire_nslot; i++) {
+            uint s = outc.px[RETIRE_SLOT_AT + 1u + i];
+            cache.v[3u * s].xyz -= an * RETIRE_SHIFT;
+        }
+    }
+    return retire_nslot <= RETIRE_SLOT_MAX;
+}
+
+bool retire_plant_texels(vec3 p, vec3 n, uint row) {
+    float size = lighting_cell_size(p);
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(p, ta), dot(p, tb)) / size - RETIRE_HALF;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    uint texel = ~0u;
+    for (uint k = 0u; k < 4u; k++) {
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (bil <= 0.0) {
+            continue;
+        }
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + RETIRE_HALF;
+        vec3 q = p + ta * (c.x * size - dot(p, ta)) + tb * (c.y * size - dot(p, tb));
+        float samples = row == RETIRE_OWN ? RETIRE_SAMPLES : 0.0;
+        vec3 rgb = row == RETIRE_OWN ? vec3(0.0) : vec3(0.0);
+        uint s = retire_claim(q, n, size, rgb, samples);
+        if (s == ~0u) {
+            return false;
+        }
+        if (texel == ~0u) {
+            texel = s;
+        }
+    }
+    if (row == RETIRE_SPLIT) {
+        uint s = retire_claim(p, n, size, vec3(0.0), 0.0);
+        if (s == ~0u) {
+            return false;
+        }
+        texel = s;
+    }
+    if (row == RETIRE_SPLIT && texel != ~0u) {
+        bool held = lighting_compact_hold_texel_rays(texel);
+        retire_u(retire_row_at(row) + 12u, held ? 2u : 1u);
+    }
+    return retire_nslot <= RETIRE_SLOT_MAX;
+}
+
+bool retire_wants_cells(uint row) {
+    return row != RETIRE_SKY && row != RETIRE_SLANT_EMPTY;
+}
+
+bool retire_wants_texels(uint row) {
+    if (row == RETIRE_SKY || row == RETIRE_SLANT || row == RETIRE_SLANT_EMPTY) {
+        return false;
+    }
+    if (row == RETIRE_MOVER || row == RETIRE_MOVER_MISS || row == RETIRE_MISSING) {
+        return false;
+    }
+    if (row == RETIRE_LOW) {
+        return false;
+    }
+    return true;
+}
+
+void retire_mover(uint row, vec3 pos) {
+    if (row != RETIRE_MOVER && row != RETIRE_MOVER_MISS) {
+        return;
+    }
+    uint at = lighting_change_at();
+    work.v[at].w += RETIRE_MOVER_MARK;
+    uint mv = at + LIGHTING_CHANGE_HEAD;
+    vec3 centre = pos - vec3(0.0, RETIRE_HALF, 0.0);
+    work.v[mv] = vec4(centre, RETIRE_MOVER_R);
+    work.v[mv + 1u] = vec4(centre, RETIRE_MOVER_R);
+    work.v[mv + 2u] = vec4(1.0, RETIRE_HALF, 1.0, 0.0);
+    work.v[mv + 3u] = vec4(1.0, 0.0, 0.0, 0.0);
+}
+
+void retire_reset_schedule() {
+    gstats.pad1 = 0u;
+    uint rays = lighting_rays();
+    for (uint probe = 0u; probe < lighting_probes(); probe++) {
+        work.v[lighting_probe_at(probe)] = vec4(0.0);
+        work.v[lighting_probe_at(probe) + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
+        uint s = lighting_stratum_at(probe, lighting_stratum());
+        work.v[s] = vec4(0.0);
+        work.v[s + 1u] = vec4(0.0, 1.0, 0.0, 0.0);
+        uint g = lighting_gdirty_at() + 2u * probe;
+        work.v[g] = vec4(0.0);
+        work.v[g + 1u] = vec4(0.0);
+        for (uint k = 0u; k < rays; k++) {
+            work.v[lighting_hit_at(probe * rays + k)] = vec4(RETIRE_SENTINEL, 0.0, 0.0, 0.0);
+        }
+    }
+}
+
+void retire_arm_kept(uint row, vec3 pos, vec3 n);
+void retire_note_kept(uint row);
+
+void retire_plant(uint row) {
+    retire_zero_row(row);
+    retire_nslot = 0u;
+    outc.px[RETIRE_SLOT_AT] = 0u;
+    if (row == 0u) {
+        for (uint v = 0u; v < 4u; v++) {
+            outc.px[4u + v] = uint(uintBitsToFloat(outc.px[RETIRE_HEAD_SRC + v * 8u + 7u]));
+        }
+    }
+    retire_head(retire_variant(row));
+    retire_screen(row, false);
+    vec3 pos = vec3(0.0);
+    vec3 n = retire_normal(row);
+    vec3 albedo = vec3(0.0);
+    bool two = false;
+    bool surface = row != RETIRE_SKY && lighting_surface(uvec2(2u, 2u), pos, n, albedo, two);
+    if (row != RETIRE_SKY && !surface) {
+        return;
+    }
+    if (surface) {
+        retire_mover(row, pos);
+    }
+    retire_reset_schedule();
+    bool planted = true;
+    if (retire_wants_cells(row)) {
+        planted = retire_plant_cells(pos, n, row);
+    }
+    if (planted && retire_wants_texels(row)) {
+        planted = retire_plant_texels(pos, n, row);
+    }
+    if (retire_nslot > RETIRE_SLOT_MAX) {
+        planted = false;
+        retire_nslot = 0u;
+    }
+    outc.px[RETIRE_SLOT_AT] = retire_nslot;
+    uint at = retire_row_at(row);
+    retire_u(at + 10u, planted ? 1u : 0u);
+    uint covers = 0u;
+    if (surface && planted) {
+        bool mover = lighting_mover_on(pos, n) != ~0u;
+        covers = lighting_sh_texel_detail_covers(pos, n, pos, mover) ? 1u : 0u;
+    }
+    retire_u(at + 11u, covers);
+    retire_u(at + 13u, retire_hash());
+    if (surface && planted) {
+        retire_arm_kept(row, pos, n);
+    }
+}
+
+// Mode 1's kept and fill range. One older stratum, one change on its ray, and
+// one sentinel in the kept block and the fill block. The current stratum is
+// left to place. Retire off is the same plant with the bit clear.
+void retire_arm_kept(uint row, vec3 pos, vec3 n) {
+    if (!retire_lifecycle(row) || lighting_stratum() == RETIRE_OLD_S) {
+        return;
+    }
+    uint rays = lighting_rays();
+    vec3 origin = pos + n * RETIRE_RAY_LIFT;
+    uint change = lighting_change_at();
+    work.v[change].x = 1.0;
+    work.v[change].y = 0.0;
+    work.v[change + LIGHTING_CHANGE_HEAD] = vec4(origin, RETIRE_SPHERE);
+    for (uint probe = 0u; probe < lighting_probes(); probe++) {
+        uint s = lighting_stratum_at(probe, RETIRE_OLD_S);
+        work.v[s] = vec4(pos, 1.0);
+        work.v[s + 1u] = vec4(n, 0.0);
+        uint h = (probe * LIGHTING_STRATA + RETIRE_OLD_S) * rays;
+        work.v[lighting_kept_at(h)] = vec4(RETIRE_SENTINEL, 0.0, 0.0, 0.0);
+        work.v[lighting_fill_at(h)] = vec4(RETIRE_SENTINEL, 0.0, 0.0, 0.0);
+        work.v[lighting_shf_at(probe)] = vec4(RETIRE_SH_MARK, 0.0, 0.0, 0.0);
+    }
+}
+
+void retire_read(uint row) {
+    uint at = retire_row_at(row);
+    uint rays = lighting_rays();
+    uint live = 0u;
+    uint opened = 0u;
+    uint left_sent = 1u;
+    uint right_sent = 1u;
+    for (uint probe = 0u; probe < lighting_probes(); probe++) {
+        bool on = lighting_probe_record_live(probe);
+        if (on) {
+            live += 1u;
+        }
+        uint sent = 1u;
+        for (uint k = 0u; k < rays; k++) {
+            float x = work.v[lighting_hit_at(probe * rays + k)].x;
+            bool held = x > RETIRE_SENTINEL - 1.0 && x < RETIRE_SENTINEL + 1.0;
+            if (!held) {
+                sent = 0u;
+                opened += 1u;
+            }
+        }
+        if (probe == 0u) {
+            left_sent = sent;
+            retire_u(at + 5u, on ? 1u : 0u);
+        } else {
+            right_sent = sent;
+            retire_u(at + 6u, on ? 1u : 0u);
+        }
+    }
+    uint filtered = 0u;
+    for (uint probe = 0u; probe < lighting_probes(); probe++) {
+        uint stamp = floatBitsToUint(work.v[lighting_gdirty_at() + 2u * probe].z);
+        if (stamp == lighting_frame()) {
+            filtered += 1u;
+        }
+    }
+    retire_u(at + 1u, live);
+    retire_u(at + 2u, opened);
+    retire_u(at + 3u, gstats.pad1);
+    retire_u(at + 4u, filtered);
+    retire_u(at + 7u, left_sent);
+    retire_u(at + 8u, right_sent);
+    retire_u(at + 9u, retire_hash() == outc.px[at + 13u] ? 1u : 0u);
+    retire_note_kept(row);
+}
+
+uint retire_slot_held(uint at) {
+    float x = work.v[at].x;
+    return (x > RETIRE_SENTINEL - 1.0 && x < RETIRE_SENTINEL + 1.0) ? 1u : 0u;
+}
+
+// Word 14: per probe, kept sentinel, fill sentinel, and the older stratum word.
+void retire_note_kept(uint row) {
+    if (!retire_lifecycle(row)) {
+        return;
+    }
+    uint rays = lighting_rays();
+    uint pack = 0u;
+    for (uint probe = 0u; probe < lighting_probes(); probe++) {
+        uint h = (probe * LIGHTING_STRATA + RETIRE_OLD_S) * rays;
+        pack |= retire_slot_held(lighting_kept_at(h)) << probe;
+        pack |= retire_slot_held(lighting_fill_at(h)) << (2u + probe);
+        if (work.v[lighting_stratum_at(probe, RETIRE_OLD_S)].w > RETIRE_HALF) {
+            pack |= 1u << (4u + probe);
+        }
+    }
+    retire_u(retire_row_at(row) + 14u, pack);
+}
+
+// Word 15 on the dead and live rows: round 1 still marked, round 2 cleared,
+// round 2 wrote the empty depth. A resurrection row uses word 15 for the first pass.
+void retire_note_filter(uint row, uint round) {
+    if (row != RETIRE_KEPT_DEAD && row != RETIRE_KEPT_OFF) {
+        return;
+    }
+    uint at = retire_row_at(row);
+    uint pack = outc.px[at + 15u];
+    if (round == 1u) {
+        if (work.v[lighting_shf_at(0u)].x == RETIRE_SH_MARK) {
+            pack |= 1u;
+        }
+    } else {
+        bool cleared = true;
+        for (uint q = 0u; q < 7u; q++) {
+            if (any(notEqual(work.v[lighting_shf_at(0u) + q], vec4(0.0)))) {
+                cleared = false;
+            }
+        }
+        if (cleared) {
+            pack |= 2u;
+        }
+        if (work.v[lighting_gdirty_at() + 1u].w == RETIRE_EMPTY_DEPTH) {
+            pack |= 4u;
+        }
+    }
+    retire_u(at + 15u, pack);
+}
+
+void retire_poke(uint row) {
+    uint at = retire_row_at(row);
+    // The first place/trace already wrote word 1. Keep it across the second pass.
+    // The resurrection row also keeps the first kept/fill pack.
+    uint saved = outc.px[at + 1u];
+    if (row == RETIRE_KEPT_BACK) {
+        saved |= outc.px[at + 14u] << 8u;
+    }
+    retire_u(at + 15u, saved);
+    retire_screen(row, true);
+    retire_reset_schedule();
+}
+
+void main() {
+    uint row = pc.lamp.x;
+    uint phase = pc.lamp.y;
+    if (row >= RETIRE_ROWS) {
+        return;
+    }
+    if (phase == 0u) {
+        retire_plant(row);
+        return;
+    }
+    if (phase == 2u) {
+        retire_poke(row);
+        return;
+    }
+    if (phase == 3u) {
+        retire_note_filter(row, 1u);
+        return;
+    }
+    if (phase == 4u) {
+        retire_note_filter(row, 2u);
+        return;
+    }
+    retire_read(row);
+}

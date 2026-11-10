@@ -3842,7 +3842,9 @@ const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
 /// `flags` is the low 23 surface-cache bits (head z, above the probe-run bit).
 /// `mode_cap` is world mode × 1000 + cap (head w, before mover counts).
 /// `head_hi` is head 3.w: high flags, the budget shift, the isolate toggles,
-/// and ADR 0039 stage 3 bit 17 (`surface_cache.sh_texel_detail`).
+/// ADR 0039 stage 3 bit 17 (`surface_cache.sh_texel_detail`), stage 4
+/// bit 18 (`surface_cache.sh_texel_ray_cut`), and the stage 5 slice
+/// bit 19 (`surface_cache.sh_probe_retire`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LightingChangeHead {
     pub flags: u32,
@@ -3863,6 +3865,8 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     const SURFACE_CACHE_HOLD: u32 = 1 << 30;
     const SH_CELLS: u32 = 1 << 23;
     const SH_TEXEL_DETAIL: u32 = 1 << 17;
+    const SH_TEXEL_RAY_CUT: u32 = 1 << 18;
+    const SH_PROBE_RETIRE: u32 = 1 << 19;
     let mut flags_all = settings.experiments.sc_flags
         | if toggles & genos_scene::LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
             2097152
@@ -3881,6 +3885,12 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     let mut head_hi = ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
     if settings.surface_cache.sh_texel_detail {
         head_hi |= SH_TEXEL_DETAIL;
+    }
+    if settings.surface_cache.sh_texel_ray_cut {
+        head_hi |= SH_TEXEL_RAY_CUT;
+    }
+    if settings.surface_cache.sh_probe_retire {
+        head_hi |= SH_PROBE_RETIRE;
     }
     LightingChangeHead {
         flags: flags_all & ((1 << 23) - 1),

@@ -55,6 +55,52 @@ fn surface_cache_attach_movers_round_trips() {
 }
 
 #[test]
+fn surface_cache_sh_probe_retire_round_trips() {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    assert!(!settings.surface_cache.sh_probe_retire);
+    settings
+        .set_key("surface_cache.sh_probe_retire", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_probe_retire);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_probe_retire);
+    assert!(
+        !parsed.surface_cache.sh_texel_detail,
+        "probe retire does not turn the detail seed on"
+    );
+    settings
+        .set_key("surface_cache.sh_probe_retire", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_probe_retire);
+    assert!(settings
+        .set_key("surface_cache.sh_probe_retire", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_sh_texel_ray_cut_round_trips() {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_texel_ray_cut);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_ray_cut);
+    assert!(
+        !parsed.surface_cache.sh_texel_detail,
+        "the ray cut does not turn the detail seed on"
+    );
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    assert!(settings
+        .set_key("surface_cache.sh_texel_ray_cut", "maybe")
+        .is_err());
+}
+
+#[test]
 fn surface_cache_sh_texel_detail_round_trips() {
     let mut settings = LightingSettings::default();
     assert!(!settings.surface_cache.sh_texel_detail);

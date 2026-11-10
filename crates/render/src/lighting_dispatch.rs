@@ -835,4 +835,44 @@ mod probe_still_tests {
         assert!(!direct_shade_plain(LampPickMode::Both, 3, LampShadeGate::Product));
         assert!(!direct_shade_plain(LampPickMode::Hits, 3, LampShadeGate::Product));
     }
+
+    /// Place searches, trace rays, gather bins, and filter bodies for `live`
+    /// probes. The CPU launch stays the full grid; this is the GPU-side count.
+    fn probe_retire_work(live: u32, rays: u32) -> (u32, u32, u32, u32, u32) {
+        (
+            live,
+            live,
+            live.saturating_mul(rays),
+            live,
+            live,
+        )
+    }
+
+    #[test]
+    fn probe_retire_keeps_the_cpu_launch_and_counts_live_work() {
+        let mut on = LightingSettings::preset(LightingPreset::High);
+        on.surface_cache.sh_cells = true;
+        on.surface_cache.sh_texel_detail = true;
+        on.surface_cache.sh_probe_retire = true;
+        on.sanitize();
+        let mut off = on.clone();
+        off.surface_cache.sh_probe_retire = false;
+        let retired = groups(&on, false, true);
+        let kept = groups(&off, false, true);
+        assert!(retired.counts[B_PLACE as usize] > 0);
+        assert!(retired.counts[B_TRACE as usize] > 0);
+        assert!(retired.counts[B_GATHER as usize] > 0);
+        assert!(retired.counts[B_FILTER as usize] > 0);
+        assert_eq!(retired.counts[B_PLACE as usize], kept.counts[B_PLACE as usize]);
+        assert_eq!(retired.counts[B_TRACE as usize], kept.counts[B_TRACE as usize]);
+        assert_eq!(retired.counts[B_GATHER as usize], kept.counts[B_GATHER as usize]);
+        assert_eq!(retired.counts[B_FILTER as usize], kept.counts[B_FILTER as usize]);
+        let (live, searches, rays, bins, threads) = probe_retire_work(1, 4);
+        assert_eq!(live, 1);
+        assert_eq!(searches, 1);
+        assert_eq!(rays, 4);
+        assert_eq!(bins, 1);
+        assert_eq!(threads, 1);
+        assert_eq!(probe_retire_work(0, 16).2, 0);
+    }
 }
