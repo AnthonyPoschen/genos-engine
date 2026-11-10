@@ -4,8 +4,81 @@
 //! This repository does not name that crate.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+)))]
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+/// Id of the calling thread. [`FakeCapture::worker`] stores this from the audio thread.
+#[must_use]
+pub fn calling_thread() -> u64 {
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    ))]
+    {
+        linux_tid()
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    )))]
+    {
+        local_token()
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn linux_tid() -> u64 {
+    let id: u64;
+    unsafe {
+        // SAFETY: syscall 186 is `gettid`. It reads this thread's id and writes nothing.
+        std::arch::asm!(
+            "syscall",
+            in("rax") 186u64,
+            lateout("rax") id,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    id
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn linux_tid() -> u64 {
+    let id: u64;
+    unsafe {
+        // SAFETY: syscall 178 is `gettid`. It reads this thread's id and writes nothing.
+        std::arch::asm!(
+            "svc #0",
+            in("x8") 178u64,
+            lateout("x0") id,
+            options(nostack),
+        );
+    }
+    id
+}
+
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+)))]
+fn local_token() -> u64 {
+    thread_local! {
+        static TOKEN: Cell<u64> = const { Cell::new(0) };
+    }
+    TOKEN.with(|slot| {
+        if slot.get() == 0 {
+            static NEXT: AtomicU64 = AtomicU64::new(1);
+            slot.set(NEXT.fetch_add(1, Ordering::Relaxed));
+        }
+        slot.get()
+    })
+}
 
 /// Rate, period, and channel count the device accepted.
 #[derive(Clone, Copy, Debug)]
@@ -67,6 +140,7 @@ struct Capture {
     /// `usize::MAX` runs freely. Zero parks the callback before the mix.
     permits: AtomicUsize,
     parked: AtomicUsize,
+    worker: AtomicU64,
 }
 
 // SAFETY: the audio thread writes slots below `filled` and then releases `filled`.
@@ -97,6 +171,7 @@ impl FakeDevice {
             filled: AtomicUsize::new(0),
             permits: AtomicUsize::new(usize::MAX),
             parked: AtomicUsize::new(0),
+            worker: AtomicU64::new(0),
         });
         (
             Self {
@@ -145,6 +220,12 @@ impl FakeCapture {
         self.capture.parked.load(Ordering::Acquire)
     }
 
+    /// [`calling_thread`] of the audio thread, once `ready` has run.
+    #[must_use]
+    pub fn worker(&self) -> u64 {
+        self.capture.worker.load(Ordering::Acquire)
+    }
+
     /// Samples stored so far.
     ///
     /// Call this after [`crate::Stream::stop`], when the audio thread has joined.
@@ -188,6 +269,9 @@ impl DevicePath for FakeDevice {
     fn close(&mut self) {}
 
     fn ready(&mut self) -> bool {
+        self.capture
+            .worker
+            .store(calling_thread(), Ordering::Release);
         let permits = self.capture.permits.load(Ordering::Acquire);
         if permits == 0 {
             self.capture.parked.fetch_add(1, Ordering::Release);

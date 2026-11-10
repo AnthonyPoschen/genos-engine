@@ -8,11 +8,14 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use genos_audio::{mix_into, start_with, Barrier, Command, FakeDevice, Listener, Source, Vec3};
+use genos_audio::{
+    calling_thread, mix_into, start_with, Barrier, Command, FakeDevice, Listener, Source, Vec3,
+};
 use genos_load::Pcm;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
 static ALLOCATED: AtomicBool = AtomicBool::new(false);
+static WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_test() -> std::sync::MutexGuard<'static, ()> {
@@ -25,7 +28,7 @@ fn lock_test() -> std::sync::MutexGuard<'static, ()> {
 // SAFETY: methods forward to the system allocator and only record that a call happened.
 unsafe impl GlobalAlloc for Guard {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.load(Ordering::Relaxed) && calling_thread() == WATCH.load(Ordering::Relaxed) {
             ALLOCATED.store(true, Ordering::Relaxed);
         }
         // SAFETY: `layout` is the size and alignment the caller requested.
@@ -73,6 +76,7 @@ fn mix_into_does_not_allocate() {
     };
     let mut out = vec![0.0f32; 480 * 2];
     ALLOCATED.store(false, Ordering::SeqCst);
+    WATCH.store(calling_thread(), Ordering::SeqCst);
     ARMED.store(true, Ordering::SeqCst);
     mix_into(
         &mut out,
@@ -82,6 +86,7 @@ fn mix_into_does_not_allocate() {
         48_000,
     );
     ARMED.store(false, Ordering::SeqCst);
+    WATCH.store(0, Ordering::SeqCst);
     assert!(!ALLOCATED.load(Ordering::SeqCst), "mix_into allocated");
     assert!(out.iter().any(|sample| *sample != 0.0));
 }
@@ -121,6 +126,8 @@ fn the_quantum_callback_does_not_allocate() {
         velocity: Vec3::ZERO,
     }));
     ALLOCATED.store(false, Ordering::SeqCst);
+    assert!(capture.worker() != 0, "the audio thread has not reached ready");
+    WATCH.store(capture.worker(), Ordering::SeqCst);
     ARMED.store(true, Ordering::SeqCst);
     capture.release(1);
     let began = std::time::Instant::now();
@@ -128,6 +135,7 @@ fn the_quantum_callback_does_not_allocate() {
         std::thread::yield_now();
     }
     ARMED.store(false, Ordering::SeqCst);
+    WATCH.store(0, Ordering::SeqCst);
     let wrote = capture.filled() >= 128;
     capture.release(usize::MAX);
     stream.stop();

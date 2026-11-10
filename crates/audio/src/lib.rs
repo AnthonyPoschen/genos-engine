@@ -26,6 +26,6 @@ pub use device::WasapiDevice;
 pub use engine::{start_with, AudioStats, Stream};
 pub use genos_math::Vec3;
 pub use mix::{allocating_mix_entries, mix, mix_into, Barrier, Listener, Source};
-pub use path::{DevicePath, FakeCapture, FakeDevice, NullDevice, OpenedDevice};
+pub use path::{calling_thread, DevicePath, FakeCapture, FakeDevice, NullDevice, OpenedDevice};
 pub use ring::Command;
 pub use space::SPEED_OF_SOUND;
