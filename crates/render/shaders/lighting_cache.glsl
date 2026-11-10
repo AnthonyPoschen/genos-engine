@@ -911,6 +911,15 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
     return q;
 }
 
+// The lit-from offer and the probe seed are decided by one atomic word each.
+// Bodies live with the key-buffer addresses (past the screen list).
+void lighting_sc_offer(uint slot, vec3 at, vec3 cell, vec3 n, float size);
+void lighting_sc_offer_apply(uint slot);
+void lighting_sc_forget(uint slot);
+void lighting_sc_seed_publish(uint slot, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf);
+void lighting_sc_seed_commit(uint slot, uint corner);
+void lighting_sc_seed_apply(uint slot);
+
 // Slot of the patch for (pos, n), claiming a free one when `claim`; ~0u if none.
 // The whole search window is checked for the key before anything is claimed: a
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
@@ -947,9 +956,18 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             // rejected 2026-10-11.)
             if (lighting_world_mode() == 3u && (lighting_sc_flags() & 16384u) != 0u) {
                 at = lighting_sc_centre(pos, n, size);
+            } else if (lighting_world_mode() == 3u) {
+                // The key position sits in the cell. The election's offsets are
+                // relative to that cell's centre, so the stored point has to
+                // stay in the cell until compact installs the winning sample.
+                at = pos;
             }
             cache.v[3u * slot] = vec4(at, uintBitsToFloat(lighting_frame()));
-            cache.v[3u * slot + 1u] = vec4(n, size);
+            // The key is the axis, not the claimer's tilt. One claimer writes
+            // the slot, and that claimer is whichever invocation won the race,
+            // so the stored facing is the axis every time.
+            vec3 stored_n = lighting_world_mode() == 3u ? lighting_axis_vec(lighting_axis(n)) : n;
+            cache.v[3u * slot + 1u] = vec4(stored_n, size);
             cache.v[3u * slot + 2u] = vec4(0.0);
             cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
@@ -977,39 +995,27 @@ uint lighting_cache_find(vec3 pos, vec3 n, bool claim) {
     return lighting_cache_find_sized(pos, n, claim, lighting_cell_size(pos), pos);
 }
 
-// Surface cache: a reader at pos (a point on the texel's surface) moves the point
-// the texel is lit from to itself when it is nearer the cell's centre, so a texel
-// ends up lit from the surface point nearest its centre whoever claimed it first
-// (the centre itself can lie inside a wall at a corner).
-void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
+// Surface cache: a reader at `at` offers itself as the point the texel is lit
+// from. The atomic word's high bits are the distance and its low bits are the
+// tangent offsets, so the nearest offer wins and the word is the point.
+// Offsets are from the cell origin (the axis-aligned centre of `cell`), not
+// from the claimer's plane, so the winner does not depend on who claimed.
+// Compact is the only writer of the texel point. A 32-bit word is the Vulkan
+// 1.3 floor: this module is one SPIR-V 1.0 binary, and a 64-bit atomic would
+// require a capability devices on that floor do not have.
+uint lighting_sc_offer_word(uint slot);
+void lighting_sc_offer_publish(uint slot, vec3 at, vec3 cell, vec3 n, float size);
+void lighting_sc_offer(uint slot, vec3 at, vec3 cell, vec3 n, float size) {
     if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u) {
         return;
     }
-    // Flag 524288 (camera only orders updates): the point still moves toward the
-    // cell's centre (a fixed point of the geometry, as Lumen's card texels), but
-    // the sets taken so far are kept: a camera move never restarts a texel.
-    if ((lighting_sc_flags() & 16384u) != 0u) {
+    // Flag 524288 keeps the sets already taken. Flag 16384 never moves the point.
+    // Size and the normal are the caller's. The claimer's store is not visible
+    // to other invocations in this dispatch.
+    if ((lighting_sc_flags() & 16384u) != 0u || !(size > 0.0)) {
         return;
     }
-    bool keep_sets = (lighting_sc_flags() & 524288u) != 0u;
-    float d = length(at - centre);
-    if (d < cache.v[LIGHTING_WORLD_AT + slot].x - 1.0e-4) {
-        cache.v[LIGHTING_WORLD_AT + slot].x = d;
-        if (keep_sets) {
-            cache.v[3u * slot].xyz = at;
-            return;
-        }
-        // Lit from far from here so far: its sets start again (value kept).
-        float size = cache.v[3u * slot + 1u].w;
-        if ((lighting_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
-            float t = cache.v[3u * slot + 2u].w;
-            if (t > 1.5) {
-                atomicAdd(gstats.restarted, 1u);
-            }
-            cache.v[3u * slot + 2u].w = min(t, 1.0);
-        }
-        cache.v[3u * slot].xyz = at;
-    }
+    lighting_sc_offer_publish(slot, at, cell, n, size);
 }
 
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
@@ -2053,6 +2059,8 @@ void lighting_sc_clear_seed(uint slot) {
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
 }
+// Only the seed election's winner calls this. y and z land in one store, with
+// the sun fraction from the same payload, so two readers cannot split them.
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2063,8 +2071,9 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
         // of the confidence, written by the detail caller after this store.
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
     }
-    cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
-    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].yz = vec2(
+        uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))),
+        clamp(conf, 0.05, 1.0));
 }
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
@@ -2948,7 +2957,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // Flag 65536: hit patches stay lit from where they were claimed (as in the
     // other modes), no offer.
     if (lighting_world_mode() == 3u && !lighting_sc_slanted(n) && (lighting_sc_flags() & 65536u) == 0u) {
-        lighting_sc_offer(slot, pos, lighting_sc_centre(pos, n, hsize));
+        lighting_sc_offer(slot, pos, pos, n, hsize);
     }
     vec4 e = cache.v[3u * slot + 2u];
     // Not lit yet (claimed this round, params.z bit 7): the lit patches beside it
@@ -4117,6 +4126,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (slot == ~0u) {
             continue;
         }
+        // Last frame's winning pixel stores the seed before this frame publishes.
+        lighting_sc_seed_commit(slot, k);
         if (tally) {
             unfilled_sets += bil * floor(max(cache.v[3u * slot + 2u].w, 0.0));
         }
@@ -4171,17 +4182,18 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
                 // S72N: a seed beside the texel's own (empty) mean, confidence
-                // by the samples it came from (8 = whole).
-                lighting_sc_set_seed(slot, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac);
+                // by the samples it came from (8 = whole). The lowest pixel id
+                // wins; one later invocation stores rgb, confidence, and sun.
+                lighting_sc_seed_publish(slot, k, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac, true);
             } else if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
                 // S64B: the seed is light as of now, with its seeds' sun/sky share.
-                cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(lighting_seed_sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
-                cache.v[3u * slot + 2u] = rs;
+                // One pixel wins the election. Compact, or that pixel next frame, stores it.
+                lighting_sc_seed_publish(slot, k, rs.rgb, rs.w, lighting_seed_sunfrac, false);
             }
         }
         if (LIGHTING_SC_WRITES && mode == 3u) {
-            lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
+            lighting_sc_offer(slot, pos, q, n, size);
             cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
         }
         // The kept neighbour read is the pixel. lighting_sc_shown would gather
@@ -4218,22 +4230,22 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 corner_parent = lighting_bounce_path == 3u;
                 corner_path = corner_parent ? 4u : 7u;
                 if (split) {
-                    lighting_sc_set_seed(slot, hc, 0.25, lighting_hit_sunfrac);
+                    lighting_sc_seed_publish(slot, k, hc, 0.25, lighting_hit_sunfrac, true);
                 }
             } else if (!detail_candidate && lighting_sh_on() && split && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // The screen-probe seed is removed. An empty fine texel that
                 // this setting does not already cover takes the SH-L1 cell
                 // when that read accepts a corner. A rejected read stays empty.
                 // Picture compose loads the lattice. The walk stays in maintenance.
+                // The lowest pixel id wins the seed election and one later
+                // invocation stores it.
 #ifdef GENOS_COMPOSE_NO_WALK
                 vec4 sh = lighting_sh_compose_lattice(q, n, false);
 #else
                 vec4 sh = lighting_sh_read(q, n, false);
 #endif
                 if (sh.w > LIGHTING_CACHE_HAS_W) {
-                    if (LIGHTING_SC_WRITES) {
-                        lighting_sc_set_seed(slot, sh.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
-                    }
+                    lighting_sc_seed_publish(slot, k, sh.rgb, LIGHTING_SH_DETAIL_CONF, 0.0, true);
                     v = vec4(sh.rgb, 1.0);
                 }
             }
@@ -4605,6 +4617,18 @@ const uint LIGHTING_SCREEN_LIST_STAMP = LIGHTING_SCREEN_LIST_HDR;
 const uint LIGHTING_SCREEN_LIST_BASE0 = LIGHTING_SCREEN_LIST_HDR + 1u;
 const uint LIGHTING_SCREEN_LIST_BASE1 = LIGHTING_SCREEN_LIST_HDR + 2u;
 const uint LIGHTING_SCREEN_LIST_AT = LIGHTING_SCREEN_LIST_HDR + 3u;
+// One uint per slot. High bits are the distance, so atomicMin keeps the nearest
+// surface sample. The low bits are that sample's tangent offsets. 0 is unset.
+// Past the SH lattice. The seen words still start at the end of the screen
+// list, and a resolution-sized seed payload must not alias that table.
+const uint LIGHTING_SC_OFFER_AT = LIGHTING_SH_LATTICE_AT + LIGHTING_SH_LATTICE_CAP * LIGHTING_SH_LATTICE_STRIDE;
+// One uint per slot: 1 + (pixel << 2 | corner). 0 is unset. atomicMin elects
+// the lowest pixel id, then the lowest corner.
+const uint LIGHTING_SC_SEED_AT = LIGHTING_SC_OFFER_AT + LIGHTING_CACHE_SLOTS;
+// Eight uints per pixel after the election: four corners, each rgb9e5 then
+// weight and sun fraction. Only that pixel writes its corners. Compact reads
+// the winning corner.
+const uint LIGHTING_SC_SEED_PAY_AT = LIGHTING_SC_SEED_AT + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;
@@ -5537,6 +5561,213 @@ uint lighting_gdirty_at() {
 }
 uint lighting_graw_at(uint probe, uint k) {
     return lighting_gdirty_at() + 2u * lighting_probes() + probe * lighting_rays() + k;
+}
+// Two vec4 per pixel, after the held-probe gather: corner rgb9e5, then corner meta.
+// Only the pixel that owns a corner writes it.
+uint lighting_seed_scratch_at() {
+    return lighting_gdirty_at() + 2u * lighting_probes() + lighting_probes() * lighting_rays();
+}
+
+// Tangent offsets are 10 bits on the cell (about 0.12 mm at 12.5 cm). Distance
+// is the next 10 bits, stored plus one so a real offer is never the unset 0.
+const float LIGHTING_SC_OFFER_SPAN = 1023.0;
+const float LIGHTING_SC_OFFER_HALF = 0.5;
+const float LIGHTING_SC_OFFER_EPS = 1.0e-4;
+const float LIGHTING_SC_SEED_SUN = 65535.0;
+
+uint lighting_sc_offer_word(uint slot) {
+    return LIGHTING_SC_OFFER_AT + slot;
+}
+uint lighting_sc_seed_word(uint slot) {
+    return LIGHTING_SC_SEED_AT + slot;
+}
+void lighting_sc_forget(uint slot) {
+    ckeys.key[lighting_sc_offer_word(slot)] = 0u;
+    ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+}
+// Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays
+// clear: glslc lowers atomicMin to a signed min, and a set sign bit would
+// keep the farther sample. The low bits are tangent offsets, so the word is
+// the whole offer. A 32-bit word is the Vulkan 1.3 floor: this module is one
+// SPIR-V 1.0 binary, and a 64-bit atomic would require a capability devices
+// on that floor do not have.
+uint lighting_sc_offer_hi(float d, float size) {
+    float dn = clamp(d / size, 0.0, 1.0);
+    uint dq = min(uint(dn * LIGHTING_SC_OFFER_SPAN), 1022u);
+    return (dq + 1u) << 21;
+}
+// Axis-aligned centre of the cell holding `pos`. Every publisher and compact
+// derive the same origin from the cell, not from the claimer's normal.
+vec3 lighting_sc_offer_origin(vec3 pos, vec3 n, float size) {
+    vec3 axis_n = lighting_axis_vec(lighting_axis(n));
+    vec3 inset = LIGHTING_SC_OFFER_HALF * axis_n;
+    return (floor(pos / size - inset) + vec3(LIGHTING_SC_OFFER_HALF) + inset) * size;
+}
+void lighting_sc_offer_publish(uint slot, vec3 at, vec3 cell, vec3 n, float size) {
+    vec3 origin = lighting_sc_offer_origin(cell, n, size);
+    float d = length(at - origin);
+    uint ax = lighting_axis(n) >> 1u;
+    uint a1 = (ax + 1u) % 3u;
+    uint a2 = (ax + 2u) % 3u;
+    float u = clamp((at[a1] - origin[a1]) / size + LIGHTING_SC_OFFER_HALF, 0.0, 1.0);
+    float v = clamp((at[a2] - origin[a2]) / size + LIGHTING_SC_OFFER_HALF, 0.0, 1.0);
+    // 1022 keeps the decoded point inside the cell, so the next frame's origin
+    // is the same cell.
+    uint uq = min(uint(u * LIGHTING_SC_OFFER_SPAN + LIGHTING_SC_OFFER_HALF), 1022u);
+    uint vq = min(uint(v * LIGHTING_SC_OFFER_SPAN + LIGHTING_SC_OFFER_HALF), 1022u);
+    uint mine = lighting_sc_offer_hi(d, size) | (uq << 11) | (vq << 1) | 1u;
+    // 0 is unset. The swap claims it; atomicMin (a signed min, bit 31 clear)
+    // then keeps the nearer word. One word is the whole offer, so only compact
+    // writes the point.
+    uint word = lighting_sc_offer_word(slot);
+    uint prev = atomicCompSwap(ckeys.key[word], 0u, mine);
+    if (prev != 0u) {
+        atomicMin(ckeys.key[word], mine);
+    }
+}
+vec3 lighting_sc_offer_hit(uint slot, uint packed) {
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    vec3 origin = lighting_sc_offer_origin(cache.v[3u * slot].xyz, n, size);
+    uint ax = lighting_axis(n) >> 1u;
+    uint a1 = (ax + 1u) % 3u;
+    uint a2 = (ax + 2u) % 3u;
+    float u = float((packed >> 11) & 1023u) / LIGHTING_SC_OFFER_SPAN - LIGHTING_SC_OFFER_HALF;
+    float v = float((packed >> 1) & 1023u) / LIGHTING_SC_OFFER_SPAN - LIGHTING_SC_OFFER_HALF;
+    vec3 at = origin;
+    at[a1] = origin[a1] + u * size;
+    at[a2] = origin[a2] + v * size;
+    return at;
+}
+// One compact thread writes the point the election picked. The word holds
+// the point, so nothing else has to be visible. Sets restart only when flag
+// 524288 is off and the point actually moves closer.
+void lighting_sc_offer_apply(uint slot) {
+    if (lighting_world_mode() != 3u || (lighting_sc_flags() & 16384u) != 0u) {
+        return;
+    }
+    uint packed = ckeys.key[lighting_sc_offer_word(slot)];
+    float size = cache.v[3u * slot + 1u].w;
+    if (packed == 0u || !(size > 0.0)) {
+        return;
+    }
+    vec3 at = lighting_sc_offer_hit(slot, packed);
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float d = length(at - lighting_sc_offer_origin(cache.v[3u * slot].xyz, n, size));
+    bool nearer = d < cache.v[LIGHTING_WORLD_AT + slot].x - 1.0e-4;
+    bool keep_sets = (lighting_sc_flags() & 524288u) != 0u;
+    if (nearer && !keep_sets && (lighting_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
+        float t = cache.v[3u * slot + 2u].w;
+        if (t > 1.5) {
+            atomicAdd(gstats.restarted, 1u);
+        }
+        cache.v[3u * slot + 2u].w = min(t, 1.0);
+    }
+    cache.v[LIGHTING_WORLD_AT + slot].x = d;
+    cache.v[3u * slot].xyz = at;
+}
+uint lighting_sc_seed_pixel() {
+    return lighting_compose_px.y * pc.dims.x + lighting_compose_px.x;
+}
+uint lighting_sc_seed_pay(uint pix, uint corner) {
+    return LIGHTING_SC_SEED_PAY_AT + (pix * 4u + corner) * 2u;
+}
+void lighting_sc_seed_store(uint pix, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf) {
+    // Split confidence is a 0..1 fraction. The own-mean weight is a sample count.
+    uint wq = as_conf
+        ? min(uint(clamp(weight, 0.0, 1.0) * LIGHTING_SC_SEED_SUN + LIGHTING_SC_OFFER_HALF), 65535u)
+        : min(uint(weight + LIGHTING_SC_OFFER_HALF), 65535u);
+    uint sq = min(uint(clamp(sunfrac, 0.0, 1.0) * LIGHTING_SC_SEED_SUN + LIGHTING_SC_OFFER_HALF), 65535u);
+    // Private to this pixel and corner, in the key buffer, so the next frame's
+    // compact reads the winner without sharing a slot.
+    uint at = lighting_sc_seed_pay(pix, corner);
+    ckeys.key[at] = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
+    ckeys.key[at + 1u] = (wq << 16) | sq;
+}
+bool lighting_sc_seed_load(uint pix, uint corner, out vec3 rgb, out float weight, out float sunfrac) {
+    rgb = vec3(0.0);
+    weight = 0.0;
+    sunfrac = 0.0;
+    if (pix >= pc.dims.x * pc.dims.y || corner > 3u) {
+        return false;
+    }
+    uint meta = ckeys.key[lighting_sc_seed_pay(pix, corner) + 1u];
+    weight = float(meta >> 16u);
+    if (weight < LIGHTING_SC_OFFER_HALF) {
+        return false;
+    }
+    sunfrac = float(meta & 65535u) / LIGHTING_SC_SEED_SUN;
+    rgb = lighting_unpack_rgb9e5(ckeys.key[lighting_sc_seed_pay(pix, corner)]);
+    return true;
+}
+void lighting_sc_seed_write(uint slot, vec3 rgb, float weight, float sunfrac) {
+    cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+    cache.v[3u * slot + 2u] = vec4(rgb, weight);
+}
+void lighting_sc_seed_publish(uint slot, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf) {
+    if (!LIGHTING_SC_WRITES || !lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    if (lighting_compose_px.x >= pc.dims.x || lighting_compose_px.y >= pc.dims.y) {
+        return;
+    }
+    uint pix = lighting_sc_seed_pixel();
+    lighting_sc_seed_store(pix, corner, rgb, weight, sunfrac, as_conf);
+    uint mine = ((pix << 2) | (corner & 3u)) + 1u;
+    uint word = lighting_sc_seed_word(slot);
+    uint prev = atomicCompSwap(ckeys.key[word], 0u, mine);
+    if (prev != 0u) {
+        atomicMin(ckeys.key[word], mine);
+    }
+}
+void lighting_sc_seed_commit_from(uint slot, uint pix, uint corner) {
+    if (cache.v[3u * slot + 2u].w >= LIGHTING_SC_OFFER_HALF) {
+        ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+        return;
+    }
+    vec3 rgb;
+    float weight;
+    float sunfrac;
+    if (!lighting_sc_seed_load(pix, corner, rgb, weight, sunfrac)) {
+        ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+        return;
+    }
+    if (lighting_sc_seed_split()) {
+        lighting_sc_set_seed(slot, rgb, weight / LIGHTING_SC_SEED_SUN, sunfrac);
+    } else {
+        lighting_sc_seed_write(slot, rgb, weight, sunfrac);
+    }
+    ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+}
+void lighting_sc_seed_commit(uint slot, uint corner) {
+    // The picture compile does not write the cache. Maintenance publishes and
+    // commits; compact applies whatever that frame left.
+    if (!LIGHTING_SC_WRITES || !lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    if (lighting_compose_px.x >= pc.dims.x || lighting_compose_px.y >= pc.dims.y) {
+        return;
+    }
+    uint e = ckeys.key[lighting_sc_seed_word(slot)];
+    if (e == 0u) {
+        return;
+    }
+    uint idx = e - 1u;
+    if ((idx >> 2u) != lighting_sc_seed_pixel() || (idx & 3u) != corner) {
+        return;
+    }
+    lighting_sc_seed_commit_from(slot, idx >> 2u, idx & 3u);
+}
+void lighting_sc_seed_apply(uint slot) {
+    if (!lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    uint e = ckeys.key[lighting_sc_seed_word(slot)];
+    if (e == 0u) {
+        return;
+    }
+    uint idx = e - 1u;
+    lighting_sc_seed_commit_from(slot, idx >> 2u, idx & 3u);
 }
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());

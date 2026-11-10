@@ -103,8 +103,10 @@ fn lighting_ckeys_words() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
 }
 
-/// Words through the lattice table. Matches `LIGHTING_SH_LATTICE_AT` in
-/// `lighting_cache.glsl`: seen, sixteen bin counts, sixteen lists, then ids.
+/// Words through the lattice table, then one lit-from offer word and one
+/// probe-seed election word per slot. Matches `LIGHTING_SH_LATTICE_AT` and
+/// `LIGHTING_SC_SEED_AT` in `lighting_cache.glsl`. The per-pixel seed payload
+/// is not included: its size is the picture.
 pub(super) fn lighting_sh_bin_count_at() -> u64 {
     lighting_atrous_ppm_at()
         + LIGHTING_ATROUS_META_WORDS
@@ -122,7 +124,8 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
     const STRIDE: u64 = 14;
     let lists = lighting_sh_bin_count_at() + STORE_BINS;
     let lattice = lists + STORE_BINS * STORE_CAP;
-    lattice + LATTICE_CAP * STRIDE
+    // Lit-from offer and probe-seed election, one word per slot, past the lattice.
+    lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -1179,6 +1182,7 @@ impl Gpu {
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
             + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
+            + pixels * 6 // probe-seed scratch, two vec4 per pixel, stride 6
         } else {
             0
         };
@@ -1245,11 +1249,11 @@ impl Gpu {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
-                // Through the lattice table: screen owner, tap list, the seen
-                // words, the two enqueue lists, and the corner-slot records.
-                // lighting_sh_keys_words matches LIGHTING_SH_LATTICE_AT.
+                // Through the lattice, then the lit-from offer and the seed
+                // election (lighting_sh_keys_words). Eight words per pixel
+                // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    lighting_sh_keys_words() * 4,
+                    (lighting_sh_keys_words() + pixels * 8) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
