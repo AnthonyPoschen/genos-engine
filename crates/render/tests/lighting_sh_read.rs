@@ -243,6 +243,54 @@ fn an_axis_aligned_hit_falls_through_to_the_owning_cells_tilt() {
 }
 
 #[test]
+fn freeze_cache_holds_the_sh_coefficients_and_a_change_marks_readers() {
+    // The mark is the existing cover rect. It does not make a slanted screen
+    // pixel a reader: that pixel's lattice read never calls find_sized.
+    // A hit-shade tilt runs with display false, so it records no cover either.
+    let text = cache_shader();
+    let body = function_body(
+        &text,
+        "void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz)",
+    );
+    let freeze = body
+        .find("LIGHTING_TOGGLE_FREEZE_CACHE")
+        .expect("freeze_cache");
+    let store = body.find("LIGHTING_SH_AT").expect("the coefficient store");
+    let mark = body
+        .find("lighting_compose_mark_slot(slot)")
+        .expect("reader mark");
+    assert!(
+        freeze < store,
+        "freeze_cache returns before a coefficient write"
+    );
+    assert!(
+        store < mark,
+        "the mark compares the value after the store"
+    );
+    assert!(
+        body.contains("lighting_sh_get(slot, after0, afterx, aftery, afterz)"),
+        "the mark reads the stored coefficients, not the pre-quantize blend"
+    );
+    assert!(
+        body.contains("LIGHTING_HIT_PATCH"),
+        "a texel store does not take the world-cell mark"
+    );
+    let screen = function_body(
+        &text,
+        "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
+    );
+    let gate = "if (lighting_sc_slanted(n))";
+    let at = screen.find(gate).expect("the slanted screen gate");
+    let after = &screen[at + gate.len()..];
+    let open = after.find('{').expect("screen gate brace");
+    let arm = block_body(&after[open + 1..]);
+    assert!(
+        !arm.contains("lighting_compose_cover") && !arm.contains("lighting_compose_mark"),
+        "the slanted screen arm does not register a compose reader"
+    );
+}
+
+#[test]
 fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
     // The axis-aligned change is the fallback inside lighting_cache_irradiance.
     // This screen return is a different function. The lattice gate rejects

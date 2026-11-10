@@ -162,6 +162,8 @@ pub(crate) struct Lighting {
     histogram_counts: Vec<u32>,
     cache_keys: Buffer,
     cache: Buffer,
+    /// Host copy of this frame's dirty-compose list length (one u32).
+    compose_host: Buffer,
     /// The cache buffers are new and get zeroed before the next frame's passes.
     cache_clear: bool,
     /// The G-buffer is new and gets filled with empty records first.
@@ -467,6 +469,7 @@ impl Default for Lighting {
             histogram_counts: Vec::new(),
             cache_keys: Buffer::empty(),
             cache: Buffer::empty(),
+            compose_host: Buffer::empty(),
             cache_clear: false,
             gbuf_clear: false,
             work_clear: false,
@@ -1153,6 +1156,10 @@ impl Gpu {
             }
             self.lighting.cache_full = want_cache;
         }
+        if want_cache && self.lighting.compose_host.buffer.is_null() {
+            // One word: the dirty-compose list length, copied after the passes.
+            self.lighting.compose_host = self.make_buffer(256, 0x2, Memory::Readback)?;
+        }
         self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
@@ -1574,7 +1581,18 @@ impl Gpu {
             full_effort: sun_controls().full_effort,
             compose: self.lighting.compose_kind,
             dispatches: self.lighting.compose_dispatches,
+            blocks: self.read_compose_blocks(),
         }
+    }
+
+    /// Dirty-list length copied at the end of the last submitted frame.
+    /// Zero when that copy was not recorded. Not a frame-loop sync: the caller
+    /// has already waited.
+    fn read_compose_blocks(&self) -> u32 {
+        if self.lighting.compose_host.memory.is_null() {
+            return 0;
+        }
+        self.read_stats_word(self.lighting.compose_host.memory, 0).unwrap_or(0)
     }
 
     /// The counter is the proof that full effort changed the work. A still or
@@ -3594,6 +3612,18 @@ impl Gpu {
                 1,
                 &region as *const Region as *const u8,
             );
+            // The dirty-list length. The same barrier covers the compute writes.
+            // One host buffer: read it only after the device is idle.
+            if self.lighting.cache_full && !self.lighting.compose_host.buffer.is_null() {
+                let list = Region { src: lighting_compose_at() * 4, dst: 0, size: 4 };
+                (self.fns.cmd_copy_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    self.lighting.compose_host.buffer,
+                    1,
+                    &list as *const Region as *const u8,
+                );
+            }
         }
         if hdr_compose {
             if let Err(err) = self.ensure_meter_pipe() {
@@ -3774,6 +3804,7 @@ impl Gpu {
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
+        let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
         for k in 0..2 {
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
@@ -3794,6 +3825,7 @@ impl Gpu {
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
+        self.destroy_buffer(&mut compose_host);
         unsafe {
             for pipe in self
                 .lighting
@@ -4143,6 +4175,10 @@ pub struct LightingSunStats {
     pub compose: u8,
     /// Compose dispatches in that frame. The sun path is one.
     pub dispatches: u32,
+    /// Dirty-list length at the end of that frame. The list dispatch's group
+    /// count. Zero when the key table was not copied. A full compose can still
+    /// report the marks it did not use.
+    pub blocks: u32,
 }
 
 #[derive(Clone, Copy, Default)]
