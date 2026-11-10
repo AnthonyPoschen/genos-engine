@@ -14,3 +14,6 @@ path = "src/main.rs"
 [dependencies]
 genos-json = { path = "../../crates/json" }
 genos-load = { path = "../../crates/load" }
+genos-math = { path = "../../crates/math" }
+genos-physics = { path = "../../crates/physics" }
+genos-scene = { path = "../../crates/scene" }

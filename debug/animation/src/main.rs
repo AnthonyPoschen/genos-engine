@@ -3,12 +3,15 @@
 
 use std::process::ExitCode;
 
-use genos_animation_debug::{dump, dump_gskin};
+use genos_animation_debug::{apply_setting, dump, dump_gskin, replay_root_x, settings_text};
 use genos_load::import_file;
 
 const USAGE: &str = "genos-animation: headless animation debug binary (import dump, no draw)
 
   <file.gltf|file.glb|file.gskin>   print one JSON object and exit
+  --settings             print the Low animation row and the 64 MB sum
+  --set key=value        edit one knob on the Low row and print the text
+  --replay               print body x after 60 ticks of a 1 m root translation
   -h, --help             this text
 
 The object lists skins (joint name, parent, node, notes), clips (name, duration,
@@ -37,6 +40,18 @@ fn run() -> Result<(), String> {
     };
     if path == "-h" || path == "--help" {
         println!("{USAGE}");
+        return Ok(());
+    }
+    if path == "--settings" {
+        println!("{}", settings_text());
+        return Ok(());
+    }
+    if let Some(line) = path.strip_prefix("--set=") {
+        println!("{}", apply_setting(line)?);
+        return Ok(());
+    }
+    if path == "--replay" {
+        println!("root_x {}", replay_root_x());
         return Ok(());
     }
     if args.next().is_some() {
