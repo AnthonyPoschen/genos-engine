@@ -177,15 +177,6 @@ vec3 downsample13(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint d
     return acc;
 }
 
-// Quarter-resolution first step. Four half-resolution Karis samples, averaged.
-vec3 karis4(uint src_w, uint src_h, uvec2 p) {
-    vec3 acc = karis_at(src_w, src_h, p * 2u);
-    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 0u));
-    acc += karis_at(src_w, src_h, p * 2u + uvec2(0u, 1u));
-    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 1u));
-    return acc * BOX_SCALE;
-}
-
 float tent(int dx, int dy) {
     if (dx == 0 && dy == 0) {
         return TENT_CENTRE;
@@ -213,9 +204,6 @@ vec3 upsample3(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint dst_
 vec3 shade(uvec2 p, uint dst_w, uint dst_h, uint src_w, uint src_h, uint src, uint mode) {
     if (mode == 0u) {
         return karis_at(src_w, src_h, p);
-    }
-    if (mode == 4u) {
-        return karis4(src_w, src_h, p);
     }
     if (mode == 1u) {
         return downsample13(src, src_w, src_h, p, dst_w, dst_h);

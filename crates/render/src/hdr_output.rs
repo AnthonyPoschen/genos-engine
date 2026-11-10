@@ -1420,15 +1420,10 @@ pub fn mib_ceiling_bytes(mib: f64) -> f64 {
     mib * 1024.0 * 1024.0
 }
 
-/// Base divisor of the bloom pyramid. `0` stores nothing. `4` is the Low
-/// pyramid (quarter resolution). Every other level count starts at half resolution.
+/// Base divisor of the bloom pyramid. `0` stores nothing. Every other count starts at half resolution.
 #[must_use]
 pub fn bloom_divisor(levels: u32) -> u32 {
-    match levels {
-        0 => 0,
-        4 => 4,
-        _ => 2,
-    }
+    if levels == 0 { 0 } else { 2 }
 }
 
 /// Levels the GPU actually builds. Legacy bytes, bloom off, or intensity 0 store nothing.
@@ -1480,11 +1475,7 @@ fn half_dim(value: u32) -> u32 {
     (value / 2).max(1)
 }
 
-fn quarter_dim(value: u32) -> u32 {
-    (value / 4).max(1)
-}
-
-/// Mip table. Level 4 (Low) starts at quarter resolution. Every other count starts at half.
+/// Mip table. Every level count starts at half resolution.
 #[must_use]
 pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
     let levels = levels.min(8);
@@ -1495,16 +1486,8 @@ pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
             bytes: 0,
         };
     }
-    let mut level_w = if bloom_divisor(levels) == 4 {
-        quarter_dim(width)
-    } else {
-        half_dim(width)
-    };
-    let mut level_h = if bloom_divisor(levels) == 4 {
-        quarter_dim(height)
-    } else {
-        half_dim(height)
-    };
+    let mut level_w = half_dim(width);
+    let mut level_h = half_dim(height);
     let mut stored = Vec::new();
     let mut cursor = 0u32;
     let mut bytes = 0u64;
@@ -2036,7 +2019,7 @@ mod tests {
         let ultra = genos_scene::HdrSettings::ultra();
         let cases = [
             (&potato, 28.13, 29_491_248_u64, 0, 0, 0),
-            (&low, 37.46, 31_788_848, 7, 640, 80),
+            (&low, 37.46, 38_679_248, 7, 1280, 160),
             (&medium, 37.49, 38_701_616, 9, 1280, 80),
             (&high, 37.50, 38_708_432, 11, 1280, 40),
             (&ultra, 37.50, 38_709_752, 13, 1280, 20),

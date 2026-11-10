@@ -132,7 +132,7 @@ The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_color
 
 **Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
 
-**Departure:** `create_targets` records that pick (`resolve_swapchain` through `surface_choice`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The SDR search is still 44, then 37, and it does not read the color space. When the resolved pair is listed, the image is that pair: `A2B10G10R10` or `A2R10G10B10` with `HDR10_ST2084`, or `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR`. `VK_EXT_swapchain_colorspace` is enabled when the instance lists it. `VK_EXT_hdr_metadata` is enabled when the device lists it, and `vkSetHdrMetadataEXT` runs only for a created HDR10 image (BT.2020 primaries, peak 1000 nits). An unlisted mode stays on the SDR image. The display pass still writes the 8-bit `AgX` code for that fallback, and it also writes the PQ or scRGB values into a side buffer so a readback can grade them. A listed 10-bit image is packed in that pass. A listed fp16 image is copied from the half-float tail of the same buffer.
+**Departure:** `create_targets` records that pick (`resolve_swapchain` through `surface_choice`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The SDR search is still 44, then 37, and it does not read the color space. When the resolved pair is listed, the image is that pair: `A2B10G10R10` or `A2R10G10B10` with `HDR10_ST2084`, or `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR`. `VK_EXT_swapchain_colorspace` is enabled when the instance lists it. `VK_EXT_hdr_metadata` is enabled when the device lists it, and `vkSetHdrMetadataEXT` runs only for a created HDR10 image (BT.2020 primaries, peak 1000 nits). An unlisted mode stays on the SDR image. The display pass still writes the 8-bit `AgX` code for that fallback, and it also writes the PQ or scRGB values into a side buffer so a readback can grade them. A listed 10-bit image is packed in that pass. A listed fp16 image is copied from the RGBA16F region at the start of that buffer.
 
 **Why the split.** HDR10 is PQ in a 10-bit UNORM image, which is the usual Wayland HDR advertisement. scRGB stores linear extended sRGB, which is the Windows linear HDR path (`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` in the Windows literature; we do not call DXGI). This preference is a decision, not a driver measurement.
 
@@ -209,7 +209,7 @@ GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 | Image | Size at 1440p | Notes |
 |---|---|---|
 | Scene-referred | 2560×1440, one image | Not per frame in flight. Compose writes it. The grade reads it. |
-| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | High is 1280×720 down to 40×22. Low's four levels start at 640×360. No full-resolution bloom image. |
+| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | Every count starts at half resolution. High is 1280×720 down to 40×22. Low's four levels stop at 160×90. No full-resolution bloom image. |
 | Exposed | same as the scene, or the swapchain's transient | The display pass can read the scene and the bloom sum and write the swapchain. A stored exposed image is not required for SDR. |
 | Histogram | preset bin count × `uint`, plus two short luma halves | High is 256 bins and 128 still samples. Fixed exposure does not allocate it. The CPU reads the header after the fence. |
 | Exposure state | two floats | Current scale and target scale. CPU owned. |
@@ -272,8 +272,8 @@ Bloom pyramid:
 | Bloom | 0 | 9.338 | 9.366 | 9.373 |
 | Histogram | 0 | < 0.01 | < 0.01 | < 0.01 |
 | **Working set** | **28.125** | **37.463** | **37.491** | **37.498** |
-| Swapchain extra | 0 | 0 | 0, or 42.188 if scRGB is chosen | 42.188 if scRGB, else 0 |
-| **With scRGB** | 28.125 | 37.463 (SDR forced) | **79.678** | **79.685** |
+| Encode image | 0 | 0 | 42.188 for HDR10 or scRGB | 42.188 for HDR10 or scRGB |
+| **With the encode image** | 28.125 | 37.463 (SDR forced) | **79.678** | **79.685** |
 | ms ceiling, 4070, 1440p | 0.25 | 0.80 | 1.00 | 1.20 |
 | ms ceiling, 1060, 1440p | 1.00 | 2.50 | not the target | not the target |
 
@@ -283,7 +283,9 @@ Frame budgets, using numbers already in the tree:
 
 - Basic scene, above 500 fps, means a frame under 2.0 ms. High post 1.20 ms plus the frozen lighting floor of 0.43 ms from ADR 0013 is 1.63 ms.
 - Stress scene, about 100 fps, means a frame under 10 ms. High post 1.20 ms plus the ADR 0013 High lighting cap of 8 ms at 1080p is 9.20 ms. The 8 ms cap is not a 1440p measurement. If 1440p lighting exceeds 8.80 ms, the lighting cap moves. This design does not raise the post ceiling to pay for it.
-The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366. The gate does not round: it compares allocated bytes with ceiling × 1024².
+The three-decimal rows are the unrounded sums, then rounded. Medium with the encode image is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366. The gate does not round: it compares allocated bytes with ceiling × 1024².
+
+42.188 MiB is `2560 × 1440 × 12`, the post encode image: tightly packed RGBA16F codes, then one BGRA word per pixel. HDR10 and scRGB both allocate it, so both use 79.68 and 79.69. The swapchain image is not in `hdr_vram_bytes`. HDR10's 10-bit swapchain is 4 bytes, the same as SDR. An scRGB swapchain is 8 bytes and copies the RGBA16F region of the encode image; that swapchain is not added again. Potato and Low force SDR, so their encode image stays 0.
 
 - 4 GB is the minimum. High with scRGB is 79.685 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
 

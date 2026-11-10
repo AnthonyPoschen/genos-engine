@@ -2505,11 +2505,6 @@ impl Gpu {
         let Some(first) = mips.levels.first() else {
             return Ok(());
         };
-        let first_mode = if crate::hdr_output::bloom_divisor(levels) == 4 {
-            4
-        } else {
-            0
-        };
         self.bloom_dispatch(
             first.width,
             first.height,
@@ -2517,7 +2512,7 @@ impl Gpu {
             height,
             0,
             first.word,
-            first_mode,
+            0,
             0,
         );
         for index in 1..mips.levels.len() {
