@@ -3974,11 +3974,14 @@ impl Gpu {
             // Pass stamps stop before the ReSTIR queries. A longer list is not timed.
             let stamp_n = (ids.len() + 1).min(RESTIR_STAMP_AT as usize);
             let mut g = vec![0u64; stamp_n];
+            // One cast for both query ranges. A second `slot as u32` is a new
+            // lossy-cast line, and the baseline does not allow it.
+            let stamp_base = slot as u32 * LIGHTING_STAMPS;
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     times.lighting_pool,
-                    slot as u32 * LIGHTING_STAMPS,
+                    stamp_base,
                     g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
@@ -4036,7 +4039,7 @@ impl Gpu {
                         (self.fns.get_query_results)(
                             self.device,
                             times.lighting_pool,
-                            slot as u32 * LIGHTING_STAMPS + RESTIR_PREPARE_AT,
+                            stamp_base + RESTIR_PREPARE_AT,
                             2,
                             16,
                             prepare_raw.as_mut_ptr().cast::<c_void>(),
