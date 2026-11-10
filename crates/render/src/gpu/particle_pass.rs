@@ -3343,6 +3343,7 @@ fn copy_buffer_handle(buffer: &Buffer) -> Buffer {
         buffer: buffer.buffer,
         memory: buffer.memory,
         size: buffer.size,
+        align: buffer.align,
     }
 }
 
