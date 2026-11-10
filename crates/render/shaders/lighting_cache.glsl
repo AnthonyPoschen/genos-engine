@@ -2297,6 +2297,7 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     return lighting_sh_gather(p, n, claim).value;
 }
 #endif
+bool lighting_sh_detail_owner_lit(uint slot);
 // The corner gather runs in the cache pass, once per texel or lattice, not
 // once per pixel. Compose is one relight behind that store.
 // Sun word w is the cells-accept bit. Sun word z stays the quarter scratch.
@@ -2482,7 +2483,7 @@ void lighting_sh_enqueue_texel(uint slot) {
     }
 }
 bool lighting_sh_detail_accepts(uint slot) {
-    return slot < LIGHTING_CACHE_SLOTS && cache.v[LIGHTING_SC_SUN_AT + slot].w > 0.5;
+    return slot < LIGHTING_CACHE_SLOTS && cache.v[LIGHTING_SC_SUN_AT + slot].w > LIGHTING_CACHE_HAS_W;
 }
 #ifndef GENOS_COMPOSE_NO_WALK
 // The gathered colour of an empty fine texel, and whether that gather still
@@ -3695,64 +3696,15 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 // skip here and then show lighting_sh_read rather than the texel seed.
 // This is not the ray-cut hold. A corner split past LIGHTING_SC_SPARSE_RATIO
 // can still be covered. The hold is luminance agreement of one texel.
-bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
+bool lighting_sh_pose_accepts(vec3 p, vec3 n) {
 #ifdef GENOS_COMPOSE_NO_WALK
-    if (lighting_world_mode() != 3u) {
-        return false;
-    }
-    if (obj) {
-        uint ids[8];
-        return lighting_sh_texel_detail_on() && lighting_sh_lattice_load(pos, n, ids)
-            && lighting_sh_blend_ids(ids, pos, n).w > LIGHTING_CACHE_HAS_W;
-    }
-    if (lighting_sc_slanted(n)) {
-        uint ids[8];
-        return lighting_sh_on() && lighting_sh_lattice_load(pos, n, ids)
-            && lighting_sh_blend_ids(ids, pos, n).w > LIGHTING_CACHE_HAS_W;
-    }
-    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
-        return false;
-    }
-    if ((lighting_sc_flags() & (32u | 512u)) != 0u) {
-        return false;
-    }
-    if (!lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u) {
-        return false;
-    }
-    if (!LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) {
-        return false;
-    }
-    float size = lighting_cell_size(wpos);
-    if (size > 0.2) {
-        return false;
-    }
-    uint ax = lighting_axis(n) >> 1u;
-    vec3 ta = vec3(0.0);
-    vec3 tb = vec3(0.0);
-    ta[(ax + 1u) % 3u] = 1.0;
-    tb[(ax + 2u) % 3u] = 1.0;
-    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
-    vec2 g0 = floor(uv);
-    vec2 f = uv - g0;
-    bool any = false;
-    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
-        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
-        if (bil <= 0.0) {
-            continue;
-        }
-        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
-        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
-        uint slot = lighting_cache_find_sized(q, n, false, size, pos);
-        if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
-            return false;
-        }
-        if (!lighting_sh_detail_accepts(slot)) {
-            return false;
-        }
-        any = true;
-    }
-    return any;
+    uint ids[8];
+    return lighting_sh_lattice_load(p, n, ids) && lighting_sh_blend_ids(ids, p, n).w > LIGHTING_CACHE_HAS_W;
 #else
+    return lighting_sh_read(p, n, false).w > LIGHTING_CACHE_HAS_W;
+#endif
+}
+bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     if (lighting_world_mode() != 3u) {
         return false;
     }
@@ -3761,15 +3713,14 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // Detail off and Low stay on the probes. Claim stays false.
         float salt = lighting_obj_salt;
         lighting_obj_salt = 0.0;
-        bool hit = lighting_sh_texel_detail_on()
-            && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+        bool hit = lighting_sh_texel_detail_on() && lighting_sh_pose_accepts(pos, n);
         lighting_obj_salt = salt;
         return hit;
     }
     if (lighting_sc_slanted(n)) {
         // The screen arm shows this read with or without the texel-detail bit.
         // Low is not world mode 3.
-        return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+        return lighting_sh_on() && lighting_sh_pose_accepts(pos, n);
     }
     if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
         return false;
@@ -3810,13 +3761,18 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
             return false;
         }
+#ifdef GENOS_COMPOSE_NO_WALK
+        if (!lighting_sh_detail_accepts(slot)) {
+            return false;
+        }
+#else
         if (lighting_sh_read(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
             return false;
         }
+#endif
         any = true;
     }
     return any;
-#endif
 }
 // The live set is the probe record place writes. Trace, gather, and filter
 // read that record. This slice does not write diag[8], diag[38], or diag[39].
