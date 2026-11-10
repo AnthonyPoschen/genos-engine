@@ -75,7 +75,7 @@ pub use hdr_output::{
     bloom_level_count, bloom_passes, PostBuffer, PostChain, PostDevice,
     agx_lut_linear, agx_lut_texel, AGX_LOG_MAX, AGX_LOG_MIN, AGX_LUT_N,
     still_pop_share, surface_choice, swapchain_format_code, swapchain_nits, swapchain_pair,
-    DisplayMode, HdrSwapchain, Image, ListedFormat, PresentHost, SceneRead, COLOR_SPACE_HDR10,
+    DisplayMode, DeckPanel, HdrSwapchain, Image, ListedFormat, PresentHost, SceneRead, COLOR_SPACE_HDR10,
     COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F,
     FORMAT_RGBA8, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS, SCRGB_NITS_PER_CODE,
 };

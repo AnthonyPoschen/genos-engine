@@ -21,3 +21,12 @@ fn the_renderer_names_its_device_kind() {
     }
     eprintln!("gpu_kind {:?}", renderer.gpu_kind());
 }
+
+#[test]
+fn a_cpu_device_type_is_the_software_split() {
+    assert_eq!(GpuKind::from_vk_device_type(4), GpuKind::Software);
+    assert_eq!(GpuKind::from_vk_device_type(2), GpuKind::Hardware);
+    assert!(GpuKind::Software.post_ms_passes(1.689, 1.50));
+    assert!(!GpuKind::Hardware.post_ms_passes(1.689, 1.50));
+    assert!(!GpuKind::Software.post_ms_passes(0.0, 1.50));
+}

@@ -26,7 +26,8 @@ pub enum DisplayTransform {
     Legacy,
 }
 
-/// Swapchain choice. Potato and Low force [`OutputMode::Sdr`].
+/// Swapchain choice. Potato and Low force [`OutputMode::Sdr`] on desktop and on the Deck LCD.
+/// Low on the Deck OLED may take HDR10 when that pair is listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
     Auto,
