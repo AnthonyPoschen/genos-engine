@@ -52,9 +52,12 @@ struct RawPad {
 }
 
 /// One pad sample. `buttons` follows [`BUTTONS`].
-struct Sample {
+///
+/// `name` is borrowed from the poll buffer or from a test literal, so a
+/// steady frame does not allocate a `String`.
+struct Sample<'a> {
     connected: bool,
-    name: String,
+    name: &'a str,
     left: Axis2d,
     right: Axis2d,
     left_trigger: f32,
@@ -67,7 +70,7 @@ extern "C" {
     fn genos_gamecontroller_poll(out: *mut RawPad, cap: i32) -> i32;
 }
 
-fn apply(system: &mut InputSystem, slot: usize, sample: &Sample) {
+fn apply(system: &mut InputSystem, slot: usize, sample: &Sample<'_>) {
     let was = system
         .gamepads
         .get(slot)
@@ -83,7 +86,7 @@ fn apply(system: &mut InputSystem, slot: usize, sample: &Sample) {
     let name = if sample.name.is_empty() {
         "Gamepad"
     } else {
-        sample.name.as_str()
+        sample.name
     };
     system.connect_gamepad(slot, true, name);
     system.set_gamepad_stick(slot, InputCode::gamepad_left_stick, sample.left);
@@ -112,66 +115,53 @@ pub(crate) fn poll(system: &mut InputSystem) {
     // SAFETY: `raw` is a writable buffer of `cap` slots. The poll fills that many.
     let count = unsafe { genos_gamecontroller_poll(raw.as_mut_ptr(), cap) };
     let count = usize::try_from(count).unwrap_or(0).min(raw.len());
-    for (slot, sample) in raw.iter().enumerate().take(count) {
-        apply_raw(system, slot, sample);
+    for (slot, pad) in raw.iter().enumerate().take(count) {
+        apply(system, slot, &sample_from(pad));
     }
 }
 
 #[cfg(target_os = "macos")]
-fn apply_raw(system: &mut InputSystem, slot: usize, raw: &RawPad) {
-    if raw.connected == 0 {
-        let was = system
-            .gamepads
-            .get(slot)
-            .is_some_and(|pad| pad.view.connected);
-        if was {
-            eprintln!("genos-input: gamepad slot={slot} source=gamecontroller connected=0");
-            system.connect_gamepad(slot, false, "");
-        }
-        return;
+fn sample_from(raw: &RawPad) -> Sample<'_> {
+    let mut buttons = [false; 15];
+    for (index, _) in BUTTONS {
+        buttons[index] = raw.buttons[index] != 0;
     }
-    let name = CStr::from_bytes_until_nul(&raw.name)
+    Sample {
+        connected: raw.connected != 0,
+        name: pad_name(raw),
+        left: Axis2d {
+            x: raw.lx,
+            y: raw.ly,
+        },
+        right: Axis2d {
+            x: raw.rx,
+            y: raw.ry,
+        },
+        left_trigger: raw.lt,
+        right_trigger: raw.rt,
+        buttons,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pad_name(raw: &RawPad) -> &str {
+    if raw.connected == 0 {
+        return "";
+    }
+    CStr::from_bytes_until_nul(&raw.name)
         .ok()
         .and_then(|text| text.to_str().ok())
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .unwrap_or("Gamepad");
-    let was = system
-        .gamepads
-        .get(slot)
-        .is_some_and(|pad| pad.view.connected);
-    if !was {
-        eprintln!("genos-input: gamepad slot={slot} source=gamecontroller connected=1");
-    }
-    system.connect_gamepad(slot, true, name);
-    system.set_gamepad_stick(
-        slot,
-        InputCode::gamepad_left_stick,
-        Axis2d {
-            x: raw.lx,
-            y: raw.ly,
-        },
-    );
-    system.set_gamepad_stick(
-        slot,
-        InputCode::gamepad_right_stick,
-        Axis2d {
-            x: raw.rx,
-            y: raw.ry,
-        },
-    );
-    system.set_gamepad_trigger(slot, InputCode::gamepad_left_trigger, raw.lt);
-    system.set_gamepad_trigger(slot, InputCode::gamepad_right_trigger, raw.rt);
-    for (index, code) in BUTTONS {
-        system.set_gamepad_button(slot, code, raw.buttons[index] != 0);
-    }
+        .unwrap_or("Gamepad")
 }
 
-impl Sample {
+#[cfg(test)]
+impl Sample<'static> {
     fn disconnected() -> Self {
         Self {
             connected: false,
-            name: String::new(),
+            name: "",
             left: Axis2d::default(),
             right: Axis2d::default(),
             left_trigger: 0.0,
@@ -200,7 +190,7 @@ mod tests {
             0,
             &Sample {
                 connected: true,
-                name: "DualSense Wireless Controller".to_string(),
+                name: "DualSense Wireless Controller",
                 left: Axis2d { x: 0.0, y: 1.0 },
                 right: Axis2d { x: -1.0, y: 0.0 },
                 left_trigger: 1.0,
@@ -230,7 +220,7 @@ mod tests {
         buttons[0] = true;
         let sample = Sample {
             connected: true,
-            name: "DualSense Wireless Controller".to_string(),
+            name: "DualSense Wireless Controller",
             left: Axis2d { x: 0.0, y: 1.0 },
             right: Axis2d::default(),
             left_trigger: 1.0,
