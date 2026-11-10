@@ -99,7 +99,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_detail: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod.comp.spv"),
-            &["-DGENOS_COMPOSE_WALK=1"],
+            &[],
             true,
         ),
         // Same production function, compose's read-only specialization.
@@ -111,7 +111,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_detail_ro: compile_texel_detail(
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
-            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1", "-DGENOS_COMPOSE_WALK=1"],
+            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
             false,
         ),
         // One specialization. No screen-probe include and no DontInline edit.
@@ -210,6 +210,24 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         println!("cargo:rerun-if-changed={src}");
         (*name, compile(&src, &out.join(format!("{file}.spv"))))
     })
+    .chain([
+        (
+            "LIGHTING_COMPOSE_DETAIL_SPV",
+            compile_args(
+                "shaders/lighting_compose.comp",
+                &out.join("lighting_compose_detail.comp.spv"),
+                &["-DGENOS_COMPOSE_DETAIL=1"],
+            ),
+        ),
+        (
+            "SUN_COMPOSE_DETAIL_SPV",
+            compile_args(
+                "shaders/lighting_sun_compose.comp",
+                &out.join("lighting_sun_compose_detail.comp.spv"),
+                &["-DGENOS_COMPOSE_DETAIL=1"],
+            ),
+        ),
+    ])
     .collect()
 }
 
@@ -392,22 +410,49 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
         &out.join("lighting_compose_maint.comp.spv"),
         "GENOS_COMPOSE_MAINT",
     );
+    let maint_detail = compile_args(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_maint_detail.comp.spv"),
+        &["-DGENOS_COMPOSE_MAINT", "-DGENOS_COMPOSE_DETAIL=1"],
+    );
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
         maint.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_MAINT_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        maint_detail.display()
     ));
     let sun_hdr = compile_define(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),
         "GENOS_HDR_COMPOSE",
     );
+    let compose_hdr_detail = compile_defines(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_hdr_detail.comp.spv"),
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_DETAIL"],
+    );
+    let sun_hdr_detail = compile_defines(
+        "shaders/lighting_sun_compose.comp",
+        &out.join("lighting_sun_compose_hdr_detail.comp.spv"),
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_DETAIL"],
+    );
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         compose_hdr.display()
     ));
     glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_HDR_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        compose_hdr_detail.display()
+    ));
+    glue_text.push_str(&format!(
         "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         sun_hdr.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static SUN_COMPOSE_HDR_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        sun_hdr_detail.display()
     ));
 }
 
@@ -423,9 +468,9 @@ fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> Path
 }
 
 /// The lavapipe fixture only. Inlining the compose function at every mover
-/// shade makes the compiler heap exceed a 16 GB software-test budget. The
-/// production compose modules are marked separately, by function name.
-/// `DontInline` does not change the GLSL those functions run.
+/// shade makes the compiler heap exceed a 16 GB software-test budget.
+/// `DontInline` does not change the GLSL those functions run. The fixture
+/// keeps the neighbour walk. The default compose modules compile it out.
 fn compile_texel_detail(
     src: &str,
     dest: &std::path::Path,
@@ -470,15 +515,18 @@ fn compile_texel_detail(
     path
 }
 
-fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
-    let compose = dest
-        .file_name()
+fn compose_dest(dest: &std::path::Path) -> bool {
+    dest.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains("compose"));
+        .is_some_and(|name| name.contains("compose"))
+}
+
+fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
     let mut args = vec![src];
-    // The neighbour memo and the gather cap stay out of every other shader.
-    if compose {
-        args.push("-DGENOS_COMPOSE_WALK=1");
+    // The default compose modules omit the detail neighbour walk. A detail
+    // compile passes GENOS_COMPOSE_DETAIL and keeps it.
+    if compose_dest(dest) && !extra.iter().any(|flag| flag.contains("GENOS_COMPOSE_DETAIL")) {
+        args.push("-DGENOS_COMPOSE_NO_DETAIL=1");
     }
     args.extend(extra);
     args.extend(["-o", dest.to_str().unwrap()]);
@@ -486,129 +534,30 @@ fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
     if !status.success() {
         panic!("glslc failed for {src} {extra:?}");
     }
-    if compose {
-        mark_compose_dont_inline(dest);
-    }
     dest.to_path_buf()
-}
-
-/// SPIR-V Function Control `DontInline`. The NVIDIA compiler inlines a callee
-/// whose control is `None`, and the live registers are then the max of every
-/// branch. The eight-cell neighbour walk inside compose is that branch.
-const DONT_INLINE: u32 = 2;
-
-const COMPOSE_DONT_INLINE: &[&str] = &[
-    "lighting_sh_gather(",
-    "lighting_sh_read(",
-    "lighting_sh_detail_owner_lit(",
-    "lighting_sh_detail_seed_rejected(",
-    "lighting_sh_texel_detail_covers(",
-    "lighting_world_irradiance(",
-    "lighting_world_irradiance_in(",
-    "lighting_sc_shown(",
-    "lighting_sc_seed(",
-    "lighting_screen_probe_indirect(",
-];
-
-fn mark_compose_dont_inline(path: &std::path::Path) {
-    let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-    let mut words: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-        .collect();
-    if words.len() < 5 || words[0] != 0x0723_0203 {
-        panic!("{} is not SPIR-V", path.display());
-    }
-    let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    let mut i = 5usize;
-    while i < words.len() {
-        let word = words[i];
-        let count = (word >> 16) as usize;
-        let op = word & 0xffff;
-        if count == 0 || i + count > words.len() {
-            panic!("{} has a truncated instruction at {i}", path.display());
-        }
-        if op == 5 {
-            let id = words[i + 1];
-            let mut raw = Vec::new();
-            for piece in &words[i + 2..i + count] {
-                raw.extend_from_slice(&piece.to_le_bytes());
-            }
-            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
-            if let Ok(name) = std::str::from_utf8(&raw[..end]) {
-                names.insert(id, name.to_string());
-            }
-        }
-        i += count;
-    }
-    let mut seen = [false; COMPOSE_DONT_INLINE.len()];
-    i = 5;
-    while i < words.len() {
-        let word = words[i];
-        let count = (word >> 16) as usize;
-        let op = word & 0xffff;
-        if op == 54 {
-            let id = words[i + 2];
-            if let Some(name) = names.get(&id) {
-                if let Some(at) = COMPOSE_DONT_INLINE.iter().position(|prefix| name.starts_with(prefix)) {
-                    words[i + 3] |= DONT_INLINE;
-                    seen[at] = true;
-                }
-            }
-        }
-        i += count;
-    }
-    if let Some(missing) = seen.iter().position(|hit| !*hit) {
-        let have: Vec<&str> = names
-            .values()
-            .filter(|name| name.starts_with("lighting_"))
-            .map(String::as_str)
-            .collect();
-        panic!(
-            "{} is missing DontInline target {}; lighting names: {have:?}",
-            path.display(),
-            COMPOSE_DONT_INLINE[missing]
-        );
-    }
-    let mut out = Vec::with_capacity(words.len() * 4);
-    for word in words {
-        out.extend_from_slice(&word.to_le_bytes());
-    }
-    std::fs::write(path, out).unwrap_or_else(|err| panic!("write {}: {err}", path.display()));
 }
 
 /// glslc's wrapper does not forward `-D`. The plain a-trous kernel needs the macro.
 fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
-    let define_flag = format!("-D{define}");
-    let mut args = vec![
-        "-V",
-        "--target-env",
-        "vulkan1.0",
-        define_flag.as_str(),
-        src,
-        "-o",
-        dest.to_str().unwrap(),
-    ];
-    let compose = dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains("compose"));
-    if compose {
-        args.insert(4, "-DGENOS_COMPOSE_WALK=1");
+    compile_defines(src, dest, &[define])
+}
+
+fn compile_defines(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {
+    let flags: Vec<String> = defines.iter().map(|define| format!("-D{define}")).collect();
+    let mut args = vec!["-V".to_string(), "--target-env".to_string(), "vulkan1.0".to_string()];
+    args.extend(flags);
+    if compose_dest(dest) && !defines.iter().any(|define| define.contains("GENOS_COMPOSE_DETAIL")) {
+        args.push("-DGENOS_COMPOSE_NO_DETAIL=1".to_string());
     }
+    args.push(src.to_string());
+    args.push("-o".to_string());
+    args.push(dest.to_str().unwrap().to_string());
     let status = Command::new("glslangValidator")
         .args(&args)
         .status()
         .expect("glslangValidator");
     if !status.success() {
-        panic!("glslangValidator failed for {src} -D{define}");
-    }
-    if dest
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains("compose"))
-    {
-        mark_compose_dont_inline(dest);
+        panic!("glslangValidator failed for {src} {defines:?}");
     }
     dest.to_path_buf()
 }

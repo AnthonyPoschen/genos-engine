@@ -80,7 +80,7 @@ fn motion_slant() -> [f32; 3] {
 }
 
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER + 2
+    8 + ROWS * STRIDE + TRAILER
 }
 
 #[expect(
@@ -767,28 +767,6 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         reads, 16,
         "the detail-off hit row has no probe; every other evaluated row reads one"
     );
-    let gathers = words[8 + ROWS * STRIDE + TRAILER].to_bits();
-    let iters = words[8 + ROWS * STRIDE + TRAILER + 1].to_bits();
-    let cap = compose_gather_cap();
-    assert!(
-        gathers >= 1 && gathers <= cap,
-        "compose neighbour gathers {gathers} (cap {cap})"
-    );
-    assert!(
-        iters >= gathers && iters <= gathers.saturating_mul(8 * 16),
-        "compose neighbour search iters {iters} gathers {gathers}"
-    );
-}
-
-fn compose_gather_cap() -> u32 {
-    let src = include_str!("../shaders/lighting_cache.glsl");
-    let key = "const uint LIGHTING_COMPOSE_GATHER_CAP = ";
-    let at = src.find(key).expect("compose gather cap");
-    let digits: String = src[at + key.len()..]
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    digits.parse().expect("compose gather cap digits")
 }
 
 #[test]

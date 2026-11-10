@@ -311,6 +311,13 @@ pub(crate) struct Lighting {
     compose_writes: bool,
     /// Sun compose with the scene image and bloom.
     sun_hdr_pipe: Handle,
+    /// Detail neighbour walk. Built the first frame `sh_texel_detail` or
+    /// `sh_cells` is on. The default pipes compile that walk out.
+    compose_detail_pipe: Handle,
+    compose_hdr_detail_pipe: Handle,
+    compose_maint_detail_pipe: Handle,
+    sun_detail_pipe: Handle,
+    sun_hdr_detail_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
     /// walks every pixel; later frames walk the band.
     sun_bounce_live: bool,
@@ -583,6 +590,11 @@ impl Default for Lighting {
             compose_maint_pipe: std::ptr::null_mut(),
             compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
+            compose_detail_pipe: std::ptr::null_mut(),
+            compose_hdr_detail_pipe: std::ptr::null_mut(),
+            compose_maint_detail_pipe: std::ptr::null_mut(),
+            sun_detail_pipe: std::ptr::null_mut(),
+            sun_hdr_detail_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
@@ -1573,6 +1585,63 @@ impl Gpu {
             Some(u32::from(self.lighting.compose_writes)),
         )?;
         self.note_pipeline_time("lighting compose hdr", start);
+        Ok(())
+    }
+
+    /// The detail modules keep the neighbour walk. Default High does not build them.
+    fn ensure_compose_detail(&mut self, sun: bool, hdr: bool) -> Result<(), String> {
+        if sun {
+            if hdr {
+                if self.lighting.sun_hdr_detail_pipe.is_null() {
+                    let start = Instant::now();
+                    self.lighting.sun_hdr_detail_pipe = self.make_compute_pipe(
+                        SUN_COMPOSE_HDR_DETAIL_SPV,
+                        self.lighting.layout,
+                        "lighting sun compose detail",
+                    )?;
+                    self.note_pipeline_time("lighting sun compose detail", start);
+                }
+            } else if self.lighting.sun_detail_pipe.is_null() {
+                let start = Instant::now();
+                self.lighting.sun_detail_pipe = self.make_compute_pipe(
+                    SUN_COMPOSE_DETAIL_SPV,
+                    self.lighting.layout,
+                    "lighting sun compose detail",
+                )?;
+                self.note_pipeline_time("lighting sun compose detail", start);
+            }
+            return Ok(());
+        }
+        if hdr {
+            if self.lighting.compose_hdr_detail_pipe.is_null() {
+                let start = Instant::now();
+                self.lighting.compose_hdr_detail_pipe = self.make_compute_pipe_spec(
+                    LIGHTING_COMPOSE_HDR_DETAIL_SPV,
+                    self.lighting.layout,
+                    "lighting compose hdr detail",
+                    Some(u32::from(self.lighting.compose_writes)),
+                )?;
+                self.note_pipeline_time("lighting compose hdr detail", start);
+            }
+        } else if self.lighting.compose_detail_pipe.is_null() {
+            let start = Instant::now();
+            self.lighting.compose_detail_pipe = self.make_compute_pipe_spec(
+                LIGHTING_COMPOSE_DETAIL_SPV,
+                self.lighting.layout,
+                "lighting compose detail",
+                Some(u32::from(self.lighting.compose_writes)),
+            )?;
+            self.note_pipeline_time("lighting compose detail", start);
+        }
+        if !self.lighting.compose_writes && self.lighting.compose_maint_detail_pipe.is_null() {
+            let start = Instant::now();
+            self.lighting.compose_maint_detail_pipe = self.make_compute_pipe(
+                LIGHTING_COMPOSE_MAINT_DETAIL_SPV,
+                self.lighting.layout,
+                "lighting compose maint detail",
+            )?;
+            self.note_pipeline_time("lighting compose maint detail", start);
+        }
         Ok(())
     }
 
@@ -3535,6 +3604,11 @@ impl Gpu {
         if !sun_compose {
             self.lighting.sun_bounce_live = false;
         }
+        let compose_detail = self.lighting.settings.surface_cache.sh_cells
+            || self.lighting.settings.surface_cache.sh_texel_detail;
+        if compose_detail {
+            self.ensure_compose_detail(sun_compose, hdr_compose)?;
+        }
         self.lighting.compose_kind = if sun_compose {
             COMPOSE_SUN
         } else if compose_full {
@@ -3729,12 +3803,24 @@ impl Gpu {
                     self.direct_pipe()
                 } else if pass == 7 && sun_compose {
                     if self.lighting.hdr.legacy_bytes {
-                        self.lighting.sun_pipe
+                        if compose_detail {
+                            self.lighting.sun_detail_pipe
+                        } else {
+                            self.lighting.sun_pipe
+                        }
+                    } else if compose_detail {
+                        self.lighting.sun_hdr_detail_pipe
                     } else {
                         self.lighting.sun_hdr_pipe
                     }
                 } else if pass == 7 && hdr_compose {
-                    self.lighting.compose_hdr_pipe
+                    if compose_detail {
+                        self.lighting.compose_hdr_detail_pipe
+                    } else {
+                        self.lighting.compose_hdr_pipe
+                    }
+                } else if pass == 7 && compose_detail {
+                    self.lighting.compose_detail_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.screen {
                     self.lighting.screen_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.plain() {
@@ -3742,11 +3828,16 @@ impl Gpu {
                 } else {
                     self.lighting.pipes[pass]
                 };
-                if pass == 7 && !sun_compose && !self.lighting.compose_maint_pipe.is_null() {
+                let maint_pipe = if compose_detail {
+                    self.lighting.compose_maint_detail_pipe
+                } else {
+                    self.lighting.compose_maint_pipe
+                };
+                if pass == 7 && !sun_compose && !maint_pipe.is_null() {
                     // #142: the cache writes compose used to make, over the same
                     // pixels, before compose reads the cache (and clears the
                     // G-buffer record this pass reads).
-                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.compose_maint_pipe);
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, maint_pipe);
                     if compose_full {
                         (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
                     } else {
@@ -4153,6 +4244,11 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_detail_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_hdr_detail_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_maint_detail_pipe))
+                .chain(std::iter::once(&mut self.lighting.sun_detail_pipe))
+                .chain(std::iter::once(&mut self.lighting.sun_hdr_detail_pipe))
             {
                 if !pipe.is_null() {
                     (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
@@ -4904,8 +5000,10 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
-        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_DETAIL_SPV, LIGHTING_COMPOSE_HDR_DETAIL_SPV,
+        LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_DETAIL_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_DETAIL_SPV, SUN_COMPOSE_HDR_DETAIL_SPV, SUN_COMPOSE_HDR_SPV,
+        SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -5000,11 +5098,10 @@ mod sun_step {
         );
     }
 
-    /// The neighbour walk stays in its own functions. glslc leaves Function
-    /// Control at None, and the NVIDIA compiler then inlines the walk into the
-    /// pixel. DontInline is the request that keeps those registers out.
+    /// The default compose modules do not call the neighbour walk. A runtime
+    /// branch left the walk in the pixel and the 4070 still paid for it.
     #[test]
-    fn compose_neighbour_walk_is_dont_inline() {
+    fn default_compose_does_not_call_the_neighbour_walk() {
         for (name, words) in [
             ("compose", LIGHTING_COMPOSE_SPV),
             ("compose maint", LIGHTING_COMPOSE_MAINT_SPV),
@@ -5012,33 +5109,46 @@ mod sun_step {
             ("sun compose", SUN_COMPOSE_SPV),
             ("sun compose hdr", SUN_COMPOSE_HDR_SPV),
         ] {
-            assert!(words.len() >= 8, "{name} is not SPIR-V");
-            let version = u32::from_le_bytes([words[4], words[5], words[6], words[7]]);
-            assert_eq!(version, 0x0001_0000, "{name} SPIR-V {version:#x}");
-            let marked = dont_inline_names(words);
-            for prefix in [
-                "lighting_sh_gather(",
-                "lighting_sh_read(",
-                "lighting_sh_texel_detail_covers(",
-                "lighting_world_irradiance_in(",
-                "lighting_sc_shown(",
-                "lighting_screen_probe_indirect(",
-            ] {
+            assert_spirv_1(name, words);
+            let reached = reachable_from_main(words);
+            for prefix in ["lighting_sh_gather(", "lighting_sh_read("] {
                 assert!(
-                    marked.iter().any(|got| got.starts_with(prefix)),
-                    "{name} is missing DontInline on {prefix}"
+                    !reached.iter().any(|got| got.starts_with(prefix)),
+                    "{name} still reaches {prefix}: {reached:?}"
                 );
             }
         }
+        for (name, words) in [
+            ("compose detail", LIGHTING_COMPOSE_DETAIL_SPV),
+            ("compose maint detail", LIGHTING_COMPOSE_MAINT_DETAIL_SPV),
+            ("compose hdr detail", LIGHTING_COMPOSE_HDR_DETAIL_SPV),
+            ("sun compose detail", SUN_COMPOSE_DETAIL_SPV),
+            ("sun compose hdr detail", SUN_COMPOSE_HDR_DETAIL_SPV),
+        ] {
+            assert_spirv_1(name, words);
+            let reached = reachable_from_main(words);
+            assert!(
+                reached.iter().any(|got| got.starts_with("lighting_sh_read(")),
+                "{name} dropped the detail neighbour read"
+            );
+        }
     }
 
-fn dont_inline_names(bytes: &[u8]) -> Vec<String> {
+    fn assert_spirv_1(name: &str, words: &[u8]) {
+        assert!(words.len() >= 8, "{name} is not SPIR-V");
+        let version = u32::from_le_bytes([words[4], words[5], words[6], words[7]]);
+        assert_eq!(version, 0x0001_0000, "{name} SPIR-V {version:#x}");
+    }
+
+fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
     let words: Vec<u32> = bytes
         .chunks_exact(4)
         .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect();
     let mut names = std::collections::HashMap::<u32, String>::new();
+    let mut calls = Vec::<(u32, u32)>::new();
     let mut i = 5usize;
+    let mut current = 0u32;
     while i < words.len() {
         let word = words[i];
         let count = (word >> 16) as usize;
@@ -5055,29 +5165,33 @@ fn dont_inline_names(bytes: &[u8]) -> Vec<String> {
             if let Ok(name) = std::str::from_utf8(&raw[..end]) {
                 names.insert(words[i + 1], name.to_string());
             }
+        } else if op == 54 && count >= 4 {
+            current = words[i + 2];
+        } else if op == 57 && count >= 4 {
+            calls.push((current, words[i + 3]));
         }
         i += count;
     }
-    let mut marked = Vec::new();
-    i = 5;
-    while i < words.len() {
-        let word = words[i];
-        let count = (word >> 16) as usize;
-        let op = word & 0xffff;
-        if count == 0 || i + count > words.len() {
-            break;
-        }
-        if op == 54 {
-            let control = words[i + 3];
-            if control & 2 != 0 {
-                if let Some(name) = names.get(&words[i + 2]) {
-                    marked.push(name.clone());
-                }
+    let Some(root) = names.iter().find(|(_, name)| *name == "main").map(|(id, _)| *id) else {
+        return Vec::new();
+    };
+    let mut seen = vec![root];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        for (caller, callee) in &calls {
+            if *caller == id && !seen.contains(callee) {
+                seen.push(*callee);
+                stack.push(*callee);
             }
         }
-        i += count;
     }
-    marked
+    let mut reached = Vec::new();
+    for id in seen {
+        if let Some(name) = names.get(&id) {
+            reached.push(name.clone());
+        }
+    }
+    reached
 }
 }
 

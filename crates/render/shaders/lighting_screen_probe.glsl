@@ -93,9 +93,12 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         vec4 world = lighting_world_irradiance(pos, n);
         lighting_px_world_w = world.w;
         lighting_sc_display = false;
-        vec3 shown = covered ? world.rgb : mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+        if (covered) {
+            lighting_compose_find_end();
+            return world.rgb;
+        }
         lighting_compose_find_end();
-        return shown;
+        return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
     }
     lighting_sc_display = false;
     lighting_compose_find_end();
