@@ -14,8 +14,18 @@ use genos_load::{hex, sha256, Pcm};
 
 const TAPE: &[u8] = include_bytes!("golden/tape.pcm");
 
+static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_test() -> std::sync::MutexGuard<'static, ()> {
+    match TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[test]
 fn the_callback_writes_the_mix_and_does_not_call_mix() {
+    let _guard = lock_test();
     let pcm = tape();
     let (device, capture) = FakeDevice::new(64, 64);
     capture.hold();
@@ -51,6 +61,7 @@ fn the_callback_writes_the_mix_and_does_not_call_mix() {
 
 #[test]
 fn a_full_ring_drops_the_newest_command_and_the_listener_still_updates() {
+    let _guard = lock_test();
     let pcm = tape();
     let (device, capture) = FakeDevice::new(64, 256);
     capture.hold();
@@ -84,6 +95,7 @@ fn a_full_ring_drops_the_newest_command_and_the_listener_still_updates() {
 
 #[test]
 fn a_rejected_write_counts_a_device_xrun() {
+    let _guard = lock_test();
     let pcm = tape();
     let (mut device, _capture) = FakeDevice::new(32, 32);
     device.fail_next(1);

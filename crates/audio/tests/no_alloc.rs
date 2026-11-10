@@ -14,7 +14,7 @@ use genos_audio::{
 use genos_load::Pcm;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
-static ALLOCATED: AtomicBool = AtomicBool::new(false);
+static PANICKED: AtomicBool = AtomicBool::new(false);
 static WATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -29,7 +29,8 @@ fn lock_test() -> std::sync::MutexGuard<'static, ()> {
 unsafe impl GlobalAlloc for Guard {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if ARMED.load(Ordering::Relaxed) && calling_thread() == WATCH.load(Ordering::Relaxed) {
-            ALLOCATED.store(true, Ordering::Relaxed);
+            let first = !PANICKED.swap(true, Ordering::Relaxed);
+            assert!(!first, "the audio mix allocated");
         }
         // SAFETY: `layout` is the size and alignment the caller requested.
         unsafe { System.alloc(layout) }
@@ -75,7 +76,7 @@ fn mix_into_does_not_allocate() {
         absorption: 2.0,
     };
     let mut out = vec![0.0f32; 480 * 2];
-    ALLOCATED.store(false, Ordering::SeqCst);
+    PANICKED.store(false, Ordering::SeqCst);
     WATCH.store(calling_thread(), Ordering::SeqCst);
     ARMED.store(true, Ordering::SeqCst);
     mix_into(
@@ -87,7 +88,6 @@ fn mix_into_does_not_allocate() {
     );
     ARMED.store(false, Ordering::SeqCst);
     WATCH.store(0, Ordering::SeqCst);
-    assert!(!ALLOCATED.load(Ordering::SeqCst), "mix_into allocated");
     assert!(out.iter().any(|sample| *sample != 0.0));
 }
 
@@ -125,7 +125,7 @@ fn the_quantum_callback_does_not_allocate() {
         position: Vec3::new(-1.0, 0.0, -2.0),
         velocity: Vec3::ZERO,
     }));
-    ALLOCATED.store(false, Ordering::SeqCst);
+    PANICKED.store(false, Ordering::SeqCst);
     assert!(capture.worker() != 0, "the audio thread has not reached ready");
     WATCH.store(capture.worker(), Ordering::SeqCst);
     ARMED.store(true, Ordering::SeqCst);
@@ -140,5 +140,4 @@ fn the_quantum_callback_does_not_allocate() {
     capture.release(usize::MAX);
     stream.stop();
     assert!(wrote, "the callback did not write a quantum");
-    assert!(!ALLOCATED.load(Ordering::SeqCst), "the callback allocated");
 }
