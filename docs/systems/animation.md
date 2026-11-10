@@ -49,7 +49,7 @@ Locomotion is derived. Speed and strafe buckets come from the quantized velocity
 - Determinism: two worlds, same handles, same quantized velocities, same tick, same locomotion phase and buckets over 10 000 ticks, with zero cue bytes while nobody starts a cue. Cross-platform `f32` bit identity is not a gate.
 - Headless server: no Vulkan device. Gameplay joints, root motion, and `AnimCue` run. Vertices are not skinned. There is no `LoadProfile` type.
 
-Inside the session's 32 m neighbourhood, characters past `far_distance_m` replicate state only. The 15 Hz rate is the local mesh sample, not a network rate. Gameplay joints still advance every tick. Outside that neighbourhood a character is absent.
+Interest and the byte budget are [PR #214](https://github.com/AnthonyPoschen/genos-engine/pull/214). A cue inside 32 m is eligible every snapshot. A cue from 32 m out to 128 m is eligible at most every fourth snapshot (5 Hz), and those field bytes still count against the 192-byte accumulator (3.75 KiB/s). Past 128 m the character is omitted. `far_distance_m` is the local mesh sample, not that radius. Gameplay joints still advance every tick.
 
 ## 7. Data and settings
 

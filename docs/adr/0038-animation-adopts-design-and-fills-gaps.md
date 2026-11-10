@@ -134,9 +134,7 @@ The session this follows is [PR #214](https://github.com/AnthonyPoschen/genos-en
 - The wire id is the generational scene handle `{ index: u32, generation: u32 }`. There is no `NetId` column and no second tick.
 - A component is dirty when its change tick is newer than the connection's acked baseline. A reader does not bump the tick.
 - Snapshots are unreliable deltas at 20 Hz (every third `1/60` tick). The tick is `crates/scene/src/camera.rs:413`.
-- Interest is the 3×3 block of 32 m cells around the view, plus always-relevant objects, plus the object this connection has input authority for.
-- The pose budget is 1024 bytes of component fields per snapshot per connection. Spawns sit outside that budget. A record header is 13 bytes (index, generation, structural, count, component id, mask), as ADR 0042's outfit example counts it. Field bytes are what the 1024 counts.
-- Priority starts at 0, gains 1 each snapshot opportunity, and gains 1 more for the owned object. Selection sorts by priority, then by snapshots skipped, then by handle index. A written object resets both counters.
+- Interest, eligibility, and the byte budget are ADR 0042's. The 32 m neighbourhood is eligible every snapshot. From there out to 128 m a character is eligible at most every fourth snapshot, which is 5 Hz. Past 128 m the character is omitted. The per-connection priority accumulator stops at 192 packed field bytes per snapshot (`192 × 20 = 3840` bytes/s, 3.75 KiB/s). `AnimCue` rides inside that budget. Animation does not name a second cap. A record header is still the 13 bytes ADR 0042 counts (index, generation, structural, count, component id, mask). Spawns sit outside the 192.
 - The owning client predicts and rolls back. Everyone else interpolates the body from snapshots 100 ms back. Cross-platform `f32` bit identity is not a gate.
 
 **Derived, and not a field.** Every peer runs this from the quantized pose the physics plan already replicates (millimetre position, smallest-three quaternion, linear velocity in cm/s as `i16`) and from the authority tick `T`.
@@ -163,18 +161,18 @@ Kind 1–4 pack to 5 field bytes. A correction packs to 7. The receiver rebuilds
 
 **Correction.** Every 15 ticks the authority compares gameplay-joint positions from the derived pose with the pose it simulated for the owning client. A joint more than 50 mm away writes kind 0 and bumps the tick. One write. The following snapshots omit it after the ack. Peers apply that phase at `start_tick` and then advance with the clock. Locomotion with no cue keeps a clean tick, including across a speed-bucket change.
 
-**Interest bands.** The session's 32 m neighbourhood is the outer cut. Inside it, `animation.far_distance_m` (25 m at Low) splits the animation dirty set:
+**Interest.** The radii, the 5 Hz far slot, and the 192-byte accumulator are ADR 0042's. `AnimCue` adds none of them. `animation.far_distance_m` stays the local mesh sample in Addition C. It is not a network radius.
 
 | Band | `AnimCue` |
 |---|---|
-| ≤ 25 m, in the neighbourhood, owned, or always-relevant | Cues and corrections enter the priority sort. |
-| In the neighbourhood and past 25 m | State only. A cue bumps the tick. A correction is not written for that connection. The drawn mesh uses the derived locomotion, sampled at `update_rate_far_hz`. |
-| Outside the neighbourhood, not owned, not always-relevant | Absent. Entering the neighbourhood is a spawn. The spawn carries the current cue when one is active, the same way a spawn carries `MeshRef`. |
-| `competitive` and occluded | Absent, with the pose. |
+| Inside the 32 m neighbourhood, or owned, or always-relevant | Eligible every snapshot. The field bytes join the same accumulator as the pose and `MeshRef`. |
+| From 32 m out to 128 m | Eligible at most every fourth snapshot (5 Hz). A dirty cue waits for that slot. If those 192 bytes are already spent, it stays dirty and tries the next eligible snapshot. Playback uses `start_tick` on the shared clock, so the wait does not move the phase. |
+| Past 128 m, not owned, not always-relevant | Omitted. |
+| `competitive` and occluded | Omitted with the pose. |
 
-Animation does not keep a second accumulator or a second budget. Field bytes of `AnimCue` count against the 1024. A snapshot that would pass 1024 leaves the rest dirty, priority intact, for the next opportunity. Spawns still go out.
+A spawn still carries the current cue when one is active, the same way a spawn carries `MeshRef`, and a spawn is outside the 192 bytes.
 
-**Bandwidth.** Field bytes are the 5 or the 7. Record bytes add the 13-byte header when the cue is the only dirty component on that object. The scripted crowd is one neighbourhood, so the 32 m cut does not drop anyone: 2% of characters begin a cue each second (`max(1, N / 50)`), and 0.5% need a correction (`max(1, N / 200)`). Each is sent once.
+**Bandwidth.** Field bytes are the 5 or the 7. Record bytes add the 13-byte header when the cue is the only dirty component on that object. Those bytes ride inside ADR 0042's 192 per snapshot. The scripted rates are 2% of characters beginning a cue each second (`max(1, N / 50)`) and 0.5% needing a correction (`max(1, N / 200)`). Each write is one send, once eligibility and the accumulator allow it. A character from 32 m to 128 m can be selected on at most 5 of the 20 snapshots in a second.
 
 | Visible characters | Cues/s | Corrections/s | Field bytes/s | Record bytes/s | Rejected 36-byte design |
 |---|---|---|---|---|---|
@@ -182,7 +180,7 @@ Animation does not keep a second accumulator or a second budget. Field bytes of 
 | 200 | 4 | 1 | 27 | 92 | `36 × 20 × 200 = 144000` |
 | 1000 | 20 | 5 | 135 | 460 | `36 × 20 × 1000 = 720000` |
 
-A walking crowd with a clean `AnimCue` tick sends 0 animation bytes at every size. The 460 record bytes/s at 1000 characters is the few KB/s target. A burst of 1000 cues in one snapshot is `1000 × 5 = 5000` field bytes, and the 1024 cap admits 204 of them. The other 796 wait on the accumulator.
+A walking crowd with a clean `AnimCue` tick sends 0 animation bytes at every size. The 460 record bytes/s at 1000 characters sits under the 3.75 KiB/s ceiling. A burst of 1000 cues is `1000 × 5 = 5000` field bytes. One snapshot admits 38 of those 5-byte cues (190 bytes) and leaves 2 bytes of the 192. The other 962 stay dirty. Cues in the 32–128 m band are not candidates on the three snapshots between fourths.
 
 **Authority.** The authority runtime is the only writer. A player enqueues a request. It does not write the column.
 
@@ -197,8 +195,8 @@ A walking crowd with a clean `AnimCue` tick sends 0 animation bytes at every siz
 - Locomotion, 10 000 ticks, two worlds: phase and both buckets match, and `AnimCue` field bytes stay 0.
 - The scripted rates above, for 32, 200, and 1000 characters, stay at or under 48, 128, and 512 field bytes/s per client. The 36-byte snapshot planted on every character fails the 1000-character cap.
 - A packed cue is 5 field bytes, a correction is 7, the pad bit is 0, and the payload contains no `f32` and no joint matrix.
-- Sixty-four near characters cue on one tick. The snapshot's `AnimCue` fields stay ≤ 1024 bytes, the unsent cues ship on a later snapshot, and a spawn in the same datagram is still present.
-- A character at 30 m inside the neighbourhood sends a cue and does not send a correction. A character outside the 32 m neighbourhood sends neither.
+- Sixty-four near characters cue on one tick. The snapshot's `AnimCue` fields stay inside the 192-byte budget, the unsent cues ship on a later snapshot, and a spawn in the same datagram is still present.
+- A character at 30 m is eligible on the next snapshot. A character at 40 m is eligible on every fourth snapshot and not on the three between. A character past 128 m is omitted.
 - An owned-client mismatch at tick `T` restores `AnimCue` with the body and replays. A remote handle is not stepped.
 - Foot IK does not change the checksum. A locomotion notify fires on the derived crossing and adds no bytes.
 
