@@ -1,0 +1,20 @@
+name: window-x11
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  xvfb-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: X11 headers and Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb libx11-dev libxi-dev libxfixes-dev
+      - name: clippy
+        run: cargo clippy -p genos-window -p genos-input --all-targets -- -D warnings
+      - name: Xvfb smoke
+        run: xvfb-run -a env -u WAYLAND_DISPLAY cargo test -p genos-window --test x11_smoke -- --nocapture

@@ -66,9 +66,9 @@ Read the axes with `axis_2d`. Read buttons with `down`. `GamepadDevice::pressed`
 
 ## Limits
 
-X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. macOS reads GameController the same way. Connect and disconnect notifications keep a controller in one slot until it leaves. Those notifications run on the main queue, and the poll does not, so one lock covers the slot assign, the clear, and the poll fill. The pad's vendor name is copied once, on connect, and selects the pictures. A controller without an extended gamepad does not take a slot. IOKit is not read, so a pad GameController does not publish stays disconnected. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
+X11 keyboard and pointer reads live in the window, not in this crate. Linux gamepads stay the shared `/dev/input/jsN` poll. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. macOS reads GameController the same way. Connect and disconnect notifications keep a controller in one slot until it leaves. Those notifications run on the main queue, and the poll does not, so one lock covers the slot assign, the clear, and the poll fill. The pad's vendor name is copied once, on connect, and selects the pictures. A controller without an extended gamepad does not take a slot. IOKit is not read, so a pad GameController does not publish stays disconnected. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
 
-The Win32 and Cocoa windows write the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
+The Win32, Cocoa, and X11 windows write the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
 
 Every backend uses the same writes:
 
@@ -76,7 +76,7 @@ Every backend uses the same writes:
 - `set_key` or `apply_evdev_keys` for the keyboard.
 - `set_mouse_button` and `add_mouse_delta` for the pointer.
 - `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux reads `/dev/input/jsN` inside `poll_gamepads`. Windows reads XInput. macOS reads GameController.
-- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch. Win32 pointer messages and Cocoa touches are the samples. A finger that is still down and did not move this frame is reported as `moved`.
+- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch. Win32 pointer messages, Cocoa touches, and X11 `XI_Touch` events are the samples. A finger that is still down and did not move this frame is reported as `moved`.
 
 The behavior source for the key and pointer reads is `input-zig`, listed in [Architecture](../architecture.md). The UI reads `take_device_changes` and `active_glyphs` after those writes.
 
