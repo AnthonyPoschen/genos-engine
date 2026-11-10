@@ -2,13 +2,6 @@
     clippy::as_conversions,
     reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
 )]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::assert_is_empty,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
 #![expect(
     clippy::cast_lossless,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
@@ -313,8 +306,6 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
-    "lighting_probe_rays",
-    "lighting_probe_stale",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
@@ -3141,8 +3132,6 @@ mod tests {
             "Firefly sigma",
             "Ray budget",
             "Dormant rays",
-            "Screen probe rays",
-            "Probe stale frames",
             "Cache stale frames",
             "Denoiser iterations",
             "Denoiser variance",
@@ -3160,7 +3149,6 @@ mod tests {
             "Shadows",
             "GI",
             "Denoiser",
-            "Screen probes",
             "Surface light cache",
             "Attach movers",
             "Sky light",
@@ -3174,7 +3162,6 @@ mod tests {
         for name in [
             "lighting_bounces",
             "lighting_direct",
-            "lighting_probes",
             "lighting_world_cache",
             "lighting_denoise",
             "lighting_sky",
@@ -3205,15 +3192,7 @@ mod tests {
         assert!(names.contains(&"day-cycle"));
         assert!(names.contains(&"gi-1bounce"));
         assert!(names.contains(&"high"));
-        let rays = rows
-            .iter()
-            .find(|row| row.label == "Screen probe rays")
-            .unwrap()
-            .slider
-            .as_ref()
-            .unwrap();
-        assert!(rays.steps.is_empty());
-        assert_eq!(rays.step, 4.0);
+        assert!(rows.iter().all(|row| row.label != "Screen probe rays"), "removed from the menu");
         let denoise = rows
             .iter()
             .find(|row| row.label == "Denoiser iterations")
@@ -3364,7 +3343,7 @@ mod tests {
         let gi = tabs.tabs.iter().find(|tab| tab.title == "GI").unwrap();
         assert!(gi.blocks.iter().any(|block| matches!(
             block,
-            genos_ui::PanelBlock::Section(section) if section.title == "Probes" && !section.collapsed
+            genos_ui::PanelBlock::Section(section) if section.title == "Indirect" && !section.collapsed
         )));
         assert!(gi.blocks.iter().any(|block| matches!(
             block,

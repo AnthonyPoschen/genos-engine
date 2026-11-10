@@ -86,25 +86,6 @@ Role: OUT · Literature: IEC 61966-2-2; `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
 **SDR output**: an 8-bit UNORM swapchain image in the sRGB nonlinear color space. Used when HDR is not selected.
 Role: OUT · Literature: `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` · More detail: `create_targets` in [`gpu.rs`](../../crates/render/src/gpu.rs)
 
-### Screen probes (final gather)
-**Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
-Role: SAMPLE · Literature: Lumen screen probe; DDGI probe is world-space (different); GIBS — (surfels play this role) · More detail: [`lighting_place.comp`](../../crates/render/shaders/lighting_place.comp), [`lighting_trace.comp`](../../crates/render/shaders/lighting_trace.comp); [../systems/gi-design.md#final-gather-screen-probes](../systems/gi-design.md#final-gather-screen-probes)
-
-**Probe tile**: the spacing of screen probes in pixels (16 from 720p up).
-Role: STORE · Literature: Lumen probe downsample factor; GIBS 16×16 spawn tile (§1.3)
-
-**Gather**: turning a screen probe's ray results into its light estimate.
-Role: OUT · Literature: Lumen final gather · More detail: [`lighting_gather.comp`](../../crates/render/shaders/lighting_gather.comp)
-
-**Probe filter**: a spatial blur across neighbouring screen probes, then projection to SH. This is not the denoiser.
-Role: DENOISE · Literature: Lumen screen-probe spatial filter; GIBS irradiance sharing (§1.14) · More detail: [`lighting_filter.comp`](../../crates/render/shaders/lighting_filter.comp)
-
-**Kept hit**: the stored hit of a screen-probe ray, reused for up to N frames. Its light is re-read every frame, so we reuse visibility, not light.
-Role: TEMPORAL · Literature: — in GIBS/DDGI; Lumen reuses radiance instead (we diverge on purpose) · More detail: [gi-design.md, final gather](../systems/gi-design.md#final-gather-screen-probes); experiments (see [../systems/lighting/experiments/](../systems/lighting/experiments/)) S78D, S78O, E05
-
-**Stale frames**: once a kept hit or entry has gone this many frames without an update, it is treated as stale.
-Role: SCHED · Literature: — · More detail: `probe_stale`, `world_stale`
-
 ### Surface light cache
 **Surface light cache** (*world cache*, *SC*): a hash table of small world-space surface patches that store the light arriving there. Every bounce after the first reads it. It stands in for Lumen's card cache, which is not built yet.
 Role: STORE · Literature: **GIBS surfel cache (closest)**; Lumen surface cache (cards, not built); DDGI probe volume (different representation) · More detail: header of [`crates/render/shaders/lighting_cache.glsl`](../../crates/render/shaders/lighting_cache.glsl); [GIBS.md §1.1–1.4](research/GIBS.md)
@@ -117,6 +98,9 @@ Role: STORE · Literature: GIBS free-stack index (§1.4)
 
 **Cache cell size**: the world size of an entry: 25 cm near the eye, doubling with distance.
 Role: STORE · Literature: GIBS screen-relative surfel size (§1.6); Lumen card resolution · More detail: `world_cell`
+
+**Stale frames**: once a cache entry has gone this many frames without an update, it is treated as stale.
+Role: SCHED · Literature: — · More detail: `world_stale`
 
 **Page**: an 8×8 block of entries scheduled and denoised together.
 Role: STORE · Literature: Lumen atlas page · More detail: experiments S72J, S72K
@@ -151,17 +135,17 @@ Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen mo
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.
 Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-design.md#world-probes-radiance-cache](../systems/gi-design.md#world-probes-radiance-cache)
 
-**SH cells**: (ADR 0039 stage 2, `surface_cache.sh_cells`) a 25 cm WRC cell also keeps colour SH-L1 (four RGB coefficients, fp16, 24 B) built from the relight rays it already traces. Cells stay keyed by the dominant axis. The screen and seed read is the eight-corner blend of those cells, evaluated at the true normal. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. At the cell's axis the tilt is that cell's mean. A corner is left out when it is missing, empty, stale, faces away, or sits more than half a cell off the query plane, and a left-out corner does not darken the blend. An axis-aligned ray hit still tilts the one owning cell. The read does not allocate. An empty slant keeps the probes.
+**SH cells**: (ADR 0039 stage 2, `surface_cache.sh_cells`) a 25 cm WRC cell also keeps colour SH-L1 (four RGB coefficients, fp16, 24 B) built from the relight rays it already traces. Cells stay keyed by the dominant axis. The screen and seed read is the eight-corner blend of those cells, evaluated at the true normal. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. At the cell's axis the tilt is that cell's mean. A corner is left out when it is missing, empty, stale, faces away, or sits more than half a cell off the query plane, and a left-out corner does not darken the blend. An axis-aligned ray hit still tilts the one owning cell. The read does not allocate. An empty slant stays black. Screen probes are removed.
 Role: STORE · Literature: Lumen WRC (SH per probe); DDGI irradiance (octahedral, not SH) · More detail: ADR 0039 (PR #165), `crates/render/src/lighting_sh.rs`
 
-**SH texel detail**: (ADR 0039 stage 3, `surface_cache.sh_texel_detail`, default off) an empty fine world texel takes its first light from the trilinear neighbour read of the 25 cm SH cells at the texel's true normal. The value is a low-confidence seed, not an own sample. The detail mark is a negative confidence. Parent, resample, hit, and probe seeds stay positive. Sun word z is the quarter sun scratch and is not this mark. Compose drops a marked seed whose neighbour read is empty on every `lighting_sc_seed` return, including the default High denoise path. That drop does not depend on the write-path lamp clear. The stored magnitude stays, so a read-only compose still refuses to resample over it and falls through to the probes. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. The read does not write the cell. An empty fine texel this setting covers does not take resample or the hit patch, even when the neighbour read accepts nothing. The probe seed still runs for that miss, so a rejected cell is not copied back in as a seed. Those two stay when the texel is not a detail candidate, including when SH cells are on and this setting is off. The parent walk is off for every texel while this setting is on. A mover is not seeded. With this setting on, a mover pixel shows the same world-cell read at its current world position and true normal. That read does not allocate, does not stamp (`claim` false), and does not write a world texel or an object texel. Coverage is the read accepting a corner, so a covered mover does not read screen-probe irradiance. A rejected read keeps the probes. Detail off still has mover trust 0 and shows the probes. A slanted pixel returns the same read and does not run those writers; an empty slant keeps the probes. A pixel whose displayed indirect is this read, including a lit slant and a covered mover, does not read screen-probe irradiance. Own samples, a parent, a resample, a partial corner, a mover whose read rejects, and Low still read the probes. Place, trace, gather, and filter stay unless `surface_cache.sh_probe_retire` is on. Requires `surface_cache.sh_cells`.
+**SH texel detail**: (ADR 0039 stage 3, `surface_cache.sh_texel_detail`, default off) an empty fine world texel takes its first light from the trilinear neighbour read of the 25 cm SH cells at the texel's true normal. The value is a low-confidence seed, not an own sample. The detail mark is a negative confidence. Parent, resample, hit, and probe seeds stay positive. Sun word z is the quarter sun scratch and is not this mark. Compose drops a marked seed whose neighbour read is empty on every `lighting_sc_seed` return, including the default High denoise path. That drop does not depend on the write-path lamp clear. The stored magnitude stays, so a read-only compose still refuses to resample over it and stays empty. Screen-probe seeds are removed. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. The read does not write the cell. An empty fine texel this setting covers does not take resample or the hit patch, even when the neighbour read accepts nothing. A rejected cell is not copied back in as a seed. Screen-probe seeds are removed. Those two stay when the texel is not a detail candidate, including when SH cells are on and this setting is off. The parent walk is off for every texel while this setting is on. A mover is not seeded. With this setting on, a mover pixel shows the same world-cell read at its current world position and true normal. That read does not allocate, does not stamp (`claim` false), and does not write a world texel or an object texel. Coverage is the read accepting a corner, so a covered mover does not read screen-probe irradiance. A rejected read stays black. Screen probes are removed. Detail off still has mover trust 0 and shows black when the cell read rejects. Screen probes are removed. A slanted pixel returns the same read and does not run those writers; an empty slant stays black. Screen probes are removed. A pixel whose displayed indirect is this read, including a lit slant and a covered mover, does not read screen-probe irradiance. Own samples, a parent, and a resample still show their texel. A partial corner and a mover whose read rejects stay on the cell read or black. Screen-probe place, trace, gather, and filter are removed. `surface_cache.sh_probe_retire` is a deprecated alias. Requires `surface_cache.sh_cells`.
 Role: STORE · Literature: Lumen card seeded from the world radiance cache · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
 
 **SH texel ray cut**: (ADR 0039 stage 4, `surface_cache.sh_texel_ray_cut`, default off) a fine world texel skips its own rays when the live 25 cm neighbour read is complete and the accepted corners agree within the sparse luminance ratio. The texel's own samples, when it has any, are compared with that live read. The stored seed is not. A world cell is not skipped, and the read does not write the cell. Requires `surface_cache.sh_texel_detail`. The comparison is Rec.709 luminance within that existing ratio. It is not an RGB match and it is not a match of the whole SH field.
 Role: SCHED · Literature: Lumen final gather where the world cache already agrees · More detail: ADR 0039 stage 4, `docs/systems/lighting/adr-0039-remaining.md`
 
-**SH probe retire**: (ADR 0039 stage 5 slice, `surface_cache.sh_probe_retire`, default off) a screen probe skips place's surface search, its rays, its gather bin, and its filter body when every surface pixel that bilinear-samples it is covered by `lighting_sh_texel_detail_covers`. That test is recomputed every place. It is not the ray-cut hold: a colour split past the sparse luminance ratio can still be covered, and this setting retires the probe without calling that agreement. An uncovered surface, an empty slant, a rejected mover read, detail off, and Low keep the probes those pixels sample. Older kept strata stay stored. While the probe record is not live they are not re-traced; a live probe, including one a new hole brings back, still re-traces them. Fills already require that record. Cache rays are not this skip. The CPU group list stays the full grid. Requires `surface_cache.sh_texel_detail`.
-Role: SCHED · Literature: Lumen screen probes (Wright et al., SIGGRAPH 2022). The departure is conditional retirement of probe work where the neighbour read is the displayed indirect, not deletion of the passes and not a new filter · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
+**SH probe retire**: (`surface_cache.sh_probe_retire`) a deprecated alias. Screen-probe passes are removed, so the key parses, warns once, and does not schedule a pass. Indirect light is the SH-L1 world cache, with texel detail as a one-way seed.
+Role: SCHED · Literature: Lumen screen probes (Wright et al., SIGGRAPH 2022) are the departure: the passes are removed · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
 
 **Acceleration grid** (proposed, not built): a spatial lookup that finds entries near a point in a big world.
 Role: STORE · Literature: GIBS trapezoid grid (§1.7) · More detail: [GIBS.md §1.7](research/GIBS.md)
@@ -406,6 +390,21 @@ Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-
 
 **residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.
 
+**Screen probe**: removed. It was a point on the visible surface placed every probe tile, tracing rays for nearby pixels. Indirect light is the SH-L1 world cache. Texel detail is a one-way seed from those cells.
+Role: SAMPLE · Literature: Lumen screen probe (Wright et al., SIGGRAPH 2022). The departure is deletion of that gather.
+
+**Probe tile**: removed. It was the pixel spacing of screen probes (16 from 720p up). The key `probe_tile` is a deprecated alias.
+Role: STORE · Literature: Lumen probe downsample factor
+
+**Gather**: removed with screen probes. It turned a probe's ray results into its light estimate.
+Role: OUT · Literature: Lumen final gather
+
+**Probe filter**: removed with screen probes. It was a spatial blur across neighbouring probes, then a projection to SH. It is not the denoiser.
+Role: DENOISE · Literature: Lumen screen-probe spatial filter
+
+**Kept hit**: removed with screen probes. It was a stored probe-ray hit whose light was re-read. Cache rays still store a hit for the light pass.
+Role: TEMPORAL · Literature: Lumen reuses radiance; this stored visibility
+
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
 ### Retired terms
@@ -421,6 +420,10 @@ Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence 
 - `v1 world probe`
 - `notice band`
 - `prominence spacing`
+- `screen probe`
+- `probe tile`
+- `probe filter`
+- `kept hit`
 
 ---
 ## How to compare a new technique

@@ -73,7 +73,6 @@ struct MediaModules {
     texel_detail: PathBuf,
     texel_detail_ro: PathBuf,
     texel_ray_cut: PathBuf,
-    probe_retire: PathBuf,
 }
 
 /// Media and froxel modules, and the two compile-only checks that sit with them.
@@ -118,12 +117,6 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         texel_ray_cut: compile(
             "shaders/texel_ray_cut_prod.comp",
             &out.join("texel_ray_cut_prod.comp.spv"),
-        ),
-        // One writing specialization. Place, trace, gather, and filter are the
-        // production modules. This one only plants and reads them back.
-        probe_retire: compile(
-            "shaders/probe_retire_prod.comp",
-            &out.join("probe_retire_prod.comp.spv"),
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
@@ -188,11 +181,11 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("GBUFFER_VERT_SPV", "gbuffer.vert"),
         ("GBUFFER_FRAG_SPV", "gbuffer.frag"),
         ("LIGHTING_COMPACT_SPV", "lighting_compact.comp"),
-        ("LIGHTING_PLACE_SPV", "lighting_place.comp"),
+        ("LIGHTING_PLACE_SPV", "lighting_noop.comp"),
         ("LIGHTING_TRACE_SPV", "lighting_trace.comp"),
         ("LIGHTING_DIRECT_SPV", "lighting_direct.comp"),
-        ("LIGHTING_GATHER_SPV", "lighting_gather.comp"),
-        ("LIGHTING_FILTER_SPV", "lighting_filter.comp"),
+        ("LIGHTING_GATHER_SPV", "lighting_noop.comp"),
+        ("LIGHTING_FILTER_SPV", "lighting_noop.comp"),
         ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
         ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
         ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
@@ -225,7 +218,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_RAY_CUT_SPV: &[u8] = include_bytes!(\"{}\");\npub static PROBE_RETIRE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_RAY_CUT_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -238,8 +231,7 @@ fn write_shader_glue(
             media.integrate.display(),
             media.texel_detail.display(),
             media.texel_detail_ro.display(),
-            media.texel_ray_cut.display(),
-            media.probe_retire.display()
+            media.texel_ray_cut.display()
         ),
     )
     .unwrap();
@@ -307,7 +299,6 @@ fn rerun_shader_pieces() {
         "froxel_integrate.comp",
         "texel_detail_prod.comp",
         "texel_ray_cut_prod.comp",
-        "probe_retire_prod.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
         "scene.vert",

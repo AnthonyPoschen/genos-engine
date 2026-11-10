@@ -400,12 +400,12 @@ fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
     let one = LightingSettings::preset(LightingPreset::Gi1Bounce);
     assert!(one.gi.enabled);
     assert_eq!(one.bounce.count, 1);
-    assert!(!one.world_cache.enabled);
+    assert!(one.world_cache.enabled);
     assert!(!one.denoiser.enabled);
     assert!(!one.prefill);
     assert_eq!(one.probe_rays(), 64);
-    assert!(one.probes_this_frame(1));
-    assert!(!one.cache_rays_this_frame(1));
+    assert!(!one.probes_this_frame(1));
+    assert!(one.cache_rays_this_frame(1));
     let high = LightingSettings::preset(LightingPreset::High);
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
@@ -438,7 +438,8 @@ fn high_is_the_tuned_path() {
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());
     let buckets = high.gpu_buckets(1);
-    assert!(buckets.direct && buckets.shadows && buckets.place && buckets.probe_trace);
+    assert!(buckets.direct && buckets.shadows && !buckets.place && !buckets.probe_trace);
+    assert!(!buckets.gather && !buckets.filter);
     assert!(buckets.cache && buckets.cache_rays && buckets.atrous && buckets.prefill);
 }
 
@@ -455,9 +456,9 @@ fn a_partial_line_overlays_a_preset() {
     assert!(text.contains("denoise_adaptive=1"));
     let parsed = LightingSettings::parse(&text).unwrap();
     assert!(parsed.denoiser.adaptive);
-    assert!(settings.probes_this_frame(1));
-    assert!(!settings.cache_rays_this_frame(1));
-    assert!(!settings.atrous_this_frame(1));
+    assert!(!settings.probes_this_frame(1));
+    assert!(settings.cache_rays_this_frame(1));
+    assert!(settings.atrous_this_frame(1));
     let mut two = settings.clone();
     two.set_key("bounces", "2").unwrap();
     assert!(two.cache_rays_this_frame(1));
