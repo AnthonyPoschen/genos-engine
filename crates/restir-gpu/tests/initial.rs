@@ -86,12 +86,15 @@ fn initial_candidates_match_the_cpu_reference_and_a_perturbed_seed_fails() {
     ]));
     assert_eq!(code, 0, "{text}");
     assert!(text.to_ascii_lowercase().contains("llvmpipe"), "{text}");
+    // Lavapipe dispatch time is not the 50 ms CPU microbench (tree.rs).
     let (code, text) = output(restir_ref(&[
         "diff",
         "--reference",
         reference.join("reference.json").to_str().expect("utf8"),
         "--candidate",
         candidate.join("candidate.json").to_str().expect("utf8"),
+        "--frame-ms",
+        "60000",
         "--out",
         diff_ok.to_str().expect("utf8"),
     ]));
@@ -111,6 +114,8 @@ fn initial_candidates_match_the_cpu_reference_and_a_perturbed_seed_fails() {
         reference.join("reference.json").to_str().expect("utf8"),
         "--candidate",
         perturbed.join("candidate.json").to_str().expect("utf8"),
+        "--frame-ms",
+        "60000",
         "--out",
         diff_bad.to_str().expect("utf8"),
     ]));
