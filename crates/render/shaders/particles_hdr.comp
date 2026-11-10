@@ -1,0 +1,28 @@
+#version 450
+// Cards were drawn premultiplied into an RGBA16F image. Fold that over the
+// scene-linear radiance before bloom and AgX. scene_lin.a is eye distance and
+// stays put; bloom and the display pass read rgb.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D cards;
+
+layout(std430, set = 0, binding = 1) buffer SceneReferred {
+    vec4 px[];
+} scene_lin;
+
+layout(push_constant) uniform Push {
+    uvec2 size;
+} pc;
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+    if (coord.x >= pc.size.x || coord.y >= pc.size.y) {
+        return;
+    }
+    vec4 card = texelFetch(cards, ivec2(coord), 0);
+    uint index = coord.y * pc.size.x + coord.x;
+    vec4 scene = scene_lin.px[index];
+    float cover = clamp(card.a, 0.0, 1.0);
+    scene.rgb = scene.rgb * (1.0 - cover) + card.rgb;
+    scene_lin.px[index] = scene;
+}
