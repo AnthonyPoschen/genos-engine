@@ -54,6 +54,50 @@ mod tests {
         );
     }
 
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[test]
+    fn an_emulated_wheel_notch_is_a_button() {
+        use std::ffi::c_int;
+
+        unsafe extern "C" {
+            fn genos_xi_pointer_kind(evtype: c_int, flags: c_int, detail: c_int) -> c_int;
+        }
+
+        const PRESS: c_int = 4;
+        const RELEASE: c_int = 5;
+        const MOTION: c_int = 6;
+        const EMULATED: c_int = 1 << 16;
+        const IGNORE: c_int = 0;
+        const MOTION_KIND: c_int = 1;
+        const BUTTON_KIND: c_int = 2;
+
+        assert_eq!(unsafe { genos_xi_pointer_kind(PRESS, 0, 1) }, BUTTON_KIND);
+        assert_eq!(unsafe { genos_xi_pointer_kind(MOTION, 0, 0) }, MOTION_KIND);
+        assert_eq!(unsafe { genos_xi_pointer_kind(PRESS, EMULATED, 1) }, IGNORE);
+        assert_eq!(
+            unsafe { genos_xi_pointer_kind(RELEASE, EMULATED, 1) },
+            IGNORE
+        );
+        assert_eq!(
+            unsafe { genos_xi_pointer_kind(MOTION, EMULATED, 0) },
+            IGNORE
+        );
+        assert_eq!(unsafe { genos_xi_pointer_kind(PRESS, EMULATED, 2) }, IGNORE);
+        assert_eq!(unsafe { genos_xi_pointer_kind(PRESS, EMULATED, 3) }, IGNORE);
+        for detail in 4..=7 {
+            assert_eq!(
+                unsafe { genos_xi_pointer_kind(PRESS, EMULATED, detail) },
+                BUTTON_KIND,
+                "press {detail}"
+            );
+            assert_eq!(
+                unsafe { genos_xi_pointer_kind(RELEASE, EMULATED, detail) },
+                BUTTON_KIND,
+                "release {detail}"
+            );
+        }
+    }
+
     #[test]
     fn left_and_right_modifiers_stay_apart() {
         assert_eq!(genos_evdev_from_x_keycode(50), 42);

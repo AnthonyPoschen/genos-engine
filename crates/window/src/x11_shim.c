@@ -293,6 +293,29 @@ static void note_net_state(struct GenosX11 *win) {
     XFree(data);
 }
 
+/* 0 ignore, 1 motion, 2 button.
+ * XI 2.1 marks a legacy wheel notch (buttons 4..7) as emulated. A touch
+ * emulated as button 1, and emulated motion, stay ignored. */
+int genos_xi_pointer_kind(int evtype, int flags, int detail) {
+    int emulated = (flags & XIPointerEmulated) != 0;
+    if (evtype == XI_Motion) {
+        if (emulated) {
+            return 0;
+        }
+        return 1;
+    }
+    if (evtype != XI_ButtonPress && evtype != XI_ButtonRelease) {
+        return 0;
+    }
+    if (detail <= 0) {
+        return 0;
+    }
+    if (emulated && (detail < 4 || detail > 7)) {
+        return 0;
+    }
+    return 2;
+}
+
 static void note_xi(struct GenosX11 *win, int evtype, void *data) {
     if (evtype == XI_RawMotion) {
         note_raw(win, data);
@@ -300,17 +323,18 @@ static void note_xi(struct GenosX11 *win, int evtype, void *data) {
     }
     if (evtype == XI_ButtonPress || evtype == XI_ButtonRelease || evtype == XI_Motion) {
         XIDeviceEvent *pointer = data;
-        if (!pointer || pointer->event != win->window || (pointer->flags & XIPointerEmulated) != 0) {
+        int kind;
+        if (!pointer || pointer->event != win->window) {
             return;
         }
-        if (evtype == XI_Motion) {
+        kind = genos_xi_pointer_kind(evtype, pointer->flags, pointer->detail);
+        if (kind == 1) {
             note_motion(win, (int)pointer->event_x, (int)pointer->event_y);
             return;
         }
-        if (pointer->detail <= 0) {
-            return;
+        if (kind == 2) {
+            note_button(win, (unsigned)pointer->detail, evtype == XI_ButtonPress);
         }
-        note_button(win, (unsigned)pointer->detail, evtype == XI_ButtonPress);
         return;
     }
     if (evtype == XI_TouchBegin || evtype == XI_TouchUpdate || evtype == XI_TouchEnd) {
