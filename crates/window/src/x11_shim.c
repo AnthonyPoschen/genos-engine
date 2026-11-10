@@ -17,6 +17,7 @@
 
 #include "genos_pump.h"
 #include "linux_host.h"
+#include "touch_log.h"
 
 extern int genos_evdev_from_x_keycode(unsigned keycode);
 
@@ -54,26 +55,30 @@ struct GenosX11 {
     int cursor_hidden;
     int minimized;
     double wheel_y;
+    double acc_dx;
+    double acc_dy;
     Atom wm_protocols;
     Atom wm_delete;
     Atom wm_state;
     Atom net_wm_state;
     Atom net_wm_fullscreen;
-    struct GenosTouch events[GENOS_TOUCH_CAP];
-    int event_count;
-    struct GenosTouch active[GENOS_TOUCH_CAP];
-    int active_count;
+    struct GenosTouchLog touch;
 };
 
 static void suspend_grab(struct GenosX11 *win);
 static void clear_keys(struct GenosX11 *win);
 static void cancel_touch(struct GenosX11 *win);
 
-static int round_delta(double value) {
-    if (value >= 0.0) {
-        return (int)(value + 0.5);
+int genos_axis_step(double *acc, double sample) {
+    double sum;
+    int whole;
+    if (!acc) {
+        return 0;
     }
-    return (int)(value - 0.5);
+    sum = *acc + sample;
+    whole = (int)sum;
+    *acc = sum - (double)whole;
+    return whole;
 }
 
 static void clear_keys(struct GenosX11 *win) {
@@ -111,47 +116,11 @@ static void set_evdev(struct GenosX11 *win, int evdev, int down) {
 }
 
 static void push_touch(struct GenosX11 *win, uint64_t id, float x, float y, int phase) {
-    int i;
-    if (win->event_count < GENOS_TOUCH_CAP) {
-        struct GenosTouch *sample = &win->events[win->event_count];
-        sample->id = id;
-        sample->x = x;
-        sample->y = y;
-        sample->phase = phase;
-        win->event_count += 1;
-    }
-    if (phase == GENOS_TOUCH_ENDED || phase == GENOS_TOUCH_CANCELLED) {
-        for (i = 0; i < win->active_count; i++) {
-            if (win->active[i].id == id) {
-                win->active[i] = win->active[win->active_count - 1];
-                win->active_count -= 1;
-                return;
-            }
-        }
-        return;
-    }
-    for (i = 0; i < win->active_count; i++) {
-        if (win->active[i].id == id) {
-            win->active[i].x = x;
-            win->active[i].y = y;
-            return;
-        }
-    }
-    if (win->active_count >= GENOS_TOUCH_CAP) {
-        return;
-    }
-    win->active[win->active_count].id = id;
-    win->active[win->active_count].x = x;
-    win->active[win->active_count].y = y;
-    win->active[win->active_count].phase = GENOS_TOUCH_MOVED;
-    win->active_count += 1;
+    genos_touch_log_push(&win->touch, id, x, y, phase);
 }
 
 static void cancel_touch(struct GenosX11 *win) {
-    while (win->active_count > 0) {
-        struct GenosTouch sample = win->active[0];
-        push_touch(win, sample.id, sample.x, sample.y, GENOS_TOUCH_CANCELLED);
-    }
+    genos_touch_log_cancel(&win->touch);
 }
 
 static void note_motion(struct GenosX11 *win, int x, int y) {
@@ -186,8 +155,8 @@ static void note_raw(struct GenosX11 *win, XIRawEvent *raw) {
     if (!win->pointer_locked || !win->xi_on) {
         return;
     }
-    win->mouse_dx += round_delta(raw_axis(raw, 0));
-    win->mouse_dy += round_delta(raw_axis(raw, 1));
+    win->mouse_dx += genos_axis_step(&win->acc_dx, raw_axis(raw, 0));
+    win->mouse_dy += genos_axis_step(&win->acc_dy, raw_axis(raw, 1));
 }
 
 static void note_button(struct GenosX11 *win, unsigned button, int down) {
@@ -329,15 +298,30 @@ static void note_xi(struct GenosX11 *win, int evtype, void *data) {
         note_raw(win, data);
         return;
     }
+    if (evtype == XI_ButtonPress || evtype == XI_ButtonRelease || evtype == XI_Motion) {
+        XIDeviceEvent *pointer = data;
+        if (!pointer || pointer->event != win->window || (pointer->flags & XIPointerEmulated) != 0) {
+            return;
+        }
+        if (evtype == XI_Motion) {
+            note_motion(win, (int)pointer->event_x, (int)pointer->event_y);
+            return;
+        }
+        if (pointer->detail <= 0) {
+            return;
+        }
+        note_button(win, (unsigned)pointer->detail, evtype == XI_ButtonPress);
+        return;
+    }
     if (evtype == XI_TouchBegin || evtype == XI_TouchUpdate || evtype == XI_TouchEnd) {
         XIDeviceEvent *touch = data;
         int phase = GENOS_TOUCH_MOVED;
-        if (touch->event != win->window) {
+        if (!touch || touch->event != win->window) {
             return;
         }
         if (evtype == XI_TouchBegin) {
             phase = GENOS_TOUCH_BEGAN;
-        } else if (evtype == XI_TouchEnd) {
+        } else if (evtype == XI_TouchEnd && (touch->flags & XITouchPendingEnd) == 0) {
             phase = GENOS_TOUCH_ENDED;
         }
         push_touch(win, (uint64_t)touch->detail, (float)touch->event_x, (float)touch->event_y, phase);
@@ -350,15 +334,26 @@ static void handle_core(struct GenosX11 *win, XEvent *ev) {
         return;
     }
     if (ev->type == ButtonPress || ev->type == ButtonRelease) {
+        if (win->xi_on) {
+            return;
+        }
         note_button(win, ev->xbutton.button, ev->type == ButtonPress);
         return;
     }
     if (ev->type == MotionNotify) {
+        if (win->xi_on) {
+            return;
+        }
         note_motion(win, ev->xmotion.x, ev->xmotion.y);
         return;
     }
     if (ev->type == FocusIn || ev->type == FocusOut) {
+        int detail = ev->xfocus.detail;
         if (ev->xfocus.mode == NotifyGrab || ev->xfocus.mode == NotifyUngrab) {
+            return;
+        }
+        if (detail == NotifyPointer || detail == NotifyPointerRoot || detail == NotifyInferior
+            || detail == NotifyVirtual) {
             return;
         }
         if (ev->type == FocusIn) {
@@ -403,7 +398,8 @@ static void handle_core(struct GenosX11 *win, XEvent *ev) {
         }
         return;
     }
-    if (ev->type == ClientMessage && (Atom)ev->xclient.data.l[0] == win->wm_delete) {
+    if (ev->type == ClientMessage && ev->xclient.message_type == win->wm_protocols
+        && ev->xclient.window == win->window && (Atom)ev->xclient.data.l[0] == win->wm_delete) {
         win->closing = 1;
     }
 }
@@ -475,13 +471,38 @@ static int engage_capture(struct GenosX11 *win) {
     return 0;
 }
 
+static int xi_select_failed;
+
+static int xi_error(Display *display, XErrorEvent *event) {
+    (void)display;
+    (void)event;
+    xi_select_failed = 1;
+    return 0;
+}
+
+static int select_mask(struct GenosX11 *win, Window target, unsigned char *mask, int mask_len) {
+    XIEventMask events;
+    int (*previous)(Display *, XErrorEvent *);
+    events.deviceid = XIAllMasterDevices;
+    events.mask_len = mask_len;
+    events.mask = mask;
+    xi_select_failed = 0;
+    XSync(win->display, False);
+    previous = XSetErrorHandler(xi_error);
+    if (XISelectEvents(win->display, target, &events, 1) != Success) {
+        xi_select_failed = 1;
+    }
+    XSync(win->display, False);
+    XSetErrorHandler(previous);
+    return xi_select_failed ? -1 : 0;
+}
+
 static void select_xi(struct GenosX11 *win) {
     int event = 0;
     int error = 0;
     int major = 2;
     int minor = 2;
     unsigned char mask[XIMaskLen(XI_LASTEVENT)];
-    XIEventMask events;
     if (!XQueryExtension(win->display, "XInputExtension", &win->xi_opcode, &event, &error)) {
         fprintf(stderr, "genos-window: XInput2 is missing\n");
         return;
@@ -493,17 +514,25 @@ static void select_xi(struct GenosX11 *win) {
     }
     memset(mask, 0, sizeof(mask));
     XISetMask(mask, XI_RawMotion);
-    events.deviceid = XIAllMasterDevices;
-    events.mask_len = (int)sizeof(mask);
-    events.mask = mask;
-    XISelectEvents(win->display, win->root, &events, 1);
+    if (select_mask(win, win->root, mask, (int)sizeof(mask)) != 0) {
+        fprintf(stderr, "genos-window: XInput2 select failed\n");
+        win->xi_opcode = 0;
+        return;
+    }
     memset(mask, 0, sizeof(mask));
-    XISetMask(mask, XI_TouchBegin);
-    XISetMask(mask, XI_TouchUpdate);
-    XISetMask(mask, XI_TouchEnd);
-    events.mask_len = (int)sizeof(mask);
-    events.mask = mask;
-    XISelectEvents(win->display, win->window, &events, 1);
+    XISetMask(mask, XI_ButtonPress);
+    XISetMask(mask, XI_ButtonRelease);
+    XISetMask(mask, XI_Motion);
+    if (minor >= 2) {
+        XISetMask(mask, XI_TouchBegin);
+        XISetMask(mask, XI_TouchUpdate);
+        XISetMask(mask, XI_TouchEnd);
+    }
+    if (select_mask(win, win->window, mask, (int)sizeof(mask)) != 0) {
+        fprintf(stderr, "genos-window: XInput2 select failed\n");
+        win->xi_opcode = 0;
+        return;
+    }
     win->xi_on = 1;
 }
 
@@ -600,7 +629,7 @@ struct GenosX11 *genos_x11_open(int width, int height, const char *app_id, const
     }
     select_xi(win);
     XMapWindow(win->display, win->window);
-    XFlush(win->display);
+    XSync(win->display, False);
     if (XQueryPointer(
             win->display,
             win->window,
@@ -672,7 +701,6 @@ void genos_x11_dispatch(struct GenosX11 *win) {
 }
 
 int genos_x11_copy_extra(struct GenosX11 *win, struct GenosExtra *out) {
-    int i;
     if (!out) {
         return -1;
     }
@@ -682,21 +710,7 @@ int genos_x11_copy_extra(struct GenosX11 *win, struct GenosExtra *out) {
     }
     out->mouse_right = win->mouse_right;
     out->mouse_middle = win->mouse_middle;
-    if (win->event_count > 0) {
-        int count = win->event_count;
-        if (count > GENOS_TOUCH_CAP) {
-            count = GENOS_TOUCH_CAP;
-        }
-        out->touch_count = count;
-        memcpy(out->touch, win->events, (size_t)count * sizeof(win->events[0]));
-        win->event_count = 0;
-        return 0;
-    }
-    out->touch_count = win->active_count;
-    for (i = 0; i < win->active_count && i < GENOS_TOUCH_CAP; i++) {
-        out->touch[i] = win->active[i];
-        out->touch[i].phase = GENOS_TOUCH_MOVED;
-    }
+    out->touch_count = genos_touch_log_copy(&win->touch, out->touch);
     return 0;
 }
 
