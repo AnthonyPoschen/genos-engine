@@ -128,6 +128,8 @@ fn red_box_path() -> Option<Codimation> {
 }
 
 fn main() {
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
