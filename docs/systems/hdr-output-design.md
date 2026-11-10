@@ -72,7 +72,7 @@ The lighting work caps are unchanged. Post has its own ceilings in §7. A slow b
 
 Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Potato and Low force SDR output. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Potato, so the grade is the same buffer on every preset. Potato does not run the pyramid or the histogram. Its exposure is fixed.
 
-Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom on Medium and above is half resolution and coarser down the pyramid. Low's four levels start at quarter resolution so that chain stays inside 0.80 ms. That is the Jimenez pyramid, not a camera-dependent kernel. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
+Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom on Medium and above is the Jimenez pyramid: half resolution, then coarser. Low's four levels start at quarter resolution. That first step averages four half-resolution Karis samples, which is not the Jimenez kernel. It is there so the chain stays inside 0.80 ms. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
 
 ## 4. Alternatives
 
@@ -180,7 +180,8 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 - There is no artist threshold and no soft knee. A threshold pops. The slides argue for thresholdless; some ports add a knee anyway. We do not.
 - The Karis luma is Rec.709, the same weights as `luminance` in `trace.rs`. The course does not pin the coefficients.
 - Karis does not commute with exposure. It runs on scene luminance, before exposure, so a later exposure change does not reshape the firefly weight. Named, because a purely linear filter would commute.
-- The pyramid is a GPU pass on the scene image compose just stored (`hdr_bloom.comp`), same frame, before the display pass. It follows `bloom_pyramid`: Karis, then the 13-tap, then the tent, bloom only. `bloom_pyramid` stays the CPU reference the gate grades. Intensity 0 does not read the buffer. The histogram is still one frame late.
+- Low's first downsample averages four half-resolution Karis samples into a quarter-resolution mip. The Jimenez first step is one half-resolution downsample. Medium and above keep that step. Low does not, because the half-resolution four-level pyramid missed the 0.80 ms ceiling.
+- The pyramid is a GPU pass on the scene image compose just stored (`hdr_bloom.comp`), same frame, before the display pass. Medium and above follow `bloom_pyramid`: Karis, then the 13-tap, then the tent, bloom only. Low's first step is the quarter-resolution average above. `bloom_pyramid` stays the CPU reference the gate grades for Medium and above. Intensity 0 does not read the buffer. The histogram is still one frame late.
 
 **Rejected:** Kawase, because the energy contract is weaker and a single bright pixel is less stable. Convolution, because the FFT and the kernel asset do not pay for themselves on a GTX 1060, and because a lens-dirt texture is a non-goal. Either can be a later mode once the dual filter has a measured cost. The mode would be a new glossary term in that change.
 
