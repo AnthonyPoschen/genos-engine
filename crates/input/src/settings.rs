@@ -193,6 +193,27 @@ mod tests {
     }
 
     #[test]
+    fn sensitivity_on_a_new_name_still_accepts_an_axis_side() {
+        let mut settings = InputSettings::character_controller();
+        settings.set_key("camera.sensitivity", "2").unwrap();
+        settings
+            .set_key("camera.vectors", "gamepad_right_stick")
+            .unwrap();
+        assert!(settings.set_key("camera.sensitivity", "nan").is_err());
+
+        let mut input = InputSystem::new();
+        settings.apply(&mut input);
+        let pad = input.gamepad_mut(0).unwrap();
+        pad.view.connected = true;
+        pad.right_stick.x = 0.4;
+        let axis = settings.map.axis_2d(&input, "camera");
+        assert!(
+            (axis.x - 0.8).abs() < 1.0e-4,
+            "a new axis keeps the sensitivity that preceded it, got {axis:?}"
+        );
+    }
+
+    #[test]
     fn settings_file_round_trips_and_json_keeps_sensitivity() {
         let mut settings = InputSettings::character_controller();
         settings

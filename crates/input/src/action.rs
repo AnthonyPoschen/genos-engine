@@ -20,7 +20,8 @@ pub struct BoundInput {
     pub code: InputCode,
     pub activation_threshold: Option<f32>,
     /// Scale applied after the stick deadzone. `1` leaves the value alone.
-    pub sensitivity: f32,
+    /// Written only through [`Self::set_sensitivity`], which clamps to `-8..=8`.
+    sensitivity: f32,
 }
 
 impl BoundInput {
@@ -31,6 +32,20 @@ impl BoundInput {
             activation_threshold: None,
             sensitivity: 1.0,
         }
+    }
+
+    #[must_use]
+    pub fn sensitivity(&self) -> f32 {
+        self.sensitivity
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error when `sensitivity` is not finite. A finite value is
+    /// clamped to `-8..=8`.
+    pub fn set_sensitivity(&mut self, sensitivity: f32) -> Result<(), String> {
+        self.sensitivity = finite_sensitivity(sensitivity)?;
+        Ok(())
     }
 }
 
@@ -127,11 +142,12 @@ impl ActionMap {
     ///
     /// # Errors
     ///
-    /// Returns an error when the action is missing or the value is not finite.
+    /// Returns an error when the value is not finite. A missing action becomes
+    /// an axis, so a side line can follow the sensitivity line.
     pub fn set_sensitivity(&mut self, name: &str, sensitivity: f32) -> Result<(), String> {
         let sensitivity = finite_sensitivity(sensitivity)?;
         if !self.actions.iter().any(|action| action.name == name) {
-            self.set(name, Vec::new());
+            self.set_2d(name, Action2dBinding::default());
         }
         let action = self
             .actions

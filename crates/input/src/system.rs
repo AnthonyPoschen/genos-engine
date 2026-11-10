@@ -740,17 +740,19 @@ fn layout_from_bitmap(glyphs: GlyphSet, buttons: &[u16], axes: &[u8]) -> JsLayou
     layout
 }
 
-/// Evdev code at a joydev index. On the Deck, `BTN_X` (`0x133`) is the
-/// physical west face and `BTN_Y` (`0x134`) is the physical north face.
+/// Evdev code at a joydev index. xpad and `hid-steam` report the west face
+/// as `BTN_X` (`0x133`) and the north face as `BTN_Y` (`0x134`).
+/// `hid-playstation` and a generic pad use the Linux names, so `BTN_X` is north.
 fn evdev_button(code: u16, glyphs: GlyphSet) -> Option<InputCode> {
     let deck = glyphs == GlyphSet::SteamDeck;
+    let labeled_xy = matches!(glyphs, GlyphSet::Xbox | GlyphSet::SteamDeck);
     Some(match code {
         0x126 if deck => InputCode::gamepad_capture,
         0x130 => InputCode::gamepad_face_south,
         0x131 => InputCode::gamepad_face_east,
-        0x133 if deck => InputCode::gamepad_face_west,
+        0x133 if labeled_xy => InputCode::gamepad_face_west,
         0x133 => InputCode::gamepad_face_north,
-        0x134 if deck => InputCode::gamepad_face_north,
+        0x134 if labeled_xy => InputCode::gamepad_face_north,
         0x134 => InputCode::gamepad_face_west,
         0x136 => InputCode::gamepad_left_shoulder,
         0x137 => InputCode::gamepad_right_shoulder,
@@ -1276,6 +1278,20 @@ mod tests {
         assert_eq!(layout.buttons[6], Some(InputCode::gamepad_select));
         assert_eq!(layout.buttons[8], Some(InputCode::gamepad_home));
         assert_eq!(layout.buttons[9], Some(InputCode::gamepad_left_stick_press));
+    }
+
+    #[test]
+    fn an_xbox_bitmap_keeps_btn_x_on_the_west_face() {
+        let xpad = [
+            0x130u16, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
+        ];
+        let xbox = layout_from_bitmap(GlyphSet::Xbox, &xpad, &[]);
+        assert_eq!(xbox.buttons[2], Some(InputCode::gamepad_face_west));
+        assert_eq!(xbox.buttons[3], Some(InputCode::gamepad_face_north));
+
+        let playstation = layout_from_bitmap(GlyphSet::PlayStation, &xpad, &[]);
+        assert_eq!(playstation.buttons[2], Some(InputCode::gamepad_face_north));
+        assert_eq!(playstation.buttons[3], Some(InputCode::gamepad_face_west));
     }
 
     #[test]
