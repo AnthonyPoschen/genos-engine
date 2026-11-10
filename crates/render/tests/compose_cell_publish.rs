@@ -135,6 +135,7 @@ fn hold_picture(
         catch_left: 0,
         full_effort: false,
         compose: 0,
+        walks: 0,
         dispatches: 0,
         blocks: 0,
     };
