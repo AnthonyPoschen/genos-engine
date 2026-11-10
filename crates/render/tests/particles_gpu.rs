@@ -298,7 +298,9 @@ fn the_sim_dispatch_is_wider_than_one_invocation() {
     // block exclusive is the earlier group's count, and a slot after the
     // first of that group has a non-zero local exclusive. Life is two steps,
     // so the third frame retires both groups in one dead-list scan.
-    let mut settings = emitter(1024, 96);
+    // 8192 slots is 128 block sums, so the block scan itself is more than one
+    // workgroup. 96 live slots still sit past the first particle workgroup.
+    let mut settings = emitter(8192, 96);
     settings.rate = 1.0e6;
     settings.life = 2.0 * DT;
     let mut cpu = CpuParticles::new();
@@ -331,6 +333,17 @@ fn the_sim_dispatch_is_wider_than_one_invocation() {
     assert!(
         u64::from(size) * u64::from(groups) >= u64::from(settings.max_particles),
         "sim launch {size}x{groups} does not cover the budget"
+    );
+    let (scan_size, scan_groups) = life.device.particle_scan_launch().expect("scan launch");
+    assert!(scan_size > 1, "block scan workgroup was a single thread");
+    assert!(
+        scan_groups > 1,
+        "block scan was one group, so one thread still walks the sums"
+    );
+    let parts = life.device.particle_sim_parts();
+    eprintln!(
+        "sim_parts init={:.3} death={:.3} emit={:.3} compact={:.3} sim={:.3}",
+        parts[0], parts[1], parts[2], parts[3], life.device.particle_stats().sim_ms
     );
 }
 

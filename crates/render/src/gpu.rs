@@ -8520,6 +8520,19 @@ impl Gpu {
         }
     }
 
+    fn retire_live_flights(&mut self) {
+        for slot in 0..2 {
+            if !self.flight_live[slot] {
+                continue;
+            }
+            let fence = self.fences[slot];
+            if self.wait_fence(fence, "retire flight").is_err() {
+                return;
+            }
+            self.flight_live[slot] = false;
+        }
+    }
+
     /// Presentation images. The seat is dispatched around this call: the
     /// driver round-trips the Wayland socket before it returns, and a client
     /// that does not read the socket waits out the driver timeout.
@@ -8529,6 +8542,13 @@ impl Gpu {
             self.swap_images.clear();
             return;
         }
+        // The drain poll gives up after 48 ms. A 1M frame is longer than that,
+        // and destroying the swapchain while the frame is still queued does not
+        // return on the 4070. Wait the fences we submitted, then the queues,
+        // before the swapchain goes away. A fence that was reset and not
+        // submitted is not live, so it is not waited.
+        self.retire_live_flights();
+        self.idle_device();
         let swapchain = self.swapchain;
         self.swapchain = std::ptr::null_mut();
         unsafe {
@@ -8923,7 +8943,9 @@ impl Gpu {
         // Finish the queues before freeing what they still reference. An
         // in-flight particle dispatch (the other flight) otherwise keeps the
         // device busy after its buffers are gone, and vkDeviceWaitIdle at the
-        // end of teardown does not return.
+        // end of teardown does not return. A fence that was reset and not
+        // submitted is not live.
+        self.retire_live_flights();
         self.idle_device();
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.

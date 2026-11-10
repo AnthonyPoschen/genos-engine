@@ -238,6 +238,7 @@ fn write_shader_glue(
 
 fn append_particles(glue_text: &mut String, out: &std::path::Path) {
     let comp = compile("shaders/particles.comp", &out.join("particles.comp.spv"));
+    let emit = compile("shaders/particles_emit.comp", &out.join("particles_emit.comp.spv"));
     let touch_read = compile(
         "shaders/particles_touch_read.comp",
         &out.join("particles_touch_read.comp.spv"),
@@ -247,6 +248,10 @@ fn append_particles(glue_text: &mut String, out: &std::path::Path) {
     glue_text.push_str(&format!(
         "pub static PARTICLES_COMP_SPV: &[u8] = include_bytes!(\"{}\");\n",
         comp.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_EMIT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        emit.display()
     ));
     glue_text.push_str(&format!(
         "pub static PARTICLES_TOUCH_READ_SPV: &[u8] = include_bytes!(\"{}\");\n",

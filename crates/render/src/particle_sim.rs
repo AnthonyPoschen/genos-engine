@@ -23,8 +23,26 @@ pub const COMPACT_STRIDE: u64 = 48;
 /// Bytes of the parameter block the CPU writes each frame.
 pub const PARAMS_BYTES: u64 = 256;
 
-/// Header plus the indirect command.
-pub const STATE_BYTES: u64 = 64;
+/// Header, scan launch, and the indirect command's neighbour.
+///
+/// Words 16 and 17 are the block-sum scan's workgroup size and group count.
+pub const STATE_BYTES: u64 = 80;
+
+/// Bytes of the scan buffer: per-slot flags and prefixes, then two levels of
+/// block sums. One thread never walks the groups.
+#[must_use]
+pub fn scan_buffer_bytes(max_particles: u32) -> u64 {
+    let slots = u64::from(max_particles);
+    let groups = u64::from(max_particles.div_ceil(64).max(1));
+    let level1 = groups.div_ceil(64).max(1);
+    let level2 = level1.div_ceil(64).max(1);
+    slots
+        .saturating_mul(2)
+        .saturating_add(groups.saturating_mul(2))
+        .saturating_add(level1.saturating_mul(2))
+        .saturating_add(level2.saturating_mul(2))
+        .saturating_mul(4)
+}
 
 const INDIRECT_BYTES: u64 = 16;
 
@@ -35,12 +53,7 @@ pub const LOW_VRAM_BYTES: u64 = 16_000_000;
 #[must_use]
 pub fn buffer_bytes(max_particles: u32) -> u64 {
     let slots = u64::from(max_particles);
-    let groups = u64::from(max_particles.div_ceil(64).max(1));
-    // Death flags, exclusive prefix, block sums, block exclusive prefix.
-    let scan = slots
-        .saturating_mul(2)
-        .saturating_add(groups.saturating_mul(2))
-        .saturating_mul(4);
+    let scan = scan_buffer_bytes(max_particles);
     PARAMS_BYTES
         .saturating_add(STATE_BYTES)
         .saturating_add(INDIRECT_BYTES)
@@ -598,6 +611,14 @@ fn project(matrix: &[f32; 16], position: [f64; 3]) -> Option<[f64; 3]> {
 pub struct ParticleStats {
     /// Compute integrate, emit, and compact, milliseconds.
     pub sim_ms: f64,
+    /// Init, inside `sim_ms`.
+    pub sim_init_ms: f64,
+    /// Integrate and the dead-list scan, inside `sim_ms`.
+    pub sim_death_ms: f64,
+    /// Spawn, inside `sim_ms`.
+    pub sim_emit_ms: f64,
+    /// Alive scan and compact, inside `sim_ms`.
+    pub sim_compact_ms: f64,
     /// Sort. Stage 1 does not dispatch it.
     pub sort_ms: f64,
     /// Indirect draw, milliseconds.
@@ -631,6 +652,10 @@ impl ParticleStats {
         };
         Self {
             sim_ms: 0.0,
+            sim_init_ms: 0.0,
+            sim_death_ms: 0.0,
+            sim_emit_ms: 0.0,
+            sim_compact_ms: 0.0,
             sort_ms: 0.0,
             draw_ms: 0.0,
             alive: 0,
@@ -652,7 +677,7 @@ impl ParticleStats {
     #[must_use]
     pub fn line(self) -> String {
         format!(
-            "fx.sim_ms={:.3} fx.sort_ms={:.3} fx.draw_ms={:.3} fx.alive={} fx.spawned={} fx.overdraw_px={} fx.vram_mb={:.3}",
+            "fx.sim_ms={:.3} fx.sort_ms={:.3} fx.draw_ms={:.3} fx.alive={} fx.spawned={} fx.overdraw_px={} fx.vram_mb={:.3} fx.sim_init_ms={:.3} fx.sim_death_ms={:.3} fx.sim_emit_ms={:.3} fx.sim_compact_ms={:.3}",
             self.sim_ms,
             self.sort_ms,
             self.draw_ms,
@@ -660,6 +685,10 @@ impl ParticleStats {
             self.spawned,
             self.overdraw_px,
             self.vram_mb,
+            self.sim_init_ms,
+            self.sim_death_ms,
+            self.sim_emit_ms,
+            self.sim_compact_ms,
         )
     }
 }
@@ -706,6 +735,27 @@ mod tests {
     fn the_low_budget_stays_under_sixteen_megabytes() {
         assert!(buffer_bytes(65_536) <= LOW_VRAM_BYTES);
         assert!(buffer_bytes(genos_scene::LOW_MAX_PARTICLES) <= LOW_VRAM_BYTES);
+    }
+
+    #[test]
+    fn the_high_scan_tree_fits_the_buffer() {
+        let budget = genos_scene::HIGH_MAX_PARTICLES;
+        let wide = budget.div_ceil(64);
+        let level1 = wide.div_ceil(64).max(1);
+        let level2 = level1.div_ceil(64).max(1);
+        assert!(level2 > 1, "the high budget must use the third scan level");
+        let sum = budget.saturating_mul(2);
+        let excl = sum.saturating_add(wide);
+        let level1_sum = excl.saturating_add(wide);
+        let level1_excl = level1_sum.saturating_add(level1);
+        let level2_sum = level1_excl.saturating_add(level1);
+        let level2_excl = level2_sum.saturating_add(level2);
+        let end = u64::from(level2_excl.saturating_add(level2)).saturating_mul(4);
+        assert!(
+            end <= scan_buffer_bytes(budget),
+            "scan writes {end} bytes past a {} byte buffer",
+            scan_buffer_bytes(budget)
+        );
     }
 
     #[test]

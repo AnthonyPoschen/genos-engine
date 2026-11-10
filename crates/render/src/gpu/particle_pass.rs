@@ -11,7 +11,7 @@ use genos_scene::{look_direction, Camera, ParticleSettings};
 use super::{check, Buffer, Gpu, Handle, Image, Memory};
 use crate::particle_sim::{
     buffer_bytes, sim_generation, ParticleFault, ParticleStats, COMPACT_STRIDE, PARAMS_BYTES,
-    SLOT_STRIDE, STATE_BYTES,
+    scan_buffer_bytes, SLOT_STRIDE, STATE_BYTES,
 };
 
 const INDIRECT_BYTES: u64 = 16;
@@ -43,7 +43,22 @@ const MODE_INIT: u32 = 0;
 const MODE_INIT_HEADER: u32 = 9;
 const MODE_INTEGRATE: u32 = 1;
 const MODE_REDUCE_FLAGS: u32 = 2;
-const MODE_SCAN_BLOCKS: u32 = 3;
+const MODE_SCAN_LEVEL: u32 = 3;
+const MODE_SCAN_ADD: u32 = 12;
+const SCAN_HEADER: u32 = 1;
+const SCAN_RECORD: u32 = 2;
+const SCAN_INDIRECT: u32 = 4;
+const SCAN_NO_SUM: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Default)]
+struct ScanPush {
+    count: u32,
+    src: u32,
+    dst: u32,
+    sum: u32,
+    parent: u32,
+    flags: u32,
+}
 const MODE_APPLY_DEAD: u32 = 4;
 const MODE_EMIT_PREP: u32 = 5;
 const MODE_EMIT_BODY: u32 = 6;
@@ -121,6 +136,8 @@ pub(super) struct Pass {
     compute_desc_layout: Handle,
     compute_layout: Handle,
     compute_pipe: Handle,
+    /// Spawn shader. Kept off `compute_pipe` so the wide passes do not carry the jump matrices.
+    emit_pipe: Handle,
     read_desc_layout: Handle,
     read_layout: Handle,
     read_pipe: Handle,
@@ -203,10 +220,16 @@ impl Gpu {
             let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
             copy_image_handle(&pass.dummy)
         };
-        let (pipe, layout, set, queries) = {
+        let (pipe, emit_pipe, layout, set, queries) = {
             let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
             let flight = &pass.flights[slot];
-            (pass.compute_pipe, pass.compute_layout, flight.compute_set, flight.queries)
+            (
+                pass.compute_pipe,
+                pass.emit_pipe,
+                pass.compute_layout,
+                flight.compute_set,
+                flight.queries,
+            )
         };
         self.write_depth_binding(set, sampled.view)?;
         self.particle_query_ready[slot] = false;
@@ -245,13 +268,16 @@ impl Gpu {
                 );
             }
             if !queries.is_null() {
-                (self.fns.cmd_reset_query)(self.cmd, queries, 0, 4);
+                (self.fns.cmd_reset_query)(self.cmd, queries, 0, 8);
             }
             memory_barrier(self, 0x4000, COMPUTE_STAGE, 0x4000, 0x20);
             (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
             (self.fns.cmd_bind_set)(self.cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
             write_particle_stamp(self, 0, COMPUTE_STAGE);
-            self.dispatch_particle_sim(layout, job.budget, job.count);
+            self.dispatch_particle_sim(layout, job.budget, job.count, pipe, emit_pipe);
+            // The 4-byte witness is not the sim. It stays in this recording,
+            // after the ring barrier, so the sync child still sees the fill.
+            write_particle_stamp(self, 1, COMPUTE_STAGE);
             (self.fns.cmd_bind_pipe)(self.cmd, 1, read_pipe);
             (self.fns.cmd_bind_set)(
                 self.cmd,
@@ -264,7 +290,6 @@ impl Gpu {
                 std::ptr::null(),
             );
             (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
-            write_particle_stamp(self, 1, COMPUTE_STAGE);
         }
         if sample_image {
             // The sampled image belongs to the other flight. Put it back in
@@ -315,32 +340,49 @@ impl Gpu {
 
     /// One thread per slot for integrate and compact. Emit jumps the rng so
     /// the spawn writes are parallel and still match the mirror's order.
-    fn dispatch_particle_sim(&mut self, layout: Handle, budget: u32, count: u32) {
+    fn dispatch_particle_sim(
+        &mut self,
+        layout: Handle,
+        budget: u32,
+        count: u32,
+        sim_pipe: Handle,
+        emit_pipe: Handle,
+    ) {
         let wide = sim_groups(budget).max(1);
         let emit = sim_groups(count.max(1)).max(1);
         self.sim_pass(layout, MODE_INIT, wide, wide);
         self.sim_pass_barrier();
         self.sim_pass(layout, MODE_INIT_HEADER, wide, 1);
+        write_particle_stamp(self, 4, COMPUTE_STAGE);
         self.sim_pass_barrier();
         if self.particle_moving() {
             self.sim_pass(layout, MODE_INTEGRATE, wide, wide);
             self.sim_pass_barrier();
             self.sim_pass(layout, MODE_REDUCE_FLAGS, wide, wide);
             self.sim_pass_barrier();
-            self.sim_pass(layout, MODE_SCAN_BLOCKS, wide, 1);
+            self.scan_tree(layout, budget, wide, false);
             self.sim_pass_barrier();
             self.sim_pass(layout, MODE_APPLY_DEAD, wide, wide);
             self.sim_pass_barrier();
         }
+        write_particle_stamp(self, 5, COMPUTE_STAGE);
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, emit_pipe);
+        }
         self.sim_pass(layout, MODE_EMIT_PREP, wide, 1);
         self.sim_pass_barrier();
         self.sim_pass(layout, MODE_EMIT_BODY, wide, emit);
+        write_particle_stamp(self, 6, COMPUTE_STAGE);
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, sim_pipe);
+        }
         self.sim_pass_barrier();
         self.sim_pass(layout, MODE_REDUCE_ALIVE, wide, wide);
         self.sim_pass_barrier();
-        self.sim_pass(layout, MODE_SCAN_BLOCKS, wide, 1);
+        self.scan_tree(layout, budget, wide, true);
         self.sim_pass_barrier();
         self.sim_pass(layout, MODE_SCATTER, wide, wide);
+        write_particle_stamp(self, 7, COMPUTE_STAGE);
     }
 
     fn particle_moving(&self) -> bool {
@@ -351,14 +393,141 @@ impl Gpu {
     }
 
     fn sim_pass(&mut self, layout: Handle, mode: u32, wide: u32, dispatch: u32) {
-        let words = [mode, wide, 0u32, 0u32];
+        self.sim_words(layout, mode, wide, dispatch, ScanPush::default());
+    }
+
+    /// Block sums are scanned in workgroups of 64, then those totals are
+    /// scanned the same way. One thread does not walk the group list.
+    fn scan_tree(&mut self, layout: Handle, budget: u32, wide: u32, indirect: bool) {
+        let level1 = sim_groups(wide).max(1);
+        let level2 = sim_groups(level1).max(1);
+        let sum = budget.saturating_mul(2);
+        let excl = sum.saturating_add(wide);
+        let level1_sum = excl.saturating_add(wide);
+        let level1_excl = level1_sum.saturating_add(level1);
+        let level2_sum = level1_excl.saturating_add(level1);
+        let level2_excl = level2_sum.saturating_add(level2);
+        let header = if indirect {
+            SCAN_HEADER | SCAN_INDIRECT
+        } else {
+            SCAN_HEADER
+        };
+        if level1 <= 1 {
+            self.scan_level(
+                layout,
+                wide,
+                1,
+                ScanPush {
+                    count: wide,
+                    src: sum,
+                    dst: excl,
+                    sum: SCAN_NO_SUM,
+                    flags: header | SCAN_RECORD,
+                    ..ScanPush::default()
+                },
+            );
+            return;
+        }
+        self.scan_level(
+            layout,
+            wide,
+            level1,
+            ScanPush {
+                count: wide,
+                src: sum,
+                dst: excl,
+                sum: level1_sum,
+                flags: SCAN_RECORD,
+                ..ScanPush::default()
+            },
+        );
+        self.sim_pass_barrier();
+        if level2 <= 1 {
+            self.scan_level(
+                layout,
+                wide,
+                1,
+                ScanPush {
+                    count: level1,
+                    src: level1_sum,
+                    dst: level1_excl,
+                    sum: SCAN_NO_SUM,
+                    flags: header,
+                    ..ScanPush::default()
+                },
+            );
+            self.sim_pass_barrier();
+        } else {
+            self.scan_level(
+                layout,
+                wide,
+                level2,
+                ScanPush {
+                    count: level1,
+                    src: level1_sum,
+                    dst: level1_excl,
+                    sum: level2_sum,
+                    ..ScanPush::default()
+                },
+            );
+            self.sim_pass_barrier();
+            self.scan_level(
+                layout,
+                wide,
+                1,
+                ScanPush {
+                    count: level2,
+                    src: level2_sum,
+                    dst: level2_excl,
+                    sum: SCAN_NO_SUM,
+                    flags: header,
+                    ..ScanPush::default()
+                },
+            );
+            self.sim_pass_barrier();
+            self.scan_add(layout, wide, level1, level1_excl, level2_excl);
+            self.sim_pass_barrier();
+        }
+        self.scan_add(layout, wide, wide, excl, level1_excl);
+    }
+
+    fn scan_level(&mut self, layout: Handle, wide: u32, dispatch: u32, push: ScanPush) {
+        self.sim_words(layout, MODE_SCAN_LEVEL, wide, dispatch, push);
+    }
+
+    fn scan_add(&mut self, layout: Handle, wide: u32, count: u32, dst: u32, parent: u32) {
+        self.sim_words(
+            layout,
+            MODE_SCAN_ADD,
+            wide,
+            sim_groups(count).max(1),
+            ScanPush {
+                count,
+                dst,
+                parent,
+                ..ScanPush::default()
+            },
+        );
+    }
+
+    fn sim_words(&mut self, layout: Handle, mode: u32, wide: u32, dispatch: u32, push: ScanPush) {
+        let words = [
+            mode,
+            wide,
+            push.count,
+            push.src,
+            push.dst,
+            push.sum,
+            push.parent,
+            push.flags,
+        ];
         unsafe {
             (self.fns.cmd_push)(
                 self.cmd,
                 layout,
                 0x20,
                 0,
-                16,
+                32,
                 words.as_ptr().cast(),
             );
             (self.fns.cmd_dispatch)(self.cmd, dispatch.max(1), 1, 1);
@@ -499,6 +668,10 @@ impl Gpu {
         let count = self.particle_job.map_or(0, |job| job.count);
         let sim_ms = self.particle_span_ms(queries, 0, 1);
         let draw_ms = self.particle_span_ms(queries, 2, 3);
+        let sim_init_ms = self.particle_query_ms(queries, 0, 4);
+        let sim_death_ms = self.particle_query_ms(queries, 4, 5);
+        let sim_emit_ms = self.particle_query_ms(queries, 5, 6);
+        let sim_compact_ms = self.particle_query_ms(queries, 6, 7);
         // The shared ring may still be written by the other flight. These two
         // words were copied at the end of this flight's compute.
         let alive = read_u32_at(self, &stats, 0).unwrap_or(0);
@@ -506,6 +679,10 @@ impl Gpu {
         let draw_instances = read_u32_at(self, &indirect, 4).unwrap_or(0);
         self.particle_stats = ParticleStats {
             sim_ms,
+            sim_init_ms,
+            sim_death_ms,
+            sim_emit_ms,
+            sim_compact_ms,
             sort_ms: 0.0,
             draw_ms,
             alive,
@@ -528,6 +705,49 @@ impl Gpu {
         let size = read_u32_at(self, &state, 56)?;
         let groups = read_u32_at(self, &state, 60)?;
         Ok((size, groups))
+    }
+
+    /// `(workgroup size, group count)` of the block-sum scan.
+    pub(super) fn particle_scan_launch(&self) -> Result<(u32, u32), String> {
+        let Some(pass) = self.particle_pass.as_ref() else {
+            return Err("particle pass missing".into());
+        };
+        let state = copy_buffer_handle(&pass.state);
+        let size = read_u32_at(self, &state, 64)?;
+        let groups = read_u32_at(self, &state, 68)?;
+        Ok((size, groups))
+    }
+
+    /// Milliseconds for init, death scan, emit, and alive compact.
+    ///
+    /// Lavapipe timestamps. They are not a desktop-GPU score. The outer
+    /// `sim_ms` is still queries 0 and 1, and it does not include the witness read.
+    pub(super) fn particle_sim_parts(&self) -> [f64; 4] {
+        let Some(pass) = self.particle_pass.as_ref() else {
+            return [0.0; 4];
+        };
+        let pool = pass.flights[self.particle_submitted.min(1)].queries;
+        [
+            self.particle_query_ms(pool, 0, 4),
+            self.particle_query_ms(pool, 4, 5),
+            self.particle_query_ms(pool, 5, 6),
+            self.particle_query_ms(pool, 6, 7),
+        ]
+    }
+
+    fn particle_query_ms(&self, pool: Handle, start: u32, end: u32) -> f64 {
+        if pool.is_null() || self.timestamp_period <= 0.0 || end <= start {
+            return 0.0;
+        }
+        let Some(first) = read_timestamp(self, pool, start) else {
+            return 0.0;
+        };
+        let Some(second) = read_timestamp(self, pool, end) else {
+            return 0.0;
+        };
+        super::tick_delta(first, second, self.timestamp_bits) as f64
+            * f64::from(self.timestamp_period)
+            / 1.0e6
     }
 
     pub(super) fn particle_positions(&self) -> Result<Vec<[f32; 3]>, String> {
@@ -556,6 +776,11 @@ impl Gpu {
         let Some(pass) = self.particle_pass.take() else {
             return;
         };
+        unsafe {
+            if !pass.emit_pipe.is_null() {
+                (self.fns.destroy_pipeline)(self.device, pass.emit_pipe, std::ptr::null());
+            }
+        }
         destroy_pipe(
             self,
             pass.flights[0].queries,
@@ -736,8 +961,7 @@ impl Gpu {
         let canary = self.make_buffer(4, 0x2, Memory::Device)?;
         let touch = self.make_buffer(4, 0x20 | 0x2, Memory::Device)?;
         let sink = self.make_buffer(4, 0x20, Memory::Device)?;
-        let scan_groups = u64::from(sim_groups(budget).max(1));
-        let scan = self.make_buffer(slots * 8 + scan_groups * 8, 0x20, Memory::Device)?;
+        let scan = self.make_buffer(scan_buffer_bytes(budget), 0x20, Memory::Device)?;
         self.write_buffer(&state, &zero_bytes(STATE_BYTES)?)?;
         let depth_bytes = depth_bytes.max(4);
         let mut built = Vec::with_capacity(2);
@@ -750,7 +974,7 @@ impl Gpu {
             self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
             self.write_buffer(&stats, &zero_bytes(8)?)?;
             let queries = if self.timestamp_period > 0.0 {
-                self.make_query_pool_n(4).unwrap_or(std::ptr::null_mut())
+                self.make_query_pool_n(8).unwrap_or(std::ptr::null_mut())
             } else {
                 std::ptr::null_mut()
             };
@@ -789,6 +1013,7 @@ impl Gpu {
         write_storage_bindings_from(self, set1, 8, &[scan.buffer])?;
         write_depth_image(self, set1, dummy.view, sampler);
         write_depth_image(self, compute.2, dummy.view, sampler);
+        let emit_pipe = self.particle_emit_pipeline(compute.3)?;
         let read_pipe = self.particle_touch_read_pipeline(touch.buffer, sink.buffer)?;
         let draw = self.particle_draw_pipeline(compact0.buffer)?;
         let (draw_pool1, draw_set1) = alloc_set(self, draw.0, 1)?;
@@ -844,6 +1069,7 @@ impl Gpu {
             compute_desc_layout: compute.0,
             compute_layout: compute.3,
             compute_pipe: compute.4,
+            emit_pipe,
             read_desc_layout: read_pipe.0,
             read_layout: read_pipe.3,
             read_pipe: read_pipe.4,
@@ -926,6 +1152,7 @@ impl Gpu {
         push_handle(&mut out, pass.compute_desc_layout);
         push_handle(&mut out, pass.compute_layout);
         push_handle(&mut out, pass.compute_pipe);
+        push_handle(&mut out, pass.emit_pipe);
         push_handle(&mut out, pass.read_desc_layout);
         push_handle(&mut out, pass.read_layout);
         push_handle(&mut out, pass.read_pipe);
@@ -1076,13 +1303,22 @@ impl Gpu {
         let (pool, set) = alloc_compute_set(self, desc_layout)?;
         write_storage_bindings(self, set, buffers)?;
         write_storage_bindings_from(self, set, 8, &[scan])?;
-        let pipe_layout = create_pipe_layout(self, desc_layout, 16, 0x20)?;
+        let pipe_layout = create_pipe_layout(self, desc_layout, 32, 0x20)?;
         let module = self.shader(super::PARTICLES_COMP_SPV)?;
         let pipe = create_compute_pipe(self, module, pipe_layout)?;
         unsafe {
             (self.fns.destroy_shader)(self.device, module, std::ptr::null());
         }
         Ok((desc_layout, pool, set, pipe_layout, pipe))
+    }
+
+    fn particle_emit_pipeline(&mut self, layout: Handle) -> Result<Handle, String> {
+        let module = self.shader(super::PARTICLES_EMIT_SPV)?;
+        let pipe = create_compute_pipe(self, module, layout)?;
+        unsafe {
+            (self.fns.destroy_shader)(self.device, module, std::ptr::null());
+        }
+        Ok(pipe)
     }
 
     fn particle_touch_read_pipeline(
@@ -1194,6 +1430,21 @@ impl super::Renderer {
     /// Returns an error when the state buffer cannot be mapped.
     pub fn particle_sim_launch(&self) -> Result<(u32, u32), String> {
         self.gpu.particle_sim_launch()
+    }
+
+    /// Block-sum scan launch: workgroup size and group count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the state buffer cannot be mapped.
+    pub fn particle_scan_launch(&self) -> Result<(u32, u32), String> {
+        self.gpu.particle_scan_launch()
+    }
+
+    /// Init, death, emit, and compact spans inside `sim_ms`, in milliseconds.
+    #[must_use]
+    pub fn particle_sim_parts(&self) -> [f64; 4] {
+        self.gpu.particle_sim_parts()
     }
 
     /// Compacted positions from the last waited frame, metres.
@@ -2188,6 +2439,27 @@ fn zero_host_buffer(gpu: &Gpu, buffer: &Buffer) -> Result<(), String> {
         (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
     }
     Ok(())
+}
+
+fn read_timestamp(gpu: &Gpu, pool: Handle, query: u32) -> Option<u64> {
+    let mut raw = 0u64;
+    let got = unsafe {
+        (gpu.fns.get_query_results)(
+            gpu.device,
+            pool,
+            query,
+            1,
+            8,
+            &mut raw as *mut u64 as *mut c_void,
+            8,
+            0x1,
+        )
+    };
+    if got != 0 {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
 fn read_u32_at(gpu: &Gpu, buffer: &Buffer, offset: u64) -> Result<u32, String> {

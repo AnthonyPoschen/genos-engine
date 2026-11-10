@@ -184,7 +184,7 @@ fn particle_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_particle_stats",
-            "Last particle step: fx.sim_ms, fx.sort_ms, fx.draw_ms, fx.alive, fx.spawned, fx.overdraw_px, fx.vram_mb, plus max_particles, count, and draw_instances. sim_ms and draw_ms are lavapipe timestamps, or 0 before a frame. sort_ms and overdraw_px stay 0. They are not a desktop-GPU score. vram_mb is decimal megabytes of the stage-1 buffers.",
+            "Last particle step: fx.sim_ms, fx.sim_init_ms, fx.sim_death_ms, fx.sim_emit_ms, fx.sim_compact_ms, fx.sort_ms, fx.draw_ms, fx.alive, fx.spawned, fx.overdraw_px, fx.vram_mb, plus max_particles, count, and draw_instances. sim_ms and draw_ms are timestamps, or 0 before a frame. The four sim_* pieces sit inside sim_ms. sort_ms and overdraw_px stay 0. They are not a desktop-GPU score. vram_mb is decimal megabytes of the stage-1 buffers.",
         ),
         spec(
             "fx.stats",
