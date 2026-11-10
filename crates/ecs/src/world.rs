@@ -249,7 +249,9 @@ struct Removal {
 /// are contiguous. A write stores the current clock on that cell, then
 /// advances it. [`Self::clock`] is the next tick a write will store.
 /// [`Self::changes_since`] returns cells and removals whose tick is that
-/// cursor or newer, in handle-index order, then tick, then component name.
+/// cursor or newer, in handle-index order, then wrapping distance from the
+/// cursor, then component name. A removal older than half the tick space is
+/// dropped, so a wrapped clock does not re-emit it.
 pub struct World {
     slots: Vec<Slot>,
     free: BTreeSet<u32>,
@@ -374,15 +376,7 @@ impl World {
     /// [`StoreError::Full`] when the table cannot grow.
     pub fn spawn(&mut self) -> Result<SceneHandle, StoreError> {
         let handle = self.alloc_handle()?;
-        let row = self
-            .archetypes
-            .first()
-            .map_or(0, |arch| arch.entities.len());
-        let Some(arch) = self.archetypes.first_mut() else {
-            return Err(StoreError::Unknown);
-        };
-        arch.entities.push(handle);
-        self.bind_row(handle, 0, row)?;
+        self.attach_new(handle)?;
         Ok(handle)
     }
 
@@ -568,15 +562,19 @@ impl World {
         out
     }
 
-    /// Components and removals at or after `tick`, sorted by handle index, then tick, then name.
+    /// Components and removals at or after `tick`, sorted by handle index, then
+    /// wrapping distance from `tick`, then name.
     ///
     /// Pass the value [`Self::clock`] returned before the writes. A cursor of
-    /// `0` returns every stored tick, including ones past the wrapping half,
-    /// because stored ticks start at 1 and `0` means "from the start". Any
-    /// other cursor uses a wrapping compare, so a tick just after `u32::MAX`
-    /// is still ahead of a cursor of `u32::MAX`.
+    /// `0` returns every stored tick that has not been retired, because stored
+    /// ticks start at 1 and `0` means "from the start". Any other cursor uses
+    /// a wrapping compare, so a tick just after `u32::MAX` is still ahead of a
+    /// cursor of `u32::MAX`. Removals older than half the tick space are
+    /// omitted. The same distance orders the batch, so a removal at `u32::MAX`
+    /// stays ahead of the re-insert at tick `1`.
     #[must_use]
     pub fn changes_since(&self, tick: u32) -> Vec<ComponentDelta> {
+        let newest = newest_issued(self.clock);
         let mut out = Vec::new();
         for arch in &self.archetypes {
             for column in &arch.columns {
@@ -594,6 +592,9 @@ impl World {
             }
         }
         for removal in &self.removals {
+            if removal_expired(removal.tick, newest) {
+                continue;
+            }
             if changed_since(removal.tick, tick) {
                 out.push(ComponentDelta {
                     handle: removal.handle,
@@ -604,11 +605,16 @@ impl World {
             }
         }
         out.sort_by(|left, right| {
-            (left.handle.index(), left.tick, left.component).cmp(&(
-                right.handle.index(),
-                right.tick,
-                right.component,
-            ))
+            (
+                left.handle.index(),
+                left.tick.wrapping_sub(tick),
+                left.component,
+            )
+                .cmp(&(
+                    right.handle.index(),
+                    right.tick.wrapping_sub(tick),
+                    right.component,
+                ))
         });
         out
     }
@@ -725,7 +731,53 @@ impl World {
     }
 
     fn take_tick(&mut self) -> u32 {
-        take_tick(&mut self.clock)
+        let tick = take_tick(&mut self.clock);
+        self.retire_removals();
+        tick
+    }
+
+    fn retire_removals(&mut self) {
+        let newest = newest_issued(self.clock);
+        self.removals
+            .retain(|removal| !removal_expired(removal.tick, newest));
+    }
+
+    /// Place `handle` when the slot is free and already carries its generation.
+    ///
+    /// A post-wrap spawn reuses the index. The follower applies the despawn
+    /// first, then this payload. The generation matches, so the object is
+    /// created instead of counting a stale reject.
+    fn adopt_for_apply(&mut self, handle: SceneHandle) -> Result<(), StoreError> {
+        if self.alive(handle) {
+            return Ok(());
+        }
+        let Ok(index) = usize::try_from(handle.index()) else {
+            self.note_stale();
+            return Err(StoreError::Stale);
+        };
+        let generation_matches = self
+            .slots
+            .get(index)
+            .is_some_and(|slot| slot.generation == handle.generation() && slot.place.is_none());
+        if !generation_matches {
+            self.note_stale();
+            return Err(StoreError::Stale);
+        }
+        self.free.remove(&handle.index());
+        self.attach_new(handle)
+    }
+
+    fn attach_new(&mut self, handle: SceneHandle) -> Result<(), StoreError> {
+        let row = self
+            .archetypes
+            .first()
+            .map(|arch| arch.entities.len())
+            .ok_or(StoreError::Unknown)?;
+        let Some(arch) = self.archetypes.first_mut() else {
+            return Err(StoreError::Unknown);
+        };
+        arch.entities.push(handle);
+        self.bind_row(handle, 0, row)
     }
 
     fn drop_object(&mut self, handle: SceneHandle) -> Result<(), StoreError> {
@@ -1004,7 +1056,10 @@ fn apply_component<T: Component>(
     bytes: &[u8],
 ) -> Result<(), StoreError> {
     match T::decode(bytes) {
-        Ok(value) => world.insert(handle, value),
+        Ok(value) => {
+            world.adopt_for_apply(handle)?;
+            world.insert(handle, value)
+        }
         Err(DecodeError::Truncated | DecodeError::Trailing) => Err(StoreError::Decode),
     }
 }
@@ -1075,6 +1130,8 @@ fn pop_rows(dest: &mut Archetype, pushed: &[usize]) {
     }
 }
 
+const TICK_HALF: u32 = 1 << 31;
+
 /// `true` when `tick` is the cursor or newer.
 ///
 /// A cursor of `0` means every stored tick. Stored ticks start at 1, so this
@@ -1085,7 +1142,21 @@ fn changed_since(tick: u32, since: u32) -> bool {
     if since == 0 {
         return tick != 0;
     }
-    tick.wrapping_sub(since) < (1_u32 << 31)
+    tick.wrapping_sub(since) < TICK_HALF
+}
+
+/// The last tick a write stored. Clock `1` follows `u32::MAX`, because tick
+/// `0` is never issued.
+fn newest_issued(clock: u32) -> u32 {
+    if clock == 1 {
+        u32::MAX
+    } else {
+        clock.wrapping_sub(1)
+    }
+}
+
+fn removal_expired(tick: u32, newest: u32) -> bool {
+    newest.wrapping_sub(tick) >= TICK_HALF
 }
 
 fn take_tick(clock: &mut u32) -> u32 {
@@ -1182,8 +1253,103 @@ mod tests {
         assert_eq!(next[0].tick, 1);
         let across = world.changes_since(cursor);
         assert_eq!(across.len(), 2, "the write before the wrap was skipped");
-        assert!(across.iter().any(|delta| delta.tick == u32::MAX));
-        assert!(across.iter().any(|delta| delta.tick == 1));
+        assert_eq!(across[0].tick, u32::MAX);
+        assert_eq!(across[0].component, "health");
+        assert_eq!(across[1].tick, 1);
+        assert_eq!(across[1].component, "tag");
+        let mut follower = World::new();
+        follower.register::<Health>().expect("health");
+        follower.register::<Tag>().expect("tag");
+        let copied = follower.spawn().expect("spawn");
+        assert_eq!(copied, handle);
+        for delta in &across {
+            follower.apply_delta(delta).expect("apply");
+        }
+        assert_eq!(follower.get::<Health>(copied).expect("health").0, 1);
+        assert_eq!(follower.get::<Tag>(copied).expect("tag").0, 4);
+    }
+
+    #[test]
+    fn a_follower_matches_after_a_remove_and_readd_across_the_wrap() {
+        let mut source = World::new();
+        let handle = source.spawn_with(Health(1)).expect("spawn");
+        source.insert(handle, Tag(3)).expect("tag");
+        source.clock = u32::MAX;
+        let cursor = source.clock();
+        source.remove::<Tag>(handle).expect("remove");
+        source.insert(handle, Tag(9)).expect("readd");
+        let deltas = source.changes_since(cursor);
+        let tags: Vec<_> = deltas
+            .iter()
+            .filter(|delta| delta.component == "tag")
+            .collect();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].tick, u32::MAX);
+        assert_eq!(tags[0].bytes.len(), 0);
+        assert_eq!(tags[1].tick, 1);
+        assert_ne!(tags[1].bytes.len(), 0);
+
+        let mut follower = World::new();
+        follower.register::<Health>().expect("health");
+        follower.register::<Tag>().expect("tag");
+        let copied = follower.spawn_with(Health(1)).expect("spawn");
+        follower.insert(copied, Tag(3)).expect("tag");
+        assert_eq!(copied, handle);
+        for delta in &deltas {
+            follower.apply_delta(delta).expect("apply");
+        }
+        assert_eq!(
+            follower.get::<Tag>(copied).expect("tag").0,
+            source.get::<Tag>(handle).expect("tag").0
+        );
+        assert_eq!(
+            follower.get::<Health>(copied).expect("health").0,
+            source.get::<Health>(handle).expect("health").0
+        );
+    }
+
+    #[test]
+    fn a_pre_wrap_despawn_stays_ahead_of_the_post_wrap_record() {
+        let mut source = World::new();
+        let old = source.spawn_with(Health(1)).expect("spawn");
+        source.clock = u32::MAX;
+        let cursor = source.clock();
+        source.despawn(old).expect("despawn");
+        let renewed = source.spawn_with(Health(7)).expect("reuse");
+        let deltas = source.changes_since(cursor);
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas[0].handle, old);
+        assert_eq!(deltas[0].tick, u32::MAX);
+        assert_eq!(deltas[0].bytes.len(), 0);
+        assert_eq!(deltas[1].handle, renewed);
+        assert_eq!(deltas[1].tick, 1);
+        assert_ne!(deltas[1].bytes.len(), 0);
+
+        let mut follower = World::new();
+        follower.register::<Health>().expect("health");
+        let seeded = follower.spawn_with(Health(1)).expect("seed");
+        assert_eq!(seeded, old);
+        let rejects = follower.stats().stale_rejects;
+        for delta in &deltas {
+            follower.apply_delta(delta).expect("apply");
+        }
+        assert_eq!(follower.stats().stale_rejects, rejects);
+        assert!(!follower.alive(old));
+        assert_eq!(follower.get::<Health>(renewed).expect("health").0, 7);
+    }
+
+    #[test]
+    fn an_old_removal_is_not_reemitted_after_the_half_range() {
+        let mut world = World::new();
+        let handle = world.spawn_with(Health(1)).expect("spawn");
+        world.despawn(handle).expect("despawn");
+        let tick = world.changes_since(0)[0].tick;
+        world.clock = tick.wrapping_add(TICK_HALF).wrapping_add(1);
+        assert_eq!(world.changes_since(0).len(), 0);
+        let fresh = world.spawn_with(Health(3)).expect("later");
+        let deltas = world.changes_since(0);
+        assert!(deltas.iter().all(|delta| delta.handle == fresh));
+        assert!(deltas.iter().all(|delta| !delta.bytes.is_empty()));
     }
 
     #[test]

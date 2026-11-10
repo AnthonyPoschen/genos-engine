@@ -17,8 +17,8 @@
 //!   copy. The store does not rewind itself.
 //! - Determinism: the same spawns and writes produce the same handles, the same
 //!   ticks, and the same [`World::changes_since`] bytes. Query order follows
-//!   table creation, then row. Deltas are sorted by handle index, then tick,
-//!   then name.
+//!   table creation, then row. Deltas are sorted by handle index, then the
+//!   wrapping distance from the cursor, then name.
 //! - Headless server: no window, no Vulkan, no threads. The store is data.
 
 mod bytes;
