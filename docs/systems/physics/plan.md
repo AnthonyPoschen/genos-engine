@@ -62,7 +62,7 @@ Primitives use closest points (`primitive_contact`). A mesh tests each convex pi
 
 The character controller (`crates/input/src/action.rs`, `character_controller`) binds `move` and `look`. It does not create a body.
 
-`genos-load` animation (`crates/load/src/animation.rs`) is one transform track (translation, quaternion, scale). [Loading](../loading.md) says glTF skins, morph targets, and glTF animations are ignored, and the text animation does not move a mesh. There is no skeleton, so nothing can plant a foot.
+The one-node text clip is gone. Skeletal sampling lives in `crates/scene/src/animation.rs` and can move a physics body by root motion. A foot plant is still the later IK hook: physics owns the ground query, and the pelvis offset does not move the body.
 
 `genos-math` components are `f32` (`crates/math/src/lib.rs`). The camera far plane is 200 m (`CAMERA_FAR` in `camera.rs`).
 

@@ -16,6 +16,90 @@ pub fn dump_bytes(bytes: &[u8]) -> Result<Value, LoadError> {
     Ok(dump(&doc))
 }
 
+/// The Low settings row, then the 32×60×52,356 byte total.
+#[must_use]
+pub fn settings_text() -> String {
+    let settings = genos_scene::AnimationSettings::preset(genos_scene::AnimQuality::Low);
+    let bytes = genos_scene::AnimationSettings::skin_bytes(32, 60, 52_356);
+    format!("{}\nskin_bytes={bytes}", settings.to_text())
+}
+
+/// Apply one `key=value` knob to the Low row and return the text.
+///
+/// # Errors
+///
+/// A line that is not `key=value`, or a key the table does not know.
+pub fn apply_setting(line: &str) -> Result<String, String> {
+    let mut settings = genos_scene::AnimationSettings::preset(genos_scene::AnimQuality::Low);
+    let Some((key, value)) = line.split_once('=') else {
+        return Err(format!("use key=value, got {line}"));
+    };
+    settings.set_key(key, value)?;
+    Ok(settings.to_text())
+}
+
+/// Body X after a one-metre root translation over 60 ticks. The pose root stays at rest.
+#[must_use]
+pub fn replay_root_x() -> f32 {
+    use genos_load::{Channel, ChannelPath, Clip, Interpolation};
+    use genos_math::Vec3;
+    use genos_physics::Body;
+    use genos_scene::{
+        tick, AnimCharacter, AnimFrame, AnimGraph, AnimQuality, AnimationSettings, PoseSource,
+        SIM_HZ,
+    };
+    let clip = Clip {
+        name: "move".into(),
+        duration: 1.0,
+        skin: 0,
+        animation: 0,
+        channels: vec![Channel {
+            joint: 0,
+            path: ChannelPath::Translation,
+            interpolation: Interpolation::Linear,
+            times: vec![0.0, 1.0],
+            values: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        }],
+    };
+    let rest_t = [[0.0, 0.0, 0.0]];
+    let rest_r = [[0.0, 0.0, 0.0, 1.0]];
+    let rest_s = [[1.0, 1.0, 1.0]];
+    let Ok(graph) = AnimGraph::parse(r#"{"states":[{"name":"move","clip":0}]}"#) else {
+        return 0.0;
+    };
+    let posed = PoseSource {
+        clips: std::slice::from_ref(&clip),
+        rest_t: &rest_t,
+        rest_r: &rest_r,
+        rest_s: &rest_s,
+    };
+    let mut character = AnimCharacter::bind(1, AnimationSettings::preset(AnimQuality::Low));
+    let mut body = Body::sphere(Vec3::ZERO, 1.0, 0.5);
+    tick(
+        &graph,
+        &posed,
+        &mut character,
+        AnimFrame {
+            tick: 0,
+            distance_m: 0.0,
+        },
+        Some(&mut body),
+        &mut [],
+    );
+    tick(
+        &graph,
+        &posed,
+        &mut character,
+        AnimFrame {
+            tick: SIM_HZ,
+            distance_m: 0.0,
+        },
+        Some(&mut body),
+        &mut [],
+    );
+    body.position.x
+}
+
 /// One JSON object for a `.gskin`: joints, clips, instance indices, and notes.
 ///
 /// # Errors
@@ -282,5 +366,17 @@ mod tests {
         assert!(text.contains("\"parent\":-1"));
         assert!(text.contains("\"clip_bytes\":"));
         assert!(text.contains("linear"));
+    }
+
+    #[test]
+    fn settings_text_names_the_low_row_and_replay_moves_one_metre() {
+        let text = super::settings_text();
+        assert!(text.contains("max_skinned=32"));
+        assert!(text.contains("skin_bytes=67107840"));
+        let edited = super::apply_setting("ik=on").expect("set");
+        assert!(edited.contains("ik=on"));
+        assert!(super::apply_setting("nope").is_err());
+        let moved = super::replay_root_x();
+        assert!((moved - 1.0).abs() < 1.0e-4);
     }
 }

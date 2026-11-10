@@ -3,13 +3,14 @@
 //! Lights and objects live here. The renderer decides which light reaches which surface.
 //! Positions and directions use `genos-math`.
 
+mod animation;
 mod camera;
-mod hdr;
 mod codimation;
 mod debug_settings;
 mod event_loop;
 mod fog;
 mod fps_counter;
+mod hdr;
 mod lighting;
 mod menu;
 mod reflections;
@@ -17,6 +18,11 @@ mod script;
 mod settings;
 mod types;
 
+pub use animation::{
+    pose_time, tick, AnimCharacter, AnimCue, AnimFrame, AnimGraph, AnimQuality, AnimState,
+    AnimationSettings, FiredCue, PoseSource, Predicate, TickReport, JOINT_BYTES, SIM_HZ,
+    SKIN_BUDGET_BYTES, VERTEX_BYTES,
+};
 pub use camera::{
     look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_FAR,
     CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
@@ -26,25 +32,25 @@ pub use debug_settings::DebugSettings;
 pub use event_loop::EventLoopSettings;
 pub use fog::{
     apply_fog_arg, check_fog_arg, fog_flag_needs_value, parse_fog_count, parse_fog_grid,
-    parse_fog_number, parse_fog_switch,
-    FogCli, FogEnv, FogInspect, FogSettings, FogShape, FogVolume,
+    parse_fog_number, parse_fog_switch, FogCli, FogEnv, FogInspect, FogSettings, FogShape,
+    FogVolume,
 };
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
-pub use hdr::{
-    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings,
-    OutputMode, HDR_ENV_MIRRORS,
-};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
+pub use hdr::{
+    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings, OutputMode,
+    HDR_ENV_MIRRORS,
+};
 pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
-    lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
-    DirectSettings, GiSettings, GpuBuckets, LightingExperimentSettings, parse_lighting_toggles,
+    lighting_flag_needs_value, parse_lighting_toggles, AmbientMode, AmbientSettings,
+    BounceSettings, DenoiserSettings, DirectSettings, GiSettings, GpuBuckets, LampPickMode,
+    LampPickSettings, LightingExperimentSettings, LightingPreset, LightingSettings, ProbeSettings,
+    ShadowFilter, ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings,
+    LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
+    LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS, LIGHTING_BOUNCES_UNLIMITED,
     LIGHTING_DEFAULT_SC_FLAGS, LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
-    LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES, LampPickMode, LampPickSettings, LightingPreset,
-    LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
-    SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
-    LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,
-    LIGHTING_BOUNCES_UNLIMITED,
+    LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use reflections::{

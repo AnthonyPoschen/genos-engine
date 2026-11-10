@@ -8,6 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
+genos-json = { path = "../json" }
+genos-load = { path = "../load" }
 genos-math = { path = "../math" }
 genos-physics = { path = "../physics" }
 rhai = "=1.26.0"

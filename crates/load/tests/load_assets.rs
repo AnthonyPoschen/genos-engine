@@ -1,22 +1,68 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::manual_assert_eq, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::bool_to_int_with_if,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Public load entry points. Each test starts at `load_*` with bytes or a path.
 
 use std::path::{Path, PathBuf};
 
 use genos_load::{
-    load_animation, load_font, load_gltf_file, load_image, load_material, load_mesh, load_pcm,
-    load_texture, load_texture_map, FileSource, LoadError, MemorySource, OutlinePoint,
+    load_font, load_gltf_file, load_image, load_material, load_mesh, load_pcm, load_texture,
+    load_texture_map, FileSource, LoadError, MemorySource, OutlinePoint,
 };
 
 const QUAD: [u8; 16] = [
@@ -49,16 +95,6 @@ f 1/1/1 2/2/2 3/3/3
 const MATERIAL: &str = "\
 color 0.25 0.5 0.75
 texture stone.png
-";
-
-const ANIMATION: &str = "\
-key 0 0 0 0 0 0 0 1 1 1 1
-key 2 4 6 8 0 0.70710677 0 0.70710677 3 5 7
-";
-
-const SHORT_ARC: &str = "\
-key 0 0 0 0 0 0 0 1 1 1 1
-key 1 0 0 0 0 -0.17364818 0 -0.98480775 1 1 1
 ";
 
 fn fixture(name: &str) -> PathBuf {
@@ -224,41 +260,6 @@ fn material_keeps_color_and_texture_file() {
     let commented = load_material(&MemorySource::new(b"# note\ncolor 1 0 0\n")).expect("comment");
     assert_eq!(commented.color, [1.0, 0.0, 0.0]);
     assert_eq!(commented.texture, None);
-}
-
-#[test]
-fn animation_halfway_translation_and_scale_are_midpoints() {
-    let animation = load_animation(&MemorySource::new(ANIMATION.as_bytes())).expect("animation");
-    assert_eq!(animation.keys.len(), 2);
-    let pose = animation.sample(1.0).expect("sample");
-    assert_eq!(pose.translation, [2.0, 3.0, 4.0]);
-    assert_eq!(pose.scale, [2.0, 3.0, 4.0]);
-    let start = animation.keys[0].pose.rotation;
-    let end = animation.keys[1].pose.rotation;
-    assert!(pose.rotation != start);
-    assert!(pose.rotation != end);
-    assert!(pose.rotation[1] > 0.2 && pose.rotation[1] < 0.55);
-    assert!(pose.rotation[3] > 0.85 && pose.rotation[3] < 0.98);
-    let length = pose
-        .rotation
-        .iter()
-        .map(|component| component * component)
-        .sum::<f32>()
-        .sqrt();
-    assert!((length - 1.0).abs() < 1.0e-4);
-}
-
-#[test]
-fn animation_rotation_takes_the_short_arc() {
-    let animation = load_animation(&MemorySource::new(SHORT_ARC.as_bytes())).expect("short arc");
-    let pose = animation.sample(0.5).expect("sample");
-    let start = animation.keys[0].pose.rotation;
-    let dot = pose.rotation[0] * start[0]
-        + pose.rotation[1] * start[1]
-        + pose.rotation[2] * start[2]
-        + pose.rotation[3] * start[3];
-    assert!(dot > 0.9);
-    assert!(pose.rotation != start);
 }
 
 #[test]
