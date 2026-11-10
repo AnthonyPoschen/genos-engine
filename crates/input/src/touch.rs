@@ -120,19 +120,31 @@ impl TouchSurface {
     }
 
     /// Apply this frame's points, in order. Gestures accumulate until [`Self::begin_frame`].
+    ///
+    /// Positions are written first, including an `Ended` sample. The pinch runs
+    /// while those contacts are still present. Lifts are classified after that.
     pub fn apply(&mut self, points: &[TouchPoint]) {
         self.reported = points.to_vec();
         for point in points {
             match point.phase {
                 TouchPhase::Began => self.track(point, true),
                 TouchPhase::Moved => self.track(point, false),
-                TouchPhase::Ended => self.end(point),
-                TouchPhase::Cancelled => {
-                    self.contacts.retain(|contact| contact.id != point.id);
-                }
+                TouchPhase::Ended => self.place(point),
+                TouchPhase::Cancelled => {}
             }
         }
         self.pinch();
+        for point in points {
+            if point.phase == TouchPhase::Ended {
+                self.classify_lift(point);
+            }
+        }
+        self.contacts.retain(|contact| {
+            !points.iter().any(|point| {
+                point.id == contact.id
+                    && matches!(point.phase, TouchPhase::Ended | TouchPhase::Cancelled)
+            })
+        });
     }
 
     #[must_use]
@@ -173,15 +185,21 @@ impl TouchSurface {
         });
     }
 
-    fn end(&mut self, point: &TouchPoint) {
-        let Some(index) = self
+    fn place(&mut self, point: &TouchPoint) {
+        if let Some(contact) = self
             .contacts
-            .iter()
-            .position(|contact| contact.id == point.id)
-        else {
+            .iter_mut()
+            .find(|contact| contact.id == point.id)
+        {
+            contact.x = point.x;
+            contact.y = point.y;
+        }
+    }
+
+    fn classify_lift(&mut self, point: &TouchPoint) {
+        let Some(contact) = self.contacts.iter().find(|contact| contact.id == point.id) else {
             return;
         };
-        let contact = self.contacts.remove(index);
         let dx = point.x - contact.origin_x;
         let dy = point.y - contact.origin_y;
         let length = dx.hypot(dy);
@@ -191,13 +209,18 @@ impl TouchSurface {
                 x: dx / length,
                 y: dy / length,
             });
-        } else if length <= TAP_SLOP {
+        } else if length <= TAP_SLOP && !self.in_pinch_pair(point.id) {
             self.gestures.push(Gesture::Tap {
                 id: point.id,
                 x: point.x,
                 y: point.y,
             });
         }
+    }
+
+    fn in_pinch_pair(&self, id: u64) -> bool {
+        self.pinch_pair
+            .is_some_and(|(left, right)| id == left || id == right)
     }
 
     fn pinch(&mut self) {
@@ -485,6 +508,74 @@ mod tests {
             loaded.to_text().contains("jump.gesture=pinch"),
             "{}",
             loaded.to_text()
+        );
+    }
+
+    #[test]
+    fn a_pinch_that_ends_in_the_same_batch_still_emits() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.set("jump", Vec::new());
+        map.set_gesture("jump", Some(GestureKind::Tap)).unwrap();
+        map.set_2d("zoom", Action2dBinding::default());
+        map.set_gesture("zoom", Some(GestureKind::Pinch)).unwrap();
+
+        input.set_touch_points(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, 40.0, 0.0, TouchPhase::Began),
+        ]);
+        assert!(map.axis_2d(&input, "zoom").y.abs() < 1.0e-4);
+
+        input.begin_frame();
+        input.set_touch_points(&[
+            point(1, 0.0, 0.0, TouchPhase::Ended),
+            point(2, 80.0, 0.0, TouchPhase::Ended),
+        ]);
+        let mut scale = None;
+        for gesture in input.gestures() {
+            if let Gesture::Pinch { scale: value } = *gesture {
+                scale = Some(value);
+            }
+        }
+        assert!(
+            scale.is_some(),
+            "ending in the emitting batch should still pinch, got {:?}",
+            input.gestures()
+        );
+        let scale = scale.unwrap();
+        assert!((scale - 2.0).abs() < 1.0e-4, "80/40, got {scale}");
+        let axis = map.axis_2d(&input, "zoom");
+        assert!(
+            (axis.y - 1.0).abs() < 1.0e-4,
+            "scale 2 saturates the axis, got {axis:?}"
+        );
+        assert!(
+            !map.down(&input, "jump"),
+            "a pinch finger that lifts inside the tap slop is not a tap"
+        );
+    }
+
+    #[test]
+    fn pinch_scale_follows_the_action_sensitivity() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.set_2d("zoom", Action2dBinding::default());
+        map.set_gesture("zoom", Some(GestureKind::Pinch)).unwrap();
+        map.set_sensitivity("zoom", 2.0).unwrap();
+
+        input.set_touch_points(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, 100.0, 0.0, TouchPhase::Began),
+        ]);
+        input.begin_frame();
+        input.set_touch_points(&[
+            point(1, 0.0, 0.0, TouchPhase::Moved),
+            point(2, 120.0, 0.0, TouchPhase::Moved),
+        ]);
+        let axis = map.axis_2d(&input, "zoom");
+        assert!(
+            (axis.y - 0.4).abs() < 1.0e-4,
+            "(1.2 - 1) times sensitivity 2, got {axis:?}"
         );
     }
 }
