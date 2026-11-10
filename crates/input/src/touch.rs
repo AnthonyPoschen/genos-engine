@@ -3,15 +3,24 @@
 //! The window writes points. This module does not read the operating system.
 //! A tap, a swipe, and a pinch are recognized here. The action map binds each
 //! one to an action.
+//!
+//! Coordinates are points, the pixel space the window already uses. Positive Y
+//! follows that space. This module does not flip Y.
 
-/// How far a finger may drift and still count as a tap, in the same units as the point.
+/// How far a finger may drift and still count as a tap, in points (pixels).
 pub const TAP_SLOP: f32 = 16.0;
-/// How far a finger must travel before the lift is a swipe.
+/// How far a finger must travel before the lift is a swipe, in points (pixels).
 pub const SWIPE_MIN: f32 = 48.0;
-/// A pinch is reported when the two-finger span changes by at least this fraction.
+/// A pinch is reported when the span has changed by at least this fraction
+/// from the span at the start of the gesture, or from the last span that emitted.
 const PINCH_FRACTION: f32 = 0.1;
+/// A span at or below this, in points, is not a pinch baseline. Fingers that
+/// start together set the baseline on the first sample that exceeds it.
+const PINCH_MIN_SPAN: f32 = 1.0;
 
 /// One sample of a finger. The platform sends the phase.
+///
+/// `x` and `y` are in points (pixels), the same space as [`TAP_SLOP`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TouchPoint {
     pub id: u64,
@@ -43,7 +52,8 @@ pub enum Gesture {
         x: f32,
         y: f32,
     },
-    /// `scale` is the new two-finger span divided by the previous span. `1` is unchanged.
+    /// `scale` is the new span divided by the span at gesture start, or by the
+    /// last span that emitted. `1` is unchanged. It is not the previous sample.
     Pinch {
         scale: f32,
     },
@@ -92,7 +102,10 @@ pub struct TouchSurface {
     contacts: Vec<Contact>,
     reported: Vec<TouchPoint>,
     gestures: Vec<Gesture>,
+    /// Span at the start of the pinch, or the span of the last emitted pinch.
     pinch_span: Option<f32>,
+    /// The two contact ids that define the pinch. A lift of either one drops it.
+    pinch_pair: Option<(u64, u64)>,
 }
 
 impl TouchSurface {
@@ -188,21 +201,70 @@ impl TouchSurface {
     }
 
     fn pinch(&mut self) {
-        if self.contacts.len() < 2 {
+        let Some((left, right)) = self.pinch_ids() else {
+            self.pinch_span = None;
+            self.pinch_pair = None;
+            return;
+        };
+        if self.pinch_pair != Some((left, right)) {
+            self.pinch_span = None;
+            self.pinch_pair = Some((left, right));
+        }
+        let Some(span) = self.span_of(left, right) else {
             self.pinch_span = None;
             return;
+        };
+        let Some(baseline) = self.pinch_span else {
+            if span > PINCH_MIN_SPAN {
+                self.pinch_span = Some(span);
+            }
+            return;
+        };
+        let scale = span / baseline;
+        if (scale - 1.0).abs() >= PINCH_FRACTION {
+            self.gestures.push(Gesture::Pinch { scale });
+            self.pinch_span = Some(span);
         }
-        let span = (self.contacts[0].x - self.contacts[1].x)
-            .hypot(self.contacts[0].y - self.contacts[1].y);
-        if let Some(previous) = self.pinch_span {
-            if previous > 1.0 {
-                let scale = span / previous;
-                if (scale - 1.0).abs() >= PINCH_FRACTION {
-                    self.gestures.push(Gesture::Pinch { scale });
-                }
+    }
+
+    /// Keep the same two ids while both are down. A lift picks a new pair.
+    fn pinch_ids(&self) -> Option<(u64, u64)> {
+        if let Some((left, right)) = self.pinch_pair {
+            let left_down = self.contacts.iter().any(|contact| contact.id == left);
+            let right_down = self.contacts.iter().any(|contact| contact.id == right);
+            if left_down && right_down {
+                return Some((left, right));
             }
         }
-        self.pinch_span = Some(span);
+        self.fresh_pair()
+    }
+
+    fn fresh_pair(&self) -> Option<(u64, u64)> {
+        let mut low = [u64::MAX; 2];
+        let mut count = 0usize;
+        for contact in &self.contacts {
+            if count < 2 {
+                low[count] = contact.id;
+                count += 1;
+                if count == 2 && low[1] < low[0] {
+                    low.swap(0, 1);
+                }
+                continue;
+            }
+            if contact.id < low[0] {
+                low[1] = low[0];
+                low[0] = contact.id;
+            } else if contact.id < low[1] {
+                low[1] = contact.id;
+            }
+        }
+        (count == 2).then_some((low[0], low[1]))
+    }
+
+    fn span_of(&self, left: u64, right: u64) -> Option<f32> {
+        let a = self.contacts.iter().find(|contact| contact.id == left)?;
+        let b = self.contacts.iter().find(|contact| contact.id == right)?;
+        Some((a.x - b.x).hypot(a.y - b.y))
     }
 }
 
@@ -298,5 +360,131 @@ mod tests {
             "span doubled, so the axis saturates at 1, got {axis:?}"
         );
         assert!(input.dump().contains("touch"));
+    }
+
+    #[test]
+    fn a_slow_pinch_emits_before_the_span_doubles() {
+        let mut surface = TouchSurface::new();
+        let mut span = 100.0_f32;
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, span, 0.0, TouchPhase::Began),
+        ]);
+        assert_eq!(surface.gestures(), &[] as &[Gesture]);
+        let mut emitted = false;
+        for _ in 0..40 {
+            span *= 1.023;
+            surface.begin_frame();
+            surface.apply(&[
+                point(1, 0.0, 0.0, TouchPhase::Moved),
+                point(2, span, 0.0, TouchPhase::Moved),
+            ]);
+            if surface
+                .gestures()
+                .iter()
+                .any(|gesture| matches!(gesture, Gesture::Pinch { scale } if *scale >= 1.1))
+            {
+                emitted = true;
+                break;
+            }
+        }
+        assert!(
+            emitted,
+            "2.3% per frame should accumulate past a tenth, span {span}"
+        );
+        assert!(
+            span < 200.0,
+            "the pinch should emit before the span doubles, span {span}"
+        );
+    }
+
+    #[test]
+    fn fingers_that_start_together_can_pinch_out() {
+        let mut surface = TouchSurface::new();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, 0.0, 0.0, TouchPhase::Began),
+        ]);
+        surface.begin_frame();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Moved),
+            point(2, 0.5, 0.0, TouchPhase::Moved),
+        ]);
+        assert_eq!(
+            surface.gestures(),
+            &[] as &[Gesture],
+            "a span of 0.5 is not a baseline"
+        );
+        surface.begin_frame();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Moved),
+            point(2, 20.0, 0.0, TouchPhase::Moved),
+        ]);
+        assert_eq!(
+            surface.gestures(),
+            &[] as &[Gesture],
+            "the first span past the threshold only sets the baseline"
+        );
+        surface.begin_frame();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Moved),
+            point(2, 24.0, 0.0, TouchPhase::Moved),
+        ]);
+        let mut scale = None;
+        for gesture in surface.gestures() {
+            if let Gesture::Pinch { scale: value } = *gesture {
+                scale = Some(value);
+            }
+        }
+        assert!(
+            scale.is_some(),
+            "a pinch out from the baseline should emit, got {:?}",
+            surface.gestures()
+        );
+        let scale = scale.unwrap();
+        assert!((scale - 1.2).abs() < 1.0e-4, "24/20, got {scale}");
+    }
+
+    #[test]
+    fn lifting_one_finger_does_not_pinch_the_remaining_pair() {
+        let mut surface = TouchSurface::new();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, 100.0, 0.0, TouchPhase::Began),
+        ]);
+        surface.begin_frame();
+        surface.apply(&[
+            point(3, 110.0, 0.0, TouchPhase::Began),
+            point(1, 0.0, 0.0, TouchPhase::Moved),
+            point(2, 100.0, 0.0, TouchPhase::Moved),
+        ]);
+        assert_eq!(surface.gestures(), &[] as &[Gesture]);
+        surface.begin_frame();
+        surface.apply(&[
+            point(1, 0.0, 0.0, TouchPhase::Ended),
+            point(2, 100.0, 0.0, TouchPhase::Moved),
+            point(3, 110.0, 0.0, TouchPhase::Moved),
+        ]);
+        assert!(
+            !surface
+                .gestures()
+                .iter()
+                .any(|gesture| matches!(gesture, Gesture::Pinch { .. })),
+            "the leftover fingers are a new pair, got {:?}",
+            surface.gestures()
+        );
+    }
+
+    #[test]
+    fn action_json_keeps_the_gesture() {
+        let mut map = ActionMap::new();
+        map.set("jump", Vec::new());
+        map.set_gesture("jump", Some(GestureKind::Pinch)).unwrap();
+        let loaded = ActionMap::from_json(&map.to_json()).unwrap();
+        assert!(
+            loaded.to_text().contains("jump.gesture=pinch"),
+            "{}",
+            loaded.to_text()
+        );
     }
 }

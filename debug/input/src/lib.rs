@@ -115,6 +115,25 @@ impl Session {
                 };
                 self.input.set_gamepad_stick(slot, code, Axis2d { x, y });
             }
+            "padbutton" => {
+                let slot = usize_from(parts.next(), line)?;
+                let code = code_from(parts.next(), line)?;
+                let down = down_from(parts.next(), line)?;
+                self.input.set_gamepad_button(slot, code, down);
+            }
+            "trigger" => {
+                let slot = usize_from(parts.next(), line)?;
+                let side = parts
+                    .next()
+                    .ok_or_else(|| format!("trigger needs left or right: {line}"))?;
+                let value = number_from(parts.next(), line)?;
+                let code = match side {
+                    "left" => InputCode::gamepad_left_trigger,
+                    "right" => InputCode::gamepad_right_trigger,
+                    _ => return Err(format!("trigger side is left or right: {line}")),
+                };
+                self.input.set_gamepad_trigger(slot, code, value);
+            }
             "touch" => {
                 let id = u64_from(parts.next(), line)?;
                 let x = number_from(parts.next(), line)?;
@@ -410,5 +429,24 @@ mod tests {
         assert!(settings.contains("mouse_sensitivity=2"));
         let again = session.command("get_input", None, None, None).unwrap();
         assert!(again.contains("glyphs=touch"), "{again}");
+    }
+
+    #[test]
+    fn a_script_can_press_a_pad_button_and_a_trigger() {
+        let mut session = Session::new();
+        let view = session
+            .run_script(
+                "
+                pad 0 connect Xbox Wireless Controller
+                rebind jump=gamepad_face_south
+                rebind fire=gamepad_right_trigger
+                padbutton 0 gamepad_face_south down
+                trigger 0 right 1
+                frame
+                ",
+            )
+            .unwrap();
+        assert!(view.contains("jump=0,0 down=1"), "{view}");
+        assert!(view.contains("fire=0,0 down=1"), "{view}");
     }
 }

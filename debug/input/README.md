@@ -20,8 +20,10 @@ points, gestures, connected pads, and the settings text.
 
 `key CODE down|up`, `button CODE down|up`, `mouse DX DY`,
 `pad SLOT connect NAME`, `pad SLOT disconnect`, `stick SLOT left|right X Y`,
+`padbutton SLOT CODE down|up`, `trigger SLOT left|right VALUE`,
 `touch ID X Y began|moved|ended|cancelled`, `rebind KEY=VALUE`, `frame`.
-`frame` prints one view and starts the next frame.
+`frame` prints one view and starts the next frame. Touch `X` and `Y` are
+points (pixels).
 
 ## Window backends
 
