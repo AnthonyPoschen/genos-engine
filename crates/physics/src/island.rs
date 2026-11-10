@@ -171,7 +171,9 @@ impl Islands {
             if !dynamic_live(body) || body.sleeping {
                 continue;
             }
-            let held = crate::vehicle::holds_awake(vehicles, body, index);
+            let held = !vehicles.is_empty()
+                && (crate::vehicle::holds_awake(vehicles, body, index)
+                    || crate::vehicle::actuator_holds_awake(vehicles, index));
             let Some(body) = bodies.get_mut(index) else {
                 continue;
             };

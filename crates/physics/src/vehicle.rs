@@ -1,9 +1,11 @@
 //! Domain forces on one chassis body.
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
-//! This stage applies the wheeled ground spring-damper and steady aircraft
-//! lift, drag, and thrust, including both on one landing chassis. Thruster
-//! force is a later stage and is not applied here. Sea is not a field.
+//! This stage applies the wheeled ground spring-damper, steady aircraft lift,
+//! drag, and thrust, including both on one landing chassis, and the space
+//! thrusters. Sea is not a field.
+//! A thruster writes force and torque through [`integrate_wrench`]. The existing
+//! gyroscopic step then consumes that angular velocity. There is no second integrator.
 
 use genos_math::{Quat, Vec3};
 
@@ -62,7 +64,7 @@ pub struct Aircraft {
     pub air_density: f32,
 }
 
-/// One space thruster. Stored for a later stage. This stage does not apply it.
+/// One space thruster. Force is `throttle * max_force` along the chassis-frame direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Thruster {
     pub local_position: Vec3,
@@ -97,6 +99,45 @@ pub fn chassis_rest_world(sleep_time: f32) -> World {
     chassis.motion = MotionQuality::Discrete;
     let index = world.insert(chassis);
     world.vehicles.push(g1_vehicle(index));
+    world
+}
+
+/// The S1 fixture: one offset thruster on a 1 000 kg cube, gravity zero.
+///
+/// Local position `(0, 2, 0)`, direction local +X, `max_force` 1 000, throttle 1.
+/// `sleep_time` of 10 keeps the cube awake for the 60-step check.
+#[must_use]
+pub fn thruster_world() -> World {
+    let mut world = World::new(Vec3::ZERO);
+    world.sleep_time = 10.0;
+    let mut body = Body::cuboid(Vec3::ZERO, 1_000.0, Vec3::new(1.0, 1.0, 1.0));
+    body.friction = 0.0;
+    body.restitution = 0.0;
+    body.motion = MotionQuality::Discrete;
+    let index = world.insert(body);
+    let mut thrusters = [Thruster {
+        local_position: Vec3::ZERO,
+        local_direction: Vec3::X,
+        max_force: 0.0,
+        throttle: 0.0,
+    }; 8];
+    if let Some(slot) = thrusters.first_mut() {
+        *slot = Thruster {
+            local_position: Vec3::new(0.0, 2.0, 0.0),
+            local_direction: Vec3::X,
+            max_force: 1_000.0,
+            throttle: 1.0,
+        };
+    }
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: None,
+        aircraft: None,
+        space: Some(SpaceCraft {
+            thrusters,
+            count: 1,
+        }),
+    });
     world
 }
 
@@ -253,18 +294,46 @@ pub(crate) fn wake_sleeping_aircraft(world: &mut World) {
     }
 }
 
+/// Wake a sleeping chassis, and the rest of its island, when a live thruster
+/// would write a finite non-zero force.
+///
+/// Runs before gravity and before the wrench, so the ignition step integrates
+/// both. A closed, zero, or non-finite thruster does not wake. This does not
+/// set `Body.motor`.
+pub(crate) fn wake_sleeping_thrusters(world: &mut World) {
+    let count = world.vehicles.len();
+    for index in 0..count {
+        let Some(vehicle) = world.vehicles.get(index).copied() else {
+            continue;
+        };
+        let Some(craft) = vehicle.space else {
+            continue;
+        };
+        let armed = world.bodies.get(vehicle.chassis).is_some_and(|body| {
+            body.presence == Presence::Live
+                && body.inverse_mass != 0.0
+                && body.sleeping
+                && space_has_live_thrust(body, &craft)
+        });
+        if armed {
+            world.wake(vehicle.chassis);
+        }
+    }
+}
+
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
-/// Order is aircraft, then ground. The ADR names space between those two.
-/// Thrusters stay unapplied, so this tree does not combine space with either
-/// other payload, and a later stage can insert that call without a second
-/// integrator.
+/// Order is aircraft, then space, then ground, including aircraft and ground
+/// together on a landing chassis. [`integrate_wrench`] is the velocity update
+/// the thruster uses. Aircraft force acts at the centre of mass. The aircraft
+/// sample runs before the thruster and before the ground push.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
     let count = world.vehicles.len();
     for index in 0..count {
         apply_aircraft(world, index, dt);
+        apply_space(world, index, dt);
         rays = rays.saturating_add(apply_ground(world, index, dt));
     }
     world.step_stats.wheel_rays = rays;
@@ -274,7 +343,7 @@ pub(crate) fn apply(world: &mut World, dt: f32) {
 ///
 /// A1 holds for a finite positive throttle whose thrust is a finite non-zero
 /// force. The same check is what [`wake_sleeping_aircraft`] uses. A thruster
-/// throttle is a later stage. This does not set `Body.motor`.
+/// hold is [`actuator_holds_awake`]. This does not set `Body.motor`.
 pub(crate) fn holds_awake(vehicles: &[Vehicle], body: &Body, chassis: usize) -> bool {
     vehicles.iter().any(|vehicle| {
         vehicle.chassis == chassis
@@ -324,8 +393,9 @@ fn apply_aircraft(world: &mut World, index: usize, dt: f32) {
 /// Lift, drag, and thrust. `None` means the input cannot produce a finite force.
 fn aircraft_force(aircraft: &Aircraft, body: &Body, gravity: Vec3, dt: f32) -> Option<Vec3> {
     // `apply_forces` has already added `gravity * dt`. Dynamic pressure uses the
-    // velocity from before that increment, and from before the ground push:
-    // `apply` runs aircraft, then ground. Drag is zero when that speed is zero.
+    // velocity from before that increment, and from before the thruster and the
+    // ground push: `apply` runs aircraft, then space, then ground. Drag is zero
+    // when that speed is zero.
     let air = body.velocity - gravity * dt;
     if !finite_aircraft(aircraft) || !finite_vec(air) {
         return None;
@@ -351,6 +421,105 @@ fn finite_aircraft(aircraft: &Aircraft) -> bool {
         && aircraft.thrust_max.is_finite()
         && aircraft.throttle.is_finite()
         && aircraft.air_density.is_finite()
+}
+
+/// A thruster with `throttle > 0` holds the chassis awake the way `Body.motor` does.
+///
+/// This does not wake a sleeper. `wake_sleeping_thrusters` does that, and only
+/// for a finite non-zero force. Aircraft wake and hold stay on [`holds_awake`].
+/// The function does not set `Body.motor`.
+pub(crate) fn actuator_holds_awake(vehicles: &[Vehicle], chassis: usize) -> bool {
+    vehicles
+        .iter()
+        .any(|vehicle| vehicle.chassis == chassis && space_throttle_open(vehicle.space))
+}
+
+fn space_throttle_open(space: Option<SpaceCraft>) -> bool {
+    let Some(craft) = space else {
+        return false;
+    };
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    craft
+        .thrusters
+        .iter()
+        .take(live)
+        .any(|thruster| thruster.throttle.is_finite() && thruster.throttle > 0.0)
+}
+
+fn apply_space(world: &mut World, index: usize, dt: f32) {
+    let Some(vehicle) = world.vehicles.get(index).copied() else {
+        return;
+    };
+    let Some(craft) = vehicle.space else {
+        return;
+    };
+    let Some(mut body) = world.bodies.get(vehicle.chassis).copied() else {
+        return;
+    };
+    if body.presence != Presence::Live || body.inverse_mass == 0.0 || body.sleeping {
+        return;
+    }
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    for thruster in craft.thrusters.iter().take(live) {
+        if let Some((force, arm)) = thruster_wrench(&body, thruster) {
+            integrate_wrench(&mut body, force, arm, dt);
+        }
+    }
+    if let Some(stored) = world.bodies.get_mut(vehicle.chassis) {
+        stored.velocity = body.velocity;
+        stored.angular_velocity = body.angular_velocity;
+    }
+}
+
+/// An open thruster that would write a finite non-zero force.
+fn space_has_live_thrust(body: &Body, craft: &SpaceCraft) -> bool {
+    let live = usize::from(craft.count).min(craft.thrusters.len());
+    craft
+        .thrusters
+        .iter()
+        .take(live)
+        .any(|thruster| thruster.throttle > 0.0 && thruster_wrench(body, thruster).is_some())
+}
+
+/// World force and the chassis-frame arm, or nothing when the inputs are not finite.
+fn thruster_wrench(body: &Body, thruster: &Thruster) -> Option<(Vec3, Vec3)> {
+    if !thruster.throttle.is_finite() || !thruster.max_force.is_finite() {
+        return None;
+    }
+    let magnitude = thruster.throttle * thruster.max_force;
+    if !magnitude.is_finite() || magnitude == 0.0 {
+        return None;
+    }
+    if !finite_vec(thruster.local_direction) || !finite_vec(thruster.local_position) {
+        return None;
+    }
+    let direction = body
+        .orientation
+        .rotate(thruster.local_direction)
+        .normalize();
+    if !finite_vec(direction) || direction.length_squared() == 0.0 {
+        return None;
+    }
+    let force = direction * magnitude;
+    let arm = body.orientation.rotate(thruster.local_position);
+    if !finite_vec(force) || !finite_vec(arm) {
+        return None;
+    }
+    Some((force, arm))
+}
+
+/// Semi-implicit wrench on the chassis. `integrate_body` runs the gyroscopic step after this.
+///
+/// A non-finite result is left unwritten. Ground keeps its own copy of the same
+/// update so a later aircraft stage can call this function without editing the ray path.
+fn integrate_wrench(body: &mut Body, force: Vec3, arm: Vec3, dt: f32) {
+    let velocity = body.velocity + force * (body.inverse_mass * dt);
+    let angular = body.angular_velocity + world_inverse_inertia(body, arm.cross(force)) * dt;
+    if !finite_vec(velocity) || !finite_vec(angular) {
+        return;
+    }
+    body.velocity = velocity;
+    body.angular_velocity = angular;
 }
 
 fn finite_vec(value: Vec3) -> bool {

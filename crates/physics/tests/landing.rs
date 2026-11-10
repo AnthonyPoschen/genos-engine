@@ -1,7 +1,7 @@
 //! T1 landing trial. Aircraft and wheeled ground share one chassis.
 //!
-//! Space combined with either payload is outside ADR 0040. A stored space
-//! payload is not forced. Sea, steering, and a second integrator are not here.
+//! A live thruster in the space slot applies. An idle one does not. Sea,
+//! steering, and a second integrator are not here.
 
 use genos_math::Vec3;
 use genos_physics::{
@@ -190,20 +190,33 @@ fn a_zero_aircraft_on_the_ground_matches_the_chassis_without_one() {
 }
 
 #[test]
-fn a_stored_space_payload_matches_the_landing_body_without_one() {
-    let mut stored = genos_physics::gear_miss_world();
+fn an_idle_space_payload_matches_the_landing_body_and_a_live_one_adds_thrust() {
+    let mut idle = genos_physics::gear_miss_world();
     let mut bare = genos_physics::gear_miss_world();
-    stored.vehicles[0].space = Some(armed_space());
+    let mut live = genos_physics::gear_miss_world();
+    let mut idle_space = armed_space();
+    idle_space.thrusters[0].throttle = 0.0;
+    idle.vehicles[0].space = Some(idle_space);
+    live.vehicles[0].space = Some(armed_space());
     for _ in 0..5 {
-        step(&mut stored, DT);
+        step(&mut idle, DT);
         step(&mut bare, DT);
+        step(&mut live, DT);
         assert!(
-            same_motion(&stored, &bare),
-            "a stored thruster changed the landing chassis"
+            same_motion(&idle, &bare),
+            "an idle thruster changed the landing chassis"
         );
-        assert_eq!(stored.step_stats.wheel_rays, 4);
+        assert!(
+            !same_motion(&live, &bare),
+            "a live thruster left the landing chassis unchanged"
+        );
+        assert_eq!(idle.step_stats.wheel_rays, 4);
+        assert_eq!(live.step_stats.wheel_rays, 4);
     }
-    assert!(!chassis(&stored).motor);
+    let body = chassis(&live);
+    assert!(body.velocity.x.is_finite() && body.angular_velocity.z.is_finite());
+    assert!(!body.motor);
+    assert!(!chassis(&idle).motor);
 }
 
 #[test]
