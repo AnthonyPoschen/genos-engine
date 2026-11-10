@@ -1530,6 +1530,12 @@ const float LIGHTING_SC_POOL_FULL = 24.0;
 // LIGHTING_DN_DARK luminance the target grows as LIGHTING_DN_DARK / L, at most 4x)
 // counts as settled.
 const float LIGHTING_DN_MIN_SETS = 8.0;
+// Half a count, so a float compare sits on the integer boundary.
+const float LIGHTING_SC_HALF = 0.5;
+// Fixed-point scale for the coverage-first weighted set mean.
+const float LIGHTING_COVERAGE_SCALE = 1000.0;
+// Hold refinement once that mean reaches twice the minimum.
+const float LIGHTING_COVERAGE_HOLD_SETS = 2.0 * LIGHTING_DN_MIN_SETS;
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -3457,7 +3463,7 @@ bool lighting_sc_settled(uint slot, float t) {
     // cap_fill (default off): the configured cap is the settle point. The
     // perceptual stop below stays the production rule when the bit is clear.
     if (lighting_cap_fill()) {
-        return floor(t) >= lighting_sc_cap(slot) - 0.5;
+        return floor(t) >= lighting_sc_cap(slot) - LIGHTING_SC_HALF;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.
