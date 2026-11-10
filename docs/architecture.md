@@ -12,9 +12,9 @@ The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass.
 
 The first program is `examples/camera`. The execution goal is [MVP scene](goals/mvp-scene.md). See [ADR 0010](adr/0010-first-proof-is-the-lit-scripted-scene.md).
 
-Linux on Wayland is the first machine for this proof. Windows and macOS run the same scene when those machines are available. The X11 window waits until an X11 session is a target.
+Linux on Wayland is the first machine for this proof. Windows opens a Win32 window (`crates/window/src/win32_shim.c`) and reads XInput. macOS runs the same scene when that machine is available. The X11 window waits until an X11 session is a target.
 
-On Wayland, the camera moves only while the window has keyboard focus. On X11, Windows, and macOS, the keyboard poll is global. That split already exists in `input-zig`.
+On Wayland and Win32, the camera moves only while the window has keyboard focus. The Win32 window clears its keys when focus leaves. X11 and macOS are not in this tree yet. `input-zig` polls those keyboards globally.
 
 ## Frame
 

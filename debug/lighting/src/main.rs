@@ -578,15 +578,17 @@ fn run() -> Result<i32, String> {
             let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
             return Ok(code);
         }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         pull_menu(
             &mut app,
@@ -859,9 +861,11 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         }
         let mut spins = 0u32;
         while app.loading() {
-            let _ = window.pump();
-            renderer.set_particle_dt(STEP);
-            let _ = renderer.draw(&load_world, &camera, false);
+            let frame = window.pump();
+            if !frame.minimized {
+                renderer.set_particle_dt(STEP);
+                let _ = renderer.draw(&load_world, &camera, false);
+            }
             if let Err(err) = app.take_load() {
                 if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
                     let line = skip_line(name, &err);

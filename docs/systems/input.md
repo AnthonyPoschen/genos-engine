@@ -18,7 +18,7 @@ The stick deadzone is per axis. The default is `DEFAULT_STICK_DEADZONE` (`0.08`)
 
 A binding has a sensitivity. The default is `1`. The deadzone runs first, then the sensitivity scales what is left. `2` on a half tilt reaches `1`. The result is still clamped to `-1..=1`. `InputSettings` key `mouse_sensitivity` scales `add_mouse_delta`. The default is `1`.
 
-Linux reads `/dev/input/jsN`. The first poll opens each present device and keeps that file. A later poll reads new events from the open file. A poll of a pad whose name is already stored does not allocate: the glyph family was computed when the name changed, and the compare does not build a new string. `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` are the writes a platform uses. The Linux poll is one caller of those writes.
+Linux reads `/dev/input/jsN`. The first poll opens each present device and keeps that file. A later poll reads new events from the open file. A poll of a pad whose name is already stored does not allocate: the glyph family was computed when the name changed, and the compare does not build a new string. `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` are the writes a platform uses. The Linux poll is one caller of those writes. Windows calls the same writes from `XInput`.
 
 On an Xbox pad, axis 0 and axis 1 are the left stick and axis 3 and axis 4 are the right stick. The Y axis is negated. Axis 2 and axis 5 are triggers that rest at `-1` and reach `1`; that range is stored as `0..=1`. `GamepadDevice::down` for a trigger is true when that button bit is down or the axis is at or above `activation_threshold` (`0.5`). Axis 6 and axis 7 are the d-pad. A Steam Deck has no `ABS_Z` or `ABS_RZ`. Its sticks are axes 0–3, its trackpads are axes 4–7 and are ignored, and the analog triggers are `ABS_HAT2X` and `ABS_HAT2Y` at joydev indices 8 and 9. The character map does not use the triggers.
 
@@ -44,7 +44,7 @@ A touch point is one finger sample: an id, a position, and a phase (`began`, `mo
 
 The crate is `crates/input`, package `genos-input`.
 
-- `InputSystem` in `src/system.rs` owns the devices, the gamepad poll, and the glyph-set changes.
+- `InputSystem` in `src/system.rs` owns the devices, the gamepad poll, and the glyph-set changes. `src/xinput.rs` owns the Windows pad read.
 - `InputCode` in `src/code.rs` owns the names and the values.
 - `character_controller` in `src/action.rs` owns the first action map. `InputSettings` in `src/settings.rs` owns the settings file.
 - `GamepadDevice` in `src/device.rs` owns the stick deadzone. `glyph_set_from_name` owns the picture family.
@@ -64,13 +64,17 @@ Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone befo
 
 ## Limits
 
-Windows, macOS, and X11 device reads are not in this crate. Agent bc-da635bf1 owns those window backends. When they land, they call the same writes and they do not own a second action map or recognize gestures:
+macOS and X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
+
+The Win32 window writes the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
+
+Every backend uses the same writes:
 
 - `begin_frame`, then the writes, then the game reads the action map.
 - `set_key` or `apply_evdev_keys` for the keyboard.
 - `set_mouse_button` and `add_mouse_delta` for the pointer.
-- `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux already does this inside `poll_gamepads` from `/dev/input/jsN`.
-- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch.
+- `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux reads `/dev/input/jsN` inside `poll_gamepads`. Windows reads XInput the same way.
+- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch. Win32 pointer messages for touch and pen are the samples. A finger that is still down and did not move this frame is reported as `moved`.
 
 The behavior source for the key and pointer reads is `input-zig`, listed in [Architecture](../architecture.md). The UI reads `take_device_changes` and `active_glyphs` after those writes.
 

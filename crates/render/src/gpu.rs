@@ -162,7 +162,7 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
-//! Vulkan loader and one forward pass. Entry points come from libvulkan.
+//! Vulkan loader and one forward pass. Entry points come from the platform loader.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -397,12 +397,36 @@ impl Renderer {
     /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
     /// except Potato and Low settings, which stay SDR.
     pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.layout_post_for(
+            hdr,
+            genos_scene::LightingPreset::High,
+            crate::hdr_output::DeckPanel::Desktop,
+            false,
+        )
+    }
+
+    /// Rebuild the post chain the way `post_locks_sdr` classifies `preset` on `panel`.
+    ///
+    /// GI targets still follow Potato. `hdr10_listed` is the Deck OLED exception.
+    pub fn layout_post_for(
+        &mut self,
+        hdr: genos_scene::HdrSettings,
+        preset: genos_scene::LightingPreset,
+        panel: crate::hdr_output::DeckPanel,
+        hdr10_listed: bool,
+    ) -> Result<(), String> {
         self.gpu.lighting.settings =
             genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
         self.gpu.lighting.hdr = hdr;
         self.gpu.lighting.budget_hdr = true;
+        self.gpu.lighting.budget_preset = preset;
+        self.gpu.lighting.budget_panel = panel;
+        self.gpu.lighting.budget_hdr10_listed = hdr10_listed;
         let result = self.gpu.make_lighting_targets();
         self.gpu.lighting.budget_hdr = false;
+        self.gpu.lighting.budget_preset = genos_scene::LightingPreset::High;
+        self.gpu.lighting.budget_panel = crate::hdr_output::DeckPanel::Desktop;
+        self.gpu.lighting.budget_hdr10_listed = false;
         result
     }
 
@@ -516,12 +540,13 @@ impl Renderer {
         self.gpu.lighting.hdr_ms
     }
 
-    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p.
+    /// A lavapipe timestamp is not that score.
     pub fn post_ms_device(&self) -> f64 {
         self.hdr_ms()
     }
 
-    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, params, meter.
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting
@@ -530,7 +555,6 @@ impl Renderer {
             .saturating_add(lighting.scene_host.size)
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
-            .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
             .saturating_add(lighting.meter_dev.size)
             .saturating_add(lighting.meter_host.size);
@@ -555,7 +579,7 @@ impl Renderer {
                 scene_host: buffer(&lighting.scene_host),
                 bloom: buffer(&lighting.bloom),
                 encode: buffer(&lighting.hdr_encode),
-                lut: buffer(&lighting.agx_lut),
+                lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
                 params: buffer(&lighting.hdr_params),
                 meter: buffer(&lighting.meter_dev),
                 meter_host: buffer(&lighting.meter_host),
@@ -563,7 +587,7 @@ impl Renderer {
         )
     }
 
-    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    /// Post-chain bytes as MiB. The ceiling is the preset row in the HDR pipeline record.
     pub fn post_vram_device(&self) -> f64 {
         self.hdr_vram_bytes() / (1024.0 * 1024.0)
     }
@@ -1074,7 +1098,9 @@ impl Renderer {
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
-        self.gpu.record_and_submit(&matrix)?;
+        if !self.gpu.record_and_submit(&matrix)? {
+            return Ok(None);
+        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
             let pixels = self.gpu.read_color()?;
@@ -2120,14 +2146,7 @@ impl Gpu {
         height: u32,
     ) -> Result<Self, String> {
         unsafe {
-            let lib = dlopen(b"libvulkan.so.1\0".as_ptr() as *const c_char, 2);
-            if lib.is_null() {
-                return Err("libvulkan.so.1 did not open".into());
-            }
-            let get_instance: GetProc = transmute(dlsym(
-                lib,
-                b"vkGetInstanceProcAddr\0".as_ptr() as *const c_char,
-            ));
+            let get_instance = load_instance_proc()?;
             let enumerate_ext: unsafe extern "system" fn(
                 *const c_void,
                 *mut u32,
@@ -2158,7 +2177,7 @@ impl Gpu {
                 )?;
             }
             let surface_ext = b"VK_KHR_surface\0";
-            let wayland_ext = b"VK_KHR_wayland_surface\0";
+            let wayland_ext = surface_extension_name();
             let color_ext = b"VK_EXT_swapchain_colorspace\0";
             let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
             let has_props2 = extension_listed(
@@ -2175,6 +2194,9 @@ impl Gpu {
             }
             if extension_listed(&inst_listed, ext_count, b"VK_EXT_swapchain_colorspace") {
                 ext_ptrs.push(color_ext.as_ptr() as *const c_char);
+            }
+            if let Some(extra) = extra_instance_extension() {
+                ext_ptrs.push(extra.as_ptr() as *const c_char);
             }
             let app_name = b"genos-camera\0";
             #[repr(C)]
@@ -2210,7 +2232,7 @@ impl Gpu {
             let info = InstInfo {
                 s_type: 1,
                 next: std::ptr::null(),
-                flags: 0,
+                flags: instance_flags(),
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
@@ -2234,7 +2256,12 @@ impl Gpu {
             let mem_props: FnMemProps = transmute(load(b"vkGetPhysicalDeviceMemoryProperties\0"));
             let create_device: FnCreateDevice = transmute(load(b"vkCreateDevice\0"));
             let get_device: GetProc = transmute(load(b"vkGetDeviceProcAddr\0"));
-            let create_wayland_surface: FnWayland = transmute(load(b"vkCreateWaylandSurfaceKHR\0"));
+            let wayland_pfn = load(b"vkCreateWaylandSurfaceKHR\0");
+            let create_wayland_surface: FnWayland = if wayland_pfn.is_null() {
+                unused_wayland_surface
+            } else {
+                transmute(wayland_pfn)
+            };
             let destroy_surface: Fn2 = transmute(load(b"vkDestroySurfaceKHR\0"));
             let surface_support: FnSupport =
                 transmute(load(b"vkGetPhysicalDeviceSurfaceSupportKHR\0"));
@@ -2260,31 +2287,7 @@ impl Gpu {
                 "device list",
             )?;
 
-            #[repr(C)]
-            struct WaylandInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                display: *mut c_void,
-                surface: *mut c_void,
-            }
-            let wayland = WaylandInfo {
-                s_type: 1000006000,
-                next: std::ptr::null(),
-                flags: 0,
-                display,
-                surface: wl_surface,
-            };
-            let mut vk_surface = std::ptr::null_mut();
-            check(
-                create_wayland_surface(
-                    instance,
-                    &wayland as *const WaylandInfo as *const u8,
-                    std::ptr::null(),
-                    &mut vk_surface,
-                ),
-                "wayland surface",
-            )?;
+            let vk_surface = create_surface(get_instance, instance, display, wl_surface)?;
 
             let get_props: unsafe extern "system" fn(Handle, *mut u8) =
                 transmute(load(b"vkGetPhysicalDeviceProperties\0"));
@@ -2467,6 +2470,7 @@ impl Gpu {
             if hdr_meta {
                 dev_exts.push(hdr_meta_ext.as_ptr() as *const c_char);
             }
+            push_device_extensions(&mut dev_exts, &dev_listed, dev_ext_count);
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -3030,11 +3034,27 @@ impl Gpu {
                 color_space,
             });
         }
-        let force_sdr = self.lighting.hdr.legacy_bytes
-            || matches!(
-                self.lighting.settings.preset,
+        let hdr10_listed = listed.iter().any(|item| {
+            (item.format == crate::hdr_output::FORMAT_A2B10
+                || item.format == crate::hdr_output::FORMAT_A2R10)
+                && item.color_space == crate::hdr_output::COLOR_SPACE_HDR10
+        });
+        let force_sdr = if self.lighting.hdr.legacy_bytes {
+            true
+        } else {
+            let preset = self.lighting.settings.preset;
+            let named = matches!(
+                preset,
                 genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
             );
+            named
+                && crate::hdr_output::post_locks_sdr(
+                    &self.lighting.hdr,
+                    preset,
+                    crate::hdr_output::deck_panel(),
+                    hdr10_listed,
+                )
+        };
         crate::hdr_output::surface_choice(
             sdr_format,
             &listed,
@@ -3705,7 +3725,23 @@ impl Gpu {
         Ok(())
     }
 
-    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+    /// One swapchain image, or `VK_ERROR_OUT_OF_DATE_KHR` when the surface moved.
+    fn acquire_index(&self) -> (i32, u32) {
+        let mut index = 0u32;
+        let result = unsafe {
+            (self.fns.acquire)(
+                self.device,
+                self.swapchain,
+                u64::MAX,
+                self.image_ready,
+                std::ptr::null_mut(),
+                &mut index,
+            )
+        };
+        (result, index)
+    }
+
+    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<bool, String> {
         if self.unfilled.dump_pct.is_some() {
             self.copy_picture = true;
         }
@@ -3738,6 +3774,7 @@ impl Gpu {
             self.particle_depth_retained[slot] = false;
         }
         let fences = [self.fence];
+        let mut index;
         unsafe {
             self.collect_slot_after_wait(slot)?;
             if self.lighting_active() {
@@ -3760,19 +3797,21 @@ impl Gpu {
                 self.fail_next_acquire = false;
                 return Err("out of date".into());
             }
-            let mut index = 0u32;
-            let acquire = (self.fns.acquire)(
-                self.device,
-                self.swapchain,
-                u64::MAX,
-                self.image_ready,
-                std::ptr::null_mut(),
-                &mut index,
-            );
+            let mut acquire;
+            (acquire, index) = self.acquire_index();
             if acquire == OUT_OF_DATE {
-                return Err("out of date".into());
+                if self.extent_w == 0 || self.extent_h == 0 {
+                    return Ok(false);
+                }
+                self.recreate(self.extent_w, self.extent_h)?;
+                (acquire, index) = self.acquire_index();
             }
-            check(acquire, "acquire")?;
+            if acquire == OUT_OF_DATE {
+                return Ok(false);
+            }
+            if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
+                check(acquire, "acquire")?;
+            }
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             if profiled {
@@ -3910,7 +3949,7 @@ impl Gpu {
             }
             self.flight = 1 - self.flight;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn make_query_pool(&mut self) -> Result<Handle, String> {
@@ -9747,11 +9786,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
-
-extern "C" {
-    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
-}
+include!("vk_platform.rs");
 
 /// `Some(true)` when `arg` is `--gpu-times` and the count is the next argument.
 /// `Some(false)` when the flag already includes its value. `None` otherwise.
@@ -10205,12 +10240,27 @@ pub enum GpuKind {
 }
 
 impl GpuKind {
-    fn from_vk_device_type(device_type: u32) -> Self {
+    /// `VK_PHYSICAL_DEVICE_TYPE_*`. `4` is `CPU` (lavapipe, llvmpipe).
+    #[must_use]
+    pub fn from_vk_device_type(device_type: u32) -> Self {
         // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
         if device_type == 4 {
             Self::Software
         } else {
             Self::Hardware
+        }
+    }
+
+    /// 1.50 ms is the 4070-at-1440p and Deck-at-800p ceiling. A software
+    /// rasterizer still needs a finite positive timestamp. It is not that score.
+    #[must_use]
+    pub fn post_ms_passes(self, value: f64, ceiling: f64) -> bool {
+        if !value.is_finite() || value <= 0.0 {
+            return false;
+        }
+        match self {
+            Self::Software => true,
+            Self::Hardware => value <= ceiling,
         }
     }
 }

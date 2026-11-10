@@ -35,7 +35,9 @@
     reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
 )]
 
+#[cfg(not(target_os = "windows"))]
 use std::fs::File;
+#[cfg(not(target_os = "windows"))]
 use std::io::{ErrorKind, Read};
 
 use crate::code::InputCode;
@@ -49,6 +51,7 @@ use crate::touch::{Gesture, TouchPoint, TouchSurface};
 const TOUCH_ID: u32 = 2;
 
 /// One open `/dev/input/jsN` file and the latest control positions.
+#[cfg(not(target_os = "windows"))]
 #[derive(Debug)]
 struct OpenJoystick {
     file: File,
@@ -120,6 +123,7 @@ pub struct InputSystem {
     pub keyboard: KeyboardDevice,
     pub mouse: MouseDevice,
     pub gamepads: [GamepadDevice; MAX_GAMEPADS],
+    #[cfg(not(target_os = "windows"))]
     joysticks: [Option<OpenJoystick>; MAX_GAMEPADS],
     mouse_sensitivity: f32,
     active_glyphs: GlyphSet,
@@ -136,6 +140,7 @@ impl Clone for InputSystem {
             keyboard: self.keyboard.clone(),
             mouse: self.mouse.clone(),
             gamepads: self.gamepads.clone(),
+            #[cfg(not(target_os = "windows"))]
             joysticks: std::array::from_fn(|_| None),
             mouse_sensitivity: self.mouse_sensitivity,
             active_glyphs: self.active_glyphs,
@@ -147,12 +152,21 @@ impl Clone for InputSystem {
     }
 }
 
+fn each_evdev_key(down: &[u8; 256], mut write: impl FnMut(crate::code::InputCode, bool)) {
+    for code in 0..256 {
+        if let Some(input) = crate::device::from_evdev(code as u32) {
+            write(input, down[code] != 0);
+        }
+    }
+}
+
 impl InputSystem {
     pub fn new() -> Self {
         Self {
             keyboard: KeyboardDevice::new(),
             mouse: MouseDevice::new(),
             gamepads: std::array::from_fn(GamepadDevice::new),
+            #[cfg(not(target_os = "windows"))]
             joysticks: std::array::from_fn(|_| None),
             mouse_sensitivity: 1.0,
             active_glyphs: GlyphSet::KeyboardMouse,
@@ -301,11 +315,37 @@ impl InputSystem {
 
     /// Write keyboard state from Linux evdev codes. Unknown codes are ignored.
     pub fn apply_evdev_keys(&mut self, down: &[u8; 256]) {
-        for code in 0..256 {
-            if let Some(input) = crate::device::from_evdev(code as u32) {
-                self.keyboard.set(input, down[code] != 0);
-            }
-        }
+        each_evdev_key(down, |input, held| self.keyboard.set(input, held));
+    }
+
+    /// Write one window's keyboard, pointer, and fingers.
+    ///
+    /// The window calls this after [`Self::begin_frame`]. It does not keep an
+    /// action map. Gestures stay in the touch surface.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one window sample: keys, pointer deltas, three buttons, and touch"
+    )]
+    #[expect(
+        clippy::similar_names,
+        reason = "mouse_dx and mouse_dy are the two pointer deltas"
+    )]
+    pub fn write_window(
+        &mut self,
+        keys_down: &[u8; 256],
+        mouse_dx: f32,
+        mouse_dy: f32,
+        mouse_left: bool,
+        mouse_right: bool,
+        mouse_middle: bool,
+        touch: &[TouchPoint],
+    ) {
+        each_evdev_key(keys_down, |input, held| self.set_key(input, held));
+        self.set_mouse_button(InputCode::mouse_left, mouse_left);
+        self.set_mouse_button(InputCode::mouse_right, mouse_right);
+        self.set_mouse_button(InputCode::mouse_middle, mouse_middle);
+        self.add_mouse_delta(mouse_dx, mouse_dy);
+        self.set_touch_points(touch);
     }
 
     pub fn set_key(&mut self, code: InputCode, down: bool) {
@@ -464,11 +504,21 @@ impl InputSystem {
         }
     }
 
-    /// Read `/dev/input/jsN` into the stable slots. A missing device leaves the slot disconnected.
+    /// Read the platform pads into the stable slots. A missing device leaves the slot disconnected.
     ///
-    /// The first poll opens a present device and keeps the file. A later poll
-    /// reads new events from that file. An empty read keeps the last sticks.
+    /// Windows calls `XInput`. Other targets read `/dev/input/jsN`. The first Linux
+    /// poll opens a present device and keeps the file. A later poll reads new
+    /// events from that file. An empty read keeps the last sticks.
     pub fn poll_gamepads(&mut self) {
+        #[cfg(target_os = "windows")]
+        crate::xinput::poll(self);
+        #[cfg(not(target_os = "windows"))]
+        self.poll_linux_joysticks();
+    }
+
+    /// Read `/dev/input/jsN` into the stable slots.
+    #[cfg(not(target_os = "windows"))]
+    fn poll_linux_joysticks(&mut self) {
         for slot in 0..MAX_GAMEPADS {
             if self.joysticks[slot].is_none() {
                 self.joysticks[slot] = open_joystick(slot);
@@ -500,6 +550,7 @@ impl InputSystem {
 
     /// Copy one polled pad. A stick that was already outside the deadzone, and a
     /// button that was already down, do not select the family again.
+    #[cfg(not(target_os = "windows"))]
     fn absorb_joystick(&mut self, slot: usize) {
         let Some(state) = self.joysticks[slot].as_ref().map(|stick| stick.state) else {
             return;
@@ -587,6 +638,7 @@ impl Default for InputSystem {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn open_joystick(slot: usize) -> Option<OpenJoystick> {
     let mut file = File::open(format!("/dev/input/js{slot}")).ok()?;
     set_nonblock(&mut file).ok()?;
@@ -604,6 +656,7 @@ fn open_joystick(slot: usize) -> Option<OpenJoystick> {
 }
 
 /// `JSIOCGNAME(128)` from `linux/joystick.h`.
+#[cfg(not(target_os = "windows"))]
 fn joystick_name(file: &File, slot: usize) -> String {
     let mut buf = [0u8; 128];
     // SAFETY: `fd` is the open joystick. The request reads the device name
@@ -622,6 +675,7 @@ fn joystick_name(file: &File, slot: usize) -> String {
 }
 
 /// Read queued events. [`ErrorKind::WouldBlock`] keeps the last stick positions.
+#[cfg(not(target_os = "windows"))]
 fn drain_joystick(stick: &mut OpenJoystick) -> Result<(), ()> {
     let mut buf = [0u8; 8];
     loop {
@@ -638,6 +692,7 @@ fn drain_joystick(stick: &mut OpenJoystick) -> Result<(), ()> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     let fd = file.as_raw_fd();
@@ -653,6 +708,7 @@ fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn js_ioctl(file: &File, request: usize, arg: *mut u8) -> i32 {
     use std::os::fd::AsRawFd;
     unsafe {
@@ -666,6 +722,7 @@ fn js_ioctl(file: &File, request: usize, arg: *mut u8) -> i32 {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn js_u8(file: &File, request: usize) -> Option<usize> {
     let mut count = 0u8;
     if js_ioctl(file, request, &raw mut count) < 0 {
@@ -676,6 +733,7 @@ fn js_u8(file: &File, request: usize) -> Option<usize> {
 
 /// `JSIOCGBUTTONS` then `JSIOCGBTNMAP`. The map is the evdev code at each
 /// joydev index. A failure keeps the family table.
+#[cfg(not(target_os = "windows"))]
 fn read_button_codes(file: &File) -> Option<([u16; MAX_GAMEPAD_BUTTONS], usize)> {
     let count = js_u8(file, 0x8001_6a12)?;
     let mut raw = [0u16; 512];
@@ -690,6 +748,7 @@ fn read_button_codes(file: &File) -> Option<([u16; MAX_GAMEPAD_BUTTONS], usize)>
 
 /// `JSIOCGAXES` then `JSIOCGAXMAP`. `ABS_X` is code 0, so the count is the
 /// length. A failure keeps the family axes.
+#[cfg(not(target_os = "windows"))]
 fn read_axis_codes(file: &File) -> Option<([u8; MAX_JS_AXES], usize)> {
     let count = js_u8(file, 0x8001_6a11)?;
     let mut raw = [0u8; 64];
@@ -702,6 +761,7 @@ fn read_axis_codes(file: &File) -> Option<([u8; MAX_JS_AXES], usize)> {
     Some((out, n))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn read_layout(file: &File, glyphs: GlyphSet) -> JsLayout {
     let mut layout = layout_for(glyphs);
     if let Some((codes, count)) = read_button_codes(file) {
@@ -1013,6 +1073,7 @@ fn set_js_button(buttons: &mut [ButtonState; MAX_GAMEPAD_BUTTONS], code: InputCo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::touch::TouchPhase;
 
     fn packet(kind: u8, number: u8, value: i16) -> [u8; 8] {
         let bytes = value.to_ne_bytes();
@@ -1376,6 +1437,7 @@ mod tests {
         assert!(pad.down(InputCode::gamepad_right_trigger));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn a_steady_poll_of_an_active_pad_does_not_allocate() {
         use std::os::fd::OwnedFd;
@@ -1446,5 +1508,29 @@ mod tests {
             gamepad_button_index(*code)
                 .is_some_and(|index| state.buttons[index] == ButtonState::Down)
         })
+    }
+
+    #[test]
+    fn write_window_sets_the_key_the_buttons_and_the_finger() {
+        let mut input = InputSystem::new();
+        input.begin_frame();
+        let mut keys = [0_u8; 256];
+        keys[17] = 1;
+        let touch = [TouchPoint {
+            id: 4,
+            x: 12.0,
+            y: 40.0,
+            phase: TouchPhase::Began,
+        }];
+        input.write_window(&keys, 3.0, -2.0, true, true, false, &touch);
+        assert!(input.keyboard.down(InputCode::key_w));
+        assert!(input.mouse.down(InputCode::mouse_left));
+        assert!(input.mouse.down(InputCode::mouse_right));
+        assert!(!input.mouse.down(InputCode::mouse_middle));
+        assert!((input.mouse.dx - 3.0).abs() < 0.01);
+        assert!((input.mouse.dy + 2.0).abs() < 0.01);
+        assert_eq!(input.touch_points().len(), 1);
+        assert_eq!(input.touch_points()[0].id, 4);
+        assert_eq!(input.active_glyphs(), GlyphSet::Touch);
     }
 }
