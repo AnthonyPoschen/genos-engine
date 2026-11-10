@@ -1,4 +1,4 @@
-# 0040: One audio mix, and device outputs only write that mix
+# 0041: One audio mix, and device outputs only write that mix
 
 Status: **Proposed**. Design: [audio design](../systems/audio-design.md). The living record of the code that already ships is [Audio](../systems/audio.md).
 

@@ -8,4 +8,4 @@ Vulkan calls use the Vulkan loader. macOS links MoltenVK. [ADR 0003](0003-one-vu
 
 **Rejected:** `winit`, SDL, GLFW, `wgpu`, `ash`, `vulkano`, `x11rb`, `cpal`, `rodio`, and `tokio`.
 
-The proposed audio plan keeps the mix in this repository and keeps ALSA, WASAPI, and CoreAudio as writes of that mix. See [ADR 0040](0040-one-audio-mix-device-outputs-only.md).
+The proposed audio plan keeps the mix in this repository and keeps ALSA, WASAPI, and CoreAudio as writes of that mix. See [ADR 0041](0041-one-audio-mix-device-outputs-only.md).

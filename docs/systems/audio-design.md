@@ -1,6 +1,6 @@
 # Audio design
 
-Status: **proposed**. ADR: [0040](../adr/0040-one-audio-mix-device-outputs-only.md). The code that already runs is the [audio record](audio.md). Words added for this plan are in `CONTEXT.md`.
+Status: **proposed**. ADR: [0041](../adr/0041-one-audio-mix-device-outputs-only.md). The code that already runs is the [audio record](audio.md). Words added for this plan are in `CONTEXT.md`.
 
 The mix in `genos-audio` is the one implementation of Doppler, pan, distance, transmission, buses, and reverb. ALSA, WASAPI, CoreAudio, and a later console write only receive the buffer that mix produced. A fixed tape rendered by `mix` hashes to the same bytes on every platform that runs `cargo test`.
 
@@ -39,7 +39,7 @@ These already match the requirement that one mix run everywhere and that a platf
 |---|---|---|
 | `mix` allocates `Vec<i16>` on every call | Add `mix_into(&mut [f32], ...)` that writes a caller buffer. `mix` allocates once, calls `mix_into`, and quantizes with `round` as it does now. | The audio thread cannot allocate. Existing callers of `mix` keep their `i16` buffer. |
 | `submit` opens, writes, and closes | Hold one device for the process. A thread named `genos-audio` mixes one quantum and writes it. ALSA's latency request drops from 200 ms to the quantum. | A game cannot open ALSA, WASAPI, or CoreAudio per buffer. The Deck feels that cost on every clip. |
-| Pan and transmission call platform `sin`, `cos`, and `exp` | Replace those three calls inside `space.rs` with the in-crate polynomials in ADR 0040. | The identical-buffer hash has to survive glibc, the Windows math library, and the macOS math library. |
+| Pan and transmission call platform `sin`, `cos`, and `exp` | Replace those three calls inside `space.rs` with the in-crate polynomials in ADR 0041. | The identical-buffer hash has to survive glibc, the Windows math library, and the macOS math library. |
 | Tests check relationships | Add a stored SHA-256 of a fixed `mix` buffer. | Two platforms can pass `mix_scene.rs` with different samples. |
 | One gain for the whole buffer | Keep one gain per `mix` call. The held thread calls `mix` once per quantum, so the pose updates every quantum. Smooth the gain with a one-pole whose state starts at the first target. | A single `mix` in today's tests stays a constant gain, so those tests keep their numbers. A running voice does not click when the next quantum's transmission jumps. |
 | `Source` has no bus | Add a bus. Default: positional sources go to World, non-positional sources go to Music. With default bus gains, the samples match the pre-bus mix. | Music, UI, and world have to be separate sums without a second mixer. |
@@ -241,7 +241,7 @@ Each stage is a later commit. This document is stage 0. A stage edits the [audio
 
 | Stage | Work | Gate |
 |---|---|---|
-| 0 | This design and ADR 0040 | The documents name the current files, the changes, and the gaps. No behavior change. |
+| 0 | This design and ADR 0041 | The documents name the current files, the changes, and the gaps. No behavior change. |
 | 1 | `mix_into`. `mix` keeps the `i16` result. | `cargo test -p genos-audio -p genos-audio-check` passes. A `#[global_allocator]` test calls `mix_into` and panics if it allocates. The existing relationship tests keep their results. |
 | 2 | In-crate `sin`, `cos`, and `exp`. Stored golden hash. | `crates/audio/tests/golden/positional.sha256` matches `mix` of the stored tape at 48 kHz. The test does not open a device. The same command is the Windows, macOS, and console run. |
 | 3 | Held device. `genos-audio` writes one quantum. Linux first. WASAPI and CoreAudio take the same hold on their machines. | A test feeds a known buffer and asserts the write path does not call `mix`. `device_period_frames` and `device_xrun` exist. ALSA is asked for 10 ms. WASAPI is asked for one quantum, replacing the one-second floor. The one-shot `submit` stays for `examples/submit.rs`. The example and `genos-audio` are not open on the same device together. A running game uses the held device. |
@@ -274,7 +274,7 @@ The guided review listens for three things: a positional source moves across the
 
 ## 14. Papers
 
-The mix follows these, and the departures are in ADR 0040.
+The mix follows these, and the departures are in ADR 0041.
 
 - Doppler is the still-air ratio already in `space.rs`: `(c + listener) / (c - source)` along the line between them, `c = 343`.
 - Transmission is Beer-Lambert through the overlapped thickness, the product the fog design uses for optical depth, applied here to occluder boxes. The code already implements it. This plan does not change the formula.
