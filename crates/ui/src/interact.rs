@@ -9,6 +9,7 @@ use genos_input::InputSystem;
 use genos_scene::Camera;
 
 use crate::controls;
+use crate::edit;
 use crate::focus::Consumed;
 use crate::kind::{Event, Kind};
 use crate::layers::{self, LayerRole, OpenLayer};
@@ -119,23 +120,25 @@ pub fn frame(
         }
     }
     if let Some(input) = keys {
-        if role == Some(LayerRole::Dialog) && nav::back(input) {
+        let on_layer = matches!(role, Some(LayerRole::Dialog | LayerRole::Popup));
+        let pool: &[Item] = if on_layer {
+            layer_items.as_deref().unwrap_or(&root_items)
+        } else {
+            &root_items
+        };
+        if edit::apply(input, state, pool, &mut events) {
+            keys_captured = true;
+        }
+        if !keys_captured && role == Some(LayerRole::Dialog) && nav::back(input) {
             if let Some(id) = layer_root {
                 events.push(Event::Dismiss { id });
                 state.close_layer();
                 keys_captured = true;
             }
         }
-        if !keys_captured {
-            let on_layer = matches!(role, Some(LayerRole::Dialog | LayerRole::Popup));
-            let pool: &[Item] = if on_layer {
-                layer_items.as_deref().unwrap_or(&root_items)
-            } else {
-                &root_items
-            };
-            if nav::apply(input, state, pool, &mut events) || (on_layer && nav::took_key(input)) {
-                keys_captured = true;
-            }
+        if !keys_captured && (nav::apply(input, state, pool, &mut events) || (on_layer && nav::took_key(input)))
+        {
+            keys_captured = true;
         }
     }
     let theme = state.theme;
@@ -149,6 +152,7 @@ pub fn frame(
     let mut paints = Vec::new();
     let mut segments = Vec::new();
     let font = state.outline.as_ref();
+    let carets = &state.carets;
     paint_items(
         &mut root_items,
         pointer,
@@ -156,6 +160,7 @@ pub fn frame(
         focus,
         &theme,
         font,
+        carets,
         &mut shown,
         &mut paints,
         &mut segments,
@@ -184,6 +189,7 @@ pub fn frame(
                 focus,
                 &theme,
                 font,
+                carets,
                 &mut shown,
                 &mut paints,
                 &mut segments,
@@ -287,13 +293,20 @@ fn paint_items(
     focus: Option<u32>,
     theme: &crate::theme::Theme,
     font: Option<&crate::outline::OutlineFont>,
+    carets: &std::collections::BTreeMap<u32, crate::Caret>,
     shown: &mut Vec<Shown>,
     paints: &mut Vec<Paint>,
     segments: &mut Vec<Segment>,
 ) {
     for item in items {
         let look = pick_look(item, pointer.down, hit, focus);
-        let painted = controls::paint_item(item, look, theme, font);
+        let caret = (focus == Some(item.id)).then(|| {
+            carets
+                .get(&item.id)
+                .copied()
+                .unwrap_or(crate::Caret { anchor: 0, head: 0 })
+        });
+        let painted = controls::paint_item(item, look, theme, font, caret);
         shown.push(Shown {
             id: item.id,
             rect: item.rect,
@@ -393,7 +406,10 @@ fn on_press(
 ) {
     match &item.kind {
         Kind::Button { enabled: true } => events.push(Event::Press { id: item.id }),
-        Kind::Button { enabled: false } | Kind::Label | Kind::Progress { .. } => {}
+        Kind::Button { enabled: false }
+        | Kind::Label
+        | Kind::Progress { .. }
+        | Kind::TextField { .. } => {}
         Kind::Toggle { on } => events.push(Event::Toggle {
             id: item.id,
             on: !on,
