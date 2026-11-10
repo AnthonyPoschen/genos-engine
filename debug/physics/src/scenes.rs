@@ -12,7 +12,8 @@
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{
-    chassis_rest_world, locked_wheel_world, thruster_world, Body, MotionQuality, World,
+    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, locked_wheel_world,
+    thruster_world, Body, MotionQuality, World,
 };
 
 /// One entry in the scene picker.
@@ -31,7 +32,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 10] = [
+pub const SCENES: [SceneInfo; 13] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -85,6 +86,24 @@ pub const SCENES: [SceneInfo; 10] = [
         summary: "G1 chassis at 10 m/s with locked wheels and the P28 slip curve",
         steps: 60,
         build: locked_wheel,
+    },
+    SceneInfo {
+        name: "aero_trim",
+        summary: "1 000 kg aircraft trimmed at 50 m/s and 100 m, lift equals weight (ADR 0040 A1)",
+        steps: 120,
+        build: aero_trim,
+    },
+    SceneInfo {
+        name: "gear_miss",
+        summary: "A1 aircraft plus four wheel rays that miss, 120 steps (ADR 0040 T1)",
+        steps: 120,
+        build: gear_miss,
+    },
+    SceneInfo {
+        name: "gear_plane",
+        summary: "1 000 kg aircraft on four springs, lift and gear share the weight (ADR 0040 T1)",
+        steps: 180,
+        build: gear_plane,
     },
     SceneInfo {
         name: "thruster",
@@ -293,6 +312,18 @@ fn chassis_rest() -> World {
 
 fn locked_wheel() -> World {
     locked_wheel_world()
+}
+
+fn aero_trim() -> World {
+    aero_trim_world()
+}
+
+fn gear_miss() -> World {
+    gear_miss_world()
+}
+
+fn gear_plane() -> World {
+    gear_plane_world()
 }
 
 fn thruster() -> World {

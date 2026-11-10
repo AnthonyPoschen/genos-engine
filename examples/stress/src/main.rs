@@ -80,7 +80,8 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ParticleSettings,
+    ReflectionSettings, Scene,
     Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
@@ -1328,6 +1329,7 @@ fn run() -> Result<i32, String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        renderer.set_particle_dt(dt);
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if opts.step && dt > 0.0 {
@@ -1420,6 +1422,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1494,6 +1497,7 @@ fn load_gltf_pumped(
             if frame.closing {
                 return genos_window::PumpStep::Close;
             }
+            renderer.set_particle_dt(bench::STEP);
             let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
             genos_window::PumpStep::Continue
         },
