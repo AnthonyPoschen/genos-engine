@@ -4006,7 +4006,7 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // Detail on: a mover shows the world-cell read at this world position and
     // true normal. It does not enter the object-local texel loop, does not
     // seed, and does not stamp (claim stays false). An empty read has w = 0,
-    // so compose keeps the probes. Detail off still uses the object frame below.
+    // so a coarse miss keeps the fine world colour. Detail off still uses the object frame below.
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         lighting_obj_salt = 0.0;
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
