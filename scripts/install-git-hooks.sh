@@ -2,6 +2,9 @@
 # Install the pre-push hook that runs scripts/lint.sh.
 # Safe to run again. An existing pre-push keeps its other commands.
 # A symlink is left in place. A file with a NUL byte is left in place.
+# scripts/hooks/pre-push is the hook the wrapper calls. Pointing
+# core.hooksPath at scripts/hooks must not wrap that file, or the wrapper
+# calls itself. A rejection is decided before any symlink is created.
 # When the active hooks directory is a dispatcher that records
 # .cursor-original-hooks-path and its other hooks are symlinks, the
 # pre-push name becomes the same kind of symlink and the lint block is
@@ -84,6 +87,30 @@ first_symlink() {
   return 1
 }
 
+real_hook=$root/scripts/hooks/pre-push
+
+canonical_path() {
+  python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1"
+}
+
+is_self_hook() {
+  [ "$(canonical_path "$1")" = "$(canonical_path "$real_hook")" ]
+}
+
+# Reject before any install mutation. A symlink or a binary stays as it was.
+reject_unless_safe_text() {
+  local dest=$1
+  if [ -L "$dest" ]; then
+    echo "pre-push: $dest is a symlink; not replacing it" >&2
+    return 1
+  fi
+  if [ -e "$dest" ] && ! is_text "$dest"; then
+    echo "pre-push: $dest is not a text hook; not modifying it" >&2
+    return 1
+  fi
+  return 0
+}
+
 hook_dir=$(git rev-parse --git-path hooks)
 case $hook_dir in
   /*) ;;
@@ -102,11 +129,21 @@ if [ -L "$target" ]; then
     echo "pre-push: $target is a symlink; not replacing it" >&2
     exit 1
   fi
+  if is_self_hook "$original/pre-push"; then
+    echo "pre-push: $original/pre-push is the lint hook; not wrapping it" >&2
+    exit 0
+  fi
+  reject_unless_safe_text "$original/pre-push"
   install_block "$original/pre-push"
   exit 0
 fi
 
 if [ -e "$target" ]; then
+  if is_self_hook "$target"; then
+    echo "pre-push: $target is the lint hook; not wrapping it" >&2
+    exit 0
+  fi
+  reject_unless_safe_text "$target"
   install_block "$target"
   exit 0
 fi
@@ -116,9 +153,22 @@ if [ -n "$original" ]; then
   sibling=$(first_symlink || true)
 fi
 if [ -n "$original" ] && [ -n "$sibling" ]; then
+  dest=$original/pre-push
+  if is_self_hook "$dest"; then
+    echo "pre-push: $dest is the lint hook; not wrapping it" >&2
+    exit 0
+  fi
+  # Validate before creating the dispatcher symlink. A rejected original
+  # hook must leave the hooks directory as it was.
+  reject_unless_safe_text "$dest"
   ln -s "$sibling" "$target"
-  install_block "$original/pre-push"
+  install_block "$dest"
   exit 0
 fi
 
+if is_self_hook "$target"; then
+  echo "pre-push: refusing to install a wrapper that calls itself" >&2
+  exit 1
+fi
+reject_unless_safe_text "$target"
 install_block "$target"

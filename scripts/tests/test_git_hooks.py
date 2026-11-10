@@ -257,6 +257,55 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(hashlib.sha256(dispatcher.read_bytes()).hexdigest(), before)
         self.assertIn(MARKER, (original_hooks / "pre-push").read_text(encoding="utf-8"))
 
+    def test_hooks_path_scripts_hooks_does_not_wrap_its_own_hook(self) -> None:
+        hook = self.repo / "scripts" / "hooks" / "pre-push"
+        before = hook.read_bytes()
+        self.git("config", "core.hooksPath", "scripts/hooks")
+        proc = self.install()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("not wrapping", proc.stderr)
+        self.assertEqual(hook.read_bytes(), before)
+        self.assertNotIn(MARKER, hook.read_text(encoding="utf-8"))
+        self.write_lint("#!/bin/sh\necho LINT\nexit 0\n")
+        try:
+            ran = subprocess.run(
+                [str(hook)],
+                cwd=self.repo,
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=2,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self.fail(f"pre-push called itself: {exc}")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout.splitlines(), ["LINT"])
+        self.assertEqual(hook.read_bytes(), before)
+
+    def test_binary_original_hook_does_not_leave_a_dispatcher_symlink(self) -> None:
+        hooks = self.repo / "cursor-hooks"
+        hooks.mkdir()
+        dispatcher = hooks / ".dispatcher"
+        dispatcher.write_text(DISPATCHER, encoding="utf-8")
+        dispatcher.chmod(0o755)
+        (hooks / "commit-msg").symlink_to(".dispatcher")
+        original_hooks = self.repo / ".git" / "hooks"
+        binary = b"#!/bin/sh\n\0echo original\n"
+        (original_hooks / "pre-push").write_bytes(binary)
+        (hooks / ".cursor-original-hooks-path").write_text(str(original_hooks) + "\n", encoding="utf-8")
+        before_names = sorted(os.listdir(hooks))
+        dispatcher_bytes = dispatcher.read_bytes()
+        link = os.readlink(hooks / "commit-msg")
+        self.git("config", "core.hooksPath", str(hooks))
+        proc = self.install()
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("not a text hook", proc.stderr)
+        self.assertEqual(sorted(os.listdir(hooks)), before_names)
+        self.assertFalse((hooks / "pre-push").exists())
+        self.assertEqual((original_hooks / "pre-push").read_bytes(), binary)
+        self.assertEqual(dispatcher.read_bytes(), dispatcher_bytes)
+        self.assertEqual(os.readlink(hooks / "commit-msg"), link)
+
 
 if __name__ == "__main__":
     unittest.main()
