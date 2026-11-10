@@ -152,6 +152,14 @@ impl Clone for InputSystem {
     }
 }
 
+fn each_evdev_key(down: &[u8; 256], mut write: impl FnMut(crate::code::InputCode, bool)) {
+    for code in 0..256 {
+        if let Some(input) = crate::device::from_evdev(code as u32) {
+            write(input, down[code] != 0);
+        }
+    }
+}
+
 impl InputSystem {
     pub fn new() -> Self {
         Self {
@@ -307,11 +315,7 @@ impl InputSystem {
 
     /// Write keyboard state from Linux evdev codes. Unknown codes are ignored.
     pub fn apply_evdev_keys(&mut self, down: &[u8; 256]) {
-        for code in 0..256 {
-            if let Some(input) = crate::device::from_evdev(code as u32) {
-                self.keyboard.set(input, down[code] != 0);
-            }
-        }
+        each_evdev_key(down, |input, held| self.keyboard.set(input, held));
     }
 
     /// Write one window's keyboard, pointer, and fingers.
@@ -336,11 +340,7 @@ impl InputSystem {
         mouse_middle: bool,
         touch: &[TouchPoint],
     ) {
-        for code in 0..256 {
-            if let Some(input) = crate::device::from_evdev(code as u32) {
-                self.set_key(input, keys_down[code] != 0);
-            }
-        }
+        each_evdev_key(keys_down, |input, held| self.set_key(input, held));
         self.set_mouse_button(InputCode::mouse_left, mouse_left);
         self.set_mouse_button(InputCode::mouse_right, mouse_right);
         self.set_mouse_button(InputCode::mouse_middle, mouse_middle);

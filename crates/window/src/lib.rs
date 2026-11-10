@@ -1,15 +1,51 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::borrow_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::borrow_as_ptr,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
+)]
 
 //! Window. Each pump pulls the platform queue, then tells subscribers what changed.
 //!
@@ -26,9 +62,9 @@ mod win32_keys;
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
     block_ms_mirror, block_ms_needs_value, close_early_flag, close_early_mirror, exit,
-    gap_within_budget, parse_block_ms, parse_quit_gap,
-    parse_quit_phases, parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample,
-    ShutdownDevice, ShutdownPermit, ThreadStop, PHASE_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX, PRESENTED_PREFIX, parse_frames_presented,
+    gap_within_budget, parse_block_ms, parse_frames_presented, parse_quit_gap, parse_quit_phases,
+    parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample, ShutdownDevice,
+    ShutdownPermit, ThreadStop, PHASE_PREFIX, PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
@@ -191,10 +227,13 @@ impl Window {
             None => None,
             Some("") => return Err("display name is empty".into()),
             Some(name) => Some(
-                std::ffi::CString::new(name).map_err(|_| "display name contains a null".to_string())?,
+                std::ffi::CString::new(name)
+                    .map_err(|_| "display name contains a null".to_string())?,
             ),
         };
-        let display_ptr = display.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
+        let display_ptr = display
+            .as_ref()
+            .map_or(std::ptr::null(), |name| name.as_ptr());
         let raw = unsafe {
             genos_window_open_on(
                 width as c_int,
@@ -578,10 +617,8 @@ mod tests {
             unsafe { genos_window_pump_size() } as usize,
             std::mem::size_of::<RawPump>()
         );
-        assert_eq!(
-            unsafe { genos_window_extra_size() } as usize,
-            std::mem::size_of::<RawExtra>()
-        );
+        let extra = usize::try_from(unsafe { genos_window_extra_size() }).unwrap_or(0);
+        assert_eq!(extra, std::mem::size_of::<RawExtra>());
     }
 
     #[cfg(target_os = "windows")]
