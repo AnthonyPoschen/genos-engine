@@ -190,6 +190,8 @@ fn a_skinned_source_writes_gskin_and_a_bad_trailer_fails_verify() {
     assert_eq!(joints[1].name, "knee");
     assert_eq!(joints[1].parent, 0);
     assert_eq!(joints[0].inverse_bind[0], 1.0);
+    assert_eq!(joints[0].ancestor, genos_load::IDENTITY_BIND);
+    assert_eq!(joints[1].ancestor, genos_load::IDENTITY_BIND);
     assert_eq!(joints[1].inverse_bind[5], 1.0);
 
     let move_clip = decoded

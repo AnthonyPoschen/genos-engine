@@ -137,6 +137,11 @@ fn skin_value(skin: &Skin) -> Value {
                             ("name", string(joint.name.clone())),
                             ("parent", int(i64::from(joint.parent))),
                             ("node", int(i64::try_from(joint.node).unwrap_or(i64::MAX))),
+                            ("translation", floats(&joint.translation)),
+                            ("rotation", floats(&joint.rotation)),
+                            ("scale", floats(&joint.scale)),
+                            ("inverse_bind", floats(&joint.inverse_bind)),
+                            ("ancestor", floats(&joint.ancestor)),
                         ])
                     })
                     .collect(),
@@ -155,6 +160,10 @@ fn clip_value(clip: &Clip) -> Value {
         ("duration", float(f64::from(clip.duration))),
         ("skin", int(i64::try_from(clip.skin).unwrap_or(i64::MAX))),
         (
+            "animation",
+            int(i64::try_from(clip.animation).unwrap_or(i64::MAX)),
+        ),
+        (
             "channels",
             array(
                 clip.channels
@@ -170,6 +179,16 @@ fn clip_value(clip: &Clip) -> Value {
             ),
         ),
     ])
+}
+
+fn floats(values: &[f32]) -> Value {
+    array(
+        values
+            .iter()
+            .copied()
+            .map(|value| float(f64::from(value)))
+            .collect(),
+    )
 }
 
 fn path_name(path: ChannelPath) -> &'static str {
@@ -230,6 +249,7 @@ mod tests {
                     translation: [0.0, 1.0, 0.0],
                     rotation: [0.0, 0.0, 0.0, 1.0],
                     scale: [1.0, 1.0, 1.0],
+                    ancestor: IDENTITY_BIND,
                     node: 4,
                 }],
                 notes: Vec::new(),
@@ -238,6 +258,7 @@ mod tests {
                 name: "move".into(),
                 duration: 1.0,
                 skin: 0,
+                animation: 0,
                 channels: vec![Channel {
                     joint: 0,
                     path: ChannelPath::Translation,
