@@ -1418,7 +1418,7 @@ pub fn mib_cents(mib: f64) -> f64 {
 
 /// Potato and Low stay on SDR. The Deck OLED Low chain may take HDR10 when that pair is listed.
 ///
-/// `preset` locks the named Low and Potato presets even when the bloom fields were edited.
+/// Potato is checked first, so an edited Potato stays locked even when its bloom fields look like Low.
 /// A chain with four levels and at most 64 bins locks the same way. scRGB stays locked.
 #[must_use]
 pub fn post_locks_sdr(
@@ -1432,12 +1432,15 @@ pub fn post_locks_sdr(
     }
     let potato = preset == genos_scene::LightingPreset::Potato
         || (hdr.bloom_levels == 0 && matches!(hdr.exposure_mode, genos_scene::ExposureMode::Fixed));
+    if potato {
+        return true;
+    }
     let low = preset == genos_scene::LightingPreset::Low
         || (hdr.bloom_levels == 4 && hdr.histogram_bins <= 64);
     if low && deck_oled_hdr10(hdr.output, panel, hdr10_listed) {
         return false;
     }
-    potato || low
+    low
 }
 
 /// HDR10 when the Deck OLED lists it. scRGB stays on SDR. Desktop and the LCD stay on SDR.
@@ -1654,9 +1657,9 @@ fn meter_slots(bins: u32) -> u32 {
 ///
 /// Scene is RGBA16F. The finest bloom mip is RGBA16F. Later mips are RGB16F,
 /// two texels per 12 bytes. The encode image is 12 bytes a pixel (RGBA16F
-/// codes, then BGRA) only when `encode_full`. Unused bindings share one
-/// The meter is empty unless
-/// exposure is auto. [`post_device_bytes`] accepts a buffer whose
+/// codes, then BGRA) only when `encode_full`. There is no lattice buffer.
+/// Empty bindings name the params buffer, already counted in `params_bytes`.
+/// The meter is empty unless exposure is auto. [`post_device_bytes`] accepts a buffer whose
 /// `VkMemoryRequirements.size` is this logical size, or that size rounded up
 /// to the alignment Vulkan reported for the same buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2300,6 +2303,46 @@ mod tests {
         assert_eq!(deck_panel_from_product("Galileo"), DeckPanel::Oled);
         assert_eq!(deck_panel_from_product("Jupiter"), DeckPanel::Lcd);
         assert_eq!(deck_panel_from_product("  "), DeckPanel::Desktop);
+        let mut edited = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Potato);
+        edited.bloom_levels = 4;
+        edited.histogram_bins = 64;
+        edited.output = genos_scene::OutputMode::Hdr10;
+        assert!(post_locks_sdr(
+            &edited,
+            genos_scene::LightingPreset::Potato,
+            DeckPanel::Oled,
+            true,
+        ));
+        let deck = post_chain(1280, 800, &low, true);
+        assert_eq!(deck.encode_bytes, 1_024_000 * 12);
+        assert_eq!(deck.bytes, 21_118_832);
+        assert!(u64_to_f64(deck.bytes) <= mib_ceiling_bytes(37.46));
+    }
+
+    #[test]
+    fn software_timestamps_skip_the_hardware_ceiling() {
+        let software = crate::gpu::GpuKind::from_vk_device_type(4);
+        let integrated = crate::gpu::GpuKind::from_vk_device_type(1);
+        let discrete = crate::gpu::GpuKind::from_vk_device_type(2);
+        let virtual_gpu = crate::gpu::GpuKind::from_vk_device_type(3);
+        let other = crate::gpu::GpuKind::from_vk_device_type(0);
+        assert_eq!(software, crate::gpu::GpuKind::Software);
+        assert_eq!(integrated, crate::gpu::GpuKind::Hardware);
+        assert_eq!(discrete, crate::gpu::GpuKind::Hardware);
+        assert_eq!(virtual_gpu, crate::gpu::GpuKind::Hardware);
+        assert_eq!(other, crate::gpu::GpuKind::Hardware);
+        let ceiling = 1.50;
+        assert!(software.post_ms_passes(1.689, ceiling));
+        assert!(software.post_ms_passes(1.639, ceiling));
+        assert!(!discrete.post_ms_passes(1.689, ceiling));
+        assert!(!integrated.post_ms_passes(1.639, ceiling));
+        assert!(discrete.post_ms_passes(ceiling, ceiling));
+        assert!(!discrete.post_ms_passes(ceiling + f64::EPSILON, ceiling));
+        assert!(!software.post_ms_passes(0.0, ceiling));
+        assert!(!software.post_ms_passes(-1.0, ceiling));
+        assert!(!software.post_ms_passes(f64::NAN, ceiling));
+        assert!(!software.post_ms_passes(f64::INFINITY, ceiling));
+        assert!(!discrete.post_ms_passes(0.0, ceiling));
     }
 
     #[test]

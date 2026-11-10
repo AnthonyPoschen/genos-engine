@@ -395,12 +395,36 @@ impl Renderer {
     /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
     /// except Potato and Low settings, which stay SDR.
     pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.layout_post_for(
+            hdr,
+            genos_scene::LightingPreset::High,
+            crate::hdr_output::DeckPanel::Desktop,
+            false,
+        )
+    }
+
+    /// Rebuild the post chain the way `post_locks_sdr` classifies `preset` on `panel`.
+    ///
+    /// GI targets still follow Potato. `hdr10_listed` is the Deck OLED exception.
+    pub fn layout_post_for(
+        &mut self,
+        hdr: genos_scene::HdrSettings,
+        preset: genos_scene::LightingPreset,
+        panel: crate::hdr_output::DeckPanel,
+        hdr10_listed: bool,
+    ) -> Result<(), String> {
         self.gpu.lighting.settings =
             genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
         self.gpu.lighting.hdr = hdr;
         self.gpu.lighting.budget_hdr = true;
+        self.gpu.lighting.budget_preset = preset;
+        self.gpu.lighting.budget_panel = panel;
+        self.gpu.lighting.budget_hdr10_listed = hdr10_listed;
         let result = self.gpu.make_lighting_targets();
         self.gpu.lighting.budget_hdr = false;
+        self.gpu.lighting.budget_preset = genos_scene::LightingPreset::High;
+        self.gpu.lighting.budget_panel = crate::hdr_output::DeckPanel::Desktop;
+        self.gpu.lighting.budget_hdr10_listed = false;
         result
     }
 
@@ -514,7 +538,8 @@ impl Renderer {
         self.gpu.lighting.hdr_ms
     }
 
-    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p.
+    /// A lavapipe timestamp is not that score.
     pub fn post_ms_device(&self) -> f64 {
         self.hdr_ms()
     }
@@ -9880,12 +9905,27 @@ pub enum GpuKind {
 }
 
 impl GpuKind {
-    fn from_vk_device_type(device_type: u32) -> Self {
+    /// `VK_PHYSICAL_DEVICE_TYPE_*`. `4` is `CPU` (lavapipe, llvmpipe).
+    #[must_use]
+    pub fn from_vk_device_type(device_type: u32) -> Self {
         // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
         if device_type == 4 {
             Self::Software
         } else {
             Self::Hardware
+        }
+    }
+
+    /// 1.50 ms is the 4070-at-1440p and Deck-at-800p ceiling. A software
+    /// rasterizer still needs a finite positive timestamp. It is not that score.
+    #[must_use]
+    pub fn post_ms_passes(self, value: f64, ceiling: f64) -> bool {
+        if !value.is_finite() || value <= 0.0 {
+            return false;
+        }
+        match self {
+            Self::Software => true,
+            Self::Hardware => value <= ceiling,
         }
     }
 }

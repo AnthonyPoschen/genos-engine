@@ -133,6 +133,12 @@ pub(crate) struct Lighting {
     post_sig: u64,
     /// `layout_post` is measuring the chain. Potato's GI size must not force SDR.
     budget_hdr: bool,
+    /// Preset the budget measurement classifies. High keeps a potato-shaped grade off Potato.
+    budget_preset: genos_scene::LightingPreset,
+    /// Panel the budget measurement classifies. Desktop is the 1440p gate.
+    budget_panel: crate::hdr_output::DeckPanel,
+    /// Whether the budget measurement saw an HDR10 pair. The 1440p gate does not.
+    budget_hdr10_listed: bool,
     /// The display pass writes the bloom tent and lattice samples into the encode buffer.
     bloom_probe: bool,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
@@ -458,6 +464,9 @@ impl Default for Lighting {
             meter_bins: 0,
             post_sig: 0,
             budget_hdr: false,
+            budget_preset: genos_scene::LightingPreset::High,
+            budget_panel: crate::hdr_output::DeckPanel::Desktop,
+            budget_hdr10_listed: false,
             bloom_probe: false,
             meter_ev: None,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
@@ -2741,7 +2750,15 @@ impl Gpu {
     /// the side buffer can be read back.
     fn hdr_output_word(&self) -> f32 {
         let force_sdr = if self.lighting.budget_hdr {
-            !crate::hdr_output::post_encode_resident(&self.lighting.hdr)
+            crate::hdr_output::post_locks_sdr(
+                &self.lighting.hdr,
+                self.lighting.budget_preset,
+                self.lighting.budget_panel,
+                self.lighting.budget_hdr10_listed,
+            ) || !matches!(
+                self.lighting.hdr.output,
+                genos_scene::OutputMode::Hdr10 | genos_scene::OutputMode::Scrgb
+            )
         } else {
             self.present_locks_sdr(self.hdr_output == crate::hdr_output::HdrSwapchain::Hdr10)
         };
