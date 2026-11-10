@@ -233,7 +233,7 @@ fn curve(
 
 /// The shader's 12-bit log luma. One code is `2^(1/64)`.
 fn log_code(luma: f32) -> u32 {
-    if !(luma > 1.0e-8) {
+    if luma.partial_cmp(&1.0e-8) != Some(core::cmp::Ordering::Greater) {
         return 0;
     }
     let q = (luma.log2() + 24.0) * 64.0;
