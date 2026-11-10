@@ -303,10 +303,20 @@ fn a_follower_drops_a_removed_component_and_a_despawned_object() {
     let copied = follower.spawn_with(Health(1)).expect("spawn");
     follower.insert(copied, Position(2)).expect("position");
     assert_eq!(copied, handle);
+    let before = follower.clock();
     follower.apply_delta(&removed[0]).expect("apply removal");
     assert!(follower.get::<Health>(copied).is_none());
     assert_eq!(follower.get::<Position>(copied).expect("position").0, 2);
     assert!(follower.alive(copied));
+    assert_eq!(
+        follower
+            .changes_since(before)
+            .iter()
+            .filter(|delta| delta.bytes.is_empty())
+            .count(),
+        0,
+        "applied removal was echoed"
+    );
 
     let cursor = source.clock();
     source.despawn(handle).expect("despawn");
@@ -314,10 +324,117 @@ fn a_follower_drops_a_removed_component_and_a_despawned_object() {
     assert!(gone.iter().any(|delta| {
         delta.handle == handle && delta.component.is_empty() && delta.bytes.is_empty()
     }));
-    for delta in &gone {
-        follower.apply_delta(delta).expect("apply despawn");
-    }
+    let before = follower.clock();
+    apply_batch(&mut follower, &gone).expect("apply despawn");
     assert!(!follower.alive(copied));
+    assert_eq!(
+        follower
+            .changes_since(before)
+            .iter()
+            .filter(|delta| delta.bytes.is_empty())
+            .count(),
+        0,
+        "applied despawn was echoed"
+    );
+}
+
+#[test]
+fn a_follower_applies_a_removal_it_never_had_and_the_later_record() {
+    let mut source = World::new();
+    let early = spawn_health(&mut source, 1);
+    let later = spawn_health(&mut source, 2);
+    let cursor = source.clock();
+    source.insert(early, Position(4)).expect("add");
+    source.remove::<Position>(early).expect("remove");
+    source.insert(later, Health(9)).expect("later");
+    let deltas = source.changes_since(cursor);
+    let tomb = deltas
+        .iter()
+        .position(|delta| delta.handle == early && delta.bytes.is_empty())
+        .expect("tombstone");
+    let after = deltas
+        .iter()
+        .position(|delta| delta.handle == later && delta.component == "health")
+        .expect("later record");
+    assert!(tomb < after, "the later record must follow the tombstone");
+
+    let mut follower = World::new();
+    follower.register::<Health>().expect("health");
+    follower.register::<Position>().expect("position");
+    let follower_early = spawn_health(&mut follower, 1);
+    let follower_later = spawn_health(&mut follower, 2);
+    assert_eq!(follower_early, early);
+    assert_eq!(follower_later, later);
+    assert!(follower.get::<Position>(follower_early).is_none());
+    let rejects = follower.stats().stale_rejects;
+    let before = follower.clock();
+    apply_batch(&mut follower, &deltas).expect("batch");
+    assert_eq!(follower.stats().stale_rejects, rejects);
+    assert!(follower.get::<Position>(follower_early).is_none());
+    assert_eq!(follower.get::<Health>(follower_early).expect("health").0, 1);
+    assert_eq!(follower.get::<Health>(follower_later).expect("later").0, 9);
+    assert_eq!(
+        follower
+            .changes_since(before)
+            .iter()
+            .filter(|delta| delta.bytes.is_empty())
+            .count(),
+        0,
+        "applied removal was echoed"
+    );
+}
+
+#[test]
+fn a_follower_applies_a_despawn_it_never_had_and_the_later_record() {
+    let mut source = World::new();
+    let gone = spawn_health(&mut source, 1);
+    let kept = spawn_health(&mut source, 2);
+    let cursor = source.clock();
+    source.despawn(gone).expect("despawn");
+    source.insert(kept, Health(8)).expect("later");
+    let deltas = source.changes_since(cursor);
+    let tomb = deltas
+        .iter()
+        .position(|delta| delta.handle == gone && delta.component.is_empty())
+        .expect("tombstone");
+    let after = deltas
+        .iter()
+        .position(|delta| delta.handle == kept && delta.component == "health")
+        .expect("later record");
+    assert!(tomb < after, "the later record must follow the tombstone");
+
+    let mut follower = World::new();
+    follower.register::<Health>().expect("health");
+    let occupied = follower.spawn().expect("index 0");
+    let follower_kept = spawn_health(&mut follower, 2);
+    assert_eq!(follower_kept, kept);
+    follower.despawn(occupied).expect("absent");
+    assert!(!follower.alive(gone));
+    let rejects = follower.stats().stale_rejects;
+    let before = follower.clock();
+    apply_batch(&mut follower, &deltas).expect("batch");
+    assert_eq!(follower.stats().stale_rejects, rejects);
+    assert!(!follower.alive(gone));
+    assert_eq!(follower.get::<Health>(follower_kept).expect("later").0, 8);
+    assert_eq!(
+        follower
+            .changes_since(before)
+            .iter()
+            .filter(|delta| delta.bytes.is_empty())
+            .count(),
+        0,
+        "applied despawn was echoed"
+    );
+}
+
+fn apply_batch(
+    world: &mut World,
+    deltas: &[genos_ecs::ComponentDelta],
+) -> Result<(), genos_ecs::StoreError> {
+    for delta in deltas {
+        world.apply_delta(delta)?;
+    }
+    Ok(())
 }
 
 #[test]

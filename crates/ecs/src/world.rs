@@ -408,15 +408,7 @@ impl World {
     /// [`StoreError::Stale`] when `handle` is not live. That increments
     /// [`Stats::stale_rejects`].
     pub fn despawn(&mut self, handle: SceneHandle) -> Result<(), StoreError> {
-        let (archetype, row) = self.place(handle)?;
-        self.remove_row(archetype, row)?;
-        let index = usize::try_from(handle.index()).map_err(|_err| StoreError::Stale)?;
-        let Some(slot) = self.slots.get_mut(index) else {
-            return Err(StoreError::Stale);
-        };
-        slot.place = None;
-        slot.generation = next_generation(slot.generation);
-        self.free.insert(handle.index());
+        self.drop_object(handle)?;
         self.note_removal(handle, "");
         Ok(())
     }
@@ -520,24 +512,7 @@ impl World {
     /// [`StoreError::Stale`] when the handle is not live.
     /// [`StoreError::Missing`] when the object has no `T`.
     pub fn remove<T: Component>(&mut self, handle: SceneHandle) -> Result<T, StoreError> {
-        self.ensure_kind::<T>()?;
-        let (from, row) = self.place(handle)?;
-        let value = self
-            .column::<T>(from)
-            .and_then(|column| column.values.get(row).cloned())
-            .ok_or(StoreError::Missing)?;
-        let type_id = TypeId::of::<T>();
-        let mut signature = self
-            .archetypes
-            .get(from)
-            .map(|arch| arch.signature.clone())
-            .ok_or(StoreError::Unknown)?;
-        let Ok(pos) = signature.binary_search(&type_id) else {
-            return Err(StoreError::Missing);
-        };
-        signature.remove(pos);
-        let to = self.ensure_archetype(&signature)?;
-        self.move_row::<T>(from, row, to, None)?;
+        let value = self.take_component::<T>(handle)?;
         self.note_removal(handle, T::component_name());
         Ok(value)
     }
@@ -638,21 +613,22 @@ impl World {
         out
     }
 
-    /// Write one delta onto the live object.
+    /// Write one delta onto this world.
     ///
-    /// The receiver must have [`Self::register`]ed that component name.
+    /// A payload requires [`Self::register`] for that component name. An empty
+    /// payload is a removal. If that object or component is already absent,
+    /// the removal succeeds and records nothing: the worlds already agree, so
+    /// a `?` over the rest of the batch continues. A removal that does drop
+    /// a present component or object does not record another local removal.
     ///
     /// # Errors
     ///
-    /// [`StoreError::Unknown`] when the name was not registered.
+    /// [`StoreError::Unknown`] when a payload's name was not registered.
     /// [`StoreError::Decode`] when the bytes are not that component.
-    /// [`StoreError::Stale`] when the handle is not live.
+    /// [`StoreError::Stale`] when a payload names a handle that is not live.
     pub fn apply_delta(&mut self, delta: &ComponentDelta) -> Result<(), StoreError> {
         if delta.bytes.is_empty() {
-            if delta.component.is_empty() {
-                return self.despawn(delta.handle);
-            }
-            return self.remove_named(delta.handle, delta.component);
+            return self.apply_removal(delta.handle, delta.component);
         }
         let apply = self
             .kinds
@@ -750,6 +726,56 @@ impl World {
 
     fn take_tick(&mut self) -> u32 {
         take_tick(&mut self.clock)
+    }
+
+    fn drop_object(&mut self, handle: SceneHandle) -> Result<(), StoreError> {
+        let (archetype, row) = self.place(handle)?;
+        self.remove_row(archetype, row)?;
+        let index = usize::try_from(handle.index()).map_err(|_err| StoreError::Stale)?;
+        let Some(slot) = self.slots.get_mut(index) else {
+            return Err(StoreError::Stale);
+        };
+        slot.place = None;
+        slot.generation = next_generation(slot.generation);
+        self.free.insert(handle.index());
+        Ok(())
+    }
+
+    fn take_component<T: Component>(&mut self, handle: SceneHandle) -> Result<T, StoreError> {
+        self.ensure_kind::<T>()?;
+        let (from, row) = self.place(handle)?;
+        let value = self
+            .column::<T>(from)
+            .and_then(|column| column.values.get(row).cloned())
+            .ok_or(StoreError::Missing)?;
+        let type_id = TypeId::of::<T>();
+        let mut signature = self
+            .archetypes
+            .get(from)
+            .map(|arch| arch.signature.clone())
+            .ok_or(StoreError::Unknown)?;
+        let Ok(pos) = signature.binary_search(&type_id) else {
+            return Err(StoreError::Missing);
+        };
+        signature.remove(pos);
+        let to = self.ensure_archetype(&signature)?;
+        self.move_row::<T>(from, row, to, None)?;
+        Ok(value)
+    }
+
+    /// Apply a tombstone. An absent object or component is already the end
+    /// state, so this returns success and does not record a removal.
+    fn apply_removal(&mut self, handle: SceneHandle, component: &str) -> Result<(), StoreError> {
+        if !self.alive(handle) {
+            return Ok(());
+        }
+        if component.is_empty() {
+            return self.drop_object(handle);
+        }
+        match self.remove_named(handle, component) {
+            Err(StoreError::Missing | StoreError::Unknown) => Ok(()),
+            other => other,
+        }
     }
 
     fn note_removal(&mut self, handle: SceneHandle, component: &'static str) {
@@ -969,7 +995,7 @@ fn remove_component<T: Component>(
     world: &mut World,
     handle: SceneHandle,
 ) -> Result<(), StoreError> {
-    world.remove::<T>(handle).map(|_value| ())
+    world.take_component::<T>(handle).map(|_value| ())
 }
 
 fn apply_component<T: Component>(
