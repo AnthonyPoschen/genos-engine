@@ -57,8 +57,8 @@ pub use png::Image;
 pub use sha256::{hex, sha256, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
 pub use skin::{
-    joint_index, pack_influences, sample_channel, sample_clip, Channel, ChannelPath, Clip,
-    InfluenceFlags, Interpolation, Joint, PackedInfluences, Skin, IDENTITY_BIND,
+    joint_index, pack_influences, rest_model, sample_channel, sample_clip, Channel, ChannelPath,
+    Clip, InfluenceFlags, Interpolation, Joint, PackedInfluences, Skin, IDENTITY_BIND,
 };
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
