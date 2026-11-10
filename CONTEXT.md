@@ -152,6 +152,10 @@ _Avoid_: Pacejka, wheel body
 The ground payload's torque path when a drive block is present. A table of rpm and torque is interpolated. `gear` picks a ratio, including a negative reverse, then a final drive. Engine speed is the mean spin of the driven wheels through that ratio. An open differential writes the same torque to each driven wheel. The clutch is 0 or 1. Wheel spin integrates from that torque and the tyre reaction. No drive block leaves wheel spin as the game wrote it.
 _Avoid_: Limited-slip differential, clutch slip
 
+**Thruster**:
+A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
+_Avoid_: Rocket body, orbit
+
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 _Avoid_: Joint, spring
@@ -255,3 +259,47 @@ _Avoid_: Sleep group, simulation island
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline
+
+**Clip**:
+Cooked or decoded PCM a sound source plays.
+_Avoid_: Sample bank, cue
+
+**Sound source**:
+One playing clip. The mix type is `Source`.
+_Avoid_: Channel
+
+**Voice**:
+The pool slot that keeps one sound source playing across quanta. `VoiceId` names it.
+_Avoid_: Channel, track
+
+**Listener**:
+The pose the mix hears from. The camera supplies the position, the facing, and the velocity.
+_Avoid_: Ear, audio listener object
+
+**Audio bus**:
+A named sum of sound sources. World, music, and UI sum into the master output.
+_Avoid_: Mixer group, channel group
+
+**Transmission**:
+The gain along the straight path through occluders, `exp(-absorption * thickness)`.
+_Avoid_: Occlusion ray, obstruction
+
+**Sound device**:
+The operating-system playback endpoint. Linux writes ALSA, Windows writes WASAPI, and macOS writes CoreAudio. A console adds an endpoint that writes the same finished buffer.
+_Avoid_: Audio backend, audio engine
+
+**Resident clip**:
+A clip decoded before it plays.
+_Avoid_: In-memory bank
+
+**Disk-fed clip**:
+A clip whose samples are read from the cooked file ahead of the playhead.
+_Avoid_: Stream, streaming buffer
+
+**Reverb zone**:
+A world box that sets the listener's reverb send. Transmission is what changes the straight-path gain.
+_Avoid_: Reverb volume, audio volume
+
+**Command tape**:
+The timed mix commands an offline render plays. The cross-platform test hashes that render.
+_Avoid_: Event list, sound script

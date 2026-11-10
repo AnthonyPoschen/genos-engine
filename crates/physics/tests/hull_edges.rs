@@ -79,28 +79,200 @@ fn crossed_edges_apart_do_not_touch() {
     }
 }
 
+/// Positional slop, correction fraction, and narrow-phase passes in `step`.
+/// One positional iteration runs on each pass (`solver.rs`, `lib.rs`).
+const SLOP: f32 = 0.001;
+const PERCENT: f32 = 0.8;
+const POSITION_PASSES: u32 = 4;
+/// A tenth of the slop. Wider than the anchor round-trip, and a 1e-8 nudge
+/// stays far outside it.
+const CORRECTION_BAND: f32 = SLOP * 0.1;
+
+/// Separation after `POSITION_PASSES` of `extra * PERCENT`, in `f32`.
+fn separation_from_solver(depth: f32) -> f32 {
+    let mut left = depth;
+    for _ in 0..POSITION_PASSES {
+        let extra = left - SLOP;
+        if extra <= 0.0 {
+            break;
+        }
+        left -= extra * PERCENT;
+    }
+    depth - left
+}
+
+struct StepMove {
+    moved_a: Vec3,
+    moved_b: Vec3,
+    share_a: f32,
+    share_b: f32,
+    velocity_a: Vec3,
+    velocity_b: Vec3,
+    spin_a: Vec3,
+    spin_b: Vec3,
+}
+
+/// `None` when the centres took the configured correction. A 1e-8 nudge,
+/// an overshoot past `depth`, a sideways drift, or a new velocity is `Some`.
+fn separation_fault(depth: f32, step: &StepMove) -> Option<String> {
+    let predicted = separation_from_solver(depth);
+    let pushed = step.moved_b.x - step.moved_a.x;
+    if step.share_a > 0.0 && step.moved_a.x >= 0.0 {
+        return Some(format!("a did not move toward -x: {:?}", step.moved_a));
+    }
+    if step.share_b > 0.0 && step.moved_b.x <= 0.0 {
+        return Some(format!("b did not move toward +x: {:?}", step.moved_b));
+    }
+    for moved in [step.moved_a, step.moved_b] {
+        if moved.y.abs() > 1.0e-6 || moved.z.abs() > 1.0e-6 {
+            return Some(format!("sideways {moved:?}"));
+        }
+    }
+    if pushed > depth {
+        return Some(format!("pushed {pushed} past depth {depth}"));
+    }
+    if (pushed - predicted).abs() > CORRECTION_BAND {
+        return Some(format!(
+            "pushed {pushed}, solver correction {predicted} for depth {depth}"
+        ));
+    }
+    let expect_a = -predicted * step.share_a;
+    let expect_b = predicted * step.share_b;
+    if (step.moved_a.x - expect_a).abs() > CORRECTION_BAND {
+        return Some(format!(
+            "a.x {} , share {} of {predicted}",
+            step.moved_a.x, step.share_a
+        ));
+    }
+    if (step.moved_b.x - expect_b).abs() > CORRECTION_BAND {
+        return Some(format!(
+            "b.x {} , share {} of {predicted}",
+            step.moved_b.x, step.share_b
+        ));
+    }
+    if step.share_a <= 0.0 && step.moved_a != Vec3::ZERO {
+        return Some(format!("static a moved {:?}", step.moved_a));
+    }
+    if step.share_b <= 0.0 && step.moved_b != Vec3::ZERO {
+        return Some(format!("static b moved {:?}", step.moved_b));
+    }
+    if step.velocity_a != Vec3::ZERO || step.velocity_b != Vec3::ZERO {
+        return Some(format!(
+            "velocity {:?} {:?}",
+            step.velocity_a, step.velocity_b
+        ));
+    }
+    if step.spin_a != Vec3::ZERO || step.spin_b != Vec3::ZERO {
+        return Some(format!("spin {:?} {:?}", step.spin_a, step.spin_b));
+    }
+    None
+}
+
+fn separate_along_x(world: &mut World, depth: f32) {
+    let before = [world.bodies[0].position, world.bodies[1].position];
+    let inv_a = world.bodies[0].inverse_mass;
+    let inv_b = world.bodies[1].inverse_mass;
+    let inv = inv_a + inv_b;
+    step(world, DT);
+    let moved_a = world.bodies[0].position - before[0];
+    let moved_b = world.bodies[1].position - before[1];
+    let fault = separation_fault(
+        depth,
+        &StepMove {
+            moved_a,
+            moved_b,
+            share_a: inv_a / inv,
+            share_b: inv_b / inv,
+            velocity_a: world.bodies[0].velocity,
+            velocity_b: world.bodies[1].velocity,
+            spin_a: world.bodies[0].angular_velocity,
+            spin_b: world.bodies[1].angular_velocity,
+        },
+    );
+    assert!(fault.is_none(), "{}", fault.unwrap_or_default());
+}
+
 #[test]
 fn crossed_edges_overlapping_separate_along_x_by_the_edge_depth() {
     let depth = 0.05_f32;
     let mut world = crossed_cubes(-depth, 1.0);
+    // Correction is bounded by the true edge depth, not a face overlap.
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn a_thin_edge_overlap_still_separates_along_x() {
+    // 5 mm is above slop. The face-clip samples of this overlap clamp to 0.
+    let depth = 0.005_f32;
+    let mut world = crossed_cubes(-depth, 1.0);
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn a_static_hull_stays_and_the_dynamic_edge_takes_the_correction() {
+    let depth = 0.05_f32;
+    let mut world = crossed_cubes(-depth, 0.0);
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn a_negligible_push_fails_the_separation_check() {
+    let depth = 0.05_f32;
+    let fault = separation_fault(
+        depth,
+        &StepMove {
+            moved_a: Vec3::new(-1.0e-8, 0.0, 0.0),
+            moved_b: Vec3::new(1.0e-8, 0.0, 0.0),
+            share_a: 0.5,
+            share_b: 0.5,
+            velocity_a: Vec3::ZERO,
+            velocity_b: Vec3::ZERO,
+            spin_a: Vec3::ZERO,
+            spin_b: Vec3::ZERO,
+        },
+    );
+    let predicted = separation_from_solver(depth);
+    assert!(
+        fault.as_deref().is_some_and(|text| text.contains("pushed"))
+            && (predicted - 2.0e-8).abs() > CORRECTION_BAND,
+        "a 1e-8 nudge passed the separation check: {fault:?}"
+    );
+}
+
+/// Eight ulps of yaw. The edge overlap stays, and face-clip penetrations clamp to 0.
+fn yawed_crossed_cubes(gap: f32) -> World {
+    let mut world = crossed_cubes(gap, 1.0);
+    let quarter = std::f32::consts::FRAC_PI_4;
+    let yaw = f32::from_bits(quarter.to_bits().wrapping_add(8));
+    world.bodies[1].orientation = Quat::from_axis_angle(Vec3::Y, yaw);
+    world
+}
+
+#[test]
+fn a_few_ulps_of_yaw_still_separates_a_crossed_edge_overlap() {
+    let depth = 0.05_f32;
+    let mut world = yawed_crossed_cubes(-depth);
+    separate_along_x(&mut world, depth);
+}
+
+#[test]
+fn the_same_yaw_with_a_gap_does_not_move() {
+    let mut world = yawed_crossed_cubes(0.01);
     let before = [world.bodies[0].position, world.bodies[1].position];
     step(&mut world, DT);
-    let moved_a = world.bodies[0].position - before[0];
-    let moved_b = world.bodies[1].position - before[1];
-    // Pushed apart along x only.
-    assert!(
-        moved_a.x < 0.0 && moved_b.x > 0.0,
-        "a {moved_a:?} b {moved_b:?}"
-    );
-    for moved in [moved_a, moved_b] {
-        assert!(
-            moved.y.abs() <= 1.0e-6 && moved.z.abs() <= 1.0e-6,
-            "sideways {moved:?}"
-        );
-    }
-    // Correction is bounded by the true edge depth, not a face overlap.
-    let pushed = moved_b.x - moved_a.x;
-    assert!(pushed <= depth, "pushed {pushed} for depth {depth}");
+    assert_eq!(world.bodies[0].position, before[0]);
+    assert_eq!(world.bodies[1].position, before[1]);
+}
+
+#[test]
+fn aligned_hulls_overlapping_on_x_still_separate() {
+    let depth = 0.05_f32;
+    let a = Body::mesh(Vec3::ZERO, 1.0, &outward_box(HALF));
+    let b = Body::mesh(Vec3::new(1.0 - depth, 0.0, 0.0), 1.0, &outward_box(HALF));
+    let mut world = World::new(Vec3::ZERO);
+    world.insert(a);
+    world.insert(b);
+    separate_along_x(&mut world, depth);
 }
 
 #[test]

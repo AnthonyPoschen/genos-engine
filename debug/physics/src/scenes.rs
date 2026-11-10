@@ -12,7 +12,8 @@
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{
-    chassis_rest_world, first_gear_world, locked_wheel_world, Body, MotionQuality, World,
+    chassis_rest_world, first_gear_world, locked_wheel_world, thruster_world, Body, MotionQuality,
+    World,
 };
 
 /// One entry in the scene picker.
@@ -31,7 +32,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 10] = [
+pub const SCENES: [SceneInfo; 11] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -91,6 +92,12 @@ pub const SCENES: [SceneInfo; 10] = [
         summary: "Settled G1 chassis, throttle 1, gear 0, ratio 3, open differential",
         steps: 120,
         build: first_gear,
+    },
+    SceneInfo {
+        name: "thruster",
+        summary: "1 000 kg cube, one offset thruster, gravity zero (ADR 0040 S1)",
+        steps: 60,
+        build: thruster,
     },
 ];
 
@@ -297,6 +304,10 @@ fn locked_wheel() -> World {
 
 fn first_gear() -> World {
     first_gear_world()
+}
+
+fn thruster() -> World {
+    thruster_world()
 }
 
 fn sleep_island() -> World {
