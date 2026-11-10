@@ -828,7 +828,7 @@ fn mix(hash: u64, value: u64) -> u64 {
     hash.wrapping_mul(0x0000_0100_0000_01b3) ^ value
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod spawn_tests {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc;
