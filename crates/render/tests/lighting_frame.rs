@@ -991,11 +991,23 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
 /// the hash wavelet.
 #[test]
 fn shadowed_floor_bounce_stays_smooth_on_high() {
-    let hash = floor_shadow_shot(false);
-    let screen = floor_shadow_shot(true);
+    expect_shadow_floor(10);
+}
+
+/// The same bars after 40 warmup frames. The frozen shot scores frames 10..15.
+/// A still texel that takes another set after its plain mean moves the cell,
+/// and the hash wavelet drops the blotch.
+#[test]
+fn shadowed_floor_bounce_stays_smooth_after_a_long_warmup() {
+    expect_shadow_floor(40);
+}
+
+fn expect_shadow_floor(warmup: usize) {
+    let hash = floor_shadow_shot(false, warmup);
+    let screen = floor_shadow_shot(true, warmup);
     let (err_mean, err_p99) = paired_luma(&hash.lumas, &screen.lumas);
     eprintln!(
-        "shadow floor hash mean {:.1} peaks {:.1}..{:.1} flicker {:.3} screen mean {:.1} peaks {:.1}..{:.1} flicker {:.3} luma mean {err_mean:.3} p99 {err_p99:.3}",
+        "shadow floor warmup {warmup} hash mean {:.1} peaks {:.1}..{:.1} flicker {:.3} screen mean {:.1} peaks {:.1}..{:.1} flicker {:.3} luma mean {err_mean:.3} p99 {err_p99:.3}",
         hash.mean, hash.peaks_min, hash.peaks_max, hash.flicker,
         screen.mean, screen.peaks_min, screen.peaks_max, screen.flicker
     );
@@ -1064,7 +1076,7 @@ struct FloorCam {
     pitch: f32,
 }
 
-fn floor_shadow_shot(screen: bool) -> FloorShadow {
+fn floor_shadow_shot(screen: bool, warmup: usize) -> FloorShadow {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -1100,7 +1112,7 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
             ..still
         },
     ];
-    for _ in 0..10 {
+    for _ in 0..warmup {
         let camera = floor_camera(&shots[0]);
         let _ = draw(window, renderer, &world, &camera);
     }

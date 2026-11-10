@@ -274,6 +274,14 @@ void main() {
         } else if (!lighting_sc_light_quiet()) {
             wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
         }
+        // A noted lamp (moved, recoloured, or out): each round's set carries
+        // the change one bounce further, so the cell takes that set whole.
+        // An average with the sets before keeps the old light. The drain flag
+        // is not a note. It also arms on a still cache, and one sample there
+        // is the cell blotch the world cache is read for.
+        if (lighting_lamp_noted()) {
+            wa = 1.0;
+        }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
         if (sh) {
@@ -348,10 +356,16 @@ void main() {
                 // and its own clamp of 8; it does not read
                 // surface_cache.firefly_sigma. A newborn starts at short = mean,
                 // inconsistency 1, vbbr 1, variance (0.15 * luma)^2 (S72T; the
-                // listing has no init, and variance 0 makes catch-up 1); while
-                // t < 16, k is at most 1/(t+1); a mover raises k to at least
-                // 0.5 and a lamp delta is capped at 0.9; A-SVGF mixes lambda
-                // when that path is on.
+                // listing has no init, and variance 0 makes catch-up 1). The
+                // first 12 sets blend the unclamped set at most 1/(t+1). A
+                // still texel then keeps that mean and the variance the
+                // wavelet reads. The clamp has already dropped the emitter
+                // from the short mean, and catch-up would spend the long
+                // mean on one later set. A 16-set mean does that: the
+                // rebuilt cell falls under the blotch gate. A mover raises
+                // k to at least 0.5 and a lamp delta is capped at 0.9.
+                // A-SVGF mixes lambda when
+                // that path is on. A noted lamp takes the set whole.
                 const vec3 msmel = vec3(0.299, 0.587, 0.114);
                 if (b.x <= 0.0) {
                     a = vec4(old.rgb, pow(0.15 * dot(old.rgb, msmel), 2.0) + 1.0e-8);
@@ -359,6 +373,9 @@ void main() {
                 }
                 float dev0 = sqrt(max(1.0e-5, a.w));
                 float sigma = lighting_sc_firefly_sigma();
+                // The clamp is the short estimator's. The long mean blends the
+                // set itself: the clamp treats a small emitter's rare hits as
+                // fireflies once the short mean has forgotten them.
                 vec3 y = e - max(e - (0.1 + a.rgb + sigma * dev0), vec3(0.0));
                 vec3 d1 = y - a.rgb;
                 vec3 sm = mix(a.rgb, y, 0.08);
@@ -371,10 +388,26 @@ void main() {
                 float vb = mix(b.x, clamp(dot(msmel, 0.5 * sm / vec3(max(1.0e-5, dev))), 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
-                // S72T: while young (under 16 sets) never faster than the plain
-                // mean 1 / (n + 1), the least-noise estimate of a still signal
-                // (the hint still overrides it).
-                if (t < 16.0) {
+                // Settling (as the cells above): the round's set whole.
+                // The drain flag is not a lamp change. It keeps the cache
+                // relighting. It does not discard a still texel's mean.
+                if (lighting_lamp_noted()) {
+                    hint = 1.0;
+                }
+                // S72T: the first 12 sets are the plain mean 1 / (n + 1) of the
+                // unclamped set. The firefly clamp stays on the short estimator.
+                // Once that short mean has forgotten a small emitter's rare
+                // hits, catch-up reads the disagreement as a change and the
+                // next set replaces the long mean. A still texel does not
+                // take that set, and the variance the wavelet reads stays.
+                // The wavelet itself rebuilds only once the texel has 16
+                // sets, so the frozen shot still uses the dirty hold. A
+                // noted lamp takes the set whole after the mix. Lambda
+                // left old bounce light at about 2.5% a round. The drain
+                // flag is not that note.
+                bool young = t < 12.0;
+                bool noted = lighting_lamp_noted();
+                if (young) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
                 if (LIGHTING_SC_ASVGF) {
@@ -382,16 +415,12 @@ void main() {
                     // hints only nominate checks (lighting_compact.comp).
                     float lam = lighting_sc_lambda(slot);
                     k = (1.0 - lam) * k + lam;
-                    // A lamp hint of 1 used to replace the mean with this set.
-                    // The picture is that mean. One set is not the light, and
-                    // the next frame's set is a different sample, so the field
-                    // popped for the whole ring. The change still moves the
-                    // mean, at the same floor the world cells use, and the
-                    // young cap above is left in place.
-                    if (lighting_sh_texel_detail_on()) {
-                        k = max(k, min(hint, LIGHTING_WRC_CHANGE_ALPHA));
-                    } else if (hint >= 1.0) {
+                    if (noted) {
                         k = 1.0;
+                    } else if (young) {
+                        k = min(k, 1.0 / (t + 1.0));
+                    } else {
+                        k = 0.0;
                     }
                 } else {
                     float raised = hint >= 1.0 ? 1.0 : min(hint, 0.9);
@@ -400,8 +429,9 @@ void main() {
                     }
                     k = max(k, raised);
                 }
-                vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
-                cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
+                vec3 taken = noted ? y : e;
+                vec3 m = mix(old.rgb, taken, clamp(k, 0.0, 1.0));
+                cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, (!young && !noted) ? a.w : var);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
                 lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
                 return;
