@@ -28,6 +28,21 @@ pub const RESOLUTION_SCALE: u32 = 1;
 pub const SPATIAL_CHECKERBOARD: u32 = 0;
 /// 1 keeps initial and temporal as two dispatches so each stamp is one pass.
 pub const SPLIT_PASSES: u32 = 0;
+/// Live workgroup width. Matches `local_size_x` in `restir_live.comp`.
+pub const GROUP_SIZE: u32 = 64;
+/// Vulkan's minimum `maxComputeWorkGroupCount[0]`. One dispatch at 1440p.
+pub const GROUP_LIMIT: u32 = 65535;
+
+/// How many dispatches cover `pixels` at [`GROUP_SIZE`] threads, staying
+/// inside [`GROUP_LIMIT`] groups. 1440p is one. A 65536-pixel chunk was
+/// about fifty launches a pass and did not change when a knob changed.
+pub const fn dispatch_count(pixels: u32) -> u32 {
+    let span = GROUP_LIMIT.saturating_mul(GROUP_SIZE);
+    if pixels == 0 || span == 0 {
+        return 0;
+    }
+    pixels.div_ceil(span)
+}
 /// Header word: screen pixels per reservoir edge.
 pub const SCALE_WORD: usize = 46;
 /// Header word: checkerboard spatial copy.
@@ -132,7 +147,7 @@ pub fn log_cost(reservoir_w: u32, reservoir_h: u32, cost: &RestirCost) {
         .saturating_mul(u64::from(cost.screen_height))
         .saturating_mul(24);
     eprintln!(
-        "restir cost: reservoir={reservoir_w}x{reservoir_h} screen={}x{} scale={} candidates={} spatial_neighbors={} spatial_radius={} checkerboard={} split_passes={} initial_iters={} temporal_iters={pixels} spatial_phat={spatial} spatial_tries={} spatial_window={window} previous_full_window_scan={old_window}",
+        "restir cost: reservoir={reservoir_w}x{reservoir_h} screen={}x{} scale={} candidates={} spatial_neighbors={} spatial_radius={} checkerboard={} split_passes={} initial_iters={} temporal_iters={pixels} spatial_phat={spatial} dispatches={} spatial_window={window} previous_full_window_scan={old_window}",
         cost.screen_width,
         cost.screen_height,
         cost.resolution_scale.clamp(1, 4),
@@ -142,7 +157,7 @@ pub fn log_cost(reservoir_w: u32, reservoir_h: u32, cost: &RestirCost) {
         u32::from(cost.checkerboard != 0),
         u32::from(cost.split_passes != 0),
         pixels.saturating_mul(u64::from(cost.candidates.clamp(1, 32))),
-        pixels.saturating_mul(neighbors).saturating_mul(4),
+        dispatch_count(u32::try_from(pixels).unwrap_or(u32::MAX)),
     );
 }
 /// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
@@ -559,5 +574,64 @@ mod tests {
         words[15] = 0;
         super::set_history_reset(&mut words, false);
         assert_eq!(words[15], 0);
+    }
+
+    #[test]
+    fn product_defaults_match_the_scene_settings_and_one_dispatch_covers_1440p() {
+        assert_eq!(
+            super::SPATIAL_NEIGHBORS,
+            genos_scene::RESTIR_SPATIAL_NEIGHBORS
+        );
+        assert_eq!(super::SPATIAL_RADIUS, genos_scene::RESTIR_SPATIAL_RADIUS);
+        assert_eq!(
+            super::RESOLUTION_SCALE,
+            genos_scene::RESTIR_RESOLUTION_SCALE
+        );
+        assert_eq!(super::CANDIDATES, genos_scene::RESTIR_CANDIDATES);
+        assert_eq!(
+            super::SPATIAL_CHECKERBOARD,
+            genos_scene::RESTIR_SPATIAL_CHECKERBOARD
+        );
+        assert_eq!(super::SPLIT_PASSES, genos_scene::RESTIR_SPLIT_PASSES);
+        assert_eq!(super::dispatch_count(2560 * 1440), 1);
+        assert_eq!(super::dispatch_count(3840 * 2160), 2);
+        let lamp = GpuLamp {
+            pos: [1.0, 2.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            directional: false,
+            range: 4.0,
+        };
+        let cost = super::RestirCost {
+            width: 32,
+            height: 16,
+            screen_width: 32,
+            screen_height: 16,
+            ..super::RestirCost::default()
+        };
+        let from_settings = super::RestirCost {
+            width: 32,
+            height: 16,
+            spatial_neighbors: genos_scene::RESTIR_SPATIAL_NEIGHBORS,
+            spatial_radius: genos_scene::RESTIR_SPATIAL_RADIUS,
+            resolution_scale: genos_scene::RESTIR_RESOLUTION_SCALE,
+            checkerboard: genos_scene::RESTIR_SPATIAL_CHECKERBOARD,
+            candidates: genos_scene::RESTIR_CANDIDATES,
+            split_passes: genos_scene::RESTIR_SPLIT_PASSES,
+            screen_width: 32,
+            screen_height: 16,
+        };
+        let Some(a) = super::prefix(&[lamp], &[], &RestirCam::default(), 1, 0, cost) else {
+            panic!("prefix");
+        };
+        let Some(b) = super::prefix(&[lamp], &[], &RestirCam::default(), 1, 0, from_settings)
+        else {
+            panic!("prefix");
+        };
+        for word in [9usize, 13, 14, 46, 47, 50] {
+            assert_eq!(a.words[word], b.words[word], "header {word}");
+        }
+        assert_eq!(a.words[46], 1, "scale 1 is full resolution");
+        assert_eq!(a.words[7], 32);
+        assert_eq!(a.words[13], 4);
     }
 }

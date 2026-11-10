@@ -3052,9 +3052,10 @@ impl Gpu {
     fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
         let pipe = self.lighting.restir_pipe;
         let mut base = 0u32;
+        let span = crate::restir_live::GROUP_LIMIT.saturating_mul(crate::restir_live::GROUP_SIZE);
         while base < pixels {
-            let count = (pixels - base).min(65536);
-            let groups = count.div_ceil(64).max(1);
+            let count = (pixels - base).min(span);
+            let groups = count.div_ceil(crate::restir_live::GROUP_SIZE).max(1);
             let mut rpc = *pc;
             rpc[9] = (rpc[9] & !(3 << 22)) | (pass << 22) | (1 << 21);
             rpc[11] = base;
@@ -3070,12 +3071,13 @@ impl Gpu {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
             }
-            base = base.saturating_add(65536);
+            base = base.saturating_add(span);
         }
     }
 
-    /// Initial, then temporal, then spatial. Each dispatch is at most 65536
-    /// reservoir pixels. `restir_split_passes` clear runs temporal in the
+    /// Initial, then temporal, then spatial. One dispatch covers 1440p
+    /// (`GROUP_LIMIT` groups of `GROUP_SIZE`). A larger reservoir continues
+    /// from `pc.lamp.w`. `restir_split_passes` clear runs temporal in the
     /// initial invocation (one dispatch). The temporal stamp is then empty
     /// and `restir_initial` is both passes. Checkerboard copies after spatial
     /// and is included in the spatial stamp. Four queries, no fifth slot.

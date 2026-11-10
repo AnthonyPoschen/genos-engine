@@ -110,7 +110,12 @@ bool g_surf_two;
 
 uint restir_scale() {
     uint s = restir_hdr(46u);
-    return s == 0u ? 1u : s;
+    // 0 and anything outside 1..4 are full resolution. A stale word must not
+    // turn the product default into a half-resolution grid.
+    if (s < 1u || s > 4u) {
+        return 1u;
+    }
+    return s;
 }
 
 // Header 7 is the reservoir grid. Header 46 is screen pixels per edge.
@@ -204,65 +209,108 @@ float restir_phat(uint recv, uint lamp) {
     return restir_phat_at(pos, n, two_sided, lamp);
 }
 
+// The product proposal is the light tree. initial_at's 64-bin weight array
+// is the checker's other proposal and is not compiled into this pass.
+#define RESTIR_TREE_ONLY
 #include "restir_tree.glsl"
 #include "restir_sample.glsl"
 #include "restir_merge.glsl"
 #include "restir_spatial_ops.glsl"
 
-// Distinct cells in the Chebyshev window. The shared neighbor_count scans
-// every cell into a 256-wide pool. This pass draws a bounded number of
-// offsets instead: take * 4 tries, not the whole window. The 1D workgroup
-// is a row segment, so a neighbour above this pixel is not in shared memory.
+// One cell of the in-bounds Chebyshev window, centre skipped. `i` is the
+// index neighbor_count would have stored in its pool.
+uint restir_window_cell(uint i, uint x0, uint y0, uint span_x, uint width, uint centre) {
+    uint cell = i >= centre ? i + 1u : i;
+    return (y0 + cell / span_x) * width + (x0 + cell % span_x);
+}
+
+// Same partial Fisher-Yates as neighbor_count. The swap table holds the
+// slots that moved, not the whole window, so this pass does not carry a
+// 256-wide array. `take` calls of uniform_index, then those cells. A short
+// rejection draw returned fewer neighbours and a different set each time
+// the stream shifted, which is the dabaff8e picture gap.
 uint restir_pick_neighbors(uint index, uint receivers, out uint picked[16]) {
     uint width = restir_hdr(7u);
     uint take = restir_hdr(13u);
     uint reach = restir_hdr(14u);
-    if (width == 0u || take == 0u || reach == 0u || receivers < width) {
+    if (width == 0u || take == 0u || reach == 0u) {
         return 0u;
+    }
+    uint height = receivers / width;
+    if (height == 0u) {
+        return 0u;
+    }
+    uint x = index % width;
+    uint y = index / width;
+    uint x0 = x > reach ? x - reach : 0u;
+    uint y0 = y > reach ? y - reach : 0u;
+    uint x1 = min(x + reach, width - 1u);
+    uint y1 = min(y + reach, height - 1u);
+    uint span_x = x1 - x0 + 1u;
+    uint span_y = y1 - y0 + 1u;
+    uint cells = span_x * span_y;
+    if (cells <= 1u) {
+        return 0u;
+    }
+    uint pool_n = cells - 1u;
+    uint centre = (y - y0) * span_x + (x - x0);
+    if (take > pool_n) {
+        take = pool_n;
     }
     if (take > 16u) {
         take = 16u;
     }
-    uint height = receivers / width;
-    uint x = index % width;
-    uint y = index / width;
-    uint span = reach * 2u + 1u;
-    uint cells = span * span;
-    if (cells <= 1u) {
-        return 0u;
+    uint sw_i[32];
+    uint sw_v[32];
+    uint nswap = 0u;
+    for (uint slot = 0u; slot < take; slot++) {
+        uint span = pool_n - slot;
+        uint pick = slot + uniform_index(span);
+        uint a = 0u;
+        uint b = 0u;
+        bool a_hit = false;
+        bool b_hit = false;
+        for (uint s = 0u; s < nswap; s++) {
+            if (sw_i[s] == slot) {
+                a = sw_v[s];
+                a_hit = true;
+            }
+            if (sw_i[s] == pick) {
+                b = sw_v[s];
+                b_hit = true;
+            }
+        }
+        if (!a_hit) {
+            a = restir_window_cell(slot, x0, y0, span_x, width, centre);
+        }
+        if (!b_hit) {
+            b = restir_window_cell(pick, x0, y0, span_x, width, centre);
+        }
+        bool wrote_slot = false;
+        bool wrote_pick = false;
+        for (uint s = 0u; s < nswap; s++) {
+            if (sw_i[s] == slot) {
+                sw_v[s] = b;
+                wrote_slot = true;
+            }
+            if (sw_i[s] == pick) {
+                sw_v[s] = a;
+                wrote_pick = true;
+            }
+        }
+        if (!wrote_slot) {
+            sw_i[nswap] = slot;
+            sw_v[nswap] = b;
+            nswap += 1u;
+        }
+        if (!wrote_pick && pick != slot) {
+            sw_i[nswap] = pick;
+            sw_v[nswap] = a;
+            nswap += 1u;
+        }
+        picked[slot] = b;
     }
-    uint window = cells - 1u;
-    if (take > window) {
-        take = window;
-    }
-    uint filled = 0u;
-    uint tries = take * 4u;
-    for (uint t = 0u; t < tries && filled < take; t++) {
-        uint pick = uniform_index(window);
-        uint cell = pick;
-        uint centre = cells / 2u;
-        if (cell >= centre) {
-            cell += 1u;
-        }
-        uint col = cell % span;
-        uint row = cell / span;
-        int nx = int(x + col) - int(reach);
-        int ny = int(y + row) - int(reach);
-        if (nx < 0 || ny < 0 || uint(nx) >= width || uint(ny) >= height) {
-            continue;
-        }
-        uint id = uint(ny) * width + uint(nx);
-        bool seen = false;
-        for (uint s = 0u; s < filled; s++) {
-            seen = seen || picked[s] == id;
-        }
-        if (seen) {
-            continue;
-        }
-        picked[filled] = id;
-        filled += 1u;
-    }
-    return filled;
+    return take;
 }
 
 void restir_rng(uint pixel, uint pass_id) {
@@ -363,10 +411,20 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     // is the old reservoir-pixel ray. The history ray is the gbuffer pixel
     // this cell sampled, so a still view compares the same depth.
     uint scale = restir_scale();
-    uint screen_w = restir_hdr(48u);
-    uint screen_h = restir_hdr(49u);
-    uint proj_w = screen_w != 0u ? screen_w : width;
-    uint proj_h = screen_h != 0u ? screen_h : height;
+    // Scale 1 projects in reservoir pixels, the aa44b042 ray. Screen words
+    // apply only when a cell covers more than one pixel.
+    uint proj_w = width;
+    uint proj_h = height;
+    if (scale > 1u) {
+        uint screen_w = restir_hdr(48u);
+        uint screen_h = restir_hdr(49u);
+        if (screen_w != 0u) {
+            proj_w = screen_w;
+        }
+        if (screen_h != 0u) {
+            proj_h = screen_h;
+        }
+    }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
     vec2 px = vec2((ndc.x + 1.0) * RESTIR_NDC_HALF * float(proj_w), (1.0 - ndc.y) * RESTIR_NDC_HALF * float(proj_h));
     if (px.x < 0.0 || px.y < 0.0 || px.x >= float(proj_w) || px.y >= float(proj_h)) {
@@ -407,31 +465,17 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     return false;
 }
 
-void restir_initial(uint pixel) {
-    uint n = restir_hdr(0u);
-    if (restir_hdr(10u) < 2u && n > 64u) {
-        n = 64u;
-    }
-    float weights[64];
-    uint lamp;
-    float w_sum;
-    uint m;
-    float target;
-    initial_at(pixel, n, lamp, w_sum, m, target, weights);
+void restir_initial(uint pixel, out uint lamp, out float w_sum, out uint m, out float target) {
+    initial_tree(pixel, lamp, w_sum, m, target);
     restir_store4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
 }
 
-void restir_temporal(uint pixel) {
+void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float target) {
     uint n = restir_hdr(0u);
     bool tree = restir_hdr(10u) >= 2u;
     if (!tree && n > 64u) {
         n = 64u;
     }
-    uint lamp;
-    float w_sum;
-    uint m;
-    float target;
-    restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
     vec3 pos;
     vec3 nrm;
     bool surfaced = restir_pixel_surface(pixel, pos, nrm);
@@ -518,6 +562,15 @@ void restir_temporal(uint pixel) {
     }
     restir_words[at + 4u] = floatBitsToUint(depth);
     restir_words[at + 5u] = packed;
+}
+
+void restir_temporal(uint pixel) {
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
+    restir_temporal_from(pixel, lamp, w_sum, m, target);
 }
 
 void restir_spatial(uint pixel) {
@@ -637,17 +690,20 @@ void main() {
     uint pass_id = (pc.lamp.y >> 22u) & 3u;
     g_surf_recv = 0xffffffffu;
     restir_rng(pixel, pass_id);
-    // Header 50 clear: this invocation runs temporal after initial and reseeds
-    // with pass 1, the same stream a split temporal dispatch would draw.
-    // Header 50 set: pass 1 is the temporal dispatch.
+    // Header 50 clear: temporal follows initial in this invocation and
+    // reseeds with pass 1, the same stream a split temporal dispatch draws.
+    // The sample stays in registers. Reloading it from the buffer raced the
+    // store on the 4070 and the picture moved with frame pacing.
+    // Header 50 set: pass 1 is the temporal dispatch, after the host barrier.
     if (pass_id == 0u) {
-        restir_initial(pixel);
+        uint lamp;
+        float w_sum;
+        uint m;
+        float target;
+        restir_initial(pixel, lamp, w_sum, m, target);
         if (restir_hdr(50u) == 0u) {
-            // The initial sample is in the storage buffer. This invocation
-            // has to see that store before temporal reads it.
-            memoryBarrierBuffer();
             restir_rng(pixel, 1u);
-            restir_temporal(pixel);
+            restir_temporal_from(pixel, lamp, w_sum, m, target);
         }
     } else if (pass_id == 1u) {
         if (restir_hdr(50u) != 0u) {

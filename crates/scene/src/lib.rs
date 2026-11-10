@@ -44,7 +44,9 @@ pub use lighting::{
     LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
     LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,
-    LIGHTING_BOUNCES_UNLIMITED,
+    LIGHTING_BOUNCES_UNLIMITED, RESTIR_CANDIDATES, RESTIR_RESOLUTION_SCALE,
+    RESTIR_SPATIAL_CHECKERBOARD, RESTIR_SPATIAL_NEIGHBORS, RESTIR_SPATIAL_RADIUS,
+    RESTIR_SPLIT_PASSES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use reflections::{

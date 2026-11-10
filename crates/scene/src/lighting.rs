@@ -201,6 +201,11 @@ pub const RESTIR_SPATIAL_RADIUS: u32 = 2;
 pub const RESTIR_RESOLUTION_SCALE: u32 = 1;
 /// Initial candidates per reservoir. Header word 9.
 pub const RESTIR_CANDIDATES: u32 = 4;
+/// 1 copies the even neighbour's spatial result onto odd reservoir pixels.
+pub const RESTIR_SPATIAL_CHECKERBOARD: u32 = 0;
+/// 1 keeps initial and temporal as two dispatches. 0 runs temporal in the
+/// initial invocation, on the sample just drawn.
+pub const RESTIR_SPLIT_PASSES: u32 = 0;
 /// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
 pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
 /// Unshadowed reservoir candidates per pixel on Medium.
@@ -915,8 +920,8 @@ impl LightingSettings {
             restir_spatial_radius: RESTIR_SPATIAL_RADIUS,
             restir_resolution_scale: RESTIR_RESOLUTION_SCALE,
             restir_candidates: RESTIR_CANDIDATES,
-            restir_spatial_checkerboard: 0,
-            restir_split_passes: 0,
+            restir_spatial_checkerboard: RESTIR_SPATIAL_CHECKERBOARD,
+            restir_split_passes: RESTIR_SPLIT_PASSES,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
@@ -2750,5 +2755,57 @@ mod launch_tests {
 
         std::env::remove_var("GENOS_LIGHTING_PRESET");
         std::env::remove_var("GENOS_GI2_PRESET");
+    }
+
+    #[test]
+    fn restir_env_defaults_match_the_preset() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "GENOS_RESTIR_DI" => Some("on".to_string()),
+                "GENOS_RESTIR_SPATIAL_NEIGHBORS" => Some(RESTIR_SPATIAL_NEIGHBORS.to_string()),
+                "GENOS_RESTIR_SPATIAL_RADIUS" => Some(RESTIR_SPATIAL_RADIUS.to_string()),
+                "GENOS_RESTIR_RESOLUTION_SCALE" => Some(RESTIR_RESOLUTION_SCALE.to_string()),
+                "GENOS_RESTIR_CANDIDATES" => Some(RESTIR_CANDIDATES.to_string()),
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD" => {
+                    Some(RESTIR_SPATIAL_CHECKERBOARD.to_string())
+                }
+                "GENOS_RESTIR_SPLIT_PASSES" => Some(RESTIR_SPLIT_PASSES.to_string()),
+                _ => None,
+            }
+        };
+        for preset in [
+            LightingPreset::High,
+            LightingPreset::Potato,
+            LightingPreset::Gi1Bounce,
+        ] {
+            let mut base = LightingSettings::preset(preset);
+            base.sanitize();
+            let mut over = base.clone();
+            over.apply_env_from(&[], &env).unwrap();
+            assert_eq!(over, base, "{}", preset.name());
+        }
+        // The picture gate's direct settings, then the same strings.
+        let mut gate = LightingSettings::preset(LightingPreset::Potato);
+        gate.direct.max_lights = 0;
+        gate.direct.refresh_frames = 1;
+        gate.direct.resolution_scale = 1;
+        gate.sky = false;
+        gate.ambient.mode = AmbientMode::Off;
+        gate.shadows.enabled = true;
+        gate.gi.enabled = false;
+        gate.bounce.count = 0;
+        gate.probes.enabled = false;
+        gate.world_cache.enabled = false;
+        gate.lamp_pick.mode = LampPickMode::Off;
+        gate.lamp_pick.radius = 0;
+        gate.compose_reuse = false;
+        gate.restir_di = true;
+        gate.sanitize();
+        let mut over = gate.clone();
+        over.apply_env_from(&[], &env).unwrap();
+        assert_eq!(over.restir_resolution_scale, RESTIR_RESOLUTION_SCALE);
+        assert_eq!(over.restir_spatial_neighbors, RESTIR_SPATIAL_NEIGHBORS);
+        assert_eq!(over.direct.resolution_scale, 1);
+        assert_eq!(over, gate);
     }
 }

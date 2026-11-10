@@ -8,8 +8,9 @@
 # restir_initial is initial and temporal together. restir_spatial includes
 # the checkerboard copy when that knob is 1.
 #
-# GENOS_RESTIR_COST=1 prints iteration counts on the first frames:
-#   initial_iters, temporal_iters, spatial_phat, spatial_tries
+# GENOS_RESTIR_COST=1 prints iteration counts and dispatch count on the first frames.
+# 1440p is one dispatch a pass. The five numeric defaults below are the code defaults.
+#   initial_iters, temporal_iters, spatial_phat, dispatches
 #   previous_full_window_scan is the old full-resolution radius-2 pool scan.
 set -eu
 echo "restir-times: neighbors=${GENOS_RESTIR_SPATIAL_NEIGHBORS:-4} radius=${GENOS_RESTIR_SPATIAL_RADIUS:-2} scale=${GENOS_RESTIR_RESOLUTION_SCALE:-1} candidates=${GENOS_RESTIR_CANDIDATES:-4} checkerboard=${GENOS_RESTIR_SPATIAL_CHECKERBOARD:-0} split=${GENOS_RESTIR_SPLIT_PASSES:-0}"

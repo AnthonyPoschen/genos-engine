@@ -95,6 +95,37 @@ void store_empty(out uint lamp, out float w_sum, out uint m, out float target) {
     target = 0.0;
 }
 
+// Tree proposal only. The live pass compiles this and not initial_at, so it
+// does not allocate the 64-bin weight array the other proposals use.
+#ifdef RESTIR_TREE_ONLY
+void initial_tree(uint recv, out uint lamp, out float w_sum, out uint m, out float target) {
+    lamp = LAMP_EMPTY;
+    w_sum = 0.0;
+    m = 0u;
+    for (uint c = 0u; c < RESTIR_CANDIDATES; c++) {
+        bool hit = false;
+        uint next_lamp = 0u;
+        float pdf = 0.0;
+        sample_tree(recv, next_lamp, pdf, hit);
+        if (!hit) {
+            stream_update(lamp, w_sum, m, LAMP_EMPTY, 0.0);
+        } else {
+            float phat = restir_phat(recv, next_lamp);
+            float stream = pdf > 0.0 ? phat / pdf : 0.0;
+            stream_update(lamp, w_sum, m, next_lamp, stream);
+        }
+    }
+    target = 0.0;
+    if (lamp != LAMP_EMPTY && lamp < RESTIR_LAMP_COUNT) {
+        target = restir_phat(recv, lamp);
+    }
+    if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
+        store_empty(lamp, w_sum, m, target);
+    }
+}
+#endif
+
+#ifndef RESTIR_TREE_ONLY
 void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, out float target, out float weights[64]) {
     bool tree = RESTIR_PROPOSAL >= PROPOSAL_TREE;
     if (!tree) {
@@ -136,3 +167,4 @@ void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, o
         store_empty(lamp, w_sum, m, target);
     }
 }
+#endif
