@@ -38,7 +38,7 @@ The crate is `crates/load`, package `genos-load`.
 - `load_texture` and `load_texture_map` start in `src/lib.rs`. The map parser is in `src/texture.rs`.
 - `load_mesh` reads OBJ text in `src/mesh.rs`.
 - `load_material` reads the material text in `src/material.rs`.
-- `load_animation` reads keys in `src/animation.rs`. Rotation uses `genos-math` `Quat::slerp`.
+- `sample_channel` and `sample_clip` in `src/skin.rs` sample a skeletal clip. Rotation uses `genos-math` `Quat::slerp`. The one-node text clip is gone.
 - `load_pcm` reads WAV data in `src/wav.rs`.
 - `load_font` reads a TrueType font in `src/ttf.rs`.
 
@@ -53,8 +53,6 @@ clip <name> <frame-seconds> <frame-name> <frame-name> ...
 
 The material text is `color <red> <green> <blue>` and optional `texture <file-name>`.
 
-The animation text is `key <time> <tx> <ty> <tz> <qx> <qy> <qz> <qw> <sx> <sy> <sz>`.
-
 `#` starts a comment line in each text file.
 
 ## Game use
@@ -63,7 +61,7 @@ Build a `FileSource` or a `MemorySource`. Pass that source to the `load_*` funct
 
 Pass the image source and the description source to `load_texture_map`. Call `TextureMap::sample` with a clip name and a time in seconds.
 
-Call `Animation::sample` with a time in seconds. Call `Font::glyph` with a character. Read `pixel` on a texture.
+Call `sample_clip` with a skeletal clip and a pose time in seconds. Call `Font::glyph` with a character. Read `pixel` on a texture.
 
 Pixels, triangles, frame rectangles, glyph outlines, and PCM samples stay in the load result. Upload or playback is a later call.
 

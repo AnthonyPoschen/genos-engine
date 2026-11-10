@@ -118,7 +118,7 @@ The note is one line: the path in the file, the feature name, and `used` or `loa
 | Float WAV, ADPCM, Ogg, Opus, MP3, FLAC | Keep the bytes. Record channels and rate when the header is readable | missing | `loaded, unsupported`. The mixer stays 16-bit interleaved. |
 | MP4, WebM, image-sequence folders | Keep the bytes. Record duration when the header says it | missing | `loaded, unsupported`. No decoder in the frame. |
 | TrueType | Keep the file and the simple glyph outlines | `used` for simple glyphs | Composites, kerning, and hinting: `loaded, unsupported`. |
-| Text material, texture map, text animation | Keep the text and the decoded value | `used` | Same. The animation still does not move a mesh until a later runtime commit. |
+| Text material, texture map | Keep the text and the decoded value | `used` | The one-node text animation was removed. Skeletal clips sample in `crates/scene`. |
 
 ### glTF features
 
@@ -140,7 +140,7 @@ The note is one line: the path in the file, the feature name, and `used` or `loa
 | `KHR_materials_emissive_strength` | `used` | `used` |
 | Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | `used` on `Primitive` and in `.gskin` | The cook writes `GSK1`. A bad trailer keeps the rigid mesh. GI design says a skinned mesh uses a proxy, not an exact SDF. |
 | Morph targets and weights | Keep the deltas | `loaded, unsupported` |
-| Animation clips (translation, rotation, scale, weights) | Linear and step channels on a skin joint are `used` | Weight channels and cubic-spline samplers stay noted and omitted. The text `Animation` type still samples the one-node file. |
+| Animation clips (translation, rotation, scale, weights) | Linear and step channels on a skin joint are `used` | Weight channels and cubic-spline samplers stay noted and omitted. The CPU runtime samples the skeletal clip. |
 | Cameras | Keep the camera JSON | `loaded, unsupported`. The game camera stays `genos-scene`. |
 | `EXT_mesh_gpu_instancing` | Keep the instance attributes | `loaded, unsupported` until the instance buffer consumes them. The node instances already drawn are `used`. |
 | `KHR_mesh_quantization` | Keep the quantized accessors | Already dequantized by `component` when the accessor is normalized. Mark the extension `used` once a fixture proves a quantized file. |
