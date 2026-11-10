@@ -182,8 +182,16 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 mod fog;
 mod media_check;
 mod stage;
-mod texel_seed_check;
-mod texel_seed_prod;
+mod texel_detail;
+
+/// Return lavapipe's compiler scratch to the OS. The software fixture calls
+/// this after it drops the device that planted the read-only scene, and before
+/// it opens the device that compiles the reader. A product frame does not call it.
+pub fn release_software_compiler_heap() {
+    texel_detail::release_compiler_heap();
+}
+
+pub use texel_detail::TexelDetailPlant;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -1098,26 +1106,39 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
-    /// Four seed records from `texel_seed_check.comp`. The parity test compares
-    /// them with `lighting_sh::texel_seed_check_expected`. This does not present
-    /// a picture. Lavapipe timings are not a 4070 measurement.
+    /// One lavapipe dispatch of `lighting_screen_probe_indirect` with the
+    /// production cache. The rows are the stage 3 covered and uncovered cases.
     ///
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn texel_seed_check(&mut self, words: &[f32; 64]) -> Result<[f32; 64], String> {
-        self.gpu.texel_seed_check(words)
+    pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod()
     }
 
-    /// Production `lighting_world_irradiance_in` on the real cache, with the
-    /// default surface-cache flags and the stage 3 seed bit. This does not
-    /// present a picture. Lavapipe timings are not a 4070 measurement.
+    /// Writing specialization with `lamp.x = 1`. The returned bytes are the
+    /// planted cache and key table. Drop this renderer before compiling the
+    /// reader: lavapipe keeps the compiler heap until the device is gone.
     ///
     /// # Errors
     ///
-    /// Returns an error when the device rejects the dispatch or the allocation.
-    pub fn texel_seed_prod(&mut self) -> Result<Vec<f32>, String> {
-        self.gpu.texel_seed_prod()
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.gpu.texel_detail_prod_plant()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// `plant` was captured by [`Self::texel_detail_prod_plant`] on a device
+    /// that has since been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly(plant)
     }
 
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
@@ -1633,10 +1654,8 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
-    /// Lazy `texel_seed_check.comp` dispatch. Absent until the parity test asks.
-    texel_seed_check: Option<texel_seed_check::Pipe>,
-    /// Lazy production seed dispatch. Absent until that test asks.
-    texel_seed_prod: Option<texel_seed_prod::Pipe>,
+    /// Lazy ADR 0039 stage 3 production dispatch. Absent until that test asks.
+    texel_detail: Option<texel_detail::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -2520,8 +2539,7 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
-                texel_seed_check: None,
-                texel_seed_prod: None,
+                texel_detail: None,
                 media_ms: None,
                 media_groups: 1,
                 froxel: None,
@@ -8881,8 +8899,7 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
-            self.destroy_texel_seed_check();
-            self.destroy_texel_seed_prod();
+            self.destroy_texel_detail();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());

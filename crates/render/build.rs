@@ -33,14 +33,7 @@ fn main() {
     let media = compile_media_modules(&out);
     let denoise = compile_denoise_modules(&out);
     let lighting = compile_lighting_modules(&out);
-    write_shader_glue(
-        &out,
-        &raster,
-        &media,
-        &denoise,
-        &lighting,
-        &reflection_spv,
-    );
+    write_shader_glue(&out, &raster, &media, &denoise, &lighting, &reflection_spv);
     rerun_shader_pieces();
 }
 
@@ -70,8 +63,8 @@ struct MediaModules {
     check: PathBuf,
     inject: PathBuf,
     integrate: PathBuf,
-    texel_seed: PathBuf,
-    texel_prod: PathBuf,
+    texel_detail: PathBuf,
+    texel_detail_ro: PathBuf,
 }
 
 /// Media and froxel modules, and the two compile-only checks that sit with them.
@@ -94,22 +87,28 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             "shaders/froxel_integrate.comp",
             &out.join("froxel_integrate.comp.spv"),
         ),
-        texel_seed: compile(
-            "shaders/texel_seed_check.comp",
-            &out.join("texel_seed_check.comp.spv"),
+        texel_detail: compile_texel_detail(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod.comp.spv"),
+            &[],
+            true,
         ),
-        texel_prod: compile(
-            "shaders/texel_seed_prod.comp",
-            &out.join("texel_seed_prod.comp.spv"),
+        // Same production function, compose's read-only specialization.
+        // PROD_READONLY drops the writing rows. Large functions get DontInline.
+        // A fresh reader process with that module was still killed on a 16 GiB
+        // lavapipe cgroup: anon-rss 14711896 kB, total-vm 21216604 kB. The
+        // planter had exited. That is not a pass.
+        texel_detail_ro: compile_texel_detail(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod_ro.comp.spv"),
+            &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
+            true,
         ),
     };
     // Not embedded: catches errors in a piece no pass includes yet.
     let reflections_check = "shaders/reflections_check.comp";
     println!("cargo:rerun-if-changed={reflections_check}");
-    compile(
-        reflections_check,
-        &out.join("reflections_check.comp.spv"),
-    );
+    compile(reflections_check, &out.join("reflections_check.comp.spv"));
     // Not embedded: GPU parity fixture for pbr_brdf.glsl (tests/pbr_parity.rs).
     let pbr_check = "shaders/pbr_check.comp";
     println!("cargo:rerun-if-changed={pbr_check}");
@@ -202,7 +201,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_SEED_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_SEED_PROD_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -213,8 +212,8 @@ fn write_shader_glue(
             media.check.display(),
             media.inject.display(),
             media.integrate.display(),
-            media.texel_seed.display(),
-            media.texel_prod.display()
+            media.texel_detail.display(),
+            media.texel_detail_ro.display()
         ),
     )
     .unwrap();
@@ -268,11 +267,9 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
 fn rerun_shader_pieces() {
     for piece in [
         "lighting_common.glsl",
+        "lighting_screen_probe.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
-        "lighting_texel_seed.glsl",
-        "texel_seed_check.comp",
-        "texel_seed_prod.comp",
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
@@ -282,6 +279,7 @@ fn rerun_shader_pieces() {
         "froxel_common.glsl",
         "froxel_inject.comp",
         "froxel_integrate.comp",
+        "texel_detail_prod.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
         "scene.vert",
@@ -348,6 +346,55 @@ fn compile(src: &str, dest: &std::path::Path) -> PathBuf {
 fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
     let flag = format!("-D{define}");
     compile_args(src, dest, &[&flag])
+}
+
+/// The lavapipe fixture only. Inlining the compose function at every mover
+/// shade makes the compiler heap exceed a 16 GB software-test budget. The
+/// production compose module is not marked. `DontInline` does not change the
+/// `GLSL` those functions run.
+fn compile_texel_detail(
+    src: &str,
+    dest: &std::path::Path,
+    extra: &[&str],
+    dont_inline: bool,
+) -> PathBuf {
+    let path = compile_args(src, dest, extra);
+    if !dont_inline {
+        return path;
+    }
+    let mut bytes = std::fs::read(&path).expect("texel detail spirv");
+    let mut i = 5usize;
+    let n = bytes.len() / 4;
+    let mut fn_ctrl: Option<usize> = None;
+    let mut fn_start = 0usize;
+    while i < n {
+        let word = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("spirv word"));
+        let count = usize::try_from(word >> 16).expect("spirv word count");
+        let op = word & 0xffff;
+        if count == 0 || i + count > n {
+            panic!("texel detail spirv is truncated");
+        }
+        if op == 54 && count >= 4 {
+            fn_ctrl = Some(i + 3);
+            fn_start = i;
+        } else if op == 56 {
+            // Only the large functions. Marking every helper DontInline keeps a
+            // separate copy of each and the compiler heap does not fit.
+            if let Some(ctrl_i) = fn_ctrl {
+                if i - fn_start > 1000 {
+                    let at = ctrl_i * 4;
+                    let ctrl =
+                        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
+                    let ctrl = (ctrl & !1) | 2;
+                    bytes[at..at + 4].copy_from_slice(&ctrl.to_le_bytes());
+                }
+            }
+            fn_ctrl = None;
+        }
+        i += count;
+    }
+    std::fs::write(&path, &bytes).expect("write texel detail spirv");
+    path
 }
 
 fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {

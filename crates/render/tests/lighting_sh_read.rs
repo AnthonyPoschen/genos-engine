@@ -107,19 +107,6 @@ fn near(got: [f32; 3], want: [f32; 3]) -> bool {
     got.iter().zip(want).all(|(a, b)| (a - b).abs() <= 1.0e-5)
 }
 
-/// Axes the lattice read keeps. The shader skips `abs(n[ax]) < 1.0`, so a
-/// slanted normal (every component below 1) contributes nothing. This is
-/// that gate, not an execution of `lighting_sh_read`.
-fn lattice_axis_weight(n: [f32; 3]) -> f32 {
-    let mut ws = 0.0;
-    for component in n {
-        if component.abs() < 1.0 {
-            continue;
-        }
-        ws += component * component;
-    }
-    ws
-}
 
 /// `lighting_sc_shown` while the default preset's SVGF arm is showing a fine
 /// texel and the stale-field world-cell read missed. Sun gain is 1. A fresh
@@ -291,22 +278,34 @@ fn freeze_cache_holds_the_sh_coefficients_and_a_change_marks_readers() {
 }
 
 #[test]
-fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
-    // The axis-aligned change is the fallback inside lighting_cache_irradiance.
-    // This screen return is a different function. The lattice gate rejects
-    // every axis whose component is below 1, so a slanted normal gets w 0,
-    // and compose's mix by that w keeps the probes. Nothing here claims the
-    // irradiance fallback changed this path.
+fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_probes() {
+    // The axis-aligned hit fallback inside lighting_cache_irradiance stays the
+    // owning cell. The screen return is this neighbour read. It accepts a
+    // slant: the lookup axis is the dominant component, and the tilt uses the
+    // true normal. An empty read is w 0, and compose's mix by that w keeps
+    // the probes. The call does not claim.
     let text = cache_shader();
     let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
     assert!(
-        read.contains("if (abs(n[ax]) < 1.0)"),
-        "the lattice read must skip an axis whose component is below 1"
+        !read.contains("if (abs(n[ax]) < 1.0)"),
+        "the neighbour read must not skip a slanted normal"
     );
     assert!(
-        read.contains("return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);"),
-        "no accepted axis is an empty read, w 0"
+        read.contains("lighting_cache_find_sized(centre, an, false, cs, p)"),
+        "the read looks up corners and does not allocate"
     );
+    assert!(
+        !read.contains(", true, cs, p)"),
+        "the neighbour read must not claim a slot"
+    );
+    assert!(read.contains("if (facing <= 0.0)"));
+    assert!(read.contains("if (plane > LIGHTING_CELL_HALF * cs)"));
+    assert!(read.contains("if (lighting_sc_stale(s))"));
+    assert!(
+        read.contains("return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);"),
+        "no accepted corner is an empty read, w 0"
+    );
+    precedes(read, "if (plane > LIGHTING_CELL_HALF * cs)", "if (claim && LIGHTING_SC_WRITES)");
     let screen = function_body(
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
@@ -316,22 +315,33 @@ fn a_slanted_screen_read_is_empty_and_compose_keeps_the_probes() {
     let after = &screen[at + gate.len()..];
     let open = after.find('{').expect("screen gate brace");
     let arm = block_body(&after[open + 1..]);
-    assert!(arm.contains("return lighting_sh_read(pos, n, true);"));
+    assert!(arm.contains("return lighting_sh_read(pos, n, false);"));
+    assert!(
+        !arm.contains("return lighting_sh_read(pos, n, true);"),
+        "the screen arm must not claim"
+    );
     assert!(arm.contains("return vec4(0.0);"));
     assert!(
         !arm.contains("lighting_sh_tilt"),
-        "the screen arm does not take the owning-cell tilt"
+        "the screen arm does not take a separate owning-cell tilt"
     );
     let compose = shader("lighting_compose.comp");
-    assert!(compose.contains("return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));"));
-
-    let slanted = [0.0_f32, 0.8, 0.6];
-    assert!(
-        lattice_axis_weight(slanted).abs() <= f32::EPSILON,
-        "a slanted normal accepts no lattice axis"
+    let sun = shader("lighting_sun_compose.comp");
+    assert!(compose.contains("return lighting_screen_probe_indirect(p, pos, n);"));
+    assert!(sun.contains("return lighting_screen_probe_indirect(p, pos, n);"));
+    assert!(!compose.contains("lighting_probe_irradiance"));
+    assert!(!sun.contains("lighting_probe_irradiance"));
+    let probe = shader("lighting_screen_probe.glsl");
+    let indirect = function_body(
+        &probe,
+        "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
     );
-    let axis = [0.0_f32, 1.0, 0.0];
-    assert!((lattice_axis_weight(axis) - 1.0).abs() <= 1.0e-6);
+    assert!(
+        indirect.contains("return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));"),
+        "an uncovered pixel, including a slant, still mixes the probes by world trust"
+    );
+    assert!(indirect.contains("return world.rgb;"));
+
     let probes = [0.3_f32, 0.4, 0.5];
     let empty = [9.0_f32, 9.0, 9.0];
     let shown = mix(probes, empty, 0.0_f32.clamp(0.0, 1.0));
@@ -510,11 +520,6 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     assert!((ck - 1.0e-3).abs() <= 1.0e-8, "confidence floor, got {ck}");
 }
 
-/// The lattice accepts an axis only when that component has magnitude 1.
-/// `lighting_sh_read` claims only inside that arm, so this is the claim gate.
-fn lattice_accepts(n: [f32; 3]) -> bool {
-    n.iter().any(|c| c.abs() >= 1.0)
-}
 
 /// `growing_wrc` in `lighting_compact.comp`: a cell under the cap stays on the
 /// relight list when something has read it since its last update, or within
@@ -558,10 +563,14 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     // still shows the probes, which read those cells.
     let text = cache_shader();
     let read = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    assert!(
+        !read.contains("lighting_cache_find_sized(p, n, true, cs, p)"),
+        "an empty neighbour read must not allocate the cell under p"
+    );
     precedes(
         read,
-        "if (abs(n[ax]) < 1.0)",
-        "lighting_cache_find_sized(p, n, true, cs, p)",
+        "if (facing <= 0.0)",
+        "if (claim && LIGHTING_SC_WRITES)",
     );
     let at = function_body(
         &text,
@@ -606,12 +615,8 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     let yaw = 0.6_f32;
     let face = [yaw.cos(), 0.0, yaw.sin()];
     assert!(
-        !lattice_accepts(face),
-        "the yaw-0.6 box face accepts no lattice axis, so the read must not claim"
-    );
-    assert!(
-        lattice_accepts([0.0, 1.0, 0.0]),
-        "an axis normal still claims"
+        face.iter().all(|c| c.abs() < 1.0),
+        "the yaw-0.6 face is not axis aligned, and the read still must not allocate"
     );
     let mean = [1.2_f32, 0.4, 0.3];
     let sh = genos_render::lighting_sh::ShL1::default();
@@ -641,83 +646,95 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     );
 }
 
+/// Source-text model of one weight for the mean and the harmonics.
+///
+/// A lamp change sets that weight to 1 before either store, and a sun rescale
+/// multiplies the held harmonics by the same gain as the held mean. Matching
+/// this text is not the ADR 0039 picture gate.
 #[test]
-fn a_texel_seed_reads_one_cell_and_does_not_write_it() {
+fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
+    let relight = shader("lighting_cache.comp");
+    let settle = relight
+        .find("if (lighting_lamp_settling())")
+        .expect("lamp settle");
+    let put = relight[settle..]
+        .find("lighting_sh_put")
+        .expect("harmonics store");
+    let window = &relight[settle..settle + put];
+    assert!(
+        window.contains("wa = 1.0;"),
+        "settling must replace the sample"
+    );
+    assert!(
+        window.contains("lighting_tex_put"),
+        "the mean is stored in that arm"
+    );
+    assert!(
+        window.contains("o0 * sh_ls"),
+        "held harmonics take the mean's sun gain"
+    );
+    let gain = relight.find("float sh_ls = 1.0;").expect("sun gain");
+    let mean_scale = relight[gain..].find("old.rgb *= ls").expect("mean rescale");
+    let sh_scale = relight[gain..]
+        .find("o0 * sh_ls")
+        .expect("harmonic rescale");
+    assert!(
+        mean_scale < sh_scale,
+        "the mean is rescaled before the harmonics blend"
+    );
+}
+
+#[test]
+fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
     let text = cache_shader();
-    assert!(text.contains("#include \"lighting_texel_seed.glsl\""));
-    let tilt = function_body(
-        &text,
-        "vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n)",
-    );
-    assert!(
-        tilt.contains("return lighting_texel_seed_tilt(e, axis, n, cx, cy, cz);"),
-        "the production tilt must be the function the lavapipe check runs"
-    );
-    let seed = function_body(&text, "vec4 lighting_sh_owning_texel_seed(vec3 p, vec3 n)");
-    assert!(seed.contains("lighting_cache_find_sized(p, n, false, LIGHTING_SH_CELL, p)"));
-    assert!(
-        !seed.contains("lighting_sh_read("),
-        "a texel seed must not blend the lattice"
-    );
-    assert!(
-        !seed.contains("lighting_sh_put("),
-        "a texel seed must not write harmonics"
-    );
-    assert!(
-        !seed.contains("uintBitsToFloat(lighting_frame())"),
-        "a texel seed must not stamp the cell read"
-    );
-    assert!(
-        !seed.contains("cache.v[3u * s + 2u] ="),
-        "a texel seed must not write the cell mean"
-    );
+    let detail = function_body(&text, "vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)");
+    assert!(detail.contains("lighting_cache_find_sized(centre, an, false, cs, p)"));
+    assert!(!detail.contains("lighting_sh_put"));
+    assert!(!detail.contains("lighting_sc_set_seed"));
     let screen = function_body(
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",
     );
-    assert!(screen.contains("if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot))"));
-    assert!(screen.contains("lighting_sc_clear_seed(slot);"));
-    let seed_at = screen
-        .find("vec4 shs = lighting_sh_owning_texel_seed(q, n);")
-        .expect("owning seed call");
-    let resample_at = screen
-        .find("vec4 rs = lighting_sc_resample(q, n, size, slot);")
-        .expect("resample call");
-    let shown_at = screen
-        .find("vec4 v = mode == 3u ? lighting_sc_shown(slot)")
-        .expect("shown call");
-    assert!(
-        seed_at < resample_at && resample_at < shown_at,
-        "the owning seed must be stored before the resample and before shown"
+    precedes(
+        screen,
+        "lighting_sh_read(q, n, false)",
+        "lighting_sc_resample",
     );
-    assert_eq!(
-        screen.matches("lighting_sh_owning_texel_seed").count(),
-        1,
-        "one owning-seed call, so the later shown bypass cannot replace it"
+    assert!(
+        screen.contains("!detail_candidate"),
+        "resample must not copy a cell the neighbour read rejected"
+    );
+    assert!(
+        screen.contains("-abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z)"),
+        "the detail mark is the sign of the confidence"
+    );
+    assert!(
+        !screen.contains("LIGHTING_SC_SUN_AT + slot].z = 1.0"),
+        "sun word z is the quarter scratch, not the detail mark"
+    );
+    let rejected = function_body(&text, "bool lighting_sh_detail_seed_rejected(uint slot)");
+    assert!(rejected.contains("LIGHTING_SC_SPARSE_AT + slot].z < 0.0"));
+    assert!(
+        !rejected.contains("LIGHTING_SC_SUN_AT"),
+        "the rejection must not read the quarter scratch"
     );
     assert!(screen.contains(
-        "lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);"
+        "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
     ));
     assert!(
-        screen.contains("lighting_sc_set_seed(slot, hc, 0.25,"),
-        "the stage 2 hit seed stays when the cell seed misses"
+        screen.contains("detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n)"),
+        "the hit fill stays for SH cells when texel detail is off"
     );
-    let gate = "if (lighting_sc_slanted(n))";
-    let at = screen.find(gate).expect("slanted screen gate");
-    let after = &screen[at + gate.len()..];
-    let open = after.find('{').expect("screen gate brace");
-    let arm = block_body(&after[open + 1..]);
-    assert!(!arm.contains("lighting_sh_owning_texel_seed"));
-    assert!(arm.contains("return lighting_sh_read(pos, n, true);"));
-    let clear = function_body(&text, "void lighting_sc_clear_seed(uint slot)");
-    assert!(clear.contains("cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;"));
-    assert!(!clear.contains("3u * slot + 2u"));
-    let relight = shader("lighting_cache.comp");
-    assert!(relight.contains("if (lighting_sh_texel_seed_on() && lighting_sc_lamp_touched(slot))"));
-    let irradiance = function_body(&text, "vec3 lighting_cache_irradiance(vec3 pos, vec3 n)");
-    let owner = "return lighting_sh_tilt(slot, e.rgb, cache.v[3u * slot + 1u].xyz, n) * lighting_sc_sun_gain(slot) * keep;";
     assert!(
-        irradiance.contains(owner),
-        "the stage 2 owner fix stays the ray-hit fallback"
+        !screen.contains("lighting_sh_on() ? vec3(0.0)"),
+        "SH cells on must not zero the hit fill by itself"
     );
+    assert!(
+        !text.contains("LIGHTING_SH_AXIS_MIN"),
+        "the unused axis-skip constant is gone"
+    );
+    assert!(screen.contains("if (detail_kept)"));
+    let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
+    assert!(shown.contains("lighting_sh_texel_detail_on()"));
+    assert!(shown.contains("!lighting_sh_texel_detail_on()"));
 }

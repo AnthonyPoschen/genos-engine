@@ -224,7 +224,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
   --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
   --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
-                            freeze_probes, none (GENOS_LIGHTING_TOGGLES)
+                            freeze_probes, cells_only, none (GENOS_LIGHTING_TOGGLES)
   --lighting-probe-tile N   screen probe tile pixels, 4..64, 0 auto (GENOS_LIGHTING_TILE)
   --lighting-denoise-dirty F  a-trous work-list fraction, 0..1 (GENOS_LIGHTING_ATROUS_DIRTY)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
@@ -958,6 +958,10 @@ fn lighting_text(renderer: &Renderer) -> String {
 fn run() -> Result<i32, String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
         gi_check::run(std::env::args().skip(2))?;
+        return Ok(0);
+    }
+    if std::env::args().nth(1).as_deref() == Some("room-blotch") {
+        gi_check::room_blotch::run(std::env::args().skip(2))?;
         return Ok(0);
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {

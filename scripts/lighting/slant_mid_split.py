@@ -355,10 +355,33 @@ def _guard_sources():
         raise SystemExit("the slanted lattice gate moved")
     if "lighting_sh_on() && lighting_obj_salt < 0.5" not in shader:
         raise SystemExit("the mover salt no longer skips the SH read")
-    axis_skip = shader.find("if (abs(n[ax]) < 1.0)")
-    screen_claim = shader.find("lighting_cache_find_sized(p, n, true, cs, p)")
-    if axis_skip < 0 or screen_claim < 0 or screen_claim < axis_skip:
-        raise SystemExit("a slanted lighting_sh_read claims before it accepts an axis")
+    # The screen and seed read is the eight-corner blend at the true normal.
+    # A corner is found with claim false, then accepted, and only then stamped.
+    # The old axis-only skip is not this read.
+    start = shader.find("vec4 lighting_sh_read(vec3 p, vec3 n, bool claim)")
+    end = shader.find("bool lighting_sh_detail_owner_lit", start if start >= 0 else 0)
+    if start < 0 or end < 0:
+        raise SystemExit("lighting_sh_read moved")
+    body = shader[start:end]
+    if "if (abs(n[ax]) < 1.0)" in body:
+        raise SystemExit("lighting_sh_read still drops a non-axis normal")
+    if "lighting_cache_find_sized(p, n, true, cs, p)" in body:
+        raise SystemExit("lighting_sh_read claims the query point")
+    accepted = -1
+    for piece in (
+        "lighting_cache_find_sized(centre, an, false, cs, p)",
+        "if (facing <= 0.0)",
+        "if (plane > LIGHTING_CELL_HALF * cs)",
+        "if (v.w < LIGHTING_CACHE_HAS_W)",
+        "if (lighting_sc_stale(s))",
+        "if (claim && LIGHTING_SC_WRITES)",
+    ):
+        found = body.find(piece)
+        if found < 0 or found < accepted:
+            raise SystemExit("a neighbour corner is claimed before it is accepted")
+        accepted = found
+    if "return lighting_sh_read(pos, n, false);" not in shader:
+        raise SystemExit("a slanted screen read does not use the neighbour blend")
     metrics = _source("scripts/lighting/oracle_metrics.py")
     if "mids.append(mid_err(ll, rl))" not in metrics:
         raise SystemExit("slant_mid_err_mean is no longer the mean of mid_err")

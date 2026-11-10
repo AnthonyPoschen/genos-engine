@@ -507,22 +507,35 @@ pub struct SurfaceCacheSettings {
     pub dormant_rays: u32,
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
     /// cells keep a colour SH-L1 of the light their relight rays bring in (the
-    /// same rays, no new ones). An axis-aligned ray hit, including the value
-    /// stored as a display seed, tilts the one owning cell. At the axis that
-    /// tilt is the cell's mean, and the hit does not blend its neighbours. A
-    /// slanted screen pixel's lattice read is empty, because an axis is used
-    /// only when its component has magnitude 1, and compose then keeps the
-    /// probes. That empty read does not claim or stamp a cell: a stamp would
-    /// mark the cell read and keep it on the relight list before any ray hit
-    /// it. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    /// same rays, no new ones). Cells stay keyed by the dominant axis. The
+    /// screen and seed read blends the eight corners at the true normal. The
+    /// corner weight is the trilinear weight times the facing dot. Equal stored
+    /// normals cancel that dot. A
+    /// corner on the far side of a thin wall, or more than half a cell off the
+    /// query plane, is left out. An axis-aligned ray hit still tilts the one
+    /// owning cell. The read does not allocate. An empty slant keeps the
+    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
     pub sh_cells: bool,
-    /// Key `surface_cache.sh_texel_seed` (ADR 0039 stage 3, default off).
-    /// An empty world texel takes its first fill from the one owning 25 cm
-    /// cell's colour SH-L1, stored as a low-confidence seed beside its own
-    /// samples. The cell is not claimed or written. A lamp change drops the
-    /// seed. Off keeps the stage 2 parent, hit, and probe seeds. The shader
-    /// also requires `sh_cells`. Head 3.w bit 17.
-    pub sh_texel_seed: bool,
+    /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3, default off).
+    /// An empty fine world texel takes its first light from the trilinear
+    /// neighbour read, at the texel's true normal. The value is a
+    /// low-confidence seed, not an own sample. The detail mark is a negative
+    /// confidence. Sun word z is not that mark. A lamp change drops the seed,
+    /// and an empty neighbour read does not keep a marked seed on screen. The
+    /// cell is not written. An empty fine texel this setting covers does not
+    /// take resample or the hit patch, even when the neighbour read accepts
+    /// nothing. The probe seed still runs for that miss. Those two stay when
+    /// the texel is not a detail candidate, including SH cells on with this
+    /// setting off. The parent walk is off for every texel while this setting
+    /// is on. A mover is not seeded. With this setting on, a mover shows the
+    /// world-cell read at its current world position and true normal, claim
+    /// false, and skips the probe irradiance read when that read accepts a
+    /// corner. Detail off still has mover trust 0 and shows the probes. A slanted
+    /// pixel shows the same read and does not run those writers. A pixel whose
+    /// displayed indirect is
+    /// this read does not read screen-probe irradiance. Requires `sh_cells`;
+    /// on without it does nothing. Head 3.w bit 17.
+    pub sh_texel_detail: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -798,7 +811,7 @@ impl LightingSettings {
                 ray_budget: 0,
                 dormant_rays: 0,
                 sh_cells: false,
-                sh_texel_seed: false,
+                sh_texel_detail: false,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
@@ -1206,8 +1219,8 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
-            "surface_cache.sh_texel_seed={}",
-            bit(self.surface_cache.sh_texel_seed)
+            "surface_cache.sh_texel_detail={}",
+            bit(self.surface_cache.sh_texel_detail)
         );
         let _ = writeln!(
             out,
@@ -1395,7 +1408,7 @@ impl LightingSettings {
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
-            "surface_cache.sh_texel_seed" => self.surface_cache.sh_texel_seed = on(value)?,
+            "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1632,8 +1645,8 @@ impl LightingSettings {
                 "surface_cache.sh_cells",
             ),
             (
-                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_SEED",
-                "surface_cache.sh_texel_seed",
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL",
+                "surface_cache.sh_texel_detail",
             ),
         ];
         for (var, key) in keys {

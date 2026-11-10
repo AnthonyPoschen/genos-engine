@@ -310,11 +310,6 @@ void main() {
         return;
     }
     if (lighting_world_mode() == 3u) {
-        // ADR 0039 stage 3: the same lamp-change clear as the display path.
-        // A world cell is not a texel and has already returned above.
-        if (lighting_sh_texel_seed_on() && lighting_sc_lamp_touched(slot)) {
-            lighting_sc_clear_seed(slot);
-        }
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
         float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);

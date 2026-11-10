@@ -156,6 +156,70 @@ pub fn relight(
     (irr, sh)
 }
 
+/// One corner of the trilinear neighbour read (ADR 0039).
+///
+/// `lighting_sh_read` accepts a corner only when it is present, has samples,
+/// is not stale, faces the query (`dot > 0`), and sits within half a cell of
+/// the query plane. A rejected or missing corner adds no weight, so it does
+/// not darken the blend. A corner with samples and a black mean is light.
+#[derive(Clone, Copy, Debug)]
+pub struct NeighbourCorner {
+    pub weight: f32,
+    pub present: bool,
+    pub samples: f32,
+    pub stale: bool,
+    pub rgb: [f32; 3],
+    pub axis: [f32; 3],
+    pub normal: [f32; 3],
+    /// Absolute distance of the stored point from the query plane, in metres.
+    pub plane: f32,
+    pub sh: ShL1,
+}
+
+/// Weight of one corner. Zero when the corner is left out of the blend.
+///
+/// The weight is the trilinear weight times `dot(stored normal, query normal)`.
+/// Equal stored normals make that dot a common factor, so it cancels. Two
+/// stored normals that both face the query do not: the larger dot weighs more.
+/// That is not a pure trilinear blend.
+#[must_use]
+pub fn neighbour_corner_weight(normal: [f32; 3], cell: f32, corner: &NeighbourCorner) -> f32 {
+    if corner.weight <= 0.0 || !corner.present || corner.samples < 0.5 || corner.stale {
+        return 0.0;
+    }
+    let facing = dot(corner.normal, normal);
+    if facing <= 0.0 {
+        return 0.0;
+    }
+    if corner.plane > 0.5 * cell {
+        return 0.0;
+    }
+    corner.weight * facing
+}
+
+/// Trilinear blend at the true normal. `None` when every corner is left out.
+#[must_use]
+pub fn neighbour_read(normal: [f32; 3], cell: f32, corners: &[NeighbourCorner]) -> Option<[f32; 3]> {
+    let mut sum = [0.0_f32; 3];
+    let mut weight_sum = 0.0_f32;
+    for corner in corners {
+        let weight = neighbour_corner_weight(normal, cell, corner);
+        if weight <= 0.0 {
+            continue;
+        }
+        let tilted = corner.sh.tilt(corner.rgb, corner.axis, normal);
+        for (channel, sample) in sum.iter_mut().zip(tilted) {
+            *channel += weight * sample;
+        }
+        weight_sum += weight;
+    }
+    if weight_sum > 0.0 {
+        Some(sum.map(|channel| channel / weight_sum))
+    } else {
+        None
+    }
+}
+
 /// GLSL `packHalf2x16`: round to nearest even, subnormals kept.
 #[must_use]
 pub fn pack_half_2x16(a: f32, b: f32) -> u32 {
@@ -247,145 +311,18 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     a.map(|v| v / l)
 }
 
-/// S72N first-fill confidence (`lighting_sc_set_seed` of a parent, a hit, or this seed).
-pub const TEXEL_SEED_CONFIDENCE: f32 = 0.25;
-/// `lighting_sc_set_seed` clamps confidence to this minimum.
-pub const TEXEL_SEED_MIN: f32 = 0.05;
-/// Own-sample count the must-fail seed-as-samples control writes.
-pub const TEXEL_SEED_FAULT_SETS: f32 = 8.0;
-/// Output region of `texel_seed_check.comp`: four records of eight floats.
-pub const TEXEL_SEED_CHECK_OUT: usize = 32;
-pub const TEXEL_SEED_CHECK_STRIDE: usize = 8;
-
-/// One detail texel. The seed is not an own sample unless `as_samples` is set,
-/// and that flag is the must-fail control, not the production path.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct TexelSeedState {
-    pub own_mean: [f32; 3],
-    pub own_samples: f32,
-    pub seed: [f32; 3],
-    pub confidence: f32,
-}
-
-impl TexelSeedState {
-    /// Store `value` beside the own mean. `as_samples` writes it into the own
-    /// mean instead, which is the fault a lamp-change clear must not hide.
-    pub fn apply_seed(
-        &mut self,
-        value: [f32; 3],
-        confidence: f32,
-        as_samples: bool,
-        seed_sets: f32,
-    ) {
-        if as_samples {
-            self.own_mean = value;
-            self.own_samples = seed_sets;
-            self.seed = [0.0; 3];
-            self.confidence = 0.0;
-        } else {
-            self.seed = value.map(|v| v.max(0.0));
-            self.confidence = confidence.clamp(TEXEL_SEED_MIN, 1.0);
-        }
-    }
-
-    /// Drop the seed. Own samples stay.
-    pub fn clear_seed(&mut self) {
-        self.seed = [0.0; 3];
-        self.confidence = 0.0;
-    }
-
-    /// Default fine texel: an own sample shows itself, and none shows the seed.
-    #[must_use]
-    pub fn shown(&self) -> [f32; 3] {
-        if self.own_samples > 0.5 {
-            return self.own_mean;
-        }
-        if self.confidence > 0.0 {
-            return self.seed;
-        }
-        [0.0; 3]
-    }
-
-    /// Seed from the one owning cell. `cell` is borrowed, so the call cannot
-    /// write the cell. Neighbour cells are not an argument.
-    pub fn seed_from_owning_cell(
-        &mut self,
-        cell: &ShL1,
-        e_axis: [f32; 3],
-        axis: [f32; 3],
-        normal: [f32; 3],
-    ) {
-        let value = cell.tilt(e_axis, axis, normal);
-        self.apply_seed(value, TEXEL_SEED_CONFIDENCE, false, 0.0);
-    }
-}
-
-/// The four `texel_seed_check.comp` records for one cell and one own colour.
-/// Record 0 keeps the seed. Records 1 and 2 clear it. Record 3 is the fault.
-#[must_use]
-pub fn texel_seed_check_expected(
-    cell: &ShL1,
-    e_axis: [f32; 3],
-    axis: [f32; 3],
-    normal: [f32; 3],
-    own: [f32; 3],
-) -> [f32; 32] {
-    let tilt = cell.tilt(e_axis, axis, normal);
-    let mut out = [0.0; 32];
-    let cases = [
-        (0.0, false, false),
-        (0.0, true, false),
-        (1.0, true, false),
-        (0.0, true, true),
-    ];
-    for (id, (samples, clear, fault)) in cases.into_iter().enumerate() {
-        let mut state = TexelSeedState {
-            own_mean: own,
-            own_samples: samples,
-            ..TexelSeedState::default()
-        };
-        state.apply_seed(tilt, TEXEL_SEED_CONFIDENCE, fault, TEXEL_SEED_FAULT_SETS);
-        if clear {
-            state.clear_seed();
-        }
-        let shown = state.shown();
-        let at = id * TEXEL_SEED_CHECK_STRIDE;
-        out[at] = shown[0];
-        out[at + 1] = shown[1];
-        out[at + 2] = shown[2];
-        out[at + 3] = state.confidence;
-        out[at + 4] = state.own_samples;
-        out[at + 5] = 0.0;
-    }
-    out
-}
-
-/// Host words for `texel_seed_check.comp`. Floats 22 onward are a decoy the
-/// shader must not read.
-#[must_use]
-pub fn texel_seed_check_words(
-    e_axis: [f32; 3],
-    axis: [f32; 3],
-    normal: [f32; 3],
-    cell: &ShL1,
-    own: [f32; 3],
-) -> [f32; 64] {
-    let mut words = [100.0; 64];
-    words[0..3].copy_from_slice(&e_axis);
-    words[3..6].copy_from_slice(&axis);
-    words[6..9].copy_from_slice(&normal);
-    words[9..12].copy_from_slice(&cell.c[1]);
-    words[12..15].copy_from_slice(&cell.c[2]);
-    words[15..18].copy_from_slice(&cell.c[3]);
-    words[18..21].copy_from_slice(&own);
-    words
-}
-
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "a neighbour read that drops every corner is a failed contract"
+)]
 mod tests {
     use super::*;
 
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    /// `LIGHTING_WRC_CAP` and the quiet-light floor `LIGHTING_WRC_CHANGE_ALPHA`.
+    const WRC_CAP: f32 = 128.0;
+    const CHANGE_ALPHA: f32 = 1.0 / 32.0;
 
     fn tilted(deg: f32) -> [f32; 3] {
         let a = deg.to_radians();
@@ -501,6 +438,135 @@ mod tests {
         assert_eq!(sh.tilt(e, UP, UP), e);
     }
 
+    /// Model of the default-flag world-cell weight in `lighting_cache.comp`.
+    ///
+    /// Dark fill while the cell is under half the cap, the change floor while
+    /// the light is not quiet, and a whole replacement while a lamp change is
+    /// settling. The mean and the harmonics take that one weight. A sun/sky
+    /// rescale hits both before the blend. A mover's local alpha is not this
+    /// path. This is a transcription of that weight. It is not the ADR 0039
+    /// picture gate and it does not grade the production cache.
+    fn model_wrc_weight(
+        cell: &Held,
+        sample: [f32; 3],
+        sample_sh: &ShL1,
+        settling: bool,
+        quiet: bool,
+        sun_gain: f32,
+    ) -> Held {
+        let fresh = cell.sets < 0.5;
+        let t = if fresh { 0.0 } else { cell.sets };
+        let add = 1.0;
+        let mut wa = add / (t + add);
+        if t < 0.5 * WRC_CAP {
+            wa = 1.0 - (t / (t + add)).powi(3);
+        }
+        if !settling && !quiet {
+            wa = wa.max(CHANGE_ALPHA * add);
+        }
+        if settling {
+            wa = 1.0;
+        }
+        let a = wa.min(1.0);
+        let (mut mean, mut sh) = (cell.mean, cell.sh);
+        if !fresh && (sun_gain - 1.0).abs() > 1.0e-3 {
+            mean = mean.map(|v| v * sun_gain);
+            for row in &mut sh.c {
+                for v in row {
+                    *v *= sun_gain;
+                }
+            }
+        }
+        let mean = if fresh {
+            sample
+        } else {
+            std::array::from_fn(|i| mean[i] + (sample[i] - mean[i]) * a)
+        };
+        let sh = if fresh {
+            *sample_sh
+        } else {
+            let mut blended = sh;
+            blended.blend(sample_sh, a);
+            blended
+        };
+        Held {
+            mean,
+            sh,
+            sets: (t + add).min(WRC_CAP),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct Held {
+        mean: [f32; 3],
+        sh: ShL1,
+        sets: f32,
+    }
+
+    fn luma(c: [f32; 3]) -> f32 {
+        0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+    }
+
+    #[test]
+    fn model_only_wrc_weight_holds_a_constant_and_settling_replaces_it() {
+        // Not the stage-2 gate. The picture and the dumped cells are graded
+        // in `examples/stress/tests/cache_energy.rs`. This only checks the
+        // transcribed weight: the axis read is the stored mean, settling
+        // (`wa = 1`) replaces a sample, and the capped mean left alone does not.
+        let lit_rad = |_: [f32; 3]| [1.0, 0.85, 0.7];
+        let (lit, sh_lit) = relight(UP, 64, 11, lit_rad);
+        let (dark, sh_dark) = relight(UP, 64, 12, |_| [0.0; 3]);
+        let mut cell = Held {
+            mean: [0.0; 3],
+            sh: ShL1::default(),
+            sets: 0.0,
+        };
+        for _ in 0..128 {
+            cell = model_wrc_weight(&cell, lit, &sh_lit, false, true, 1.0);
+        }
+        let energy = luma(cell.sh.tilt(cell.mean, UP, UP)) / luma(lit);
+        assert!(energy >= 0.9, "axis energy {energy}");
+        let face = tilted(35.0);
+        let face_energy = luma(cell.sh.tilt(cell.mean, UP, face)) / luma(sh_lit.tilt(lit, UP, face));
+        assert!(face_energy >= 0.9, "slanted energy {face_energy}");
+
+        let lit_luma = luma(cell.mean);
+        let mut cleared = cell;
+        for _ in 0..120 {
+            cleared = model_wrc_weight(&cleared, dark, &sh_dark, true, false, 1.0);
+        }
+        let linger = luma(cleared.sh.tilt(cleared.mean, UP, face)) / lit_luma;
+        assert!(linger <= 0.05, "lamp still present at frame 120 ({linger})");
+
+        let mut stuck = cell;
+        for _ in 0..120 {
+            stuck = model_wrc_weight(&stuck, dark, &sh_dark, false, true, 1.0);
+        }
+        let remain = luma(stuck.mean) / lit_luma;
+        assert!(
+            remain > 0.05,
+            "the capped mean would already pass the lamp gate ({remain})"
+        );
+
+        // Lag: lamps on, the first rounds still dark, then the reference.
+        // Settling holds the latest sample, so frame 300 is that reference.
+        let mut filling = Held {
+            mean: [0.0; 3],
+            sh: ShL1::default(),
+            sets: 0.0,
+        };
+        for frame in 1..=300 {
+            let (sample, sh) = if frame < 40 { (dark, &sh_dark) } else { (lit, &sh_lit) };
+            filling = model_wrc_weight(&filling, sample, sh, frame <= 120, frame > 120, 1.0);
+        }
+        let lag = luma(filling.sh.tilt(filling.mean, UP, UP)) / luma(lit);
+        assert!(lag >= 0.9, "lag {lag}");
+
+        let gained = model_wrc_weight(&cell, lit, &sh_lit, false, true, 2.0);
+        assert_eq!(gained.sh.tilt(gained.mean, UP, UP), gained.mean);
+        assert!(luma(gained.mean) > 1.5 * lit_luma, "sun rescale {}", luma(gained.mean));
+    }
+
     #[test]
     fn blending_harmonics_with_the_means_alpha_keeps_the_axis_read() {
         // The cell blends mean and harmonics with one alpha, so the tilt read
@@ -535,78 +601,117 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_seed_is_not_an_own_sample_and_a_clear_drops_it() {
-        let mut texel = TexelSeedState::default();
-        texel.apply_seed([0.75, 0.25, 0.1], 1.0, false, TEXEL_SEED_FAULT_SETS);
-        assert_eq!(texel.own_samples, 0.0);
-        assert!(close(texel.shown()[0], 0.75, 1.0e-6));
-        texel.clear_seed();
-        assert_eq!(texel.shown(), [0.0; 3]);
-        assert_eq!(texel.own_samples, 0.0);
-        assert_eq!(texel.confidence, 0.0);
+    fn corner(
+        weight: f32,
+        rgb: [f32; 3],
+        normal: [f32; 3],
+        plane: f32,
+        sh: ShL1,
+    ) -> super::NeighbourCorner {
+        super::NeighbourCorner {
+            weight,
+            present: true,
+            samples: 16.0,
+            stale: false,
+            rgb,
+            axis: normal,
+            normal,
+            plane,
+            sh,
+        }
     }
 
     #[test]
-    fn seed_as_samples_survives_the_clear() {
-        let mut good = TexelSeedState::default();
-        good.apply_seed([0.75, 0.0, 0.0], 1.0, false, TEXEL_SEED_FAULT_SETS);
-        good.clear_seed();
-        assert_eq!(good.shown(), [0.0; 3]);
-
-        let mut broken = TexelSeedState::default();
-        broken.apply_seed([0.75, 0.0, 0.0], 1.0, true, TEXEL_SEED_FAULT_SETS);
-        broken.clear_seed();
-        assert_eq!(broken.own_samples, TEXEL_SEED_FAULT_SETS);
+    fn a_missing_corner_does_not_darken_and_a_black_corner_does() {
+        let cell = 0.25;
+        let red = [8.0, 0.0, 0.0];
+        let blue = [0.0, 0.0, 7.0];
+        let up = [0.0, 1.0, 0.0];
+        let lit = corner(0.75, red, up, 0.0, ShL1::default());
+        let mut absent = corner(0.25, blue, up, 0.0, ShL1::default());
+        absent.present = false;
+        let blended = super::neighbour_read(up, cell, &[lit, absent]).expect("the lit corner");
+        assert_eq!(blended, red, "a missing corner is left out, not averaged as black");
+        let mut black = corner(0.25, [0.0; 3], up, 0.0, ShL1::default());
+        black.samples = 16.0;
+        let darkened = super::neighbour_read(up, cell, &[lit, black]).expect("black is light");
         assert!(
-            broken.shown()[0] > 0.05,
-            "fault did not retain the stale seed"
+            close(darkened[0], 6.0, 1.0e-5),
+            "0.75 of red and 0.25 of valid black is 6, got {darkened:?}"
         );
     }
 
     #[test]
-    fn an_own_sample_replaces_the_seed_and_a_clear_keeps_the_sample() {
-        let own = [8.0, 0.25, 3.0];
-        let mut texel = TexelSeedState {
-            own_mean: own,
-            own_samples: 1.0,
-            ..TexelSeedState::default()
+    fn an_opposite_normal_and_a_far_plane_are_left_out() {
+        let cell = 0.25;
+        let up = [0.0, 1.0, 0.0];
+        let down = [0.0, -1.0, 0.0];
+        let red = [8.0, 0.0, 0.0];
+        let green = [0.0, 6.0, 0.0];
+        let near = corner(0.75, red, up, 0.0, ShL1::default());
+        let opposite = corner(0.25, green, down, 0.0, ShL1::default());
+        let kept = super::neighbour_read(up, cell, &[near, opposite]).expect("near side");
+        assert_eq!(kept, red);
+        let far = corner(0.25, green, up, 0.1875, ShL1::default());
+        let plane = super::neighbour_read(up, cell, &[near, far]).expect("near plane");
+        assert_eq!(plane, red);
+        let mut stale = corner(1.0, red, up, 0.0, ShL1::default());
+        stale.stale = true;
+        assert!(super::neighbour_read(up, cell, &[stale]).is_none());
+    }
+
+    #[test]
+    fn equal_facing_cancels_and_mixed_facing_is_not_pure_trilinear() {
+        let up = [0.0, 1.0, 0.0];
+        let half = [0.0, 0.5, 0.0];
+        let red = [6.0, 0.0, 0.0];
+        let blue = [0.0, 0.0, 6.0];
+        let sh = ShL1::default();
+        let same = super::neighbour_read(
+            up,
+            0.25,
+            &[
+                corner(0.5, red, half, 0.0, sh),
+                corner(0.5, blue, half, 0.0, sh),
+            ],
+        )
+        .expect("equal facing");
+        assert!(close(same[0], 3.0, 1.0e-5), "{same:?}");
+        assert!(close(same[2], 3.0, 1.0e-5), "{same:?}");
+        let mixed = super::neighbour_read(
+            up,
+            0.25,
+            &[
+                corner(0.5, red, up, 0.0, sh),
+                corner(0.5, blue, half, 0.0, sh),
+            ],
+        )
+        .expect("mixed facing");
+        assert!(close(mixed[0], 4.0, 1.0e-5), "{mixed:?}");
+        assert!(close(mixed[2], 2.0, 1.0e-5), "{mixed:?}");
+        assert!(
+            (mixed[0] - 3.0).abs() > 0.5,
+            "mixed facing must not collapse to the pure trilinear mean {mixed:?}"
+        );
+    }
+
+    #[test]
+    fn the_blend_is_the_true_normal_not_the_axis_mean() {
+        let up = [0.0, 1.0, 0.0];
+        let mut sh = ShL1::default();
+        sh.c[2] = [4.0, 0.0, 0.0];
+        let mean = [8.0, 0.0, 0.0];
+        let n = {
+            let len = (0.36_f32 + 0.64 + 0.04).sqrt();
+            [0.6 / len, 0.8 / len, 0.2 / len]
         };
-        texel.apply_seed([0.2, 0.2, 0.2], TEXEL_SEED_CONFIDENCE, false, 0.0);
-        assert_eq!(texel.shown(), own);
-        texel.clear_seed();
-        assert_eq!(texel.own_samples, 1.0);
-        assert_eq!(texel.shown(), own);
-    }
-
-    #[test]
-    fn the_owning_cell_seeds_the_texel_and_the_cell_is_unchanged() {
-        let (e, cell) = relight(UP, 64, 3, |d| [d[0].max(0.0), 0.2, 0.4]);
-        let before = cell;
-        let normal = tilted(25.0);
-        let mut texel = TexelSeedState::default();
-        texel.seed_from_owning_cell(&cell, e, UP, normal);
-        assert_eq!(cell, before);
-        assert_eq!(texel.own_samples, 0.0);
-        assert!(close(texel.confidence, TEXEL_SEED_CONFIDENCE, 1.0e-6));
-        let want = cell.tilt(e, UP, normal);
-        assert_eq!(texel.shown(), want);
-
-        let (e2, other) = relight(UP, 64, 9, |d| [0.0, d[1].max(0.0), 1.0]);
-        let blend: [f32; 3] = std::array::from_fn(|ch| {
-            f32::midpoint(cell.tilt(e, UP, normal)[ch], other.tilt(e2, UP, normal)[ch])
-        });
-        assert!(
-            (texel.shown()[0] - blend[0]).abs() > 1.0e-3,
-            "the seed blended a neighbour"
-        );
-    }
-
-    #[test]
-    fn confidence_below_the_minimum_clamps_and_does_not_become_a_sample() {
-        let mut texel = TexelSeedState::default();
-        texel.apply_seed([1.0, 0.0, 0.0], 0.01, false, TEXEL_SEED_FAULT_SETS);
-        assert!(close(texel.confidence, TEXEL_SEED_MIN, 1.0e-6));
-        assert_eq!(texel.own_samples, 0.0);
+        let mut sample = corner(1.0, mean, up, 0.0, sh);
+        sample.axis = up;
+        let got = super::neighbour_read(n, 0.25, &[sample]).expect("slant");
+        let want = sh.tilt(mean, up, n);
+        assert!(got[0] < mean[0] - 0.5, "tilt {got:?} stayed on the axis mean");
+        for ch in 0..3 {
+            assert!(close(got[ch], want[ch], 1.0e-5));
+        }
     }
 }

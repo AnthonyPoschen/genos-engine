@@ -24,6 +24,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(constant_id = 0) const bool COMPOSE_SC_WRITES = true;
 #define LIGHTING_SC_WRITES COMPOSE_SC_WRITES
 #include "lighting_common.glsl"
+#include "lighting_screen_probe.glsl"
 #include "dither.glsl"
 #include "froxel_compose.glsl"
 
@@ -57,54 +58,13 @@ uint pack_rgb(vec3 rgb) {
 }
 
 vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
-    float tile = float(pc.params.y);
-    vec2 g = (vec2(p) + 0.5) / tile - 0.5;
-    ivec2 g0 = ivec2(floor(g));
-    vec2 f = g - vec2(g0);
-    float dist = length(pos - scene.eye.xyz);
-    float plane = 0.03 + 0.01 * dist;
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    ivec2 grid = ivec2(pc.dims.zw);
-    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
-        ivec2 c = g0 + ivec2(int(k & 1u), int(k >> 1u));
-        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
-            continue;
-        }
-        uint probe = uint(c.y) * pc.dims.z + uint(c.x);
-        vec4 pp = work.v[lighting_probe_at(probe)];
-        if (pp.w < 0.5) {
-            continue;
-        }
-        vec3 pn = work.v[lighting_probe_at(probe) + 1u].xyz;
-        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
-        float w = (bil + 1.0e-3) * pow(max(dot(pn, n), 0.0), 8.0)
-            * exp(-abs(dot(pp.xyz - pos, n)) / plane);
-        if (w <= 1.0e-6) {
-            continue;
-        }
-        sum += w * lighting_probe_irradiance(probe, n);
-        wsum += w;
-    }
-    // Pixels no probe matches well (thin pillars, edges, surfaces no tile centre
-    // landed on) blend in the light cache's patch; their lookup keeps it alive.
-    const float CACHE_WEIGHT = 0.05;
-    // Cover every cache slot this pixel reads, including the probe fallback.
-    lighting_sc_display = true;
-    if (wsum < CACHE_WEIGHT) {
-        float w = CACHE_WEIGHT - wsum;
-        sum += w * lighting_cache_irradiance(pos, n);
-        wsum += w;
-    }
-    vec3 probes = sum / wsum;
-    if (lighting_world_mode() != 0u) {
-        lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
-        vec4 world = lighting_world_irradiance(pos, n);
-        lighting_sc_display = false;
-        return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
-    }
-    lighting_sc_display = false;
-    return probes;
+    // lighting_screen_probe_indirect. A pixel whose displayed indirect is the
+    // SH texel detail value does not read screen-probe irradiance. A covered
+    // mover is one of those pixels. Coverage and the display each call
+    // lighting_sh_read, so that pixel is two lookups, and diag counts the
+    // compose call, not one lookup. A mover whose read rejects, a miss, and
+    // an empty slant still read the probes.
+    return lighting_screen_probe_indirect(p, pos, n);
 }
 
 void main() {
