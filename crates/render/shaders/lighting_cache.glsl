@@ -3423,7 +3423,8 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     }
     if (obj) {
         // The mover arm shows lighting_sh_read and does not seed a world texel.
-        // Detail off and Low stay on the probes. Claim stays false.
+        // Detail off and Low are not this skip. They read the world cache.
+        // Claim stays false.
         float salt = lighting_obj_salt;
         lighting_obj_salt = 0.0;
         bool hit = lighting_sh_texel_detail_on()
@@ -3572,8 +3573,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         return vec4(lighting_sc_wrc_now(pos, n).rgb, 1.0);
     }
     if (lighting_sc_slanted(n)) {
-        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal
-        // instead of the probes (a mover's stay on the probes).
+        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal.
+        // A mover does not take this arm.
         if (lighting_sh_on() && !obj) {
             // Claim stays off. A slant that accepts cells must not allocate,
             // and an empty read must not stamp.
@@ -3737,11 +3738,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         trust += bil * (mode == 3u ? sc_trust : (mode != 2u ? 1.0 : min(v.w / 4.0, 1.0)));
     }
-    // Surface cache: while the light changes or around an object that moves, the
-    // probes (no history) show it.
-    // S72L: corners with no light are left out of the blend, not handed to the
-    // probes texel by texel (first fill tore as corners flipped between the two
-    // methods); the probes take the pixel only where most of it has nothing.
+    // While the light changes, or near a change with keep-near off, trust is 0.
+    // The pixel mixes a found coarser cell, or keeps the fine colour on a miss.
+    // Corners with no light stay out of the blend.
     if (mode == 3u && wsum > 0.0 && (lighting_sc_flags() & 33554432u) == 0u) {
         trust = trust / wsum * min(4.0 * wsum, 1.0);
     }
