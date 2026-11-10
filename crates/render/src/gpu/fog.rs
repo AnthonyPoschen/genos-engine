@@ -51,6 +51,13 @@ pub(super) struct Targets {
     cmd: Handle,
     fence: Handle,
     image_ready: bool,
+    /// Last buffers written into `set`. A repeat update while the other flight
+    /// still executes this set is VUID-vkUpdateDescriptorSets-None-03047.
+    bound: bool,
+    bound_scene: Handle,
+    bound_params: Handle,
+    bound_columns: Handle,
+    bound_view: Handle,
 }
 
 impl Gpu {
@@ -132,7 +139,9 @@ impl Gpu {
             return;
         }
         let cmd = self.cmd;
-        self.barrier_on(cmd, 0x8000 | 0x800, 0x1000, 0x20, 0x1000);
+        // The scene upload is a transfer write of this buffer, including the
+        // word at byte 12. Wait for that write, not only the earlier reads.
+        self.barrier_on(cmd, 0x8000 | 0x800 | 0x1000, 0x1000, 0x20 | 0x1000, 0x1000);
         let zero = 0u32.to_ne_bytes();
         unsafe {
             (self.fns.cmd_update_buffer)(
@@ -224,6 +233,9 @@ impl Gpu {
                 4,
                 word.as_ptr().cast(),
             );
+            // Two transfer writes of frame_scene. Sync validation without range
+            // tracking treats them as one buffer even though the ranges differ.
+            self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
             (self.fns.cmd_update_buffer)(
                 cmd,
                 self.frame_scene[0].buffer,
@@ -231,6 +243,9 @@ impl Gpu {
                 16,
                 head.as_ptr().cast(),
             );
+            // The 16-byte header and the column copy are both transfer writes of
+            // frame_scene. Order them before the copy.
+            self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
             let region = CopyRegion {
                 src: 0,
                 dst: scene_offset().saturating_add(16),
@@ -568,6 +583,21 @@ impl Gpu {
         {
             return Ok(());
         }
+        let replacing = self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| !targets.image.image.is_null());
+        if replacing {
+            // The current flight was waited by the caller. Its fence may already
+            // have been reset, so only the other flight is waited here.
+            let other = 1 - self.flight;
+            self.wait_flight(other)?;
+            let fence = self
+                .froxel
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |targets| targets.fence);
+            self.wait_fence(fence, "froxel replace")?;
+        }
         let (image_bytes, image) = self.make_image_3d(size)?;
         let columns = self.make_buffer(
             column_bytes(size.width, size.height).max(16),
@@ -589,6 +619,7 @@ impl Gpu {
             targets.size = size;
             targets.bytes = bytes;
             targets.image_ready = false;
+            targets.bound = false;
             retired
         };
         self.destroy_image(&mut retired.0);
@@ -700,6 +731,11 @@ impl Gpu {
             cmd,
             fence,
             image_ready: false,
+            bound: false,
+            bound_scene: std::ptr::null_mut(),
+            bound_params: std::ptr::null_mut(),
+            bound_columns: std::ptr::null_mut(),
+            bound_view: std::ptr::null_mut(),
         })
     }
 
@@ -970,7 +1006,30 @@ impl Gpu {
         Ok((cmd, fence))
     }
 
-    fn write_froxel_set(&self, scene: Handle) -> Result<(), String> {
+    fn write_froxel_set(&mut self, scene: Handle) -> Result<(), String> {
+        let unchanged = self.froxel.as_ref().is_some_and(|targets| {
+            targets.bound
+                && targets.bound_scene == scene
+                && targets.bound_params == targets.params.buffer
+                && targets.bound_columns == targets.columns.buffer
+                && targets.bound_view == targets.image.view
+        });
+        if unchanged {
+            return Ok(());
+        }
+        // The set is shared by both frames and by the standalone dispatch.
+        // record_and_submit has already reset the current flight's fence, so
+        // waiting it here would hang. The other flight, and the froxel fence,
+        // are the command buffers that can still be executing this set.
+        let other = 1 - self.flight;
+        self.wait_flight(other)?;
+        let fence = self
+            .froxel
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |targets| targets.fence);
+        if !fence.is_null() {
+            self.wait_fence(fence, "froxel descriptor")?;
+        }
         let targets = self.froxel.as_ref().ok_or("froxel targets missing")?;
         #[repr(C)]
         struct BufInfo {
@@ -1069,6 +1128,16 @@ impl Gpu {
         ];
         unsafe {
             (self.fns.update_desc)(self.device, 4, writes.as_ptr().cast(), 0, std::ptr::null());
+        }
+        if let Some(targets) = self.froxel.as_mut() {
+            let params = targets.params.buffer;
+            let columns = targets.columns.buffer;
+            let view = targets.image.view;
+            targets.bound = true;
+            targets.bound_scene = scene;
+            targets.bound_params = params;
+            targets.bound_columns = columns;
+            targets.bound_view = view;
         }
         Ok(())
     }

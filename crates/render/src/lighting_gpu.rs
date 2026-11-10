@@ -140,10 +140,12 @@ pub(crate) struct Lighting {
     still_pop: f64,
     /// GPU histogram and the stride-32 luma halves. The header is the bin counts.
     meter_dev: Buffer,
-    /// Host copy of the meter header. Read after the fence, one frame late.
-    meter_host: Buffer,
-    /// A meter dispatch is in the frame the fence just waited for.
-    meter_pending: bool,
+    /// Host copy of the meter header, one buffer per frame in flight.
+    /// Both frames used to copy into one buffer: the second `vkCmdCopyBuffer`
+    /// was a WRITE_AFTER_WRITE. Read the slot whose fence just waited.
+    meter_host: [Buffer; 2],
+    /// A meter dispatch is in the frame the fence just waited for, per slot.
+    meter_pending: [bool; 2],
     /// The meter has stored one luma half, so the next pass can compare.
     meter_has_prev: bool,
     /// Which luma half holds the previous frame. The dispatch flips it.
@@ -432,8 +434,8 @@ impl Default for Lighting {
             bloom: Buffer::empty(),
             still_pop: 0.0,
             meter_dev: Buffer::empty(),
-            meter_host: Buffer::empty(),
-            meter_pending: false,
+            meter_host: [Buffer::empty(), Buffer::empty()],
+            meter_pending: [false, false],
             meter_has_prev: false,
             meter_ping: 0,
             meter_ev: None,
@@ -1012,7 +1014,10 @@ impl Gpu {
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
-        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
+        let mut meter_host = std::mem::replace(
+            &mut self.lighting.meter_host,
+            [Buffer::empty(), Buffer::empty()],
+        );
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
@@ -1023,7 +1028,9 @@ impl Gpu {
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut meter_dev);
-        self.destroy_buffer(&mut meter_host);
+        for host in &mut meter_host {
+            self.destroy_buffer(host);
+        }
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -1124,8 +1131,11 @@ impl Gpu {
         // Storage for the histogram, transfer so the header can be cleared and copied.
         self.lighting.meter_dev =
             self.make_buffer(meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.lighting.meter_host = self.make_buffer(METER_HEADER_BYTES, 0x2, Memory::Readback)?;
-        self.lighting.meter_pending = false;
+        for slot in 0..2 {
+            self.lighting.meter_host[slot] =
+                self.make_buffer(METER_HEADER_BYTES, 0x2, Memory::Readback)?;
+        }
+        self.lighting.meter_pending = [false, false];
         self.lighting.meter_has_prev = false;
         self.lighting.meter_ping = 0;
         self.lighting.meter_ev = None;
@@ -1655,6 +1665,9 @@ impl Gpu {
                 self.lighting.gbuf.size,
                 u32::MAX,
             );
+            // The whole-buffer clears land before the count and header writes.
+            // A subrange fill of the key table is the same buffer as the clear above.
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // Quiet-compose indirect args: group count x starts at 0, y and z stay 1.
             // The key table is absent while GI is off; those offsets would be past the dummy.
             if self.lighting.cache_full {
@@ -1674,8 +1687,6 @@ impl Gpu {
                     yz.as_ptr() as *const c_void,
                 );
             }
-            // The whole-buffer clears land before the count and header writes.
-            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world && self.lighting.cache_full {
                 for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
@@ -2252,19 +2263,21 @@ impl Gpu {
         crate::hdr_output::pack_f32(next)
     }
 
-    /// Header from the previous frame's meter. The fence has already waited.
+    /// Header from this flight's previous meter. That slot's fence has waited.
+    /// The other flight may still be copying its own host buffer.
     fn take_meter(&mut self) {
-        if !self.lighting.meter_pending || self.lighting.meter_host.memory.is_null() {
+        let slot = self.flight;
+        if !self.lighting.meter_pending[slot] || self.lighting.meter_host[slot].memory.is_null() {
             return;
         }
-        self.lighting.meter_pending = false;
+        self.lighting.meter_pending[slot] = false;
         let words = METER_BIN_CAP + 4;
         let mut raw = vec![0_u32; words];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
                 self.device,
-                self.lighting.meter_host.memory,
+                self.lighting.meter_host[slot].memory,
                 0,
                 METER_HEADER_BYTES,
                 0,
@@ -2274,7 +2287,7 @@ impl Gpu {
                 return;
             }
             std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), raw.as_mut_ptr(), words);
-            (self.fns.unmap_mem)(self.device, self.lighting.meter_host.memory);
+            (self.fns.unmap_mem)(self.device, self.lighting.meter_host[slot].memory);
         }
         let had_prev = self.lighting.meter_has_prev;
         let moved = raw.get(METER_BIN_CAP).copied().unwrap_or(0);
@@ -2601,11 +2614,11 @@ impl Gpu {
 
     /// Histogram of every pixel, and a stride-32 still check. The header is copied
     /// for the next frame. Luma halves stay on the device.
-    fn record_gpu_meter(&mut self, width: u32, height: u32) {
+    fn record_gpu_meter(&mut self, slot: usize, width: u32, height: u32) {
         if self.lighting.hdr.legacy_bytes
             || self.lighting.meter_pipe.is_null()
             || self.lighting.meter_dev.buffer.is_null()
-            || self.lighting.meter_host.buffer.is_null()
+            || self.lighting.meter_host[slot].buffer.is_null()
             || width == 0
             || height == 0
         {
@@ -2673,12 +2686,12 @@ impl Gpu {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
                 self.lighting.meter_dev.buffer,
-                self.lighting.meter_host.buffer,
+                self.lighting.meter_host[slot].buffer,
                 1,
                 &region as *const Region as *const u8,
             );
         }
-        self.lighting.meter_pending = true;
+        self.lighting.meter_pending[slot] = true;
         self.lighting.meter_ping ^= 1;
     }
 
@@ -3492,7 +3505,7 @@ impl Gpu {
             if let Err(err) = self.ensure_meter_pipe() {
                 eprintln!("lighting: gpu meter off: {err}");
             } else {
-                self.record_gpu_meter(w, h);
+                self.record_gpu_meter(slot, w, h);
             }
         }
         self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
@@ -3662,7 +3675,10 @@ impl Gpu {
         let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
-        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
+        let mut meter_host = std::mem::replace(
+            &mut self.lighting.meter_host,
+            [Buffer::empty(), Buffer::empty()],
+        );
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -3682,7 +3698,9 @@ impl Gpu {
         self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut meter_dev);
-        self.destroy_buffer(&mut meter_host);
+        for host in &mut meter_host {
+            self.destroy_buffer(host);
+        }
         self.destroy_buffer(&mut lamp_res);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
