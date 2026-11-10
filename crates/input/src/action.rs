@@ -14,6 +14,7 @@
 use crate::code::InputCode;
 use crate::device::Axis2d;
 use crate::system::InputSystem;
+use crate::touch::{Gesture, GestureKind};
 
 #[derive(Clone, Debug)]
 pub struct BoundInput {
@@ -71,6 +72,7 @@ struct Action {
     /// Scale remembered so a sensitivity line can precede the binding line.
     sensitivity: f32,
     kind: ActionKind,
+    gesture: Option<GestureKind>,
 }
 
 /// Named bindings evaluated against an [`InputSystem`].
@@ -218,6 +220,7 @@ impl ActionMap {
                 "left" | "right" | "up" | "down" | "vectors" => {
                     self.rebind_side(name, field, parse_code_list(value)?)?;
                 }
+                "gesture" => self.set_gesture(name, parse_gesture(value)?)?,
                 _ => return Err(format!("unknown action field {key}")),
             }
             return Ok(());
@@ -237,7 +240,9 @@ impl ActionMap {
         for action in &self.actions {
             match &action.kind {
                 ActionKind::Codes(codes) => {
-                    out.push_str(&format!("{}={}\n", action.name, format_code_list(codes)));
+                    if !codes.is_empty() {
+                        out.push_str(&format!("{}={}\n", action.name, format_code_list(codes)));
+                    }
                 }
                 ActionKind::Axis2d(binding) => {
                     for (side, codes) in [
@@ -259,8 +264,39 @@ impl ActionMap {
             if !action.enabled {
                 out.push_str(&format!("{}.enabled=0\n", action.name));
             }
+            if let Some(gesture) = action.gesture {
+                out.push_str(&format!("{}.gesture={}\n", action.name, gesture.name()));
+            }
         }
         out
+    }
+
+    /// Action names in binding order.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.actions
+            .iter()
+            .map(|action| action.name.clone())
+            .collect()
+    }
+
+    /// Bind a tap, a swipe, or a pinch to `name`. `None` clears it.
+    /// A missing action becomes a button action with no keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the action cannot be created.
+    pub fn set_gesture(&mut self, name: &str, gesture: Option<GestureKind>) -> Result<(), String> {
+        if !self.actions.iter().any(|action| action.name == name) {
+            self.set(name, Vec::new());
+        }
+        let action = self
+            .actions
+            .iter_mut()
+            .find(|action| action.name == name)
+            .ok_or_else(|| format!("unknown action {name}"))?;
+        action.gesture = gesture;
+        Ok(())
     }
 
     /// Build a map from settings lines. An empty text is an empty map.
@@ -296,6 +332,14 @@ impl ActionMap {
         if !action.enabled {
             return false;
         }
+        if action.gesture == Some(GestureKind::Tap)
+            && input
+                .gestures()
+                .iter()
+                .any(|gesture| matches!(gesture, Gesture::Tap { .. }))
+        {
+            return true;
+        }
         let ActionKind::Codes(codes) = &action.kind else {
             return false;
         };
@@ -309,7 +353,7 @@ impl ActionMap {
         if !action.enabled {
             return Axis2d::default();
         }
-        match &action.kind {
+        let mut out = match &action.kind {
             ActionKind::Axis2d(binding) => eval_2d(input, binding),
             ActionKind::Codes(codes) => {
                 let mut out = Axis2d::default();
@@ -321,7 +365,9 @@ impl ActionMap {
                 }
                 clamp_axis(out)
             }
-        }
+        };
+        add_gesture(&mut out, input, action.gesture, action.sensitivity);
+        clamp_axis(out)
     }
 
     pub fn to_json(&self) -> String {
@@ -338,7 +384,9 @@ impl ActionMap {
                 ActionKind::Codes(codes) => {
                     out.push_str("\"kind\":\"codes\",\"codes\":[");
                     write_codes(&mut out, codes);
-                    out.push_str("]}");
+                    out.push(']');
+                    write_gesture_field(&mut out, action.gesture);
+                    out.push('}');
                 }
                 ActionKind::Axis2d(binding) => {
                     out.push_str("\"kind\":\"axis_2d\"");
@@ -353,6 +401,7 @@ impl ActionMap {
                         write_codes(&mut out, codes);
                         out.push(']');
                     }
+                    write_gesture_field(&mut out, action.gesture);
                     out.push('}');
                 }
             }
@@ -382,9 +431,13 @@ impl ActionMap {
                     },
                 );
             }
+            let body = chunk.split("{\"name\":\"").next().unwrap_or(chunk);
             if let Some(action) = map.actions.iter_mut().find(|action| action.name == name) {
                 if let Some(enabled) = enabled {
                     action.enabled = enabled;
+                }
+                if let Some(text) = json_string(body, "gesture") {
+                    action.gesture = parse_gesture(text)?;
                 }
             }
         }
@@ -420,6 +473,7 @@ impl ActionMap {
                 enabled: true,
                 sensitivity: 1.0,
                 kind,
+                gesture: None,
             });
         }
     }
@@ -504,6 +558,49 @@ fn code_axis_2d(input: &InputSystem, code: InputCode) -> Option<Axis2d> {
         }
     }
     found.then_some(sum)
+}
+
+fn write_gesture_field(out: &mut String, gesture: Option<GestureKind>) {
+    if let Some(gesture) = gesture {
+        out.push_str(",\"gesture\":\"");
+        out.push_str(gesture.name());
+        out.push('"');
+    }
+}
+
+fn add_gesture(
+    out: &mut Axis2d,
+    input: &InputSystem,
+    gesture: Option<GestureKind>,
+    sensitivity: f32,
+) {
+    match gesture {
+        Some(GestureKind::Swipe) => {
+            for item in input.gestures() {
+                if let Gesture::Swipe { x, y, .. } = *item {
+                    out.x += x;
+                    out.y += y;
+                }
+            }
+        }
+        Some(GestureKind::Pinch) => {
+            for item in input.gestures() {
+                if let Gesture::Pinch { scale } = *item {
+                    out.y += (scale - 1.0).clamp(-1.0, 1.0) * sensitivity;
+                }
+            }
+        }
+        Some(GestureKind::Tap) | None => {}
+    }
+}
+
+fn parse_gesture(value: &str) -> Result<Option<GestureKind>, String> {
+    if value.is_empty() || matches!(value.to_ascii_lowercase().as_str(), "off" | "none") {
+        return Ok(None);
+    }
+    GestureKind::parse(value)
+        .map(Some)
+        .ok_or_else(|| format!("gesture is tap, swipe, pinch, or off, got {value}"))
 }
 
 fn clamp_axis(mut value: Axis2d) -> Axis2d {

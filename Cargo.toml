@@ -29,6 +29,7 @@ members = [
     "debug/lighting",
     "debug/particles",
     "debug/physics",
+    "debug/input",
 ]
 
 [workspace.lints.rust]

@@ -200,6 +200,15 @@ name = "genos-input"
 version = "0.1.0"
 
 [[package]]
+name = "genos-input-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-input",
+ "genos-mcp",
+ "genos-scene",
+]
+
+[[package]]
 name = "genos-json"
 version = "0.1.0"
 

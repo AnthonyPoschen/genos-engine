@@ -43,6 +43,10 @@ use crate::device::{
     gamepad_button_index, glyph_set_from_name, Axis2d, ButtonState, DeviceKind, DeviceView,
     GamepadDevice, GlyphSet, KeyboardDevice, MouseDevice, MAX_GAMEPADS, MAX_GAMEPAD_BUTTONS,
 };
+use crate::touch::{Gesture, TouchPoint, TouchSurface};
+
+/// Stable id for the touch surface. The keyboard is 0 and the mouse is 1.
+const TOUCH_ID: u32 = 2;
 
 /// One open `/dev/input/jsN` file and the latest control positions.
 #[derive(Debug)]
@@ -122,6 +126,7 @@ pub struct InputSystem {
     active_id: u32,
     action_text: String,
     changes: Vec<DeviceChange>,
+    touch: TouchSurface,
 }
 
 impl Clone for InputSystem {
@@ -137,6 +142,7 @@ impl Clone for InputSystem {
             active_id: self.active_id,
             action_text: self.action_text.clone(),
             changes: self.changes.clone(),
+            touch: self.touch.clone(),
         }
     }
 }
@@ -153,6 +159,7 @@ impl InputSystem {
             active_id: 0,
             action_text: String::new(),
             changes: Vec::new(),
+            touch: TouchSurface::new(),
         }
     }
 
@@ -196,11 +203,12 @@ impl InputSystem {
     #[must_use]
     pub fn dump(&self) -> String {
         let mut out = format!(
-            "glyphs={}\nactive_id={}\nstick_deadzone={}\nmouse_sensitivity={}\n",
+            "glyphs={}\nactive_id={}\nstick_deadzone={}\nmouse_sensitivity={}\ntouches={}\n",
             self.active_glyphs.name(),
             self.active_id,
             crate::action::format_number(self.gamepads[0].left_stick_deadzone),
             crate::action::format_number(self.mouse_sensitivity),
+            self.touch.points().len(),
         );
         for pad in self.gamepads.iter().filter(|pad| pad.view.connected) {
             out.push_str("pad ");
@@ -249,6 +257,35 @@ impl InputSystem {
                 .filter(|pad| pad.view.connected)
                 .map(|pad| pad.view.clone())
                 .collect(),
+            DeviceKind::Touch => vec![DeviceView {
+                id: TOUCH_ID,
+                kind: DeviceKind::Touch,
+                connected: self.touch.connected(),
+                name: "touch".into(),
+            }],
+        }
+    }
+
+    /// Gestures recognized since the last [`Self::begin_frame`].
+    #[must_use]
+    pub fn gestures(&self) -> &[Gesture] {
+        self.touch.gestures()
+    }
+
+    /// The touch points from the last [`Self::set_touch_points`] this frame.
+    #[must_use]
+    pub fn touch_points(&self) -> &[TouchPoint] {
+        self.touch.points()
+    }
+
+    /// Replace this frame's touch samples. A finger that begins selects the touch glyph set.
+    pub fn set_touch_points(&mut self, points: &[TouchPoint]) {
+        let began = points
+            .iter()
+            .any(|point| point.phase == crate::touch::TouchPhase::Began);
+        self.touch.apply(points);
+        if began {
+            self.note_active(GlyphSet::Touch, TOUCH_ID, DeviceKind::Touch, "touch", true);
         }
     }
 
@@ -259,6 +296,7 @@ impl InputSystem {
         for pad in &mut self.gamepads {
             pad.begin_frame();
         }
+        self.touch.begin_frame();
     }
 
     /// Write keyboard state from Linux evdev codes. Unknown codes are ignored.
@@ -861,6 +899,7 @@ fn button_from_family(glyphs: GlyphSet, number: usize) -> Option<InputCode> {
         GlyphSet::PlayStation => playstation_button(number),
         GlyphSet::SteamDeck => deck_button(number),
         GlyphSet::GenericGamepad | GlyphSet::KeyboardMouse => spec_button(number),
+        GlyphSet::Touch => None,
     }
 }
 
