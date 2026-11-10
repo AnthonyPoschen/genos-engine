@@ -277,7 +277,8 @@ pub fn portal_dir(link: PortalLink, direction: Vec3) -> Vec3 {
 }
 
 fn wave_axis(wave: GerstnerWave) -> [f32; 2] {
-    let len = (wave.direction[0] * wave.direction[0] + wave.direction[1] * wave.direction[1]).sqrt();
+    let len =
+        (wave.direction[0] * wave.direction[0] + wave.direction[1] * wave.direction[1]).sqrt();
     if len <= 1.0e-8 {
         return [1.0, 0.0];
     }
@@ -447,7 +448,11 @@ mod tests {
         let behind = [-0.5_f32, -1.0, -2.0];
         for world_z in front {
             let point = Vec3::new(0.0, 0.0, -world_z - 4.0);
-            assert!(plane_in_front(Vec3::new(0.0, 0.0, world_z), Vec3::ZERO, Vec3::Z));
+            assert!(plane_in_front(
+                Vec3::new(0.0, 0.0, world_z),
+                Vec3::ZERO,
+                Vec3::Z
+            ));
             assert!(
                 oblique_draws(projection, plane, point),
                 "mirror side clipped world z={world_z} view={point:?}"
@@ -455,7 +460,11 @@ mod tests {
         }
         for world_z in behind {
             let point = Vec3::new(0.0, 0.0, -world_z - 4.0);
-            assert!(!plane_in_front(Vec3::new(0.0, 0.0, world_z), Vec3::ZERO, Vec3::Z));
+            assert!(!plane_in_front(
+                Vec3::new(0.0, 0.0, world_z),
+                Vec3::ZERO,
+                Vec3::Z
+            ));
             assert!(
                 !oblique_draws(projection, plane, point),
                 "back side drawn world z={world_z} view={point:?}"

@@ -172,6 +172,8 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 
 **Pick: the dual filter.** It is thresholdless, the flat-field sum is 1, and the widest level is a handful of pixels. "Physically based" in this design means those three facts plus the order: bloom runs on the scene-referred image, before exposure, so a linear kernel commutes with the exposure scale. It does not mean Spencer's eye PSF, and it does not mean a measured lens.
 
+[ADR 0028](../adr/0028-bloom.md) (proposed) keeps this kernel and replaces the additive combine with an energy-conserving scatter mix. The shipped pass is unchanged until that ADR is accepted. The headless chain is `genos-math::bloom`. `bloom_pyramid` stays the reference the gate grades.
+
 **Departures from Jimenez 2014**
 
 - The pyramid runs when the highlight check says the scene-referred max moved by more than half a stop, or the scene key changed. The course shows a pyramid every frame. A reused pyramid is the frame-reuse rule, not a different kernel.

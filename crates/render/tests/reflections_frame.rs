@@ -14,14 +14,18 @@ use genos_math::optics::ReflectionPreset;
 use genos_render::{grade_camera, grade_world, Renderer, GRADE_HEIGHT, GRADE_WIDTH};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(GRADE_WIDTH, GRADE_HEIGHT).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, window, renderer)
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn sample(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 3] {
@@ -35,7 +39,9 @@ fn sample(pixels: &[u8], width: u32, x: u32, y: u32) -> [f32; 3] {
 
 #[test]
 fn the_presented_frame_shows_the_mirror_the_portal_and_the_ray_cap() {
-    let (_guard, mut window, mut renderer) = open();
+    let (_guard, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = grade_camera();
     let scene = grade_world(ReflectionPreset::Medium);
     let _ = window.pump();

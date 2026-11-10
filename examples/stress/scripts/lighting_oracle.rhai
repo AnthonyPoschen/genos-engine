@@ -14,6 +14,11 @@ let PROFILE = "quick";
 let HIST = 30;
 let REF_EVERY = if PROFILE == "full" { 1 } else { 12 };
 let DAY = 120.0; // stress default --day-seconds 120
+// oracle_run.sh fills these from ORACLE_REF_EVERY_FRAME and ORACLE_ONLY:
+// scenarios traced on every frame (for grid_excess), and the only scenarios run
+// (empty runs all).
+let EVERY_FRAME = [];
+let ONLY = [];
 
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("boxes", "still");
@@ -25,7 +30,7 @@ fn measure(dir, f) {
     time(#{ pause: true });
     capture(#{ path: `oracle/${dir}/f${pad(f)}-live.png` });
     capture(#{ path: `oracle/${dir}/f${pad(f)}-depth.png`, mode: "depth" });
-    let r = reference(#{ prefix: `oracle/${dir}/f${pad(f)}`, spp: 16, max_spp: 256,
+    let r = reference(#{ measure: true, prefix: `oracle/${dir}/f${pad(f)}`, spp: 16, max_spp: 256,
                          noise: 0.05, seconds: 30, bounces: 3 });
     log(`ORACLE ${dir} f=${f} spp=${r.spp} noise=${r.noise} s=${r.trace_seconds}`);
     time(#{ pause: false });
@@ -176,8 +181,13 @@ fn turn(pass, hist, every) {
 }
 
 let speeds = if PROFILE == "full" { [100.0, 10.0, 1.0] } else { [100.0, 10.0] };
-for speed in speeds { sun(speed, PASS, HIST, REF_EVERY, DAY); }
-spin(PASS, HIST, REF_EVERY);
-light_switch(PASS);
-turn(PASS, HIST, REF_EVERY);
+for speed in speeds {
+    let name = `sun-x${speed.to_int()}`;
+    if ONLY.len() == 0 || name in ONLY {
+        sun(speed, PASS, HIST, if name in EVERY_FRAME { 1 } else { REF_EVERY }, DAY);
+    }
+}
+if ONLY.len() == 0 || "spin" in ONLY { spin(PASS, HIST, if "spin" in EVERY_FRAME { 1 } else { REF_EVERY }); }
+if ONLY.len() == 0 || "switch" in ONLY { light_switch(PASS); }
+if ONLY.len() == 0 || "turn" in ONLY { turn(PASS, HIST, if "turn" in EVERY_FRAME { 1 } else { REF_EVERY }); }
 log(`lighting_oracle ${PASS} ${PROFILE} done`);

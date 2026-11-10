@@ -345,6 +345,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::switch(
+            "lighting_direct_specular",
+            "Direct specular",
+            lighting.direct.specular,
+        ),
         Knob::choice(
             "lighting_lamp_pick",
             "Lamp pick",
@@ -611,6 +616,7 @@ pub fn apply_lighting_knob(
         "lighting_direct_lights" => ("direct_lights", whole.to_string()),
         "lighting_direct_refresh" => ("direct_refresh", whole.max(1).to_string()),
         "lighting_direct_scale" => ("direct_scale", whole.to_string()),
+        "lighting_direct_specular" => ("direct_specular", on_off(v)),
         "lighting_lamp_pick" => (
             "lamp_pick",
             ["off", "hits", "pixels", "both", "reuse"]
@@ -846,6 +852,7 @@ mod tests {
         "lighting_direct_lights",
         "lighting_direct_refresh",
         "lighting_direct_scale",
+        "lighting_direct_specular",
         "lighting_shadows",
         "lighting_shadow_filter",
         "lighting_gi",

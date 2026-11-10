@@ -286,7 +286,7 @@ impl Gpu {
         self.reflection.query_slot = u32::try_from(self.flight).unwrap_or(0) * 2;
         self.stamp_reflection(0, 1);
         self.copy_scene_depth();
-        self.upload_water_buffer();
+        self.upload_water_buffer()?;
         let mut drawn = 0u32;
         let count = self.reflection.plane_count;
         for index in 0..count {
@@ -310,7 +310,7 @@ impl Gpu {
             self.draw_water_surfaces(matrix);
         }
         if self.reflection.swatch {
-            self.draw_ggx_swatch();
+            self.draw_ggx_swatch()?;
         }
         self.dispatch_reflection_rays()?;
         self.stamp_reflection(1, 0x2000);
@@ -334,7 +334,7 @@ impl Gpu {
         let normal = Vec3::new(plane.normal[0], plane.normal[1], plane.normal[2]);
         let portal = plane.kind == ReflectorKind::Portal;
         if portal {
-            self.upload_portal_link(&plane);
+            self.upload_portal_link(&plane)?;
         }
         let view = if portal {
             [0.0; 16]
@@ -489,8 +489,8 @@ impl Gpu {
         }
     }
 
-    fn draw_ggx_swatch(&self) {
-        self.upload_ggx_quad();
+    fn draw_ggx_swatch(&mut self) -> Result<(), String> {
+        self.upload_ggx_quad()?;
         self.begin_target_pass(self.reflection.composite_pass, self.framebuffer, false);
         let identity = crate::world::identity_pose();
         unsafe {
@@ -511,6 +511,7 @@ impl Gpu {
             (self.fns.cmd_draw)(self.cmd, 6, 1, 0, 0);
             (self.fns.cmd_end_rp)(self.cmd);
         }
+        Ok(())
     }
 
     fn dispatch_reflection_rays(&mut self) -> Result<(), String> {
@@ -554,7 +555,7 @@ impl Gpu {
         Ok(())
     }
 
-    fn upload_water_buffer(&self) {
+    fn upload_water_buffer(&mut self) -> Result<(), String> {
         let mut bytes = vec![0u8; usize::try_from(WATER_BYTES).unwrap_or(0)];
         let mut at = 0usize;
         let push = |bytes: &mut [u8], at: &mut usize, value: f32| {
@@ -668,11 +669,13 @@ impl Gpu {
                 ],
             );
         }
-        self.update_buffer(&self.reflection.water_buf, &bytes);
+        let dst = self.reflection.water_buf.buffer;
+        self.update_buffer(dst, &bytes)?;
         self.buffer_barrier(self.reflection.water_buf.buffer, 0x1000, 0x80, 0x1000, 0x20);
+        Ok(())
     }
 
-    fn upload_portal_link(&self, plane: &Reflector) {
+    fn upload_portal_link(&mut self, plane: &Reflector) -> Result<(), String> {
         let mut bytes = vec![0u8; usize::try_from(LINK_BYTES).unwrap_or(0)];
         let mut at = 0usize;
         let push4 = |bytes: &mut [u8], at: &mut usize, value: [f32; 4]| {
@@ -759,16 +762,18 @@ impl Gpu {
                 0.0,
             ],
         );
-        self.update_buffer(&self.reflection.link_buf, &bytes);
+        let dst = self.reflection.link_buf.buffer;
+        self.update_buffer(dst, &bytes)?;
         self.buffer_barrier(self.reflection.link_buf.buffer, 0x1000, 0x8, 0x1000, 0x20);
         self.write_storage(
             self.reflection.portal_set,
             1,
             &self.instance_bufs[self.flight],
         );
+        Ok(())
     }
 
-    fn upload_ggx_quad(&self) {
+    fn upload_ggx_quad(&mut self) -> Result<(), String> {
         let width = self.extent_w.max(1) as f32;
         let height = self.extent_h.max(1) as f32;
         let x1 = -1.0 + 16.0 / width;
@@ -791,27 +796,15 @@ impl Gpu {
         let bytes = unsafe {
             std::slice::from_raw_parts(verts.as_ptr() as *const u8, std::mem::size_of_val(&verts))
         };
-        self.update_buffer(&self.reflection.ggx_buf, bytes);
+        let dst = self.reflection.ggx_buf.buffer;
+        self.update_buffer(dst, bytes)?;
         self.buffer_barrier(self.reflection.ggx_buf.buffer, 0x1000, 0x4, 0x1000, 0x4);
+        Ok(())
     }
 
-    fn update_buffer(&self, buffer: &Buffer, bytes: &[u8]) {
-        if buffer.buffer.is_null() || bytes.is_empty() {
-            return;
-        }
-        let size = u64::try_from(bytes.len()).unwrap_or(0) & !3;
-        if size == 0 {
-            return;
-        }
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                buffer.buffer,
-                0,
-                size,
-                bytes.as_ptr() as *const c_void,
-            );
-        }
+    fn update_buffer(&mut self, buffer: Handle, bytes: &[u8]) -> Result<(), String> {
+        let cmd = self.cmd;
+        self.write_device(cmd, buffer, 0, bytes)
     }
 
     fn copy_scene_depth(&mut self) {

@@ -10,19 +10,21 @@ use genos_render::{Renderer, World};
 use genos_scene::{Camera, Floor, Scene, Vec3};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 #[test]
 fn a_profiled_draw_reports_device_time_for_the_draw() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = World::from_scene(Scene {
         floor: Floor {
             position: Vec3::new(0.0, 0.0, 0.0),

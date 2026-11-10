@@ -12,6 +12,7 @@ genos-load = { path = "../load" }
 genos-mcp = { path = "../mcp" }
 genos-render = { path = "../render" }
 genos-gpuref = { path = "../gpuref" }
+genos-fog-ref = { path = "../fog-ref" }
 genos-scene = { path = "../scene" }
 rhai = "=1.26.0"
 

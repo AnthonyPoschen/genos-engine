@@ -12,12 +12,12 @@ use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Floor, Scene, Sky, Vec3, Wall};
 use genos_window::Window;
 
-fn open() -> (Window, Renderer) {
+fn open() -> genos_window::Lifecycle<Renderer> {
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (window, renderer)
+    genos_window::Lifecycle::new(window, renderer, permit)
 }
 
 fn open_floor(sky: Option<Sky>, walls: Vec<Wall>) -> World {
@@ -77,13 +77,15 @@ const SKY: [f32; 3] = [0.2, 0.25, 0.3];
 
 #[test]
 fn an_open_floor_under_the_sky_sends_back_its_albedo_of_the_sky() {
-    let (mut window, mut renderer) = open();
+    let mut owner = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let (width, height) = (renderer.width(), renderer.height());
     let mut camera = Camera::new(0.0, 0.0, 0.0);
     camera.set_pose(Vec3::new(0.0, 3.0, 4.0), 0.0, -0.6);
     let lit = draw(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &open_floor(Some(Sky { color: SKY }), Vec::new()),
         &camera,
     );
@@ -91,8 +93,8 @@ fn an_open_floor_under_the_sky_sends_back_its_albedo_of_the_sky() {
     // light it gathered, and the caller drops it, as the app does.
     renderer.reset_lighting_cache();
     let dark = draw(
-        &mut window,
-        &mut renderer,
+        window,
+        renderer,
         &open_floor(None, Vec::new()),
         &camera,
     );
@@ -125,7 +127,9 @@ fn an_open_floor_under_the_sky_sends_back_its_albedo_of_the_sky() {
 
 #[test]
 fn a_slab_overhead_shades_the_floor_from_the_sky() {
-    let (mut window, mut renderer) = open();
+    let mut owner = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let (width, height) = (renderer.width(), renderer.height());
     // A raised 6 m square slab 0.5 m thick, 1 m above the floor: under its middle the
     // floor sees sky only in a band about 20 degrees above the horizon.
@@ -143,7 +147,7 @@ fn a_slab_overhead_shades_the_floor_from_the_sky() {
     let mut camera = Camera::new(0.0, 0.0, 0.0);
     camera.set_pose(Vec3::new(0.0, 0.6, 6.0), 0.0, -0.1);
     let world = open_floor(Some(Sky { color: SKY }), vec![slab]);
-    let pixels = draw(&mut window, &mut renderer, &world, &camera);
+    let pixels = draw(window, renderer, &world, &camera);
     let under = sample(&pixels, width, height, &camera, [0.0, 0.0, 0.0]);
     let open = sample(&pixels, width, height, &camera, [0.0, 0.0, 4.5]);
     assert!(

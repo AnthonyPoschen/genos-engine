@@ -1,5 +1,17 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{step, Body, Spring, World, GRAVITY};
@@ -198,7 +210,15 @@ fn a_ball_lands_on_its_own_pillar_among_hundreds() {
         step(&mut world, 1.0 / 120.0);
     }
     let body = world.bodies[ball];
-    assert!((body.position.y - 1.25).abs() < 0.02, "the ball rests at {}", body.position.y);
-    assert!(body.velocity.length() < 0.05, "the ball still moves at {:?}", body.velocity);
+    assert!(
+        (body.position.y - 1.25).abs() < 0.02,
+        "the ball rests at {}",
+        body.position.y
+    );
+    assert!(
+        body.velocity.length() < 0.05,
+        "the ball still moves at {:?}",
+        body.velocity
+    );
     assert_eq!(world.bodies.len(), 401);
 }

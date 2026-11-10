@@ -94,40 +94,40 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA` | `crates/scene/src/lighting.rs:1247` | `--surface-cache-firefly-sigma` |
 | `GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET` | `crates/scene/src/lighting.rs:1248` | `--surface-cache-ray-budget` |
 | `GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS` | `crates/scene/src/lighting.rs:1249` | `--surface-cache-dormant-rays` |
+| `GENOS_LIGHTING_DIRECT_SPECULAR` | `crates/scene/src/lighting.rs` | `--lighting-direct-specular` |
 
 | Variable | Where | CLI today |
 |---|---|---|
 | `GENOS_GPU_DISPATCH` | `crates/render/src/gpu.rs:2315` | none |
 | `GENOS_GPU_TIMES` | `crates/render/src/gpu.rs:1448` | `--gpu-times` |
 | `GENOS_GI_METRICS` | `crates/render/src/gpu.rs:1550` | `--gi-metrics` |
-| `GENOS_LIGHTING_ASYNC` | `crates/render/src/lighting_gpu.rs:373` | none |
-| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/render/src/lighting_gpu.rs:2947` | none |
+| `GENOS_LIGHTING_ASYNC` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-async` |
+| `GENOS_LIGHTING_ATROUS_DIRTY` | `crates/scene/src/lighting.rs:1529` | `--lighting-denoise-dirty` |
 | `GENOS_LIGHTING_BORROW` | `crates/render/src/lighting_gpu.rs:2246` | none |
-| `GENOS_LIGHTING_CACHE_HZ` | `crates/render/src/lighting_gpu.rs:398` | none |
-| `GENOS_LIGHTING_CACHE_PICKS` | `crates/render/src/lighting_gpu.rs:2237` | none |
+| `GENOS_LIGHTING_CACHE_HZ` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-hz` |
+| `GENOS_LIGHTING_CACHE_PICKS` | `crates/scene/src/lighting.rs:1529` | `--lighting-cache-picks` |
 | `GENOS_LIGHTING_CATCH_UP` | `crates/render/src/lighting_gpu.rs:3250` | none |
 | `GENOS_LIGHTING_COMPOSE_ALL` | `crates/render/src/lighting_gpu.rs:2286` | `--full-effort` |
 | `GENOS_LIGHTING_DEBUG` | `crates/render/src/lighting_gpu.rs:3254` | `--lighting-debug` |
 | `GENOS_LIGHTING_DUMP` | `crates/render/src/lighting_gpu.rs:2669` | none |
 | `GENOS_LIGHTING_DUMP_DIR` | `crates/render/src/lighting_gpu.rs:2723` | none |
-| `GENOS_LIGHTING_FILL` | `crates/render/src/lighting_gpu.rs:2238` | none |
+| `GENOS_LIGHTING_FILL` | `crates/scene/src/lighting.rs:1529` | `--lighting-fill` |
 | `GENOS_LIGHTING_FULL_EFFORT` | `crates/render/src/lighting_gpu.rs:3243` | `--lighting-full-effort` |
 | `GENOS_LIGHTING_LAMP_PICK_DIAG` | `crates/render/src/lighting_dispatch.rs:91`, `crates/render/src/gpu.rs:2205` | none |
 | `GENOS_LIGHTING_MOVED_DROP` | `crates/render/src/lighting_gpu.rs:2244` | none |
-| `GENOS_LIGHTING_SC_FLAGS` | `crates/render/src/lighting_gpu.rs:2963` | none |
-| `GENOS_LIGHTING_SC_SETTLE` | `crates/render/src/lighting_gpu.rs:1101` | none |
+| `GENOS_LIGHTING_SC_FLAGS` | `crates/scene/src/lighting.rs:1529` | `--lighting-sc-flags` |
+| `GENOS_LIGHTING_SC_SETTLE` | `crates/scene/src/lighting.rs:1529` | `--lighting-sc-settle` |
 | `GENOS_LIGHTING_SC_TRACE` | `crates/render/src/lighting_gpu.rs:1725`, `crates/render/src/lighting_gpu.rs:2934` | none |
 | `GENOS_LIGHTING_SUN` | `crates/render/src/lighting_gpu.rs:3240` | `--lighting-sun` |
 | `GENOS_LIGHTING_SUN_BANDS` | `crates/render/src/lighting_gpu.rs:3246` | `--lighting-sun-bands` |
-| `GENOS_LIGHTING_TILE` | `crates/render/src/lighting_gpu.rs:35` | none |
-| `GENOS_LIGHTING_TOGGLES` | `crates/render/src/lighting_gpu.rs:3176` | none |
-| `GENOS_LIGHTING_TOGGLES_FILE` | `crates/render/src/lighting_gpu.rs:3177` | none |
+| `GENOS_LIGHTING_TILE` | `crates/scene/src/lighting.rs:1529` | `--lighting-probe-tile` |
+| `GENOS_LIGHTING_TOGGLES` | `crates/scene/src/lighting.rs:1529` | `--lighting-toggles` |
 | `GENOS_LIGHTING_UNFILLED` | `crates/render/src/unfilled.rs:193` | `--unfilled` |
 | `GENOS_LIGHTING_UNFILLED_DUMP` | `crates/render/src/unfilled.rs:195` | `--unfilled-dump` |
 | `GENOS_LIGHTING_UNFILLED_TINT` | `crates/render/src/unfilled.rs:194` | `--unfilled-tint` |
 | `GENOS_LIGHTING_URGENT` | `crates/render/src/lighting_gpu.rs:2245` | none |
-| `GENOS_LIGHTING_WORLD_CAP` | `crates/render/src/lighting_gpu.rs:1097`, `crates/render/src/lighting_gpu.rs:2010` | none |
-| `GENOS_LIGHTING_YOUNG_ONLY` | `crates/render/src/lighting_gpu.rs:392` | none |
+| `GENOS_LIGHTING_WORLD_CAP` | `crates/scene/src/lighting.rs:1529` | `--lighting-world-cap` |
+| `GENOS_LIGHTING_YOUNG_ONLY` | `crates/scene/src/lighting.rs:1529` | `--lighting-young-only` |
 | `GENOS_SCENE_DELTA` | `crates/render/src/lib.rs:56` | none |
 | `GENOS_UNFILLED_MAX_AGE_SECS` | `crates/render/src/unfilled.rs:198` | `--unfilled-max-age-secs` |
 | `GENOS_UNFILLED_MAX_BYTES` | `crates/render/src/unfilled.rs:197` | `--unfilled-max-bytes` |
@@ -247,6 +247,25 @@ float shade(float x) {
 
 Move each literal onto a `const` or `#define` and lower that file's count. A new shader with a bare fraction fails immediately. Start outside `lighting_cache.glsl`.
 
+## Baseline growth (proposal)
+
+Status: a proposal for Anthony to confirm through Skills before anyone treats it as a rule. It is not a standing permission to raise a ceiling. The repository labels today are the GitHub defaults. There is no owner-approval label. This change does not create one, and it does not edit `lint/lossy-cast-baseline.txt` or `lint/shader-magic-baseline.txt`.
+
+`scripts/lint-baseline-growth.py` compares those two files, and any other `lint/*baseline*.txt`, at the pull request head with the same paths at the merge-base of the event's `pull_request.base.sha` and `pull_request.head.sha`. The base SHA is the pull request's base, including a base that is not `master`. An added entry is a path whose last-wins count went up. That includes a new path that replaces a renamed one, and a git rename of the baseline file itself (`git diff -M20%`). A rewrite below that similarity is a new file, so every entry on it is an addition. A lower count, a deleted path, a reorder, or a duplicate line that does not change the last-wins count passes with no label. A new path whose count is `0` does not raise the ceiling the linters enforce (`missing` is already `0`), so it is not an addition.
+
+When an entry is added, the proposed gate requires both of these:
+
+1. The pull request carries the label `baseline-growth-approved`. That is the default of `--label`. `GENOS_BASELINE_GROWTH_LABEL` is the environment mirror and applies only when `--label` is omitted. The argument wins when both are set. The label is not on the repository. Confirm the exact name before depending on it.
+2. The line immediately above that entry is `# owner: <who> — <why>`. `<who>` and `<why>` are non-empty. The dash is U+2014 EM DASH. One comment covers the one entry on the next line. A blank line, a second entry, or a hyphen does not count. The check requires the why to be non-empty. It does not grade the sentence.
+
+The workflow `.github/workflows/baseline-growth.yml` reads labels with `GET /repos/{owner}/{repo}/pulls/{n}` using `contents: read` and `pull-requests: read`. For `pull_request_target`, `github.sha` is the default-branch commit, and that is the checkout. A stacked base can predate the gate script, so the job does not check out `pull_request.base.sha`. It fetches that SHA, the base branch, and `refs/pull/<n>/head` from `origin` and reads baseline text with `git show`. The fetched head must match the event head. The worktree stays on `github.sha`. It does not check out the head, it does not fetch a URL from the event, and it does not run the pull request's code. A trusted checkout with no gate script fails closed; the job does not skip the gate. `opened`, `synchronize`, `reopened`, `labeled`, `unlabeled`, and `edited` run the job, so a label change or a body edit retriggers it. Re-running the job from the Actions tab is the manual trigger. The script does not read the pull request body as the why. An API error, a missing token, a bad SHA, a bad ref, or unrelated histories fail the job closed.
+
+`scripts/lint-clippy.py` and `scripts/lint-shader-constants.py` skip blank lines and lines that start with `#`, then take the last word as the count. The owner line is a `#` comment, so those ceilings stay the same. A note on the entry's own line breaks that parse. This gate rejects that shape.
+
+`./scripts/lint.sh` runs `--self-test` only. The label check runs in the workflow, where the pull request metadata exists. The workflow file is active once it is on the default branch. This draft does not change branch protection, so GitHub will not require the check until that is a separate decision.
+
+`scripts/install-git-hooks.sh` installs a pre-push hook that runs `scripts/lint.sh`. Run it again and it stays as it was. An existing pre-push keeps its other commands. The installer does not replace a symlink or a non-text hook, and it checks that before it creates a dispatcher symlink. It does not wrap `scripts/hooks/pre-push`, because that file is the hook the wrapper calls. A local hook is not enforcement: `git push --no-verify` skips it, and a new clone does not run it until the installer has. CI remains the authority.
+
 ## cargo-deny
 
 `deny.toml`, added 2026-10-14. `cargo deny check` covers advisories, bans, licenses, and sources.
@@ -270,12 +289,12 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 
 | Kind | Count | Meaning |
 |---|---|---|
-| `mirror` | 30 | A CLI argument exists and wins when both are set. `detail` is the flag. |
-| `todo` | 94 | Read today, and still has no argument. |
+| `mirror` | 93 | A CLI argument exists and wins when both are set. `detail` is the flag. |
+| `todo` | 82 | Read today, and still has no argument. |
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
-| `build` | 2 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`. |
+| `build` | 3 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, and `GENOS_HDR_COMPOSE` (the HDR compose shader compile). |
 
 Do not add a new `kind = "todo"`. Add a `mirror` whose `detail` is the flag, or do not read the variable.
 
@@ -287,7 +306,7 @@ let _ = std::env::var("GENOS_NOT_A_MIRROR");
 
 ### TODO: env switches without an argument
 
-The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`, `GENOS_LIGHTING_YOUNG_ONLY`, `GENOS_LIGHTING_CACHE_PICKS`, `GENOS_LIGHTING_CACHE_HZ`, `GENOS_LIGHTING_SC_SETTLE`, `GENOS_LIGHTING_WORLD_CAP`. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
+The 82 `kind = "todo"` rows are the list. The cluster called out in `docs/lighting/RENAMES.md` item 14 is still env-only: `GENOS_LIGHTING_URGENT`, `GENOS_LIGHTING_BORROW`, `GENOS_LIGHTING_MOVED_DROP`. Young-only, cache picks, cache Hz, surface cache settle and world cap are now `LightingSettings.experiments` keys. Promote the live ones onto the settings value, the debug menu, and MCP, or delete them.
 
 ## Semgrep
 
@@ -301,6 +320,8 @@ The 94 `kind = "todo"` rows are the list. The cluster called out in `docs/lighti
 | `genos-no-gi-v1-term` | 2026-10-14 | GI v1 names stay in the glossary Historical section. Do not put radiance cascade, radiance field, lightmap, light probe, product "GI v2", `archive-v1.md`, ADR 0008, or `gi_v2_floor` back into Rust or shader code. | `lint/fail/gi_v1_term.rs` | 0. Extended 2026-10-14 for leftover product labels and deleted paths. |
 | `genos-no-hardcoded-display` | 2026-10-14 | HDMI-A-1 is the proof display and DP-1 is the main display. Only `--proof` selects a proof window, and it must not hard-code either connector. | `lint/fail/hardcoded_display.rs` | 0. |
 | `genos-no-hyprctl` | 2026-10-14 | A proof run does not resize or focus unrelated windows. Shipping code does not spawn `hyprctl`. | `lint/fail/hyprctl.rs` | 6 call sites, all in the pointer-lock test in `crates/window/src/lib.rs`. |
+| `genos-no-process-exit` | 2026-10-26 | The process leaves through `genos_window::exit`, after the app lifecycle has destroyed the device. That function flushes and calls `_exit`. `std::process::exit` skips the lifecycle and runs the driver atexit handler. | `lint/fail/process_exit.rs` | 0. The one exit is `crates/window/src/lifecycle.rs`. |
+| `genos-no-device-teardown` | 2026-10-26 | Fence drain and device destruction stay on the app lifecycle. Do not call `vkDeviceWaitIdle` or abandon the device from a binary. A `drop` of the renderer is refused by `ShutdownPermit` and by `Gpu`'s `Drop`, which panics instead of waiting idle. | `lint/fail/device_teardown.rs` | The Vulkan load and the idle path stay in `crates/render/src/gpu.rs` and `crates/render/src/lighting_gpu.rs`. `crates/gpuref` is the offline reference. |
 | `genos-stream-no-wait` | 2026-10-26 | Streaming functions poll the transfer fence, including helpers such as `transfer_signaled`. They do not call `wait_for_fences`, `queue_wait_idle`, `vkWaitForFences`, `vkQueueWaitIdle`, `wait_fences`, `idle_device`, or `device_wait`. | `lint/fail/stream_wait.rs` | 0. |
 
 ### TODO: semgrep excludes

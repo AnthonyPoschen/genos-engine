@@ -13,8 +13,11 @@ genos-bake = { path = "../bake" }
 genos-math = { path = "../math" }
 genos-mesh = { path = "../mesh" }
 genos-scene = { path = "../scene" }
+genos-window = { path = "../window" }
 
 [dev-dependencies]
+genos-cook = { path = "../cook" }
+genos-fog-ref = { path = "../fog-ref" }
 genos-ui = { path = "../ui" }
 genos-window = { path = "../window" }
 

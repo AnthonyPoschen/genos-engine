@@ -36,6 +36,10 @@ _Avoid_: Backend
 The operating-system object that shows a surface and can take focus.
 _Avoid_: Viewport, canvas
 
+**App lifecycle**:
+The owner of shutdown. The event loop stops producers, drains the GPU by polling fences, destroys the device, unmaps the window, and then exits. Opening the device returns a permit that this owner consumes. Dropping the device without that owner panics and does not wait idle.
+_Avoid_: quit path, teardown helper
+
 **Surface**:
 The renderable area a window presents.
 _Avoid_: Swapchain, framebuffer, screen
@@ -219,6 +223,14 @@ _Avoid_: Stream, backend
 **Texture map**:
 One image with frame rectangles and named clips for 2D animation.
 _Avoid_: Sprite sheet, atlas
+
+**Object layer**:
+The collision group on a body. Layer 0 is static, layer 1 is dynamic, and layer 2 is debris. The world pair table decides which groups produce a contact. Debris does not meet debris.
+_Avoid_: Collision channel, mask bit
+
+**Island**:
+The set of dynamic bodies joined by a contact. They sleep together and they wake together.
+_Avoid_: Sleep group, simulation island
 
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.

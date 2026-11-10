@@ -100,6 +100,11 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
         reflections_check,
         &out.join("reflections_check.comp.spv"),
     );
+    // Not embedded: GPU parity fixture for pbr_brdf.glsl (tests/pbr_parity.rs).
+    let pbr_check = "shaders/pbr_check.comp";
+    println!("cargo:rerun-if-changed={pbr_check}");
+    println!("cargo:rerun-if-changed=shaders/pbr_brdf.glsl");
+    compile(pbr_check, &out.join("pbr_check.comp.spv"));
     media
 }
 
@@ -268,6 +273,7 @@ fn rerun_shader_pieces() {
         "overlay.frag",
         "depth_mask.frag",
         "material_atlas.glsl",
+        "gbuffer_layout.glsl",
         "wire.vert",
         "wire.frag",
         "scene_rays.glsl",
@@ -281,6 +287,8 @@ fn rerun_shader_pieces() {
         "reflections_composite.frag",
         "reflections_ggx.frag",
         "reflections_check.comp",
+        "pbr_brdf.glsl",
+        "pbr_check.comp",
         "scene_data.glsl",
         "dither.glsl",
         "hdr_shoulder.glsl",
@@ -301,6 +309,16 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
         &out.join("lighting_compose_hdr.comp.spv"),
         "GENOS_HDR_COMPOSE",
     );
+    // #142: the compose writes, run just before the read-only compose.
+    let maint = compile_glslc_define(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_maint.comp.spv"),
+        "GENOS_COMPOSE_MAINT",
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        maint.display()
+    ));
     let sun_hdr = compile_define(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),

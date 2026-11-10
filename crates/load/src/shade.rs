@@ -1,9 +1,9 @@
 //! One glTF metallic-roughness shade.
 //!
 //! The bake, the G-buffer's atlas and mean, and the path tracer all call this.
-//! Diffuse albedo is base colour times (1 − metallic). The real-time picture
-//! stays Lambert: callers multiply by their existing BRDF weight. The specular
-//! lobe is not evaluated here.
+//! Diffuse albedo is base colour times (1 − metallic). This function does not
+//! evaluate the specular lobe. Pixel direct does, in `pbr_brdf.glsl`, when
+//! `direct_specular` is on (it defaults off). Callers of `outgoing` still pass the Lambert weight.
 //!
 //! Departure from glTF 2.0 Appendix B and from Filament: no specular term.
 //! Departure from the glTF sampler default: a missing mag filter stays nearest,
@@ -63,6 +63,21 @@ impl ShadeSample {
             self.base[1] * keep,
             self.base[2] * keep,
         ]
+    }
+
+    /// This sample as a [`genos_math::brdf::Material`] for the CPU reference.
+    ///
+    /// Emission already carries `emissiveStrength`, so the reference gets a
+    /// strength of 1. Alpha, occlusion and the normal stay with the caller.
+    #[must_use]
+    pub fn brdf_material(self) -> genos_math::brdf::Material {
+        genos_math::brdf::Material {
+            base_color: self.base.map(f64::from),
+            metallic: f64::from(self.metallic),
+            roughness: f64::from(self.roughness),
+            emissive: self.emissive.map(f64::from),
+            emissive_strength: 1.0,
+        }
     }
 
     /// Outgoing radiance for the Lambert picture.

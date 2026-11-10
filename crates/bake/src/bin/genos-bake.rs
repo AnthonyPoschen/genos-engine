@@ -1,5 +1,11 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Build the GI import data (mesh SDFs and cards) for glTF files ahead of time.
 //!
@@ -11,12 +17,13 @@
 
 use std::time::Instant;
 
-use genos_bake::{cache_path, read, rebake, BakeMesh, BakeMode, BakeSettings};
+use genos_bake::{key_path, read, prepare_meshes, rebake_phased, BakeMode, BakePhases, BakeSettings};
+use genos_load::LoadPhases;
 
 fn main() {
     if let Err(err) = run() {
         eprintln!("genos-bake: {err}");
-        std::process::exit(1);
+        genos_window::exit(1);
     }
 }
 
@@ -46,17 +53,24 @@ fn run() -> Result<(), String> {
     if files.is_empty() {
         return Err("no input files (try --help)".into());
     }
+    let total = Instant::now();
+    let mut load = LoadPhases::default();
+    let mut bake = BakePhases::default();
+    let mut prepare = std::time::Duration::ZERO;
     for file in files {
-        let scene = genos_load::load_gltf_file(&file).map_err(|e| format!("{file}: {e}"))?;
-        for index in 0..scene.meshes.len() {
-            let mesh = BakeMesh::from_gltf(&scene, index);
-            let path = cache_path(&mesh, &settings);
+        let scene =
+            genos_load::load_gltf_file_phased(&file, &mut load).map_err(|e| format!("{file}: {e}"))?;
+        let start = Instant::now();
+        let meshes = prepare_meshes(&scene, &settings);
+        prepare += start.elapsed();
+        for (mesh, key) in meshes {
+            let path = key_path(&settings, key);
             if !force && read(&path).is_some() {
                 println!("{file} {}: up to date ({})", mesh.name, path.display());
                 continue;
             }
             let start = Instant::now();
-            let (baked, path) = rebake(&mesh, &settings).map_err(|e| e.to_string())?;
+            let (baked, path) = rebake_phased(&mesh, &settings, key, &mut bake).map_err(|e| e.to_string())?;
             let sdf = &baked.sdf;
             println!(
                 "{file} {}: {} triangles, voxel {:.3} m, {} bricks{} ({:.1} MB), {} cards ({} texels), {:.2} s -> {}",
@@ -73,6 +87,20 @@ fn run() -> Result<(), String> {
             );
         }
     }
+    let s = |d: std::time::Duration| d.as_secs_f64();
+    println!(
+        "phases: import {:.2} s, decode {:.2} s, meshes {:.2} s, mips {:.2} s, prepare {:.2} s, bvh {:.2} s, sdf {:.2} s, cards {:.2} s, write {:.2} s, total {:.2} s",
+        s(load.import),
+        s(load.decode),
+        s(load.meshes),
+        s(load.mips),
+        s(prepare),
+        s(bake.bvh),
+        s(bake.sdf),
+        s(bake.cards),
+        s(bake.write),
+        s(total.elapsed())
+    );
     Ok(())
 }
 

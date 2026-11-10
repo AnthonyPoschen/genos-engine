@@ -1,0 +1,18 @@
+[package]
+name = "genos-physics-debug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-physics"
+path = "src/main.rs"
+
+[dependencies]
+genos-math = { path = "../../crates/math" }
+genos-mcp = { path = "../../crates/mcp" }
+genos-physics = { path = "../../crates/physics" }
+genos-scene = { path = "../../crates/scene" }

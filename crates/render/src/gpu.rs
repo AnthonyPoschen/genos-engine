@@ -167,6 +167,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_scene::{view_proj, Camera, LightingPreset};
@@ -180,6 +181,10 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 mod fog;
 mod media_check;
+mod stage;
+mod traffic;
+
+pub use traffic::VkTraffic;
 
 #[path = "debug_view.rs"]
 mod debug_view;
@@ -276,6 +281,8 @@ impl MaterialStats {
 
 pub struct Renderer {
     gpu: Gpu,
+    /// The world identity drawn last (0 before the first draw).
+    world_identity: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -290,6 +297,11 @@ pub struct Renderer {
     keep_pictures: bool,
     /// Debug view and lighting overrides ([`debug_view`]).
     debug: debug_view::DebugState,
+    /// One wait inside `poll_idle`, planted by the quit harness.
+    ///
+    /// Real fences signal immediately on lavapipe. This wait is the slow fence
+    /// the harness uses so a blocked drain still fails the 100 ms budget.
+    slow_fence: Option<Duration>,
 }
 
 impl Renderer {
@@ -298,27 +310,33 @@ impl Renderer {
         surface: *mut c_void,
         width: u32,
         height: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, genos_window::ShutdownPermit), String> {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
         let unfilled = gpu.unfilled;
-        Ok(Self {
-            gpu,
-            width,
-            height,
-            wire_on: false,
-            memory: FrameMemory::default(),
-            shapes: crate::pool::MeshPool::default(),
-            overlay_rects: Vec::new(),
-            overlay_lines: Vec::new(),
-            overlay_verts: Vec::new(),
-            keep_pictures: false,
-            debug: debug_view::DebugState {
-                unfilled,
-                ..debug_view::DebugState::default()
+        let permit = genos_window::ShutdownPermit::issue();
+        Ok((
+            Self {
+                gpu,
+                width,
+                height,
+                wire_on: false,
+                world_identity: 0,
+                memory: FrameMemory::default(),
+                shapes: crate::pool::MeshPool::default(),
+                overlay_rects: Vec::new(),
+                overlay_lines: Vec::new(),
+                overlay_verts: Vec::new(),
+                keep_pictures: false,
+                debug: debug_view::DebugState {
+                    unfilled,
+                    ..debug_view::DebugState::default()
+                },
+                slow_fence: None,
             },
-        })
+            permit,
+        ))
     }
 
     /// Answer compositor pings on a side thread during device waits and pipeline compiles.
@@ -334,16 +352,6 @@ impl Renderer {
     pub fn clear_blocker() {
         ENTER.with(|cell| cell.set(None));
         LEAVE.with(|cell| cell.set(None));
-    }
-
-    /// Drop the renderer without `vkDeviceWaitIdle`.
-    ///
-    /// Call this after the window is destroyed. The driver reclaims the device
-    /// when the process exits. Waiting here is what makes a quit miss pings
-    /// when the window is still mapped, and what keeps the process alive after
-    /// the window is gone.
-    pub fn abandon(mut self) {
-        self.gpu.abandon = true;
     }
 
     /// Lines drawn over the picture with the next overlay rectangles, in the same
@@ -564,6 +572,12 @@ impl Renderer {
         }
     }
 
+    /// The device enabled BC7 and BC5 (`textureCompressionBC`).
+    #[must_use]
+    pub fn bc_textures(&self) -> bool {
+        self.gpu.bc_textures
+    }
+
     /// Material knobs in force. `texture_quality` does not follow the VRAM size.
     pub fn material_settings(&self) -> genos_load::MaterialSettings {
         self.gpu.materials
@@ -701,10 +715,26 @@ impl Renderer {
         self.gpu.fail_device_allocs.set(count);
     }
 
+    /// What kind of device this renderer runs on. A check that grades a timing
+    /// or a real-GPU picture asks this first: a software device cannot prove it.
+    #[must_use]
+    pub fn gpu_kind(&self) -> GpuKind {
+        self.gpu.gpu_kind
+    }
+
     /// Device bytes still held. This drops only when a free reaches the driver.
     #[must_use]
     pub fn device_bytes(&self) -> u64 {
         self.gpu.device_bytes.get()
+    }
+
+    /// Vulkan creates, allocates, and recording calls since the process started.
+    ///
+    /// One device per process. The steady-state delta is [`VkTraffic::is_flat`].
+    #[must_use]
+    pub fn vk_traffic(&self) -> VkTraffic {
+        let _ = self.gpu.device;
+        traffic::snapshot()
     }
 
     /// Bytes of device memory still bound to streamed mip pages.
@@ -804,6 +834,18 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        // A different world is a scene switch: the cached texels belong to the
+        // old one (docs/systems/lighting/surface-cache-wall-leak.md).
+        if world.identity() != self.world_identity {
+            if self.world_identity != 0 {
+                self.reset_lighting_cache();
+            }
+            self.world_identity = world.identity();
+        }
+        // A lamp added, removed, recoloured or dimmed is followed incrementally
+        // (lighting_wrc_note_lamps: the change ring and the settle rounds drain
+        // the old bounce), not by dropping the cache: a reset showed the frame
+        // after a power step with no bounce at all, a pop below both levels.
         self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
@@ -822,7 +864,8 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
-        let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
+        let views =
+            crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
         self.gpu.tick_materials(self.memory.accounted(), &views)?;
         self.fund_stream_pages()?;
         self.gpu.submit_transfer()?;
@@ -844,6 +887,9 @@ impl Renderer {
                     color_rect,
                     normal_rect,
                     cutoff,
+                    roughness,
+                    metallic,
+                    material_flags,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -871,7 +917,7 @@ impl Renderer {
                         ],
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
-                        extra: [*cutoff, 0.0, 0.0, 0.0],
+                        extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -1061,7 +1107,10 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn run_fog(&mut self, job: &crate::fog_pass::FogDispatch) -> Result<crate::fog_pass::FogGpu, String> {
+    pub fn run_fog(
+        &mut self,
+        job: &crate::fog_pass::FogDispatch,
+    ) -> Result<crate::fog_pass::FogGpu, String> {
         self.gpu.run_fog(job)
     }
 
@@ -1070,7 +1119,11 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device has no timestamp queries or the dispatch fails.
-    pub fn froxel_sample_ms(&mut self, preset: LightingPreset, samples: u32) -> Result<f64, String> {
+    pub fn froxel_sample_ms(
+        &mut self,
+        preset: LightingPreset,
+        samples: u32,
+    ) -> Result<f64, String> {
         self.gpu.froxel_sample_ms(preset, samples)
     }
 
@@ -1089,14 +1142,22 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the image or buffer allocation fails.
-    pub fn froxel_allocation(&mut self, preset: LightingPreset, doubled: bool) -> Result<u64, String> {
+    pub fn froxel_allocation(
+        &mut self,
+        preset: LightingPreset,
+        doubled: bool,
+    ) -> Result<u64, String> {
         self.gpu.froxel_allocation(preset, doubled)
     }
 
     /// Probe for the debug page. `pass_ms` is the last frame's froxel timestamp.
     /// History stays off, so accepts and rejects stay 0.
     #[must_use]
-    pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
+    pub fn fog_frame_probe(
+        &self,
+        fog: &genos_scene::FogSettings,
+        preset: LightingPreset,
+    ) -> crate::fog_budget::FogProbe {
         let mut probe = crate::fog_budget::fog_probe(fog, preset);
         if probe.dispatches == 0 || !self.gpu.froxel_wrote {
             probe.dispatches = 0;
@@ -1202,6 +1263,53 @@ impl Renderer {
     /// Off by default: the copy is a whole picture over the bus each frame.
     pub fn set_keep_pictures(&mut self, on: bool) {
         self.keep_pictures = on;
+    }
+}
+
+impl genos_window::ShutdownDevice for Renderer {
+    fn poll_idle(&mut self) -> bool {
+        if let Some(stall) = self.slow_fence.take() {
+            // No seat thread. The drain phase's clock includes this wait, and
+            // the next seat dispatch records it as the quit gap.
+            wait_unpumped(stall);
+        }
+        self.gpu.poll_idle()
+    }
+
+    fn destroy_step(&mut self) -> bool {
+        self.gpu.destroy_step()
+    }
+
+    fn next_phase(&self) -> &'static str {
+        self.gpu.next_shutdown_phase()
+    }
+
+    fn plant_slow_fence(&mut self, stall: Duration) {
+        self.slow_fence = Some(stall);
+    }
+
+    fn frames_presented(&self) -> u64 {
+        self.gpu.presented
+    }
+}
+
+/// Wait out `duration` without dispatching the seat.
+///
+/// A condvar timeout is the wait. `std::thread::sleep` is denied, and this
+/// must not run inside `block()`, or the seat thread would hide the stall.
+fn wait_unpumped(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
     }
 }
 
@@ -1415,8 +1523,8 @@ struct Gpu {
     /// This frame's scene bytes, written into `frame_scene` once its slot is free.
     frame_bytes: Vec<u8>,
     /// S70C: what the resident scene buffer holds (`frame_scene[0]`, device-local;
-    /// `[1]` names the same buffer). A frame records only the 256-byte blocks that
-    /// differ (vkCmdUpdateBuffer, in the frame's command stream).
+    /// `[1]` names the same buffer). A frame copies only the 256-byte blocks that
+    /// differ, from the staging buffer, in the frame's command stream.
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
     /// Device-local atlases the fragment shader loads (bindings 4 and 7).
@@ -1427,6 +1535,17 @@ struct Gpu {
     sampled_size: [(u32, u32); 2],
     sampled_layout: [u32; 2],
     sampled_cleared: [bool; 2],
+    /// `VkFormat` of the two sampled atlases. 37 is RGBA8.
+    sampled_format: [i32; 2],
+    sampled_mips: [u32; 2],
+    /// Nearest sampler for texelFetch of the atlases.
+    atlas_sampler: Handle,
+    /// `color_linear`, `color_lod`, `normal_lod`, pad. Host uniform, binding 1.
+    atlas_mode: Buffer,
+    atlas_linear: u32,
+    atlas_lod: [u32; 2],
+    /// The device enabled `textureCompressionBC`.
+    bc_textures: bool,
     /// One texel copied from the colour atlas by the transfer. The CPU never
     /// stores a mip byte here.
     atlas_readback: Buffer,
@@ -1447,7 +1566,7 @@ struct Gpu {
     transfer_wait: bool,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
-    /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
+    /// copies only `mesh_field_dirty` (byte ranges) from the staging buffer, so a
     /// moving instance costs its 128-byte record and no device wait.
     mesh_field: Buffer,
     mesh_field_cap: u64,
@@ -1507,10 +1626,27 @@ struct Gpu {
     /// This frame's `record_froxel` copied columns and wrote the compose header.
     froxel_wrote: bool,
     submit_pending: bool,
-    /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
-    abandon: bool,
+    /// Frame-slot fence has a submit that has not been waited. A reset fence
+    /// with no submit stays false: polling it would wait forever.
+    flight_live: [bool; 2],
+    /// Presents the driver accepted (success or suboptimal).
+    presented: u64,
+    /// The lifecycle is draining and destroying. Lighting waits must not block.
+    lifecycle_release: bool,
+    /// The instance has been destroyed.
+    torn_down: bool,
+    /// 0 yields, 1 destroys lighting, 2 destroys the swapchain, 3 releases
+    /// images and pipelines, 4 destroys the device, 5 the surface, then the instance.
+    teardown: u8,
+    /// The drain submits have been queued.
+    shutdown_armed: bool,
+    /// Fence for the graphics-queue drain submit.
+    shutdown_fence: Handle,
+    /// Fence for the compute-queue drain submit, when that queue is distinct.
+    shutdown_compute: Handle,
     timestamp_period: f32,
     timestamp_bits: u32,
+    gpu_kind: GpuKind,
     query_pool: Handle,
     /// Two timestamps per frame, bloom start and display end. Independent of `--gpu-times`.
     hdr_time_pool: Handle,
@@ -1567,6 +1703,10 @@ struct Gpu {
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
     frame_mark: Option<Instant>,
+    /// Host staging for device uploads. One slot per reused command buffer.
+    /// Reset when that buffer's fence has retired, so the copy memory is not
+    /// allocated again each frame.
+    stage: stage::StageSet,
 }
 
 struct Image {
@@ -1584,10 +1724,12 @@ struct Buffer {
 struct StreamSource {
     index: usize,
     color: bool,
+    /// This chain is the image the fragment shader fetches.
+    sampled: bool,
     chain: crate::material_stream::Chain,
     staging: Buffer,
     mip_offset: Vec<u64>,
-    /// Mip last blitted into the device atlas. `None` until the first copy.
+    /// Mip last copied into the device atlas. `None` until the first copy.
     shown: Option<u32>,
 }
 
@@ -1625,6 +1767,7 @@ struct MemProps {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct Fns {
     destroy_instance: FnDestroy,
     destroy_device: FnDestroy,
@@ -1674,6 +1817,8 @@ struct Fns {
     cmd_clear_color: FnClearColor,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
+    create_sampler: FnCreateSem,
+    destroy_sampler: Fn2,
     create_fence: FnFence,
     destroy_fence: Fn2,
     wait_fences: FnWait,
@@ -2046,6 +2191,10 @@ impl Gpu {
             );
             let mut prop_bytes = vec![0u8; 1024];
             get_props(physical, prop_bytes.as_mut_ptr());
+            // VkPhysicalDeviceProperties.deviceType sits at byte 16.
+            let gpu_kind = GpuKind::from_vk_device_type(u32::from_ne_bytes(
+                prop_bytes[16..20].try_into().unwrap(),
+            ));
             let timestamp_flag = u32::from_ne_bytes(prop_bytes[716..720].try_into().unwrap());
             let mut timestamp_period = f32::from_ne_bytes(prop_bytes[720..724].try_into().unwrap());
             if timestamp_flag == 0
@@ -2059,23 +2208,12 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let mut transfer_family = queue_family;
-            let mut transfer_dedicated = false;
-            for index in 0..family_count {
-                if index == queue_family || index == compute_family {
-                    continue;
-                }
-                let base = index as usize * 24;
-                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
-                let queues =
-                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
-                // Transfer without graphics. A shared graphics family keeps the graphics queue.
-                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
-                    transfer_family = index;
-                    transfer_dedicated = true;
-                    break;
-                }
-            }
+            // The streaming submit blits mips into the atlas (vkCmdBlitImage) and
+            // can clear it (vkCmdClearColorImage) and hand it to fragment stages. All need a graphics
+            // queue. A transfer-only family (NVIDIA family 1) cannot run them: the
+            // submit faults and its fence never signals, so `wait_fence` blocked
+            // forever. Streaming stays on the graphics family.
+            let transfer_family = queue_family;
             let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
@@ -2113,7 +2251,7 @@ impl Gpu {
                     priorities: priorities.as_ptr().add(2),
                 },
             ];
-            let mut queue_info_count = if separate {
+            let queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -2121,9 +2259,6 @@ impl Gpu {
             } else {
                 1
             };
-            if transfer_dedicated {
-                queue_info_count += 1;
-            }
             let enumerate_device_ext: unsafe extern "system" fn(
                 Handle,
                 *const c_char,
@@ -2165,10 +2300,18 @@ impl Gpu {
             } else {
                 None
             };
-            // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
-            // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
+            // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
+            // G-buffer, and textureCompressionBC (22) when the device has it.
+            type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
+            let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
+            let mut have = [0u32; 55];
+            get_features(physical, have.as_mut_ptr());
+            let bc_textures = have[22] != 0;
             let mut features = [0u32; 55];
             features[26] = 1;
+            if bc_textures {
+                features[22] = 1;
+            }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
             let hdr_meta_ext = b"VK_EXT_hdr_metadata\0";
@@ -2226,10 +2369,7 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
-            let mut transfer_queue = queue;
-            if transfer_dedicated {
-                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
-            }
+            let transfer_queue = queue;
             let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
@@ -2304,6 +2444,13 @@ impl Gpu {
                 sampled_size: [(0, 0), (0, 0)],
                 sampled_layout: [0, 0],
                 sampled_cleared: [false, false],
+                sampled_format: [37, 37],
+                sampled_mips: [1, 1],
+                atlas_sampler: std::ptr::null_mut(),
+                atlas_mode: Buffer::empty(),
+                atlas_linear: 0,
+                atlas_lod: [0, 0],
+                bc_textures,
                 atlas_readback: Buffer::empty(),
                 page_readback: Buffer::empty(),
                 material_key: 0,
@@ -2354,9 +2501,17 @@ impl Gpu {
                 froxel_pending: false,
                 froxel_wrote: false,
                 submit_pending: false,
-                abandon: false,
+                flight_live: [false, false],
+                presented: 0,
+                lifecycle_release: false,
+                torn_down: false,
+                teardown: 0,
+                shutdown_armed: false,
+                shutdown_fence: std::ptr::null_mut(),
+                shutdown_compute: std::ptr::null_mut(),
                 timestamp_period,
                 timestamp_bits,
+                gpu_kind,
                 query_pool: std::ptr::null_mut(),
                 hdr_time_pool: std::ptr::null_mut(),
                 gpu_times: {
@@ -2393,7 +2548,7 @@ impl Gpu {
                 aa_pool: std::ptr::null_mut(),
                 aa_sets: [std::ptr::null_mut(); 2],
                 reflection: ReflectionGpu::idle(),
-                fns: load_fns(
+                fns: load_fns_installed(
                     dload,
                     create_wayland_surface,
                     destroy_surface,
@@ -2433,6 +2588,7 @@ impl Gpu {
                 budget_extension,
                 memory_budget_query,
                 frame_mark: None,
+                stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
@@ -2596,6 +2752,7 @@ impl Gpu {
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.create_targets(width, height)
     }
 
@@ -2698,7 +2855,10 @@ impl Gpu {
             }
             let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
             let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
-            listed.push(crate::hdr_output::ListedFormat { format, color_space });
+            listed.push(crate::hdr_output::ListedFormat {
+                format,
+                color_space,
+            });
         }
         let force_sdr = self.lighting.hdr.legacy_bytes
             || matches!(
@@ -2723,6 +2883,7 @@ impl Gpu {
         }
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.destroy_color_pipelines();
         self.format = format;
         self.color_space = space;
@@ -2893,6 +3054,12 @@ impl Gpu {
                 present: i32,
                 clipped: u32,
                 old: Handle,
+            }
+            // One wl_surface carries one wp_fifo. A second live swapchain on
+            // the same surface is a protocol error on drivers that use
+            // fifo-v1, and the surface is lost.
+            if !self.swapchain.is_null() {
+                return Err("swapchain: the previous swapchain is still live".into());
             }
             let present = self.choose_present()?;
             self.present_mode = present;
@@ -3141,6 +3308,220 @@ impl Gpu {
         self.vertex = copy_buffer(&self.vertices[slot]);
     }
 
+    /// Record `cmd` again. The caller has waited this buffer's fence and reset
+    /// it. Flags stay 0.
+    ///
+    /// `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` makes the NVIDIA driver
+    /// drop that recording's backing store. The stores are freed in
+    /// `vkDestroyDevice`, so the quit stall grew with the frame count.
+    fn begin_reused(&mut self, cmd: Handle) -> Result<(), String> {
+        self.stage_reset(cmd);
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 0,
+            inherit: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cmd",
+            )
+        }
+    }
+
+    fn stage_slot(&self, cmd: Handle) -> Option<usize> {
+        if cmd.is_null() {
+            return None;
+        }
+        if cmd == self.cmds[0] {
+            return Some(0);
+        }
+        if cmd == self.cmds[1] {
+            return Some(1);
+        }
+        if cmd == self.lighting.world_cmd {
+            return Some(2);
+        }
+        if cmd == self.audio_cmd {
+            return Some(3);
+        }
+        if self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| targets.cmd == cmd)
+        {
+            return Some(4);
+        }
+        if self
+            .media_check
+            .as_ref()
+            .is_some_and(|pipe| pipe.cmd == cmd)
+        {
+            return Some(5);
+        }
+        None
+    }
+
+    fn stage_families(&self, index: usize) -> Vec<u32> {
+        if index == 2 {
+            self.light_families()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn make_stage(&self, size: u64, families: &[u32]) -> Result<stage::Staged, String> {
+        let buffer = self.make_buffer_queues(size, 1, Memory::Upload, families)?;
+        let mut mapped = std::ptr::null_mut();
+        let result = unsafe {
+            (self.fns.map_mem)(self.device, buffer.memory, 0, buffer.size, 0, &mut mapped)
+        };
+        if result != VK_SUCCESS {
+            let mut buffer = buffer;
+            self.destroy_buffer(&mut buffer);
+            return Err(format!("map stage {result}"));
+        }
+        Ok(stage::Staged {
+            buffer,
+            mapped: mapped.cast(),
+        })
+    }
+
+    fn drop_staged(&self, staged: &mut stage::Staged) {
+        if !staged.mapped.is_null() && !staged.buffer.memory.is_null() && !self.device.is_null() {
+            unsafe {
+                (self.fns.unmap_mem)(self.device, staged.buffer.memory);
+            }
+        }
+        staged.mapped = std::ptr::null_mut();
+        self.destroy_buffer(&mut staged.buffer);
+    }
+
+    fn drop_stages(&mut self) {
+        for index in 0..self.stage.slots.len() {
+            let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+            for extra in &mut overflow {
+                self.drop_staged(extra);
+            }
+            let mut main =
+                std::mem::replace(&mut self.stage.slots[index].main, stage::Staged::empty());
+            self.drop_staged(&mut main);
+        }
+    }
+
+    /// The fence for `cmd` has retired. Drop overflow copies and grow the
+    /// standing buffer when the last recording did not fit.
+    fn stage_reset(&mut self, cmd: Handle) {
+        let Some(index) = self.stage_slot(cmd) else {
+            return;
+        };
+        let families = self.stage_families(index);
+        let filled = self.stage.slots[index].filled;
+        let main_size = self.stage.slots[index].main.buffer.size;
+        let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+        for extra in &mut overflow {
+            self.drop_staged(extra);
+        }
+        if filled > main_size && main_size > 0 {
+            let cap = filled
+                .max(4096)
+                .checked_next_power_of_two()
+                .unwrap_or(filled);
+            if let Ok(created) = self.make_stage(cap, &families) {
+                let mut old = std::mem::replace(&mut self.stage.slots[index].main, created);
+                self.drop_staged(&mut old);
+            }
+        }
+        self.stage.slots[index].cursor = 0;
+        self.stage.slots[index].filled = 0;
+    }
+
+    fn stage_reserve(&mut self, index: usize, size: u64) -> Result<(Handle, u64, *mut u8), String> {
+        let families = self.stage_families(index);
+        if self.stage.slots[index].main.buffer.buffer.is_null() {
+            self.stage.slots[index].main = self.make_stage(256u64 * 1024, &families)?;
+        }
+        let aligned = {
+            let slot = &self.stage.slots[index];
+            let cursor = slot.cursor.saturating_add(3) & !3;
+            if cursor.saturating_add(size) <= slot.main.buffer.size {
+                Some(cursor)
+            } else {
+                None
+            }
+        };
+        if let Some(aligned) = aligned {
+            let slot = &mut self.stage.slots[index];
+            slot.cursor = aligned.saturating_add(size);
+            slot.filled = slot.filled.max(slot.cursor);
+            let offset = usize::try_from(aligned).unwrap_or(0);
+            let ptr = unsafe { slot.main.mapped.add(offset) };
+            return Ok((slot.main.buffer.buffer, aligned, ptr));
+        }
+        let cap = size.max(4096).checked_next_power_of_two().unwrap_or(size);
+        let extra = self.make_stage(cap, &families)?;
+        let handle = extra.buffer.buffer;
+        let ptr = extra.mapped;
+        self.stage.slots[index].overflow.push(extra);
+        let slot = &mut self.stage.slots[index];
+        slot.filled = slot.filled.saturating_add(size);
+        Ok((handle, 0, ptr))
+    }
+
+    /// Copy `bytes` into the staging slot for `cmd` and record a buffer copy.
+    /// `vkCmdUpdateBuffer` embeds the host bytes in the command buffer. NVIDIA
+    /// frees that copy in `vkDestroyDevice`.
+    fn write_device(
+        &mut self,
+        cmd: Handle,
+        dst: Handle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if dst.is_null() || bytes.is_empty() {
+            return Ok(());
+        }
+        let size = u64::try_from(bytes.len()).unwrap_or(0) & !3;
+        if size == 0 {
+            return Ok(());
+        }
+        if offset & 3 != 0 {
+            return Err("device upload offset is not a multiple of 4".into());
+        }
+        let Some(index) = self.stage_slot(cmd) else {
+            return Err("device upload has no staging slot".into());
+        };
+        let (src, src_offset, ptr) = self.stage_reserve(index, size)?;
+        let count = usize::try_from(size).unwrap_or(0);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, count);
+        }
+        self.barrier_on(cmd, 0x4000, 0x1000, 0x4000, 0x800);
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region {
+            src: src_offset,
+            dst: offset,
+            size,
+        };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(cmd, src, dst, 1, &region as *const Region as *const u8);
+        }
+        Ok(())
+    }
+
     fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
         if self.unfilled.dump_pct.is_some() {
             self.copy_picture = true;
@@ -3153,6 +3534,7 @@ impl Gpu {
         self.bind_flight();
         let slot = self.flight;
         self.wait_fence(self.fence, "wait fence")?;
+        self.flight_live[slot] = false;
         let fences = [self.fence];
         unsafe {
             self.collect_slot_after_wait(slot)?;
@@ -3181,39 +3563,24 @@ impl Gpu {
             }
             check(acquire, "acquire")?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            self.begin_reused(self.cmd)?;
             if profiled {
                 self.reset_queries(slot);
                 // Top of pipe, before the GPU work. The value is device ticks.
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.write_atlas_mode()?;
             self.init_fresh_atlas();
-            self.update_resident_scene();
-            self.update_resident_fields();
+            self.update_resident_scene()?;
+            self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
             self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
                 if lighting {
-                    self.lighting_begin(slot);
+                    self.lighting_begin(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
                 self.raster_scene(
@@ -3228,10 +3595,10 @@ impl Gpu {
                 self.froxel_wrote = false;
                 self.record_froxel()?;
                 if !self.froxel_wrote {
-                    self.release_froxel_header();
+                    self.release_froxel_header()?;
                 }
                 if lighting {
-                    self.lighting_passes(slot);
+                    self.lighting_passes(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Lighting);
                 self.reflections_after_lighting(matrix)?;
@@ -3306,6 +3673,7 @@ impl Gpu {
                 ),
                 "submit",
             )?;
+            self.flight_live[slot] = true;
             self.present_index = index;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
@@ -3423,8 +3791,22 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
-                c.pixels, c.kept, c.fills, c.cache, c.spatial
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
+                 hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
+                 hit_near_tests={} px_lamps={} hit_lamps={}",
+                c.pixels,
+                c.kept,
+                c.fills,
+                c.cache,
+                c.spatial,
+                c.kept_live,
+                c.kept_due,
+                c.kept_shade,
+                c.fill_live,
+                c.fill_shade,
+                c.near_tests,
+                c.px_lamps,
+                c.hit_lamps
             )
         } else {
             String::new()
@@ -3837,6 +4219,9 @@ impl Gpu {
             if result != VK_SUCCESS && result != SUBOPTIMAL && result != OUT_OF_DATE {
                 return Err(format!("present failed: {result}"));
             }
+            if result != OUT_OF_DATE {
+                self.presented += 1;
+            }
             Ok(result)
         }
     }
@@ -3854,23 +4239,7 @@ impl Gpu {
                 "reset fence",
             )?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            self.begin_reused(self.cmd)?;
             self.copy_color_to_buffer();
             self.copy_scene_for_readback();
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
@@ -3970,7 +4339,11 @@ impl Gpu {
         if src.is_null() || dst.is_null() {
             return;
         }
-        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        let size = self
+            .lighting
+            .scene_lin
+            .size
+            .min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -3980,7 +4353,11 @@ impl Gpu {
             dst: u64,
             size: u64,
         }
-        let region = Region { src: 0, dst: 0, size };
+        let region = Region {
+            src: 0,
+            dst: 0,
+            size,
+        };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
@@ -4086,10 +4463,18 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            // Atlas mode: color_linear and the resident lods. Fragment only.
+            Binding {
+                binding: 1,
+                kind: 6,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
             // Device-local colour atlas. Fragment only: the depth mask and the G-buffer.
             Binding {
                 binding: 4,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4112,7 +4497,7 @@ impl Gpu {
             // Device-local normal atlas. Same readers as binding 4.
             Binding {
                 binding: 7,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4149,9 +4534,14 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
-        self.sampled_color = self.make_atlas_image(1, 1)?;
-        self.sampled_normal = self.make_atlas_image(1, 1)?;
+        self.atlas_sampler = self.make_sampler()?;
+        self.atlas_mode = self.make_buffer(16, 0x10, Memory::Upload)?;
+        self.write_buffer(&self.atlas_mode, &[0u8; 16])?;
+        self.sampled_color = self.make_atlas_image(1, 1, 37, 1)?;
+        self.sampled_normal = self.make_atlas_image(1, 1, 37, 1)?;
         self.sampled_size = [(1, 1), (1, 1)];
+        self.sampled_format = [37, 37];
+        self.sampled_mips = [1, 1];
         self.atlas_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         self.page_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         // The CPU never stores a mip here. A skipped copy reads back as zero.
@@ -4184,8 +4574,12 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        // Two raster sets: five storage buffers plus the two material images.
-        let sizes = [Size { kind: 7, count: 16 }, Size { kind: 3, count: 8 }];
+        // Two raster sets: storage buffers, the atlas-mode uniform, and two samplers.
+        let sizes = [
+            Size { kind: 7, count: 16 },
+            Size { kind: 6, count: 4 },
+            Size { kind: 1, count: 8 },
+        ];
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -4353,13 +4747,18 @@ impl Gpu {
             view: Handle,
             layout: u32,
         }
+        let mode = BufInfo {
+            buffer: self.atlas_mode.buffer,
+            offset: 0,
+            range: 16,
+        };
         let color_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_color.view,
             layout: 1,
         };
         let normal_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_normal.view,
             layout: 1,
         };
@@ -4428,10 +4827,22 @@ impl Gpu {
                 s_type: 35,
                 next: std::ptr::null(),
                 set,
+                binding: 1,
+                element: 0,
+                count: 1,
+                kind: 6,
+                image: std::ptr::null(),
+                buffer: &mode,
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
                 binding: 4,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &color_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -4443,7 +4854,7 @@ impl Gpu {
                 binding: 7,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &normal_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -4814,23 +5225,7 @@ impl Gpu {
                 "audio reset fence",
             )?;
             check((self.fns.reset_cmd)(self.audio_cmd, 0), "audio reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.audio_cmd, &begin as *const BeginInfo as *const u8),
-                "audio begin",
-            )?;
+            self.begin_reused(self.audio_cmd)?;
             #[repr(C)]
             struct MemBar {
                 s_type: i32,
@@ -5004,10 +5399,10 @@ impl Gpu {
     }
 
     /// Record the field's marked ranges into this frame (before any pass reads it).
-    fn update_resident_fields(&mut self) {
+    fn update_resident_fields(&mut self) -> Result<(), String> {
         const RUN: usize = 65536;
         if self.mesh_field_dirty.is_empty() || self.mesh_field.buffer.is_null() {
-            return;
+            return Ok(());
         }
         if self.lighting.async_on {
             // The async light cache reads the field too: let its round finish, and
@@ -5029,15 +5424,13 @@ impl Gpu {
                 if end <= at {
                     break;
                 }
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.mesh_field.buffer,
-                        at as u64,
-                        (end - at) as u64,
-                        self.mesh_field_shadow[at..end].as_ptr() as *const c_void,
-                    );
-                }
+                let chunk = self.mesh_field_shadow[at..end].to_vec();
+                let cmd = self.cmd;
+                let dst = self.mesh_field.buffer;
+                let Ok(offset) = u64::try_from(at) else {
+                    break;
+                };
+                self.write_device(cmd, dst, offset, &chunk)?;
                 sent += end - at;
                 at = end;
             }
@@ -5051,6 +5444,7 @@ impl Gpu {
                 self.mesh_field_shadow.len()
             );
         }
+        Ok(())
     }
 
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
@@ -5077,15 +5471,15 @@ impl Gpu {
         self.write_buffer(&self.particle_buf, bytes)
     }
 
-    /// S70C: bring the resident scene up to this frame's bytes, recording only the
-    /// 256-byte blocks that changed (runs up to vkCmdUpdateBuffer's 64 KiB).
-    fn update_resident_scene(&mut self) {
+    /// S70C: bring the resident scene up to this frame's bytes, copying only the
+    /// 256-byte blocks that changed (runs up to 64 KiB).
+    fn update_resident_scene(&mut self) -> Result<(), String> {
         const BLOCK: usize = 256;
         const RUN: usize = 65536;
         let bytes = std::mem::take(&mut self.frame_bytes);
         if bytes.is_empty() || self.frame_scene[0].buffer.is_null() {
             self.frame_bytes = bytes;
-            return;
+            return Ok(());
         }
         let len = bytes.len().min(self.frame_scene[0].size as usize) & !3;
         let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -5106,15 +5500,12 @@ impl Gpu {
             // The last frame's reads are done before the writes (in queue order).
             self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
             for &(start, stop) in &runs {
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.frame_scene[0].buffer,
-                        start as u64,
-                        (stop - start) as u64,
-                        bytes[start..stop].as_ptr() as *const c_void,
-                    );
-                }
+                let cmd = self.cmd;
+                let dst = self.frame_scene[0].buffer;
+                let Ok(offset) = u64::try_from(start) else {
+                    continue;
+                };
+                self.write_device(cmd, dst, offset, &bytes[start..stop])?;
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -5129,6 +5520,7 @@ impl Gpu {
             }
         }
         self.frame_bytes = bytes;
+        Ok(())
     }
 
     fn sync_materials(&mut self, world: &World) -> Result<(), String> {
@@ -5170,19 +5562,45 @@ impl Gpu {
         atlas: &crate::world::MaterialAtlas,
         sampled: bool,
     ) -> Result<(), String> {
-        let Some(chain) = crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
-        else {
-            return Ok(());
+        let chain = if atlas.block_format != 0 && !atlas.block_mips.is_empty() {
+            crate::material_stream::Chain {
+                width: atlas.width,
+                height: atlas.height,
+                levels: atlas.block_mips.clone(),
+                format: i32::try_from(atlas.block_format).unwrap_or(37),
+            }
+        } else {
+            let Some(chain) =
+                crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
+            else {
+                return Ok(());
+            };
+            chain
         };
         if sampled {
-            self.ensure_sampled(color, chain.width, chain.height)?;
+            self.ensure_sampled(
+                color,
+                chain.width,
+                chain.height,
+                chain.format,
+                u32::try_from(chain.levels.len()).unwrap_or(1),
+            )?;
+            if color && chain.format == 146 {
+                self.atlas_linear = 1;
+            }
+            if color && chain.format == 37 {
+                self.atlas_linear = 0;
+                self.atlas_lod[0] = 0;
+            }
+            if !color && chain.format == 37 {
+                self.atlas_lod[1] = 0;
+            }
         }
         let started = Instant::now();
         let bytes = chain.level_bytes();
         let total = chain.total_bytes();
         let index = self.streamer.texture_count();
-        self.streamer
-            .add_texture(chain.width, chain.height, &bytes);
+        self.streamer.add_texture(chain.width, chain.height, &bytes);
         let elapsed = started.elapsed().as_millis().max(1);
         let ms = u32::try_from(elapsed).unwrap_or(u32::MAX);
         self.streamer.observe_disk(total, ms);
@@ -5191,6 +5609,7 @@ impl Gpu {
         self.stream_sources.push(StreamSource {
             index,
             color,
+            sampled,
             chain,
             staging,
             mip_offset,
@@ -5199,13 +5618,25 @@ impl Gpu {
         Ok(())
     }
 
-    fn ensure_sampled(&mut self, color: bool, width: u32, height: u32) -> Result<(), String> {
+    fn ensure_sampled(
+        &mut self,
+        color: bool,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<(), String> {
         let slot = usize::from(!color);
-        if self.sampled_size[slot] == (width, height) && !self.sampled_image(color).image.is_null()
+        if self.sampled_size[slot] == (width, height)
+            && self.sampled_format[slot] == format
+            && self.sampled_mips[slot] == mips.max(1)
+            && !self.sampled_image(color).image.is_null()
         {
             return Ok(());
         }
-        let image = self.make_atlas_image(width, height)?;
+        let image = self.make_atlas_image(width, height, format, mips)?;
+        self.sampled_format[slot] = format;
+        self.sampled_mips[slot] = mips.max(1);
         let mut old = if color {
             std::mem::replace(&mut self.sampled_color, image)
         } else {
@@ -6054,7 +6485,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind image",
             )?;
-            let view = self.make_view(image, format, aspect)?;
+            let view = self.make_view(image, format, aspect, 1)?;
             Ok(Image {
                 image,
                 view,
@@ -6063,8 +6494,14 @@ impl Gpu {
         }
     }
 
-    /// Device-local atlas the fragment shader loads. Transfer is the only writer.
-    fn make_atlas_image(&self, width: u32, height: u32) -> Result<Image, String> {
+    /// Device-local atlas the fragment shader fetches. Transfer is the only writer.
+    fn make_atlas_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<Image, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -6096,17 +6533,18 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width.max(1),
                 h: height.max(1),
                 d: 1,
             },
-            mips: 1,
+            mips: mips.max(1),
             layers: 1,
             samples: 1,
             tiling: 0,
-            usage: 0x1 | 0x2 | 0x8,
+            // TRANSFER_SRC | TRANSFER_DST | SAMPLED. Block formats are not storage images.
+            usage: 0x1 | 0x2 | 0x4,
             sharing: u32::from(shared),
             queue_count: if shared { 2 } else { 0 },
             queues: if shared {
@@ -6136,7 +6574,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind atlas",
             )?;
-            let view = self.make_view(image, 37, 1)?;
+            let view = self.make_view(image, format, 1, mips.max(1))?;
             Ok(Image {
                 image,
                 view,
@@ -6145,7 +6583,13 @@ impl Gpu {
         }
     }
 
-    fn make_view(&self, image: Handle, format: i32, aspect: u32) -> Result<Handle, String> {
+    fn make_view(
+        &self,
+        image: Handle,
+        format: i32,
+        aspect: u32,
+        levels: u32,
+    ) -> Result<Handle, String> {
         #[repr(C)]
         struct Comp {
             r: u32,
@@ -6188,7 +6632,7 @@ impl Gpu {
             range: Range {
                 aspect,
                 mip: 0,
-                levels: 1,
+                levels: levels.max(1),
                 layer: 0,
                 layers: 1,
             },
@@ -6537,7 +6981,8 @@ impl Gpu {
         raw[8..16].copy_from_slice(&next.to_ne_bytes());
         unsafe { query(self.physical, raw.as_mut_ptr()) };
         let props = parse_mem_props(&raw[16..]);
-        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let heap_count =
+            u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
         let mut heap_budget = 0u64;
         let mut heap_usage = 0u64;
         for index in 0..heap_count {
@@ -6593,23 +7038,7 @@ impl Gpu {
                 "transfer reset fence",
             )?;
             check((self.fns.reset_cmd)(self.transfer_cmd, 0), "transfer reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inheritance: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 0x1,
-                inheritance: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.transfer_cmd, &begin as *const BeginInfo as *const u8),
-                "transfer begin",
-            )?;
+            self.begin_reused(self.transfer_cmd)?;
         }
         self.staging_barrier(0x4000, 0x1000, 0x4000, 0x800);
         let mut copied = 0u64;
@@ -6649,6 +7078,15 @@ impl Gpu {
                 .find(|source| source.index == index)
             {
                 source.shown = Some(level);
+            }
+        }
+        for source in &self.stream_sources {
+            // RGBA blits the resident mip up to mip 0. Block formats are copied
+            // into the matching mip, so the fetch lod is that level.
+            if source.sampled && block_texel(source.chain.format) {
+                if let Some(level) = source.shown {
+                    self.atlas_lod[usize::from(!source.color)] = level;
+                }
             }
         }
         self.finish_atlas_draw(true, true);
@@ -6758,7 +7196,11 @@ impl Gpu {
     }
 
     fn record_mip_copy(&self, index: usize, level: u32) -> u64 {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return 0;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -6784,8 +7226,9 @@ impl Gpu {
             page.layout,
             width,
             height,
+            block_texel(source.chain.format),
         );
-        u64::from(width) * u64::from(height) * 4
+        u64::try_from(mip.rgba.len()).unwrap_or(0)
     }
 
     /// Move the atlas to transfer-dest and clear it once. A later blit overwrites
@@ -6812,7 +7255,9 @@ impl Gpu {
             self.sampled_layout[slot] = 7;
         }
         if !self.sampled_cleared[slot] {
-            self.clear_color(self.transfer_cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             self.sampled_cleared[slot] = true;
         }
     }
@@ -6829,7 +7274,9 @@ impl Gpu {
                 continue;
             }
             self.cmd_image_barrier(self.cmd, image, 0, 7, 0x1, 0x1000, 0, 0x1000);
-            self.clear_color(self.cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.cmd, image, 7);
+            }
             self.cmd_image_barrier(self.cmd, image, 7, 1, 0x1000, 0x80, 0x1000, 0x20);
             self.sampled_layout[slot] = 1;
             self.sampled_cleared[slot] = true;
@@ -6861,7 +7308,7 @@ impl Gpu {
             0x800,
         );
         self.sampled_layout[slot] = 1;
-        if readback {
+        if readback && !block_texel(self.sampled_format[0]) {
             self.copy_atlas_texel(image);
         }
     }
@@ -6871,7 +7318,11 @@ impl Gpu {
     }
 
     fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -6880,16 +7331,21 @@ impl Gpu {
         let Some(mip) = source.chain.levels.get(slot) else {
             return;
         };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
-        else {
+        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
             return;
         };
-        self.publish_resident(&page, source.color);
+        self.publish_resident(&page, source.color, level);
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
     /// handle and not a staging buffer.
-    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+    fn copied_page(
+        &self,
+        index: usize,
+        level: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ResidentPage> {
         let page = self.stream_pages.iter().find(|page| {
             page.index == index && page.level == level && page.copied && !page.image.is_null()
         })?;
@@ -6901,21 +7357,26 @@ impl Gpu {
     }
 
     /// Blit `page` into the device atlas. This is the only atlas write.
-    fn publish_resident(&self, page: &ResidentPage, color: bool) {
+    fn publish_resident(&self, page: &ResidentPage, color: bool, level: u32) {
+        let slot = usize::from(!color);
         let atlas = self.sampled_image(color).image;
-        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!color)];
+        let (atlas_w, atlas_h) = self.sampled_size[slot];
         if atlas.is_null() || page.image.is_null() {
             return;
         }
-        self.blit_nearest(
-            page.image,
-            atlas,
-            page.width,
-            page.height,
-            atlas_w.max(1),
-            atlas_h.max(1),
-        );
-        if color {
+        if block_texel(self.sampled_format[slot]) {
+            self.copy_same_size(page.image, atlas, page.width, page.height, level);
+        } else {
+            self.blit_nearest(
+                page.image,
+                atlas,
+                page.width,
+                page.height,
+                atlas_w.max(1),
+                atlas_h.max(1),
+            );
+        }
+        if color && !block_texel(self.sampled_format[slot]) {
             self.copy_page_texel(page.image);
         }
     }
@@ -6957,7 +7418,9 @@ impl Gpu {
             if buffer.is_null() || size < 4 {
                 continue;
             }
-            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+            self.transfer_buffer_barrier(
+                buffer, size, src_stage, dst_stage, src_access, dst_access,
+            );
         }
     }
 
@@ -7034,6 +7497,134 @@ impl Gpu {
                 color.as_ptr().cast(),
                 1,
                 &range as *const Range as *const u8,
+            );
+        }
+    }
+
+    fn write_atlas_mode(&self) -> Result<(), String> {
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&self.atlas_linear.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.atlas_lod[0].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.atlas_lod[1].to_le_bytes());
+        self.write_buffer(&self.atlas_mode, &bytes)
+    }
+
+    fn make_sampler(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            mag: i32,
+            min: i32,
+            mip: i32,
+            addr_u: i32,
+            addr_v: i32,
+            addr_w: i32,
+            bias: f32,
+            aniso: u32,
+            max_aniso: f32,
+            compare: u32,
+            compare_op: i32,
+            min_lod: f32,
+            max_lod: f32,
+            border: [f32; 4],
+            unnorm: u32,
+        }
+        let info = Info {
+            s_type: 31,
+            next: std::ptr::null(),
+            flags: 0,
+            mag: 0,
+            min: 0,
+            mip: 0,
+            addr_u: 2,
+            addr_v: 2,
+            addr_w: 2,
+            bias: 0.0,
+            aniso: 0,
+            max_aniso: 1.0,
+            compare: 0,
+            compare_op: 0,
+            min_lod: 0.0,
+            max_lod: 16.0,
+            border: [0.0; 4],
+            unnorm: 0,
+        };
+        let mut sampler = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_sampler)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut sampler,
+                ),
+                "sampler",
+            )?;
+        }
+        Ok(sampler)
+    }
+
+    /// Copy a block page into one mip of the atlas. Both images are the same size.
+    fn copy_same_size(&self, src: Handle, dst: Handle, width: u32, height: u32, dst_mip: u32) {
+        #[repr(C)]
+        struct Sub {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Off {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        #[repr(C)]
+        struct Ext {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Copy {
+            src: Sub,
+            src_off: Off,
+            dst: Sub,
+            dst_off: Off,
+            extent: Ext,
+        }
+        let copy = Copy {
+            src: Sub {
+                aspect: 1,
+                mip: 0,
+                layer: 0,
+                count: 1,
+            },
+            src_off: Off { x: 0, y: 0, z: 0 },
+            dst: Sub {
+                aspect: 1,
+                mip: dst_mip,
+                layer: 0,
+                count: 1,
+            },
+            dst_off: Off { x: 0, y: 0, z: 0 },
+            extent: Ext {
+                w: width,
+                h: height,
+                d: 1,
+            },
+        };
+        unsafe {
+            (self.fns.cmd_copy_image)(
+                self.transfer_cmd,
+                src,
+                6,
+                dst,
+                7,
+                1,
+                &copy as *const Copy as *const u8,
             );
         }
     }
@@ -7166,7 +7757,12 @@ impl Gpu {
         }
     }
 
-    fn create_unbound_image(&self, width: u32, height: u32) -> Result<UnboundImage, String> {
+    fn create_unbound_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> Result<UnboundImage, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -7196,7 +7792,7 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width,
                 h: height,
@@ -7243,6 +7839,7 @@ impl Gpu {
         old_layout: u32,
         width: u32,
         height: u32,
+        block: bool,
     ) {
         #[repr(C)]
         struct Range {
@@ -7365,9 +7962,11 @@ impl Gpu {
                     &barrier as *const Barrier as *const u8,
                 );
             }
-            // Zero first. The buffer copy is the only writer of a real texel.
-            // Skipping that copy leaves the clear, and the blit publishes black.
-            self.clear_color(self.transfer_cmd, image, 7);
+            // Zero first on an uncompressed page. A block image cannot be cleared
+            // with vkCmdClearColorImage. Skipping the copy leaves the previous texel.
+            if !block {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             (self.fns.cmd_barrier)(
                 self.transfer_cmd,
                 0x1000,
@@ -7529,7 +8128,11 @@ impl Gpu {
             let Some(mip) = source.chain.levels.get(slot) else {
                 continue;
             };
-            let image = self.create_unbound_image(mip.width.max(1), mip.height.max(1))?;
+            let image = self.create_unbound_image(
+                mip.width.max(1),
+                mip.height.max(1),
+                source.chain.format,
+            )?;
             self.stream_pages.push(StreamPage {
                 index,
                 level,
@@ -7555,14 +8158,7 @@ impl Gpu {
         dst_access: u32,
     ) {
         self.cmd_image_barrier(
-            self.cmd,
-            image,
-            old,
-            new,
-            src_stage,
-            dst_stage,
-            src_access,
-            dst_access,
+            self.cmd, image, old, new, src_stage, dst_stage, src_access, dst_access,
         );
     }
 
@@ -7611,7 +8207,7 @@ impl Gpu {
             range: Range {
                 aspect: 1,
                 mip: 0,
-                levels: 1,
+                levels: u32::MAX,
                 layer: 0,
                 layers: 1,
             },
@@ -7778,12 +8374,24 @@ impl Gpu {
             self.color = Image::empty();
             self.depth = Image::empty();
             self.host = Buffer::empty();
-            if !self.swapchain.is_null() {
-                (self.fns.destroy_swapchain)(self.device, self.swapchain, std::ptr::null());
-                self.swapchain = std::ptr::null_mut();
-            }
-            self.swap_images.clear();
         }
+    }
+
+    /// Presentation images. The seat is dispatched around this call: the
+    /// driver round-trips the Wayland socket before it returns, and a client
+    /// that does not read the socket waits out the driver timeout.
+    fn destroy_swapchain(&mut self) {
+        if self.device.is_null() || self.swapchain.is_null() {
+            self.swapchain = std::ptr::null_mut();
+            self.swap_images.clear();
+            return;
+        }
+        let swapchain = self.swapchain;
+        self.swapchain = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_swapchain)(self.device, swapchain, std::ptr::null());
+        }
+        self.swap_images.clear();
     }
 
     fn destroy_image(&self, image: &mut Image) {
@@ -7863,6 +8471,21 @@ fn read_f32s(
         .collect())
 }
 
+fn pod_bytes<T>(value: &T) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(value).cast::<u8>(),
+            std::mem::size_of::<T>(),
+        )
+    }
+}
+
+fn pod_slice<T>(values: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+    }
+}
+
 fn copy_buffer(buffer: &Buffer) -> Buffer {
     Buffer {
         buffer: buffer.buffer,
@@ -7893,13 +8516,273 @@ impl Buffer {
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        unsafe {
-            if self.abandon || self.device.is_null() {
+        if self.torn_down {
+            return;
+        }
+        if !self.lifecycle_release {
+            // A null device was never opened. Already unwinding: leak. An idle wait is the stall.
+            if self.device.is_null() || std::thread::panicking() {
                 return;
             }
-            self.idle_device();
-            self.drop_stream_resources();
+            panic!("genos-render: the device was dropped outside the app lifecycle");
+        }
+        // The device pointer is cleared before the surface and the instance,
+        // so a null device here still has those two calls left.
+        self.finish_teardown();
+    }
+}
+
+impl Gpu {
+    /// `true` when the queues that presented and built lighting have retired.
+    ///
+    /// An empty submit on each queue, after the last present, is ordered after
+    /// that present. Frame fences are polled only when a submit is in flight.
+    /// A reset fence with no submit stays unsignaled, so it is not polled.
+    /// The transfer queue is separate from graphics and compute.
+    pub(crate) fn poll_idle(&mut self) -> bool {
+        if self.device.is_null() || self.torn_down {
+            return true;
+        }
+        if !self.shutdown_armed && !self.arm_shutdown() {
+            return false;
+        }
+        self.frames_retired()
+            && self.transfer_retired()
+            && self.fence_retired(self.shutdown_fence)
+            && self.fence_retired(self.shutdown_compute)
+            && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
+    }
+
+    fn frames_retired(&self) -> bool {
+        (0..2).all(|slot| !self.flight_live[slot] || self.fence_retired(self.fences[slot]))
+    }
+
+    fn transfer_retired(&self) -> bool {
+        !self.transfer_busy || self.fence_retired(self.transfer_fence)
+    }
+
+    /// Name of the group the next [`Self::destroy_step`] call destroys.
+    pub(crate) fn next_shutdown_phase(&self) -> &'static str {
+        match self.teardown {
+            0 => "destroy_yield",
+            1 => "destroy_lighting",
+            2 => "destroy_swapchain",
+            3 => "destroy_objects",
+            4 => "destroy_surface",
+            5 => "destroy_device",
+            _ => "destroy_instance",
+        }
+    }
+
+    /// Destroy one group and return. `true` when the instance is gone.
+    pub(crate) fn destroy_step(&mut self) -> bool {
+        if self.torn_down {
+            return true;
+        }
+        self.lifecycle_release = true;
+        match self.teardown {
+            0 => {
+                self.teardown = 1;
+                false
+            }
+            1 => {
+                // The seat thread dispatches while the driver call runs. On a
+                // real device these calls wait for the compositor, and a missed
+                // ping makes that wait hit the driver timeout.
+                block(|| self.destroy_lighting());
+                self.teardown = 2;
+                false
+            }
+            2 => {
+                block(|| self.destroy_swapchain());
+                self.teardown = 3;
+                false
+            }
+            3 => {
+                block(|| self.destroy_gpu_objects());
+                self.teardown = 4;
+                false
+            }
+            4 => {
+                // The surface goes before the device. Its swapchain is already
+                // gone, so this is legal, and it lets the WSI layer release the
+                // compositor's buffers on its own step instead of inside
+                // vkDestroyDevice, where a wait on them looked like a driver
+                // stall of up to 20 s on the 4070.
+                block(|| self.destroy_surface_handle());
+                self.teardown = 5;
+                false
+            }
+            5 => {
+                block(|| self.destroy_device_handle());
+                self.teardown = 6;
+                false
+            }
+            _ => {
+                block(|| self.destroy_instance_handle());
+                true
+            }
+        }
+    }
+
+    fn finish_teardown(&mut self) {
+        if self.teardown < 2 {
             self.destroy_lighting();
+            self.teardown = 2;
+        }
+        if self.teardown < 3 {
+            self.destroy_swapchain();
+            self.teardown = 3;
+        }
+        if self.teardown < 4 {
+            self.destroy_gpu_objects();
+            self.teardown = 4;
+        }
+        if self.teardown < 5 {
+            self.destroy_surface_handle();
+            self.teardown = 5;
+        }
+        if self.teardown < 6 {
+            self.destroy_device_handle();
+            self.teardown = 6;
+        }
+        self.destroy_instance_handle();
+    }
+
+    fn fence_retired(&self, fence: Handle) -> bool {
+        if fence.is_null() || self.device.is_null() {
+            return true;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+        status != VK_NOT_READY
+    }
+
+    fn arm_shutdown(&mut self) -> bool {
+        if self.shutdown_armed {
+            return true;
+        }
+        let Ok(graphics) = self.make_plain_fence() else {
+            return false;
+        };
+        self.shutdown_fence = graphics;
+        let distinct =
+            !self.compute_queue.is_null() && !std::ptr::eq(self.compute_queue, self.queue);
+        if distinct {
+            let Ok(fence) = self.make_plain_fence() else {
+                self.destroy_shutdown_fences();
+                return false;
+            };
+            self.shutdown_compute = fence;
+        }
+        // The queue can block in the driver until the compositor releases a
+        // buffer. The seat thread answers that while this thread waits.
+        let graphics_submitted = block(|| self.submit_empty(self.queue, self.shutdown_fence));
+        if !graphics_submitted {
+            self.destroy_shutdown_fences();
+            return false;
+        }
+        let compute_submitted =
+            !distinct || block(|| self.submit_empty(self.compute_queue, self.shutdown_compute));
+        if distinct && !compute_submitted {
+            unsafe {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+            }
+            self.shutdown_compute = std::ptr::null_mut();
+        }
+        self.shutdown_armed = true;
+        true
+    }
+
+    fn make_plain_fence(&mut self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct FenceInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+        }
+        let info = FenceInfo {
+            s_type: 8,
+            next: std::ptr::null(),
+            flags: 0,
+        };
+        let mut fence = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &info as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut fence,
+                ),
+                "shutdown fence",
+            )?;
+        }
+        Ok(fence)
+    }
+
+    fn submit_empty(&self, queue: Handle, fence: Handle) -> bool {
+        if queue.is_null() || fence.is_null() {
+            return false;
+        }
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 0,
+            cmds: std::ptr::null(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        let result = unsafe {
+            (self.fns.queue_submit)(queue, 1, &submit as *const Submit as *const u8, fence)
+        };
+        result == VK_SUCCESS
+    }
+
+    fn destroy_shutdown_fences(&mut self) {
+        if self.device.is_null() {
+            self.shutdown_fence = std::ptr::null_mut();
+            self.shutdown_compute = std::ptr::null_mut();
+            return;
+        }
+        unsafe {
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
+            }
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Images, buffers, and pipelines. The device, surface, and instance stay.
+    fn destroy_gpu_objects(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        self.lifecycle_release = true;
+        // Stream pages and staging buffers are device memory. Free them here,
+        // on the lifecycle step, instead of waiting idle in Drop.
+        teardown_phase("drop_stages", || self.drop_stages());
+        teardown_phase("drop_stream_resources", || self.drop_stream_resources());
+        let rest = Instant::now();
+        unsafe {
             self.destroy_targets();
             self.vertex = Buffer::empty();
             let mut vertices =
@@ -7931,6 +8814,12 @@ impl Drop for Gpu {
             self.destroy_image(&mut sampled_normal);
             self.destroy_buffer(&mut atlas_readback);
             self.destroy_buffer(&mut page_readback);
+            let mut atlas_mode = std::mem::replace(&mut self.atlas_mode, Buffer::empty());
+            self.destroy_buffer(&mut atlas_mode);
+            if !self.atlas_sampler.is_null() {
+                (self.fns.destroy_sampler)(self.device, self.atlas_sampler, std::ptr::null());
+                self.atlas_sampler = std::ptr::null_mut();
+            }
             if !self.transfer_done.is_null() {
                 (self.fns.destroy_sem)(self.device, self.transfer_done, std::ptr::null());
                 self.transfer_done = std::ptr::null_mut();
@@ -8039,13 +8928,67 @@ impl Drop for Gpu {
             if !self.aa_desc_layout.is_null() {
                 (self.fns.destroy_desc_layout)(self.device, self.aa_desc_layout, std::ptr::null());
             }
-            self.destroy_reflection();
-            (self.fns.destroy_device)(self.device, std::ptr::null());
-            if !self.surface.is_null() {
-                (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
             }
-            (self.fns.destroy_instance)(self.instance, std::ptr::null());
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
+            self.destroy_reflection();
         }
+        eprintln!(
+            "vk_teardown phase=buffers_images_pipelines_pools ms={:.2}",
+            rest.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    fn destroy_device_handle(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = self.device;
+        self.device = std::ptr::null_mut();
+        let traffic = traffic::snapshot();
+        eprintln!("vk_traffic {}", traffic.line());
+        eprintln!("vk_memory {}", traffic::memory_line());
+        eprintln!("vk_traffic_run {}", traffic::rate_line());
+        eprintln!("vk_teardown_by_type{}", traffic::destroy_line());
+        let wait = self.fns.device_wait;
+        teardown_phase("device_wait_idle", || unsafe {
+            wait(device);
+        });
+        teardown_phase("free_parked_memory", || traffic::free_parked(device));
+        let destroy = self.fns.destroy_device;
+        teardown_phase("vk_destroy_device", || unsafe {
+            destroy(device, std::ptr::null());
+        });
+    }
+
+    fn destroy_surface_handle(&mut self) {
+        if self.surface.is_null() || self.instance.is_null() {
+            self.surface = std::ptr::null_mut();
+            return;
+        }
+        let surface = self.surface;
+        self.surface = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_surface)(self.instance, surface, std::ptr::null());
+        }
+    }
+
+    fn destroy_instance_handle(&mut self) {
+        if self.instance.is_null() {
+            self.torn_down = true;
+            return;
+        }
+        let instance = self.instance;
+        self.instance = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_instance)(instance, std::ptr::null());
+        }
+        self.torn_down = true;
     }
 }
 
@@ -8088,7 +9031,8 @@ fn device_extension_present(
             unsafe extern "system" fn(Handle, *const c_void, *mut u32, *mut u8) -> VkResult;
         let enumerate: Enumerate = transmute(raw);
         let mut count = 0u32;
-        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0 || count == 0
+        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0
+            || count == 0
         {
             return false;
         }
@@ -8237,6 +9181,8 @@ fn load_fns(
             cmd_clear_color: d!("vkCmdClearColorImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
+            create_sampler: d!("vkCreateSampler"),
+            destroy_sampler: d!("vkDestroySampler"),
             create_fence: d!("vkCreateFence"),
             destroy_fence: d!("vkDestroyFence"),
             wait_fences: d!("vkWaitForFences"),
@@ -8278,6 +9224,36 @@ fn load_fns(
             get_query_results: d!("vkGetQueryPoolResults"),
         }
     }
+}
+
+fn load_fns_installed(
+    dload: impl Fn(&[u8]) -> Pfn,
+    create_wayland_surface: FnWayland,
+    destroy_surface: Fn2,
+    surface_support: FnSupport,
+    surface_caps: FnCaps,
+    surface_formats: FnCount,
+    surface_modes: FnCount,
+    destroy_instance: FnDestroy,
+    enumerate_devices: FnEnumDev,
+    queue_families: FnQueues,
+    mem_props: FnMemProps,
+) -> Fns {
+    let mut fns = load_fns(
+        dload,
+        create_wayland_surface,
+        destroy_surface,
+        surface_support,
+        surface_caps,
+        surface_formats,
+        surface_modes,
+        destroy_instance,
+        enumerate_devices,
+        queue_families,
+        mem_props,
+    );
+    traffic::install(&mut fns);
+    fns
 }
 
 fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
@@ -8605,6 +9581,17 @@ impl Default for GpuTimes {
     }
 }
 
+/// Run one teardown call and print how long it took, so a slow quit names
+/// the driver call that owns the time.
+fn teardown_phase(name: &str, f: impl FnOnce()) {
+    let start = Instant::now();
+    f();
+    eprintln!(
+        "vk_teardown phase={name} ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 #[cfg(test)]
 mod pass_time_tests {
     use super::pass_times;
@@ -8726,4 +9713,29 @@ mod memory_props {
         assert!(extension_listed(&listed, 1, name));
         assert!(!extension_listed(&listed, 1, b"VK_KHR_swapchain"));
     }
+}
+
+/// The device a frame was drawn on. Results from `Software` (lavapipe) prove
+/// correctness on that driver only; timings and real-GPU picture gates need `Hardware`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuKind {
+    /// `VK_PHYSICAL_DEVICE_TYPE_CPU`, e.g. lavapipe.
+    Software,
+    /// Integrated, discrete or virtual GPU.
+    Hardware,
+}
+
+impl GpuKind {
+    fn from_vk_device_type(device_type: u32) -> Self {
+        // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
+        if device_type == 4 {
+            Self::Software
+        } else {
+            Self::Hardware
+        }
+    }
+}
+
+fn block_texel(format: i32) -> bool {
+    matches!(format, 141 | 145 | 146 | 157 | 158)
 }
