@@ -881,6 +881,14 @@ mod tests {
             world_at < bit_at,
             "bit 21 is set only after the world submit"
         );
+        assert!(
+            gpu.contains("self.lighting.restir_spatial_pipe"),
+            "spatial must be its own pipeline"
+        );
+        assert!(
+            gpu.contains("restir_spatial_neighbors > 4"),
+            "the product neighbour count stays on the scalar spatial pipeline"
+        );
         assert_restir_words_under_restir_pix(direct);
     }
 

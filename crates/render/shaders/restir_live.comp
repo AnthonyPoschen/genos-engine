@@ -211,8 +211,17 @@ float restir_phat(uint recv, uint lamp) {
 
 // The product proposal is the light tree. initial_at's 64-bin weight array
 // is the checker's other proposal and is not compiled into this pass.
+// The spatial shader is a second pipeline (RESTIR_SPATIAL_ONLY). It does not
+// carry the tree, and the product cap does not carry the 17-wide merge lists.
+#ifndef RESTIR_SPATIAL_ONLY
 #define RESTIR_TREE_ONLY
 #include "restir_tree.glsl"
+#else
+#define RESTIR_TREE_ONLY
+#define RESTIR_NO_INITIAL
+const uint PROPOSAL_TREE = 2u;
+const uint PROPOSAL_TREE_FAULT = 3u;
+#endif
 #include "restir_sample.glsl"
 #include "restir_merge.glsl"
 #include "restir_spatial_ops.glsl"
@@ -469,6 +478,7 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     return false;
 }
 
+#ifndef RESTIR_SPATIAL_ONLY
 void restir_initial(uint pixel, out uint lamp, out float w_sum, out uint m, out float target) {
     initial_tree(pixel, lamp, w_sum, m, target);
     restir_store4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
@@ -576,7 +586,345 @@ void restir_temporal(uint pixel) {
     restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
     restir_temporal_from(pixel, lamp, w_sum, m, target);
 }
+#endif
 
+void restir_canon_at(uint at, out uint lamp, out float w, out uint m, out float target) {
+    restir_load4(at, lamp, w, m, target);
+    if (is_empty(lamp, m)) {
+        lamp = LAMP_EMPTY;
+        m = RESTIR_CANDIDATES;
+    }
+}
+
+float restir_slot_mass(uint lamp, float w, uint m, float target, float tq) {
+    if (is_empty(lamp, m) || !(tq > 0.0)) {
+        return 0.0;
+    }
+    return m_as_f(m) * reservoir_w(lamp, w, m, target) * tq;
+}
+
+bool restir_neighbor_ok(uint source, uint next, uint stride, float z_here, vec3 nrm) {
+    float z_stored = uintBitsToFloat(restir_words[next + source * stride + 4u]);
+    if (!(z_here > 0.0) || !(z_stored > 0.0)) {
+        return false;
+    }
+    float gap = abs(z_here - z_stored);
+    if (gap / z_here > RESTIR_DEPTH_REL && gap > RESTIR_DEPTH_ABS) {
+        return false;
+    }
+    vec3 npos;
+    vec3 nn;
+    if (!restir_pixel_surface(source, npos, nn)) {
+        return false;
+    }
+    float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
+    return restir_depth_normal(z_here, z_n, nrm, nn);
+}
+
+#if defined(RESTIR_SPATIAL_CAP)
+// Product neighbours (4). Slots stay in scalars. A 17-wide list is private
+// memory: at 1440p that was several GB of spill and the 8 ms spatial pass.
+// No visibility ray. p-hat is unshadowed lamp_light, same as balance_list.
+void restir_pick_four(uint index, uint receivers, out uint nbor, out uint p0, out uint p1, out uint p2, out uint p3) {
+    uint picked[16];
+    nbor = restir_pick_neighbors(index, receivers, picked);
+    p0 = 0u;
+    p1 = 0u;
+    p2 = 0u;
+    p3 = 0u;
+    if (nbor > 0u) {
+        p0 = picked[0];
+    }
+    if (nbor > 1u) {
+        p1 = picked[1];
+    }
+    if (nbor > 2u) {
+        p2 = picked[2];
+    }
+    if (nbor > 3u) {
+        p3 = picked[3];
+    }
+}
+
+void restir_apply_cap(
+    uint pixel, uint next, uint stride, uint n,
+    uint nkeep, uint a0, uint a1, uint a2, uint a3, float unit,
+    inout uint out_lamp, inout float out_w, inout uint out_m, inout float out_target
+) {
+    uint nslots = nkeep + 1u;
+    uint l0;
+    uint l1 = LAMP_EMPTY;
+    uint l2 = LAMP_EMPTY;
+    uint l3 = LAMP_EMPTY;
+    uint l4 = LAMP_EMPTY;
+    float w0;
+    float w1 = 0.0;
+    float w2 = 0.0;
+    float w3 = 0.0;
+    float w4 = 0.0;
+    uint m0;
+    uint m1 = 0u;
+    uint m2 = 0u;
+    uint m3 = 0u;
+    uint m4 = 0u;
+    float t0;
+    float t1 = 0.0;
+    float t2 = 0.0;
+    float t3 = 0.0;
+    float t4 = 0.0;
+    float q0;
+    float q1 = 0.0;
+    float q2 = 0.0;
+    float q3 = 0.0;
+    float q4 = 0.0;
+    restir_canon_at(next + pixel * stride, l0, w0, m0, t0);
+    q0 = phat_at(pixel, l0, n);
+    if (nkeep >= 1u) {
+        restir_canon_at(next + a0 * stride, l1, w1, m1, t1);
+        q1 = phat_at(pixel, l1, n);
+    }
+    if (nkeep >= 2u) {
+        restir_canon_at(next + a1 * stride, l2, w2, m2, t2);
+        q2 = phat_at(pixel, l2, n);
+    }
+    if (nkeep >= 3u) {
+        restir_canon_at(next + a2 * stride, l3, w3, m3, t3);
+        q3 = phat_at(pixel, l3, n);
+    }
+    if (nkeep >= 4u) {
+        restir_canon_at(next + a3 * stride, l4, w4, m4, t4);
+        q4 = phat_at(pixel, l4, n);
+    }
+    if (nslots == 2u && m0 == 0u) {
+        if (is_empty(l1, m1)) {
+            store_empty(out_lamp, out_w, out_m, out_target);
+        } else {
+            out_lamp = l1;
+            out_w = w1;
+            out_m = m1;
+            out_target = t1;
+        }
+        return;
+    }
+    float mass0 = restir_slot_mass(l0, w0, m0, t0, q0);
+    float mass1 = restir_slot_mass(l1, w1, m1, t1, q1);
+    float mass2 = restir_slot_mass(l2, w2, m2, t2, q2);
+    float mass3 = restir_slot_mass(l3, w3, m3, t3, q3);
+    float mass4 = restir_slot_mass(l4, w4, m4, t4, q4);
+    float area = mass0;
+    if (nslots > 1u) {
+        area += mass1;
+    }
+    if (nslots > 2u) {
+        area += mass2;
+    }
+    if (nslots > 3u) {
+        area += mass3;
+    }
+    if (nslots > 4u) {
+        area += mass4;
+    }
+    if (area <= 0.0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    int selected = -1;
+    if (nslots == 2u) {
+        if (mass1 > 0.0 && unit < mass1 / area) {
+            selected = 1;
+        } else if (mass0 > 0.0) {
+            selected = 0;
+        } else if (mass1 > 0.0) {
+            selected = 1;
+        }
+    } else {
+        float mark = unit * area;
+        float acc = 0.0;
+        int last = -1;
+        if (mass0 > 0.0) {
+            last = 0;
+            acc += mass0;
+            if (mark < acc) {
+                selected = 0;
+            }
+        }
+        if (selected < 0 && nslots > 1u && mass1 > 0.0) {
+            last = 1;
+            acc += mass1;
+            if (mark < acc) {
+                selected = 1;
+            }
+        }
+        if (selected < 0 && nslots > 2u && mass2 > 0.0) {
+            last = 2;
+            acc += mass2;
+            if (mark < acc) {
+                selected = 2;
+            }
+        }
+        if (selected < 0 && nslots > 3u && mass3 > 0.0) {
+            last = 3;
+            acc += mass3;
+            if (mark < acc) {
+                selected = 3;
+            }
+        }
+        if (selected < 0 && nslots > 4u && mass4 > 0.0) {
+            last = 4;
+            acc += mass4;
+            if (mark < acc) {
+                selected = 4;
+            }
+        }
+        if (selected < 0) {
+            selected = last;
+        }
+    }
+    if (selected < 0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    uint sel_lamp = l0;
+    float tq = q0;
+    uint sel_src = pixel;
+    if (selected == 1) {
+        sel_lamp = l1;
+        tq = q1;
+        sel_src = a0;
+    } else if (selected == 2) {
+        sel_lamp = l2;
+        tq = q2;
+        sel_src = a1;
+    } else if (selected == 3) {
+        sel_lamp = l3;
+        tq = q3;
+        sel_src = a2;
+    } else if (selected == 4) {
+        sel_lamp = l4;
+        tq = q4;
+        sel_src = a3;
+    }
+    float t_src = max(phat_at(sel_src, sel_lamp, n), 0.0);
+    tq = max(tq, 0.0);
+    if (tq <= 0.0 || t_src <= 0.0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    float denom = 0.0;
+    uint count = 0u;
+    if (m0 != 0u) {
+        count += m0;
+        denom += m_as_f(m0) * max(phat_at(pixel, sel_lamp, n), 0.0);
+    }
+    if (nslots > 1u && m1 != 0u) {
+        count += m1;
+        denom += m_as_f(m1) * max(phat_at(a0, sel_lamp, n), 0.0);
+    }
+    if (nslots > 2u && m2 != 0u) {
+        count += m2;
+        denom += m_as_f(m2) * max(phat_at(a1, sel_lamp, n), 0.0);
+    }
+    if (nslots > 3u && m3 != 0u) {
+        count += m3;
+        denom += m_as_f(m3) * max(phat_at(a2, sel_lamp, n), 0.0);
+    }
+    if (nslots > 4u && m4 != 0u) {
+        count += m4;
+        denom += m_as_f(m4) * max(phat_at(a3, sel_lamp, n), 0.0);
+    }
+    if (denom <= 0.0 || count == 0u) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    float w_new = area * t_src / (tq * denom);
+    out_lamp = sel_lamp;
+    out_w = w_new * m_as_f(count) * tq;
+    out_m = count;
+    out_target = tq;
+}
+
+void restir_spatial(uint pixel) {
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    uint receivers = width * height;
+    uint n = restir_hdr(0u);
+    uint stride = restir_hdr(19u);
+    uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(next + pixel * stride, lamp, w_sum, m, target);
+    uint out_lamp = lamp;
+    float out_w = w_sum;
+    uint out_m = m;
+    float out_target = target;
+    vec3 pos;
+    vec3 nrm;
+    bool surfaced = restir_pixel_surface(pixel, pos, nrm);
+    float z_here = surfaced ? dot(pos - scene.eye.xyz, scene.view_forward.xyz) : 0.0;
+    bool skip = false;
+    if (restir_hdr(47u) != 0u && width != 0u) {
+        uint x = pixel % width;
+        uint y = pixel / width;
+        skip = ((x + y) & 1u) != 0u;
+    }
+    if (!skip && surfaced && restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
+        uint nbor;
+        uint p0;
+        uint p1;
+        uint p2;
+        uint p3;
+        restir_pick_four(pixel, receivers, nbor, p0, p1, p2, p3);
+        float unit = next_f32();
+        uint nkeep = 0u;
+        uint a0 = 0u;
+        uint a1 = 0u;
+        uint a2 = 0u;
+        uint a3 = 0u;
+        if (nbor > 0u && restir_neighbor_ok(p0, next, stride, z_here, nrm)) {
+            a0 = p0;
+            nkeep = 1u;
+        }
+        if (nbor > 1u && restir_neighbor_ok(p1, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p1;
+            } else {
+                a1 = p1;
+            }
+            nkeep += 1u;
+        }
+        if (nbor > 2u && restir_neighbor_ok(p2, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p2;
+            } else if (nkeep == 1u) {
+                a1 = p2;
+            } else {
+                a2 = p2;
+            }
+            nkeep += 1u;
+        }
+        if (nbor > 3u && restir_neighbor_ok(p3, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p3;
+            } else if (nkeep == 1u) {
+                a1 = p3;
+            } else if (nkeep == 2u) {
+                a2 = p3;
+            } else {
+                a3 = p3;
+            }
+            nkeep += 1u;
+        }
+        if (nkeep != 0u) {
+            restir_apply_cap(
+                pixel, next, stride, n, nkeep, a0, a1, a2, a3, unit,
+                out_lamp, out_w, out_m, out_target);
+        }
+    }
+    restir_store4(restir_hdr(6u) + pixel * 4u, out_lamp, out_w, out_m, out_target);
+}
+#elif defined(RESTIR_SPATIAL_ONLY)
 void restir_spatial(uint pixel) {
     uint width = restir_hdr(7u);
     uint height = restir_hdr(8u);
@@ -632,22 +980,7 @@ void restir_spatial(uint pixel) {
                 // buffer. A depth miss fails the live test too, so the gbuffer
                 // fetch and p-hat are skipped. A depth hit still uses the live
                 // surface, including its full-precision normal.
-                float z_stored = uintBitsToFloat(restir_words[next + source * stride + 4u]);
-                if (!(z_here > 0.0) || !(z_stored > 0.0)) {
-                    continue;
-                }
-                float gap = abs(z_here - z_stored);
-                if (gap / z_here > RESTIR_DEPTH_REL && gap > RESTIR_DEPTH_ABS) {
-                    continue;
-                }
-                vec3 npos;
-                vec3 nn;
-                bool ok = restir_pixel_surface(source, npos, nn);
-                if (ok) {
-                    float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
-                    ok = restir_depth_normal(z_here, z_n, nrm, nn);
-                }
-                if (!ok) {
+                if (!restir_neighbor_ok(source, next, stride, z_here, nrm)) {
                     continue;
                 }
                 src_recv[nslots] = source;
@@ -669,6 +1002,7 @@ void restir_spatial(uint pixel) {
     }
     restir_store4(restir_hdr(6u) + pixel * 4u, out_lamp, out_w, out_m, out_target);
 }
+#endif
 
 void restir_checker_copy(uint pixel) {
     if (restir_hdr(47u) == 0u) {
@@ -713,6 +1047,15 @@ void main() {
     // The sample stays in registers. Reloading it from the buffer raced the
     // store on the 4070 and the picture moved with frame pacing.
     // Header 50 set: pass 1 is the temporal dispatch, after the host barrier.
+    // Spatial is a separate pipeline so this entry point does not keep the
+    // merge lists live across the tree walk.
+#ifdef RESTIR_SPATIAL_ONLY
+    if (pass_id == 2u) {
+        restir_spatial(pixel);
+    } else {
+        restir_checker_copy(pixel);
+    }
+#else
     if (pass_id == 0u) {
         uint lamp;
         float w_sum;
@@ -723,13 +1066,8 @@ void main() {
             restir_rng(pixel, 1u);
             restir_temporal_from(pixel, lamp, w_sum, m, target);
         }
-    } else if (pass_id == 1u) {
-        if (restir_hdr(50u) != 0u) {
-            restir_temporal(pixel);
-        }
-    } else if (pass_id == 2u) {
-        restir_spatial(pixel);
-    } else {
-        restir_checker_copy(pixel);
+    } else if (pass_id == 1u && restir_hdr(50u) != 0u) {
+        restir_temporal(pixel);
     }
+#endif
 }

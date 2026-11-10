@@ -334,6 +334,10 @@ pub(crate) struct Lighting {
     /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
     restir_buf: Buffer,
     restir_pipe: Handle,
+    /// Product spatial pass. Four neighbours, scalar slots, no light tree.
+    restir_spatial_pipe: Handle,
+    /// Spatial pass when the neighbour knob is above 4. The 17-wide lists stay here.
+    restir_spatial_wide: Handle,
     restir_direct: Handle,
     /// This frame shades screen pixels from the reservoir.
     restir_frame: bool,
@@ -595,6 +599,8 @@ impl Default for Lighting {
             shade_gate: LampShadeGate::Product,
             restir_buf: Buffer::empty(),
             restir_pipe: std::ptr::null_mut(),
+            restir_spatial_pipe: std::ptr::null_mut(),
+            restir_spatial_wide: std::ptr::null_mut(),
             restir_direct: std::ptr::null_mut(),
             restir_frame: false,
             restir_slot: 0,
@@ -2948,6 +2954,32 @@ impl Gpu {
             }
             self.note_pipeline_time("restir-di", start);
         }
+        if self.lighting.restir_spatial_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial") {
+                Ok(pipe) => self.lighting.restir_spatial_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial", start);
+        }
+        if self.lighting.restir_spatial_wide.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                RESTIR_SPATIAL_WIDE_SPV,
+                self.lighting.layout,
+                "restir-spatial-wide",
+            ) {
+                Ok(pipe) => self.lighting.restir_spatial_wide = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial-wide pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial-wide", start);
+        }
         if self.lighting.restir_direct.is_null() {
             let start = Instant::now();
             match self.make_compute_pipe(
@@ -3064,7 +3096,17 @@ impl Gpu {
     }
 
     fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
-        let pipe = self.lighting.restir_pipe;
+        // Pass 2 and the checker copy are the spatial pipeline. The initial
+        // pipeline does not contain that pass, so the tree walk does not keep
+        // the merge lists in its live range. Four neighbours is the scalar
+        // shader. Above that, the wide shader keeps the 17-wide lists.
+        let pipe = if pass < 2 {
+            self.lighting.restir_pipe
+        } else if self.lighting.settings.restir_spatial_neighbors > 4 {
+            self.lighting.restir_spatial_wide
+        } else {
+            self.lighting.restir_spatial_pipe
+        };
         let mut base = 0u32;
         let span = crate::restir_live::GROUP_LIMIT.saturating_mul(crate::restir_live::GROUP_SIZE);
         while base < pixels {
@@ -3102,8 +3144,11 @@ impl Gpu {
         else {
             return;
         };
-        let pipe = self.lighting.restir_pipe;
-        if pipe.is_null() || pixels == 0 {
+        if self.lighting.restir_pipe.is_null()
+            || self.lighting.restir_spatial_pipe.is_null()
+            || self.lighting.restir_spatial_wide.is_null()
+            || pixels == 0
+        {
             return;
         }
         let stamp = !pool.is_null();
@@ -4233,6 +4278,8 @@ impl Gpu {
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
                 .chain(std::iter::once(&mut self.lighting.restir_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
                 .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))

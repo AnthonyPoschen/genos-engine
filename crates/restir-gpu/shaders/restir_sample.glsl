@@ -97,6 +97,8 @@ void store_empty(out uint lamp, out float w_sum, out uint m, out float target) {
 
 // Tree proposal only. The live pass compiles this and not initial_at, so it
 // does not allocate the 64-bin weight array the other proposals use.
+// RESTIR_NO_INITIAL: the spatial shader does not carry either proposal.
+#ifndef RESTIR_NO_INITIAL
 #ifdef RESTIR_TREE_ONLY
 void initial_tree(uint recv, out uint lamp, out float w_sum, out uint m, out float target) {
     lamp = LAMP_EMPTY;
@@ -167,4 +169,5 @@ void initial_at(uint recv, uint n, out uint lamp, out float w_sum, out uint m, o
         store_empty(lamp, w_sum, m, target);
     }
 }
+#endif
 #endif
