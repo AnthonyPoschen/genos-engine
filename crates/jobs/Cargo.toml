@@ -8,4 +8,8 @@ description = "Fiber-free work-stealing scheduler. Serial mode is the oracle."
 [lints]
 workspace = true
 
+[features]
+loom = ["dep:loom"]
+
 [dependencies]
+loom = { version = "0.7", optional = true }

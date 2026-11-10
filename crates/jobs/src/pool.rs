@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -178,7 +178,18 @@ pub struct Scheduler {
     deferred: AtomicU32,
     over_budget: AtomicU32,
     slack_during_fence: AtomicU32,
+    /// Planted bug for `debug/jobs --mutate`. `0` is correct code.
+    plant: AtomicU8,
+    /// Fail [`Self::run`]'s worker spawn once this many workers exist.
+    /// `usize::MAX` spawns every worker. Tests use a small value.
+    spawn_fail_after: AtomicUsize,
 }
+
+const PLANT_UNORDERED: u8 = 1;
+const PLANT_SERVER: u8 = 2;
+const PLANT_NESTED: u8 = 3;
+const PLANT_SLACK: u8 = 4;
+const PLANT_MISLABEL: u8 = 5;
 
 impl Scheduler {
     /// Build from settings and a clock.
@@ -201,7 +212,27 @@ impl Scheduler {
             deferred: AtomicU32::new(0),
             over_budget: AtomicU32::new(0),
             slack_during_fence: AtomicU32::new(0),
+            plant: AtomicU8::new(0),
+            spawn_fail_after: AtomicUsize::new(usize::MAX),
         }
+    }
+
+    /// Plant one `--mutate` bug. The next frames misbehave in that way.
+    ///
+    /// # Errors
+    ///
+    /// `name` is not a known mutation.
+    pub fn plant(&self, name: &str) -> Result<(), String> {
+        let code = match name {
+            "unordered_slots" => PLANT_UNORDERED,
+            "server_runs_parallel" => PLANT_SERVER,
+            "nested_wait" => PLANT_NESTED,
+            "slack_in_fence" => PLANT_SLACK,
+            "mislabeled" => PLANT_MISLABEL,
+            other => return Err(format!("unknown plant {other}")),
+        };
+        self.plant.store(code, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Serial, workers 0, a 6 ms budget, Slack on, manual clock at 0.
@@ -226,7 +257,9 @@ impl Scheduler {
         }
     }
 
-    /// Counters accumulated by this scheduler, including a failed [`Self::run`].
+    /// Counters for the last frame, including a failed [`Self::run`].
+    ///
+    /// The next [`Self::run`] clears them first. A nested run does not.
     #[must_use]
     pub fn counters(&self) -> Stats {
         self.snapshot(0.0, 0.0, 0.0, &[])
@@ -239,10 +272,15 @@ impl Scheduler {
     /// A duplicate index, a gap, a full queue, a spawn failure, a panic, or a
     /// nested `run`.
     pub fn run<T: Send + 'static>(&self, jobs: Vec<Job<T>>) -> Result<Report<T>, ScheduleError> {
-        if in_task() {
+        let nested = in_task();
+        if nested && self.plant.load(Ordering::Relaxed) != PLANT_NESTED {
             self.rejected.fetch_add(1, Ordering::Relaxed);
             return Err(ScheduleError::Rejected);
         }
+        if !nested {
+            self.reset_frame();
+        }
+        let frame_start = self.clock.now_ms();
         let mut stages = BTreeMap::<u32, Vec<Job<T>>>::new();
         for job in jobs {
             stages.entry(job.stage).or_default().push(job);
@@ -259,13 +297,18 @@ impl Scheduler {
             let mut by_class = split_classes(jobs);
             for class in [Class::Must, Class::Soon, Class::Slack, Class::Pumped] {
                 let class_jobs = by_class.remove(&class_rank(class)).unwrap_or_default();
-                let wall = self.run_class(class, class_jobs, &mut slots, &mut labels)?;
+                let wall =
+                    self.run_class(class, class_jobs, &mut slots, &mut labels, frame_start)?;
                 match class {
                     Class::Must => must_wall += wall,
                     Class::Soon => soon_wall += wall,
                     Class::Slack => slack_wall += wall,
                     Class::Pumped => {}
                 }
+            }
+            let plant = self.plant.load(Ordering::Relaxed);
+            if plant == PLANT_UNORDERED || plant == PLANT_SERVER {
+                slots.reverse();
             }
             out.push(StageSlots { stage, slots });
         }
@@ -284,6 +327,7 @@ impl Scheduler {
         jobs: Vec<Job<T>>,
         slots: &mut [Option<T>],
         labels: &mut Vec<(&'static str, f64)>,
+        frame_start: f64,
     ) -> Result<f64, ScheduleError> {
         if jobs.is_empty() {
             return Ok(0.0);
@@ -295,19 +339,25 @@ impl Scheduler {
             );
             return Ok(0.0);
         }
-        if class == Class::Soon && self.clock.now_ms() >= self.budget_ms {
+        let elapsed = self.clock.now_ms() - frame_start;
+        if class == Class::Soon && elapsed >= self.budget_ms {
             self.deferred.fetch_add(
                 u32::try_from(jobs.len()).unwrap_or(u32::MAX),
                 Ordering::Relaxed,
             );
             return Ok(0.0);
         }
-        if class == Class::Slack
-            && (self.seat.load(Ordering::Relaxed) > 0
-                || !self.slack
-                || self.clock.now_ms() >= self.budget_ms)
-        {
-            return Ok(0.0);
+        if class == Class::Slack {
+            let fenced = self.seat.load(Ordering::Relaxed) > 0;
+            let forced = fenced && self.plant.load(Ordering::Relaxed) == PLANT_SLACK;
+            if forced {
+                self.slack_during_fence.fetch_add(
+                    u32::try_from(jobs.len()).unwrap_or(u32::MAX),
+                    Ordering::Relaxed,
+                );
+            } else if fenced || !self.slack || elapsed >= self.budget_ms {
+                return Ok(0.0);
+            }
         }
         let start = self.clock.now_ms();
         let parallel = self.order == Order::Parallel && self.workers > 0 && jobs.len() > 1;
@@ -325,7 +375,7 @@ impl Scheduler {
         slots: &mut [Option<T>],
         labels: &mut Vec<(&'static str, f64)>,
     ) -> Result<(), ScheduleError> {
-        for job in jobs {
+        for job in self.relabel(jobs) {
             let index = usize::try_from(job.index).unwrap_or(0);
             let (value, elapsed, panicked) = invoke(self.clock.as_ref(), job.work);
             labels.push((job.label, elapsed));
@@ -346,6 +396,7 @@ impl Scheduler {
         slots: &mut [Option<T>],
         labels: &mut Vec<(&'static str, f64)>,
     ) -> Result<(), ScheduleError> {
+        let jobs = self.relabel(jobs);
         let access: Vec<Vec<_>> = jobs.iter().map(|job| job.access.clone()).collect();
         let batches = conflict_batches(&access);
         let mut parked: Vec<Option<Job<T>>> = jobs.into_iter().map(Some).collect();
@@ -353,7 +404,10 @@ impl Scheduler {
             let units = take_batch(&mut parked, &batch);
             run_batch(
                 units,
-                self.workers,
+                BatchLimits {
+                    workers: self.workers,
+                    spawn_fail_after: self.spawn_fail_after.load(Ordering::Relaxed),
+                },
                 Arc::clone(&self.clock),
                 &self.steals,
                 &self.panics,
@@ -362,6 +416,29 @@ impl Scheduler {
             )?;
         }
         Ok(())
+    }
+
+    fn reset_frame(&self) {
+        self.rejected.store(0, Ordering::Relaxed);
+        self.panics.store(0, Ordering::Relaxed);
+        self.steals.store(0, Ordering::Relaxed);
+        self.deferred.store(0, Ordering::Relaxed);
+        self.over_budget.store(0, Ordering::Relaxed);
+        self.slack_during_fence.store(0, Ordering::Relaxed);
+    }
+
+    fn relabel<T>(&self, jobs: Vec<Job<T>>) -> Vec<Job<T>> {
+        if self.plant.load(Ordering::Relaxed) != PLANT_MISLABEL {
+            return jobs;
+        }
+        jobs.into_iter()
+            .map(|mut job| {
+                if job.label == "physics" {
+                    job.label = "anim";
+                }
+                job
+            })
+            .collect()
     }
 
     fn snapshot(
@@ -439,6 +516,13 @@ fn take_batch<T: Send + 'static>(jobs: &mut [Option<Job<T>>], batch: &[usize]) -
     units
 }
 
+fn join_workers<T>(handles: Vec<thread::JoinHandle<()>>, share: &Share<T>) {
+    share.remaining.store(0, Ordering::Release);
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
 fn invoke<T>(clock: &dyn Clock, work: Box<dyn FnOnce() -> T + Send>) -> (Option<T>, f64, bool) {
     IN_TASK.with(|flag| flag.set(true));
     let start = clock.now_ms();
@@ -451,9 +535,15 @@ fn invoke<T>(clock: &dyn Clock, work: Box<dyn FnOnce() -> T + Send>) -> (Option<
     }
 }
 
+#[derive(Clone, Copy)]
+struct BatchLimits {
+    workers: usize,
+    spawn_fail_after: usize,
+}
+
 fn run_batch<T: Send + 'static>(
     units: Vec<Unit<T>>,
-    workers: usize,
+    limits: BatchLimits,
     clock: Arc<dyn Clock>,
     steals: &AtomicU32,
     panics: &AtomicU32,
@@ -474,7 +564,7 @@ fn run_batch<T: Send + 'static>(
         }
         return Ok(());
     }
-    let runners = workers + 1;
+    let runners = limits.workers + 1;
     let capacity = units.len().next_power_of_two().max(2);
     let mut deques = Vec::with_capacity(runners);
     for _ in 0..runners {
@@ -499,14 +589,27 @@ fn run_batch<T: Send + 'static>(
     };
     let mut handles = Vec::new();
     for id in 1..runners {
-        let owner = Arc::clone(deques.get(id).ok_or(ScheduleError::Spawn)?);
+        if handles.len() >= limits.spawn_fail_after {
+            join_workers(handles, &share);
+            return Err(ScheduleError::Spawn);
+        }
+        let Some(owner) = deques.get(id) else {
+            join_workers(handles, &share);
+            return Err(ScheduleError::Spawn);
+        };
+        let owner = Arc::clone(owner);
         let all = deques.clone();
-        let share = share.clone_handles();
-        let handle = thread::Builder::new()
+        let share_for_worker = share.clone_handles();
+        let spawned = thread::Builder::new()
             .name(format!("genos-job-{id}"))
-            .spawn(move || worker_loop(&owner, &all, &share))
-            .map_err(|_| ScheduleError::Spawn)?;
-        handles.push(handle);
+            .spawn(move || worker_loop(&owner, &all, &share_for_worker));
+        match spawned {
+            Ok(handle) => handles.push(handle),
+            Err(_err) => {
+                join_workers(handles, &share);
+                return Err(ScheduleError::Spawn);
+            }
+        }
     }
     let owner = Arc::clone(deques.first().ok_or(ScheduleError::Spawn)?);
     worker_loop(&owner, &deques, &share);
@@ -662,4 +765,63 @@ pub fn hash_slots(stages: &[StageSlots<u64>]) -> u64 {
 
 fn mix(hash: u64, value: u64) -> u64 {
     hash.wrapping_mul(0x0000_0100_0000_01b3) ^ value
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use super::Scheduler;
+    use crate::{Class, Job, JobSettings, ManualClock, Order, ScheduleError};
+
+    #[test]
+    fn a_failed_spawn_joins_the_workers_already_started() {
+        let scheduler = Scheduler::new(
+            JobSettings {
+                workers: 4,
+                order: Order::Parallel,
+                frame_budget_ms: 6.0,
+                slack: false,
+            },
+            Arc::new(ManualClock::new(0.0)),
+        );
+        scheduler.spawn_fail_after.store(1, Ordering::Relaxed);
+        let jobs = (0..4u32)
+            .map(|index| Job {
+                stage: 0,
+                index,
+                class: Class::Must,
+                label: "move",
+                access: Vec::new(),
+                work: Box::new(move || u64::from(index)),
+            })
+            .collect();
+        let err = scheduler.run(jobs).unwrap_err();
+        assert!(matches!(err, ScheduleError::Spawn));
+        scheduler
+            .spawn_fail_after
+            .store(usize::MAX, Ordering::Relaxed);
+        let report = scheduler
+            .run(vec![
+                Job {
+                    stage: 0,
+                    index: 0,
+                    class: Class::Must,
+                    label: "move",
+                    access: Vec::new(),
+                    work: Box::new(|| 1u64),
+                },
+                Job {
+                    stage: 0,
+                    index: 1,
+                    class: Class::Must,
+                    label: "move",
+                    access: Vec::new(),
+                    work: Box::new(|| 2u64),
+                },
+            ])
+            .unwrap();
+        assert_eq!(report.stages[0].slots, vec![Some(1), Some(2)]);
+    }
 }
