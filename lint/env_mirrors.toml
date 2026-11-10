@@ -18,6 +18,21 @@ kind = "mirror"
 detail = "--fps-hz"
 
 [[var]]
+name = "GENOS_JOBS_WORKERS"
+kind = "mirror"
+detail = "--jobs-workers"
+
+[[var]]
+name = "GENOS_JOBS_ORDER"
+kind = "mirror"
+detail = "--jobs-order"
+
+[[var]]
+name = "GENOS_JOBS_BUDGET_MS"
+kind = "mirror"
+detail = "--jobs-budget-ms"
+
+[[var]]
 name = "GENOS_MENU"
 kind = "mirror"
 detail = "--menu"

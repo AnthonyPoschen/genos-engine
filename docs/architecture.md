@@ -41,12 +41,14 @@ crates/math/        package genos-math
 crates/physics/     package genos-physics
 crates/fracture/    package genos-fracture
 crates/ecs/         package genos-ecs
+crates/jobs/        package genos-jobs
 crates/scene/       package genos-scene
 crates/mcp/         package genos-mcp
 crates/debug/       package genos-debug
 debug/scene-lib/    package genos-scene-lib
 debug/lighting/     package genos-lighting
 debug/ecs/          package genos-ecs-debug
+debug/jobs/         package genos-jobs-debug
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
@@ -63,6 +65,8 @@ examples/camera/    package genos-camera
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
 
 `genos-ecs` stores placed objects in archetype tables. A scene handle is an index plus a generation. Each component cell stores the tick of its last write and can encode itself to bytes, so a replication pass can send one component. The crate does not open a window or a socket. The headless check is the `genos-ecs` binary in `genos-ecs-debug`: `--check` writes `./genos-debug/ecs/metrics.json`. `--out` changes that directory.
+
+`genos-jobs` runs a frame of jobs on a work-stealing deque. Serial mode is the server tick and the replay. The headless check is the `genos-jobs` binary in `genos-jobs-debug`: `--check` writes `./genos-debug/jobs/metrics.json`. `--out` changes that directory. `--jobs-workers`, `--jobs-order`, and `--jobs-budget-ms` are mirrored by `GENOS_JOBS_WORKERS`, `GENOS_JOBS_ORDER`, and `GENOS_JOBS_BUDGET_MS` when the argument was omitted.
 
 `genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `reflections-check` is a binary in that crate: analytic gates for specular reflections, mirrors, portals, and water. It writes `./genos-debug/reflections/metrics.json`. The optics it grades live are `genos-math` `optics`, and the GLSL mirror is compiled with the renderer. The reflection passes are not in this crate. See [the reflections design](systems/reflections-design.md). `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
