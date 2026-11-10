@@ -120,7 +120,8 @@ fn default_fine_shown(
     seed: [f32; 3],
     seed_w: f32,
 ) -> [f32; 3] {
-    if field_fresh && field.iter().any(|c| *c > 0.0) {
+    // Support is the caller's field_fresh flag. A filtered black is the estimate.
+    if field_fresh {
         return field;
     }
     if own_w > 0.5 {
@@ -406,7 +407,7 @@ fn a_default_fine_texel_shows_the_seed_then_its_own_mean() {
     let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
     precedes(
         shown,
-        "if ((gstats.ctrl_bits & 64u) == 0u && lighting_world_mode() == 3u)",
+        "if ((lighting_ctrl_bits() & 64u) == 0u && lighting_world_mode() == 3u)",
         "if (lighting_sc_svgf())",
     );
     precedes(
@@ -443,6 +444,13 @@ fn a_default_fine_texel_shows_the_seed_then_its_own_mean() {
         default_fine_shown(true, field, own, 1.0, seed, SEED_CONFIDENCE),
         field
     ));
+    assert!(
+        near(
+            default_fine_shown(true, [0.0; 3], own, 1.0, seed, SEED_CONFIDENCE),
+            [0.0; 3]
+        ),
+        "a fresh filtered black is the estimate"
+    );
 }
 
 #[test]
@@ -684,7 +692,7 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
 fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
     let relight = shader("lighting_cache.comp");
     let settle = relight
-        .find("if (lighting_lamp_settling())")
+        .find("if (lighting_lamp_noted())")
         .expect("lamp settle");
     let put = relight[settle..]
         .find("lighting_sh_put")
@@ -751,8 +759,12 @@ fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
         "the rejection must not read the quarter scratch"
     );
     assert!(screen.contains(
-        "if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
+        "if (!detail_kept && own_sets < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
     ));
+    assert!(
+        screen.contains("float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));"),
+        "the empty-corner fallback keys off the own-sample count, not the seed"
+    );
     assert!(
         screen.contains("detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n)"),
         "the hit fill stays for SH cells when texel detail is off"

@@ -228,7 +228,12 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     }
     // A ring entry that reaches the texel is a lamp change. The live cell still
     // agrees within the sparse ratio. The rays are not cut.
-    let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK];
+    // An empty texel (STABLE, zero sets) keeps its rays. Agreement of a full
+    // count, including a full count of black, may hold.
+    let stable = &rows[STABLE];
+    assert_eq!(stable.held, 0, "zero sets keep their rays");
+    assert_eq!(stable.rays, 0);
+    let held_rows = [SEED_DIFF, OWN_AGREE, BLACK, MIX_OK];
     for id in held_rows {
         let row = &rows[id];
         assert_eq!(row.held, 1, "row {id} should hold");
@@ -282,8 +287,8 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     let rays: u32 = rows.iter().map(|row| row.rays).sum();
     assert_eq!(word(&words, 0), held);
     assert_eq!(word(&words, 1), rays);
-    assert_eq!(held, 6);
-    assert_eq!(rays, 6 * FULL_SET);
+    assert_eq!(held, 4);
+    assert_eq!(rays, 4 * FULL_SET);
     assert_eq!(word(&words, 2), 0, "the gate does not list a young cell");
     assert_eq!(word(&words, 3), 0, "the gate does not list a world-cell refresh");
 }
