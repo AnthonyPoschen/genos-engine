@@ -1,6 +1,6 @@
 # Scene ECS (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. No code in this change.
+Status: accepted, 10 Nov 2026. Owner: Engine. The tables are `genos-ecs` (`crates/ecs`). `genos-scene` still stores walls, solids, and lights in typed vecs until the migration. The headless check is `debug/ecs`.
 
 The live scene is four arrays and a side table of names. That is enough for one scripted room. It is not enough for the four systems that have to name an object and find it again later. [Animation](animation.md) needs a parent link for joints. The [physics plan](physics/plan.md) scales to thousands of bodies and says snapshot order is `NetId` order once bodies live on stable ids. Save, load, and MCP undo need a name that survives a removal and a reload. Lighting invalidation needs a change record per object that moved, which [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) already specifies and the scene does not yet emit. The [job system](job-system.md) runs the wide passes; this design is the storage those passes iterate.
 
@@ -17,6 +17,7 @@ One table of placed objects, each with a scene handle that a save file, an undo 
 | Piece | State | Code |
 |---|---|---|
 | Scene storage | One `Floor`, `Vec<Wall>`, `Vec<Solid>`, `Vec<Light>`, plus settings structs | `Scene` in `crates/scene/src/types.rs` |
+| Object store | Archetype tables, a scene handle (index plus generation), a write tick per cell, and component bytes | `genos-ecs` in `crates/ecs`. The scene vecs do not use it yet |
 | Ids on the objects | None. `Wall`, `Solid`, and `Light` have no handle field | `types.rs` |
 | Live names | A side table. `Handles::index` assigns from 1 every time a `Host` is built. The strings are `floor`, `wall:<id>`, `solid:<id>`, `light:<id>` | `crates/mcp/src/live.rs` |
 | Edit path | `set_object` / `spawn_object` / `remove_object`. A geometry edit calls `Camera::attach_scene`, which rebuilds colliders. The `.rhai` file is not written | `live.rs`; [scene record](scene.md) limits |
@@ -136,7 +137,7 @@ Records are sorted by scene handle before they are published, so two runs with t
 
 ## 10. Migration
 
-The work stays in `genos-scene`, `genos-mcp`, and `genos-render`. No new crate. Each step is one commit, keeps the camera and scene tests green, and adds the test on that row. The scene record and `CONTEXT.md` change in the step that changes the handle's meaning or the picture.
+The work for the placed objects stays in `genos-scene`, `genos-mcp`, and `genos-render`. The tables themselves are `genos-ecs` ([ADR 0032](../adr/0032-scene-ecs-and-transform-hierarchy.md) amendment, 10 Nov 2026): animation and replication take that crate without Rhai, the camera, or the lighting settings. Each step is one commit, keeps the camera and scene tests green, and adds the test on that row. The scene record and `CONTEXT.md` change in the step that changes the handle's meaning or the picture.
 
 | Step | Change | Test |
 |---|---|---|

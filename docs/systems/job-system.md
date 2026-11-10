@@ -1,6 +1,6 @@
 # Job system (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. No code in this change.
+Status: accepted, 10 Nov 2026. Owner: Engine. The pool is not in the tree yet. [ADR 0031](../adr/0031-job-system.md) is the decision.
 
 This is the CPU scheduler the rest of the building blocks wait on. [Animation](animation.md) samples many skeletons on the CPU. The [physics plan](physics/plan.md) (P23, P24, P26) runs a wide solve that must hash-match the one-thread step. Save, load, and the net snapshot are ordered by the [scene ECS](ecs-scene.md), and that order is only useful if the parallel pass reduces in the same order every time. The scheduler is the piece that makes those four wide without making the server or a replay depend on which worker finished first.
 

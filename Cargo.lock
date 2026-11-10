@@ -168,6 +168,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-ecs"
+version = "0.1.0"
+dependencies = [
+ "genos-load",
+]
+
+[[package]]
+name = "genos-ecs-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-ecs",
+]
+
+[[package]]
 name = "genos-fog-check"
 version = "0.1.0"
 dependencies = [

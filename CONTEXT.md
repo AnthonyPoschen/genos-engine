@@ -81,8 +81,12 @@ The view a game uses to look at the world.
 _Avoid_: Viewport, spectator
 
 **Scene handle**:
-A stable name for one floor, wall, solid, or light in the live scene. The floor name is `floor`.
+A stable name for one placed object. It is an index plus a generation. A stale generation misses after the slot is reused. The floor's handle is index 0, generation 1, and its MCP string stays `floor`.
 _Avoid_: Entity id
+
+**Prefab**:
+A `.gprefab` file of components. Spawning it copies those components onto new scene handles. An override is a component on the instance. The room script stays a script.
+_Avoid_: Blueprint
 
 **Agent endpoint**:
 The loopback MCP session on the running camera. An agent reads and edits the live scene there.

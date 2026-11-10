@@ -9,6 +9,7 @@ members = [
     "crates/bake",
     "crates/physics",
     "crates/fracture",
+    "crates/ecs",
     "crates/scene",
     "crates/mcp",
     "crates/debug",
@@ -28,6 +29,7 @@ members = [
     "debug/scene-lib",
     "debug/lighting",
     "debug/physics",
+    "debug/ecs",
 ]
 
 [workspace.lints.rust]
