@@ -140,7 +140,30 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         u32::from(settings.denoiser.enabled && settings.denoiser.screen),
         // Bit 0: reservoirs are allocated. Bit 1: a second slot for spatial reuse.
         // Radius 0 is one slot (temporal only).
-        u32::from(settings.lamp_pick.reuse()) | (u32::from(settings.lamp_pick.radius > 0) << 1),
+        // Bit 2: ReSTIR DI reservoirs. Sized while nothing is in flight.
+        u32::from(settings.lamp_pick.reuse())
+            | (u32::from(settings.lamp_pick.radius > 0) << 1)
+            | (u32::from(settings.restir_di) << 2),
+    )
+}
+
+/// The ReSTIR direct module is the product shade. Exact, random, and
+/// broken stay on the existing module, and so does `restir_di` off.
+pub(crate) fn restir_product_shade(restir_di: bool, gate: LampShadeGate) -> bool {
+    restir_di && gate == LampShadeGate::Product
+}
+
+/// `restir_di` off is the labelled exact sum for a pixel mode that used to sample.
+///
+/// Mode off already walks every lamp. Hits leave pixels on that walk.
+/// The noise gate's random, exact, and broken bits are not this switch.
+pub(crate) fn restir_off_is_exact(restir_di: bool, mode: LampPickMode, gate: LampShadeGate) -> bool {
+    if restir_di || gate != LampShadeGate::Product {
+        return false;
+    }
+    matches!(
+        mode,
+        LampPickMode::Reuse | LampPickMode::Pixels | LampPickMode::Both
     )
 }
 
@@ -150,7 +173,7 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
 /// persist a fault injection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LampShadeGate {
-    /// The preset's shade. A quiet held view can take the exact sum and hold.
+    /// The preset's shade. ReSTIR DI when `restir_di` is on. Off is the exact sum.
     #[default]
     Product,
     /// Every point lamp, inside the reuse shade. The gate's baseline.
@@ -169,29 +192,6 @@ pub(crate) fn lamp_shade_bits(gate: LampShadeGate) -> u32 {
         LampShadeGate::Random => 1 << 18,
         // Hold off as well, or a still view would shade the exact sum and pass.
         LampShadeGate::Broken => (1 << 18) | (1 << 20),
-    }
-}
-
-/// Point lamps at or under this count shade the exact sum.
-///
-/// Matches `LAMP_PICK_EXACT_LIT` in `lighting_lamp_pick.glsl`.
-const DIRECT_PLAIN_LAMPS: u32 = 8;
-
-/// Bind the pre-reservoir direct shade.
-///
-/// Off traces every lamp. Reuse of at most [`DIRECT_PLAIN_LAMPS`] point lamps
-/// does too, then holds on a matching signature. The reservoir module's
-/// register file was the direct-pass cost on that path. The noise gate stays
-/// on the reservoir module so a still view can grade the random path. Hits,
-/// pixels, and both stay there: those modes are the lamp-pick tests.
-pub(crate) fn direct_shade_plain(mode: LampPickMode, point_lamps: u32, gate: LampShadeGate) -> bool {
-    if gate != LampShadeGate::Product {
-        return false;
-    }
-    match mode {
-        LampPickMode::Off => true,
-        LampPickMode::Reuse => point_lamps <= DIRECT_PLAIN_LAMPS,
-        LampPickMode::Hits | LampPickMode::Pixels | LampPickMode::Both => false,
     }
 }
 
@@ -821,19 +821,22 @@ mod probe_still_tests {
     }
 
     #[test]
-    fn few_lamp_reuse_binds_the_pre_reservoir_shade() {
+    fn restir_off_is_the_exact_reference_and_not_a_sample() {
         use genos_scene::LampPickMode;
-        assert!(direct_shade_plain(LampPickMode::Off, 5, LampShadeGate::Product));
-        assert!(direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Product));
-        assert!(direct_shade_plain(LampPickMode::Reuse, 8, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 9, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 16, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Random));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Exact));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Broken));
-        assert!(!direct_shade_plain(LampPickMode::Pixels, 3, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Both, 3, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Hits, 3, LampShadeGate::Product));
+        assert!(restir_product_shade(true, LampShadeGate::Product));
+        assert!(!restir_product_shade(false, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, LampShadeGate::Exact));
+        assert!(!restir_product_shade(true, LampShadeGate::Random));
+        assert!(!restir_product_shade(true, LampShadeGate::Broken));
+        assert!(restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Product));
+        assert!(restir_off_is_exact(false, LampPickMode::Pixels, LampShadeGate::Product));
+        assert!(restir_off_is_exact(false, LampPickMode::Both, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Off, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Hits, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(true, LampPickMode::Reuse, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Exact));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Random));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Broken));
     }
 
     /// Place searches, trace rays, gather bins, and filter bodies for `live`

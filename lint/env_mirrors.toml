@@ -1482,6 +1482,71 @@ detail = "--out"
 
 
 [[var]]
+name = "GENOS_RESTIR_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_RESTIR_INITIAL"
+kind = "mirror"
+detail = "--initial"
+
+[[var]]
+name = "GENOS_RESTIR_TEMPORAL"
+kind = "mirror"
+detail = "--temporal"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL"
+kind = "mirror"
+detail = "--spatial"
+
+[[var]]
+name = "GENOS_RESTIR_DI"
+kind = "mirror"
+detail = "--restir-di"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_NEIGHBORS"
+kind = "mirror"
+detail = "--restir-spatial-neighbors (stress), LightingSettings key restir_spatial_neighbors"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_RADIUS"
+kind = "mirror"
+detail = "--restir-spatial-radius (stress), LightingSettings key restir_spatial_radius"
+
+[[var]]
+name = "GENOS_RESTIR_RESOLUTION_SCALE"
+kind = "mirror"
+detail = "--restir-resolution-scale (stress), LightingSettings key restir_resolution_scale"
+
+[[var]]
+name = "GENOS_RESTIR_CANDIDATES"
+kind = "mirror"
+detail = "--restir-candidates (stress), LightingSettings key restir_candidates"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_CHECKERBOARD"
+kind = "mirror"
+detail = "--restir-spatial-checkerboard (stress), LightingSettings key restir_spatial_checkerboard"
+
+[[var]]
+name = "GENOS_RESTIR_SPLIT_PASSES"
+kind = "mirror"
+detail = "--restir-split-passes (stress), LightingSettings key restir_split_passes"
+
+[[var]]
+name = "GENOS_RESTIR_COST"
+kind = "test"
+detail = "diagnostic: 1 prints reservoir iteration counts, not milliseconds"
+
+[[var]]
+name = "GENOS_RESTIR_REUSE"
+kind = "test"
+detail = "diagnostic: off drops ReSTIR temporal and spatial reuse"
+
+[[var]]
 name = "GENOS_LIFECYCLE_BLOCK_MS"
 kind = "mirror"
 detail = "--lifecycle-block-ms"

@@ -28,12 +28,12 @@ JSON, one object per scenario) plus the pictures it scored.
 | `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
 | `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
 
-The main scene has 5 point lamps. Every pixel then has at most 5 lit lamps and
-shades the exact sum (`LAMP_PICK_EXACT_LIT` is 8), so `spin` and `switch` never
-grade the random lamp path. The `lamps` profile exists to grade that path. Its
-script logs `LAMP_COVER`, the number of lamps whose reach holds the subject.
-That number is an upper bound on `point_lit`. The script fails if it is 8 or
-less.
+The main scene has 5 point lamps. Production pixels shade the ReSTIR reservoir
+at that count and at every other count (`restir_di` on). `LAMP_PICK_EXACT_LIT`
+(8) is the noise-gate few-lamp row, not a product fallback, so `spin` and
+`switch` grade the reservoir. The `lamps` profile raises the count. Its script
+logs `LAMP_COVER`, the number of lamps whose reach holds the subject. That
+number is an upper bound on `point_lit`. The script fails if it is 8 or less.
 
 The `sun_speed` knob tops out at x64, so the script freezes the sun and steps
 `time_of_day` itself, one step per frame. Camera paths and the fixed 1/60 s

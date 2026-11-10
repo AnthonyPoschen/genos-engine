@@ -133,7 +133,6 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
 struct DenoiseModules {
     screen: PathBuf,
     atrous_plain: PathBuf,
-    direct_plain: PathBuf,
 }
 
 fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
@@ -156,19 +155,9 @@ fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
         &out.join("lighting_atrous_plain.comp.spv"),
         "LIGHTING_DENOISE_PLAIN",
     );
-    // glslc forwards -D. The plain direct module is the pre-reservoir shade:
-    // the reservoir block is not in the SPIR-V, so a quiet few-lamp view holds
-    // at the same cost as the shade before ReSTIR. glslangValidator is not used
-    // here; that path emitted a newer SPIR-V for another kernel and faulted.
-    let direct_plain = compile_glslc_define(
-        "shaders/lighting_direct.comp",
-        &out.join("lighting_direct_plain.comp.spv"),
-        "LIGHTING_DIRECT_PLAIN",
-    );
     DenoiseModules {
         screen,
         atrous_plain,
-        direct_plain,
     }
 }
 
@@ -244,10 +233,6 @@ fn write_shader_glue(
         denoise.atrous_plain.display()
     ));
     glue_text.push_str(&format!(
-        "pub static LIGHTING_DIRECT_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        denoise.direct_plain.display()
-    ));
-    glue_text.push_str(&format!(
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         denoise.screen.display()
     ));
@@ -258,7 +243,81 @@ fn write_shader_glue(
         ));
     }
     append_hdr_compose(&mut glue_text, out);
+    append_restir(&mut glue_text, out);
     std::fs::write(&glue, glue_text).unwrap();
+}
+
+fn append_restir(glue_text: &mut String, out: &std::path::Path) {
+    let (live, spatial, wide) = compile_restir_live(out);
+    let direct = compile_glslc_define(
+        "shaders/lighting_direct.comp",
+        &out.join("lighting_direct_restir.comp.spv"),
+        "GENOS_RESTIR_DI",
+    );
+    glue_text.push_str(&format!(
+        "pub static RESTIR_LIVE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        live.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static RESTIR_SPATIAL_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        spatial.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static RESTIR_SPATIAL_WIDE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        wide.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_DIRECT_RESTIR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        direct.display()
+    ));
+}
+
+fn compile_restir_live(out: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
+    println!("cargo:rerun-if-changed=shaders/restir_live.comp");
+    for piece in [
+        "../restir-gpu/shaders/restir_tree.glsl",
+        "../restir-gpu/shaders/restir_sample.glsl",
+        "../restir-gpu/shaders/restir_merge.glsl",
+        "../restir-gpu/shaders/restir_spatial_ops.glsl",
+    ] {
+        println!("cargo:rerun-if-changed={piece}");
+    }
+    let live = out.join("restir_live.comp.spv");
+    let spatial = out.join("restir_spatial.comp.spv");
+    let wide = out.join("restir_spatial_wide.comp.spv");
+    compile_restir_variant("shaders/restir_live.comp", &live, &[]);
+    compile_restir_variant(
+        "shaders/restir_live.comp",
+        &spatial,
+        &["-DRESTIR_SPATIAL_ONLY", "-DRESTIR_SPATIAL_CAP"],
+    );
+    compile_restir_variant(
+        "shaders/restir_live.comp",
+        &wide,
+        &["-DRESTIR_SPATIAL_ONLY"],
+    );
+    (live, spatial, wide)
+}
+
+fn compile_restir_variant(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {
+    let mut args = vec![
+        "-V".to_string(),
+        "--target-env".to_string(),
+        "vulkan1.0".to_string(),
+        "-I../restir-gpu/shaders".to_string(),
+    ];
+    args.extend(defines.iter().map(|d| (*d).to_string()));
+    args.push(src.to_string());
+    args.push("-o".to_string());
+    args.push(dest.to_str().unwrap().to_string());
+    let status = Command::new("glslangValidator")
+        .args(&args)
+        .status()
+        .expect("glslangValidator");
+    if !status.success() {
+        panic!("glslangValidator failed for {src} {defines:?}");
+    }
+    dest.to_path_buf()
 }
 
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {

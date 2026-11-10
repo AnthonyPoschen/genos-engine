@@ -129,7 +129,7 @@ pub fn height_optical_depth_f32(
     ))
 }
 
-/// Rounds an f64 to the nearest f32. The workspace's one f64 to f32 narrowing.
+/// Rounds an f64 to the nearest f32. The one f64 to f32 narrowing.
 #[allow(
     clippy::as_conversions,
     reason = "the one shared f64 to f32 narrowing; f32 callers of f64 closed forms use it"
@@ -141,4 +141,8 @@ pub fn height_optical_depth_f32(
 #[must_use]
 pub fn f32_from_f64(value: f64) -> f32 {
     value as f32
+}
+
+fn narrow(value: f64) -> f32 {
+    f32_from_f64(value)
 }

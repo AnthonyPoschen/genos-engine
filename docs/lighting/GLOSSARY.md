@@ -216,14 +216,32 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (potato, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). At 8 positive lamps or fewer, and on a quiet held view, `reuse` shades the sum. `reuse (experimental)` is a deprecated value and logs a warning.
-Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI (Bitterli et al. 2020) with pairwise MIS (Bitterli et al. 2022); GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
+**Lamp pick**: chooses a few lamps per shaded hit, weighted by their expected contribution. Modes: `off`, `hits` (`gi-1bounce`), `pixels`, `both`, `reuse`. Production screen pixels do not use this pick. They use ReSTIR DI. `reuse (experimental)` is a deprecated value and logs a warning.
+Role: LIGHTS · Literature: RIS (Talbot 2005) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
-**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and merges it again next frame (`lamp_pick_reuse`). Low is temporal only. Medium and High also merge one neighbour. History is the previous frame's pixel under the motion vector, rejected on depth and normal. A quiet held pixel stores the exact sum and then holds. Off fills a new reservoir each frame. The menu switch is this key.
-Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020); motion vectors with depth/normal rejection · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
+**Lamp reuse**: the hit picker and the noise-gate sample (`lamp_pick_reuse`). Production pixels are ReSTIR DI, not this merge. The menu switch is this key.
+Role: TEMPORAL · Literature: the noise gate's fresh candidates · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
 
-**Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On is pairwise MIS and does not clamp M. The shade is `light * W`. Off divides by the sum of M, clamps M, and shades with `point_total / phat`. The menu switch is this key.
-Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 2023); the off path is Bitterli et al. 2020 section 3 and Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
+**Lamp unbiased**: the noise-gate sample weight (`lamp_pick_unbiased`). On shades with `W`. The product pixel does not read it. The menu switch is this key.
+Role: LIGHTS · Literature: the noise-gate sample · More detail: `lamp_pick_unbiased`
+
+**ReSTIR DI**: `restir_di`. Screen pixels shade one reservoir sample from the C1–C5 light tree, at every point-lamp count. On by default. Off is the labelled exact sum. The graded colour is that raw sample. A 32-frame mean is stored beside it and is not the picture. History is one reprojected pixel, relative depth 0.02, absolute 0.05 m, normal dot 0.9. The sun, the flame, and hit shades stay. `LampShadeGate::Exact` stays the labelled sum. With `GENOS_LIGHTING_LAMP_PICK_DIAG=1`, `lighting_lamp_pick_counts` reads `history_accepts` and `history_rejects` for that reprojection (a reset counts neither) and `restir_point_adds` for a near point lamp the direct loop added on a product pixel (stays 0 while the loop skips it). The three counts are restir header words 43, 44, and 45.
+Role: LIGHTS · Literature: ReSTIR DI (Bitterli et al. 2020); the light tree is Conty Estevez and Kulla, HPG 2018 · More detail: `crates/render/shaders/restir_live.comp`
+
+**ReSTIR spatial neighbours**: `restir_spatial_neighbors`. How many reservoirs the spatial pass merges. 0 skips that pass. Default 4. Header word 13. The radius is `restir_spatial_radius` (header word 14, default 2, reservoir pixels). The draw is the checker's partial shuffle of the in-bounds window.
+Role: LIGHTS · Literature: ReSTIR spatial reuse (Bitterli et al. 2020) · More detail: `restir_live.comp`
+
+**ReSTIR resolution scale**: `restir_resolution_scale`. Screen pixels along one edge of a reservoir cell. Default 1 is one reservoir per pixel. 2 is one reservoir per 2×2, and each screen pixel still traces its own shadow ray. Header word 46.
+Role: LIGHTS · Literature: ReSTIR at a coarser grid · More detail: `restir_live.comp`
+
+**ReSTIR candidates**: `restir_candidates`. Initial light-tree candidates per reservoir. Default 4. Header word 9.
+Role: SAMPLE · Literature: ReSTIR M · More detail: `restir_sample.glsl`
+
+**ReSTIR checkerboard**: `restir_spatial_checkerboard`. 1 shades an odd reservoir pixel with the even neighbour's spatial sample. Default 0. Header word 47.
+Role: LIGHTS · Literature: checkerboard ReSTIR reuse · More detail: `restir_live.comp`
+
+**ReSTIR pass split**: `restir_split_passes`. 1 keeps initial and temporal as two dispatches so each GPU stamp is one pass. Default 0 runs temporal in the initial invocation, and the temporal stamp is then empty. Header word 50.
+Role: SCHED · Literature: — · More detail: `dispatch_restir_di`
 
 **ReSTIR reference**: the CPU checker for ReSTIR direct (`restir-ref`). It resamples point lamps with RIS, reuses a reservoir in time and across a receiver grid, and shades with the balance-heuristic weight. The dump is what a later GPU stage is diffed against. It is not the live lamp-pick shader.
 Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005); ReSTIR DI (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)

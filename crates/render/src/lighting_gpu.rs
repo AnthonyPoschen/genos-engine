@@ -116,8 +116,6 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
-    /// Pre-reservoir direct shade. Bound when reuse would only sum a few lamps.
-    direct_plain: Handle,
     screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
@@ -328,8 +326,33 @@ pub(crate) struct Lighting {
     lamp_res_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
-    /// Positive point lamps in the uploaded scene. The sun is not counted.
-    point_lamps: u32,
+    /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
+    restir_buf: Buffer,
+    restir_pipe: Handle,
+    /// Product spatial pass. Four neighbours, scalar slots, no light tree.
+    restir_spatial_pipe: Handle,
+    /// Spatial pass when the neighbour knob is above 4. The 17-wide lists stay here.
+    restir_spatial_wide: Handle,
+    /// Last spatial bind: 1 is `restir-spatial`, 2 is `restir-spatial-wide`. 0 before either.
+    restir_spatial_bound: u8,
+    restir_direct: Handle,
+    /// This frame shades screen pixels from the reservoir.
+    restir_frame: bool,
+    restir_slot: u32,
+    restir_prev: crate::restir_live::RestirCam,
+    restir_have_prev: bool,
+    /// Timestamp query of the three ReSTIR passes. `u32::MAX` if this slot skipped them.
+    restir_query: [u32; 2],
+    restir_lamps: Vec<crate::pack::GpuLamp>,
+    restir_prev_lamps: Vec<crate::pack::GpuLamp>,
+    restir_view: crate::restir_live::RestirCam,
+    restir_w: u32,
+    restir_h: u32,
+    restir_clear: bool,
+    /// Product frames whose reservoir upload failed and shaded the labelled sum.
+    restir_prepare_failures: u32,
+    /// Test hook. The next product prepare returns the labelled exact path.
+    restir_force_fail: bool,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -370,12 +393,20 @@ pub struct LightingAtrousStats {
     pub changed_pixels: u32,
 }
 
-/// Shadow rays traced last frame, spatial reservoir merges, and how pixels shaded.
+/// Shadow rays traced last frame, and how pixels shaded.
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
-/// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
-/// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
-/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]`.
+/// light-cache rays. `exact` shaded the labelled sum, `restir` shaded one
+/// ReSTIR DI sample. Counts stay zero unless the diag push bit was set.
+/// `exact` / `restir` are `diag[58]` and `diag[59]`. `diag[52]` and `diag[57]`
+/// are unused: the pairwise spatial merge and the trusted-colour copy are gone,
+/// and the later words are not shifted.
+/// `history_accepts` / `history_rejects` are restir header words 43 and 44:
+/// the live temporal reprojection kept or rejected a surfaced pixel. A history
+/// reset counts neither. `restir_point_adds` is header word 45: near point
+/// lamps the direct loop added on a ReSTIR pixel. It stays 0 while that loop
+/// skips them. The host reads a copy at the tail of the stats readback. Compact
+/// keeps `gstats.diag` 5, 6, and 13 when `LIGHTING_DIAG` is on.
 /// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
 /// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
 /// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
@@ -390,8 +421,6 @@ pub struct LampPickCounts {
     pub kept: u32,
     pub fills: u32,
     pub cache: u32,
-    pub spatial: u32,
-    pub copied: u32,
     pub exact: u32,
     pub restir: u32,
     pub kept_live: u32,
@@ -402,6 +431,12 @@ pub struct LampPickCounts {
     pub near_tests: u32,
     pub px_lamps: u32,
     pub hit_lamps: u32,
+    /// Surfaced pixels whose live temporal reprojection kept history.
+    pub history_accepts: u32,
+    /// Surfaced pixels whose live temporal reprojection rejected history.
+    pub history_rejects: u32,
+    /// Near point lamps added by the direct loop on a ReSTIR pixel.
+    pub restir_point_adds: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -443,7 +478,6 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
-            direct_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
@@ -555,7 +589,25 @@ impl Default for Lighting {
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             shade_gate: LampShadeGate::Product,
-            point_lamps: 0,
+            restir_buf: Buffer::empty(),
+            restir_pipe: std::ptr::null_mut(),
+            restir_spatial_pipe: std::ptr::null_mut(),
+            restir_spatial_wide: std::ptr::null_mut(),
+            restir_spatial_bound: 0,
+            restir_direct: std::ptr::null_mut(),
+            restir_frame: false,
+            restir_slot: 0,
+            restir_prev: crate::restir_live::RestirCam::default(),
+            restir_have_prev: false,
+            restir_query: [u32::MAX; 2],
+            restir_lamps: Vec::new(),
+            restir_prev_lamps: Vec::new(),
+            restir_view: crate::restir_live::RestirCam::default(),
+            restir_w: 0,
+            restir_h: 0,
+            restir_clear: false,
+            restir_prepare_failures: 0,
+            restir_force_fail: false,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
@@ -630,6 +682,15 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting atrous",
 ];
 
+fn copy_gpu_lamp(lamp: &crate::pack::GpuLamp) -> crate::pack::GpuLamp {
+    crate::pack::GpuLamp {
+        pos: lamp.pos,
+        color: lamp.color,
+        directional: lamp.directional,
+        range: lamp.range,
+    }
+}
+
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
@@ -660,7 +721,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -749,7 +810,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 45 };
+            let size = Size { kind: 7, count: 48 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -816,13 +877,6 @@ impl Gpu {
             "atrous-plain",
         )?;
         self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.direct_plain = self.make_compute_pipe(
-            LIGHTING_DIRECT_PLAIN_SPV,
-            self.lighting.layout,
-            "direct-plain",
-        )?;
-        self.note_pipeline_time("direct-plain", start);
         let start = Instant::now();
         self.lighting.screen_pipe = self.make_compute_pipe(
             LIGHTING_SCREEN_SPV,
@@ -1220,6 +1274,22 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        // ReSTIR reservoirs are sized here, after the frames in flight have
+        // finished. A resize inside a recording frame is not this path.
+        let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
+        self.destroy_buffer(&mut restir_old);
+        let restir_bytes = if settings.restir_di {
+            crate::restir_live::buffer_bytes(pixels)
+        } else {
+            256
+        };
+        self.lighting.restir_buf = self.make_buffer(restir_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
+        self.lighting.restir_w = if settings.restir_di { w } else { 0 };
+        self.lighting.restir_h = if settings.restir_di { h } else { 0 };
+        self.lighting.restir_clear = true;
+        self.lighting.restir_have_prev = false;
+        self.lighting.restir_slot = 0;
+        self.lighting.restir_frame = false;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -1283,6 +1353,7 @@ impl Gpu {
                 (10, self.lighting.cache.buffer),
                 (11, stats),
                 (12, self.lighting.lamp_res.buffer),
+                (19, self.lighting.restir_buf.buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -1377,20 +1448,18 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
-    /// Shadow rays the last frame actually traced, by consumer, plus spatial
-    /// merges. Zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame.
-    /// Waits for that frame.
+    /// Shadow rays the last frame actually traced, by consumer. Zero unless
+    /// `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame. Waits for that frame.
     pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.idle_device();
         let slot = self.lighting.last_slot;
+        let restir_diag = self.read_restir_diag(self.lighting.stats[slot].memory);
         self.read_stats16(self.lighting.stats[slot].memory)
             .map(|w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
                 cache: w[LAMP_PICK_DIAG_WORD + 3],
-                spatial: w[LAMP_PICK_DIAG_WORD + 4],
-                copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
                 kept_live: w[LAMP_PICK_DIAG_WORD + 5],
@@ -1401,8 +1470,21 @@ impl Gpu {
                 near_tests: w[LAMP_PICK_DIAG_WORD - 14],
                 px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
                 hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
+                history_accepts: restir_diag[0],
+                history_rejects: restir_diag[1],
+                restir_point_adds: restir_diag[2],
             })
             .unwrap_or_default()
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub(crate) fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.lighting.restir_prepare_failures
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub(crate) fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.lighting.restir_force_fail = on;
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -1509,10 +1591,6 @@ impl Gpu {
     /// arms the corner catch-up for the frame the lamps stop.
     pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
         self.lighting.view_content_key = lighting_view_content_key(pack);
-        self.lighting.point_lamps = u32::try_from(
-            pack.lamps.iter().filter(|lamp| !lamp.directional).count(),
-        )
-        .unwrap_or(u32::MAX);
         let (dir, light, n) = lighting_sun_live(pack);
         self.lighting.sun_live_dir = dir;
         self.lighting.sun_live_light = light;
@@ -1531,6 +1609,17 @@ impl Gpu {
             }
             _ => {}
         }
+        self.lighting.restir_lamps.clear();
+        self.lighting.restir_lamps.extend(pack.lamps.iter().map(copy_gpu_lamp));
+        self.lighting.restir_view = crate::restir_live::RestirCam {
+            eye: pack.eye,
+            right: pack.view_right,
+            up: pack.view_up,
+            forward: pack.view_forward,
+            tan: pack.view_tan,
+            aspect: pack.view_aspect,
+            valid: true,
+        };
     }
 
     /// True when this frame's sun step is inside the staleness budget and the
@@ -1940,17 +2029,12 @@ impl Gpu {
         }
     }
 
-    /// Reservoir shade, or the pre-reservoir sum when that sum is what reuse would do.
+    /// ReSTIR product shade, or the module that still holds the exact reference.
     fn direct_pipe(&self) -> Handle {
-        if direct_shade_plain(
-            self.lighting.settings.lamp_pick.mode,
-            self.lighting.point_lamps,
-            self.lighting.shade_gate,
-        ) {
-            self.lighting.direct_plain
-        } else {
-            self.lighting.pipes[3]
+        if self.lighting.restir_frame && !self.lighting.restir_direct.is_null() {
+            return self.lighting.restir_direct;
         }
+        self.lighting.pipes[3]
     }
 
     /// Record and submit one light cache round on the async compute queue: list
@@ -2177,6 +2261,36 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// Header words 43, 44, and 45, copied to the tail of this slot's stats
+    /// readback. Three zeros when the copy did not run.
+    fn read_restir_diag(&self, memory: Handle) -> [u32; 3] {
+        if memory.is_null() {
+            return [0; 3];
+        }
+        let mut words = [0u32; 3];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    restir_diag_tail_offset(),
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
+                    &mut mapped,
+                ),
+                "map restir diag",
+            )
+            .is_err()
+            {
+                return [0; 3];
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), words.as_mut_ptr(), 3);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        words
     }
 
     /// One word of a stats ring buffer whose fence was already waited.
@@ -2796,6 +2910,762 @@ impl Gpu {
         self.lighting.meter_ping ^= 1;
     }
 
+    /// Upload the light tree and the point lamps. Reservoirs stay on the device.
+    /// The product gate is the only shade that reads them.
+    fn prepare_restir_di(
+        &mut self,
+        width: u32,
+        height: u32,
+        changes: Option<&Vec<[f32; 4]>>,
+    ) -> bool {
+        self.lighting.restir_frame = false;
+        if !restir_product_shade(self.lighting.settings.restir_di, self.lighting.shade_gate)
+            || width == 0
+            || height == 0
+        {
+            if !self.lighting.settings.restir_di {
+                self.lighting.restir_have_prev = false;
+            }
+            return false;
+        }
+        if self.lighting.restir_force_fail {
+            self.lighting.restir_have_prev = false;
+            eprintln!("lighting: restir prepare failed: the reservoir upload was forced off");
+            return false;
+        }
+        let scale = self.lighting.settings.restir_resolution_scale;
+        let (rw, rh) = crate::restir_live::reservoir_size(width, height, scale);
+        if rw == 0 || rh == 0 {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
+            return false;
+        }
+        let reservoir_pixels = u64::from(rw).saturating_mul(u64::from(rh));
+        if u32::try_from(reservoir_pixels).is_err() {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
+            return false;
+        }
+        let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
+        if self.lighting.restir_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
+                Ok(pipe) => self.lighting.restir_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-di pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-di", start);
+        }
+        if self.lighting.restir_spatial_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial") {
+                Ok(pipe) => self.lighting.restir_spatial_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial", start);
+        }
+        if self.lighting.restir_spatial_wide.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                RESTIR_SPATIAL_WIDE_SPV,
+                self.lighting.layout,
+                "restir-spatial-wide",
+            ) {
+                Ok(pipe) => self.lighting.restir_spatial_wide = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial-wide pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial-wide", start);
+        }
+        if self.lighting.restir_direct.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                LIGHTING_DIRECT_RESTIR_SPV,
+                self.lighting.layout,
+                "restir-direct",
+            ) {
+                Ok(pipe) => self.lighting.restir_direct = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-direct pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-direct", start);
+        }
+        let need = crate::restir_live::buffer_bytes(reservoir_pixels);
+        if self.lighting.restir_buf.size < need {
+            eprintln!(
+                "lighting: restir prepare failed: reservoir {} bytes does not cover {} bytes at {rw}x{rh} (screen {width}x{height})",
+                self.lighting.restir_buf.size,
+                need
+            );
+            self.lighting.restir_have_prev = false;
+            return false;
+        }
+        let geom_reset = changes.is_none();
+        let previous = if self.lighting.restir_have_prev {
+            self.lighting.restir_prev
+        } else {
+            crate::restir_live::RestirCam::default()
+        };
+        let cost = crate::restir_live::RestirCost {
+            width: rw,
+            height: rh,
+            spatial_neighbors: self.lighting.settings.restir_spatial_neighbors,
+            spatial_radius: self.lighting.settings.restir_spatial_radius,
+            resolution_scale: scale,
+            checkerboard: self.lighting.settings.restir_spatial_checkerboard,
+            candidates: self.lighting.settings.restir_candidates,
+            split_passes: self.lighting.settings.restir_split_passes,
+            screen_width: width,
+            screen_height: height,
+        };
+        crate::restir_live::log_cost(rw, rh, &cost);
+        let Some(mut prefix) = crate::restir_live::prefix(
+            &self.lighting.restir_lamps,
+            &self.lighting.restir_prev_lamps,
+            &previous,
+            self.lighting.frame,
+            self.lighting.restir_slot,
+            cost,
+        ) else {
+            eprintln!("lighting: restir prepare failed: the reservoir prefix does not fit");
+            return false;
+        };
+        let reset = geom_reset || prefix.layout_changed || resized || !self.lighting.restir_have_prev;
+        crate::restir_live::set_history_reset(&mut prefix.words, reset);
+        self.lighting.restir_prev_lamps.clear();
+        self.lighting
+            .restir_prev_lamps
+            .extend(self.lighting.restir_lamps.iter().map(copy_gpu_lamp));
+        // One restir buffer, two frames in flight, and each frame waits only on
+        // its own slot fence. Frame N still has compute reads and writes in
+        // this buffer when frame N+1 records, and a transfer read of header
+        // words 43-46 (the stats copy of history_accepts, history_rejects, and
+        // restir_point_adds). On one queue a barrier's first scope is every
+        // earlier command in submission order. Source is compute and transfer,
+        // so that copy finishes before vkCmdUpdateBuffer overwrites those
+        // words. A second scratch and prefix would not remove the history
+        // dependency, and a barrier waits for the whole source stage either
+        // way, so the extra buffers do not start the next frame sooner.
+        // The world submit copies pc before bit 21 is set. Every restir_words
+        // load sits under restir_pix, which requires that bit, so the async
+        // pass does not touch this buffer.
+        self.memory_barrier(0x800 | 0x1000, 0x1000, 0x20 | 0x40 | 0x800, 0x1000);
+        if self.lighting.restir_clear {
+            self.lighting.restir_clear = false;
+            unsafe {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    0,
+                    self.lighting.restir_buf.size,
+                    0,
+                );
+            }
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+        }
+        let mut at = 0usize;
+        while at < prefix.words.len() {
+            let end = (at + 16384).min(prefix.words.len());
+            let Ok(offset) = u64::try_from(at.saturating_mul(4)) else {
+                return false;
+            };
+            let Ok(bytes) = u64::try_from(end.saturating_sub(at).saturating_mul(4)) else {
+                return false;
+            };
+            unsafe {
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    offset,
+                    bytes,
+                    prefix.words[at..end].as_ptr().cast::<std::ffi::c_void>(),
+                );
+            }
+            at = end;
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+        self.lighting.restir_w = rw;
+        self.lighting.restir_h = rh;
+        self.lighting.restir_frame = prefix.total_words.saturating_mul(4) <= self.lighting.restir_buf.size;
+        self.lighting.restir_frame
+    }
+
+    /// `restir-spatial` for 0–4 neighbours, `restir-spatial-wide` above that.
+    /// The frame dispatch and the fixed-reservoir oracle both use this.
+    fn restir_spatial_for(&mut self, neighbors: u32) -> Handle {
+        if neighbors > 4 {
+            self.lighting.restir_spatial_bound = 2;
+            self.lighting.restir_spatial_wide
+        } else {
+            self.lighting.restir_spatial_bound = 1;
+            self.lighting.restir_spatial_pipe
+        }
+    }
+
+    fn restir_oracle_pipes(&mut self) -> Result<(), String> {
+        if self.lighting.layout.is_null() {
+            return Err("lighting layout is not ready".to_string());
+        }
+        if self.lighting.restir_spatial_pipe.is_null() {
+            let start = Instant::now();
+            let pipe = self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial")?;
+            self.lighting.restir_spatial_pipe = pipe;
+            self.note_pipeline_time("restir-spatial", start);
+        }
+        if self.lighting.restir_spatial_wide.is_null() {
+            let start = Instant::now();
+            let pipe = self.make_compute_pipe(
+                RESTIR_SPATIAL_WIDE_SPV,
+                self.lighting.layout,
+                "restir-spatial-wide",
+            )?;
+            self.lighting.restir_spatial_wide = pipe;
+            self.note_pipeline_time("restir-spatial-wide", start);
+        }
+        Ok(())
+    }
+
+    fn restir_merge_oracle(
+        &mut self,
+        neighbors: u32,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        self.restir_oracle_pipes()?;
+        let pipe = self.restir_spatial_for(neighbors);
+        if pipe.is_null() {
+            return Err("spatial pipeline was not created".to_string());
+        }
+        self.dispatch_restir_oracle(pipe, scene, gbuf, restir)
+    }
+
+    fn oracle_words(&self, words: &[u32]) -> Result<Buffer, String> {
+        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0).max(16);
+        let buffer = self.make_buffer(bytes, 0x20, Memory::Upload)?;
+        let mut raw = Vec::with_capacity(words.len().saturating_mul(4));
+        for word in words {
+            raw.extend_from_slice(&word.to_ne_bytes());
+        }
+        self.write_buffer(&buffer, &raw)?;
+        Ok(buffer)
+    }
+
+    fn dispatch_restir_oracle(
+        &self,
+        pipe: Handle,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        let scene_b = self.oracle_words(scene)?;
+        let gbuf_b = self.oracle_words(gbuf)?;
+        let restir_b = self.oracle_words(restir)?;
+        let dummy = self.oracle_words(&[0u32; 4])?;
+        let read = self.record_restir_oracle(pipe, &scene_b, &gbuf_b, &restir_b, &dummy, restir);
+        self.destroy_oracle_buffers(scene_b, gbuf_b, restir_b, dummy);
+        read
+    }
+
+    fn destroy_oracle_buffers(&self, mut scene: Buffer, mut gbuf: Buffer, mut restir: Buffer, mut dummy: Buffer) {
+        self.destroy_buffer(&mut scene);
+        self.destroy_buffer(&mut gbuf);
+        self.destroy_buffer(&mut restir);
+        self.destroy_buffer(&mut dummy);
+    }
+
+    fn record_restir_oracle(
+        &self,
+        pipe: Handle,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+        words: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        let width = words.get(7).copied().unwrap_or(0);
+        let height = words.get(8).copied().unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        if pixels == 0 {
+            return Err("oracle grid is empty".to_string());
+        }
+        let set = self.oracle_descriptors(scene, gbuf, restir, dummy)?;
+        let cmd = self.oracle_commands(pipe, set.1, restir, words, pixels);
+        self.destroy_oracle_sets(set.0, set.1);
+        cmd
+    }
+
+    fn oracle_descriptors(
+        &self,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+    ) -> Result<(Handle, Handle), String> {
+        #[repr(C)]
+        struct Size {
+            kind: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            max_sets: u32,
+            size_count: u32,
+            sizes: *const Size,
+        }
+        let size = Size { kind: 7, count: 16 };
+        let pool_info = PoolInfo {
+            s_type: 33,
+            next: std::ptr::null(),
+            flags: 0,
+            max_sets: 1,
+            size_count: 1,
+            sizes: &size,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_desc_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "oracle descriptor pool",
+            )?;
+        }
+        #[repr(C)]
+        struct Alloc {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            count: u32,
+            layouts: *const Handle,
+        }
+        let layouts = [self.lighting.desc_layout];
+        let alloc = Alloc {
+            s_type: 34,
+            next: std::ptr::null(),
+            pool,
+            count: 1,
+            layouts: layouts.as_ptr(),
+        };
+        let mut set = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_desc)(
+                    self.device,
+                    &alloc as *const Alloc as *const u8,
+                    &mut set,
+                ),
+                "oracle descriptor set",
+            )?;
+        }
+        self.write_oracle_set(set, scene, gbuf, restir, dummy)?;
+        Ok((pool, set))
+    }
+
+    fn write_oracle_set(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+    ) -> Result<(), String> {
+        #[repr(C)]
+        struct BufInfo {
+            buffer: Handle,
+            offset: u64,
+            range: u64,
+        }
+        #[repr(C)]
+        struct Write {
+            s_type: i32,
+            next: *const c_void,
+            set: Handle,
+            binding: u32,
+            element: u32,
+            count: u32,
+            kind: u32,
+            image: *const c_void,
+            buffer: *const BufInfo,
+            texel: *const c_void,
+        }
+        let bindings = [
+            (0u32, scene.buffer),
+            (5, dummy.buffer),
+            (6, gbuf.buffer),
+            (7, dummy.buffer),
+            (8, dummy.buffer),
+            (9, dummy.buffer),
+            (10, dummy.buffer),
+            (11, dummy.buffer),
+            (12, dummy.buffer),
+            (13, dummy.buffer),
+            (14, dummy.buffer),
+            (15, dummy.buffer),
+            (16, dummy.buffer),
+            (17, dummy.buffer),
+            (18, dummy.buffer),
+            (19, restir.buffer),
+        ];
+        let infos: Vec<BufInfo> = bindings
+            .iter()
+            .map(|(_, buffer)| BufInfo {
+                buffer: *buffer,
+                offset: 0,
+                range: u64::MAX,
+            })
+            .collect();
+        let writes: Vec<Write> = bindings
+            .iter()
+            .zip(&infos)
+            .map(|((binding, _), info)| Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: *binding,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: info,
+                texel: std::ptr::null(),
+            })
+            .collect();
+        unsafe {
+            (self.fns.update_desc)(
+                self.device,
+                u32::try_from(writes.len()).unwrap_or(0),
+                writes.as_ptr().cast::<u8>(),
+                0,
+                std::ptr::null(),
+            );
+        }
+        Ok(())
+    }
+
+    fn destroy_oracle_sets(&self, pool: Handle, _set: Handle) {
+        if !pool.is_null() {
+            unsafe {
+                (self.fns.destroy_desc_pool)(self.device, pool, std::ptr::null());
+            }
+        }
+    }
+
+    fn oracle_commands(
+        &self,
+        pipe: Handle,
+        set: Handle,
+        restir: &Buffer,
+        words: &[u32],
+        pixels: u32,
+    ) -> Result<Vec<u32>, String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool_info = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 0,
+            family: self.queue_family,
+        };
+        let mut cmd_pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut cmd_pool,
+                ),
+                "oracle command pool",
+            )?;
+        }
+        let read = self.submit_restir_oracle(pipe, set, cmd_pool, restir, words, pixels);
+        unsafe {
+            (self.fns.destroy_pool)(self.device, cmd_pool, std::ptr::null());
+        }
+        read
+    }
+
+    fn oracle_barrier(&self, cmd: Handle, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        #[repr(C)]
+        struct MemBar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+        }
+        let bar = MemBar {
+            s_type: 46,
+            next: std::ptr::null(),
+            src_access,
+            dst_access,
+        };
+        unsafe {
+            (self.fns.cmd_barrier)(
+                cmd,
+                src_stage,
+                dst_stage,
+                0,
+                1,
+                &bar as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+        }
+    }
+
+    fn submit_restir_oracle(
+        &self,
+        pipe: Handle,
+        set: Handle,
+        cmd_pool: Handle,
+        restir: &Buffer,
+        words: &[u32],
+        pixels: u32,
+    ) -> Result<Vec<u32>, String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool: cmd_pool,
+            level: 0,
+            count: 1,
+        };
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 0,
+            inherit: std::ptr::null(),
+        };
+        let mut cmd = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
+                "oracle command",
+            )?;
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin oracle",
+            )?;
+        }
+        self.oracle_barrier(cmd, 0x4000, 0x800, 0x4000, 0x20);
+        let mut pc = [0u32; 12];
+        pc[0] = words.get(48).copied().unwrap_or(0);
+        pc[1] = words.get(49).copied().unwrap_or(0);
+        pc[9] = 2u32 << 22;
+        unsafe {
+            (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
+            (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
+            (self.fns.cmd_push)(
+                cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<c_void>(),
+            );
+            (self.fns.cmd_dispatch)(cmd, pixels.div_ceil(64).max(1), 1, 1);
+        }
+        self.oracle_barrier(cmd, 0x800, 0x4000, 0x40, 0x2000);
+        unsafe {
+            check((self.fns.end_cmd)(cmd), "end oracle")?;
+        }
+        self.oracle_submit(cmd)?;
+        self.read_oracle(restir, words.len())
+    }
+
+    fn oracle_submit(&self, cmd: Handle) -> Result<(), String> {
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let cmds = [cmd];
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 1,
+            cmds: cmds.as_ptr(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    std::ptr::null_mut(),
+                ),
+                "oracle submit",
+            )?;
+            check((self.fns.device_wait)(self.device), "oracle wait")?;
+        }
+        Ok(())
+    }
+
+    fn read_oracle(&self, buffer: &Buffer, words: usize) -> Result<Vec<u32>, String> {
+        let bytes = u64::try_from(words.saturating_mul(4)).unwrap_or(0);
+        if bytes == 0 || bytes > buffer.size {
+            return Err("oracle read does not fit".to_string());
+        }
+        let mut out = vec![0u32; words];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, buffer.memory, 0, bytes, 0, &mut mapped),
+                "map oracle",
+            )?;
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), out.as_mut_ptr(), words);
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Ok(out)
+    }
+
+    fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
+        // Pass 2 and the checker copy are the spatial pipeline. The initial
+        // pipeline does not contain that pass, so the tree walk does not keep
+        // the merge lists in its live range. Four neighbours is the scalar
+        // shader. Above that, the wide shader keeps the 17-wide lists.
+        let pipe = if pass < 2 {
+            self.lighting.restir_pipe
+        } else {
+            self.restir_spatial_for(self.lighting.settings.restir_spatial_neighbors)
+        };
+        let mut base = 0u32;
+        let span = crate::restir_live::GROUP_LIMIT.saturating_mul(crate::restir_live::GROUP_SIZE);
+        while base < pixels {
+            let count = (pixels - base).min(span);
+            let groups = count.div_ceil(crate::restir_live::GROUP_SIZE).max(1);
+            let mut rpc = *pc;
+            rpc[9] = (rpc[9] & !(3 << 22)) | (pass << 22) | (1 << 21);
+            rpc[11] = base;
+            unsafe {
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.lighting.layout,
+                    0x20,
+                    0,
+                    LIGHTING_PC_BYTES,
+                    rpc.as_ptr().cast::<std::ffi::c_void>(),
+                );
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+                (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            }
+            base = base.saturating_add(span);
+        }
+    }
+
+    /// Initial, then temporal, then spatial. One dispatch covers 1440p
+    /// (`GROUP_LIMIT` groups of `GROUP_SIZE`). A larger reservoir continues
+    /// from `pc.lamp.w`. `restir_split_passes` clear runs temporal in the
+    /// initial invocation (one dispatch). The temporal stamp is then empty
+    /// and `restir_initial` is both passes. Checkerboard copies after spatial
+    /// and is included in the spatial stamp. Four queries, no fifth slot.
+    fn dispatch_restir_di(&mut self, slot: usize, pc: &[u32; 12], pool: Handle, first: u32) {
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let Some(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))).ok()
+        else {
+            return;
+        };
+        if self.lighting.restir_pipe.is_null()
+            || self.lighting.restir_spatial_pipe.is_null()
+            || self.lighting.restir_spatial_wide.is_null()
+            || pixels == 0
+        {
+            return;
+        }
+        let stamp = !pool.is_null();
+        if !stamp {
+            self.lighting.restir_query[slot] = u32::MAX;
+        }
+        let split = self.lighting.settings.restir_split_passes != 0;
+        let checker = self.lighting.settings.restir_spatial_checkerboard != 0;
+        let write_stamp = |this: &Self, at: u32| {
+            if stamp {
+                unsafe {
+                    (this.fns.cmd_write_timestamp)(this.cmd, 0x800, pool, first + RESTIR_STAMP_AT + at);
+                }
+            }
+        };
+        if stamp {
+            self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
+        }
+        write_stamp(self, 0);
+        self.dispatch_restir_pass(pixels, 0, pc);
+        write_stamp(self, 1);
+        if split {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 1, pc);
+        }
+        write_stamp(self, 2);
+        self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+        self.dispatch_restir_pass(pixels, 2, pc);
+        if checker {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 3, pc);
+        }
+        write_stamp(self, 3);
+        unsafe {
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<std::ffi::c_void>(),
+            );
+        }
+        self.lighting.restir_prev = self.lighting.restir_view;
+        self.lighting.restir_have_prev = true;
+        self.lighting.restir_slot ^= 1;
+    }
+
     fn lighting_passes(&mut self, slot: usize) -> Result<(), String> {
         self.lighting.hdr_query[slot] = u32::MAX;
         self.write_hdr_exposure();
@@ -3081,6 +3951,13 @@ impl Gpu {
         };
         let mut lamp = lamp_pick_push(&self.lighting.settings);
         lamp[1] |= lamp_shade_bits(self.lighting.shade_gate);
+        if restir_off_is_exact(
+            self.lighting.settings.restir_di,
+            self.lighting.settings.lamp_pick.mode,
+            self.lighting.shade_gate,
+        ) {
+            lamp[1] |= 1 << 19;
+        }
         // The existing diag bit counts fresh shadow rays. It does not change
         // the shade. It is set only while GI metrics are recording.
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
@@ -3297,6 +4174,45 @@ impl Gpu {
             // indirect read needs the draw-indirect stage
             // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
             self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
+            let restir_wanted = restir_product_shade(
+                self.lighting.settings.restir_di,
+                self.lighting.shade_gate,
+            );
+            let first = slot as u32 * LIGHTING_STAMPS;
+            let stamps = self
+                .gpu_times
+                .as_mut()
+                .filter(|t| !t.lighting_pool.is_null())
+                .map(|t| {
+                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
+                    t.lighting_pool
+                });
+            if let Some(pool) = stamps {
+                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
+                // GPU time of the prefix upload. The close stamp is after prepare.
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT);
+            }
+            let restir_on = self.prepare_restir_di(w, h, changes.as_ref());
+            if let Some(pool) = stamps {
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT + 1);
+            }
+            if restir_on {
+                pc[9] |= 1 << 21;
+            } else {
+                self.lighting.restir_query[slot] = u32::MAX;
+                if restir_wanted {
+                    // Labelled exact. The next frame that binds the reservoir
+                    // clears this bit, and that frame does not keep the hold.
+                    pc[9] |= 1 << 19;
+                    self.lighting.restir_prepare_failures = self
+                        .lighting
+                        .restir_prepare_failures
+                        .saturating_add(1);
+                    eprintln!(
+                        "lighting: restir prepare failed; this frame shades the labelled exact sum"
+                    );
+                }
+            }
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
@@ -3316,17 +4232,24 @@ impl Gpu {
                 pc.as_ptr() as *const c_void,
             );
             // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
-            let stamps = self
-                .gpu_times
-                .as_mut()
-                .filter(|t| !t.lighting_pool.is_null())
-                .map(|t| {
-                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
-                    t.lighting_pool
-                });
-            let first = slot as u32 * LIGHTING_STAMPS;
+            // The query reset and the prepare-open stamp are above prepare.
+            if restir_on {
+                let pool = stamps.unwrap_or(std::ptr::null_mut());
+                // Frame N wrote the history slot this frame reads, and wrote the
+                // scratch this frame overwrites. The prefix barrier above makes
+                // those writes available. This one makes them visible to the
+                // passes' reads and writes.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                self.dispatch_restir_di(slot, &pc, pool, first);
+                // Shade reads the spatial store (header word 6). A 1440p pass is
+                // one dispatch; without this barrier the 4070 starts the direct
+                // shade while that store is still in flight, and the picture
+                // changes with the overlap. Lavapipe runs the dispatches in
+                // order, so the race does not show there. This is intra-frame:
+                // the two barriers above order the other frame.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            }
             if let Some(pool) = stamps {
-                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
@@ -3471,7 +4394,10 @@ impl Gpu {
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
                 if let Some(pool) = stamps {
-                    (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
+                    let at = first + 1 + k as u32;
+                    if at < first + RESTIR_STAMP_AT {
+                        (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
+                    }
                 }
             }
             if agx_display {
@@ -3578,6 +4504,34 @@ impl Gpu {
                     self.lighting.compose_host.buffer,
                     1,
                     &list as *const Region as *const u8,
+                );
+            }
+            // History counters live in the restir header, past the prefix fields.
+            // The tail sits after the unfilled mask so diag[], chg[], and the
+            // mask keep their words. A frame that did not run ReSTIR stores zeros.
+            let tail = Region {
+                src: (crate::restir_live::HIST_ACCEPT_WORD as u64).saturating_mul(4),
+                dst: restir_diag_tail_offset(),
+                size: RESTIR_DIAG_TAIL_BYTES,
+            };
+            let restir_ready = self.lighting.restir_frame
+                && self.lighting.restir_buf.size
+                    >= tail.src.saturating_add(RESTIR_DIAG_TAIL_BYTES);
+            if restir_ready {
+                (self.fns.cmd_copy_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    self.lighting.stats[slot].buffer,
+                    1,
+                    &tail as *const Region as *const u8,
+                );
+            } else {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.stats[slot].buffer,
+                    tail.dst,
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
                 );
             }
         }
@@ -3758,6 +4712,7 @@ impl Gpu {
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
         let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
+        let mut restir_buf = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
@@ -3779,6 +4734,7 @@ impl Gpu {
         self.destroy_buffer(&mut meter_dev);
         self.destroy_buffer(&mut meter_host);
         self.destroy_buffer(&mut lamp_res);
+        self.destroy_buffer(&mut restir_buf);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         self.destroy_buffer(&mut compose_host);
@@ -3788,7 +4744,10 @@ impl Gpu {
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
-                .chain(std::iter::once(&mut self.lighting.direct_plain))
+                .chain(std::iter::once(&mut self.lighting.restir_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
+                .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
@@ -3903,12 +4862,15 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
 /// control block at word 124 (16 words), then the unfilled-pixel count and the
 /// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
 /// mask follows, one bit per composed pixel, and is not part of this header.
-/// The change-counter enable word stays chg[31] (word 119).
+/// The change-counter enable word stays chg[31] (word 119). Sixteen bytes
+/// after the mask cap hold the restir history counters. They are not diag words.
 const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+/// Three header words plus one pad, after the unfilled mask.
+const RESTIR_DIAG_TAIL_BYTES: u64 = 16;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
 const LIGHTING_SHADED_WORD: usize = 141;
@@ -3950,8 +4912,12 @@ fn unfilled_mask_bytes(width: u32, height: u32) -> u64 {
     u64::from(unfilled_mask_words(width, height)) * 4
 }
 
-fn lighting_stats_storage_bytes() -> u64 {
+fn restir_diag_tail_offset() -> u64 {
     LIGHTING_STATS_BYTES + u64::from(LIGHTING_UNFILLED_MASK_CAP) * 4
+}
+
+fn lighting_stats_storage_bytes() -> u64 {
+    restir_diag_tail_offset() + RESTIR_DIAG_TAIL_BYTES
 }
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
@@ -3959,7 +4925,9 @@ const LIGHTING_ATROUS_STAT: usize = 120;
 /// `None` when those two would fall outside [`LIGHTING_STAMPS`].
 fn hdr_stamp_base(groups: usize, first: u32) -> Option<u32> {
     let used = u32::try_from(groups).unwrap_or(u32::MAX).saturating_add(1);
-    if used.saturating_add(2) > LIGHTING_STAMPS {
+    // ReSTIR owns the queries at RESTIR_STAMP_AT. A long pass list skips the
+    // bloom pair rather than sharing those queries.
+    if used.saturating_add(2) > RESTIR_STAMP_AT {
         return None;
     }
     Some(first.saturating_add(used))

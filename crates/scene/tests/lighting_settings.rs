@@ -254,17 +254,20 @@ fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
 }
 
 #[test]
-fn gi_presets_sample_pixels_from_a_reservoir() {
+fn gi_presets_shade_pixels_with_restir() {
     let low = LightingSettings::preset(LightingPreset::Low);
+    assert!(low.restir_di);
     assert_eq!(low.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(low.lamp_pick.candidates, LAMP_PICK_CANDIDATES_LOW);
     assert_eq!(low.lamp_pick.radius, 0, "low is temporal only");
     assert!(low.lamp_pick.unbiased);
     let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert!(medium.restir_di);
     assert_eq!(medium.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(medium.lamp_pick.candidates, LAMP_PICK_CANDIDATES_MEDIUM);
     assert_eq!(medium.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
     let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.restir_di);
     assert_eq!(high.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(high.lamp_pick.candidates, LAMP_PICK_CANDIDATES_HIGH);
     assert_eq!(high.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
@@ -284,8 +287,40 @@ fn gi_presets_sample_pixels_from_a_reservoir() {
         );
     }
     let potato = LightingSettings::preset(LightingPreset::Potato);
-    assert_eq!(potato.direct.max_lights, 8);
+    // The reservoir samples every lamp. The old 8 was a production cap.
+    assert_eq!(potato.direct.max_lights, 0);
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Low).direct.max_lights,
+        0
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Medium)
+            .direct
+            .max_lights,
+        0
+    );
     assert!(!potato.gi.enabled);
+}
+
+#[test]
+fn restir_pass_cost_round_trips_and_clamps() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.restir_spatial_neighbors, 4);
+    assert_eq!(settings.restir_spatial_radius, 2);
+    assert_eq!(settings.restir_resolution_scale, 1);
+    assert_eq!(settings.restir_candidates, 4);
+    assert_eq!(settings.restir_spatial_checkerboard, 0);
+    assert_eq!(settings.restir_split_passes, 0);
+    settings.set_key("restir_spatial_neighbors", "8").expect("neighbors");
+    settings.set_key("restir_resolution_scale", "9").expect("scale");
+    settings.set_key("restir_candidates", "0").expect("candidates");
+    assert_eq!(settings.restir_spatial_neighbors, 8);
+    assert_eq!(settings.restir_resolution_scale, 4);
+    assert_eq!(settings.restir_candidates, 1);
+    let parsed = LightingSettings::parse(&settings.to_text()).expect("parse");
+    assert_eq!(parsed.restir_spatial_neighbors, 8);
+    assert_eq!(parsed.restir_resolution_scale, 4);
+    assert_eq!(parsed.restir_candidates, 1);
 }
 
 #[test]

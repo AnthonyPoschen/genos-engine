@@ -6,7 +6,9 @@
 //! with dynamic direct lighting", TOG 2020. The weight is the balance
 //! heuristic (Bitterli et al., "Generalized Resampled Importance Sampling",
 //! SIGGRAPH 2022). Two reservoirs use the same threshold as
-//! `genos_render::lamp_pick::pairwise_merge`. The renderer is unchanged.
+//! `genos_render::lamp_pick::pairwise_merge`. The live direct pass can run
+//! the same draws behind `LightingSettings::restir_di`, which stays on.
+//! This checker is unchanged.
 //!
 //! Departures from those papers:
 //! - Proposal is uniform, an exact discrete target CDF, or a light-tree bound
@@ -47,6 +49,6 @@ pub mod tree;
 pub use dump::{diff_dumps, encode_dump, parse_dump, Diff, Dump};
 pub use harness::{encode_report, evaluate, write_run, EvalSpec, Report};
 pub use metrics::{frames_to_ref, grid_worst, ref_err_near, GateLimits};
-pub use restir::{Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
-pub use tree::{LightTree, TreeFault};
+pub use restir::{Boost, Config, Counters, History, Proposal, Session, DEFAULT_M_CLAMP};
 pub use shade::Scene;
+pub use tree::{LightTree, TreeFault};

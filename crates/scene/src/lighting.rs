@@ -193,6 +193,19 @@ impl ShadowFilter {
     }
 }
 
+/// Spatial reservoirs the product pass merges. 0 skips spatial reuse.
+pub const RESTIR_SPATIAL_NEIGHBORS: u32 = 4;
+/// Chebyshev radius of that window, in reservoir pixels.
+pub const RESTIR_SPATIAL_RADIUS: u32 = 2;
+/// Screen pixels along one edge of a reservoir cell. 1 is full resolution.
+pub const RESTIR_RESOLUTION_SCALE: u32 = 1;
+/// Initial candidates per reservoir. Header word 9.
+pub const RESTIR_CANDIDATES: u32 = 4;
+/// 1 copies the even neighbour's spatial result onto odd reservoir pixels.
+pub const RESTIR_SPATIAL_CHECKERBOARD: u32 = 0;
+/// 1 keeps initial and temporal as two dispatches. 0 runs temporal in the
+/// initial invocation, on the sample just drawn.
+pub const RESTIR_SPLIT_PASSES: u32 = 0;
 /// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
 pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
 /// Unshadowed reservoir candidates per pixel on Medium.
@@ -208,16 +221,20 @@ pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
 
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
-/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
-/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
-/// stay [`Off`](Self::Off).
+/// The sun is never a sample. It is traced on its own. With `restir_di` on,
+/// every preset shades screen pixels from the ReSTIR reservoir, including
+/// [`Hits`](Self::Hits) (`gi-1bounce`) and [`Off`](Self::Off) (potato and
+/// day-cycle). A quiet view does not hold those pixels off the reservoir.
+/// `gi-1bounce` still samples bounce hits. The labelled exact path is
+/// `restir_di` off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Every lamp. Potato and day-cycle.
+    /// Every lamp on the labelled exact path. Potato and day-cycle. With
+    /// `restir_di` on, screen pixels still shade the reservoir.
     Off = 0,
-    /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
+    /// Bounce hits, probe fills, and cache-ray hits. `gi-1bounce`. With
+    /// `restir_di` on, screen pixels shade the reservoir, not the full sum.
     Hits = 1,
     /// Primary pixels only. No previous frame. Diagnostic.
     Pixels = 2,
@@ -255,7 +272,8 @@ impl LampPickMode {
 ///
 /// `rays` is the shadow-ray count (samples per shaded point). `candidates` is
 /// the unshadowed reservoir fill. They are not the same knob: a candidate is
-/// not a ray. `direct.max_lights` stays a hard cap and does not read these.
+/// not a ray. `direct.max_lights` caps the labelled exact walk and the hit
+/// picker. The production reservoir does not read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LampPickSettings {
     pub mode: LampPickMode,
@@ -310,7 +328,9 @@ impl LampPickSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectSettings {
     pub enabled: bool,
-    /// Lamps shaded per pixel. 0 means every lamp that reaches the point.
+    /// Lamps walked on the labelled exact path and the hit picker. 0 means
+    /// every lamp that reaches the point. Production ReSTIR samples the
+    /// reservoir and does not read this.
     pub max_lights: u32,
     /// Recompute every Nth frame. 1 is every frame. Older frames reuse the stored direct.
     pub refresh_frames: u32,
@@ -690,10 +710,27 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
-    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
-    /// Potato and day-cycle trace every lamp.
+    /// Weighted lamp picking for hits and for the noise-gate sample.
+    /// Production screen pixels use [`Self::restir_di`].
     pub lamp_pick: LampPickSettings,
+    /// Screen-pixel ReSTIR DI. On in every preset. Off is the labelled exact
+    /// sum for a pixel mode that used to sample. Mode off already sums.
+    pub restir_di: bool,
+    /// Spatial reservoirs merged per pixel. 0 skips the spatial pass. 1..=16.
+    pub restir_spatial_neighbors: u32,
+    /// Chebyshev radius of that window, in reservoir pixels. 0..=8.
+    pub restir_spatial_radius: u32,
+    /// Screen pixels along one edge of a reservoir cell. 1 is one reservoir
+    /// per pixel. 2 is one reservoir per 2×2. Each screen pixel still traces
+    /// its own shadow ray.
+    pub restir_resolution_scale: u32,
+    /// Initial candidates per reservoir. 1..=32. The header word the shader reads.
+    pub restir_candidates: u32,
+    /// 1 shades odd reservoir pixels with the even neighbour's spatial sample.
+    pub restir_spatial_checkerboard: u32,
+    /// 1 keeps initial and temporal as two dispatches so each GPU stamp is one
+    /// pass. 0 runs temporal in the initial invocation.
+    pub restir_split_passes: u32,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
@@ -749,7 +786,6 @@ impl LightingSettings {
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
-                s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -764,7 +800,6 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
-                s.direct.max_lights = 4;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
                 s.probes.rays = 16;
@@ -783,7 +818,6 @@ impl LightingSettings {
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
-                s.direct.max_lights = 8;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
@@ -881,6 +915,13 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            restir_di: true,
+            restir_spatial_neighbors: RESTIR_SPATIAL_NEIGHBORS,
+            restir_spatial_radius: RESTIR_SPATIAL_RADIUS,
+            restir_resolution_scale: RESTIR_RESOLUTION_SCALE,
+            restir_candidates: RESTIR_CANDIDATES,
+            restir_spatial_checkerboard: RESTIR_SPATIAL_CHECKERBOARD,
+            restir_split_passes: RESTIR_SPLIT_PASSES,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
@@ -951,6 +992,12 @@ impl LightingSettings {
         };
         self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
+        self.restir_spatial_neighbors = self.restir_spatial_neighbors.min(16);
+        self.restir_spatial_radius = self.restir_spatial_radius.min(8);
+        self.restir_resolution_scale = self.restir_resolution_scale.clamp(1, 4);
+        self.restir_candidates = self.restir_candidates.clamp(1, 32);
+        self.restir_spatial_checkerboard = u32::from(self.restir_spatial_checkerboard != 0);
+        self.restir_split_passes = u32::from(self.restir_split_passes != 0);
     }
 
     /// World mode the shaders see. A forced mode wins once cache-to-cache is
@@ -1344,6 +1391,25 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
+        let _ = writeln!(
+            out,
+            "restir_spatial_neighbors={}",
+            self.restir_spatial_neighbors
+        );
+        let _ = writeln!(out, "restir_spatial_radius={}", self.restir_spatial_radius);
+        let _ = writeln!(
+            out,
+            "restir_resolution_scale={}",
+            self.restir_resolution_scale
+        );
+        let _ = writeln!(out, "restir_candidates={}", self.restir_candidates);
+        let _ = writeln!(
+            out,
+            "restir_spatial_checkerboard={}",
+            self.restir_spatial_checkerboard
+        );
+        let _ = writeln!(out, "restir_split_passes={}", self.restir_split_passes);
         let x = &self.experiments;
         let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
         let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
@@ -1540,6 +1606,13 @@ impl LightingSettings {
                     self.lamp_pick.mode = LampPickMode::Both;
                 }
             }
+            "restir_di" => self.restir_di = on(value)?,
+            "restir_spatial_neighbors" => self.restir_spatial_neighbors = num_u32(value)?,
+            "restir_spatial_radius" => self.restir_spatial_radius = num_u32(value)?,
+            "restir_resolution_scale" => self.restir_resolution_scale = num_u32(value)?,
+            "restir_candidates" => self.restir_candidates = num_u32(value)?,
+            "restir_spatial_checkerboard" => self.restir_spatial_checkerboard = num_u32(value)?,
+            "restir_split_passes" => self.restir_split_passes = num_u32(value)?,
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -1665,6 +1738,16 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_RESTIR_DI", "restir_di"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "restir_spatial_neighbors"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "restir_spatial_radius"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "restir_resolution_scale"),
+            ("GENOS_RESTIR_CANDIDATES", "restir_candidates"),
+            (
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+                "restir_spatial_checkerboard",
+            ),
+            ("GENOS_RESTIR_SPLIT_PASSES", "restir_split_passes"),
             ("GENOS_LIGHTING_ASYNC", "cache_async"),
             ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
             ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
@@ -2672,5 +2755,57 @@ mod launch_tests {
 
         std::env::remove_var("GENOS_LIGHTING_PRESET");
         std::env::remove_var("GENOS_GI2_PRESET");
+    }
+
+    #[test]
+    fn restir_env_defaults_match_the_preset() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "GENOS_RESTIR_DI" => Some("on".to_string()),
+                "GENOS_RESTIR_SPATIAL_NEIGHBORS" => Some(RESTIR_SPATIAL_NEIGHBORS.to_string()),
+                "GENOS_RESTIR_SPATIAL_RADIUS" => Some(RESTIR_SPATIAL_RADIUS.to_string()),
+                "GENOS_RESTIR_RESOLUTION_SCALE" => Some(RESTIR_RESOLUTION_SCALE.to_string()),
+                "GENOS_RESTIR_CANDIDATES" => Some(RESTIR_CANDIDATES.to_string()),
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD" => {
+                    Some(RESTIR_SPATIAL_CHECKERBOARD.to_string())
+                }
+                "GENOS_RESTIR_SPLIT_PASSES" => Some(RESTIR_SPLIT_PASSES.to_string()),
+                _ => None,
+            }
+        };
+        for preset in [
+            LightingPreset::High,
+            LightingPreset::Potato,
+            LightingPreset::Gi1Bounce,
+        ] {
+            let mut base = LightingSettings::preset(preset);
+            base.sanitize();
+            let mut over = base.clone();
+            over.apply_env_from(&[], &env).unwrap();
+            assert_eq!(over, base, "{}", preset.name());
+        }
+        // The picture gate's direct settings, then the same strings.
+        let mut gate = LightingSettings::preset(LightingPreset::Potato);
+        gate.direct.max_lights = 0;
+        gate.direct.refresh_frames = 1;
+        gate.direct.resolution_scale = 1;
+        gate.sky = false;
+        gate.ambient.mode = AmbientMode::Off;
+        gate.shadows.enabled = true;
+        gate.gi.enabled = false;
+        gate.bounce.count = 0;
+        gate.probes.enabled = false;
+        gate.world_cache.enabled = false;
+        gate.lamp_pick.mode = LampPickMode::Off;
+        gate.lamp_pick.radius = 0;
+        gate.compose_reuse = false;
+        gate.restir_di = true;
+        gate.sanitize();
+        let mut over = gate.clone();
+        over.apply_env_from(&[], &env).unwrap();
+        assert_eq!(over.restir_resolution_scale, RESTIR_RESOLUTION_SCALE);
+        assert_eq!(over.restir_spatial_neighbors, RESTIR_SPATIAL_NEIGHBORS);
+        assert_eq!(over.direct.resolution_scale, 1);
+        assert_eq!(over, gate);
     }
 }

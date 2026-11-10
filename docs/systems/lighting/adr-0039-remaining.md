@@ -29,7 +29,7 @@ The six axis copies are still separate entries. The thin-wall reject uses that: 
 | Mover texels | Detail off: object-frame entries, trust 0, probes. Detail on: no seed. Compose reads the world cell at the current pose and skips probes when that read is what is shown | Mover-only probe helper if cells cannot keep up (ADR decision 3). Object-frame lookup stays for detail off. Not deleted while that fallback exists |
 | SVGF per-axis world read (`lighting_sc_wrc_now`) | Texel detail off, and a texel that already has samples whose field is stale | Texel detail on skips that read. The texel's own samples show instead |
 | Direct per-pixel light, including the GI-on lamp-ray cost | Always. ADR D1 | D1 explains the ray count. Not this stage |
-| ReSTIR and world-cell light lists | Not the bounce seed. ADR D2, where the direct path is approved | Its own stage. Temporal reuse is that reservoir's history for a matched depth and normal, not a new bounce cache |
+| ReSTIR and world-cell light lists | Not the bounce seed. ADR D2 is `restir_di`, default on: the existing C1–C5 reservoir for screen point lamps, every count, no cell table. The pre-reservoir module and the pairwise pixel sample are gone | Off is the labelled exact sum, not a second estimator. `LampShadeGate::Exact` stays that reference. History is the product depth/normal test (0.02, 0.05 m, 0.9), one pixel. The raw sample is the picture. The 32-frame mean is stored and is not the picture. World-cell light lists stay out. The 3 ms and 5 ms gates are not shown met |
 
 ## Parked (accuracy or performance, not a functional stop)
 

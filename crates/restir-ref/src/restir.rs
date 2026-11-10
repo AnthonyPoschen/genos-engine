@@ -134,6 +134,24 @@ impl Counters {
     }
 }
 
+/// Extra work for receivers whose temporal history is thin (Bitterli 2020
+/// section 6; RTXDI boosts spatial reuse on disocclusion). A receiver is thin
+/// when its stored history `M` is below `thin_m` at the start of a frame:
+/// fresh on screen, disoccluded, or dropped by a change. Thin receivers take
+/// `candidates` initial candidates and `neighbors` spatial neighbours within
+/// `radius` instead of the config values. The merges keep the generalized
+/// balance heuristic, which stays unbiased when inputs have different `M`.
+/// Samples are points on point lamps, so the reuse shift is the identity in
+/// light-sample space and its Jacobian is 1. Shading is unchanged: one
+/// shadow ray per receiver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Boost {
+    pub thin_m: u32,
+    pub candidates: u32,
+    pub neighbors: u32,
+    pub radius: u32,
+}
+
 /// A running reference. Owns the scene, the history, and one PCG stream.
 #[derive(Clone, Debug)]
 pub struct Session {
@@ -145,6 +163,8 @@ pub struct Session {
     shaded: Vec<Reservoir>,
     counters: Counters,
     frame: u32,
+    boost: Option<Boost>,
+    thin: Vec<bool>,
 }
 
 impl Session {
@@ -172,6 +192,8 @@ impl Session {
             shaded: vec![Reservoir::empty(); count],
             counters: Counters::zero(),
             frame: 0,
+            boost: None,
+            thin: vec![false; count],
         })
     }
 
@@ -219,6 +241,35 @@ impl Session {
         }
     }
 
+    /// Turns the thin-history boost on (`Some`) or off (`None`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a string when a boosted count is outside the config ranges.
+    pub fn set_boost(&mut self, boost: Option<Boost>) -> Result<(), String> {
+        if let Some(b) = boost {
+            Config {
+                candidates: b.candidates,
+                spatial_neighbors: b.neighbors,
+                spatial_radius: b.radius,
+                ..self.config
+            }
+            .validate()?;
+        }
+        self.boost = boost;
+        Ok(())
+    }
+
+    /// Drops temporal history at these receivers only: a camera turn's
+    /// disoccluded or newly visible pixels.
+    pub fn drop_history(&mut self, receivers: &[usize]) {
+        for &index in receivers {
+            if let Some(reservoir) = self.history.get_mut(index) {
+                *reservoir = Reservoir::empty();
+            }
+        }
+    }
+
     /// Drops temporal history. The next frame reuses neighbours only.
     pub fn reset_temporal(&mut self) {
         for reservoir in &mut self.history {
@@ -230,6 +281,13 @@ impl Session {
     #[must_use]
     pub fn step(&mut self) -> Vec<Vec3> {
         let count = self.scene.receivers.len();
+        let thin_m = self.boost.map_or(0, |b| b.thin_m);
+        for (flag, reservoir) in self.thin.iter_mut().zip(&self.history) {
+            *flag = !self.config.temporal || reservoir.m < thin_m;
+        }
+        if self.boost.is_none() {
+            self.thin.fill(false);
+        }
         let mut initial = vec![Reservoir::empty(); count];
         let mut counters = Counters::zero();
         for (index, slot) in initial.iter_mut().enumerate() {
@@ -272,10 +330,27 @@ impl Session {
         radiance
     }
 
+    fn boost_at(&self, index: usize) -> Option<Boost> {
+        self.boost
+            .filter(|_| self.thin.get(index).copied().unwrap_or(false))
+    }
+
+    fn candidates_at(&self, index: usize) -> u32 {
+        self.boost_at(index)
+            .map_or(self.config.candidates, |b| b.candidates)
+    }
+
+    fn spatial_at_counts(&self, index: usize) -> (u32, u32) {
+        self.boost_at(index).map_or(
+            (self.config.spatial_neighbors, self.config.spatial_radius),
+            |b| (b.neighbors, b.radius),
+        )
+    }
+
     fn initial_at(&mut self, index: usize, counters: &mut Counters) -> Reservoir {
         let weights = lamp_weights(&self.scene, index);
         let mut reservoir = Reservoir::empty();
-        let count = usize::try_from(self.config.candidates).unwrap_or(1);
+        let count = usize::try_from(self.candidates_at(index)).unwrap_or(1);
         for _ in 0..count {
             counters.candidates = counters.candidates.saturating_add(1);
             let Some((lamp, pdf)) = self.propose(index, &weights) else {
@@ -348,7 +423,8 @@ impl Session {
             .get(index)
             .copied()
             .unwrap_or_else(Reservoir::empty);
-        if self.config.spatial_neighbors == 0 || self.config.spatial_radius == 0 {
+        let (wanted, radius) = self.spatial_at_counts(index);
+        if wanted == 0 || radius == 0 {
             return current;
         }
         let height = self.scene.receivers.len() / self.scene.width;
@@ -356,8 +432,8 @@ impl Session {
             index,
             self.scene.width,
             height,
-            self.config.spatial_radius,
-            self.config.spatial_neighbors,
+            radius,
+            wanted,
             &mut self.rng,
         );
         let unit = self.rng.next_f32();
@@ -736,10 +812,7 @@ mod tests {
         let grown = held.history_m(0).ok_or("missing history")?;
         let limited = fresh.history_m(0).ok_or("missing history")?;
         assert!(grown > 40, "unclamped M {grown}");
-        assert!(
-            limited <= super::DEFAULT_M_CLAMP + 1,
-            "clamped M {limited}"
-        );
+        assert!(limited <= super::DEFAULT_M_CLAMP + 1, "clamped M {limited}");
         let far = genos_math::Vec3::new(7.5, 1.0, 0.15);
         assert!(held.set_lamp_position(0, far));
         assert!(fresh.set_lamp_position(0, far));
