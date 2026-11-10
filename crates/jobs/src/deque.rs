@@ -268,13 +268,13 @@ mod loom_tests {
     use loom::sync::Arc;
     use loom::thread;
 
-    fn collect(popped: Option<u32>, stolen: Stolen<u32>) -> Vec<u32> {
+    fn collect(popped: Option<u32>, stolen: &Stolen<u32>) -> Vec<u32> {
         let mut got = Vec::new();
         if let Some(value) = popped {
             got.push(value);
         }
         if let Stolen::Task(value) = stolen {
-            got.push(value);
+            got.push(*value);
         }
         got
     }
@@ -288,7 +288,7 @@ mod loom_tests {
             let thief = Arc::clone(&deque);
             let pop = thread::spawn(move || owner.pop());
             let steal = thread::spawn(move || thief.steal());
-            let mut got = collect(pop.join().unwrap(), steal.join().unwrap());
+            let mut got = collect(pop.join().unwrap(), &steal.join().unwrap());
             if let Some(value) = deque.pop() {
                 got.push(value);
             }
@@ -307,7 +307,7 @@ mod loom_tests {
             let thief = Arc::clone(&deque);
             let pop = thread::spawn(move || owner.pop());
             let steal = thread::spawn(move || thief.steal());
-            let mut got = collect(pop.join().unwrap(), steal.join().unwrap());
+            let mut got = collect(pop.join().unwrap(), &steal.join().unwrap());
             if let Some(value) = deque.pop() {
                 got.push(value);
             }
