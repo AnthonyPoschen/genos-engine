@@ -435,7 +435,9 @@ fn normal_coupling(
     let other_a = other_arm_a.cross(normal);
     let lever_b = arm_b.cross(normal);
     let other_b = other_arm_b.cross(normal);
-    inv_mass(a) + inv_mass(b) + lever_a.dot(inv_inertia(a, other_a))
+    inv_mass(a)
+        + inv_mass(b)
+        + lever_a.dot(inv_inertia(a, other_a))
         + lever_b.dot(inv_inertia(b, other_b))
 }
 
@@ -639,6 +641,10 @@ fn inv_mass(body: &Body) -> f32 {
     } else {
         body.inverse_mass
     }
+}
+
+pub(crate) fn world_inverse_inertia(body: &Body, vector: Vec3) -> Vec3 {
+    inv_inertia(body, vector)
 }
 
 fn inv_inertia(body: &Body, vector: Vec3) -> Vec3 {

@@ -49,6 +49,7 @@ fn room() -> World {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }
