@@ -101,7 +101,12 @@ pub struct InfluenceFlags {
     pub reduced: bool,
     /// A vertex's weights summed to zero, so joint 0 carries weight 1.
     pub zero_sum: bool,
+    /// The kept weights summed to something other than 1, so they were divided by that sum.
+    pub renormalized: bool,
 }
+
+/// One `JOINTS_*` / `WEIGHTS_*` set.
+pub(crate) type InfluenceSet<'a> = (&'a [[f32; 4]], &'a [[f32; 4]]);
 
 /// Four influences per vertex, after the reduction in [`pack_influences`].
 #[derive(Clone, Debug, PartialEq)]
@@ -147,10 +152,10 @@ pub fn joint_index(value: f32) -> Result<u16, LoadError> {
 
 /// Keep four influences per vertex.
 ///
-/// `extra` is `JOINTS_1` / `WEIGHTS_1` when the file has them. Every non-zero
-/// weight is a candidate, from either set. More than four non-zero weights
-/// keep the four largest, then those four are divided by their sum. Four or
-/// fewer stay as written. A zero sum writes weight 1 on joint 0.
+/// `extra` is `JOINTS_1` / `WEIGHTS_1` when the file has them. `further` is
+/// `JOINTS_2` / `WEIGHTS_2` and `JOINTS_3` / `WEIGHTS_3`. Every non-zero weight
+/// is a candidate. More than four keep the four largest. A kept sum that is
+/// not 1 is divided by that sum. A zero sum writes weight 1 on joint 0.
 ///
 /// # Errors
 ///
@@ -161,6 +166,7 @@ pub fn pack_influences(
     primary_weights: &[[f32; 4]],
     extra_joints: Option<&[[f32; 4]]>,
     extra_weights: Option<&[[f32; 4]]>,
+    further: &[InfluenceSet<'_>],
 ) -> Result<PackedInfluences, LoadError> {
     if primary_joints.len() != primary_weights.len() {
         return Err(LoadError::Unrecognized);
@@ -172,17 +178,25 @@ pub fn pack_influences(
     } else if extra_joints.is_some() || extra_weights.is_some() {
         return Err(LoadError::Unrecognized);
     }
+    for (joints, weights) in further {
+        if joints.len() != primary_joints.len() || weights.len() != primary_joints.len() {
+            return Err(LoadError::Unrecognized);
+        }
+    }
     let mut out_j = Vec::with_capacity(primary_joints.len());
     let mut out_w = Vec::with_capacity(primary_joints.len());
     let mut flags = InfluenceFlags::default();
     for (index, (joints, weights)) in primary_joints.iter().zip(primary_weights).enumerate() {
-        let mut slots = [(0u16, 0.0f32); 8];
+        let mut slots = [(0u16, 0.0f32); 16];
         let mut count = 0usize;
         push_set(&mut slots, &mut count, joints, weights)?;
         if let (Some(joints), Some(weights)) = (extra_joints, extra_weights) {
             push_set(&mut slots, &mut count, &joints[index], &weights[index])?;
         }
-        let mut ranked = [0usize; 8];
+        for (joints, weights) in further {
+            push_set(&mut slots, &mut count, &joints[index], &weights[index])?;
+        }
+        let mut ranked = [0usize; 16];
         let mut nonzero = 0usize;
         for (slot, pair) in slots.iter().enumerate().take(count) {
             if pair.1 > 0.0 {
@@ -206,7 +220,8 @@ pub fn pack_influences(
         if sum <= 0.0 {
             flags.zero_sum = true;
             picked = [(0, 1.0), (0, 0.0), (0, 0.0), (0, 0.0)];
-        } else if nonzero > 4 {
+        } else if (sum - 1.0).abs() > 1.0e-5 {
+            flags.renormalized = true;
             let inv = 1.0 / sum;
             for slot in &mut picked {
                 slot.1 *= inv;
@@ -223,7 +238,7 @@ pub fn pack_influences(
 }
 
 fn push_set(
-    slots: &mut [(u16, f32); 8],
+    slots: &mut [(u16, f32)],
     count: &mut usize,
     joints: &[f32; 4],
     weights: &[f32; 4],
@@ -488,8 +503,8 @@ mod tests {
         let primary_w = vec![[0.5, 0.25, 0.125, 0.0625]];
         let extra_j = vec![[1.0, 0.0, 0.0, 0.0]];
         let extra_w = vec![[0.125, 0.0, 0.0, 0.0]];
-        let packed =
-            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        let packed = pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w), &[])
+            .expect("pack");
         assert!(packed.flags.reduced);
         assert!(!packed.flags.zero_sum);
         assert_eq!(packed.joints, vec![[0, 1, 0, 1]]);
@@ -500,7 +515,7 @@ mod tests {
     fn a_zero_weight_sum_writes_joint_zero() {
         let joints = vec![[0.0, 1.0, 2.0, 3.0]];
         let weights = vec![[0.0, 0.0, 0.0, 0.0]];
-        let packed = pack_influences(&joints, &weights, None, None).expect("pack");
+        let packed = pack_influences(&joints, &weights, None, None, &[]).expect("pack");
         assert!(packed.flags.zero_sum);
         assert_eq!(packed.joints, vec![[0, 0, 0, 0]]);
         assert_eq!(packed.weights, vec![[1.0, 0.0, 0.0, 0.0]]);
@@ -512,8 +527,8 @@ mod tests {
         let primary_w = vec![[0.5, 0.5, 0.5, 0.5]];
         let extra_j = vec![[4.0, 0.0, 0.0, 0.0]];
         let extra_w = vec![[0.5, 0.0, 0.0, 0.0]];
-        let packed =
-            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        let packed = pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w), &[])
+            .expect("pack");
         assert!(packed.flags.reduced);
         assert_eq!(packed.joints, vec![[0, 1, 2, 3]]);
         assert_eq!(packed.weights, vec![[0.25, 0.25, 0.25, 0.25]]);
@@ -525,8 +540,8 @@ mod tests {
         let primary_w = vec![[0.0, 0.0, 0.0, 0.0]];
         let extra_j = vec![[1.0, 0.0, 0.0, 0.0]];
         let extra_w = vec![[1.0, 0.0, 0.0, 0.0]];
-        let packed =
-            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        let packed = pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w), &[])
+            .expect("pack");
         assert!(!packed.flags.zero_sum);
         assert!(!packed.flags.reduced);
         assert_eq!(packed.joints, vec![[1, 0, 0, 0]]);
@@ -539,11 +554,36 @@ mod tests {
         let primary_w = vec![[0.4, 0.0, 0.0, 0.0]];
         let extra_j = vec![[4.0, 0.0, 0.0, 0.0]];
         let extra_w = vec![[0.6, 0.0, 0.0, 0.0]];
-        let packed =
-            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        let packed = pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w), &[])
+            .expect("pack");
         assert!(!packed.flags.reduced);
         assert_eq!(packed.joints, vec![[0, 4, 0, 0]]);
         assert_eq!(packed.weights, vec![[0.4, 0.6, 0.0, 0.0]]);
+        assert!(!packed.flags.renormalized);
+    }
+
+    #[test]
+    fn a_short_sum_is_divided_back_to_one() {
+        let joints = vec![[2.0, 0.0, 0.0, 0.0]];
+        let weights = vec![[0.5, 0.0, 0.0, 0.0]];
+        let packed = pack_influences(&joints, &weights, None, None, &[]).expect("pack");
+        assert!(packed.flags.renormalized);
+        assert!(!packed.flags.reduced);
+        assert_eq!(packed.joints, vec![[2, 0, 0, 0]]);
+        assert_eq!(packed.weights, vec![[1.0, 0.0, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn a_third_set_competes_for_the_four_largest() {
+        let primary_j = vec![[0.0, 1.0, 2.0, 3.0]];
+        let primary_w = vec![[0.1, 0.1, 0.1, 0.1]];
+        let later_j = vec![[8.0, 0.0, 0.0, 0.0]];
+        let later_w = vec![[0.9, 0.0, 0.0, 0.0]];
+        let packed = pack_influences(&primary_j, &primary_w, None, None, &[(&later_j, &later_w)])
+            .expect("pack");
+        assert!(packed.flags.reduced);
+        assert_eq!(packed.joints[0][0], 8);
+        assert!((packed.weights[0][0] - 0.9 / 1.2).abs() < 1.0e-5);
     }
 
     #[test]
