@@ -96,6 +96,40 @@ pub fn publish(scene: &Scene) -> Result<World, StoreError> {
     Ok(world)
 }
 
+/// A scene and the store published from its draw lists.
+pub struct Published {
+    /// The scene the store was copied from.
+    pub scene: Scene,
+    /// Rows for the floor, walls, solids, and lights on [`Self::scene`].
+    pub world: World,
+}
+
+impl Published {
+    /// Publish `scene` and keep that store beside it.
+    ///
+    /// # Errors
+    ///
+    /// [`publish`] failed.
+    pub fn new(scene: Scene) -> Result<Self, StoreError> {
+        let world = publish(&scene)?;
+        Ok(Self { scene, world })
+    }
+
+    /// Set menu visibility.
+    ///
+    /// The menu is a setting, not a placed row, so this does not write
+    /// [`Self::world`].
+    ///
+    /// # Errors
+    ///
+    /// The menu key rejected the value.
+    pub fn set_menu_visible(&mut self, visible: bool) -> Result<(), String> {
+        self.scene
+            .menu
+            .set_key("visible", if visible { "shown" } else { "hidden" })
+    }
+}
+
 /// Write a new position on the store row.
 ///
 /// This is the store copy only. `scene.walls`, `scene.solids`, and

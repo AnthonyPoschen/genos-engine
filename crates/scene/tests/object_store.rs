@@ -81,11 +81,12 @@ fn an_unchanged_move_emits_nothing_and_the_draw_list_stays() {
 
 #[test]
 fn a_menu_edit_emits_none() {
-    let mut scene = load_str(ROOM).expect("script");
-    let world = publish(&scene).expect("publish");
-    let cursor = world.clock();
-    scene.menu.visible = !scene.menu.visible;
-    assert_eq!(world.changes_since(cursor).len(), 0);
+    let mut published =
+        genos_scene::Published::new(load_str(ROOM).expect("script")).expect("publish");
+    let cursor = published.world.clock();
+    let visible = published.scene.menu.visible;
+    published.set_menu_visible(!visible).expect("menu");
+    assert_eq!(published.world.changes_since(cursor).len(), 0);
 }
 
 #[test]

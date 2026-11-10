@@ -49,7 +49,7 @@ pub use lighting::{
     LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
-pub use objects::{move_placed, publish, Placed};
+pub use objects::{move_placed, publish, Placed, Published};
 pub use particles::{
     apply_particle_arg, particle_flag_needs_value, ParticleCli, ParticleEnv, ParticleLight,
     ParticlePreset, ParticleSettings, DEFAULT_SEED, HIGH_MAX_PARTICLES, LOW_MAX_PARTICLES,
