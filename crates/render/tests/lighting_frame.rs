@@ -22,12 +22,6 @@ use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // Lavapipe runs shader invocations on several host threads. The surface
-    // cache's lit-from offer, probe seed and vec4 component stores are plain
-    // writes, so the hash shot and the screen shot of one test can disagree
-    // and one of them drops the floor blotch. One thread runs those stores in
-    // program order. A hardware driver does not read this variable.
-    std::env::set_var("LP_NUM_THREADS", "1");
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();

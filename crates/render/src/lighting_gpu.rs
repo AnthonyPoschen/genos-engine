@@ -1058,6 +1058,7 @@ impl Gpu {
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
             + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
+            + pixels * 6 // probe-seed scratch, two vec4 per pixel, stride 6
         } else {
             0
         };
@@ -1117,12 +1118,15 @@ impl Gpu {
                 // +SLOTS: screen-owner election, past the sun block. See
                 // LIGHTING_SCREEN_OWNER_AT. Another SLOTS plus a 3-word header:
                 // the screen launch's tap-list dedup (LIGHTING_SCREEN_LIST_AT).
+                // Two more SLOTS: the lit-from offer word and the probe-seed election.
                 self.lighting.cache_keys = self.make_buffer_queues(
                     (lighting_atrous_ppm_at()
                         + LIGHTING_ATROUS_META_WORDS
                         + LIGHTING_SUN_WORDS
                         + LIGHTING_CACHE_SLOTS
                         + 3
+                        + LIGHTING_CACHE_SLOTS
+                        + LIGHTING_CACHE_SLOTS
                         + LIGHTING_CACHE_SLOTS)
                         * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
