@@ -380,7 +380,8 @@ impl Renderer {
 
     /// Pixels from the frame before the latest submit. That frame keeps its own lamp.
     ///
-    /// Needs `set_keep_pictures(true)` before both draws.
+    /// Needs `set_keep_pictures(true)` before both draws. A flight whose fence was
+    /// reset and not submitted is not waited.
     pub fn read_earlier_frame(&mut self) -> Result<Vec<u8>, String> {
         let slot = self.gpu.flight;
         self.gpu.read_host(slot)
@@ -1181,6 +1182,8 @@ impl Renderer {
     }
 
     /// Columns written by the last frame dispatch. Empty when that frame skipped fog.
+    ///
+    /// A flight whose fence was reset and not submitted is not waited.
     ///
     /// # Errors
     ///
@@ -4307,6 +4310,19 @@ impl Gpu {
         self.wait_fence(self.fences[slot], "flight wait")
     }
 
+    /// Wait `fence` when it belongs to a flight that has a submit in flight.
+    ///
+    /// An out-of-date acquire resets the fence and returns before submit, so
+    /// the slot is not live. Waiting that fence never returns.
+    fn wait_live_fence(&mut self, fence: Handle, what: &str) -> Result<(), String> {
+        if let Some(slot) = (0..2).find(|&slot| std::ptr::eq(self.fences[slot], fence)) {
+            if !self.flight_live[slot] {
+                return Ok(());
+            }
+        }
+        self.wait_fence(fence, what)
+    }
+
     fn wait_all_inflight(&mut self) -> Result<(), String> {
         for slot in 0..2 {
             if self.flight_live[slot] {
@@ -4334,7 +4350,7 @@ impl Gpu {
     }
 
     fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
-        self.wait_fence(self.fences[slot], "earlier frame")?;
+        self.wait_live_fence(self.fences[slot], "earlier frame")?;
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;

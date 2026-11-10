@@ -82,11 +82,14 @@ impl Gpu {
     }
 
     /// Columns the last frame dispatch wrote. Empty when that frame did not dispatch.
+    ///
+    /// The wait is the fence bound to this flight, and only when that slot has a
+    /// submit in flight. A reset fence from an out-of-date acquire is not waited.
     pub(super) fn read_frame_columns(&mut self) -> Result<Vec<FogColumn>, String> {
         if !self.froxel_wrote {
             return Ok(Vec::new());
         }
-        self.wait_fence(self.fence, "frame columns")?;
+        self.wait_live_fence(self.fence, "frame columns")?;
         let Some(job) = self.froxel_frame.as_ref() else {
             return Ok(Vec::new());
         };

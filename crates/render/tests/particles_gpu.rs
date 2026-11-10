@@ -393,20 +393,36 @@ fn exclusive_prefix(values: &[u32]) -> Vec<u32> {
 
 #[test]
 fn an_out_of_date_acquire_does_not_wait_the_reset_fence() {
-    let (_w, _h, mut life) = open();
+    let (width, height, mut life) = open();
     let camera = Camera::new(0.0, 2.0, 0.0);
     let settings = emitter(8, 4);
-    draw(&mut life, &world(settings.clone()), &camera);
+    let mut drawn = world(settings);
+    drawn.scene.fog.enabled = true;
+    drawn.scene.fog.density = 0.02;
+    drawn.scene.fog.grid_width = 1;
+    drawn.scene.fog.grid_height = 1;
+    drawn.scene.fog.grid_slices = 1;
+    life.device.set_keep_pictures(true);
+    draw(&mut life, &drawn, &camera);
     life.device.fail_next_acquire();
     let err = life
         .device
-        .draw(&world(settings.clone()), &camera, false)
+        .draw(&drawn, &camera, false)
         .expect_err("acquire was submitted");
     assert!(
         err.contains("out of date"),
         "acquire failed for another reason: {err}"
     );
-    draw(&mut life, &world(settings), &camera);
+    // Both readers used to wait this flight's fence. It was reset and not submitted.
+    let earlier = life.device.read_earlier_frame().expect("earlier frame");
+    let pixels = usize::try_from(width).unwrap_or(0) * usize::try_from(height).unwrap_or(0) * 4;
+    assert_eq!(earlier.len(), pixels);
+    let columns = life.device.frame_fog_columns().expect("frame columns");
+    assert!(
+        !columns.is_empty(),
+        "fog wrote no columns, so the reset fence was not the one waited"
+    );
+    draw(&mut life, &drawn, &camera);
 }
 
 #[test]
