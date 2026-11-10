@@ -1952,9 +1952,11 @@ const float LIGHTING_SC_HANDOVER_K = 2.0;
 // half. Later sets converge to the sample mean. The first set does not
 // replace the cell, so a yaw does not show one noisy set.
 const float LIGHTING_SC_SEED_PRIOR = 0.5;
-// A stored field moves this far toward a later filter target on each push.
-// The first stored field is the target, so a fill shows at once. There is
-// no hold, so a small gap still moves and the field reaches the target.
+// A stored field moves this far toward a later filter target on each push
+// when the block's λ is 0. A-SVGF eq. 7 raises that step with λ:
+// α' = (1 - λ) α + λ. The first stored field is the target, so a fill
+// shows at once. There is no hold, so a small gap still moves and the
+// field reaches the target.
 const float LIGHTING_FIELD_CATCH = 1.0 / 16.0;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
@@ -5045,6 +5047,7 @@ vec4 lighting_svgf_target(uint slot) {
     }
     return vec4(outc, max(W, cw));
 }
+float lighting_sc_lambda(uint slot);
 void lighting_svgf_push(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {
@@ -5099,12 +5102,17 @@ void lighting_svgf_push(uint slot) {
                 outc = mix(prev, outc, LIGHTING_SC_SEED_PRIOR);
             }
         } else {
-            // Quiet texels step 1/16 toward the target. A lamp that moved or
-            // went out leaves none of the stored field: lighting_lamp_keep is
-            // 0, and holding the 1/16 step is the multi-frame tail.
+            // α' = (1 - λ) α + λ (Schied, Peters & Dachsbacher, HPG 2018,
+            // eq. 7). λ is this texel's 3×3 block value from the same-seed
+            // check, already noise-subtracted, so variance is not a change.
+            // λ of 0 keeps the sixteenth. A lamp that left
+            // (lighting_lamp_keep is 0) takes the target on this push.
             float catch_up = LIGHTING_FIELD_CATCH;
             if (lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
                 catch_up = 1.0;
+            } else {
+                float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
+                catch_up = (1.0 - lam) * catch_up + lam;
             }
             outc = mix(prev, outc, catch_up);
         }
@@ -5160,7 +5168,9 @@ void lighting_svgf_push(uint slot) {
 // scene gives exactly 0: same ray, same hit, same light). lambda = min(1,
 // |delta| / max(L_now, L_then)) (A-SVGF eq. 6), written to the 9 texels of the
 // block; alpha' = (1 - lambda) alpha + lambda (A-SVGF eq. 7) in the MSME
-// update. A texel is resolved while lambda < LIGHTING_ASVGF_EPS and its mean's
+// update. The displayed field uses the same alpha' for its step toward the
+// filter target. The paper's alpha' blends noisy samples; that step is the
+// departure. A texel is resolved while lambda < LIGHTING_ASVGF_EPS and its mean's
 // standard error sqrt(var / n) is under LIGHTING_ASVGF_SE of its mean (ReBLUR-
 // style convergence); a resolved texel takes no rays besides its checks. One
 // with lambda >= eps is relit with probability min(1, lambda / FULL) a round.
