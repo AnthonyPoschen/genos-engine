@@ -15,6 +15,7 @@ mod cooked;
 mod emitters;
 mod error;
 mod gltf;
+mod gskin;
 mod import;
 mod inflate;
 mod jpeg;
@@ -44,6 +45,10 @@ pub use emitters::{
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
 pub use error::LoadError;
+pub use gskin::{
+    decode_skin, encode_skin, skin_path, DecodedSkin, EncodedSkin, SkinCook, SkinPrimitive,
+    GSKIN_MAGIC, GSKIN_VERSION,
+};
 pub use gltf::{
     image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
     PbrMaterial, Primitive, Sampler, TextureSlot,
