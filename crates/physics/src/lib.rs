@@ -31,6 +31,8 @@
 //! statics are not a pair.
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
+//! A vehicle is optional state on one chassis body. An empty vehicle list
+//! leaves this step unchanged.
 
 mod broadphase;
 mod ccd;
@@ -39,6 +41,12 @@ mod destruction;
 mod island;
 mod mesh;
 mod solver;
+mod vehicle;
+
+pub use vehicle::{
+    chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel,
+    WheeledGround,
+};
 
 pub use destruction::{
     allows_slice, apply_damage, chunk_body, destruction_report, gi_cache_dirty, intact_body,
@@ -265,6 +273,10 @@ pub struct StepStats {
     pub awake_bodies: u32,
     /// Dynamic bodies the narrow phase handed to the solver.
     pub solver_bodies: u32,
+    /// Wheel rays cast this step. A sleeping chassis casts none.
+    pub wheel_rays: u32,
+    /// Vehicles stored on the world. An empty list stays zero.
+    pub vehicle_count: u32,
 }
 
 impl StepStats {
@@ -283,6 +295,8 @@ impl StepStats {
             islands: 0,
             awake_bodies: 0,
             solver_bodies: 0,
+            wheel_rays: 0,
+            vehicle_count: 0,
         }
     }
 }
@@ -448,12 +462,16 @@ pub struct World {
     ccd_scratch: ccd::CcdScratch,
     broadphase: broadphase::Broadphase,
     islands: island::Islands,
+    /// Chassis payloads. Empty from [`World::new`]. A wheel is not a body.
+    pub vehicles: Vec<vehicle::Vehicle>,
 }
 
-/// Two worlds are equal when their bodies and gravity are.
+/// Two worlds are equal when their bodies, gravity, and vehicles are.
 impl PartialEq for World {
     fn eq(&self, other: &Self) -> bool {
-        self.bodies == other.bodies && self.gravity == other.gravity
+        self.bodies == other.bodies
+            && self.gravity == other.gravity
+            && self.vehicles == other.vehicles
     }
 }
 
@@ -476,6 +494,7 @@ impl World {
             ccd_scratch: ccd::CcdScratch::new(),
             broadphase: broadphase::Broadphase::new(),
             islands: island::Islands::new(),
+            vehicles: Vec::new(),
         }
     }
 
@@ -622,6 +641,9 @@ pub fn step(world: &mut World, dt: f32) {
         }
     }
     world.step_stats = StepStats::zero();
+    if !world.vehicles.is_empty() {
+        vehicle::apply(world, dt);
+    }
     let (speculative, swept) = motion_flags(world);
     world.step_stats.ccd_applied = speculative || swept;
     ccd::prepare_swept(

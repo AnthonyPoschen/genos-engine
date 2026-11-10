@@ -600,6 +600,10 @@ Each step is one commit. The `Deviation:` line says where the step leaves a sour
 - **Deviation:** none. This step adds no solver feature. It is the scale gate for the CPU path.
 - **Commit:** `physics: test thousands of active and asleep bodies`
 
+### Vehicles (P27–P32) wait on ADR 0040
+
+P27–P32 are the wheeled-car and thruster sketches in this plan. They are not a reviewed vehicle decision. [ADR 0040](../../adr/0040-vehicle-domains.md) is **Proposed**. It keeps ground, aircraft, and space as separate payloads on one chassis body, and it leaves sea as uncommitted buoyancy and quadratic drag. G1 is in the step as a trial: four wheel rays and an explicit spring-damper, a `usize` chassis index, and a ray against a plane or a box. P27 stays unchecked because that box still asks for `BodyId`, a P10 soft step, and a cylinder cast. P28–P32 stay unchecked. A1, S1, and sea are not in the G1 trial. The boxes below stay so the original fixtures remain written down.
+
 ### P27. Wheel suspension
 
 - [ ] **Files:** `vehicle.rs`. Test `crates/physics/tests/vehicle.rs`. Record the game use in `docs/systems/physics.md`.
