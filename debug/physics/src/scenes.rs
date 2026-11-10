@@ -11,7 +11,9 @@
 //! lighting geometry, not bodies.
 
 use genos_math::{Quat, Vec3};
-use genos_physics::{chassis_rest_world, locked_wheel_world, Body, MotionQuality, World};
+use genos_physics::{
+    chassis_rest_world, locked_wheel_world, thruster_world, Body, MotionQuality, World,
+};
 
 /// One entry in the scene picker.
 pub struct SceneInfo {
@@ -29,7 +31,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 9] = [
+pub const SCENES: [SceneInfo; 10] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -83,6 +85,12 @@ pub const SCENES: [SceneInfo; 9] = [
         summary: "G1 chassis at 10 m/s with locked wheels and the P28 slip curve",
         steps: 60,
         build: locked_wheel,
+    },
+    SceneInfo {
+        name: "thruster",
+        summary: "1 000 kg cube, one offset thruster, gravity zero (ADR 0040 S1)",
+        steps: 60,
+        build: thruster,
     },
 ];
 
@@ -285,6 +293,10 @@ fn chassis_rest() -> World {
 
 fn locked_wheel() -> World {
     locked_wheel_world()
+}
+
+fn thruster() -> World {
+    thruster_world()
 }
 
 fn sleep_island() -> World {
