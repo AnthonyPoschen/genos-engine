@@ -8,6 +8,7 @@
 
 #![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
 use genos_render::{DebugView, Renderer, ViewMode, World};
@@ -18,6 +19,14 @@ const WARM: usize = 24;
 const TAIL: usize = 12;
 const WIDTH: u32 = 160;
 const HEIGHT: u32 = 90;
+
+struct LampDiag;
+
+impl Drop for LampDiag {
+    fn drop(&mut self) {
+        std::env::remove_var("GENOS_LIGHTING_LAMP_PICK_DIAG");
+    }
+}
 
 fn open() -> (
     std::sync::MutexGuard<'static, ()>,
@@ -314,6 +323,10 @@ fn lock_the_drop_before_the_cap() {
 #[test]
 fn a_moved_box_shadow_is_within_ten_percent_by_frame_eight() {
     lock_the_drop_before_the_cap();
+    // Header words 43 and 44 stay zero unless this bit is on, so the
+    // reprojection bar would pass a run that never counted an accept.
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
