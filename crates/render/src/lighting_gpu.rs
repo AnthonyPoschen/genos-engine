@@ -5027,11 +5027,17 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     // stored as f32, so these stay at or below bit 23 (exact integer).
     const COVERAGE_FIRST: u32 = 1 << 20;
     const CAP_FILL: u32 = 1 << 21;
+    // bounded_quarters. Bit 22 stays inside the exact integer range of the
+    // f32 head word (through bit 23).
+    const BOUNDED_QUARTERS: u32 = 1 << 22;
     if settings.experiments.coverage_first {
         head_hi |= COVERAGE_FIRST;
     }
     if settings.experiments.cap_fill {
         head_hi |= CAP_FILL;
+    }
+    if settings.experiments.bounded_quarters {
+        head_hi |= BOUNDED_QUARTERS;
     }
     LightingChangeHead {
         flags: flags_all & ((1 << 23) - 1),
@@ -5841,15 +5847,18 @@ mod sun_step {
         assert_eq!(on.mode_cap, 3 * 1000 + 8, "high set cap is 8");
         assert_eq!(on.head_hi & (1 << 20), 0, "coverage_first defaults off");
         assert_eq!(on.head_hi & (1 << 21), 0, "cap_fill defaults off");
+        assert_eq!(on.head_hi & (1 << 22), 0, "bounded_quarters defaults off");
         let mut sixty_four = settings.clone();
         sixty_four.experiments.world_cap = 64;
         let explicit = super::lighting_change_head(&sixty_four);
         assert_eq!(explicit.mode_cap, 3 * 1000 + 64, "an explicit cap is packed");
         settings.experiments.coverage_first = true;
         settings.experiments.cap_fill = true;
+        settings.experiments.bounded_quarters = true;
         let both = super::lighting_change_head(&settings);
         assert_eq!(both.head_hi & (1 << 20), 1 << 20);
         assert_eq!(both.head_hi & (1 << 21), 1 << 21);
+        assert_eq!(both.head_hi & (1 << 22), 1 << 22);
     }
 
     fn assert_spirv_1(name: &str, words: &[u8]) {

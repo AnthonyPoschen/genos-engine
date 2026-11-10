@@ -645,6 +645,14 @@ pub struct LightingExperimentSettings {
     /// `world_cap` 0) is the only early settle. A texel at the cap is full
     /// either way: it is not kept on the trickle list.
     pub cap_fill: bool,
+    /// Key `bounded_quarters`. Default off. Under a camera or lamp change,
+    /// and for a new claim, each due fine texel takes one 16-ray quarter per
+    /// round instead of a whole 64-ray set. The round stops at
+    /// `surface_cache.ray_budget` when that is set, and at the base room
+    /// when it is 0, so the boosted texel room is not the ceiling. Near
+    /// texels under the 8-set minimum are listed before far ones, and both
+    /// before refinement and before a texel already at its set cap.
+    pub bounded_quarters: bool,
     /// Key `sc_settle`. Surface cache: frames still before the debug tools
     /// call the picture settled. `0` uses the change counter.
     pub sc_settle: u32,
@@ -667,6 +675,7 @@ impl Default for LightingExperimentSettings {
             world_cap: 0,
             coverage_first: false,
             cap_fill: false,
+            bounded_quarters: false,
             sc_settle: 0,
             sc_flags: LIGHTING_DEFAULT_SC_FLAGS,
             toggles: 0,
@@ -1457,6 +1466,7 @@ impl LightingSettings {
         let _ = writeln!(out, "world_cap={}", x.world_cap);
         let _ = writeln!(out, "coverage_first={}", bit(x.coverage_first));
         let _ = writeln!(out, "cap_fill={}", bit(x.cap_fill));
+        let _ = writeln!(out, "bounded_quarters={}", bit(x.bounded_quarters));
         let _ = writeln!(out, "sc_settle={}", x.sc_settle);
         let _ = writeln!(out, "sc_flags={}", x.sc_flags);
         let _ = writeln!(out, "toggles={}", toggles_text(x.toggles));
@@ -1569,6 +1579,7 @@ impl LightingSettings {
             "world_cap" => self.experiments.world_cap = num_u32(value)?.min(999),
             "coverage_first" => self.experiments.coverage_first = on(value)?,
             "cap_fill" => self.experiments.cap_fill = on(value)?,
+            "bounded_quarters" => self.experiments.bounded_quarters = on(value)?,
             "sc_settle" => self.experiments.sc_settle = num_u32(value)?,
             "sc_flags" => {
                 self.experiments.sc_flags = value
@@ -1816,6 +1827,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_WORLD_CAP", "world_cap"),
             ("GENOS_LIGHTING_COVERAGE_FIRST", "coverage_first"),
             ("GENOS_LIGHTING_CAP_FILL", "cap_fill"),
+            ("GENOS_LIGHTING_BOUNDED_QUARTERS", "bounded_quarters"),
             ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
             ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
             ("GENOS_LIGHTING_TOGGLES", "toggles"),

@@ -508,6 +508,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1024.0,
             "",
         ),
+        Knob::switch(
+            "lighting_bounded_quarters",
+            "Bounded quarters",
+            lighting.experiments.bounded_quarters,
+        ),
         Knob::number(
             "lighting_surface_cache_dormant_rays",
             "Dormant rays",
@@ -702,6 +707,7 @@ pub fn apply_lighting_knob(
         ),
         "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
         "lighting_surface_cache_ray_budget" => ("surface_cache.ray_budget", whole.to_string()),
+        "lighting_bounded_quarters" => ("bounded_quarters", on_off(v)),
         "lighting_surface_cache_dormant_rays" => ("surface_cache.dormant_rays", whole.to_string()),
         "lighting_world_cache" => ("world_cache", on_off(v)),
         "lighting_world_stale" => ("world_stale", whole.max(1).to_string()),
@@ -918,6 +924,7 @@ mod tests {
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",
+        "lighting_bounded_quarters",
         "lighting_surface_cache_dormant_rays",
         "lighting_world_cache",
         "lighting_world_stale",

@@ -55,21 +55,54 @@ void main() {
             for (uint b = 0u; b < LIGHTING_SC_BUCKETS; b++) {
                 total += ckeys.key[LIGHTING_SC_HIST_AT + b];
             }
-            uint c = total > base - young ? min(ckeys.key[LIGHTING_SC_BOOST_AT] + 1u, 100000u) : 0u;
-            ckeys.key[LIGHTING_SC_BOOST_AT] = c;
-            bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
-            gstats.pad3 = boost ? 1u : 0u;
-            uint budget = (boost ? room : base) - young;
+            uint budget;
+            if (lighting_bounded_quarters()) {
+                // The boost is the 1,404,928-ray ceiling. A bounded round does
+                // not take it. The next compact lists from the top bucket down
+                // until this many entries are in.
+                ckeys.key[LIGHTING_SC_BOOST_AT] = 0u;
+                gstats.pad3 = 0u;
+                uint cap = lighting_bounded_entry_cap();
+                uint young_keep = min(lighting_young_count(), lighting_bounded_cell_cap());
+                budget = cap > young_keep ? cap - young_keep : 0u;
+            } else {
+                uint c = total > base - young ? min(ckeys.key[LIGHTING_SC_BOOST_AT] + 1u, 100000u) : 0u;
+                ckeys.key[LIGHTING_SC_BOOST_AT] = c;
+                bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
+                gstats.pad3 = boost ? 1u : 0u;
+                budget = (boost ? room : base) - young;
+            }
             uint acc = 0u;
             uint thr = 0u;
+            // ~0 admits every entry of the threshold bucket. A bounded round
+            // that crosses inside a bucket keeps only the leftover entries, so
+            // a lower band cannot crowd the higher ones out of the dispatch.
+            uint allow = 0xffffffffu;
+            bool crossed = false;
             for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
-                acc += ckeys.key[LIGHTING_SC_HIST_AT + uint(b)];
+                uint n = ckeys.key[LIGHTING_SC_HIST_AT + uint(b)];
                 ckeys.key[LIGHTING_SC_HIST_AT + uint(b)] = 0u;
-                if (acc >= budget && thr == 0u) {
+                uint next = acc + n;
+                if (lighting_bounded_quarters()) {
+                    if (!crossed && budget > 0u && next >= budget) {
+                        thr = uint(b);
+                        allow = budget - acc;
+                        crossed = true;
+                    }
+                } else if (next >= budget && thr == 0u) {
                     thr = uint(b);
                 }
+                acc = next;
+            }
+            if (lighting_bounded_quarters() && budget == 0u) {
+                thr = LIGHTING_SC_BUCKETS;
+                allow = 0u;
             }
             ckeys.key[LIGHTING_SC_THR_AT] = thr;
+            if (lighting_bounded_quarters()) {
+                ckeys.key[LIGHTING_SC_ALLOW_AT] = allow;
+                ckeys.key[LIGHTING_SC_ALLOW_USED_AT] = 0u;
+            }
             gstats.sched_thr = thr;
         }
     }
@@ -172,28 +205,41 @@ void main() {
         atomicAdd(gstats.extra, 1u);
     }
     if (lighting_world_mode() == 3u) {
-        cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
-        // Few rays a relight: the set's quarters add up; the mean takes the set
-        // once its last quarter is in.
+        // Few rays a relight: the set's quarters add up and the mean takes the
+        // set once its last quarter is in. The sum and the count are one store.
         if (LIGHTING_SC_QUARTERS > 1u && !wrc_cell) {
+            vec4 obj = cache.v[LIGHTING_SC_OBJ_AT + slot];
+            vec4 sun = cache.v[LIGHTING_SC_SUN_AT + slot];
             uint q = q0 + run;
+            vec3 prev = vec3(0.0);
             if (q0 > 0u) {
-                e += lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].z));
+                prev = lighting_unpack_rgb9e5(floatBitsToUint(obj.z));
+                e += prev;
                 // S64B: and their sun/sky share (SUN_AT .z share, .w all, luminance).
-                es += cache.v[LIGHTING_SC_SUN_AT + slot].z;
-                el += cache.v[LIGHTING_SC_SUN_AT + slot].w;
+                es += sun.z;
+                el += sun.w;
             }
+            obj.y = uintBitsToFloat(lighting_frame());
             if (q < LIGHTING_SC_QUARTERS) {
-                cache.v[LIGHTING_SC_OBJ_AT + slot].z = uintBitsToFloat(lighting_pack_rgb9e5(e));
-                cache.v[LIGHTING_SC_OBJ_AT + slot].w = uintBitsToFloat(q);
-                cache.v[LIGHTING_SC_SUN_AT + slot].zw = vec2(es, el);
+                obj.z = uintBitsToFloat(lighting_pack_rgb9e5(max(e, vec3(0.0))));
+                obj.w = uintBitsToFloat(q);
+                sun.z = es;
+                sun.w = el;
+                cache.v[LIGHTING_SC_OBJ_AT + slot] = obj;
+                cache.v[LIGHTING_SC_SUN_AT + slot] = sun;
                 atomicAdd(gstats.partial, 1u);
                 return;
             }
-            cache.v[LIGHTING_SC_OBJ_AT + slot].zw = vec2(0.0);
-            cache.v[LIGHTING_SC_SUN_AT + slot].zw = vec2(0.0);
+            obj.z = 0.0;
+            obj.w = 0.0;
+            sun.z = 0.0;
+            sun.w = 0.0;
+            cache.v[LIGHTING_SC_OBJ_AT + slot] = obj;
+            cache.v[LIGHTING_SC_SUN_AT + slot] = sun;
             atomicAdd(gstats.sets, 1u);
             rays = float(LIGHTING_SC_SET_RAYS);
+        } else {
+            cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
         }
     }
     e *= LIGHTING_TAU / rays;
