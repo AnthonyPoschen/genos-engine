@@ -229,7 +229,7 @@ The debug menu on `debug/jobs` edits the same `JobSettings` keys. It is not a se
 - Authority: the process that runs the tick. The server process forces `order=serial`. A client may run `parallel` when the reduce matches.
 - Prediction / rollback: none inside the scheduler. The physics plan rolls the view body back by calling `step` again. Those calls are serial Must work. Rhai stays out of them.
 - Determinism: in-process, the parallel reduce matches the serial reduce. The replay record is that serial reduce. Wall-clock time and steal order are not inputs.
-- Headless server: no window, no Vulkan device, no audio device, `workers` may be non-zero only for a stage whose reduce matches serial, and the tick itself uses serial mode. MCP for the game session is the session listener, not this pool. The session tick stays serial, which [ADR 0040](../adr/0040-multiplayer-topologies.md) keeps. A listen-server runs that same serial tick inside the player runtime.
+- Headless server: no window, no Vulkan device, no audio device, `workers` may be non-zero only for a stage whose reduce matches serial, and the tick itself uses serial mode. MCP for the game session is the session listener, not this pool. The session tick stays serial, which [ADR 0042](../adr/0042-multiplayer-topologies.md) keeps. A listen-server runs that same serial tick inside the player runtime.
 
 ## 16. Failure modes and probes
 

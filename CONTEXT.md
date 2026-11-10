@@ -97,8 +97,8 @@ A stable name for one floor, wall, solid, or light in the live scene. The floor 
 _Avoid_: Entity id
 
 **NetId**:
-The replication id of one scene object: an index plus a generation, assigned by the authority runtime. Snapshots apply by this id. For an object from the shared scene file the bits match that file's scene handle. The two names stay distinct.
-_Avoid_: Entity id, vec index
+The physics plan's name for a replicated object's scene handle. Index plus generation. The authority runtime allocates it, and the snapshot applies by it. It is that handle, not a second id.
+_Avoid_: Entity id, a second generational counter, vec index
 
 **Agent endpoint**:
 The loopback MCP session on the running camera. An agent reads and edits the live scene there.

@@ -1,10 +1,10 @@
 # Multiplayer topologies
 
-Status: proposed, 10 Nov 2026. Decision: [ADR 0040](../../adr/0040-multiplayer-topologies.md). No code in this change.
+Status: proposed, 10 Nov 2026. Decision: [ADR 0042](../../adr/0042-multiplayer-topologies.md). No code in this change.
 
-This file extends the server-authoritative plan in [PR #14](https://github.com/AnthonyPoschen/genos-engine/pull/14). That plan's file is `docs/systems/core-networking/plan.md` on `cursor/core-networking-plan-c247`. It is not on master. Where this file and that plan disagree, [ADR 0040](../../adr/0040-multiplayer-topologies.md) wins. Everywhere else, that plan's recommendation stands, including its open questions D1–D54.
+This file extends the server-authoritative plan in [PR #14](https://github.com/AnthonyPoschen/genos-engine/pull/14). That plan's file is `docs/systems/core-networking/plan.md` on `cursor/core-networking-plan-c247`. It is not on master. Where this file and that plan disagree, [ADR 0042](../../adr/0042-multiplayer-topologies.md) wins. Everywhere else, that plan's recommendation stands, including its open questions D1–D54.
 
-The scene store this file reads is [PR #131](https://github.com/AnthonyPoschen/genos-engine/pull/131) and [`ecs-scene.md`](../ecs-scene.md). The asset id is the one [`crates/load`](../../../crates/load/src/sha256.rs) and the cook record already write.
+The scene store this file reads is the approved implementation of [PR #131](https://github.com/AnthonyPoschen/genos-engine/pull/131): a generational scene handle and a change tick on each component ([`ecs-scene.md`](../ecs-scene.md)). The asset id is the one [`crates/load`](../../../crates/load/src/sha256.rs) and the cook record already write.
 
 ## 1. Goal
 
@@ -41,15 +41,15 @@ PR #14 locks the numbers this file uses. They are copied here so a session commi
 | Command window | every command newer than the ack, capped at 64 |
 | Notices | reliable, ordered, at most 4 per datagram, payload at most 256 bytes |
 | Lost snapshot | not retransmitted. The next delta uses whichever ack is still in the ring |
-| Checksum | FNV-1a over replicated fields in `NetId` index order. Not a cross-machine physics golden |
+| Checksum | FNV-1a over replicated fields in scene-handle index order. Not a cross-machine physics golden |
 
-PR #14's `EntityId` is this file's `NetId`. PR #14's flag bit 128 stays reserved for the cause word. `MeshRef` does not use it.
+PR #14's `EntityId` is the scene handle. PR #14's flag bit 128 stays reserved for the cause word. `MeshRef` does not use it.
 
 ## 3. Revisions
 
 These are the only places this file changes PR #14.
 
-1. **No second store.** Columns are archetype columns in `genos-scene`. `genos-sim` is not added. `NetId`, `BodyId`, and the scene handle share a shape and are not interchangeable. `BodyId` stays the physics handle.
+1. **The scene handle is the wire id.** Columns are archetype columns in `genos-scene`. `genos-sim` is not added. The snapshot names the generational handle the ECS implementation stores. PR #14's `EntityId` and the physics plan's `NetId` are that handle. There is no second generational id. `BodyId` stays the physics id. The dirty bit is the per-component change tick. Replication does not store another tick.
 2. **The writer may be a listen-server.** PR #14's refusal of shared mode stays. One process is still the only writer. That process may be the player runtime.
 3. **The record is a component list.** The fixed flag byte does not grow a bit for every new component. Structural flags stay spawn and despawn. Each dirty component is a `u16` id, a field mask, and the absolute bytes of the dirty fields.
 4. **A datagram payload is at most 1200 bytes.** A snapshot that does not fit is sliced. Apply waits for every slice of that tick. A missing slice is a lost snapshot, and the next tick sends again. This is the late-joiner rule PR #14 left to UDP fragmentation.
@@ -102,27 +102,27 @@ Punch, later, uses the relay as the introducer. Each peer learns the other's pub
 Migration moves the writer. It does not split the writer across peers.
 
 1. The authority stops taking new commands at tick `T`.
-2. It sends the nominee a baseline-0 snapshot of every replicated `NetId`, sliced at 1200 bytes, outside `POSE_BUDGET`. The nominee learns objects that were outside its interest. That is the leak.
+2. It sends the nominee a baseline-0 snapshot of every replicated scene handle, sliced at 1200 bytes, outside `POSE_BUDGET`. The nominee learns objects that were outside its interest. That is the leak.
 3. Each guest receives a baseline-0 of its own interest set at tick `T`, and a reliable notice `migrate` (notice name `4`) that names the nominee. Guests do not receive the omniscient snapshot.
 4. Guests clear the prediction ring and the interpolation buffer, then apply the baseline. They do not resimulate from commands.
-5. Datagrams whose authority generation is the old one are dropped.
-6. The nominee's next tick is `T+1`. The baseline header carries the next `NetId` index and the live generations, so a spawn cannot reuse a live id or resurrect a dead one.
+5. Datagrams whose writer epoch is the old one are dropped. The epoch is the handoff counter. It is not the scene handle's generation.
+6. The nominee's next tick is `T+1`. The baseline header carries the next scene-handle index and the live generations, so a spawn cannot reuse a live id or resurrect a dead one.
 
 `competitive` refuses steps 1–6 and ends the match instead. A driven vehicle's wheel scalars have to be in the schema before migration is turned on, or the nominee would respawn the car from the prefab default. `MeshRef` is the same requirement, which is why the outfit test exists before this stage.
 
 ## 5. Identity, spawn, and prefabs
 
-`NetId` is `{ index: u32, generation: u32 }`, assigned only by the authority runtime. Index 0, generation 1, is the origin, as in PR #14. A read whose generation mismatches returns absent. A despawn bumps the generation. A stale snapshot cannot resurrect the object.
+The scene handle is `{ index: u32, generation: u32 }`. That is the generational id the ECS implementation stores, and it is the id on the wire. The physics plan's `NetId` is this handle. There is no second allocator. A read whose generation mismatches returns absent. A despawn bumps the generation. A stale snapshot cannot resurrect the object. The floor keeps the handle the scene file stored, which is index 0 when the file says so. The sector component rides on that object. Replication does not take index 0 away from the floor for a second origin object.
 
-An object placed by the shared scene file uses that file's scene handle as its `NetId`. Two runtimes that loaded the same bytes agree on those ids before anyone sends a spawn. A runtime spawn gets a fresh `NetId`. The spawner's local scene handle is not that id. The client stores `NetId` on the object and applies by it. Vec order is not on the wire.
+An object placed by the shared scene file keeps the handle the file stored. Two runtimes that loaded the same bytes agree on those ids before anyone sends a spawn. A runtime spawn is allocated by the authority. The guest inserts that index and generation. It does not allocate a local handle and map it. Vec order is not on the wire. A listen-server is the authority, so its allocator is the session allocator. A guest-local cosmetic that is not replicated is not inserted into that table.
 
 Spawn and despawn are structural. They are queued during the tick and applied at the end, so a pass does not scan a set it is also mutating. The snapshot sets structural flag `1` for a spawn and `2` for a despawn. Those records are written even when the 1024-byte field budget is spent. They still obey the 1200-byte slice cap. A despawn record carries no component payload.
 
 An object that enters a connection's interest set is encoded as a spawn for that connection, even when the world spawned it earlier. An object that leaves the set is omitted. It is not sent with a hidden flag. The next time it is relevant, it is a spawn again, with every present component.
 
-A prefab spawn is a notice. The authority copies the prefab's components onto a new `NetId` and sets `PrefabSource` to the content hash. The snapshot carries that hash and the overrides, not the prefab file. A `.gprefab` hash is the SHA-256 of that file. A glTF model uses the source `AssetId`, which is the hash [asset loading](../asset-loading.md) already stores on `PrefabSource`. The record's kind byte says which. Peers that have the hash instantiate it. Peers that do not have it take the reliable file transfer PR #14 already describes, then apply the spawn. They do not mint the `NetId`. A tick pass does not eval Rhai to spawn. [ADR 0009](../../adr/0009-rhai-is-the-scripting-language.md) stays: a script enqueues a notice or it does not run.
+A prefab spawn is a notice. The authority copies the prefab's components onto a new scene handle and sets `PrefabSource` to the content hash. The snapshot carries that hash and the overrides, not the prefab file. A `.gprefab` hash is the SHA-256 of that file. A glTF model uses the source `AssetId`, which is the hash [asset loading](../asset-loading.md) already stores on `PrefabSource`. The record's kind byte says which. Peers that have the hash instantiate it. Peers that do not have it take the reliable file transfer PR #14 already describes, then apply the spawn. They do not allocate the handle. A tick pass does not eval Rhai to spawn. [ADR 0009](../../adr/0009-rhai-is-the-scripting-language.md) stays: a script enqueues a notice or it does not run.
 
-Players, NPCs, and props are the same object. A player has `InputAuthority` set to its connection. An NPC and a prop have `InputAuthority` empty, so every player runtime interpolates them. A cosmetic child with no `NetId` is not an object on the wire. Its local transform is recomputed from the replicated root.
+Players, NPCs, and props are the same object. A player has `InputAuthority` set to its connection. An NPC and a prop have `InputAuthority` empty, so every player runtime interpolates them. A cosmetic child with no scene handle is not an object on the wire. Its local transform is recomputed from the replicated root.
 
 ## 6. Schema, dirty ticks, and deltas
 
@@ -139,9 +139,9 @@ A column replicates only when it is in the registration table. The table is stat
 
 `asset_id` is `ImportDoc.asset_id`. It is the 32 bytes in the `.gcook` header. It is not the cook trailer, not a path, and not a vertex.
 
-Pose on the wire is the quantized root, millimetres and yaw, truncated toward zero. The stored column is the transform (and, once a body exists, the body pose the physics plan already quantizes). `changed_tick` on that column dirties component 1. There is no second stored pose that a writer can forget to update. `InputAuthority`, `StunUntil`, `Health`, and `MeshRef` are stored columns. `Origin` is stored on the origin object.
+Pose on the wire is the quantized root, millimetres and yaw, truncated toward zero. The stored column is the transform (and, once a body exists, the body pose the physics plan already quantizes). That component's change tick dirties component 1. There is no second stored pose that a writer can forget to update, and there is no second tick beside the one the ECS stores. `InputAuthority`, `StunUntil`, `Health`, and `MeshRef` are stored columns. `Origin` is stored on the floor object.
 
-The writer sets `changed_tick` to the tick it writes. A reader does not. Writing the same bytes still sets the tick. The codec then decides what is sent. A component whose `changed_tick` is less than or equal to the connection's baseline tick is omitted. Inside a component that is sent, a field equal to the baseline value is omitted. The values that are sent are absolute, not a subtraction and not a Huffman stream. A mask that comes out empty omits the component. An object with no components and no structural flag is omitted.
+The writer sets the component's change tick to the tick it writes. A reader does not. Writing the same bytes still sets the tick. The codec then decides what is sent. A component whose change tick is less than or equal to the connection's baseline tick is omitted. Inside a component that is sent, a field equal to the baseline value is omitted. The values that are sent are absolute, not a subtraction and not a Huffman stream. A mask that comes out empty omits the component. An object with no components and no structural flag is omitted.
 
 Baseline 0 writes every live relevant object, as a spawn, with every field. That is the late joiner's snapshot and the migration baseline. Applying the same baseline and the same payload twice is the same columns.
 
@@ -153,7 +153,7 @@ The datagram, authority to player, little-endian:
 - `u32` snapshot tick
 - `u32` baseline tick (`0` is a full baseline)
 - `u8` slice index, `u8` slice count
-- `u16` object records, in ascending `NetId` index
+- `u16` object records, in ascending scene-handle index
 - each record: `u32` index, `u32` generation, `u8` structural (`1` spawn, `2` despawn), `u8` component count, then each component as `u16` id, `u8` field mask, then the masked fields in registration order
 - `u16` notice count, then the notices PR #14 already defined
 
@@ -165,7 +165,7 @@ There is no serde. A derive macro is allowed later only if it emits the same `wr
 
 ## 7. Authority, prediction, interpolation
 
-The authority runs every tick pass on every replicated object, in registration order, on the calling thread. [ADR 0031](https://github.com/AnthonyPoschen/genos-engine/blob/docs/adr-jobs-ecs/docs/adr/0031-job-system.md)'s serial mode is that order. `step_parallel` may run on the authority only when `hash_world` equals `step` for that world. The predicting runtime calls `step`. A listen-server is the authority, so it uses the authority rule, not the guest rule.
+The authority runs every tick pass on every replicated object, in registration order, on the calling thread. The job system's serial mode is that order ([`job-system.md`](../job-system.md)). `step_parallel` may run on the authority only when `hash_world` equals `step` for that world. The predicting runtime calls `step`. A listen-server is the authority, so it uses the authority rule, not the guest rule.
 
 A guest runs the motion pass only on the object it has input authority for. It keeps the pose it produced for 128 ticks. A snapshot for tick `T` that disagrees restores that object's replicated components from the snapshot and reruns `T+1 ..= local_tick`. Other objects are not visited. Rhai does not run inside the rerun. Hierarchy under the owned body recomputes after the rerun and is not in the checksum.
 
@@ -175,7 +175,7 @@ A driven vehicle sends throttle, brake, steer, and the gear request on the owner
 
 `InputAuthority` written during tick `T` selects commands at `T+1`. Commands from the old connection after `T` are dropped. Leave clears the component. State authority is not a field on the object.
 
-`MeshRef` is not predicted and not replayed. The runtime that requested a swap may draw the requested mesh immediately. The next snapshot of that `NetId` is the correction. If the authority refused, the picture returns to the previous id. Other runtimes draw the snapshot only.
+`MeshRef` is not predicted and not replayed. The runtime that requested a swap may draw the requested mesh immediately. The next snapshot of that scene handle is the correction. If the authority refused, the picture returns to the previous id. Other runtimes draw the snapshot only.
 
 Lag compensation stays PR #14's 16-tick rewind of hit poses. The strike is a button on the command, not a notice. The authority rewinds, queries, writes `Health`, and leaves the live poses. A guest does not register its own hit.
 
@@ -185,7 +185,7 @@ The rule is the 3 by 3 block of 32 m cells around the view, plus always-relevant
 
 Until bodies have stable ids, the cell is computed from the quantized pose, which is PR #14's grid. Once `BodyId` exists, the candidate set is an AABB overlap of those cells against the static tree and the dynamic tree in `crates/physics/src/broadphase.rs`. The trees are the index. The cell rule is the policy. `Broadphase::fill` emits contact pairs for the solver. A body in the cell with no contact is still relevant, so the interest query is not `fill`. Asleep bodies with an unchanged sleep bit send no pose, which [physics.md](../physics.md) already requires, and they remain in the set so a wake is sent.
 
-Among the relevant dirty objects, priority starts at 0, gains 1 each snapshot opportunity, and gains 1 more for the owned object. Selection sorts by priority descending, then by snapshots skipped, then by `NetId` index. A written object resets both counters. A neighbour that has waited still ships. This is the Iris accumulation PR #14 already copied, without a replication graph.
+Among the relevant dirty objects, priority starts at 0, gains 1 each snapshot opportunity, and gains 1 more for the owned object. Selection sorts by priority descending, then by snapshots skipped, then by scene-handle index. A written object resets both counters. A neighbour that has waited still ships. This is the Iris accumulation PR #14 already copied, without a replication graph.
 
 `competitive` may also drop an object the authority's occluders hide, which is PR #14's visibility cut. The object is omitted, not flagged. `sandbox` does not run that cut. The agent endpoint is not this cut. It remains the loopback scene editor.
 
@@ -232,26 +232,26 @@ There is no client-side authority "if the server agrees later." The snapshot is 
 
 ## 13. What the scene store has to expose
 
-[ADR 0032](https://github.com/AnthonyPoschen/genos-engine/blob/docs/adr-jobs-ecs/docs/adr/0032-scene-ecs-and-transform-hierarchy.md) can land in its own order. Replication starts reading it when these are true. The letters are that design's steps.
+PR #131 is approved and being implemented. The first three rows are that implementation: the generational handle, the columns, and the per-component change tick. Replication reads them. It does not add a second id or a second tick.
 
-| Need | Step | Done when |
+| Need | Where it comes from | Done when |
 |---|---|---|
-| Handle on the object, reload keeps it, stale generation misses | E1 | `reload_keeps_scene_handles` |
-| Columns behind the vecs, signatures of `walls()`, `solids()`, `lights()` unchanged | E3 | the camera room tests still pass |
-| Writer tick, no `Scene` clone on a one-field edit | E5's tick | `scene.full_compares == 0` and `a_write_sets_changed_tick_and_a_read_does_not` |
-| `NetId` column, file id for file objects, authority id for runtime spawns, apply by it | E8 | `shared_file_net_id_matches_on_two_loads`, `runtime_spawn_net_id_is_not_the_client_index` |
-| Prefab hash on `PrefabSource` | E6 | `prefab_override_does_not_write_the_file` |
-| `MeshRef` column of source `AssetId` plus mesh index | new on that store | `mesh_ref_stores_the_source_sha256` |
+| Generational scene handle. A reload keeps it. A stale generation misses | the ECS implementation | `reload_keeps_scene_handles` |
+| Columns behind the vecs, signatures of `walls()`, `solids()`, `lights()` unchanged | the ECS implementation | the camera room tests still pass |
+| A change tick on each component. A one-field edit does not clone `Scene`. A reader does not bump the tick | the ECS implementation | `scene.full_compares == 0` and `a_write_bumps_the_component_tick_and_a_read_does_not` |
+| Apply by that handle. Shared-file handles match on two loads. A guest inserts the authority's handle. A removal does not retarget the survivor | replication, on the handle above | `shared_file_handles_match_on_two_loads`, `a_guest_inserts_the_authority_handle`, `a_removal_does_not_retarget_the_survivor` |
+| Prefab hash on `PrefabSource` | the ECS prefab step | `prefab_override_does_not_write_the_file` |
+| `MeshRef` column of source `AssetId` plus mesh index | replication, on that store | `mesh_ref_stores_the_source_sha256` |
 
 E2, E4, and E7 are not in this table. E4's parent link is required before a replicated child transform is believed. It is not required to replicate a root `MeshRef`. The snapshot module in `genos-scene` is a pure function of the columns. It does not call `std::net` and it does not eval Rhai. `genos-net` calls that function. `genos-scene` does not depend on `genos-net`.
 
 ## 14. Worked example: an outfit swap
 
-One scene object, the player, `NetId { index: 4, generation: 1 }`. It has a `MeshRef`. The coat file's bytes hash to `COAT = sha256(coat.glb)`, 32 bytes, the value `import_bytes` would store. The cloak file hashes to `CLOAK`. Both ids are in the session table. The mesh index stays `0`. The object is inside the other player's 32 m neighbourhood. Pose is clean.
+One scene object, the player, scene handle `{ index: 4, generation: 1 }`. It has a `MeshRef`. The coat file's bytes hash to `COAT = sha256(coat.glb)`, 32 bytes, the value `import_bytes` would store. The cloak file hashes to `CLOAK`. Both ids are in the session table. The mesh index stays `0`. The object is inside the other player's 32 m neighbourhood. Pose is clean.
 
 The owning player runtime wants the cloak. It does not set the column. It enqueues notice name `3` (request), payload under 256 bytes: request kind `1` (set `MeshRef`), index `4`, generation `1`, the 32 bytes of `CLOAK`, mesh `0`. It may draw the cloak locally at that moment.
 
-The authority tick checks the generation and looks up `CLOAK` in the session table. The id is present, so it writes `MeshRef { asset_id: CLOAK, mesh: 0 }` and sets that column's `changed_tick` to `T`. The transform column's tick is unchanged, so the wire pose stays clean. A miss would leave `COAT` in the column, count `net.refused_requests`, and write nothing for the other runtime to apply. The owner's local draw would snap back when the next snapshot still says `COAT`.
+The authority tick checks the generation and looks up `CLOAK` in the session table. The id is present, so it writes `MeshRef { asset_id: CLOAK, mesh: 0 }` and sets that component's change tick to `T`. The transform component's change tick is unchanged, so the wire pose stays clean. A miss would leave `COAT` in the column, count `net.refused_requests`, and write nothing for the other runtime to apply. The owner's local draw would snap back when the next snapshot still says `COAT`.
 
 The next snapshot tick (`T` divisible by 3) builds a delta against the connection's acked baseline, where this object still has `COAT` and mesh `0`. The record is:
 
@@ -267,7 +267,7 @@ asset_id         CLOAK      32 bytes
 
 Pose is absent because the transform tick is older than the baseline. The vertex buffer is absent because it was never a field. The cook trailer is absent because it is not `asset_id`. The field payload is the 32 bytes of `CLOAK`, which counts against the 1024-byte budget. The record is 45 bytes and fits in one 1200-byte slice (`slice index 0`, `slice count 1`).
 
-The guest applies by `NetId`, not by vec index. It writes the 32 bytes onto `MeshRef`. It resolves them the way the cook package already does: `Package::line_for(&CLOAK)`, or the object cache path for that hex. `decode_geometry` on the `.gcook` returns a header `asset_id` that must equal `CLOAK`. The renderer then draws that mesh. Residency stays a local table. A missing file does not stall the tick. The guest keeps the previous mesh, or draws nothing while bounds stay, which is the missing-geometry rule in [asset loading](../asset-loading.md), and the reliable file stream fetches the bytes. The gameplay datagram does not grow to hold them.
+The guest applies by the scene handle, not by vec index. It writes the 32 bytes onto `MeshRef`. It resolves them the way the cook package already does: `Package::line_for(&CLOAK)`, or the object cache path for that hex. `decode_geometry` on the `.gcook` returns a header `asset_id` that must equal `CLOAK`. The renderer then draws that mesh. Residency stays a local table. A missing file does not stall the tick. The guest keeps the previous mesh, or draws nothing while bounds stay, which is the missing-geometry rule in [asset loading](../asset-loading.md), and the reliable file stream fetches the bytes. The gameplay datagram does not grow to hold them.
 
 A runtime that joins after the swap has no ack. Its baseline is 0. The object is a spawn in its interest set:
 
@@ -299,7 +299,7 @@ A planted bug that writes the `.gcook` body, or the vertices, into the snapshot 
 
 `SessionSettings` is an `EngineSettings` value on `Scene`, the same three surfaces as [the settings principles](../../engine/settings-principles.md). Keys: `topology` (`dedicated` or `host`), `mode` (`vanilla`, `competitive`, `modded`, `sandbox`), `cell_m` (default 32), `pose_budget` (default 1024), `snapshot_every` (default 3). `--host`, `--bind`, `--mode`, `--cell-m`, `--pose-budget`, and `--snapshot-every` are the arguments. `GENOS_SESSION_TOPOLOGY` and the matching `GENOS_SESSION_*` variables apply only when that argument was omitted. MCP `get_session_settings` and `set_session_settings` read and write the text form. The debug menu edits the same keys.
 
-The binary is `debug/networking`, package `genos-net-view`, on the shared scaffolding in [debugging](../debugging.md). PR #14 called this `examples/net-view`. The folder moves under `debug/` so it matches the other systems. Headless: `--headless --players N --frames N --latency MS --loss PERCENT --jitter MS --seed U --topology dedicated|host --check --out DIR`. Default output is `./genos-debug/networking/`. `--out` overrides it. The process does not write under `$HOME`. The report is JSON through `genos-json`: rows of `NetId`, authority millimetres, guest millimetres, corrections, and the `MeshRef` hex. Two runs with the same arguments write the same bytes. The window, when a later commit opens one, is the slider panel PR #14 specified. The headless test does not open it.
+The binary is `debug/networking`, package `genos-net-view`, on the shared scaffolding in [debugging](../debugging.md). PR #14 called this `examples/net-view`. The folder moves under `debug/` so it matches the other systems. Headless: `--headless --players N --frames N --latency MS --loss PERCENT --jitter MS --seed U --topology dedicated|host --check --out DIR`. Default output is `./genos-debug/networking/`. `--out` overrides it. The process does not write under `$HOME`. The report is JSON through `genos-json`: rows of scene handle, authority millimetres, guest millimetres, corrections, and the `MeshRef` hex. Two runs with the same arguments write the same bytes. The window, when a later commit opens one, is the slider panel PR #14 specified. The headless test does not open it.
 
 | Failure | Probe |
 |---|---|
@@ -317,13 +317,13 @@ The binary is `debug/networking`, package `genos-net-view`, on the shared scaffo
 
 ## 16. Stages
 
-Each stage is one later commit, with one test. This change is none of them. G1–G4 touch the scene store and do not open a socket, so they do not wait on D1–D54. G5–G10 are the session. They wait until this ADR is accepted. They do not build the replay file, the agent tool, or the mod loader.
+Each stage is one later commit, with one test. This change is none of them. G1 and G2 are the ECS implementation that is already approved: the generational handle and the per-component change tick. Replication consumes them. G3 and G4 sit on that store and do not open a socket, so they do not wait on D1–D54. G5–G10 are the session. They wait until this ADR is accepted. They do not build the replay file, the agent tool, or the mod loader.
 
 | Stage | Change | Gate |
 |---|---|---|
-| G1 | E1 handles | `reload_keeps_scene_handles`. Plant `renumber_on_load`: the test fails |
-| G2 | E3 columns and the writer tick | `scene.full_compares == 0`. Plant `clone_to_detect`: the counter is non-zero |
-| G3 | `NetId` | `shared_file_net_id_matches_on_two_loads`, `runtime_spawn_net_id_is_not_the_client_index`, `a_removal_does_not_retarget_the_survivor` |
+| G1 | Generational scene handle, from the ECS implementation | `reload_keeps_scene_handles`. Plant `renumber_on_load`: the test fails |
+| G2 | Per-component change tick, from the ECS implementation | `scene.full_compares == 0` and `a_write_bumps_the_component_tick_and_a_read_does_not`. Plant `clone_to_detect`: the counter is non-zero. The snapshot reads this tick |
+| G3 | Apply by that handle. No second id | `shared_file_handles_match_on_two_loads`, `a_guest_inserts_the_authority_handle`, `a_removal_does_not_retarget_the_survivor` |
 | G4 | Registration table and `MeshRef` | `an_unregistered_component_is_absent_from_the_delta`, `mesh_ref_stores_the_source_sha256`, `outfit_delta_is_the_source_asset_id` |
 | G5 | `Link` with latency, jitter, loss, seed | `a_seeded_link_drops_the_same_datagrams`. Two scene stores and one `Link`, no socket. Checksums match under loss |
 | G6 | Owned-body restore, remote interpolation | `a_stun_replays_the_owned_pawn_and_leaves_the_bystander`, `a_remote_pose_lerps_and_a_gap_holds`, `a_driven_vehicle_is_interpolated` |
@@ -346,7 +346,7 @@ The two-client CI test is G9. It uses `Link`, not a GPU and not a second machine
 
 ## 17. Five lines
 
-- Replicated state: opted-in columns on objects with a `NetId`. Pose, input authority, and `MeshRef` (source `AssetId`, mesh index) are the launch set. Spawns carry the prefab hash. Mesh bytes stay local.
+- Replicated state: opted-in columns on objects named by their scene handle. Pose, input authority, and `MeshRef` (source `AssetId`, mesh index) are the launch set. A component is dirty when its change tick is newer than the baseline. Spawns carry the prefab hash. Mesh bytes stay local.
 - Authority: the dedicated process or the listen-server. Guests send commands and notices. `competitive` is dedicated only. Input authority moves at a tick boundary. State authority moves only in a later migration, and not in `competitive`.
 - Prediction / rollback: the owned body, by replaying `step`. Other players, NPCs, props, and driven vehicles interpolate from snapshots 100 ms back. `MeshRef` previews on the requester and corrects from the snapshot.
 - Determinism: serial `step` at `1/60` in one process. The wire compares quantized poses and SHA-256 bytes. Cross-machine `f32` identity is not required.
@@ -354,7 +354,7 @@ The two-client CI test is G9. It uses `Link`, not a GPU and not a second machine
 
 ## References
 
-- [ADR 0040](../../adr/0040-multiplayer-topologies.md)
+- [ADR 0042](../../adr/0042-multiplayer-topologies.md)
 - [ADR 0007](../../adr/0007-native-calls-go-to-the-system-and-vulkan.md)
 - [ADR 0009](../../adr/0009-rhai-is-the-scripting-language.md)
 - [ADR 0035](../../adr/0035-cooked-package-runtime-load.md)
