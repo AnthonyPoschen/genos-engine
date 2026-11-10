@@ -1,0 +1,27 @@
+{
+  "name": "lint-from-master",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["~ALL"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "workflows",
+      "parameters": {
+        "do_not_enforce_on_create": true,
+        "workflows": [
+          {
+            "path": ".github/workflows/lint-from-master.yml",
+            "ref": "refs/heads/master",
+            "repository_id": 1405620462
+          }
+        ]
+      }
+    }
+  ]
+}
