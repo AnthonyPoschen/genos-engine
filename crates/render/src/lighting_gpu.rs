@@ -438,9 +438,12 @@ pub struct LightingAtrousStats {
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
 /// light-cache rays. `exact` shaded the labelled sum, `restir` shaded one
 /// ReSTIR DI sample. Counts stay zero unless the diag push bit was set.
-/// `exact` / `restir` are `diag[58]` and `diag[59]`. `diag[52]` and `diag[57]`
-/// are unused: the pairwise spatial merge and the trusted-colour copy are gone,
-/// and the later words are not shifted.
+/// `exact` / `restir` are `diag[58]` and `diag[59]`. `diag[52]` is the
+/// gradient-budget overflow in compact. `diag[57]`
+/// (`LIGHTING_DIAG_UNDER_TRUSTED`, stats word 81) counts displaying picture
+/// pixels whose fine read was under a full set count. The pairwise spatial
+/// merge and the trusted-colour copy are gone, and the later words are not
+/// shifted.
 /// `history_accepts` / `history_rejects` are restir header words 43 and 44:
 /// the live temporal reprojection kept or rejected a surfaced pixel. A history
 /// reset counts neither. `restir_point_adds` is header word 45: near point
@@ -1548,6 +1551,16 @@ impl Gpu {
                 restir_point_adds: restir_diag[2],
             })
             .unwrap_or_default()
+    }
+
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. Stats word 81 (`gstats.diag[57]`). Waits.
+    pub(crate) fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.idle_device();
+        const WORD: usize = 24 + 57;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map(|w| w[WORD])
+            .unwrap_or(0)
     }
 
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
