@@ -684,7 +684,7 @@ fn read_layout(file: &File, glyphs: GlyphSet) -> JsLayout {
 fn layout_for(glyphs: GlyphSet) -> JsLayout {
     let mut buttons = [None; MAX_GAMEPAD_BUTTONS];
     for number in 0..MAX_GAMEPAD_BUTTONS {
-        buttons[number] = button_from_family(glyphs, number as u8);
+        buttons[number] = button_from_family(glyphs, number);
     }
     JsLayout {
         buttons,
@@ -853,7 +853,7 @@ fn trigger_from_axis(norm: f32) -> f32 {
 /// those trigger buttons keeps select at 6. The Deck follows `hid-steam`:
 /// the pad touches and the quick-access button come first, so south is index
 /// 3 and select is index 11.
-fn button_from_family(glyphs: GlyphSet, number: u8) -> Option<InputCode> {
+fn button_from_family(glyphs: GlyphSet, number: usize) -> Option<InputCode> {
     match glyphs {
         GlyphSet::Xbox => xpad_button(number),
         GlyphSet::PlayStation => playstation_button(number),
@@ -866,7 +866,7 @@ fn button_from_family(glyphs: GlyphSet, number: u8) -> Option<InputCode> {
 /// (left pad touch) and index 1 is `BTN_THUMB2` (right pad touch). Index 2
 /// is `BTN_BASE` (quick access). `BTN_X` is the physical west face and
 /// `BTN_Y` is the physical north face. Grip codes have no `InputCode`.
-fn deck_button(number: u8) -> Option<InputCode> {
+fn deck_button(number: usize) -> Option<InputCode> {
     Some(match number {
         2 => InputCode::gamepad_capture,
         3 => InputCode::gamepad_face_south,
@@ -890,7 +890,7 @@ fn deck_button(number: u8) -> Option<InputCode> {
     })
 }
 
-fn xpad_button(number: u8) -> Option<InputCode> {
+fn xpad_button(number: usize) -> Option<InputCode> {
     Some(match number {
         0 => InputCode::gamepad_face_south,
         1 => InputCode::gamepad_face_east,
@@ -907,7 +907,7 @@ fn xpad_button(number: u8) -> Option<InputCode> {
     })
 }
 
-fn playstation_button(number: u8) -> Option<InputCode> {
+fn playstation_button(number: usize) -> Option<InputCode> {
     Some(match number {
         0 => InputCode::gamepad_face_south,
         1 => InputCode::gamepad_face_east,
@@ -926,7 +926,7 @@ fn playstation_button(number: u8) -> Option<InputCode> {
     })
 }
 
-fn spec_button(number: u8) -> Option<InputCode> {
+fn spec_button(number: usize) -> Option<InputCode> {
     Some(match number {
         0 => InputCode::gamepad_face_south,
         1 => InputCode::gamepad_face_east,
