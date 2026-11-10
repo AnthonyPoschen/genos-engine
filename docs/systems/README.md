@@ -52,5 +52,6 @@ These are plans. They are not system records. A step edits the matching record w
 - [Fog and volumetric lighting](fog-and-volumetric-lighting-design.md): a budgeted froxel volume, height fog, local volumes, shadowed shafts, and a world-cache read. [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md) is accepted. The froxel holds height fog and local volumes. Sun and point-lamp shafts use traced shadows. The world-cache read waits for lighting phase 3. `fog-check` grades the closed forms and each live renderer row. `debug/lighting` exposes the Fog page and `get_fog_settings`, `set_fog_settings`, and `get_fog_stats`.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 - [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
+- [Navigation](navigation.md): tiled navigation meshes, path queries, and crowd steering ([ADR 0043](../adr/0043-navmesh-pathfinding.md), proposed). No code in that decision.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
