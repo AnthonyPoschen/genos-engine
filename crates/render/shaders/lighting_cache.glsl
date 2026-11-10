@@ -4398,7 +4398,6 @@ bool lighting_svgf_active(uint s) {
 const uint LIGHTING_SUN_META = 391u;
 const uint LIGHTING_SUN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + LIGHTING_SUN_META;
 const uint LIGHTING_SUN_SMALL = 1u;
-bool lighting_stratum_held(uint probe);
 
 uint lighting_sun_flags() {
     return ckeys.key[LIGHTING_SUN_AT + 1u];
@@ -4412,25 +4411,20 @@ uint lighting_sun_n() {
 uint lighting_sun_slice_id() {
     return (lighting_sun_flags() >> 16u) & 255u;
 }
-// This frame's band. The nearest probe row, or the page column of the surface
-// cell (page_x = cell.x >> 3, the same split as lighting_sun_slot_slice, at the
-// one texel size). A pixel on either walks probes. The rest reuse stored bounce.
+// This frame's band: one tile-row of the picture. Probe rows are gone.
+// pc.dims.w is 0, and max(rows, 1) used to clamp every pixel onto row 0, so
+// slice 0 matched the whole picture. Cache slots still update by page column
+// (lighting_sun_slot_slice). A pixel outside this row reuses stored bounce.
 bool lighting_sun_pixel_band(uvec2 p, vec3 pos, vec3 n) {
-    uint bands = lighting_sun_n();
-    uint slice = lighting_sun_slice_id();
-    float tile = float(max(pc.params.y, 1u));
-    float gy = (float(p.y) + 0.5) / tile - 0.5;
-    int row = int(floor(gy + 0.5));
-    int rows = int(max(pc.dims.w, 1u));
-    row = clamp(row, 0, rows - 1);
-    if (uint(row) % bands == slice) {
-        return true;
+    uint bands = max(lighting_sun_n(), 1u);
+    uint tile = max(pc.params.y, 1u);
+    uint rows = max((pc.dims.y + tile - 1u) / tile, 1u);
+    uint row = min(p.y / tile, rows - 1u);
+    // A NaN surface is not a band. Real positions fall through.
+    if (pos.x != pos.x || n.x != n.x) {
+        return false;
     }
-    uint axd = lighting_axis(n);
-    uint ax = axd >> 1u;
-    int cell_x = int(floor(pos[(ax + 1u) % 3u] / LIGHTING_SC_TEXEL));
-    uint page_x = uint(cell_x) >> 3u;
-    return page_x % bands == slice;
+    return row % bands == lighting_sun_slice_id();
 }
 vec3 lighting_sun_committed_dir() {
     return vec3(uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 2u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 3u]), uintBitsToFloat(ckeys.key[LIGHTING_SUN_AT + 4u]));
@@ -4444,38 +4438,10 @@ float lighting_sun_live_light() {
 bool lighting_catch_up() {
     return ckeys.key[LIGHTING_SUN_AT + 7u] != 0u;
 }
-bool lighting_sun_probe_slice(uint probe) {
-    uint cols = max(pc.dims.z, 1u);
-    return (probe / cols) % lighting_sun_n() == lighting_sun_slice_id();
-}
 bool lighting_sun_slot_slice(uint slot) {
     ivec4 c = lighting_sc_cell(slot);
     uint page_x = uint(c.x) >> 3u;
     return page_x % lighting_sun_n() == lighting_sun_slice_id();
-}
-bool lighting_sun_hold_kept(uint h) {
-    if (!lighting_sun_small()) {
-        return false;
-    }
-    uint rays = lighting_rays();
-    uint pk = h / rays / LIGHTING_STRATA;
-    if (lighting_sun_probe_slice(pk) || !lighting_stratum_held(pk)) {
-        return false;
-    }
-    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
-        return false;
-    }
-    return floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]) != 0u;
-}
-bool lighting_sun_hold_fill(uint h) {
-    if (!lighting_sun_small()) {
-        return false;
-    }
-    uint pk = h / lighting_rays() / LIGHTING_STRATA;
-    if (lighting_sun_probe_slice(pk)) {
-        return false;
-    }
-    return floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]) != 0u;
 }
 // One thread records that this dispatch took the sun path. Bit 0: a small sun
 // step. Bit 1: the corner catch-up. The slice id is the band this frame shades

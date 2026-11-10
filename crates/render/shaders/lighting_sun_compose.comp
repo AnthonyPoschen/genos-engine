@@ -2,13 +2,11 @@
 #define GENOS_SUN_SHADER 1
 // Sun-step compose. The startup pipeline is lighting_compose.comp and does not
 // compile this file. One full-grid dispatch writes this frame's direct on
-// every pixel. The probe walk runs only for this frame's probe row and page
-// column, and for a pixel whose stored bounce is still empty. No occluder
+// every pixel. The world-cache walk runs only for this frame's picture tile
+// row, and for a pixel whose stored bounce is still empty. No occluder
 // walk lives here. No second pass.
 // GI final pass: per pixel, emitted light, then direct irradiance plus the
-// screen probes' irradiance
-// (the 4 nearest probes, weighted by plane distance and normal; the light cache
-// where none matches), through the same
+// world-cache indirect, through the same
 // tone curve and dither as the picture. Pixels with no surface keep the raster
 // colour already in the output. Clears the G-buffer record for the next frame.
 //
@@ -155,6 +153,9 @@ void main() {
     uint stored = outc.px[lighting_bounce_word(index)];
     bool walk = want && (stored == 0u || lighting_sun_pixel_band(p, pos, n));
     if (walk) {
+        // diag[3] is this dispatch's world-cache walks. The host zeros the
+        // stats block at the start of the frame, and nothing else writes it.
+        atomicAdd(gstats.diag[3], 1u);
         bounce = indirect(p, pos, n);
     } else if (stored != 0u) {
         bounce = lighting_unpack_rgb9e5(stored - 1u);

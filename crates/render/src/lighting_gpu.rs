@@ -707,6 +707,8 @@ const LIGHTING_SUN_IRR: f32 = 0.02;
 /// Stats words 142 and 143 (the unfilled pads). Bit 0 of the mark is the sun path.
 const LIGHTING_SUN_MARK: usize = 142;
 const LIGHTING_SUN_SLICE_WORD: usize = 143;
+/// `gstats.diag[0]` is stats word 24. `diag[3]` counts sun-compose world-cache walks.
+const LIGHTING_SUN_WALK: usize = 27;
 
 fn lighting_sun_at() -> u64 {
     lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
@@ -1723,15 +1725,18 @@ impl Gpu {
     pub(crate) fn lighting_sun_stats(&mut self) -> LightingSunStats {
         self.idle_device();
         let slot = self.lighting.last_slot;
+        let mut walks = 0u32;
         if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
             self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
             self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
+            walks = words[LIGHTING_SUN_WALK];
         }
         self.publish_sun_counter(false);
         LightingSunStats {
             gpu_sun: self.lighting.sun_gpu_mark & 1 != 0,
             gpu_catch: self.lighting.sun_gpu_mark & 2 != 0,
             slice: self.lighting.sun_gpu_slice,
+            walks,
             host_frames: self.lighting.sun_frames,
             catch_left: self.lighting.catch_left,
             full_effort: sun_controls().full_effort,
@@ -5316,6 +5321,9 @@ pub struct LightingSunStats {
     pub full_effort: bool,
     /// 1 full picture compose, 2 dirty list, 3 sun band. 0 before any compose.
     pub compose: u8,
+    /// World-cache walks in the last sun compose. The first sun frame stores
+    /// bounce for the picture. Later frames are one tile-row band.
+    pub walks: u32,
     /// Compose dispatches in that frame. The sun path is one.
     pub dispatches: u32,
     /// Dirty-list length at the end of that frame. The list dispatch's group
