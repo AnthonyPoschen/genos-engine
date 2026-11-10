@@ -4,13 +4,14 @@
 // A caller includes lighting_common.glsl first.
 // `p` stays in the signature so compose and the sun compose keep one call.
 //
-// A full-trust read is the fine world colour. Anything less mixes in the
-// coarser world-cache cells (two size steps, bilinear, stale and off-plane
-// cells left out), or a corner's SH irradiance when SH cells are on. Trust 0
-// is that coarser colour, not black, so the first accepted texel does not pop
-// from black to full luminance. One flat cell would paint the grid the banner
-// cut measures, so the corners blend. This does not stamp the cell and it is
-// not a second neighbour gather.
+// A full-trust read is the fine world colour. Anything less mixes a found
+// coarser world-cache cell (two size steps, bilinear, stale and off-plane
+// cells left out), or a corner's SH irradiance when SH cells are on. A miss
+// keeps the fine colour and mixes nothing: black is not a stand-in for a
+// missing cell. Trust 0 with a found cell is that coarser colour, so the
+// first accepted texel does not pop from black to full luminance. One flat
+// cell would paint the grid the banner cut measures, so the corners blend.
+// This does not stamp the cell and it is not a second neighbour gather.
 
 const float LIGHTING_COARSE_HALF = 0.5;
 // Same plane gate as lighting_sc_bilerp_cover. A step or a ledge is another surface.
@@ -70,20 +71,21 @@ vec4 lighting_coarse_bilerp(vec3 pos, vec3 n, float size) {
     return vec4(sum / wsum, 1.0);
 }
 
-// Two size steps, written out. A loop of this lookup in compose faults lavapipe.
-vec3 lighting_coarse_world(vec3 pos, vec3 n) {
+// Two size steps, written out. w is the hit flag lighting_coarse_bilerp already
+// computed. A miss is w 0. A loop of this lookup in compose faults lavapipe.
+vec4 lighting_coarse_world(vec3 pos, vec3 n) {
     float size = lighting_cell_size(pos);
     size += size;
     vec4 e = lighting_coarse_bilerp(pos, n, size);
     if (e.w > LIGHTING_CACHE_HAS_W) {
-        return e.rgb;
+        return e;
     }
     size += size;
     e = lighting_coarse_bilerp(pos, n, size);
     if (e.w > LIGHTING_CACHE_HAS_W) {
-        return e.rgb;
+        return e;
     }
-    return vec3(0.0);
+    return vec4(0.0);
 }
 
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
@@ -106,6 +108,10 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     if (trust >= 1.0) {
         return max(world.rgb, vec3(0.0));
     }
-    vec3 coarse = lighting_coarse_world(pos, n);
-    return max(mix(coarse, max(world.rgb, vec3(0.0)), trust), vec3(0.0));
+    vec4 coarse = lighting_coarse_world(pos, n);
+    // A miss is not black light. Mix only a found cell.
+    if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
+        return max(world.rgb, vec3(0.0));
+    }
+    return max(mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust), vec3(0.0));
 }

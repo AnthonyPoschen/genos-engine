@@ -3632,8 +3632,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // as a seed. A texel that is not a detail candidate (detail off, a
         // mover, its own samples, a coarse size) keeps those two. The parent
         // walk is off for every texel while texel detail is on, including a
-        // mover. A mover's trust is 0, so it shows the probes without that
-        // walk. An empty read falls through to the probe seed.
+        // mover. Flag 32 is the only sets/(sets+6) scale, so a mover with its
+        // own sets is the fine colour. An empty read falls through to the probe seed.
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
@@ -3679,7 +3679,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         // Texel detail on skips this walk for every texel, including a mover.
-        // A mover's trust is 0, so the pixel shows the probes without it.
+        // A mover with its own sets is the fine colour once flag 32 is off.
         if (!detail_kept && v.w < 0.5 && mode == 3u && !lighting_sh_texel_detail_on()) {
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
@@ -3725,14 +3725,13 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         wsum += bil;
         float own_w = cache.v[3u * slot + 2u].w;
         // With the estimator (flag 1048576) a texel lit under changing light is
-        // still shown (its short mean lags a little, as Lumen's surface cache does);
-        // swapping the pixel to the probes swaps methods, and their difference was
-        // most of the mix error. Around a moving object the probes still take over.
+        // still shown (its short mean lags a little, as Lumen's surface cache does).
         bool est = (lighting_sc_flags() & 1048576u) != 0u;
         bool stale = mode == 3u && fract(own_w) > 0.1 && !est;
         float sc_trust = stale ? 0.0 : 1.0;
-        if ((lighting_sc_flags() & 32u) != 0u || obj) {
-            // A texel with few sets shares the pixel with the probes.
+        if ((lighting_sc_flags() & 32u) != 0u) {
+            // Flag 32 only. It used to apply to every mover as well, so a
+            // settled mover stayed at sets/(sets+6) and never reached trust 1.
             float c = floor(max(own_w, 0.0));
             sc_trust *= c / (c + LIGHTING_SC_TRUST_SETS);
         }
@@ -4970,11 +4969,4 @@ uint lighting_graw_at(uint probe, uint k) {
 }
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
-}
-// A write to a kept hit's slot (record or light) that changed it marks its probe.
-void lighting_gdirty_kept_at(uint at) {
-    uint base = lighting_kept_at(0u);
-    if (at >= base && at < base + lighting_kept_hits()) {
-        lighting_gdirty_mark((at - base) / lighting_rays() / LIGHTING_STRATA);
-    }
 }

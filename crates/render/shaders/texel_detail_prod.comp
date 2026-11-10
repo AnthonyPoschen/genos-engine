@@ -9,10 +9,10 @@ layout(local_size_x = 1) in;
 #include "lighting_screen_probe.glsl"
 
 const uint PROD_HEAD_WORDS = 8u;
-const uint PROD_ROWS = 35u;
+const uint PROD_ROWS = 37u;
 const uint PROD_STRIDE = 17u;
 const uint PROD_MOTION_AT = 33u;
-const uint PROD_TRAILER_AT = 8u + 35u * 17u;
+const uint PROD_TRAILER_AT = 8u + PROD_ROWS * 17u;
 const uint PROD_TRAILER = 36u;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -27,14 +27,12 @@ const float PROD_LAMP_RANGE = 64.0;
 const float PROD_LAMP_POWER = 8.0;
 const float PROD_LAMP_SHIFT = 1.0;
 const float PROD_CONF = 0.25;
-const float PROBE_Y0 = 0.282095;
 const vec3 PROD_UP = vec3(0.0, 1.0, 0.0);
 const vec3 PROD_RED = vec3(8.0, 0.0, 0.0);
 const vec3 PROD_GREEN = vec3(0.0, 6.0, 0.0);
 const vec3 PROD_BLUE = vec3(0.0, 0.0, 7.0);
 const vec3 PROD_OWN = vec3(4.0, 2.0, 0.0);
 const vec3 PROD_SLANT = vec3(0.6, 0.8, 0.2);
-const vec3 PROD_PROBE = vec3(1.0, 2.0, 3.0);
 // A parent/resample/probe seed. Not the screen-probe colour and not the stale detail seed.
 const vec3 PROD_PARENT = vec3(5.0, 1.0, 4.0);
 // Detail-seed mark: 1 stores a negative confidence. 0 stores a positive one.
@@ -110,6 +108,13 @@ const vec3 PROD_RO_B = vec3(508.1875, 0.0, 4.1875);
 const vec3 PROD_RO_SLANT = vec3(516.1875, 0.0, 4.1875);
 const vec3 PROD_RO_STALE = vec3(524.1875, 0.0, 4.1875);
 const vec3 PROD_RO_EMPTY = vec3(532.1875, 0.0, 4.1875);
+// Detail-off movers with no coarser world cell. The object texel is the fine
+// colour. 35 is at the set cap (trust 1). 36 is the same colour with trust
+// forced to 0, so a coarse miss has to keep that colour.
+const vec3 PROD_MV_CAP = vec3(600.1875, 0.0, 4.1875);
+const vec3 PROD_MV_FEW = vec3(608.1875, 0.0, 4.1875);
+const vec3 PROD_MOVER_FINE = vec3(7.0, 3.0, 1.0);
+const float PROD_CAP_N = 64.0;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -228,13 +233,6 @@ uint prod_owner(vec3 q, vec3 n, vec3 rgb, float samples) {
     return s;
 }
 
-void prod_probe(vec3 pos, vec3 n) {
-    work.v[lighting_probe_at(0u)] = vec4(pos, 1.0);
-    work.v[lighting_probe_at(0u) + 1u] = vec4(n, 0.0);
-    vec3 c = PROD_PROBE / PROBE_Y0;
-    work.v[lighting_shf_at(0u)] = vec4(c, 0.0);
-}
-
 const float PROD_MOVER_WORD = 300000.0;
 // Head w below this is the world mode. 100000 is the attach-movers slot.
 const float PROD_ATTACH_MOD = 100000.0;
@@ -321,7 +319,6 @@ void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, 
         // The writer stores a marked seed while the owner is lit. Clearing the
         // sun scratch afterwards must not unmark it: the mark is the confidence
         // sign. The recorded compose then sees an empty owner.
-        prod_probe(pos, n);
         lighting_compose_px = uvec2(0u);
         lighting_screen_probe_indirect(uvec2(0u), pos, n);
         cache.v[3u * cell + 2u] = vec4(0.0);
@@ -397,6 +394,10 @@ void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, 
             cache.v[3u * cell + 1u].xyz = n;
             cache.v[LIGHTING_SC_SUN_AT + cell] = vec4(0.0);
         }
+    } else if (id == 35u) {
+        pos = PROD_MV_CAP;
+    } else if (id == 36u) {
+        pos = PROD_MV_FEW;
     }
     if (id == 3u || id == 9u) {
         uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
@@ -444,7 +445,6 @@ void prod_lamp_dark(uint cell) {
 }
 
 vec3 prod_shade(vec3 pos, vec3 n) {
-    prod_probe(pos, n);
     lighting_compose_px = uvec2(0u);
     return lighting_screen_probe_indirect(uvec2(0u), pos, n);
 }
@@ -611,7 +611,6 @@ void prod_read_row(uint id, vec3 pos, vec3 n, vec3 q, uint cell) {
     vec4 mean_before = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
     uint stamp_before = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
     uint hash_before = cell == ~0u ? 0u : prod_sh_hash(cell);
-    prod_probe(pos, n);
     lighting_compose_px = uvec2(0u);
     vec3 shown = lighting_screen_probe_indirect(uvec2(0u), pos, n);
     vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
@@ -825,6 +824,33 @@ void prod_readonly() {
     }
 }
 
+// Four object-local corners of the mover query (local (0, 1, 0), yaw identity).
+// No world cell at 0.25 m or 0.50 m, so the coarse read misses.
+void prod_plant_local_corners(float samples) {
+    lighting_obj_salt = 1.0;
+    vec3 pos = vec3(0.0, 1.0, 0.0);
+    vec3 n = PROD_UP;
+    float size = LIGHTING_SC_TEXEL;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - vec2(PROD_HALF);
+    vec2 g0 = floor(uv);
+    for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + vec2(PROD_HALF);
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint s = lighting_cache_find_sized(q, n, true, size, pos);
+        if (s != ~0u) {
+            cache.v[3u * s + 2u] = vec4(PROD_MOVER_FINE, samples);
+            cache.v[3u * s + 1u].xyz = n;
+            cache.v[LIGHTING_SC_SUN_AT + s] = vec4(0.0);
+        }
+    }
+    lighting_obj_salt = 0.0;
+}
+
 void main() {
     gstats.ctrl_bits = PROD_DENOISE;
     gstats.chg[31] = 1u;
@@ -847,7 +873,7 @@ void main() {
     if (LIGHTING_SC_WRITES) {
     for (uint id = 0u; id < PROD_ROWS; id++) {
         uint variant = 0u;
-        if (id == 2u || id == 22u || id == 23u) {
+        if (id == 2u || id == 22u || id == 23u || id == 35u || id == 36u) {
             variant = 1u;
         } else if (id == 8u || id == 24u) {
             variant = 2u;
@@ -865,8 +891,11 @@ void main() {
         uint cell;
         uint extra;
         prod_prepare(id, pos, n, q, cell, extra);
-        if (id == 6u || (id >= 23u && id <= 32u)) {
+        if (id == 6u || (id >= 23u && id <= 32u) || id == 35u || id == 36u) {
             prod_mover(pos);
+        }
+        if (id == 35u || id == 36u) {
+            prod_plant_local_corners(PROD_CAP_N);
         }
         if (id == 6u) {
             uint seeded = lighting_cache_find_sized(q, n, false, LIGHTING_SC_TEXEL, q);
@@ -881,14 +910,12 @@ void main() {
         if (id == 22u) {
             work.v[lighting_probe_at(0u)] = vec4(0.0);
             work.v[lighting_probe_at(0u) + 1u] = vec4(0.0);
-        } else {
-            prod_probe(pos, n);
         }
         // Bounce 2 lets lighting_cache_irradiance answer. Below that it
         // returns black before it loads a cell, so neither row would show
         // whether the hit fill kept or dropped the cell.
         gstats.ctrl_bounce = (id == 20u || id == 22u) ? 2u : 0u;
-        if (id == 34u) {
+        if (id == 34u || id == 36u) {
             // Flag 512 is bit 9 of lighting_sc_flags, which is bit 10 of head z.
             uint at = lighting_change_at();
             work.v[at].z = float(uint(work.v[at].z) | 1024u);
