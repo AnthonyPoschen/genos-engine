@@ -15,7 +15,7 @@
 
 use genos_render::{
     lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset,
-    LightingSettings, Renderer,
+    LightingSettings, Renderer, TexelDetailPlant,
 };
 use genos_window::{ShutdownDevice, Window};
 

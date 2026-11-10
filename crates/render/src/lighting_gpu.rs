@@ -616,7 +616,8 @@ impl Default for Lighting {
             compose_hdr_pipe: std::ptr::null_mut(),
             compose_maint_pipe: std::ptr::null_mut(),
             sh_drain_pipe: std::ptr::null_mut(),
-            compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
+            compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
+                .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
