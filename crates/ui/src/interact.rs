@@ -35,7 +35,11 @@ pub fn frame(
     keys: Option<&InputSystem>,
 ) -> Frame {
     let press_edge = pointer.down && !state.down;
-    if state.dragging && pointer.down && !press_edge {
+    let covers = matches!(
+        state.layer.as_ref().map(|layer| layer.role),
+        Some(LayerRole::Dialog | LayerRole::Popup)
+    );
+    if state.dragging && pointer.down && !press_edge && !covers {
         state.drag_offset[0] += pointer.x - state.pointer_x;
         state.drag_offset[1] += pointer.y - state.pointer_y;
     }
@@ -110,7 +114,7 @@ pub fn frame(
         });
         if on_layer {
             slide_held(layer_items.as_deref().unwrap_or(&[]), pointer, state, &mut events);
-        } else {
+        } else if !covers {
             slide_held(&root_items, pointer, state, &mut events);
         }
     }
@@ -445,18 +449,38 @@ fn shift_subtree(items: &mut [Item], root: u32, delta: [f32; 2]) {
         if !in_subtree(items, items[index].id, root) {
             continue;
         }
-        let child = items[index].id != root;
         items[index].rect.x += delta[0];
         items[index].rect.y += delta[1];
         items[index].content.x += delta[0];
         items[index].content.y += delta[1];
-        if child {
-            if let Some(clip) = items[index].clip_to.as_mut() {
-                clip.x += delta[0];
-                clip.y += delta[1];
-            }
-        }
     }
+    recompute_clips(items);
+}
+
+fn recompute_clips(items: &mut [Item]) {
+    for index in 0..items.len() {
+        let inherited = items[index]
+            .parent
+            .and_then(|parent| clip_for_children(items, parent));
+        items[index].clip_to = inherited;
+    }
+}
+
+fn clip_for_children(items: &[Item], parent_id: u32) -> Option<Rect> {
+    let parent = items.iter().find(|item| item.id == parent_id)?;
+    if !parent.clip {
+        return parent.clip_to;
+    }
+    let content = parent.content;
+    Some(match parent.clip_to {
+        Some(outer) => layout::intersect(outer, content).unwrap_or(Rect {
+            x: content.x,
+            y: content.y,
+            w: 0.0,
+            h: 0.0,
+        }),
+        None => content,
+    })
 }
 
 fn in_subtree(items: &[Item], mut id: u32, root: u32) -> bool {

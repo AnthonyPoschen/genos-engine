@@ -455,7 +455,7 @@ Moving the damage loop and asserting `Frame.damage` **requires #5.** On `gi-v2`,
 - Modify: `crates/ui/src/panel.rs`, `crates/ui/src/lib.rs`
 - Test: `crates/ui/tests/frame.rs`
 
-**Produces:** `frame` as in Architecture, with `keys: Option` omitted until Task 17. `Frame.events` exists and is empty for the lighting panel. `Node.kind` exists and defaults to `Kind::Box`. `lighting_frame` and `button_panel` build their trees as they do now, then call `frame` for hit testing, looks, drag, damage, and `Node.action`.
+**Produces:** `frame` as in Architecture, with `keys: Option` omitted until Task 17. `Frame.events` exists and is empty for the lighting panel. `Node.kind` exists and defaults to `Kind::Box`. `lighting_frame` and `button_panel` keep their own pass and do not call `frame`.
 
 - [x] **Step 1: Write the failing test**
 

@@ -39,10 +39,11 @@ pub(crate) fn paint_item(
             push_fill(&mut paints, item.rect, *value, theme);
         }
         Kind::Progress { value, radial: true } => {
-            return Painted {
+            let painted = Painted {
                 paints,
                 segments: radial(*value, item.rect, theme),
             };
+            return paint_text(painted, item, theme, font);
         }
         Kind::Checkbox { checked: false }
         | Kind::Box
@@ -50,12 +51,29 @@ pub(crate) fn paint_item(
         | Kind::Button { .. }
         | Kind::Radio { .. } => {}
     }
+    paint_text(
+        Painted {
+            paints,
+            segments: Vec::new(),
+        },
+        item,
+        theme,
+        font,
+    )
+}
+
+fn paint_text(
+    mut painted: Painted,
+    item: &Item,
+    theme: &Theme,
+    font: Option<&OutlineFont>,
+) -> Painted {
     if let Some(text) = &item.text {
         let color = text_color(item, theme);
         match item.face {
             TextFace::Bitmap => {
                 for blot in text::blots(text, item.content.x, item.content.y, item.content.w.max(1.0)) {
-                    paints.push(Paint {
+                    painted.paints.push(Paint {
                         x: blot.x,
                         y: blot.y,
                         w: blot.w,
@@ -68,7 +86,7 @@ pub(crate) fn paint_item(
             TextFace::Outline => {
                 if let Some(font) = font {
                     outline::paint_outline_into(
-                        &mut paints,
+                        &mut painted.paints,
                         font,
                         text,
                         [item.content.x, item.content.y],
@@ -79,10 +97,7 @@ pub(crate) fn paint_item(
             }
         }
     }
-    Painted {
-        paints,
-        segments: Vec::new(),
-    }
+    painted
 }
 
 pub(crate) fn slider_value(item: &Item, x: f32, y: f32) -> Option<f64> {
@@ -186,7 +201,7 @@ fn push_mark(out: &mut Vec<Paint>, rect: Rect, theme: &Theme) {
 }
 
 fn push_fill(out: &mut Vec<Paint>, track: Rect, value: f32, theme: &Theme) {
-    let value = value.clamp(0.0, 1.0);
+    let value = unit_progress(value);
     push_rect(
         out,
         Rect {
@@ -238,8 +253,16 @@ fn push_slider_thumb(
     }
 }
 
+fn unit_progress(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 fn radial(value: f32, rect: Rect, theme: &Theme) -> Vec<Segment> {
-    let value = value.clamp(0.0, 1.0);
+    let value = unit_progress(value);
     let radius = rect.w.min(rect.h) * 0.5 - 2.0;
     arc::arc_segments(
         [rect.x + rect.w * 0.5, rect.y + rect.h * 0.5],

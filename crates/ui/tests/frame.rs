@@ -91,3 +91,96 @@ fn a_drag_moves_the_node_and_dragging_is_only_a_read() {
     assert!((parked.rect.x - 28.0).abs() < 0.01, "x {}", parked.rect.x);
     assert!((parked.rect.y - 20.0).abs() < 0.01, "y {}", parked.rect.y);
 }
+
+#[test]
+fn a_dialog_or_popup_leaves_the_root_drag_and_slider_alone() {
+    for dialog in [true, false] {
+        let mut node = Node::new(4);
+        node.draggable = true;
+        node.width = Sizing::fixed(40.0);
+        node.height = Sizing::fixed(20.0);
+        node.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], [10.0, 10.0]));
+        let mut state = State::default();
+        let _press = frame(
+            &node,
+            &mut state,
+            Space::Screen,
+            [200.0, 100.0],
+            None,
+            Pointer::at(12.0, 12.0, true),
+            0.0,
+            None,
+        );
+        let moved = frame(
+            &node,
+            &mut state,
+            Space::Screen,
+            [200.0, 100.0],
+            None,
+            Pointer::at(30.0, 22.0, true),
+            0.0,
+            None,
+        );
+        let parked = moved.shown.iter().find(|row| row.id == 4).expect("node").rect.x;
+        assert!((parked - 28.0).abs() < 0.01, "x {parked}");
+        cover(&mut state, dialog);
+        let held = frame(
+            &node,
+            &mut state,
+            Space::Screen,
+            [200.0, 100.0],
+            None,
+            Pointer::at(60.0, 40.0, true),
+            0.0,
+            None,
+        );
+        let frozen = held.shown.iter().find(|row| row.id == 4).expect("node").rect.x;
+        assert!((frozen - parked).abs() < 0.01, "x {frozen}");
+
+        let mut slider = Node::new(5);
+        slider.kind = genos_ui::Kind::Slider {
+            value: 0.0,
+            min: 0.0,
+            max: 10.0,
+            step: 0.0,
+            vertical: false,
+        };
+        slider.width = Sizing::fixed(100.0);
+        slider.height = Sizing::fixed(24.0);
+        let mut state = State::default();
+        let down = frame(
+            &slider,
+            &mut state,
+            Space::Screen,
+            [120.0, 40.0],
+            None,
+            Pointer::at(20.0, 12.0, true),
+            0.0,
+            None,
+        );
+        assert!(matches!(down.events.first(), Some(genos_ui::Event::Change { .. })));
+        cover(&mut state, dialog);
+        let slide = frame(
+            &slider,
+            &mut state,
+            Space::Screen,
+            [120.0, 40.0],
+            None,
+            Pointer::at(80.0, 12.0, true),
+            0.0,
+            None,
+        );
+        assert_eq!(slide.events, []);
+    }
+}
+
+fn cover(state: &mut State, dialog: bool) {
+    let mut node = Node::new(9);
+    node.width = Sizing::fixed(20.0);
+    node.height = Sizing::fixed(20.0);
+    if dialog {
+        state.open_dialog(node);
+    } else {
+        state.open_layer(node);
+    }
+}

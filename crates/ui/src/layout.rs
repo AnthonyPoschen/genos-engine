@@ -243,6 +243,8 @@ pub struct Item {
     pub action: Option<Action>,
     /// Ancestor clip. `None` means the item is not clipped.
     pub clip_to: Option<Rect>,
+    /// This node clips its children to its padding box.
+    pub clip: bool,
     /// Bitmap unless the node set [`TextFace::Outline`].
     pub face: TextFace,
     /// The node has tip text. The string stays on the node so layout does not copy it.
@@ -401,6 +403,7 @@ fn placed_item(node: &Node, rect: Rect, content: Rect, parent: Option<u32>, clip
         draggable: node.draggable,
         action: node.action,
         clip_to,
+        clip: node.clip,
         face: node.face,
         has_tooltip: node.tooltip.is_some(),
     }
