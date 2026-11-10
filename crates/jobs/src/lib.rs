@@ -22,8 +22,8 @@ mod schedule;
 mod settings;
 
 pub use pool::{
-    hash_slots, in_task, Clock, InstantClock, Job, ManualClock, Report, Scheduler, StageSlots,
-    Stats,
+    hash_slots, in_task, note_seat_enter, note_seat_leave, Clock, InstantClock, Job, ManualClock,
+    Report, Scheduler, StageSlots, Stats,
 };
 pub use schedule::{
     class_rank, conflict_batches, conflicts, ensure_parallel, Access, AccessKey, Mode,

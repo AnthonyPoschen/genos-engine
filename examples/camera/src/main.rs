@@ -185,6 +185,7 @@ fn main() {
 }
 
 fn run() -> Result<i32, String> {
+    genos_window::set_seat_notifier(genos_jobs::note_seat_enter, genos_jobs::note_seat_leave);
     let mut frames = None;
     let mut readback = None;
     let mut trace = false;

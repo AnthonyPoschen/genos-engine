@@ -150,6 +150,35 @@ thread_local! {
     static SEAT_PUMP: std::cell::RefCell<Option<SeatPump>> = const { std::cell::RefCell::new(None) };
 }
 
+type SeatNotify = (fn(), fn());
+
+static SEAT_NOTIFY: std::sync::Mutex<Option<SeatNotify>> = std::sync::Mutex::new(None);
+
+fn lock_notify() -> std::sync::MutexGuard<'static, Option<SeatNotify>> {
+    SEAT_NOTIFY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Called from [`seat_enter`] and [`seat_leave`] at the outer nesting edge.
+///
+/// The window crate does not depend on the scheduler. The frame installs
+/// `note_seat_enter` / `note_seat_leave` here.
+pub fn set_seat_notifier(enter: fn(), leave: fn()) {
+    *lock_notify() = Some((enter, leave));
+}
+
+fn notify_seat(enter: bool) {
+    let guard = lock_notify();
+    if let Some((on_enter, on_leave)) = *guard {
+        if enter {
+            on_enter();
+        } else {
+            on_leave();
+        }
+    }
+}
+
 /// Start answering compositor pings. Pair this with [`seat_leave`].
 ///
 /// The frame thread keeps running the device work. A nested enter does not
@@ -157,6 +186,9 @@ thread_local! {
 pub fn seat_enter() {
     let depth = PUMP_DEPTH.with(std::cell::Cell::get);
     PUMP_DEPTH.with(|cell| cell.set(depth.saturating_add(1)));
+    if depth == 0 {
+        notify_seat(true);
+    }
     if depth > 0 {
         return;
     }
@@ -208,6 +240,9 @@ pub fn seat_leave() {
         return;
     }
     PUMP_DEPTH.with(|cell| cell.set(depth - 1));
+    if depth == 1 {
+        notify_seat(false);
+    }
     if depth > 1 {
         return;
     }
