@@ -10,6 +10,7 @@
 //! reads the resident scene and does not present a swapchain image.
 
 mod device;
+mod disk;
 mod engine;
 mod mix;
 mod path;
@@ -23,7 +24,7 @@ pub use device::AlsaDevice;
 pub use device::CoreAudioDevice;
 #[cfg(target_os = "windows")]
 pub use device::WasapiDevice;
-pub use engine::{start_with, AudioStats, Stream};
+pub use engine::{start_disk, start_with, AudioStats, Stream};
 pub use genos_math::Vec3;
 pub use mix::{allocating_mix_entries, mix, mix_into, Barrier, Listener, Source};
 pub use path::{calling_thread, DevicePath, FakeCapture, FakeDevice, NullDevice, OpenedDevice};
