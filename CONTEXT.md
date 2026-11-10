@@ -60,6 +60,10 @@ _Avoid_: Controller, peripheral
 A stable player slot for one gamepad. Slot 0 stays player one while that gamepad is disconnected.
 _Avoid_: Joystick index, controller id
 
+**Glyph set**:
+The picture family for the device the player is using: keyboard and mouse, Xbox, PlayStation, Steam Deck, or a generic gamepad. The input system reports the active family.
+_Avoid_: Icon theme, prompt set
+
 **Input code**:
 The shared token for a key, a mouse button, or a gamepad control.
 _Avoid_: Keycode, scancode, virtual key
