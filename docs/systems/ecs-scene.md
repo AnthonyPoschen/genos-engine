@@ -1,6 +1,6 @@
 # Scene ECS (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. No code in this change.
+Status: accepted, 10 Nov 2026. Owner: Engine. The tables are `genos-ecs` (`crates/ecs`). `genos-scene` still stores walls, solids, and lights in typed vecs until the migration. The headless check is `debug/ecs`.
 
 The live scene is four arrays and a side table of names. That is enough for one scripted room. It is not enough for the four systems that have to name an object and find it again later. [Animation](animation.md) needs a parent link for joints. The [physics plan](physics/plan.md) scales to thousands of bodies and says snapshot order is `NetId` order once bodies live on stable ids. Save, load, and MCP undo need a name that survives a removal and a reload. Lighting invalidation needs a change record per object that moved, which [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) already specifies and the scene does not yet emit. The [job system](job-system.md) runs the wide passes; this design is the storage those passes iterate.
 
@@ -17,6 +17,7 @@ One table of placed objects, each with a scene handle that a save file, an undo 
 | Piece | State | Code |
 |---|---|---|
 | Scene storage | One `Floor`, `Vec<Wall>`, `Vec<Solid>`, `Vec<Light>`, plus settings structs | `Scene` in `crates/scene/src/types.rs` |
+| Object store | Archetype tables, a scene handle (index plus generation), a write tick per cell, and component bytes | `genos-ecs` in `crates/ecs`. The scene vecs do not use it yet |
 | Ids on the objects | None. `Wall`, `Solid`, and `Light` have no handle field | `types.rs` |
 | Live names | A side table. `Handles::index` assigns from 1 every time a `Host` is built. The strings are `floor`, `wall:<id>`, `solid:<id>`, `light:<id>` | `crates/mcp/src/live.rs` |
 | Edit path | `set_object` / `spawn_object` / `remove_object`. A geometry edit calls `Camera::attach_scene`, which rebuilds colliders. The `.rhai` file is not written | `live.rs`; [scene record](scene.md) limits |
@@ -42,22 +43,22 @@ One table of placed objects, each with a scene handle that a save file, an undo 
 
 ## 4. Options
 
-| | bevy_ecs | hecs | flecs-style relationships | Custom archetypes in `genos-scene` |
+| | bevy_ecs | hecs | flecs-style relationships | Custom archetypes in `genos-ecs` |
 |---|---|---|---|---|
 | Storage | Archetype tables | Archetype tables | Archetype tables plus a relation index | Archetype tables |
 | Id | `Entity` (index, generation) | `Entity` (index, generation) | `entity_t` | Scene handle `{ index: u32, generation: u32 }` |
 | Hierarchy | `ChildOf` since 0.15 | A component the caller adds | `ChildOf` as a relationship | A `Parent` component, one link |
 | Prefab | A scene and a spawn | A spawn the caller writes | `IsA` overrides | A prefab file and a `PrefabSource` component |
 | Change detection | Per-component tick | None | Component hooks, query order is graph order | A `u32` tick per column, copied from the bevy filter idea |
-| Who owns the world | The bevy crate, including its schedule | The hecs crate | A C runtime | `genos-scene`, which already owns `Scene` |
+| Who owns the world | The bevy crate, including its schedule | The hecs crate | A C runtime | `genos-ecs`. `genos-scene` keeps `Scene` |
 | Deterministic iteration | The caller's order | The caller's order | Relationship traversal order | Column order, then scene-handle order at the stage join |
-| Fit | Pulls the scheduler this repo is designing separately, and would own the scene type MCP and the renderer already use | The right storage, none of the handle, parent, tick, or file behavior, and the scene type would still move into that crate | A relation engine for two links, and a C ABI under ADR 0007 | The storage stays next to `Wall` and `Solid` |
+| Fit | Pulls the scheduler this repo is designing separately, and would own the scene type MCP and the renderer already use | The right storage, none of the handle, parent, tick, or file behavior, and the scene type would still move into that crate | A relation engine for two links, and a C ABI under ADR 0007 | The tables are their own crate. `Scene` stays with the renderer and MCP |
 
 ## 5. Recommendation
 
-Keep the scene in `genos-scene`. Store objects in archetype tables. Give every placed object a scene handle. Implement exactly two links, each as a component: `Parent` and `PrefabSource`. Emit change records from column ticks, in handle order.
+Keep `Scene`, the script, and the draw lists in `genos-scene`. The archetype tables live in `genos-ecs` (`crates/ecs`). Give every placed object a scene handle. Implement exactly two links, each as a component: `Parent` and `PrefabSource`. Emit change records from column ticks, in handle order.
 
-**Why archetypes, and why here.** A wall does not gain and drop components every frame, so the archetype move on add and remove stays rare. The columns a job walks are contiguous: every local transform at one depth, every light. That is the layout the [job system](job-system.md) reduces by index. Frykholm's packed column is the same idea without the archetype grouping; hecs and bevy show the grouping. Putting it in a new crate, or inside hecs, would split `Scene` away from the renderer and from MCP, which already take it by value.
+**Why archetypes, and why `genos-ecs`.** A wall does not gain and drop components every frame, so the archetype move on add and remove stays rare. The columns a job walks are contiguous: every local transform at one depth, every light. That is the layout the [job system](job-system.md) reduces by index. Frykholm's packed column is the same idea without the archetype grouping; hecs and bevy show the grouping. The tables live in `genos-ecs` so animation and replication can take the store without Rhai, the camera, or the lighting settings. `genos-scene` keeps `Scene`, which the renderer and MCP already take by value.
 
 **Why not the other three.** `bevy_ecs` would own the world and bring a schedule on top of the job system. hecs has the tables and stops there: the handle persistence, the parent, the tick, and the prefab file would be this design anyway, living outside the crate that owned the bytes. flecs relationships are the right model for a generic graph. This scene has two links. A query that walks a relation graph has an order the server hash would have to pin down. A `Parent` component iterated by depth, then by handle, has an order that is a sort.
 
@@ -136,7 +137,7 @@ Records are sorted by scene handle before they are published, so two runs with t
 
 ## 10. Migration
 
-The work stays in `genos-scene`, `genos-mcp`, and `genos-render`. No new crate. Each step is one commit, keeps the camera and scene tests green, and adds the test on that row. The scene record and `CONTEXT.md` change in the step that changes the handle's meaning or the picture.
+The work for the placed objects stays in `genos-scene`, `genos-mcp`, and `genos-render`. The tables themselves are `genos-ecs` ([ADR 0032](../adr/0032-scene-ecs-and-transform-hierarchy.md) amendment, 10 Nov 2026): animation and replication take that crate without Rhai, the camera, or the lighting settings. Each step is one commit, keeps the camera and scene tests green, and adds the test on that row. The scene record and `CONTEXT.md` change in the step that changes the handle's meaning or the picture.
 
 | Step | Change | Test |
 |---|---|---|
