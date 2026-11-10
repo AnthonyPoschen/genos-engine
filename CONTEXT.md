@@ -235,3 +235,31 @@ _Avoid_: Sleep group, simulation island
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline
+
+**Navigation mesh**:
+The walkable ground as convex polygons, baked from collision geometry for one agent profile.
+_Avoid_: Waypoint graph, recast mesh
+
+**Navigation tile**:
+One square of a navigation mesh that can be rebuilt on its own.
+_Avoid_: Chunk, sector
+
+**Agent profile**:
+The radius, height, step, and slope a navigation mesh was baked for.
+_Avoid_: Character class, capsule
+
+**Off-mesh link**:
+A jump, a ladder, or a door crossing that is not a walk along polygons.
+_Avoid_: Portal, teleporter
+
+**Planner**:
+The search that computes a path on a navigation mesh or on the sparse volume graph.
+_Avoid_: Behavior tree, AI controller
+
+**Corridor**:
+The polygon sequence a planner returns, together with the taut path pulled through that sequence.
+_Avoid_: Spline, steering path
+
+**Navigation intent**:
+The replicated goal and the next corner. A player runtime follows it and does not search.
+_Avoid_: Path blob, flow field
