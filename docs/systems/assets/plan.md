@@ -138,9 +138,9 @@ The note is one line: the path in the file, the feature name, and `used` or `loa
 | `KHR_texture_transform` | Keep the transform | `loaded, unsupported`. `load_gltf` still refuses it when it is required. |
 | `KHR_lights_punctual` | Keep the light nodes | `loaded, unsupported`. Scene lamps stay the Rhai `light` call. |
 | `KHR_materials_emissive_strength` | `used` | `used` |
-| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | Keep the accessors and the skin JSON | `loaded, unsupported`. GI design says a skinned mesh uses a proxy, not an exact SDF. |
+| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | `used` on `Primitive` and `GltfScene::skins` | Joints and weights load. The `.gskin` cook is ADR 0038 Addition A. GI design says a skinned mesh uses a proxy, not an exact SDF. |
 | Morph targets and weights | Keep the deltas | `loaded, unsupported` |
-| Animation clips (translation, rotation, scale, weights) | Keep the samplers | `loaded, unsupported`. The text `Animation` type stays the one the game samples today. |
+| Animation clips (translation, rotation, scale, weights) | Linear and step channels on a skin joint are `used` | Weight channels and cubic-spline samplers stay noted and omitted. The text `Animation` type still samples the one-node file. |
 | Cameras | Keep the camera JSON | `loaded, unsupported`. The game camera stays `genos-scene`. |
 | `EXT_mesh_gpu_instancing` | Keep the instance attributes | `loaded, unsupported` until the instance buffer consumes them. The node instances already drawn are `used`. |
 | `KHR_mesh_quantization` | Keep the quantized accessors | Already dequantized by `component` when the accessor is normalized. Mark the extension `used` once a fixture proves a quantized file. |
@@ -603,7 +603,7 @@ Files: `debug/assets/Cargo.toml`, `debug/assets/src/main.rs`, `debug/assets/src/
 
 The commands, knobs, views, and failure probes are the debug-binary section. `--headless` loads `LoadProfile::Sim` and writes metrics JSON. It does not open a window. The windowed path depends on `genos-window`, `genos-render`, and `genos-ui`. The headless path depends on `genos-load`, `genos-cook`, `genos-debug`, and `genos-scene`.
 
-Test: `cargo test -p genos-assets-view`. `metrics_for(LoadProfile::Sim, cube fixture)` reports one asset, texture bytes 0, and the same sim hash on a second call. A relevant page marked evicted sets `evicted_relevant`. A truncated byte source sets `error` to truncated. A skin note from step 1 is `LoadedUnsupported`.
+Test: `cargo test -p genos-assets-view`. `metrics_for(LoadProfile::Sim, cube fixture)` reports one asset, texture bytes 0, and the same sim hash on a second call. A relevant page marked evicted sets `evicted_relevant`. A truncated byte source sets `error` to truncated. A morph-target note is `LoadedUnsupported`. A skin note is `Used`.
 
 GPU proof, owner:
 
