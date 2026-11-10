@@ -572,7 +572,7 @@ mod tests {
         GatedInput, RawExtra, RawPump, WindowMode,
     };
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     use super::Window;
 
     #[test]

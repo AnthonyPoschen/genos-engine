@@ -321,19 +321,17 @@ mod tests {
             Ok(guard) => guard,
             Err(poison) => poison.into_inner(),
         };
+        // A condvar timeout can fire before the deadline. Only the clock ends the wait.
         loop {
             let now = Instant::now();
             if now >= deadline {
                 break;
             }
-            let (next, status) = match pair.1.wait_timeout(guard, deadline - now) {
+            let (next, _) = match pair.1.wait_timeout(guard, deadline - now) {
                 Ok(waited) => waited,
                 Err(poison) => poison.into_inner(),
             };
             guard = next;
-            if status.timed_out() {
-                break;
-            }
         }
     }
 
