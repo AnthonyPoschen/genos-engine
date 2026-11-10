@@ -176,6 +176,8 @@ pub struct Scene {
     pub(crate) wall_order: Vec<SceneHandle>,
     pub(crate) solid_order: Vec<SceneHandle>,
     pub(crate) light_order: Vec<SceneHandle>,
+    /// Parent writes a walk rejected because they would cycle.
+    pub cycle_rejects: u32,
     /// None leaves the scene open to the sky.
     pub ceiling: Option<Ceiling>,
     /// None: a ray that leaves the scene brings nothing back, and the background is black.

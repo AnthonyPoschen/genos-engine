@@ -51,10 +51,6 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 #![expect(
-    clippy::redundant_closure,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
-#![expect(
     clippy::too_many_arguments,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
@@ -84,7 +80,7 @@
 //! lamp above an object colors the floor all around, a side lamp does not
 //! color the far side, and a lit wall brightens the near floor shadow.
 
-use genos_scene::Shape;
+use genos_scene::{Shape, Vec3};
 
 use crate::budget::FrameMemory;
 use crate::particles::{self, Card, FireLight, Puff};
@@ -576,10 +572,13 @@ fn pack_draw(
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) => {
             let floor = &world.scene.floor;
+            let place = world
+                .scene
+                .world_point(world.scene.floor_handle(), floor.position);
             let key = shape_key(1, &[floor.half_x, floor.half_z]);
             Some(PackedDraw::Shape {
                 key,
-                model: translation(floor.position.x, 0.0, floor.position.z),
+                model: translation(place.x, place.y, place.z),
                 color,
                 emission: [0.0; 3],
                 color_rect: [0.0; 4],
@@ -596,11 +595,14 @@ fn pack_draw(
         }
         DrawKind::Fixed(FixedPart::Ceiling) => {
             let floor = &world.scene.floor;
+            let place = world
+                .scene
+                .world_point(world.scene.floor_handle(), floor.position);
             let ceiling = world.scene.ceiling.as_ref()?;
             let key = shape_key(6, &[floor.half_x, floor.half_z]);
             Some(PackedDraw::Shape {
                 key,
-                model: translation(floor.position.x, ceiling.height, floor.position.z),
+                model: translation(place.x, ceiling.height, place.z),
                 color,
                 emission: [0.0; 3],
                 color_rect: [0.0; 4],
@@ -616,7 +618,16 @@ fn pack_draw(
             })
         }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
+            let handle = world.scene.wall_handle(*index)?;
             let wall = world.scene.wall_at(*index)?;
+            let place = world.scene.world_point(
+                handle,
+                Vec3::new(
+                    wall.position.x,
+                    wall.position.y + wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ),
+            );
             let half = [wall.half_x, wall.height * 0.5, wall.half_z];
             // A wall lower than the eye shows its top; a raised one (lintel, sill, roof
             // slab) shows its underside too. The fourth key value names the faces.
@@ -627,11 +638,7 @@ fn pack_draw(
             );
             Some(PackedDraw::Shape {
                 key,
-                model: translation(
-                    wall.position.x,
-                    wall.base + wall.height * 0.5,
-                    wall.position.z,
-                ),
+                model: translation(place.x, place.y, place.z),
                 color,
                 emission: [0.0; 3],
                 color_rect: [0.0; 4],
@@ -648,17 +655,26 @@ fn pack_draw(
             })
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
+            let handle = world.scene.solid_handle(*index)?;
             let solid = world.scene.solid_at(*index)?;
             match solid.shape {
                 Shape::Square => {
                     let half = solid.size * 0.5;
                     let extent = [half, solid.height * 0.5, half];
+                    let place = world.scene.world_point(
+                        handle,
+                        Vec3::new(
+                            solid.position.x,
+                            solid.position.y + solid.height * 0.5,
+                            solid.position.z,
+                        ),
+                    );
                     let key = shape_key(2, &[extent[0], extent[1], extent[2], 1.0]);
                     Some(PackedDraw::Shape {
                         key,
                         model: turned(
-                            translation(solid.position.x, solid.height * 0.5, solid.position.z),
-                            solid.yaw,
+                            translation(place.x, place.y, place.z),
+                            world.scene.world_yaw(handle),
                         ),
                         color,
                         emission: [0.0; 3],
@@ -678,9 +694,10 @@ fn pack_draw(
                 Shape::Circle => {
                     let radius = solid.size * 0.5;
                     let key = shape_key(3, &[radius, solid.height]);
+                    let place = world.scene.world_point(handle, solid.position);
                     Some(PackedDraw::Shape {
                         key,
-                        model: translation(solid.position.x, 0.0, solid.position.z),
+                        model: translation(place.x, place.y, place.z),
                         color,
                         emission: [0.0; 3],
                         color_rect: [0.0; 4],
@@ -1093,25 +1110,46 @@ fn lamps_of(world: &World) -> Vec<GpuLamp> {
 fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) | DrawKind::Fixed(FixedPart::Ceiling) => None,
-        DrawKind::Fixed(FixedPart::Wall(index)) => world.scene.wall_at(*index).map(|wall| GpuOcc {
-            center: [
-                wall.position.x,
-                wall.base + wall.height * 0.5,
-                wall.position.z,
-            ],
-            shape: 0.0,
-            half_x: wall.half_x,
-            height: wall.height,
-            half_z: wall.half_z,
-            radius: 0.0,
-            albedo: wall.color,
-            absorption: wall.absorption,
-            reflectance: wall.reflectance,
-            color_mix: wall.color_mix,
-            yaw: 0.0,
-        }),
+        DrawKind::Fixed(FixedPart::Wall(index)) => {
+            let handle = world.scene.wall_handle(*index)?;
+            let wall = world.scene.wall_at(*index)?;
+            let place = world.scene.world_point(
+                handle,
+                Vec3::new(
+                    wall.position.x,
+                    wall.position.y + wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ),
+            );
+            Some(GpuOcc {
+                center: [place.x, place.y, place.z],
+                shape: 0.0,
+                half_x: wall.half_x,
+                height: wall.height,
+                half_z: wall.half_z,
+                radius: 0.0,
+                albedo: wall.color,
+                absorption: wall.absorption,
+                reflectance: wall.reflectance,
+                color_mix: wall.color_mix,
+                yaw: 0.0,
+            })
+        }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            world.scene.solid_at(*index).map(|solid| solid_occ(solid))
+            let handle = world.scene.solid_handle(*index)?;
+            let solid = world.scene.solid_at(*index)?;
+            let mut occ = solid_occ(solid);
+            let place = world.scene.world_point(
+                handle,
+                Vec3::new(
+                    solid.position.x,
+                    solid.position.y + solid.height * 0.5,
+                    solid.position.z,
+                ),
+            );
+            occ.center = [place.x, place.y, place.z];
+            occ.yaw = world.scene.world_yaw(handle);
+            Some(occ)
         }
         _ => Some(GpuOcc {
             center: object.bounds.center,

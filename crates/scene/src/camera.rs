@@ -23,6 +23,7 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
+use genos_ecs::SceneHandle;
 use genos_math::{Mat4, Quat, Vec3};
 use genos_physics::{step, Body, World, GRAVITY};
 use std::f32::consts::{FRAC_PI_2, TAU};
@@ -135,6 +136,21 @@ impl Camera {
         true
     }
 
+    /// Bind a looping path to the solid named by `handle`.
+    ///
+    /// Returns false when the handle is not a live solid.
+    pub fn codimate_handle(
+        &mut self,
+        scene: &Scene,
+        handle: SceneHandle,
+        motion: Codimation,
+    ) -> bool {
+        let Some(index) = scene.solid_index(handle) else {
+            return false;
+        };
+        self.codimate(scene, index, motion)
+    }
+
     /// Hold or resume the path on `solid`. A hold leaves the solid where it is.
     pub fn set_codimation_running(&mut self, solid: usize, running: bool) -> bool {
         let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) else {
@@ -156,19 +172,35 @@ impl Camera {
             0.0,
             Vec3::new(floor.half_x, FLOOR_HALF_Y, floor.half_z),
         ));
-        for wall in scene.walls() {
-            physics.insert(Body::cuboid(
+        for index in 0..scene.wall_len() {
+            let Some(handle) = scene.wall_handle(index) else {
+                continue;
+            };
+            let wall = scene.wall(index);
+            let center = scene.world_point(
+                handle,
                 Vec3::new(
                     wall.position.x,
-                    wall.base + wall.height * 0.5,
+                    wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
+            );
+            physics.insert(Body::cuboid(
+                center,
                 0.0,
                 Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
             ));
         }
-        for solid in scene.solids() {
-            physics.insert(solid_collider(solid));
+        for index in 0..scene.solid_len() {
+            let Some(handle) = scene.solid_handle(index) else {
+                continue;
+            };
+            let solid = scene.solid(index);
+            physics.insert(solid_collider_at(
+                solid,
+                scene.world_point(handle, solid.position),
+                scene.world_yaw(handle),
+            ));
         }
         self.view = physics.insert(view_capsule(self.position));
         self.solid_origin = Some(1 + scene.wall_len());
@@ -235,21 +267,21 @@ fn view_capsule(eye: Vec3) -> Body {
     body
 }
 
-fn solid_collider(solid: &Solid) -> Body {
+fn solid_collider_at(solid: &Solid, origin: Vec3, yaw: f32) -> Body {
     match solid.shape {
         Shape::Square => {
             let half = solid.size * 0.5;
             let mut body = Body::cuboid(
-                solid.position + Vec3::Y * center_lift(solid),
+                origin + Vec3::Y * center_lift(solid),
                 0.0,
                 Vec3::new(half, solid.height * 0.5, half),
             );
-            body.orientation = Quat::from_axis_angle(Vec3::Y, solid.yaw);
+            body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
             body
         }
         Shape::Circle => {
             let radius = solid.size * 0.5;
-            Body::mesh(solid.position, 0.0, &cylinder(radius, solid.height, 16))
+            Body::mesh(origin, 0.0, &cylinder(radius, solid.height, 16))
         }
     }
 }
