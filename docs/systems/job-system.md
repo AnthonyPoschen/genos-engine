@@ -1,6 +1,14 @@
 # Job system (design)
 
-Status: accepted, 10 Nov 2026. Owner: Engine. The pool is not in the tree yet. [ADR 0031](../adr/0031-job-system.md) is the decision.
+Status: accepted, 10 Nov 2026. Owner: Engine. The pool is `genos-jobs` (`crates/jobs`). [ADR 0031](../adr/0031-job-system.md) is the decision. `debug/jobs` is the headless check.
+
+What landed with the crate, and what did not:
+
+- The deque is Chase-Lev and bounded. It does not grow. A full push returns an error. Capacity is the batch size, rounded up to a power of two.
+- Workers are named `genos-job-N` and joined before `Scheduler::run` returns. They are not kept across frames.
+- `run` puts conflicting jobs in a later batch, in index order. `ensure_parallel` is the hard error for a caller that asked for one parallel set.
+- `JobSettings` has `to_text`, `parse`, and `set_key`. It is not a field on `Scene` yet.
+- The camera loop, `command::take`, and `seat_enter` are not wired. `suspend_slack` and `resume_slack` are the seat hooks. `jobs.slack_during_fence` stays 0 because Slack does not run while the seat is held.
 
 This is the CPU scheduler the rest of the building blocks wait on. [Animation](animation.md) samples many skeletons on the CPU. The [physics plan](physics/plan.md) (P23, P24, P26) runs a wide solve that must hash-match the one-thread step. Save, load, and the net snapshot are ordered by the [scene ECS](ecs-scene.md), and that order is only useful if the parallel pass reduces in the same order every time. The scheduler is the piece that makes those four wide without making the server or a replay depend on which worker finished first.
 
