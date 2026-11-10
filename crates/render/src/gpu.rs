@@ -183,6 +183,15 @@ mod fog;
 mod media_check;
 mod stage;
 mod texel_detail;
+
+/// Return lavapipe's compiler scratch to the OS. The software fixture calls
+/// this after it drops the device that planted the read-only scene, and before
+/// it opens the device that compiles the reader. A product frame does not call it.
+pub fn release_software_compiler_heap() {
+    texel_detail::release_compiler_heap();
+}
+
+pub use texel_detail::TexelDetailPlant;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -1107,13 +1116,29 @@ impl Renderer {
         self.gpu.texel_detail_prod()
     }
 
-    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// Writing specialization with `lamp.x = 1`. The returned bytes are the
+    /// planted cache and key table. Drop this renderer before compiling the
+    /// reader: lavapipe keeps the compiler heap until the device is gone.
     ///
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn texel_detail_prod_readonly(&mut self) -> Result<Vec<f32>, String> {
-        self.gpu.texel_detail_prod_readonly()
+    pub fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.gpu.texel_detail_prod_plant()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// `plant` was captured by [`Self::texel_detail_prod_plant`] on a device
+    /// that has since been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly(plant)
     }
 
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.

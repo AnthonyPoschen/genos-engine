@@ -56,7 +56,8 @@ pub use gpu::{
     gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, DebugView,
     DrawProfile, GiSample, GpuKind, LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats,
     LightingChangeHead, LightingSunStats, MaterialStats, Renderer, ScreenLine, ScreenRect,
-    SettleStats, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
+    SettleStats, TexelDetailPlant, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
+    release_software_compiler_heap,
 };
 pub use hdr_output::{
     aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,

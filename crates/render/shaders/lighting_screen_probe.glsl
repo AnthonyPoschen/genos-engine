@@ -6,19 +6,31 @@
 // An axis pixel needs every weighted fine-texel corner to be an empty world
 // texel whose neighbour read has a corner. A slant has no fine texel: flag
 // 2048 returns that same read, and the skip is that read having a corner.
-// Own samples, a parent, a resample, a miss, a mover, and a trust gate that
-// hands the pixel back to the probes are not this. Trust is not the test.
+// Own samples, a parent, a resample, a miss, and a trust gate that hands the
+// pixel back to the probes are not this. Trust is not the test. A mover is
+// this when the world-cell read at its current position and true normal
+// accepts a corner: that read is what the pixel shows, and it does not seed.
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
 // skip here and then show lighting_sh_read rather than the texel seed.
 // Defined after lighting_probe_irradiance: the cache include is earlier.
 bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
-    if (obj || lighting_world_mode() != 3u) {
+    if (lighting_world_mode() != 3u) {
         return false;
+    }
+    if (obj) {
+        // The mover arm shows lighting_sh_read and does not seed a world texel.
+        // Detail off and Low stay on the probes. Claim stays false.
+        float salt = lighting_obj_salt;
+        lighting_obj_salt = 0.0;
+        bool hit = lighting_sh_texel_detail_on()
+            && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
+        lighting_obj_salt = salt;
+        return hit;
     }
     if (lighting_sc_slanted(n)) {
         // The screen arm shows this read with or without the texel-detail bit.
-        // A mover already returned above. Low is not world mode 3.
+        // Low is not world mode 3.
         return lighting_sh_on() && lighting_sh_read(pos, n, false).w > LIGHTING_CACHE_HAS_W;
     }
     if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
@@ -70,8 +82,9 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
 
 // Compose's screen-probe indirect. A covered pixel does not read probe SH:
 // the neighbour read is the displayed indirect, so the probe read cannot
-// change it. A miss, a mover, Low, and a slant whose read is empty still
-// read the probes. Place, trace, gather, and filter stay.
+// change it. A miss, a mover whose world-cell read rejects, Low, and a slant
+// whose read is empty still read the probes. Place, trace, gather, and
+// filter stay.
 vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_reads = 0u;
     lighting_px_probe_skipped = 0u;
