@@ -146,15 +146,15 @@ Quantized fields are what reconciliation compares. The solver keeps `f32`.
 
 ### Prediction and rollback
 
-The owned view body is the only predicted body.
+Every entity this connection owns is predicted, including a driven chassis. [ADR 0042](../../adr/0042-multiplayer-topologies.md) is the rule. Remote bodies are interpolated, then extrapolated for a short gap. They are not resimulated.
 
-Each client tick samples the character-controller action map once into an `InputFrame` and stores it. The client steps the view body ahead of the server and keeps a ring of 128 predicted poses, keyed by tick. Remote bodies and vehicles are interpolated between the two snapshots that bracket render time (the core-networking plan uses a 100 ms delay). They are not resimulated.
+Each client tick samples the character-controller action map once into an `InputFrame` and stores it. The client steps each owned body ahead of the server and keeps a ring of 128 predicted poses, keyed by tick. Remote bodies use the 100 ms delay from that ADR.
 
-When a snapshot arrives for tick `T`, the client compares the quantized server pose of the owned body with the stored prediction at `T`. On a mismatch it restores the owned body to the server pose at `T`, then replays `InputFrame`s `T+1 … now` through `step` for that body only. Other islands are not rolled back. Rhai does not run inside the replay. Codimation on a remote solid is server state, not a predicted wish.
+When a snapshot arrives for tick `T`, the client compares the quantized server pose of the owned body with the stored prediction at `T`. Outside the deadband it restores the owned body to the server pose at `T`, then replays `InputFrame`s `T+1 … now` through `step` for that body only. Inside the deadband the predicted pose stands. Other islands are not rolled back. Rhai does not run inside the replay. Codimation on a remote solid is server state, not a predicted wish.
 
 Foot plant runs after the replay, on the pose that will be drawn. A correction can move the hips. The feet recast. The plant is not part of the replicated checksum.
 
-A driven vehicle in v1 is server-authoritative and interpolated, including wheel spin and suspension length. Predicting a chassis would roll back contacts with the world. That waits until the owned-body test is green, and even then the predicted set is the chassis only, with the same ring and the same rule that other dynamics stay interpolated.
+The driver predicts the chassis with that ring and that deadband. A passenger does not. Wheel spin and suspension length on a remote vehicle stay interpolated. The tyre solver stays out of the client step until it hash-matches `step`. Contacts with other dynamics are not rolled back. Those bodies stay on the snapshot.
 
 ### Determinism
 

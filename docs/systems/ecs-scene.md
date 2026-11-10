@@ -2,7 +2,7 @@
 
 Status: proposed, 27 Oct 2026. Owner: Engine. No code in this change.
 
-The live scene is four arrays and a side table of names. That is enough for one scripted room. It is not enough for the four systems that have to name an object and find it again later. [Animation](animation.md) needs a parent link for joints. The [physics plan](physics/plan.md) scales to thousands of bodies and says snapshot order is `NetId` order once bodies live on stable ids. Save, load, and MCP undo need a name that survives a removal and a reload. Lighting invalidation needs a change record per object that moved, which [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) already specifies and the scene does not yet emit. The [job system](job-system.md) runs the wide passes; this design is the storage those passes iterate.
+The live scene is four arrays and a side table of names. That is enough for one scripted room. It is not enough for the four systems that have to name an object and find it again later. [Animation](animation.md) needs a parent link for joints. The [physics plan](physics/plan.md) scales to thousands of bodies and says snapshot order is `NetId` order once bodies live on stable ids. [ADR 0042](../adr/0042-multiplayer-topologies.md) reads that `NetId` as this design's scene handle. Save, load, and MCP undo need a name that survives a removal and a reload. Lighting invalidation needs a change record per object that moved, which [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) already specifies and the scene does not yet emit. The [job system](job-system.md) runs the wide passes; this design is the storage those passes iterate.
 
 Binds to [ADR 0009](../adr/0009-rhai-is-the-scripting-language.md), [ADR 0013](../adr/0013-lighting-invalidation-is-local.md), [ADR 0014](../adr/0014-pbr-materials.md), [ADR 0019](../adr/0019-agent-operable.md), [the scene record](scene.md), and [the settings principles](../engine/settings-principles.md).
 
@@ -75,15 +75,14 @@ Keep the scene in `genos-scene`. Store objects in archetype tables. Give every p
 - From glTF's node tree: the runtime parent is a scene handle, not a glTF node index. The loader's job is to write those handles when skins arrive. This design does not parse skins. [Loading](loading.md) still ignores them.
 - `FixedPart::Wall(usize)` stays an index into the vec `World::from_scene` builds. That vec is rebuilt in handle order in the same frame as the edit, and the change record carries the handle, so a lighting key that still uses the vec index is rebuilt rather than silently pointed at a different wall. The record is what ADR 0013 consumes.
 
-Three ids, three owners. They share a shape and they are not interchangeable.
+Two ids. They share a shape and they are not interchangeable. The physics plan's `NetId` is the scene handle on the wire ([ADR 0042](../adr/0042-multiplayer-topologies.md)). It is not a third counter.
 
 | Id | Owner | Used for |
 |---|---|---|
-| Scene handle | This design | The save file, the undo stack, MCP, Rhai, the parent pointer |
+| Scene handle | This design | The save file, the undo stack, MCP, Rhai, the parent pointer, and the snapshot. Index plus generation. The per-component change tick is the dirty signal the snapshot reads |
 | `BodyId` | Physics plan P2 | The physics world. A component on the object stores it. `insert` still returns `usize` until P2 |
-| `NetId` | The core-networking plan, as the [physics plan](physics/plan.md) names it | The snapshot. Server-assigned. Storage and hash order are `NetId` order |
 
-For an object that came from the shared scene file, the server's `NetId` is that file's scene handle, so two peers that loaded the same file agree before any spawn message. A runtime spawn gets a server `NetId` that is not a client-local index. The client stores that `NetId` on the component and applies the snapshot by it. Local vec order is not on the wire.
+For an object that came from the shared scene file, every runtime keeps the handle the file stored, so two peers agree before any spawn message. A runtime spawn uses the handle the authority allocated. The guest inserts that index and generation. It does not allocate a second handle. Local vec order is not on the wire. Storage and hash order are scene-handle order.
 
 ## 6. Handles, undo, and the files
 
@@ -147,7 +146,7 @@ The work stays in `genos-scene`, `genos-mcp`, and `genos-render`. No new crate. 
 | E5 | Ticks emit change records in handle order. Settings edits emit none. A material edit emits one (ADR 0014). The server flag stays off | `a_moved_solid_emits_one_record`, `a_menu_edit_emits_none` |
 | E6 | `.gscene` and `.gprefab` round-trip. Rhai `prefab`. An override does not change the prefab file's hash | `prefab_override_does_not_write_the_file` |
 | E7 | Rhai `get` / `set` / `parent`. The physics replay path does not call them | `set_handle_emits_a_change_record`, `replay_does_not_run_rhai` |
-| E8 | `NetId` component. Snapshot apply by `NetId`. `debug/scene` on the shared scaffolding | `a_removal_does_not_retarget_the_survivor` |
+| E8 | Snapshot apply by the scene handle. No second id and no second tick. `debug/scene` on the shared scaffolding | `a_removal_does_not_retarget_the_survivor` |
 
 E4's hierarchy walk is a function the job system's Must stage can call. `genos-scene` does not spawn threads. Until the pool exists the walk runs on the caller, in handle order, which is the serial reduce.
 
@@ -203,13 +202,15 @@ The [job system](job-system.md) sets the frame ceiling: Must work ≤ 6.0 ms wal
 
 ## 14. Networking
 
-`docs/systems/core-networking/plan.md` is not in the tree. The names below are the ones the [physics plan](physics/plan.md) assigns to that file. A name there wins when it lands. This crate does not open a socket.
+The socket and the snapshot rates live in the core-networking plan (PR #14), which is not on master. [ADR 0042](../adr/0042-multiplayer-topologies.md) and [the topologies note](core-networking/topologies.md) revise two points: the replicated columns are these tables, and the authority runtime may be a listen-server. The snapshot names the generational scene handle and reads the per-component change tick. Where they disagree with that plan, the ADR wins. This crate does not open a socket.
 
-- Replicated state: for each replicated object, the `NetId`, the quantized root pose the physics plan already lists, the parent `NetId`, and the prefab content hash. Local transforms of cosmetic children stay on the client. The scene handle is the save id; on the wire the id is `NetId`.
-- Authority: the server assigns `NetId` and is the only writer of a replicated root. An owning client predicts the view body through the physics plan, not through this table.
-- Prediction / rollback: the owned view body only, by replaying `step`. Hierarchy under that body recomputes after the replay and is not in the checksum. Other objects interpolate from snapshots. Rhai does not run inside the replay.
-- Determinism: the same spawns, the same `.gscene` bytes, and `step` at 1/60 produce the same world transforms in handle order in one process. The parallel hierarchy reduce matches that order. Cross-machine `f32` identity is not required; the snapshot compares quantized poses.
-- Headless server: no window, no Vulkan, no audio. `emit_change_records` is false. The tick uses the job system's serial mode. The server still holds the table, the handles, and the bodies.
+Replication reads the columns below. It does not add a second entity store, a second id, or a second tick. The handle and the change tick are this design. Before a snapshot, the store also needs E3 (the columns), E6 (the prefab hash), and a `MeshRef` of the source `AssetId`. E2, E4, and E7 are not on that path. The topologies note is the list, and the outfit swap there is the test that `MeshRef` sends the source SHA-256.
+
+- Replicated state: for each replicated object, the scene handle, the quantized root pose the physics plan already lists, the parent handle, the prefab content hash, and `MeshRef` as the source `AssetId` plus a mesh index. A component replicates when its change tick is newer than the baseline. Local transforms of cosmetic children stay on the client.
+- Authority: the authority runtime allocates the scene handle and is the only writer of a replicated root. That runtime is headless, or a listen-server. An owning client predicts the view body through the physics plan, not through this table. A guest does not write a column.
+- Prediction / rollback: every owned entity, by replaying `step`. A miss inside the deadband does not replay. Hierarchy under that body recomputes after the replay and is not in the checksum. Other objects interpolate, then extrapolate for a short gap. `MeshRef` is not in the replay. Rhai does not run inside the replay.
+- Determinism: the same spawns, the same `.gscene` bytes, and `step` at 1/60 produce the same world transforms in handle order in one process. The parallel hierarchy reduce matches that order. Cross-machine `f32` identity is not required; the snapshot compares quantized poses and `AssetId` bytes.
+- Headless server: no window, no Vulkan, no audio. `emit_change_records` is false. The tick uses the job system's serial mode. The server still holds the table, the handles, and the bodies. A listen-server is the player process and is not this headless build.
 
 ## 15. Failure modes and probes
 
