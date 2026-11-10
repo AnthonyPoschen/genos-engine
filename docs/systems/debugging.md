@@ -172,14 +172,19 @@ The ping is answered only inside the seat dispatch. A scene load runs on
 pipeline compiles keep a side thread answering pings, and that thread is joined
 before the next present. Quit is the app lifecycle in `crates/window`: it stops
 the script and the MCP listener without a blind join, polls GPU fences, destroys
-the device, unmaps the window, and then exits. Dropping the device outside that
+our GPU objects, unmaps the window, and then exits. It does not call
+`vkDestroyDevice` or `vkDestroyInstance`, except when `--lifecycle-full-destroy`
+is set for the validation gate. Unix exit is `_exit`. Windows exit is
+`TerminateProcess`, so `DLL_PROCESS_DETACH` does not destroy the device after
+`lifecycle_visible_quit_ms` is printed. Dropping the device outside that
 lifecycle panics and does not wait idle. The event thread dispatches the
 seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
 pump gap (a synchronous load, a device wait, or a teardown). A phase line at
-or above 100 ms names that shutdown step. The probes are the Perf row,
-`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
+or above 100 ms names that shutdown step. `lifecycle_visible_quit_ms` at or
+above 100 ms means the process stayed up after the window was gone. The probes are the Perf row,
+`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_visible_quit_ms`, `lifecycle_phase=`, and
 `lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
 That test plants a 2000 ms fence inside the drain so lavapipe's instant fences
 cannot hide a blocked phase.

@@ -1502,6 +1502,11 @@ kind = "mirror"
 detail = "--lifecycle-close-early"
 
 [[var]]
+name = "GENOS_LIFECYCLE_FULL_DESTROY"
+kind = "mirror"
+detail = "--lifecycle-full-destroy"
+
+[[var]]
 name = "GENOS_PBR_PARITY_DEVICE"
 kind = "test"
 detail = "harness only"

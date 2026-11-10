@@ -17,8 +17,9 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_window::{
-    gap_within_budget, parse_quit_gap, parse_quit_phases, parse_quit_total, phases_within_budget,
-    PhaseSample, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
+    gap_within_budget, parse_quit_gap, parse_quit_phases, parse_quit_total, parse_visible_quit,
+    phases_within_budget, PhaseSample, DRIVER_RELEASE_LINE, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
+    VISIBLE_QUIT_PREFIX,
 };
 
 const ICD: &str = "/usr/share/vulkan/icd.d/lvp_icd.json";
@@ -65,10 +66,8 @@ const FULL_PHASES: &[&str] = &[
     "destroy_swapchain",
     "destroy_objects",
     "destroy_surface",
-    "destroy_device",
-    "destroy_instance",
+    "driver_release",
     "unmap",
-    "device_drop",
     "exit_tail",
 ];
 
@@ -80,21 +79,30 @@ fn every_binary_answers_pings_while_it_quits() {
         let run = launch(&seat, &spec, None).expect(spec.label);
         let gap = must_gap(spec.label, &run);
         let total = must_total(spec.label, &run);
+        let visible = must_visible(spec.label, &run);
         let phases = phases_of(&run);
         print_phases(spec.label, gap, total, &phases);
-        measured.push((spec.label, gap, total));
+        println!("MEASURE {}_visible_quit_ms={visible:.3}", spec.label);
+        measured.push((spec.label, gap, total, visible));
         assert_finished(&spec, &run);
         assert_rendered(&spec, &run);
-        assert_clean(spec.label, gap, total, &phases, &run);
+        assert_clean(spec.label, gap, total, visible, &phases, &run);
     }
     for spec in plants() {
         let run = launch(&seat, &spec, Some("2000")).expect(spec.label);
         let gap = must_gap(spec.label, &run);
         let total = must_total(spec.label, &run);
+        let visible = must_visible(spec.label, &run);
         let phases = phases_of(&run);
         print_phases(spec.label, gap, total, &phases);
+        println!("MEASURE {}_visible_quit_ms={visible:.3}", spec.label);
         assert_finished(&spec, &run);
         assert_rendered(&spec, &run);
+        assert!(
+            gap_within_budget(visible),
+            "{} planted stall stretched the visible quit to {visible:.1} ms",
+            spec.label
+        );
         assert!(
             !gap_within_budget(gap),
             "{} planted stall must fail the budget, gap {gap:.1} ms; clean runs {measured:?}",
@@ -133,10 +141,12 @@ fn every_binary_answers_pings_while_it_quits() {
         let run = launch(&seat, &spec, None).expect(spec.label);
         let gap = must_gap(spec.label, &run);
         let total = must_total(spec.label, &run);
+        let visible = must_visible(spec.label, &run);
         let phases = phases_of(&run);
         print_phases(spec.label, gap, total, &phases);
+        println!("MEASURE {}_visible_quit_ms={visible:.3}", spec.label);
         assert_finished(&spec, &run);
-        assert_clean(spec.label, gap, total, &phases, &run);
+        assert_clean(spec.label, gap, total, visible, &phases, &run);
         // `lifecycle_frames_presented=0` also contains "frames=", so match
         // the binary's own `<name> frames=N` line.
         let frames_line = format!("{} frames=", spec.name);
@@ -161,7 +171,12 @@ fn every_binary_answers_pings_while_it_quits() {
 /// from a binary that never rendered proves nothing.
 fn assert_rendered(spec: &Spec, run: &Finished) {
     let text = format!("{}\n{}", run.stdout, run.stderr);
-    for bad in ["swapchain failed", "already has a fifo", "-1000000000", "previous swapchain"] {
+    for bad in [
+        "swapchain failed",
+        "already has a fifo",
+        "-1000000000",
+        "previous swapchain",
+    ] {
         assert!(
             !text.contains(bad),
             "{} swapchain creation failed ({bad})\nstdout {}\nstderr {}",
@@ -522,6 +537,21 @@ fn must_total(name: &str, run: &Finished) -> f64 {
         .expect("quit total line")
 }
 
+fn visible_of(run: &Finished) -> Option<f64> {
+    parse_visible_quit(&run.stdout).or_else(|| parse_visible_quit(&run.stderr))
+}
+
+fn must_visible(name: &str, run: &Finished) -> f64 {
+    visible_of(run)
+        .ok_or_else(|| {
+            format!(
+                "{name} printed no {VISIBLE_QUIT_PREFIX}: stdout {} stderr {}",
+                run.stdout, run.stderr
+            )
+        })
+        .expect("visible quit line")
+}
+
 fn phase_ms(phases: &[PhaseSample], name: &str) -> f64 {
     phases
         .iter()
@@ -536,15 +566,37 @@ fn print_phases(label: &str, gap: f64, total: f64, phases: &[PhaseSample]) {
     }
 }
 
-fn assert_clean(label: &str, gap: f64, total: f64, phases: &[PhaseSample], run: &Finished) {
+fn assert_clean(
+    label: &str,
+    gap: f64,
+    total: f64,
+    visible: f64,
+    phases: &[PhaseSample],
+    run: &Finished,
+) {
     assert!(
         gap_within_budget(gap),
         "{label} quit gap {gap:.1} ms is outside the 100 ms ping budget"
     );
     assert!(
+        gap_within_budget(visible),
+        "{label} visible quit {visible:.1} ms is outside the 100 ms budget (window gone to process exit)"
+    );
+    assert!(
         phases_within_budget(phases, total),
         "{label} phase or total is outside the 100 ms budget, total {total:.1} phases {phases:?}"
     );
+    let text = format!("{}\n{}", run.stdout, run.stderr);
+    assert!(
+        text.contains(DRIVER_RELEASE_LINE),
+        "{label} did not leave the driver to process exit\n{text}"
+    );
+    for held in ["destroy_device", "destroy_instance"] {
+        assert!(
+            !phases.iter().any(|phase| phase.name == held),
+            "{label} waited in {held}; that driver call is off the quit path. phases {phases:?}"
+        );
+    }
     for name in FULL_PHASES {
         assert!(
             phases.iter().any(|phase| phase.name == *name),

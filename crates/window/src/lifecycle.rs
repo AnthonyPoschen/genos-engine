@@ -22,19 +22,56 @@
 //!
 //! [`Lifecycle`] is the only owner of that sequence. The frame calls [`Lifecycle::quit`]
 //! or drops the lifecycle. Either way the state machine runs on this thread:
-//! stop producers, poll GPU fences, destroy resources, unmap, then exit.
+//! stop producers, poll GPU fences, destroy our resources, unmap, then exit.
+//! [`Lifecycle::quit`] does not call `vkDestroyDevice` or `vkDestroyInstance`.
+//! Those two driver calls wait on one shared lavapipe lock, and the wait lands
+//! on whichever call takes it. The process exit reclaims that driver state.
 //! [`Lifecycle::pump`] is not required. The machine itself dispatches the seat
 //! between steps, so the gap between dispatches stays inside [`PUMP_BUDGET`].
 //!
 //! Safe code cannot move the window or the device out. Both sit in
 //! [`ManuallyDrop`]. [`exit`] is the only way out of the process. It flushes
-//! and calls `_exit`, so the driver's atexit handler does not run.
+//! the visible-quit line, then terminates without running driver detach.
+//! Unix uses `_exit`. Windows uses `TerminateProcess`, because the CRT
+//! `_exit` is `ExitProcess` and that still runs `DLL_PROCESS_DETACH`.
 
 use std::io::Write;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+/// The process is about to terminate. A [`Lifecycle`] drop then skips
+/// `vkDestroyDevice` and `vkDestroyInstance`, same as [`Lifecycle::quit`].
+static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// The validation gate asked for a real `vkDestroyDevice` and
+/// `vkDestroyInstance`, so object-leak reports still fire. This wins over
+/// [`RELEASE_DRIVER_ON_EXIT`].
+static FULL_DRIVER_DESTROY: AtomicBool = AtomicBool::new(false);
+
+/// Arm every later lifecycle drop in this process to leave the driver
+/// teardown for process exit. Call this from a binary whose `main` ends in
+/// [`exit`]. In-process tests do not, so a drop there still destroys the device.
+pub fn release_driver_on_process_exit() {
+    RELEASE_DRIVER_ON_EXIT.store(true, Ordering::Relaxed);
+}
+
+/// Destroy the device and the instance on the way out.
+///
+/// [`release_driver_on_process_exit`] stays armed. This flag wins, so the
+/// Vulkan validation layer still sees `vkDestroyDevice` and `vkDestroyInstance`
+/// and can report objects that were left alive. The quit-gap run does not
+/// call this.
+pub fn request_full_driver_destroy() {
+    FULL_DRIVER_DESTROY.store(true, Ordering::Relaxed);
+}
+
+fn skip_driver_destroy() -> bool {
+    RELEASE_DRIVER_ON_EXIT.load(Ordering::Relaxed)
+        && !FULL_DRIVER_DESTROY.load(Ordering::Relaxed)
+}
 
 use crate::{Window, PUMP_BUDGET};
 
@@ -50,6 +87,14 @@ pub const PRESENTED_PREFIX: &str = "lifecycle_frames_presented=";
 /// Printed immediately before the process image is replaced. Wall time from
 /// the quit request through every drop after the window unmaps.
 pub const QUIT_TOTAL_PREFIX: &str = "lifecycle_quit_total_ms=";
+
+/// Wall time from the window unmap to process exit. This is the quit the
+/// player sees: the window is gone, then the process is gone.
+pub const VISIBLE_QUIT_PREFIX: &str = "lifecycle_visible_quit_ms=";
+
+/// Printed when quit leaves `vkDestroyDevice` and `vkDestroyInstance` to
+/// process exit instead of waiting on the driver lock.
+pub const DRIVER_RELEASE_LINE: &str = "lifecycle_driver_release=process_exit";
 
 /// How long a producer may stay unfinished before shutdown detaches it.
 const PRODUCER_LIMIT: Duration = Duration::from_secs(2);
@@ -119,6 +164,16 @@ pub trait ShutdownDevice {
     fn frames_presented(&self) -> u64 {
         0
     }
+
+    /// The following quit calls [`exit`] and will not wait for driver teardown.
+    ///
+    /// `vkDestroyDevice` and `vkDestroyInstance` share one lavapipe wait (the
+    /// submit thread, the raster thread pool, or the shader-cache queue). The
+    /// wait is tens to about 150 ms and shows up on whichever call takes the
+    /// lock. A player quit unmaps the window and leaves, so that wait is not
+    /// on the path the player sees. A drop that returns to the caller does
+    /// not use this and still destroys the driver objects.
+    fn release_driver_at_exit(&mut self) {}
 }
 
 /// A worker the lifecycle joins without blocking the seat.
@@ -339,10 +394,12 @@ impl<D: ShutdownDevice> Lifecycle<D> {
 
     /// Run shutdown, then [`exit`] with `code`.
     ///
-    /// Producers registered with [`Self::add_stop`] run first. The device is
-    /// destroyed while the window is still mapped. The window is unmapped only
-    /// after that. `_exit` does not run destructors, so this drops the
-    /// device and the window first.
+    /// Producers registered with [`Self::add_stop`] run first. Our GPU objects
+    /// are destroyed while the window is still mapped, with the seat dispatched
+    /// between steps. The window is then unmapped. `vkDestroyDevice` and
+    /// `vkDestroyInstance` are not called unless [`request_full_driver_destroy`]
+    /// ran. The device is left in place on purpose. Process exit does not run
+    /// its destructor, and it does not run driver detach.
     pub fn quit(mut self, code: i32) -> ! {
         if !self.quit {
             self.exit_code = code;
@@ -351,6 +408,11 @@ impl<D: ShutdownDevice> Lifecycle<D> {
             self.exit_code = code;
         }
         let code = self.exit_code;
+        // Quit leaves the driver for process exit. The validation gate asks
+        // for a full destroy, and that request wins.
+        if !FULL_DRIVER_DESTROY.load(Ordering::Relaxed) {
+            self.device.release_driver_at_exit();
+        }
         self.shutdown();
         unsafe {
             if self.window_alive {
@@ -358,7 +420,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 self.window_alive = false;
             }
         }
-        self.drop_device();
+        // The driver device stays alive until process exit. Dropping it here
+        // is the vkDestroyDevice / vkDestroyInstance wait.
+        self.device_dropped = true;
         std::mem::forget(self);
         exit(code);
     }
@@ -396,6 +460,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
                 }
             }
             SeatOp::Unmap => {
+                // The player-visible quit starts as the window goes away,
+                // before the drop, so a slow disconnect is part of that span.
+                mark_visible_quit();
                 if *alive {
                     window.clear_seat_pump();
                     // SAFETY: `window` was created in `new` and this flag is the
@@ -434,6 +501,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
 
 impl<D: ShutdownDevice> Drop for Lifecycle<D> {
     fn drop(&mut self) {
+        if skip_driver_destroy() {
+            self.device.release_driver_at_exit();
+        }
         if !self.released {
             self.shutdown();
         }
@@ -500,6 +570,11 @@ pub fn parse_quit_total(text: &str) -> Option<f64> {
     prefixed_f64(text, QUIT_TOTAL_PREFIX)
 }
 
+/// Read [`VISIBLE_QUIT_PREFIX`] from a child's stdout or stderr.
+pub fn parse_visible_quit(text: &str) -> Option<f64> {
+    prefixed_f64(text, VISIBLE_QUIT_PREFIX)
+}
+
 /// `true` when every phase and the total stay inside the seat budget.
 pub fn phases_within_budget(phases: &[PhaseSample], total_ms: f64) -> bool {
     gap_within_budget(total_ms) && phases.iter().all(|phase| gap_within_budget(phase.ms))
@@ -554,6 +629,37 @@ pub fn close_early_flag(arg: &str) -> bool {
     arg == "--lifecycle-close-early"
 }
 
+/// `true` when the argument asks quit to call `vkDestroyDevice` and
+/// `vkDestroyInstance`. The validation gate uses this so leak reports fire.
+pub fn full_destroy_flag(arg: &str) -> bool {
+    arg == "--lifecycle-full-destroy"
+}
+
+/// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_FULL_DESTROY`
+/// set to `1` or `true`.
+///
+/// A value that is anything else is ignored. The flag wins when both are set,
+/// because the caller passes `true` only for the argument.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_LIFECYCLE_FULL_DESTROY mirrors --lifecycle-full-destroy. The argument wins when cli is true. docs/LINT_RULES.md"
+)]
+pub fn full_destroy_mirror(cli: bool) -> bool {
+    full_destroy_from(
+        cli,
+        std::env::var("GENOS_LIFECYCLE_FULL_DESTROY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn full_destroy_from(cli: bool, env: Option<&str>) -> bool {
+    if cli {
+        return true;
+    }
+    matches!(env, Some("1" | "true"))
+}
+
 /// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_CLOSE_EARLY`
 /// set to `1` or `true`.
 ///
@@ -594,29 +700,71 @@ pub fn block_ms_mirror(cli: Option<Duration>) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
+#[cfg(not(windows))]
 extern "C" {
     fn _exit(code: i32) -> !;
 }
 
 /// Leave the process. Binaries call this instead of `std::process::exit`.
 ///
-/// Rust buffers stdout, so this flushes first. The total line is the wall time
-/// from the quit request to this call, including drops after the window
-/// unmapped. `_exit` skips the Vulkan driver's atexit handler. That handler
-/// waits again after `vkDestroyInstance`, and on a real device the wait is the
-/// multi-second tail after the quit lines.
+/// Rust buffers stdout, so this flushes first. `lifecycle_visible_quit_ms` is
+/// the wall time from the window unmap to this flush. The terminating call
+/// is next, and it does not run driver teardown after the line:
+///
+/// - Unix `_exit` does not run `atexit` handlers or shared-library fini.
+/// - Windows CRT `_exit` is `ExitProcess`, which does run `DLL_PROCESS_DETACH`.
+///   The Vulkan loader would then destroy a live `VkDevice` after the line,
+///   and that wait would be unmeasured. This function calls `TerminateProcess`
+///   instead. Detach does not run. The kernel reclaims the process.
+///
+/// Time inside the terminating call is not in the number. The process is
+/// leaving, and no driver detach follows the flush.
 pub fn exit(code: i32) -> ! {
     if let Some(tail) = take_quit_tail() {
+        let ms = duration_ms(tail);
         phase_end("exit_tail", tail);
+        // Same span as `exit_tail`: the window is already gone.
+        println!("{VISIBLE_QUIT_PREFIX}{ms:.3}");
     }
     if let Some(total) = quit_total() {
         println!("{QUIT_TOTAL_PREFIX}{:.3}", duration_ms(total));
     }
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    // SAFETY: stdout is flushed. The lifecycle has destroyed the device and
-    // unmapped the window before this call. `_exit` does not run atexit.
-    unsafe { _exit(code) }
+    end_process(code)
+}
+
+/// Stop the process without running driver detach.
+///
+/// Stdout and stderr are already flushed. A mapped window is already
+/// unmapped. The device may still be alive. Neither call below runs driver
+/// `atexit` or `DLL_PROCESS_DETACH`.
+fn end_process(code: i32) -> ! {
+    #[cfg(windows)]
+    {
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle.
+        // `TerminateProcess` accepts it and does not run `DLL_PROCESS_DETACH`.
+        // If the call returns, this thread must not call `ExitProcess`.
+        unsafe {
+            let status = u32::try_from(code).unwrap_or(u32::MAX);
+            let _ = TerminateProcess(GetCurrentProcess(), status);
+        }
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // SAFETY: `_exit` does not run `atexit` or shared-library fini.
+        unsafe { _exit(code) }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    fn TerminateProcess(process: *mut core::ffi::c_void, exit_code: u32) -> i32;
 }
 
 struct MachineStop {
@@ -764,6 +912,15 @@ fn begin_quit_clock() {
 }
 
 fn mark_quit_tail() {
+    let mut clock = quit_clock();
+    if clock.tail.is_none() {
+        clock.tail = Some(Instant::now());
+    }
+}
+
+/// Start the player-visible quit clock, and the exit tail, at the unmap.
+fn mark_visible_quit() {
+    // Replaces any earlier tail. The player-visible span starts at the unmap.
     quit_clock().tail = Some(Instant::now());
 }
 
@@ -938,6 +1095,10 @@ mod tests {
         let text = "noise\nlifecycle_phase_begin=drain_gpu\nlifecycle_phase=drain_gpu ms=4.000\nlifecycle_phase=destroy_swapchain ms=80.500\nlifecycle_quit_gap_ms=12.500\nlifecycle_quit_total_ms=90.250\n";
         assert_eq!(parse_quit_gap(text), Some(12.5));
         assert_eq!(parse_quit_total(text), Some(90.25));
+        assert_eq!(
+            parse_visible_quit("lifecycle_visible_quit_ms=1.250\n"),
+            Some(1.25)
+        );
         let phases = parse_quit_phases(text);
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[0].name, "drain_gpu");
@@ -966,6 +1127,13 @@ mod tests {
         assert!(close_early_flag("--lifecycle-close-early"));
         assert!(!close_early_flag("--frames"));
         assert!(close_early_mirror(true));
+        assert!(full_destroy_flag("--lifecycle-full-destroy"));
+        assert!(!full_destroy_flag("--frames"));
+        assert!(full_destroy_from(true, Some("0")));
+        assert!(!full_destroy_from(false, Some("0")));
+        assert!(full_destroy_from(false, Some("1")));
+        assert!(full_destroy_from(false, Some("true")));
+        assert!(!full_destroy_from(false, None));
     }
 
     #[test]

@@ -63,7 +63,22 @@ def main() -> int:
     if args:
         text = "".join(Path(p).read_text(errors="replace") for p in args)
     else:
-        text = run(["cargo", "run", "--locked", "-q", "-p", "genos-camera", "--", "--frames", "60"])
+        # Full destroy: the quit path otherwise leaves VkDevice alive, and the
+        # validation layer reports object leaks from vkDestroyInstance.
+        text = run(
+            [
+                "cargo",
+                "run",
+                "--locked",
+                "-q",
+                "-p",
+                "genos-camera",
+                "--",
+                "--frames",
+                "60",
+                "--lifecycle-full-destroy",
+            ]
+        )
         if "Validation Error" not in text and "genos-camera frames=" not in text:
             print(text[-4000:])
             print("genos-camera did not draw its frames", file=sys.stderr)
