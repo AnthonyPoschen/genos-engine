@@ -708,6 +708,7 @@ fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 fn js_ioctl(file: &File, request: usize, arg: *mut u8) -> i32 {
     use std::os::fd::AsRawFd;
     unsafe {
@@ -721,6 +722,7 @@ fn js_ioctl(file: &File, request: usize, arg: *mut u8) -> i32 {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn js_u8(file: &File, request: usize) -> Option<usize> {
     let mut count = 0u8;
     if js_ioctl(file, request, &raw mut count) < 0 {
@@ -731,6 +733,7 @@ fn js_u8(file: &File, request: usize) -> Option<usize> {
 
 /// `JSIOCGBUTTONS` then `JSIOCGBTNMAP`. The map is the evdev code at each
 /// joydev index. A failure keeps the family table.
+#[cfg(not(target_os = "windows"))]
 fn read_button_codes(file: &File) -> Option<([u16; MAX_GAMEPAD_BUTTONS], usize)> {
     let count = js_u8(file, 0x8001_6a12)?;
     let mut raw = [0u16; 512];
@@ -745,6 +748,7 @@ fn read_button_codes(file: &File) -> Option<([u16; MAX_GAMEPAD_BUTTONS], usize)>
 
 /// `JSIOCGAXES` then `JSIOCGAXMAP`. `ABS_X` is code 0, so the count is the
 /// length. A failure keeps the family axes.
+#[cfg(not(target_os = "windows"))]
 fn read_axis_codes(file: &File) -> Option<([u8; MAX_JS_AXES], usize)> {
     let count = js_u8(file, 0x8001_6a11)?;
     let mut raw = [0u8; 64];
@@ -757,6 +761,7 @@ fn read_axis_codes(file: &File) -> Option<([u8; MAX_JS_AXES], usize)> {
     Some((out, n))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn read_layout(file: &File, glyphs: GlyphSet) -> JsLayout {
     let mut layout = layout_for(glyphs);
     if let Some((codes, count)) = read_button_codes(file) {
