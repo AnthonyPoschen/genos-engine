@@ -1,8 +1,23 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Benchmark sweep: lamp count × dynamic share × scale from one fixed viewpoint on a
 //! fixed timeline, then tables with deltas and the cost of one static or dynamic lamp.
@@ -123,8 +138,7 @@ fn lamps_in_view(stage: &Stage, camera: &Camera, aspect: f32) -> usize {
     stage
         .world
         .scene
-        .lights
-        .iter()
+        .lights()
         .filter(|light| light.direction == genos_scene::Vec3::ZERO)
         .filter(|light| {
             let p = light.position;
@@ -158,7 +172,12 @@ fn run_one(
             return Err("window closed during the benchmark".into());
         }
         // Draw at the size the compositor gave, not the size the window opened at.
-        if extent_changed(renderer.width(), renderer.height(), pumped.width, pumped.height) {
+        if extent_changed(
+            renderer.width(),
+            renderer.height(),
+            pumped.width,
+            pumped.height,
+        ) {
             renderer.resize(pumped.width, pumped.height)?;
         }
         stage.advance(STEP);
@@ -299,7 +318,10 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
     let asked = if sizes == [plan.size] {
         String::new()
     } else {
-        format!(" (asked {}x{}; the compositor gave the size above)", plan.size.0, plan.size.1)
+        format!(
+            " (asked {}x{}; the compositor gave the size above)",
+            plan.size.0, plan.size.1
+        )
     };
     let _ = writeln!(
         out,
@@ -330,9 +352,13 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
             "\nLayout `spread` puts fewer lamps near the camera at a bigger scale, so a scale delta mixes size with lamp density; see the lamps in view, or use `--layout first`."
         );
     }
-    table(&mut out, "Point lamps whose range reaches the view", plan, runs, &|r| {
-        r.view_lamps as f64
-    });
+    table(
+        &mut out,
+        "Point lamps whose range reaches the view",
+        plan,
+        runs,
+        &|r| r.view_lamps as f64,
+    );
     table(
         &mut out,
         "Frame time, ms (wall clock per frame)",
@@ -345,9 +371,13 @@ fn report(plan: &Plan, runs: &[Run], profiled: bool) -> String {
         mean(&r.cpu_ms)
     });
     if profiled {
-        table(&mut out, "Frame GPU (raster and lighting), ms per frame", plan, runs, &|r| {
-            mean(&r.gpu_ms)
-        });
+        table(
+            &mut out,
+            "Frame GPU (raster and lighting), ms per frame",
+            plan,
+            runs,
+            &|r| mean(&r.gpu_ms),
+        );
     }
     per_lamp(&mut out, plan, runs, profiled);
     out
@@ -366,9 +396,7 @@ fn per_lamp(out: &mut String, plan: &Plan, runs: &[Run], profiled: bool) {
         out,
         "\n### Cost of one lamp, ms (slope from {lo} to {hi} lamps)\n\n| scale | metric | per static lamp | per dynamic lamp | dynamic premium |\n|---|---|---:|---:|---:|"
     );
-    let mut metrics: Vec<(&str, Metric)> = vec![
-        ("frame", Box::new(Run::frame_mean)),
-    ];
+    let mut metrics: Vec<(&str, Metric)> = vec![("frame", Box::new(Run::frame_mean))];
     if profiled {
         metrics.push(("frame GPU", Box::new(|r: &Run| mean(&r.gpu_ms))));
     }

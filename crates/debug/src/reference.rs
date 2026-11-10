@@ -1,20 +1,74 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::ignore_without_reason, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::ignored_unit_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::excessive_precision,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::ignore_without_reason,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::ignored_unit_patterns,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Ground truth: a brute-force path trace of the frozen scene from the picture's
 //! pose, and the comparison of a live picture against it.
@@ -42,8 +96,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use genos_load::ShadeSample;
 use genos_render::{
-    direct_light_in, lamps_in, linear_from_display, solid_contains, pack_f32, rec709_y, scene_luma, SceneMesh, SceneRead,
-    Surfaces, TraceHit,
+    direct_light_in, lamps_in, linear_from_display, pack_f32, rec709_y, scene_luma, solid_contains,
+    SceneMesh, SceneRead, Surfaces, TraceHit,
 };
 use genos_scene::{look_direction, Camera, Scene};
 
@@ -136,10 +190,7 @@ impl Reference {
         self.specular.as_ref().map(|spec| Image {
             width: self.image.width,
             height: self.image.height,
-            rgb: spec
-                .iter()
-                .flat_map(|c| c.map(tone8))
-                .collect(),
+            rgb: spec.iter().flat_map(|c| c.map(tone8)).collect(),
         })
     }
 }
@@ -273,7 +324,10 @@ fn path_from(
         weight = mul(weight, scale(next_shade.diffuse_albedo(), LAMBERT));
         sum = add(
             sum,
-            mul(weight, direct_light_in(scene, surfaces, lift(&next), next.normal)),
+            mul(
+                weight,
+                direct_light_in(scene, surfaces, lift(&next), next.normal),
+            ),
         );
         if bounce >= 2 {
             let keep = (next.albedo.iter().fold(0.0f32, |m, c| m.max(*c)) * LAMBERT * PI)
@@ -327,7 +381,15 @@ pub fn bounce_irradiance(
                 let emitted = ShadeSample::paint(hit.albedo).emissive;
                 add(
                     emitted,
-                    path_from(scene, scene, &hit, 0.0, max_bounces.saturating_sub(1), rest, &mut rng),
+                    path_from(
+                        scene,
+                        scene,
+                        &hit,
+                        0.0,
+                        max_bounces.saturating_sub(1),
+                        rest,
+                        &mut rng,
+                    ),
                 )
             }
         };
@@ -347,7 +409,7 @@ fn material_at(setup: &RefSetup, first: &TraceHit) -> Option<SolidMaterial> {
     setup
         .materials
         .iter()
-        .zip(&setup.scene.solids)
+        .zip(setup.scene.solids())
         .find_map(|(m, solid)| m.filter(|_| solid_contains(solid, inward)))
 }
 
@@ -385,7 +447,11 @@ fn specular_from(
     let mut sum = [0.0; 3];
     for (l, irradiance) in lamps_in(scene, surfaces, lift(first), n) {
         let h = normalize(add(v, l));
-        let (nl, nh, vh) = (dot(n, l).max(1.0e-4), dot(n, h).max(0.0), dot(v, h).max(0.0));
+        let (nl, nh, vh) = (
+            dot(n, l).max(1.0e-4),
+            dot(n, h).max(0.0),
+            dot(v, h).max(0.0),
+        );
         let den = nh * nh * (a2 - 1.0) + 1.0;
         let d = a2 / (PI * den * den);
         let g = smith_g1(nl, a2) * smith_g1(nv, a2);
@@ -422,7 +488,15 @@ fn specular_from(
         None => scene.sky.as_ref().map_or([0.0; 3], |s| s.color),
         Some(next) => {
             let u = (rng.next(), rng.next());
-            path_from(scene, surfaces, &next, 0.0, max_bounces.saturating_sub(1), u, rng)
+            path_from(
+                scene,
+                surfaces,
+                &next,
+                0.0,
+                max_bounces.saturating_sub(1),
+                u,
+                rng,
+            )
         }
     };
     add(sum, mul(weight, incoming))
@@ -616,10 +690,7 @@ pub fn render(setup: &RefSetup) -> Reference {
             }
         })
         .collect();
-    let rgb = linear
-        .iter()
-        .flat_map(|c| c.map(tone8))
-        .collect();
+    let rgb = linear.iter().flat_map(|c| c.map(tone8)).collect();
     Reference {
         image: Image {
             width: w as u32,
@@ -669,8 +740,7 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
         .collect();
     let lamps = setup
         .scene
-        .lights
-        .iter()
+        .lights()
         .map(|l| genos_gpuref::Lamp {
             position: [l.position.x, l.position.y, l.position.z],
             direction: [l.direction.x, l.direction.y, l.direction.z],
@@ -704,11 +774,7 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
         "gpuref: {} spp in {:.1} s on {}, noise {:.4} (halves {:.4})",
         out.spp, out.seconds, out.device, out.noise, out.noise_halves
     );
-    let rgb = out
-        .linear
-        .iter()
-        .flat_map(|c| c.map(tone8))
-        .collect();
+    let rgb = out.linear.iter().flat_map(|c| c.map(tone8)).collect();
     Ok(Reference {
         image: Image {
             width: setup.width.max(1),
@@ -822,10 +888,7 @@ fn load(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
         linear.push([f(0), f(4), f(8)]);
         hit.push(bytes[at + 12] != 0);
     }
-    let rgb = linear
-        .iter()
-        .flat_map(|c| c.map(tone8))
-        .collect();
+    let rgb = linear.iter().flat_map(|c| c.map(tone8)).collect();
     Some(Reference {
         image: Image {
             width: w,
@@ -913,7 +976,14 @@ pub fn compare_linear(
     grid: (u32, u32),
     block: u32,
 ) -> (Compare, Image) {
-    grade(&reference.image, reference, Some(scene), region, grid, block)
+    grade(
+        &reference.image,
+        reference,
+        Some(scene),
+        region,
+        grid,
+        block,
+    )
 }
 
 fn grade(
@@ -1095,60 +1165,66 @@ mod tests {
     }
 
     fn open(lights: Vec<Light>, walls: Vec<Wall>, sky: Option<Sky>) -> Scene {
-        Scene {
-            floor: Floor {
-                position: Vec3::ZERO,
-                half_x: 40.0,
-                half_z: 40.0,
-                color: [1.0; 3],
-            },
-            walls,
-            solids: Vec::new(),
-            lights,
-            ceiling: None,
-            sky,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::ZERO,
+                    half_x: 40.0,
+                    half_z: 40.0,
+                    color: [1.0; 3],
+                },
+                walls,
+                Vec::new(),
+                lights,
+            );
+            __scene.ceiling = None;
+            __scene.sky = sky;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         }
     }
 
     /// A shut white 6 x 3 x 6 m room around the origin with one lamp.
     fn closed_room() -> Scene {
         let w = [1.0; 3];
-        Scene {
-            floor: Floor {
-                position: Vec3::ZERO,
-                half_x: 3.5,
-                half_z: 3.5,
-                color: w,
-            },
-            walls: vec![
-                wall(0.0, -3.25, 3.5, 0.25, w),
-                wall(0.0, 3.25, 3.5, 0.25, w),
-                wall(-3.25, 0.0, 0.25, 3.5, w),
-                wall(3.25, 0.0, 0.25, 3.5, w),
-            ],
-            solids: Vec::new(),
-            lights: vec![lamp(0.7, 1.9, -0.4)],
-            ceiling: Some(Ceiling {
+        {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::ZERO,
+                    half_x: 3.5,
+                    half_z: 3.5,
+                    color: w,
+                },
+                vec![
+                    wall(0.0, -3.25, 3.5, 0.25, w),
+                    wall(0.0, 3.25, 3.5, 0.25, w),
+                    wall(-3.25, 0.0, 0.25, 3.5, w),
+                    wall(3.25, 0.0, 0.25, 3.5, w),
+                ],
+                Vec::new(),
+                vec![lamp(0.7, 1.9, -0.4)],
+            );
+            __scene.ceiling = Some(Ceiling {
                 height: 3.0,
                 color: w,
-            }),
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+            });
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         }
     }
 
@@ -1270,13 +1346,13 @@ mod tests {
         );
         std::fs::create_dir_all(&dir).unwrap();
         let mut cornell = closed_room();
-        cornell.walls[2].color = [0.9, 0.1, 0.1];
-        cornell.walls[3].color = [0.1, 0.8, 0.1];
-        cornell.lights = vec![Light {
+        cornell.wall_mut(2).color = [0.9, 0.1, 0.1];
+        cornell.wall_mut(3).color = [0.1, 0.8, 0.1];
+        cornell.set_lights(vec![Light {
             color: [0.08; 3],
             ..lamp(0.0, 2.2, 0.0)
-        }];
-        cornell.solids.push(genos_scene::Solid {
+        }]);
+        cornell.push_solid(genos_scene::Solid {
             yaw: 0.4,
             shape: genos_scene::Shape::Square,
             position: Vec3::new(0.8, 0.0, -0.8),
@@ -1294,11 +1370,11 @@ mod tests {
                 color: [0.25, 0.35, 0.5],
             }),
         );
-        sunny.lights = vec![Light {
+        sunny.set_lights(vec![Light {
             position: Vec3::ZERO,
             color: [1.0, 0.95, 0.85],
             direction: Vec3::new(0.4, -0.7, 0.5),
-        }];
+        }]);
         let scenes = [
             ("cornell", cornell, [0.0, 1.5, 2.9], 0.0, -0.1),
             (
@@ -1359,10 +1435,10 @@ mod tests {
             reflectance: -1.0,
             color_mix: -1.0,
         };
-        scene.solids = vec![
+        scene.set_solids(vec![
             solid(genos_scene::Shape::Square, -1.2, -1.0),
             solid(genos_scene::Shape::Circle, 1.2, 0.8),
-        ];
+        ]);
         let setup = |triangles| RefSetup {
             scene: scene.clone(),
             eye: [0.0, 1.6, 2.7],
@@ -1396,7 +1472,10 @@ mod tests {
         // Two independent traces of the same picture differ by about the noise.
         let noise = a.noise.max(b.noise);
         assert_eq!(hit_diff, 0);
-        assert!(rel < 2.0 * noise + 0.01, "mean relative difference {rel}, noise {noise}");
+        assert!(
+            rel < 2.0 * noise + 0.01,
+            "mean relative difference {rel}, noise {noise}"
+        );
         let mean = |r: &Reference| r.linear.iter().map(|c| luma(*c) as f64).sum::<f64>();
         let bias = (mean(&b) / mean(&a) - 1.0).abs() as f32;
         assert!(bias < 0.01, "picture mean differs by {bias}");
@@ -1407,7 +1486,7 @@ mod tests {
     #[test]
     fn specular_layer_is_lit_for_metal_and_dark_for_paint() {
         let mut scene = closed_room();
-        scene.solids = vec![genos_scene::Solid {
+        scene.set_solids(vec![genos_scene::Solid {
             shape: genos_scene::Shape::Square,
             position: Vec3::new(0.0, 0.0, 0.0),
             size: 1.5,
@@ -1417,7 +1496,7 @@ mod tests {
             absorption: 0.0,
             reflectance: -1.0,
             color_mix: -1.0,
-        }];
+        }]);
         let setup = |materials| RefSetup {
             scene: scene.clone(),
             eye: [0.0, 1.6, 2.7],
@@ -1434,9 +1513,7 @@ mod tests {
             materials,
             specular: true,
         };
-        let total = |r: &Reference| -> f32 {
-            r.specular.iter().flatten().map(|c| luma(*c)).sum()
-        };
+        let total = |r: &Reference| -> f32 { r.specular.iter().flatten().map(|c| luma(*c)).sum() };
         let metal = render(&setup(vec![Some(SolidMaterial {
             roughness: 0.05,
             metallic: 1.0,
@@ -1504,7 +1581,11 @@ mod tests {
             distance_m: vec![1.0],
         };
         let (matched, _) = compare_linear(&scene, &reference, Region::default(), (1, 1), 1);
-        assert!(matched.mean_rel < 1.0e-5, "linear grade {}", matched.mean_rel);
+        assert!(
+            matched.mean_rel < 1.0e-5,
+            "linear grade {}",
+            matched.mean_rel
+        );
         let shoulder = genos_render::legacy_display([4.0, 4.0, 4.0]);
         let toned = SceneRead {
             width: 1,

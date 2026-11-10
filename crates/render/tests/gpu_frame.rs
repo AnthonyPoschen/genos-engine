@@ -1,18 +1,102 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::uninlined_format_args, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_wrap,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::excessive_precision,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::needless_range_loop,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_arguments,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::uninlined_format_args,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::unreadable_literal,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The real Vulkan draw. Pixel checks use the presented readback, not the CPU bake.
 
@@ -20,37 +104,47 @@ use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn scene(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [1.0, 1.0, 1.0],
-        },
-        walls,
-        solids,
-        lights,
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            walls,
+            solids,
+            lights,
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 
@@ -136,7 +230,7 @@ fn shipped_hall() -> World {
 /// Hall walls and the white lamp. The flame and the colored solids stay out.
 fn hall_lamp() -> World {
     let mut scene = shipped_scene();
-    scene.solids.clear();
+    scene.clear_solids();
     World::from_scene(scene)
 }
 
@@ -463,7 +557,7 @@ fn moving_a_middle_solid_moves_it_on_the_gpu() {
         lead(on_red) > 15.0,
         "the middle solid is not red: {on_red:?}"
     );
-    world.scene.solids[1].position.x = 1.6;
+    world.scene.solid_mut(1).position.x = 1.6;
     let second = draw(window, renderer, &world, &camera);
     let old_spot = sample(&second, width, height, &camera, [0.0, 1.15, 0.0]);
     let new_spot = sample(&second, width, height, &camera, [1.6, 1.15, 0.0]);
@@ -1120,12 +1214,12 @@ fn the_corridor_carries_bounce_around_the_bend() {
         )))
         .expect("shipped scene"),
     );
-    world.scene.lights = vec![Light {
+    world.scene.set_lights(vec![Light {
         position: Vec3::new(0.0, 1.1, 6.2),
         color: [1.0, 1.0, 1.0],
 
         direction: Vec3::ZERO,
-    }];
+    }]);
     let mouth_cam = Camera::new(0.0, 5.5, std::f32::consts::PI);
     let far_cam = Camera::new(0.2, 9.0, std::f32::consts::FRAC_PI_2);
     let out_cam = Camera::new(-6.2, 7.0, std::f32::consts::FRAC_PI_2);
@@ -1141,7 +1235,7 @@ fn the_corridor_carries_bounce_around_the_bend() {
     ));
     let far = brightness(sample(&far_px, width, height, &far_cam, [4.2, 0.0, 9.0]));
     let outside = brightness(sample(&out_px, width, height, &out_cam, [-2.4, 0.0, 7.0]));
-    world.scene.lights.clear();
+    world.scene.clear_lights();
     let dark_px = draw(window, renderer, &world, &far_cam);
     let dark = brightness(sample(&dark_px, width, height, &far_cam, [4.2, 0.0, 9.0]));
     println!("corridor mouth {mouth} far {far} outside {outside} dark {dark}");
@@ -1173,12 +1267,12 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
         )))
         .expect("shipped scene"),
     );
-    world.scene.lights = vec![Light {
+    world.scene.set_lights(vec![Light {
         position: Vec3::new(8.0, 1.0, 5.0),
         color: [8.0, 8.0, 8.0],
 
         direction: Vec3::ZERO,
-    }];
+    }]);
     let shadow_cam = Camera::new(1.0, 6.0, -std::f32::consts::FRAC_PI_2);
     let gap_cam = Camera::new(1.0, 9.0, -std::f32::consts::FRAC_PI_2);
     let shadow_px = draw(window, renderer, &world, &shadow_cam);
@@ -1190,7 +1284,7 @@ fn the_outside_lamp_and_the_fire_stop_at_the_corridor_wall() {
         "the gap face is not brighter than the shadowed face: gap {gap_face:?} shadow {shadow_face:?}"
     );
 
-    world.scene.lights.clear();
+    world.scene.clear_lights();
     let mut sim = genos_render::Simulation::from_scene(&world.scene);
     for _ in 0..genos_render::PROOF_STEPS {
         sim.advance(&mut world, genos_render::STEP_DT);
@@ -1625,7 +1719,7 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
     let lit_px = draw(window, renderer, &world, &top_cam);
     let top = brightness(sample(&lit_px, width, height, &top_cam, [0.0, 1.2, 0.0]));
     let away = brightness(sample(&lit_px, width, height, &top_cam, [0.0, 0.55, 0.78]));
-    world.scene.lights.clear();
+    world.scene.clear_lights();
     let dark_px = draw(window, renderer, &world, &top_cam);
     let dark_top = brightness(sample(&dark_px, width, height, &top_cam, [0.0, 1.2, 0.0]));
     eprintln!("shape top {top:.1} away {away:.1} dark {dark_top:.1}");
@@ -1639,12 +1733,12 @@ fn the_shape_top_and_the_near_corridor_read_local_probes() {
     );
 
     let mut corridor = World::from_scene(genos_scene::load_path(path).expect("shipped scene"));
-    corridor.scene.lights = vec![Light {
+    corridor.scene.set_lights(vec![Light {
         position: Vec3::new(0.0, 3.0, 6.5),
         color: [1.0, 1.0, 1.0],
 
         direction: Vec3::ZERO,
-    }];
+    }]);
     let mut leg_cam = Camera::new(0.0, 5.1, std::f32::consts::PI);
     leg_cam.position.y = 10.0;
     leg_cam.pitch = -1.43;

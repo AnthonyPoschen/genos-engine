@@ -1,19 +1,67 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::format_push_string,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -86,8 +134,7 @@ struct PendingProfile {
 /// The red square in `scene.rhai`.
 fn red_box_index(scene: &Scene) -> Option<usize> {
     scene
-        .solids
-        .iter()
+        .solids()
         .position(|solid| solid.color[0] > 0.9 && solid.color[1] < 0.05 && solid.color[2] < 0.05)
 }
 
@@ -305,7 +352,8 @@ fn run() -> Result<i32, String> {
     if first.closing {
         return Ok(0);
     }
-    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = block_ms {
@@ -354,12 +402,12 @@ fn run() -> Result<i32, String> {
     }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
-            scene.lights = vec![genos_scene::Light {
+            scene.set_lights(vec![genos_scene::Light {
                 position: genos_scene::Vec3::new(x, y, z),
                 color: [1.0, 1.0, 1.0],
 
                 direction: genos_scene::Vec3::ZERO,
-            }];
+            }]);
         });
     }
     let server = genos_mcp::Server::start_on(host.clone(), genos_mcp::listen_port())?;
@@ -445,13 +493,7 @@ fn run() -> Result<i32, String> {
             let stream = profile_stream
                 .as_mut()
                 .ok_or("detailed profile is missing its file")?;
-            publish_profile(
-                renderer,
-                &mut profile_pending,
-                &mut profile,
-                stream,
-                false,
-            )?;
+            publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
         }
         if graph_on && input.keyboard.pressed(InputCode::key_p) && !profile.is_paused() {
             // Wait for GPU times that were submitted before this key, then freeze.
@@ -500,8 +542,7 @@ fn run() -> Result<i32, String> {
         wireframe = toggle_wireframe(wireframe, &input, view.captured);
         let lamp = world
             .scene
-            .lights
-            .first()
+            .light_at(0)
             .map(|light| [light.position.x, light.position.y, light.position.z]);
         let mut scene_cpu = scene_at.elapsed();
         // ui
@@ -695,13 +736,7 @@ fn run() -> Result<i32, String> {
             // A paused present stays on screen and does not enter the held graph.
             let record = !paused;
             if let Some(gpu) = draw_gpu {
-                publish_profile(
-                    renderer,
-                    &mut profile_pending,
-                    &mut profile,
-                    stream,
-                    false,
-                )?;
+                publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
                 if !profile_pending.is_empty() {
                     return Err("profile gpu time arrived out of order".into());
                 }
@@ -712,13 +747,7 @@ fn run() -> Result<i32, String> {
                 }
             } else {
                 profile_pending.push_back(PendingProfile { open, record });
-                publish_profile(
-                    renderer,
-                    &mut profile_pending,
-                    &mut profile,
-                    stream,
-                    false,
-                )?;
+                publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
             }
         } else if graph_on && !paused {
             profile.remember(open.finish(Duration::ZERO));
@@ -773,13 +802,7 @@ fn run() -> Result<i32, String> {
         let stream = profile_stream
             .as_mut()
             .ok_or("detailed profile is missing its file")?;
-        publish_profile(
-            renderer,
-            &mut profile_pending,
-            &mut profile,
-            stream,
-            true,
-        )?;
+        publish_profile(renderer, &mut profile_pending, &mut profile, stream, true)?;
         if !profile_pending.is_empty() {
             return Err("profile frames are missing gpu time".into());
         }
@@ -840,28 +863,31 @@ impl SceneLoad {
 }
 
 fn loading_world() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 2.0,
-            half_z: 2.0,
-            color: [0.15, 0.15, 0.16],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: Some(Sky {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 2.0,
+                half_z: 2.0,
+                color: [0.15, 0.15, 0.16],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(Sky {
             color: [0.02, 0.02, 0.025],
-        }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
-        debug: DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        menu: MenuSettings::default(),
+        });
+        __scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+        __scene.debug = DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     })
 }
 
@@ -1167,7 +1193,7 @@ impl Bench {
         let seconds: f32 = value
             .parse()
             .map_err(|_| format!("GENOS_BENCH={value} is not seconds"))?;
-        if scene.lights.is_empty() {
+        if scene.light_len() == 0 {
             return Err("GENOS_BENCH needs a lamp in the scene".into());
         }
         let now = Instant::now();
@@ -1178,14 +1204,14 @@ impl Bench {
             Err(_) => BENCH_FLICKER_FRAMES,
         };
         let drag = red_box_index(scene)
-            .or((!scene.solids.is_empty()).then_some(0))
-            .map(|i| (i, scene.solids[i].position));
+            .or((scene.solid_len() != 0).then_some(0))
+            .map(|i| (i, scene.solid(i).position));
         Ok(Some(Self {
             camera,
             phase: BenchPhase::Warmup,
             phase_start: now,
             span: Duration::from_secs_f32((seconds / 3.0).max(1.0)),
-            home: scene.lights[0].position,
+            home: scene.light(0).position,
             last: None,
             frames: Vec::new(),
             lines: Vec::new(),
@@ -1201,7 +1227,7 @@ impl Bench {
                 frames: flicker_frames,
                 ..Flicker::default()
             },
-            solids: scene.solids.iter().map(|s| s.position).collect(),
+            solids: scene.solids().map(|s| s.position).collect(),
             converge: Converge::default(),
         }))
     }
@@ -1278,8 +1304,7 @@ impl Bench {
                 self.shot = Some(format!("{:?}_{ms:05}ms.png", self.phase).to_lowercase());
             }
         }
-        let lamp = &mut scene.lights[0].position;
-        *lamp = match self.phase {
+        scene.light_mut(0).position = match self.phase {
             BenchPhase::Warmup | BenchPhase::Still | BenchPhase::Up => self.home,
             // About one turn every six seconds, around the boxes.
             BenchPhase::Moving => Vec3::new(1.0 + 2.5 * t.cos(), 2.5, -1.0 + 2.5 * t.sin()),
@@ -1301,12 +1326,13 @@ impl Bench {
                 BenchPhase::DragFlicker => out - self.drag_flicker.drawn as f32 * BENCH_DRAG_STEP,
                 _ => 0.0,
             };
-            scene.solids[index].position = start + Vec3::new(x, 0.0, 0.0);
+            scene.solid_mut(index).position = start + Vec3::new(x, 0.0, 0.0);
         }
         if self.phase == BenchPhase::Switch {
             let shift = Vec3::new(BENCH_SWITCH_SHIFT, 0.0, BENCH_SWITCH_SHIFT);
-            for (solid, start) in scene.solids.iter_mut().zip(&self.solids) {
-                solid.position = *start + shift;
+            let count = scene.solid_len().min(self.solids.len());
+            for index in 0..count {
+                scene.solid_mut(index).position = self.solids[index] + shift;
             }
         }
         false

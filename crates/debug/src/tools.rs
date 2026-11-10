@@ -1,18 +1,63 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::explicit_iter_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_pattern_char_comparison, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::explicit_iter_loop,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_pattern_char_comparison,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! The frame side of the debug tools: runs queued commands against the renderer,
 //! the scene and the camera, holds edits the example's own update would undo, and
@@ -317,8 +362,13 @@ impl RefJob {
                 took = true;
             }
         }
-        let wait = self.timing == RefTiming::Measure && (self.live.is_some() || self.shot.is_none());
-        if self.worker.as_ref().is_some_and(|w| wait || w.is_finished()) {
+        let wait =
+            self.timing == RefTiming::Measure && (self.live.is_some() || self.shot.is_none());
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|w| wait || w.is_finished())
+        {
             self.reference = self.worker.take().and_then(|w| w.join().ok());
             if self.reference.is_none() {
                 self.shot = None;
@@ -511,7 +561,7 @@ impl Tools {
         self.poll_scene_loads(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
-        let materials = self.materials(ctx.host.scene().solids.len());
+        let materials = self.materials(ctx.host.scene().solid_len());
         for running in &mut self.jobs {
             if let Job::Reference(job) = &mut running.job {
                 if job.worker.is_none() && job.reference.is_none() {
@@ -548,10 +598,7 @@ impl Tools {
         self.reading = self.jobs.iter().find_map(|r| match &r.job {
             Job::Shots { shots, got, .. } => shots.get(got.len()).copied(),
             Job::Flicker { shot, .. } => Some(*shot),
-            Job::Reference(job) if job.live_due() =>
-            {
-                job.shot
-            }
+            Job::Reference(job) if job.live_due() => job.shot,
             _ => None,
         });
         let look = self.reading.map_or(self.look, |s| s.look);
@@ -726,27 +773,28 @@ impl Tools {
     }
 
     fn apply_edits(&mut self, scene: &mut Scene) {
-        self.base_lights = scene.lights.len();
+        self.base_lights = scene.light_len();
         for (index, edit) in &self.lights {
-            if let Some(light) = scene.lights.get_mut(*index) {
+            if let Some(light) = scene.light_at_mut(*index) {
                 edit.apply(light, self.frame);
             }
         }
         for (light, edit) in &self.added {
             let mut light = light.clone();
             edit.apply(&mut light, self.frame);
-            scene.lights.push(light);
+            scene.push_light(light);
         }
         if let Some(keep) = self.solo {
-            for (i, light) in scene.lights.iter_mut().enumerate() {
-                if i != keep {
-                    light.color = [0.0; 3];
+            let count = scene.light_len();
+            for index in 0..count {
+                if index != keep {
+                    scene.light_mut(index).color = [0.0; 3];
                 }
             }
         }
         let dt = self.dt;
         for (index, edit) in self.objects.iter_mut() {
-            let Some(solid) = scene.solids.get_mut(*index) else {
+            let Some(solid) = scene.solid_at_mut(*index) else {
                 continue;
             };
             if let Some((p, yaw)) = edit.frozen {
@@ -969,8 +1017,7 @@ impl Tools {
             "objects" => reply(list(
                 ctx.host
                     .scene()
-                    .solids
-                    .iter()
+                    .solids()
                     .enumerate()
                     .map(|(i, s)| {
                         obj(vec![
@@ -1006,8 +1053,7 @@ impl Tools {
                 let solid = ctx
                     .host
                     .scene()
-                    .solids
-                    .get(index)
+                    .solid_at(index)
                     .ok_or_else(|| format!("no object {index}"))?
                     .clone();
                 if args.bool("reset")? == Some(true) {
@@ -1298,7 +1344,9 @@ impl Tools {
                 let aov = match args.str("aov")?.as_deref() {
                     None | Some("full") => Aov::Full,
                     Some("specular") => Aov::Specular,
-                    Some(other) => return Err(format!("aov must be full or specular, not {other}")),
+                    Some(other) => {
+                        return Err(format!("aov must be full or specular, not {other}"))
+                    }
                 };
                 let grid = args
                     .floats("grid", 2)?
@@ -1400,12 +1448,10 @@ impl Tools {
                 ctx.renderer.clear_lighting_override();
                 reply(lighting_report(&written, ctx.renderer))
             }
-            "get_material_settings" => {
-                reply(obj(vec![(
-                    "text",
-                    text(ctx.renderer.material_settings().to_text()),
-                )]))
-            }
+            "get_material_settings" => reply(obj(vec![(
+                "text",
+                text(ctx.renderer.material_settings().to_text()),
+            )])),
             "get_material_stats" => reply(material_stats_value(ctx.renderer.material_stats())),
             "set_material_settings" => {
                 let mut settings = ctx.renderer.material_settings();
@@ -2182,7 +2228,6 @@ fn apply_hdr_update(settings: &mut HdrSettings, args: &Value) -> Result<(), Stri
     Ok(())
 }
 
-
 fn fog_settings_value(settings: &FogSettings) -> Value {
     obj(vec![
         ("text", text(settings.to_text())),
@@ -2497,7 +2542,11 @@ mod tests {
 
     fn stub_reference() -> Reference {
         Reference {
-            image: Image { width: 1, height: 1, rgb: vec![0, 0, 0] },
+            image: Image {
+                width: 1,
+                height: 1,
+                rgb: vec![0, 0, 0],
+            },
             linear: vec![[0.0; 3]],
             hit: vec![true],
             spp: 1,
@@ -2525,7 +2574,10 @@ mod tests {
             })),
             reference: None,
             frames_left: 0,
-            shot: Some(Shot { look: Look::parse("full").unwrap(), ui: false }),
+            shot: Some(Shot {
+                look: Look::parse("full").unwrap(),
+                ui: false,
+            }),
             live: None,
             name: "reference".into(),
             prefix: None,
@@ -2547,7 +2599,11 @@ mod tests {
     fn drive(job: &mut RefJob) -> (u8, u32) {
         let mut draws = 0u32;
         while job.live.is_none() || job.reference.is_none() {
-            let img = Image { width: 1, height: 1, rgb: vec![u8::try_from(draws).unwrap_or(u8::MAX); 3] };
+            let img = Image {
+                width: 1,
+                height: 1,
+                rgb: vec![u8::try_from(draws).unwrap_or(u8::MAX); 3],
+            };
             job.on_draw(Some(&img));
             draws += 1;
             if job.reference.is_none() {
@@ -2605,7 +2661,10 @@ mod tests {
     fn an_interactive_reference_still_shows_the_frame_after_the_trace() {
         let mut job = stub_job(false, 160);
         let (live, draws) = drive(&mut job);
-        assert!(draws > 1 && u32::from(live) == draws - 1, "live {live} after {draws} draws");
+        assert!(
+            draws > 1 && u32::from(live) == draws - 1,
+            "live {live} after {draws} draws"
+        );
     }
 
     #[test]

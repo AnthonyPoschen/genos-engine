@@ -57,8 +57,9 @@ fn moving_lamps_cost_the_plain_rate() {
     for f in 0..MOVING_FRAMES {
         // A small sway every frame: each frame is a lamp change.
         let dx = 0.02 * if f % 40 < 20 { 1.0 } else { -1.0 };
-        for light in &mut stage.world.scene.lights {
-            light.position.x += dx;
+        let count = stage.world.scene.light_len();
+        for index in 0..count {
+            stage.world.scene.light_mut(index).position.x += dx;
         }
         let _ = window.pump();
         renderer

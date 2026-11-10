@@ -298,38 +298,41 @@ fn identity() -> [f32; 16] {
 }
 
 fn proof_world(lit: bool) -> World {
-    let mut world = World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(1000.0, 0.0, 0.0),
-            half_x: 0.01,
-            half_z: 0.01,
-            color: [0.0, 0.0, 0.0],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: if lit {
-            vec![genos_scene::Light {
-                position: Vec3::new(0.0, 2.0, 3.0),
-                color: [1.0, 1.0, 1.0],
-                direction: Vec3::ZERO,
-            }]
-        } else {
-            Vec::new()
-        },
-        ceiling: None,
-        sky: None,
-        lighting: if lit {
+    let mut world = World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(1000.0, 0.0, 0.0),
+                half_x: 0.01,
+                half_z: 0.01,
+                color: [0.0, 0.0, 0.0],
+            },
+            Vec::new(),
+            Vec::new(),
+            if lit {
+                vec![genos_scene::Light {
+                    position: Vec3::new(0.0, 2.0, 3.0),
+                    color: [1.0, 1.0, 1.0],
+                    direction: Vec3::ZERO,
+                }]
+            } else {
+                Vec::new()
+            },
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = if lit {
             genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato)
         } else {
             genos_scene::LightingSettings::default()
-        },
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+        };
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     });
     for object in &mut world.objects {
         if let genos_render::DrawKind::Fixed(genos_render::FixedPart::Floor) = object.kind {

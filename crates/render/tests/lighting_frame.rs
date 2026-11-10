@@ -1,15 +1,84 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::doc_markdown,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::manual_midpoint,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::many_single_char_names,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! GI frame path (lighting_gpu.rs): its pipelines build quickly, and its direct light
 //! matches the current frame's direct light.
@@ -20,14 +89,21 @@ use genos_render::{DebugView, LampPickCounts, LightingAtrousStats, Renderer, Vie
 use genos_scene::{AmbientMode, Camera, LampPickMode, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn shipped_hall() -> World {
@@ -61,7 +137,9 @@ fn lighting_pipelines_build_quickly() {
         .filter(|(name, _)| name.starts_with("lighting"))
         .collect();
     assert!(
-        lighting.iter().all(|(name, _)| *name != "lighting sun compose"),
+        lighting
+            .iter()
+            .all(|(name, _)| *name != "lighting sun compose"),
         "the sun compose is built on the first small step, not at startup: {times:?}"
     );
     // Nine compute names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
@@ -155,26 +233,29 @@ fn lighting_draws_emitted_light_and_bounces_it() {
         ..genos_bake::BakeSettings::default()
     };
     let dark_room = |glow: f32| {
-        let mut world = World::from_scene(Scene {
-            floor: genos_scene::Floor {
-                position: genos_scene::Vec3::ZERO,
-                half_x: 20.0,
-                half_z: 20.0,
-                color: [0.8; 3],
-            },
-            walls: Vec::new(),
-            solids: Vec::new(),
-            lights: Vec::new(),
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        let mut world = World::from_scene({
+            let mut __scene = Scene::from_lists(
+                genos_scene::Floor {
+                    position: genos_scene::Vec3::ZERO,
+                    half_x: 20.0,
+                    half_z: 20.0,
+                    color: [0.8; 3],
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         });
         let mut lit = gltf.clone();
         for m in &mut lit.materials {
@@ -280,20 +361,20 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let base: Scene = shipped_hall().scene;
-    assert!(!base.lights.is_empty());
+    assert!(base.light_len() != 0);
     let camera = Camera::opening();
     let mut moved_lamp = base.clone();
-    moved_lamp.lights[0].position.x += 1.5;
+    moved_lamp.light_mut(0).position.x += 1.5;
     let mut dimmed = base.clone();
-    dimmed.lights[0].color = [
-        dimmed.lights[0].color[0] * 0.25,
-        dimmed.lights[0].color[1] * 0.25,
-        dimmed.lights[0].color[2] * 2.0,
+    dimmed.light_mut(0).color = [
+        dimmed.light(0).color[0] * 0.25,
+        dimmed.light(0).color[1] * 0.25,
+        dimmed.light(0).color[2] * 2.0,
     ];
     let mut off = base.clone();
-    off.lights.remove(0);
+    off.remove_light(0);
     let mut sun = base.clone();
-    sun.lights.push(genos_scene::Light {
+    sun.push_light(genos_scene::Light {
         position: genos_scene::Vec3::new(0.0, 0.0, 0.0),
         color: [2.0, 1.8, 1.5],
         direction: genos_scene::Vec3::new(0.3, -1.0, 0.2),
@@ -311,12 +392,7 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
     ];
     for (what, scene, keeps) in changes {
         let before = fill_strata(window, renderer, &still_world, &camera);
-        let after = draw(
-            window,
-            renderer,
-            &World::from_scene(scene),
-            &camera,
-        );
+        let after = draw(window, renderer, &World::from_scene(scene), &camera);
         let held = samples_per_probe(renderer);
         if keeps {
             assert!(
@@ -350,23 +426,13 @@ fn lighting_moving_object_retraces_the_rays_it_crosses() {
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let base: Scene = shipped_hall().scene;
-    assert!(!base.solids.is_empty());
+    assert!(base.solid_len() != 0);
     let camera = Camera::opening();
     let mut moved = base.clone();
-    moved.solids[0].position.x += 0.5;
-    let before = fill_strata(
-        window,
-        renderer,
-        &World::from_scene(base),
-        &camera,
-    );
+    moved.solid_mut(0).position.x += 0.5;
+    let before = fill_strata(window, renderer, &World::from_scene(base), &camera);
     let full = samples_per_probe(renderer);
-    let after = draw(
-        window,
-        renderer,
-        &World::from_scene(moved),
-        &camera,
-    );
+    let after = draw(window, renderer, &World::from_scene(moved), &camera);
     let held = samples_per_probe(renderer);
     assert!(
         held > full - 14.0,
@@ -419,12 +485,7 @@ fn lighting_floor_change_drops_all_kept_rays() {
     let camera = Camera::opening();
     let mut floor = base.clone();
     floor.floor.color = [0.2, 0.6, 0.3];
-    fill_strata(
-        window,
-        renderer,
-        &World::from_scene(base),
-        &camera,
-    );
+    fill_strata(window, renderer, &World::from_scene(base), &camera);
     let changed = World::from_scene(floor);
     let _ = draw(window, renderer, &changed, &camera);
     let held = samples_per_probe(renderer);
@@ -888,11 +949,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     );
 }
 
-fn high_bounce(
-    screen: bool,
-    frames: usize,
-    shift: f32,
-) -> (Vec<Vec<u8>>, LightingAtrousStats) {
+fn high_bounce(screen: bool, frames: usize, shift: f32) -> (Vec<Vec<u8>>, LightingAtrousStats) {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -902,11 +959,11 @@ fn high_bounce(
     view_at(renderer, ViewMode::Bounce);
     let mut world = shipped_hall();
     let camera = Camera::opening();
-    let x0 = world.scene.solids[0].position.x;
+    let x0 = world.scene.solid(0).position.x;
     let mut out = Vec::with_capacity(frames);
     for i in 0..frames {
         if shift != 0.0 {
-            world.scene.solids[0].position.x = x0 + shift * (i as f32 + 1.0);
+            world.scene.solid_mut(0).position.x = x0 + shift * (i as f32 + 1.0);
         }
         out.push(draw(window, renderer, &world, &camera));
     }
@@ -1006,12 +1063,14 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     assert!(
         hash_far.p95 <= hash_lit.p95 * 0.45,
         "hash shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
-        hash_far.p95, hash_lit.p95
+        hash_far.p95,
+        hash_lit.p95
     );
     assert!(
         screen_far.p95 <= screen_lit.p95 * 0.45,
         "screen shows the far lamp on the camera side: p95 {:.1} lamp side {:.1}",
-        screen_far.p95, screen_lit.p95
+        screen_far.p95,
+        screen_lit.p95
     );
     assert!(
         hash_far.peaks < 8.0,
@@ -1032,7 +1091,8 @@ fn sponza_banner_cells_stay_still_under_the_screen_wavelet() {
     assert!(
         screen_far.flicker <= hash_far.flicker * 0.85 + 0.35,
         "screen flicker {:.3} did not beat hash {:.3}",
-        screen_far.flicker, hash_far.flicker
+        screen_far.flicker,
+        hash_far.flicker
     );
     if sponza_gltf_is_real() {
         let (hash_edge, hash_flicker) = sponza_curtain_scores(false);
@@ -1079,7 +1139,8 @@ fn shadowed_floor_bounce_stays_smooth_on_high() {
     assert!(
         screen.peaks_max <= hash.peaks_max + 8.0,
         "screen cell excess {:.1} is above the hash {:.1}",
-        screen.peaks_max, hash.peaks_max
+        screen.peaks_max,
+        hash.peaks_max
     );
     assert!(
         err_mean <= 1.5,
@@ -1092,7 +1153,8 @@ fn shadowed_floor_bounce_stays_smooth_on_high() {
     assert!(
         screen.flicker <= hash.flicker + 0.2,
         "screen flicker {:.3} is above hash {:.3}",
-        screen.flicker, hash.flicker
+        screen.flicker,
+        hash.flicker
     );
     assert!(
         screen.flicker <= 1.5,
@@ -1168,12 +1230,7 @@ fn floor_shadow_shot(screen: bool) -> FloorShadow {
     }
     let mut frames = Vec::new();
     for cam in &shots {
-        frames.push(draw(
-            window,
-            renderer,
-            &world,
-            &floor_camera(cam),
-        ));
+        frames.push(draw(window, renderer, &world, &floor_camera(cam)));
     }
     let still_lumas = floor_lumas(&frames[0], &shots[0]);
     let covered = still_lumas.len();
@@ -1227,55 +1284,58 @@ fn shadow_floor_world() -> World {
         cache_dir: dir.join("bake"),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
-        floor: genos_scene::Floor {
-            position: genos_scene::Vec3::ZERO,
-            half_x: 6.0,
-            half_z: 6.0,
-            color: [0.55, 0.42, 0.30],
-        },
-        walls: vec![
-            genos_scene::Wall {
-                position: genos_scene::Vec3::new(0.0, 0.0, -0.15),
-                half_x: 3.0,
-                half_z: 0.12,
-                height: 2.8,
-                base: 0.0,
-                color: [0.4, 0.38, 0.34],
-                absorption: 0.0,
-                reflectance: 0.4,
-                color_mix: -1.0,
+    let mut world = World::from_scene({
+        let mut __scene = Scene::from_lists(
+            genos_scene::Floor {
+                position: genos_scene::Vec3::ZERO,
+                half_x: 6.0,
+                half_z: 6.0,
+                color: [0.55, 0.42, 0.30],
             },
-            genos_scene::Wall {
-                position: genos_scene::Vec3::new(0.0, 0.0, -3.5),
-                half_x: 3.2,
-                half_z: 0.12,
-                height: 3.0,
-                base: 0.0,
-                color: [0.86, 0.78, 0.64],
-                absorption: 0.0,
-                reflectance: 0.85,
-                color_mix: -1.0,
-            },
-        ],
-        solids: Vec::new(),
-        lights: vec![genos_scene::Light {
-            position: genos_scene::Vec3::ZERO,
-            color: [4.0, 3.4, 2.6],
-            direction: genos_scene::Vec3::new(0.08, -0.85, -0.55),
-        }],
-        ceiling: None,
-        sky: Some(genos_scene::Sky {
+            vec![
+                genos_scene::Wall {
+                    position: genos_scene::Vec3::new(0.0, 0.0, -0.15),
+                    half_x: 3.0,
+                    half_z: 0.12,
+                    height: 2.8,
+                    base: 0.0,
+                    color: [0.4, 0.38, 0.34],
+                    absorption: 0.0,
+                    reflectance: 0.4,
+                    color_mix: -1.0,
+                },
+                genos_scene::Wall {
+                    position: genos_scene::Vec3::new(0.0, 0.0, -3.5),
+                    half_x: 3.2,
+                    half_z: 0.12,
+                    height: 3.0,
+                    base: 0.0,
+                    color: [0.86, 0.78, 0.64],
+                    absorption: 0.0,
+                    reflectance: 0.85,
+                    color_mix: -1.0,
+                },
+            ],
+            Vec::new(),
+            vec![genos_scene::Light {
+                position: genos_scene::Vec3::ZERO,
+                color: [4.0, 3.4, 2.6],
+                direction: genos_scene::Vec3::new(0.08, -0.85, -0.55),
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(genos_scene::Sky {
             color: [0.02, 0.02, 0.025],
-        }),
-        lighting: LightingSettings::preset(LightingPreset::High),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+        });
+        __scene.lighting = LightingSettings::preset(LightingPreset::High);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
     // A few centimetres off the floor, just beside the scored patch, so the
@@ -1368,7 +1428,11 @@ fn floor_flicker(frames: &[Vec<u8>], cams: &[FloorCam]) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn floor_project(cam: &FloorCam, world: [f32; 3]) -> Option<(usize, usize)> {
@@ -1381,11 +1445,7 @@ fn floor_project(cam: &FloorCam, world: [f32; 3]) -> Option<(usize, usize)> {
         right[2] * forward[0] - right[0] * forward[2],
         right[0] * forward[1] - right[1] * forward[0],
     ];
-    let rel = [
-        world[0] - cam.x,
-        world[1] - cam.y,
-        world[2] - cam.z,
-    ];
+    let rel = [world[0] - cam.x, world[1] - cam.y, world[2] - cam.z];
     let zv = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
     if zv < 1.0e-3 {
         return None;
@@ -1438,12 +1498,7 @@ fn banner_cut(screen: bool) -> (BannerView, BannerView) {
         let camera = banner_camera(lamp_side);
         let _ = draw(window, renderer, &world, &camera);
     }
-    let lamp_frame = draw(
-        window,
-        renderer,
-        &world,
-        &banner_camera(lamp_side),
-    );
+    let lamp_frame = draw(window, renderer, &world, &banner_camera(lamp_side));
     let lit = BannerView {
         p95: cloth_p95(&lamp_frame, lamp_side),
         peaks: cloth_square_peaks(&lamp_frame, lamp_side),
@@ -1460,12 +1515,7 @@ fn banner_cut(screen: bool) -> (BannerView, BannerView) {
     ];
     let mut frames = Vec::new();
     for cam in far_shots {
-        frames.push(draw(
-            window,
-            renderer,
-            &world,
-            &banner_camera(cam),
-        ));
+        frames.push(draw(window, renderer, &world, &banner_camera(cam)));
     }
     let edge = frames
         .iter()
@@ -1502,26 +1552,29 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         cache_dir: dir.join(format!("bake-{lamp_x}-{lamp_z}")),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
-        floor: genos_scene::Floor {
-            position: genos_scene::Vec3::ZERO,
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [0.02, 0.02, 0.02],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::High),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    let mut world = World::from_scene({
+        let mut __scene = Scene::from_lists(
+            genos_scene::Floor {
+                position: genos_scene::Vec3::ZERO,
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [0.02, 0.02, 0.02],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::High);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     });
     world
         .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
@@ -1587,7 +1640,8 @@ fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::new();
     let mut i = 0;
     while i + 3 <= bytes.len() {
-        let n = (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
+        let n =
+            (u32::from(bytes[i]) << 16) | (u32::from(bytes[i + 1]) << 8) | u32::from(bytes[i + 2]);
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
         out.push(T[((n >> 6) & 63) as usize] as char);
@@ -1656,8 +1710,16 @@ fn cell_edge_excess(frame: &[u8], width: usize, stride: usize) -> f64 {
                     interior_n += 1.0;
                 }
             }
-            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
-            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            let b = if boundary_n > 0.0 {
+                boundary / boundary_n
+            } else {
+                0.0
+            };
+            let i = if interior_n > 0.0 {
+                interior / interior_n
+            } else {
+                0.0
+            };
             best = best.max(b - i);
         }
     }
@@ -1689,8 +1751,16 @@ fn cell_edge_ratio(frame: &[u8], width: usize, stride: usize) -> f64 {
                     interior_n += 1.0;
                 }
             }
-            let b = if boundary_n > 0.0 { boundary / boundary_n } else { 0.0 };
-            let i = if interior_n > 0.0 { interior / interior_n } else { 0.0 };
+            let b = if boundary_n > 0.0 {
+                boundary / boundary_n
+            } else {
+                0.0
+            };
+            let i = if interior_n > 0.0 {
+                interior / interior_n
+            } else {
+                0.0
+            };
             best = best.max(b / (i + 0.05));
         }
     }
@@ -1781,7 +1851,11 @@ fn cloth_flicker(frames: &[Vec<u8>], cams: &[(f32, f32, f32)]) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn banner_project(cam: (f32, f32, f32), world: [f32; 3]) -> Option<(usize, usize)> {
@@ -1820,7 +1894,11 @@ fn roi_flicker(frames: &[Vec<u8>], width: usize) -> f64 {
             n += 1.0;
         }
     }
-    if n == 0.0 { 0.0 } else { acc / n }
+    if n == 0.0 {
+        0.0
+    } else {
+        acc / n
+    }
 }
 
 fn sponza_gltf_is_real() -> bool {
@@ -1852,37 +1930,40 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         cache_dir: std::env::temp_dir().join("genos-sponza-banner-test"),
         ..genos_bake::BakeSettings::default()
     };
-    let mut world = World::from_scene(Scene {
-        floor: genos_scene::Floor {
-            position: genos_scene::Vec3::ZERO,
-            half_x: 1.0,
-            half_z: 1.0,
-            color: [0.2, 0.2, 0.2],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: vec![
-            genos_scene::Light {
-                position: genos_scene::Vec3::new(0.0, 6.0, 0.0),
-                color: [6.0, 4.5, 3.0],
-                direction: genos_scene::Vec3::ZERO,
-            },
-            genos_scene::Light {
+    let mut world = World::from_scene({
+        let mut __scene = Scene::from_lists(
+            genos_scene::Floor {
                 position: genos_scene::Vec3::ZERO,
-                color: [2.0, 1.9, 1.7],
-                direction: genos_scene::Vec3::new(0.25, -1.0, 0.15),
+                half_x: 1.0,
+                half_z: 1.0,
+                color: [0.2, 0.2, 0.2],
             },
-        ],
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::High),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                genos_scene::Light {
+                    position: genos_scene::Vec3::new(0.0, 6.0, 0.0),
+                    color: [6.0, 4.5, 3.0],
+                    direction: genos_scene::Vec3::ZERO,
+                },
+                genos_scene::Light {
+                    position: genos_scene::Vec3::ZERO,
+                    color: [2.0, 1.9, 1.7],
+                    direction: genos_scene::Vec3::new(0.25, -1.0, 0.15),
+                },
+            ],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::High);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     });
     world
         .add_gltf_traced(&scene, &genos_render::identity_pose(), &settings_bake)
@@ -1897,7 +1978,11 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         );
         frames.push(draw(window, renderer, &world, &camera));
     }
-    let edge = frames.iter().map(|f| cell_edge_ratio(f, 320, 6)).sum::<f64>() / frames.len() as f64;
+    let edge = frames
+        .iter()
+        .map(|f| cell_edge_ratio(f, 320, 6))
+        .sum::<f64>()
+        / frames.len() as f64;
     (edge, roi_flicker(&frames, 320))
 }
 
@@ -1925,26 +2010,29 @@ fn white_lamps(n: usize) -> World {
             direction: genos_scene::Vec3::ZERO,
         });
     }
-    World::from_scene(Scene {
-        floor: genos_scene::Floor {
-            position: genos_scene::Vec3::ZERO,
-            half_x: 20.0,
-            half_z: 20.0,
-            color: [0.8, 0.8, 0.8],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights,
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Potato),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            genos_scene::Floor {
+                position: genos_scene::Vec3::ZERO,
+                half_x: 20.0,
+                half_z: 20.0,
+                color: [0.8, 0.8, 0.8],
+            },
+            Vec::new(),
+            Vec::new(),
+            lights,
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 
@@ -2127,7 +2215,7 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     // being held, so twelve lamps stay on ReSTIR instead of the exact sum.
     let _ = draw(window, renderer, &world, &camera);
     camera.set_pose(pose, 0.05, 0.0);
-    world.scene.lights[0].position.x += 3.0;
+    world.scene.light_mut(0).position.x += 3.0;
     let _ = draw(window, renderer, &world, &camera);
     let spatial = renderer.lighting_lamp_pick_counts().spatial;
     assert_eq!(spatial, 0, "radius 0 merged a neighbour");
@@ -2136,7 +2224,7 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     camera.set_pose(pose, 0.10, 0.0);
     let _ = draw(window, renderer, &world, &camera);
     camera.set_pose(pose, 0.15, 0.0);
-    world.scene.lights[1].position.x += 3.0;
+    world.scene.light_mut(1).position.x += 3.0;
     let _ = draw(window, renderer, &world, &camera);
     let moving = renderer.lighting_lamp_pick_counts();
     assert!(
@@ -2182,7 +2270,7 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
 /// centre lamp's unshadowed weight stays in the prefix, and its shadow ray does not.
 fn shadowed_lamps() -> World {
     let mut world = white_lamps(3);
-    world.scene.solids.push(genos_scene::Solid {
+    world.scene.push_solid(genos_scene::Solid {
         shape: genos_scene::Shape::Square,
         position: genos_scene::Vec3::new(0.0, 0.0, -1.0),
         size: 0.8,
@@ -2242,10 +2330,7 @@ fn lamp_pick_each_mode_against_off() {
     let off = draw(window, renderer, &world, &camera);
     let boxed = mean_abs(&open, &off);
     let off_rays = renderer.lighting_lamp_pick_counts().pixels;
-    assert!(
-        boxed > 2.0,
-        "the centre lamp is not shadowed ({boxed:.4})"
-    );
+    assert!(boxed > 2.0, "the centre lamp is not shadowed ({boxed:.4})");
     assert!(
         mean_byte(&off) > 1.0,
         "the shadowed full sum is black ({})",
@@ -2277,10 +2362,7 @@ fn lamp_pick_each_mode_against_off() {
         "settled reuse traced more than the full sum ({} vs {off_rays})",
         counts.pixels
     );
-    assert!(
-        err < 1.0,
-        "settled reuse left the full sum ({err:.4})"
-    );
+    assert!(err < 1.0, "settled reuse left the full sum ({err:.4})");
 }
 
 /// `light:I` shades that scene lamp and not the others.
@@ -2290,8 +2372,8 @@ fn light_view_shades_only_that_lamp() {
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let mut world = white_lamps(2);
-    world.scene.lights[0].color = [4.0, 0.2, 0.2];
-    world.scene.lights[1].color = [0.2, 0.2, 4.0];
+    world.scene.light_mut(0).color = [4.0, 0.2, 0.2];
+    world.scene.light_mut(1).color = [0.2, 0.2, 4.0];
     let camera = lamp_camera();
     renderer.set_lighting_settings(direct_pick(LampPickMode::Off, 1));
     renderer.set_debug_view(DebugView {
@@ -2308,8 +2390,8 @@ fn light_view_shades_only_that_lamp() {
     eprintln!("light view split {split:.3}");
     assert!(split > 2.0, "light:0 and light:1 matched ({split:.3})");
     let mut only = white_lamps(1);
-    only.scene.lights[0].color = [4.0, 0.2, 0.2];
-    only.scene.lights[0].position = world.scene.lights[0].position;
+    only.scene.light_mut(0).color = [4.0, 0.2, 0.2];
+    only.scene.light_mut(0).position = world.scene.light(0).position;
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         lamp: 0,
@@ -2374,13 +2456,7 @@ fn preset_direct_scales_with_samples_not_lamps() {
     // A yaw keeps this frame off the quiet held path, which would shade every lamp once.
     let mut moving = camera.clone();
     moving.set_pose(genos_scene::Vec3::new(0.4, 1.7, 4.0), 0.2, 0.0);
-    let high12 = count_of(
-        renderer,
-        window,
-        12,
-        LightingPreset::High,
-        &moving,
-    );
+    let high12 = count_of(renderer, window, 12, LightingPreset::High, &moving);
     eprintln!("preset high rays 3={high3} 12={high12}");
     assert!(high3 > 0 && high12 > 0, "high traced nothing");
     assert!(

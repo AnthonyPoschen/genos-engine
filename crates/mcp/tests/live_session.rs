@@ -1,12 +1,60 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::map_unwrap_or,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::similar_names,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! A separate client discovers the real loopback server and edits the live scene.
 
@@ -190,10 +238,10 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
 
     let drawn = host.drawn_scene();
     let world = World::from_scene(drawn.clone());
-    assert_eq!(world.scene.walls.len(), drawn.walls.len());
+    assert_eq!(world.scene.wall_len(), drawn.wall_len());
     assert_eq!(
         world.objects.len(),
-        1 + drawn.walls.len() + drawn.solids.len()
+        1 + drawn.wall_len() + drawn.solid_len()
     );
     assert!(
         world.objects.iter().any(|object| {
@@ -214,7 +262,7 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
 
     let stepped = host.camera();
     let bodies = &stepped.physics.bodies[..];
-    assert_eq!(bodies.len(), 1 + drawn.walls.len() + drawn.solids.len() + 1);
+    assert_eq!(bodies.len(), 1 + drawn.wall_len() + drawn.solid_len() + 1);
     assert!(
         bodies.iter().any(|body| {
             let Collider::Box { half_extents } = body.shape else {
@@ -270,7 +318,7 @@ fn a_separate_client_discovers_reads_and_edits_the_live_scene() {
 
     host.with_frame(|scene, camera| {
         camera.yaw += 0.4;
-        scene.lights[0].position.x = 1.5;
+        scene.light_mut(0).position.x = 1.5;
     });
     let second = events.event();
     assert!(
@@ -311,7 +359,11 @@ fn the_lighting_report_is_served_on_the_bound_port() {
     drop(listener);
     let host = Host::new(shipped_scene(), Camera::opening());
     let server = Server::start_on(host, port).expect("server");
-    assert!(server.url().contains(&format!(":{port}/mcp")), "{}", server.url());
+    assert!(
+        server.url().contains(&format!(":{port}/mcp")),
+        "{}",
+        server.url()
+    );
     publish_lighting("stable: false\npending: 4\n");
     let (status, _, body) = round_trip(
         "127.0.0.1",
@@ -845,8 +897,8 @@ fn assert_scene(live: &LiveScene, scene: &Scene, camera: &Camera) {
     assert!(near(live.floor_half_x, scene.floor.half_x));
     assert!(near(live.floor_half_z, scene.floor.half_z));
     assert!(near_color(live.floor_color, scene.floor.color));
-    assert_eq!(live.walls.len(), scene.walls.len());
-    for (got, wall) in live.walls.iter().zip(&scene.walls) {
+    assert_eq!(live.walls.len(), scene.wall_len());
+    for (got, wall) in live.walls.iter().zip(scene.walls()) {
         assert!(got.handle.starts_with("wall:"), "{}", got.handle);
         assert!(near_vec(got.position, wall.position));
         assert!(near(got.half_x, wall.half_x) && near(got.half_z, wall.half_z));
@@ -854,8 +906,8 @@ fn assert_scene(live: &LiveScene, scene: &Scene, camera: &Camera) {
         assert!(near_color(got.color, wall.color));
         assert!(near(got.absorption, wall.absorption));
     }
-    assert_eq!(live.solids.len(), scene.solids.len());
-    for (got, solid) in live.solids.iter().zip(&scene.solids) {
+    assert_eq!(live.solids.len(), scene.solid_len());
+    for (got, solid) in live.solids.iter().zip(scene.solids()) {
         assert!(got.handle.starts_with("solid:"), "{}", got.handle);
         let shape = match solid.shape {
             genos_scene::Shape::Square => "square",
@@ -867,8 +919,8 @@ fn assert_scene(live: &LiveScene, scene: &Scene, camera: &Camera) {
         assert!(near_color(got.color, solid.color));
         assert!(near(got.absorption, solid.absorption));
     }
-    assert_eq!(live.lights.len(), scene.lights.len());
-    for (got, light) in live.lights.iter().zip(&scene.lights) {
+    assert_eq!(live.lights.len(), scene.light_len());
+    for (got, light) in live.lights.iter().zip(scene.lights()) {
         assert!(got.handle.starts_with("light:"), "{}", got.handle);
         assert!(near_vec(got.position, light.position));
         assert!(near_color(got.color, light.color));

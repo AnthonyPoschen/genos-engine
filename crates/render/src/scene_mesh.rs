@@ -1,9 +1,30 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::float_cmp,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! The analytic scene as triangles: floor, roof, walls, square and round solids.
 //!
@@ -79,11 +100,11 @@ impl SceneMesh {
             let m = material(ShapeRef::Ceiling, c.color);
             plane(&mut triangles, c.height, [x0, z0, x1, z1], m);
         }
-        for (i, wall) in scene.walls.iter().enumerate() {
+        for (i, wall) in scene.walls().enumerate() {
             let m = material(ShapeRef::Wall(i), wall.color);
             wall_box(&mut triangles, wall, m);
         }
-        for (i, solid) in scene.solids.iter().enumerate() {
+        for (i, solid) in scene.solids().enumerate() {
             let m = material(ShapeRef::Solid(i), solid.color);
             match solid.shape {
                 Shape::Square => square_solid(&mut triangles, solid, m),
@@ -247,35 +268,38 @@ mod tests {
             reflectance: -1.0,
             color_mix: -1.0,
         };
-        Scene {
-            floor: Floor {
-                position: Vec3::new(1.0, 0.0, -2.0),
-                half_x: 9.0,
-                half_z: 7.0,
-                color: [0.8, 0.8, 0.8],
-            },
-            walls: vec![
-                wall(3.0, 2.0, 0.1, 4.0, 0.0),
-                wall(-4.0, -1.0, 3.0, 0.15, 1.0),
-            ],
-            solids: vec![
-                solid(Shape::Square, -1.0, 2.0, 0.6),
-                solid(Shape::Circle, 1.5, -3.0, 0.0),
-            ],
-            lights: Vec::new(),
-            ceiling: Some(Ceiling {
+        {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::new(1.0, 0.0, -2.0),
+                    half_x: 9.0,
+                    half_z: 7.0,
+                    color: [0.8, 0.8, 0.8],
+                },
+                vec![
+                    wall(3.0, 2.0, 0.1, 4.0, 0.0),
+                    wall(-4.0, -1.0, 3.0, 0.15, 1.0),
+                ],
+                vec![
+                    solid(Shape::Square, -1.0, 2.0, 0.6),
+                    solid(Shape::Circle, 1.5, -3.0, 0.0),
+                ],
+                Vec::new(),
+            );
+            __scene.ceiling = Some(Ceiling {
                 height: 3.0,
                 color: [0.7, 0.7, 0.7],
-            }),
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+            });
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         }
     }
 

@@ -1,7 +1,22 @@
-#![cfg_attr(test, expect(clippy::bool_assert_comparison, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::bool_assert_comparison,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The frame-rate toggle round-trips through the settings text and through MCP.
 //!
@@ -22,36 +37,41 @@ use genos_window::Window;
 fn open() -> genos_window::Lifecycle<Renderer> {
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
     genos_window::Lifecycle::new(window, renderer, permit)
 }
 
 fn room() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.5, 0.5, 0.5],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: vec![Light {
-            position: Vec3::new(0.0, 2.0, 0.0),
-            color: [1.0, 1.0, 1.0],
-            direction: Vec3::new(0.0, -1.0, 0.0),
-        }],
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        menu: MenuSettings::default(),
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 4.0,
+                half_z: 4.0,
+                color: [0.5, 0.5, 0.5],
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![Light {
+                position: Vec3::new(0.0, 2.0, 0.0),
+                color: [1.0, 1.0, 1.0],
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     })
 }
 

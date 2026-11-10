@@ -1,14 +1,47 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![allow(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The stress building: one 25 m section tiled into a grid, its moving boxes, its lamp
 //! slots and the sun. Everything here is scene content built on the public scene types;
@@ -455,21 +488,19 @@ impl Building {
             half_z: depth * 0.5 + YARD,
             color: WHITE,
         };
-        let scene = Scene {
-            floor,
-            walls,
-            solids,
-            lights: Vec::new(),
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        let scene = {
+            let mut __scene = Scene::from_lists(floor, walls, solids, Vec::new());
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         };
         let mut building = Self {
             scene,
@@ -477,9 +508,9 @@ impl Building {
             spread: slots,
             first: local,
         };
-        let mut solids = std::mem::take(&mut building.scene.solids);
+        let mut solids = building.scene.solids_cloned();
         building.place_movers(&mut solids, 0.0);
-        building.scene.solids = solids;
+        building.scene.set_solids(solids);
         building
     }
 

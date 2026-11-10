@@ -11,11 +11,9 @@ use genos_scene::{
 
 use crate::fog::{
     add, aligned_volume_point, apply_fog, dot, falloff, grid_size, height_closed_column,
-    height_segment_column,
-    integrate_samples,
-    integrate_unshadowed, length, length_sq, luma, near_columns, normalize, point_at, ray_dir,
-    scale, scale_color, slice_edge, sub, unit, world_cache_inscatter, DirectSun, FogColumn,
-    FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
+    height_segment_column, integrate_samples, integrate_unshadowed, length, length_sq, luma,
+    near_columns, normalize, point_at, ray_dir, scale, scale_color, slice_edge, sub, unit,
+    world_cache_inscatter, DirectSun, FogColumn, FogView, GridSize, SliceSample, Z_FAR, Z_NEAR,
 };
 use crate::trace::sees;
 
@@ -351,7 +349,11 @@ fn blob_luma(frame: u32) -> Vec<f32> {
     };
     let scene = empty_scene();
     let width = usize::try_from(size.width).unwrap_or(0);
-    let mut samples = vec![0.0_f32; size.cells().saturating_div(usize::try_from(size.slices.max(1)).unwrap_or(1))];
+    let mut samples = vec![
+        0.0_f32;
+        size.cells()
+            .saturating_div(usize::try_from(size.slices.max(1)).unwrap_or(1))
+    ];
     for y in 0..size.height {
         for x in 0..size.width {
             if !ray_hits_blob(&view, size, x, y) {
@@ -442,61 +444,67 @@ fn shaft_scene() -> (
         position: [2.5, 2.2, -4.0],
         color: [1.0, 0.7, 0.45],
     };
-    let scene = Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 30.0,
-            half_z: 30.0,
-            color: [0.5, 0.5, 0.5],
-        },
-        walls: vec![Wall {
-            position: Vec3::new(0.0, 0.0, -4.0),
-            half_x: 0.2,
-            half_z: 4.0,
-            height: 6.0,
-            base: 0.0,
-            color: [0.8, 0.8, 0.8],
-            absorption: 0.0,
-            reflectance: -1.0,
-            color_mix: -1.0,
-        }],
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    let scene = {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 30.0,
+                half_z: 30.0,
+                color: [0.5, 0.5, 0.5],
+            },
+            vec![Wall {
+                position: Vec3::new(0.0, 0.0, -4.0),
+                half_x: 0.2,
+                half_z: 4.0,
+                height: 6.0,
+                base: 0.0,
+                color: [0.8, 0.8, 0.8],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     };
     (settings, view, size, sun, lamp, scene)
 }
 
 fn empty_scene() -> Scene {
-    Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 1.0,
-            half_z: 1.0,
-            color: [0.0; 3],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 1.0,
+                half_z: 1.0,
+                color: [0.0; 3],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }
 
@@ -696,7 +704,8 @@ fn phase_coeff(
     p1: [f32; 3],
     mu: f32,
 ) -> f32 {
-    let mut coeff = sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu);
+    let mut coeff =
+        sigma_height * settings.albedo.clamp(0.0, 1.0) * phase_hg_f32(settings.phase_g, mu);
     for volume in &settings.volumes {
         let mut local = 0.0_f32;
         for tap in 0..8 {
@@ -899,7 +908,10 @@ pub fn smear_dispatch(frame: u32) -> FogDispatch {
 /// In-scatter luminance, one value per column.
 #[must_use]
 pub fn column_luma(columns: &[FogColumn]) -> Vec<f32> {
-    columns.iter().map(|column| luma(column.inscatter)).collect()
+    columns
+        .iter()
+        .map(|column| luma(column.inscatter))
+        .collect()
 }
 
 /// `apply_fog` of `[0.05, 0.05, 0.06]` over the columns.
@@ -911,24 +923,26 @@ pub fn picture_from(size: GridSize, columns: &[FogColumn]) -> FogImage {
 /// Low-preset floor the frame grade draws. `enabled` is the fog switch.
 #[must_use]
 pub fn composed_frame_scene(enabled: bool) -> Scene {
-    Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.6, 0.6, 0.6],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Low),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings {
+    {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 4.0,
+                half_z: 4.0,
+                color: [0.6, 0.6, 0.6],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::Low);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings {
             enabled,
             density: if enabled { 0.08 } else { 0.0 },
             thickness: 40.0,
@@ -937,9 +951,10 @@ pub fn composed_frame_scene(enabled: bool) -> Scene {
             history: false,
             gi: false,
             ..FogSettings::default()
-        },
-        reflections: genos_scene::ReflectionSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+        };
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }
 
@@ -1017,4 +1032,3 @@ mod tests {
         assert!(picture_mean_abs(&[0, 10], &[0, 0]) > 0.0);
     }
 }
-

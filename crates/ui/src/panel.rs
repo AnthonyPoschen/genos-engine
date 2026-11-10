@@ -1,17 +1,59 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::if_same_then_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::if_same_then_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_pass_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! The lighting panel, the lamp sun, and the pointer step the camera frame uses.
 
@@ -1122,10 +1164,7 @@ fn focusable_ids(
         let widget = bars.iter().any(|bar| bar.id == item.id)
             || drops.iter().any(|drop| drop.id == item.id)
             || checks.iter().any(|check| check.id == item.id)
-            || matches!(
-                item.action,
-                Some(Action::Press(_) | Action::Toggle { .. })
-            );
+            || matches!(item.action, Some(Action::Press(_) | Action::Toggle { .. }));
         if widget {
             ranked.push((rect.y, rect.x, item.id));
         }
@@ -1894,7 +1933,9 @@ fn finish_panel(
             consumed.wheel = true;
         }
         list_closed = was_open.is_some() && state.open_drop.is_none() && pointer.key_dismiss;
-        if keys_open && !legacy && (pointer.key_dec || pointer.key_inc || pointer.key_activate || list_closed)
+        if keys_open
+            && !legacy
+            && (pointer.key_dec || pointer.key_inc || pointer.key_activate || list_closed)
         {
             consumed.keys = true;
         }
@@ -1944,8 +1985,7 @@ fn finish_panel(
                 drops: &drops,
                 checks: &checks,
             };
-            if step_or_move_focus(state, &items, &page, &widgets, pointer, &mut actions)
-            {
+            if step_or_move_focus(state, &items, &page, &widgets, pointer, &mut actions) {
                 consumed.keys = true;
             }
             if pointer.key_activate
@@ -1979,7 +2019,8 @@ fn finish_panel(
             }
         }
     }
-    if policy.is_some_and(|policy| policy.wheel == FocusPolicy::Modal) && pointer.wheel_y.abs() >= 1.0e-4
+    if policy.is_some_and(|policy| policy.wheel == FocusPolicy::Modal)
+        && pointer.wheel_y.abs() >= 1.0e-4
     {
         consumed.wheel = true;
     }
@@ -2524,7 +2565,7 @@ fn push_tip(out: &mut Vec<Paint>, viewport: [f32; 2], anchor_x: f32, anchor_y: f
 
 /// Write one control onto the first lamp. Intensity scales `Light.color`.
 pub fn apply_lamp(scene: &mut Scene, action: Action) {
-    let Some(light) = scene.lights.first_mut() else {
+    let Some(light) = scene.light_at_mut(0) else {
         return;
     };
     match action {

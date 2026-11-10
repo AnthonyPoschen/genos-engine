@@ -1,11 +1,35 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::float_cmp,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! The scene and camera the frame draws and steps.
 //!
@@ -273,15 +297,15 @@ impl Handles {
             solids: Vec::new(),
             lights: Vec::new(),
         };
-        for _ in &scene.walls {
+        for _ in scene.walls() {
             let id = handles.alloc();
             handles.walls.push(id);
         }
-        for _ in &scene.solids {
+        for _ in scene.solids() {
             let id = handles.alloc();
             handles.solids.push(id);
         }
-        for _ in &scene.lights {
+        for _ in scene.lights() {
             let id = handles.alloc();
             handles.lights.push(id);
         }
@@ -312,8 +336,7 @@ fn document(inner: &Inner) -> Value {
             json::array(
                 inner
                     .scene
-                    .walls
-                    .iter()
+                    .walls()
                     .zip(&inner.handles.walls)
                     .map(|(wall, id)| wall_value(*id, wall))
                     .collect(),
@@ -324,8 +347,7 @@ fn document(inner: &Inner) -> Value {
             json::array(
                 inner
                     .scene
-                    .solids
-                    .iter()
+                    .solids()
                     .zip(&inner.handles.solids)
                     .map(|(solid, id)| solid_value(*id, solid))
                     .collect(),
@@ -336,8 +358,7 @@ fn document(inner: &Inner) -> Value {
             json::array(
                 inner
                     .scene
-                    .lights
-                    .iter()
+                    .lights()
                     .zip(&inner.handles.lights)
                     .map(|(light, id)| light_value(*id, light))
                     .collect(),
@@ -465,7 +486,7 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
             };
             apply_wall(&mut wall, &patch);
             let id = inner.handles.alloc();
-            inner.scene.walls.push(wall);
+            inner.scene.push_wall(wall);
             inner.handles.walls.push(id);
             inner.camera.attach_scene(&inner.scene);
             format!("wall:{id}")
@@ -485,7 +506,7 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
             };
             apply_solid(&mut solid, &patch);
             let id = inner.handles.alloc();
-            inner.scene.solids.push(solid);
+            inner.scene.push_solid(solid);
             inner.handles.solids.push(id);
             inner.camera.attach_scene(&inner.scene);
             format!("solid:{id}")
@@ -500,7 +521,7 @@ fn spawn_object(inner: &mut Inner, arguments: &Value) -> Result<String, String> 
             };
             apply_light(&mut light, &patch);
             let id = inner.handles.alloc();
-            inner.scene.lights.push(light);
+            inner.scene.push_light(light);
             inner.handles.lights.push(id);
             format!("light:{id}")
         }
@@ -517,16 +538,16 @@ fn remove_object(inner: &mut Inner, arguments: &Value) -> Result<(), String> {
     match slot {
         Slot::Floor => return Err("the floor stays".into()),
         Slot::Wall(index) => {
-            inner.scene.walls.remove(index);
+            inner.scene.remove_wall(index);
             inner.handles.walls.remove(index);
         }
         Slot::Solid(index) => {
             inner.camera.solid_removed(index);
-            inner.scene.solids.remove(index);
+            inner.scene.remove_solid(index);
             inner.handles.solids.remove(index);
         }
         Slot::Light(index) => {
-            inner.scene.lights.remove(index);
+            inner.scene.remove_light(index);
             inner.handles.lights.remove(index);
         }
     }
@@ -625,9 +646,9 @@ impl Slot {
 fn apply_slot(inner: &mut Inner, slot: Slot, patch: &Patch) {
     match slot {
         Slot::Floor => apply_floor(&mut inner.scene.floor, patch),
-        Slot::Wall(index) => apply_wall(&mut inner.scene.walls[index], patch),
-        Slot::Solid(index) => apply_solid(&mut inner.scene.solids[index], patch),
-        Slot::Light(index) => apply_light(&mut inner.scene.lights[index], patch),
+        Slot::Wall(index) => apply_wall(inner.scene.wall_mut(index), patch),
+        Slot::Solid(index) => apply_solid(inner.scene.solid_mut(index), patch),
+        Slot::Light(index) => apply_light(inner.scene.light_mut(index), patch),
     }
 }
 
@@ -705,10 +726,10 @@ fn geometry_changed(before: &Scene, after: &Scene) -> bool {
     {
         return true;
     }
-    if before.walls.len() != after.walls.len() || before.solids.len() != after.solids.len() {
+    if before.wall_len() != after.wall_len() || before.solid_len() != after.solid_len() {
         return true;
     }
-    for (left, right) in before.walls.iter().zip(&after.walls) {
+    for (left, right) in before.walls().zip(after.walls()) {
         if left.position.x != right.position.x
             || left.position.z != right.position.z
             || left.half_x != right.half_x
@@ -718,7 +739,7 @@ fn geometry_changed(before: &Scene, after: &Scene) -> bool {
             return true;
         }
     }
-    for (left, right) in before.solids.iter().zip(&after.solids) {
+    for (left, right) in before.solids().zip(after.solids()) {
         if left.shape != right.shape
             || left.position.x != right.position.x
             || left.position.y != right.position.y

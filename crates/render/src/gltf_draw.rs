@@ -416,7 +416,8 @@ fn build_surface(
     color: &mut Shelf,
     normal: &mut Shelf,
 ) -> Surface {
-    let store_metal = matches!(m.alpha_mode, AlphaMode::Opaque) && m.metallic_roughness_texture.is_some();
+    let store_metal =
+        matches!(m.alpha_mode, AlphaMode::Opaque) && m.metallic_roughness_texture.is_some();
     let color_rect = place_image(color, bake_diffuse(m, images, store_metal));
     let (normal_image, flat_normal, rough_in_alpha) = bake_normal_rough(m, images);
     let normal_rect = place_image(normal, normal_image);
@@ -439,7 +440,11 @@ fn build_surface(
         cutoff: alpha_cutoff(m.alpha_mode),
         two_sided: m.double_sided,
         roughness: m.roughness,
-        metallic: if flags & MAT_BASE != 0 { m.metallic } else { 0.0 },
+        metallic: if flags & MAT_BASE != 0 {
+            m.metallic
+        } else {
+            0.0
+        },
         material_flags: flags,
     }
 }
@@ -486,7 +491,11 @@ fn fit_shelf(w: u32, h: u32, rgba: Vec<u8>) -> (u32, u32, Vec<u8>) {
 /// colour, not baked here. Opaque materials with a metallic-roughness texture
 /// store metallic in alpha; every other material keeps the base texture's alpha
 /// for the cutoff test.
-fn bake_diffuse(m: &PbrMaterial, images: &[Image], store_metal: bool) -> Option<(u32, u32, Vec<u8>)> {
+fn bake_diffuse(
+    m: &PbrMaterial,
+    images: &[Image],
+    store_metal: bool,
+) -> Option<(u32, u32, Vec<u8>)> {
     let slot = m.base_color_texture?;
     let img = images.get(slot.image)?;
     let pixels = (img.width as usize)
@@ -519,7 +528,10 @@ fn bake_diffuse(m: &PbrMaterial, images: &[Image], store_metal: bool) -> Option<
 
 /// Normal atlas plus roughness in alpha when a metallic-roughness texture exists.
 /// `flat` is a generated normal (rgb 0.5, 0.5, 1) used only to carry roughness.
-fn bake_normal_rough(m: &PbrMaterial, images: &[Image]) -> (Option<(u32, u32, Vec<u8>)>, bool, bool) {
+fn bake_normal_rough(
+    m: &PbrMaterial,
+    images: &[Image],
+) -> (Option<(u32, u32, Vec<u8>)>, bool, bool) {
     let rough = m.metallic_roughness_texture.is_some();
     let Some((w, h, mut rgba)) = copy_normal(m, images) else {
         if !rough {
@@ -771,26 +783,29 @@ mod tests {
     #[test]
     fn a_gltf_cube_becomes_a_mesh_draw_with_its_pose_and_colour() {
         let scene = genos_load::load_gltf_file(fixture("cube.gltf")).unwrap();
-        let mut world = World::from_scene(genos_scene::Scene {
-            floor: genos_scene::Floor {
-                position: genos_scene::Vec3::ZERO,
-                half_x: 5.0,
-                half_z: 5.0,
-                color: [1.0; 3],
-            },
-            walls: Vec::new(),
-            solids: Vec::new(),
-            lights: Vec::new(),
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        let mut world = World::from_scene({
+            let mut __scene = genos_scene::Scene::from_lists(
+                genos_scene::Floor {
+                    position: genos_scene::Vec3::ZERO,
+                    half_x: 5.0,
+                    half_z: 5.0,
+                    color: [1.0; 3],
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         });
         let before = world.objects.len();
         let mut place = identity_pose();
@@ -869,26 +884,29 @@ mod tests {
     }
 
     fn empty_world() -> World {
-        World::from_scene(genos_scene::Scene {
-            floor: genos_scene::Floor {
-                position: genos_scene::Vec3::ZERO,
-                half_x: 5.0,
-                half_z: 5.0,
-                color: [1.0; 3],
-            },
-            walls: Vec::new(),
-            solids: Vec::new(),
-            lights: Vec::new(),
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        World::from_scene({
+            let mut __scene = genos_scene::Scene::from_lists(
+                genos_scene::Floor {
+                    position: genos_scene::Vec3::ZERO,
+                    half_x: 5.0,
+                    half_z: 5.0,
+                    color: [1.0; 3],
+                },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         })
     }
 
@@ -976,7 +994,10 @@ mod tests {
         let scene = textured_quad(1.0, genos_load::AlphaMode::Opaque);
         let mut world = empty_world();
         world.add_gltf(&scene, &identity_pose(), false);
-        assert_eq!(world.color_atlas.rgba[0], 255, "base colour stays in the atlas");
+        assert_eq!(
+            world.color_atlas.rgba[0], 255,
+            "base colour stays in the atlas"
+        );
         assert_eq!(world.color_atlas.rgba[1], 0);
         assert_eq!(world.color_atlas.rgba[2], 0);
         let surface = world.objects.iter().find_map(|object| {

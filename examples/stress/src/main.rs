@@ -1399,28 +1399,31 @@ fn script_exit_code(
 }
 
 fn loading_world() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 2.0,
-            half_z: 2.0,
-            color: [0.15, 0.15, 0.16],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: Some(Sky {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 2.0,
+                half_z: 2.0,
+                color: [0.15, 0.15, 0.16],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(Sky {
             color: [0.02, 0.02, 0.025],
-        }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
-        debug: DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        menu: MenuSettings::default(),
+        });
+        __scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+        __scene.debug = DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     })
 }
 

@@ -68,7 +68,8 @@ impl Gpu {
         }
         let origin = [camera.position.x, camera.position.y, camera.position.z];
         let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
-        let (sun, lamps) = sun_and_lamps(&scene.lights);
+        let lights = scene.lights_cloned();
+        let (sun, lamps) = sun_and_lamps(&lights);
         self.froxel_frame = Some(FrameJob {
             params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),
             width: size.width,
@@ -207,7 +208,13 @@ impl Gpu {
         height: u32,
         slices: u32,
     ) -> Result<(), String> {
-        self.barrier_on(cmd, 0x800, 0x1000 | 0x4000, 0x40 | 0x20, 0x800 | 0x1000 | 0x2000);
+        self.barrier_on(
+            cmd,
+            0x800,
+            0x1000 | 0x4000,
+            0x40 | 0x20,
+            0x800 | 0x1000 | 0x2000,
+        );
         let word = tail_word().to_ne_bytes();
         let head = column_header(width, height, slices);
         let dst = self.frame_scene[0].buffer;
@@ -1567,26 +1574,29 @@ fn height_settings() -> FogSettings {
 }
 
 fn empty_scene() -> Scene {
-    Scene {
-        floor: genos_scene::Floor {
-            position: genos_scene::Vec3::ZERO,
-            half_x: 30.0,
-            half_z: 30.0,
-            color: [0.4, 0.4, 0.4],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    {
+        let mut __scene = Scene::from_lists(
+            genos_scene::Floor {
+                position: genos_scene::Vec3::ZERO,
+                half_x: 30.0,
+                half_z: 30.0,
+                color: [0.4, 0.4, 0.4],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }
 

@@ -94,7 +94,7 @@ fn the_loaded_room_has_one_capsule_and_a_collider_on_each_object() {
         }),
         "the floor has no support"
     );
-    for wall in &scene.walls {
+    for wall in scene.walls() {
         assert!(
             bodies.iter().any(|body| {
                 let Collider::Box { half_extents } = body.shape else {
@@ -112,7 +112,7 @@ fn the_loaded_room_has_one_capsule_and_a_collider_on_each_object() {
             wall.position.z
         );
     }
-    for solid in &scene.solids {
+    for solid in scene.solids() {
         let found = bodies.iter().any(|body| {
             near(body.position.x, solid.position.x)
                 && near(body.position.z, solid.position.z)
@@ -139,7 +139,7 @@ fn the_loaded_room_has_one_capsule_and_a_collider_on_each_object() {
             solid.position.x, solid.position.z
         );
     }
-    assert_eq!(bodies.len(), 1 + scene.walls.len() + scene.solids.len() + 1);
+    assert_eq!(bodies.len(), 1 + scene.wall_len() + scene.solid_len() + 1);
 }
 
 #[test]
@@ -176,8 +176,7 @@ fn the_view_rests_near_eye_height_and_walks_on_open_floor() {
 fn a_wish_into_a_wall_or_solid_does_not_cross_it() {
     let mut scene = shipped();
     let long = scene
-        .walls
-        .iter()
+        .walls()
         .find(|wall| wall.half_x > wall.half_z)
         .unwrap();
     let long_x = long.position.x;
@@ -200,8 +199,7 @@ fn a_wish_into_a_wall_or_solid_does_not_cross_it() {
     );
 
     let short = scene
-        .walls
-        .iter()
+        .walls()
         .find(|wall| wall.half_z > wall.half_x)
         .unwrap();
     let short_x = short.position.x;
@@ -224,8 +222,7 @@ fn a_wish_into_a_wall_or_solid_does_not_cross_it() {
     );
 
     let solids: Vec<_> = scene
-        .solids
-        .iter()
+        .solids()
         .map(|solid| (solid.position.x, solid.position.z, solid.size))
         .collect();
     for (x, z, size) in solids {

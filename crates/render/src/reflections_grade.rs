@@ -90,26 +90,29 @@ pub fn grade_camera() -> Camera {
 /// on Potato; the reflection passes read `ReflectionSettings`, not that preset.
 #[must_use]
 pub fn grade_world(preset: ReflectionPreset) -> World {
-    let mut world = World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(80.0, -40.0, 80.0),
-            half_x: 0.05,
-            half_z: 0.05,
-            color: [0.2, 0.2, 0.2],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: Some(Sky { color: SKY }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
-        debug: DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::for_preset(preset),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: MenuSettings::default(),
+    let mut world = World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(80.0, -40.0, 80.0),
+                half_x: 0.05,
+                half_z: 0.05,
+                color: [0.2, 0.2, 0.2],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(Sky { color: SKY });
+        __scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+        __scene.debug = DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::for_preset(preset);
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     });
     world.reflection_swatch = true;
     world.reflection_sky = SKY;
