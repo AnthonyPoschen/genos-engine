@@ -218,6 +218,8 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<CookedGeometry, CookedError> {
                 material: (material != NONE)
                     .then(|| usize::try_from(material).ok())
                     .flatten(),
+                joints: Vec::new(),
+                weights: Vec::new(),
             });
         }
         meshes.push(GltfMesh { name, primitives });
@@ -234,6 +236,7 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<CookedGeometry, CookedError> {
             mesh,
             node_name,
             transform,
+            skin: None,
         });
     }
     let notes = r.len()?;

@@ -1,16 +1,55 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_pass_by_value, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::match_same_arms,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_pass_by_value,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! glTF 2.0: `.gltf` (JSON with external or `data:` buffers and images) and `.glb`.
 //!
@@ -31,6 +70,10 @@ use crate::error::LoadError;
 use crate::mips::{mip_chain, Mip, MipSpace};
 use crate::pages::miss_colour;
 use crate::png::Image;
+use crate::skin::{
+    pack_influences, Channel, ChannelPath, Clip, InfluenceFlags, Interpolation, Joint,
+    PackedInfluences, Skin, IDENTITY_BIND,
+};
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
 const TEXCOORD_KEYS: [&str; 8] = [
@@ -60,6 +103,12 @@ pub struct GltfScene {
     /// Colour a sample uses when the finest mip of that image was dropped.
     /// Parallel to [`Self::images`] after a file load.
     pub mip_fallback: Vec<[f32; 4]>,
+    /// Skins in file order. Empty when the file has none.
+    pub skins: Vec<Skin>,
+    /// Clips whose channels target a joint in [`Self::skins`].
+    pub clips: Vec<Clip>,
+    /// Features the skin path dropped or repaired (cubic-spline, a fifth weight, a morph channel).
+    pub skin_notes: Vec<String>,
 }
 
 /// One glTF mesh: a list of primitives, each with one material.
@@ -86,6 +135,10 @@ pub struct Primitive {
     pub indices: Vec<u32>,
     /// Index into [`GltfScene::materials`]; `None` is the default material.
     pub material: Option<usize>,
+    /// `JOINTS_0`, four joint indices per vertex. Empty when the primitive is rigid.
+    pub joints: Vec<[u16; 4]>,
+    /// `WEIGHTS_0`, four weights per vertex, parallel to [`Self::joints`].
+    pub weights: Vec<[f32; 4]>,
 }
 
 /// A placed mesh.
@@ -95,6 +148,8 @@ pub struct MeshInstance {
     pub node_name: Option<String>,
     /// Column-major object-to-world matrix (glTF's layout).
     pub transform: [f32; 16],
+    /// Index into [`GltfScene::skins`] when this node's mesh is skinned.
+    pub skin: Option<usize>,
 }
 
 /// How alpha is used.
@@ -343,11 +398,13 @@ pub(crate) fn decode_gltf_phased(
         .iter()
         .map(|m| material(&doc, m, images.len()))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut skin_notes = Vec::new();
     let mut meshes = Vec::new();
-    for mesh in list(&doc, "meshes") {
+    for (mesh_index, mesh) in list(&doc, "meshes").iter().enumerate() {
         let mut primitives = Vec::new();
-        for p in list(mesh, "primitives") {
-            if let Some(primitive) = reader.primitive(p, materials.len())? {
+        for (primitive_index, p) in list(mesh, "primitives").iter().enumerate() {
+            let path = format!("meshes[{mesh_index}].primitives[{primitive_index}]");
+            if let Some(primitive) = reader.primitive(p, materials.len(), &path, &mut skin_notes)? {
                 primitives.push(primitive);
             }
         }
@@ -356,6 +413,7 @@ pub(crate) fn decode_gltf_phased(
             primitives,
         });
     }
+    let skins = reader.skins()?;
 
     let nodes = list(&doc, "nodes");
     let roots: Vec<usize> =
@@ -404,16 +462,25 @@ pub(crate) fn decode_gltf_phased(
             if mesh >= meshes.len() {
                 return Err(LoadError::Unrecognized);
             }
+            let skin = opt_usize(node, "skin")?;
+            if let Some(skin) = skin {
+                if skin >= skins.len() {
+                    return Err(LoadError::Unrecognized);
+                }
+            }
             instances.push(MeshInstance {
                 mesh,
                 node_name: node.get("name").and_then(Value::as_str).map(str::to_string),
                 transform: world,
+                skin,
             });
         }
         for c in list(node, "children").iter().rev() {
             stack.push((index(c)?, world, depth + 1));
         }
     }
+    let (clips, clip_notes) = reader.clips(&skins)?;
+    skin_notes.extend(clip_notes);
     lap(&mut phases.meshes);
     let mips = cook_mips(&images, &materials);
     let (resident_bytes, mip_fallback) = fit_mips(&mips);
@@ -426,6 +493,9 @@ pub(crate) fn decode_gltf_phased(
         mips,
         resident_bytes,
         mip_fallback,
+        skins,
+        clips,
+        skin_notes,
     })
 }
 
@@ -507,7 +577,11 @@ fn parallel_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Ve
 pub fn image_spaces(images: usize, materials: &[PbrMaterial]) -> Vec<MipSpace> {
     let mut spaces = vec![MipSpace::Linear; images];
     for material in materials {
-        paint_space(&mut spaces, material.metallic_roughness_texture, MipSpace::Linear);
+        paint_space(
+            &mut spaces,
+            material.metallic_roughness_texture,
+            MipSpace::Linear,
+        );
         paint_space(&mut spaces, material.occlusion_texture, MipSpace::Linear);
         paint_space(&mut spaces, material.base_color_texture, MipSpace::Srgb);
         paint_space(&mut spaces, material.emissive_texture, MipSpace::Srgb);
@@ -891,7 +965,13 @@ impl Reader<'_> {
         Ok(out)
     }
 
-    fn primitive(&self, p: &Value, materials: usize) -> Result<Option<Primitive>, LoadError> {
+    fn primitive(
+        &self,
+        p: &Value,
+        materials: usize,
+        path: &str,
+        notes: &mut Vec<String>,
+    ) -> Result<Option<Primitive>, LoadError> {
         let mode = opt_usize(p, "mode")?.unwrap_or(4);
         if !(4..=6).contains(&mode) {
             return Ok(None);
@@ -963,6 +1043,7 @@ impl Reader<'_> {
         if material.is_some_and(|m| m >= materials) {
             return Err(LoadError::Unrecognized);
         }
+        let influences = self.influences(attrs, n, path, notes)?;
         let mut primitive = Primitive {
             positions,
             normals: Vec::new(),
@@ -971,6 +1052,8 @@ impl Reader<'_> {
             tangents,
             indices,
             material,
+            joints: influences.joints,
+            weights: influences.weights,
         };
         if normals.is_empty() {
             primitive = flat_shaded(primitive);
@@ -978,6 +1061,341 @@ impl Reader<'_> {
             primitive.normals = std::mem::take(&mut normals);
         }
         Ok(Some(primitive))
+    }
+
+    fn influences(
+        &self,
+        attrs: &Value,
+        count: usize,
+        path: &str,
+        notes: &mut Vec<String>,
+    ) -> Result<PackedInfluences, LoadError> {
+        let Some(joints_0) = opt_usize(attrs, "JOINTS_0")? else {
+            if opt_usize(attrs, "WEIGHTS_0")?.is_some() {
+                return Err(LoadError::Unrecognized);
+            }
+            return Ok(PackedInfluences {
+                joints: Vec::new(),
+                weights: Vec::new(),
+                flags: InfluenceFlags::default(),
+            });
+        };
+        let weights_0 = opt_usize(attrs, "WEIGHTS_0")?.ok_or(LoadError::Unrecognized)?;
+        let joints: Vec<[f32; 4]> = self.floats(joints_0)?;
+        let weights: Vec<[f32; 4]> = self.floats(weights_0)?;
+        if joints.len() != count || weights.len() != count {
+            return Err(LoadError::Unrecognized);
+        }
+        let extra_j = match opt_usize(attrs, "JOINTS_1")? {
+            Some(accessor) => Some(self.floats::<4>(accessor)?),
+            None => None,
+        };
+        let extra_w = match opt_usize(attrs, "WEIGHTS_1")? {
+            Some(accessor) => Some(self.floats::<4>(accessor)?),
+            None => None,
+        };
+        if extra_j.is_some() != extra_w.is_some() {
+            return Err(LoadError::Unrecognized);
+        }
+        let packed = pack_influences(&joints, &weights, extra_j.as_deref(), extra_w.as_deref())?;
+        if packed.flags.reduced {
+            notes.push(format!(
+                "{path} kept the four largest influences and renormalized"
+            ));
+        }
+        if packed.flags.zero_sum {
+            notes.push(format!("{path} zero weight sum wrote weight 1 on joint 0"));
+        }
+        Ok(packed)
+    }
+
+    fn skins(&self) -> Result<Vec<Skin>, LoadError> {
+        let nodes = list(self.doc, "nodes");
+        let mut parent_of = vec![None; nodes.len()];
+        for (node_index, node) in nodes.iter().enumerate() {
+            for child in list(node, "children") {
+                let child = index(child)?;
+                if let Some(slot) = parent_of.get_mut(child) {
+                    *slot = Some(node_index);
+                }
+            }
+        }
+        let mut skins = Vec::new();
+        for (skin_index, skin) in list(self.doc, "skins").iter().enumerate() {
+            let joint_nodes: Vec<usize> = list(skin, "joints")
+                .iter()
+                .map(index)
+                .collect::<Result<_, _>>()?;
+            if joint_nodes.iter().any(|node| *node >= nodes.len()) {
+                return Err(LoadError::Unrecognized);
+            }
+            let mut repairs = Vec::new();
+            let inverse = match opt_usize(skin, "inverseBindMatrices")? {
+                Some(accessor) => {
+                    let matrices: Vec<[f32; 16]> = self.floats(accessor)?;
+                    if matrices.len() != joint_nodes.len() {
+                        return Err(LoadError::Unrecognized);
+                    }
+                    matrices
+                }
+                None => {
+                    repairs.push(format!("skins[{skin_index}] inverse bind missing"));
+                    vec![IDENTITY_BIND; joint_nodes.len()]
+                }
+            };
+            let mut joints = Vec::with_capacity(joint_nodes.len());
+            for (joint_index, &node_index) in joint_nodes.iter().enumerate() {
+                let node = &nodes[node_index];
+                let pose = node_trs(node)?;
+                let parent = parent_of[node_index].and_then(|parent_node| {
+                    joint_nodes
+                        .iter()
+                        .position(|joint| *joint == parent_node)
+                        .and_then(|found| i32::try_from(found).ok())
+                });
+                joints.push(Joint {
+                    name: node
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    parent: parent.unwrap_or(-1),
+                    inverse_bind: inverse[joint_index],
+                    translation: pose.translation,
+                    rotation: pose.rotation,
+                    scale: pose.scale,
+                    node: node_index,
+                });
+            }
+            skins.push(Skin {
+                name: skin.get("name").and_then(Value::as_str).map(str::to_string),
+                joints,
+                notes: repairs,
+            });
+        }
+        Ok(skins)
+    }
+
+    fn clips(&self, skins: &[Skin]) -> Result<(Vec<Clip>, Vec<String>), LoadError> {
+        let mut clips = Vec::new();
+        let mut notes = Vec::new();
+        let animations = list(self.doc, "animations");
+        if skins.is_empty() {
+            if !animations.is_empty() {
+                notes.push("animations omitted because the file has no skin".to_string());
+            }
+            return Ok((clips, notes));
+        }
+        for (anim_index, anim) in animations.iter().enumerate() {
+            let samplers = list(anim, "samplers");
+            let name = anim
+                .get("name")
+                .and_then(Value::as_str)
+                .map_or_else(|| format!("animation_{anim_index}"), str::to_string);
+            let mut by_skin: Vec<Vec<Channel>> = (0..skins.len()).map(|_| Vec::new()).collect();
+            for (channel_index, channel) in list(anim, "channels").iter().enumerate() {
+                let sampler_index = usize_of(channel, "sampler")?;
+                let sampler = samplers.get(sampler_index).ok_or(LoadError::Unrecognized)?;
+                let target = channel.get("target").ok_or(LoadError::Unrecognized)?;
+                let node = usize_of(target, "node")?;
+                let path_name = target
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .ok_or(LoadError::Unrecognized)?;
+                let where_ = format!("animations[{anim_index}].channels[{channel_index}]");
+                let Some(path) = channel_path(path_name) else {
+                    notes.push(format!("{where_} omitted path {path_name}"));
+                    continue;
+                };
+                let interpolation = match sampler
+                    .get("interpolation")
+                    .and_then(Value::as_str)
+                    .unwrap_or("LINEAR")
+                {
+                    "LINEAR" => Interpolation::Linear,
+                    "STEP" => Interpolation::Step,
+                    other => {
+                        notes.push(format!("{where_} omitted interpolation {other}"));
+                        continue;
+                    }
+                };
+                let Some((skin, joint)) = joint_in(skins, node) else {
+                    notes.push(format!("{where_} omitted node {node} is not in a skin"));
+                    continue;
+                };
+                let times = scalar_times(self, usize_of(sampler, "input")?)?;
+                let values = match path {
+                    ChannelPath::Translation | ChannelPath::Scale => {
+                        flatten(self.floats::<3>(usize_of(sampler, "output")?)?)
+                    }
+                    ChannelPath::Rotation => {
+                        flatten(self.floats::<4>(usize_of(sampler, "output")?)?)
+                    }
+                };
+                let stride = path.stride();
+                if times.is_empty() || values.len() != times.len() * stride {
+                    return Err(LoadError::Unrecognized);
+                }
+                if times
+                    .windows(2)
+                    .any(|pair| pair[1].total_cmp(&pair[0]) != std::cmp::Ordering::Greater)
+                {
+                    return Err(LoadError::Unrecognized);
+                }
+                let joint = u16::try_from(joint).map_err(|_| LoadError::Unrecognized)?;
+                by_skin[skin].push(Channel {
+                    joint,
+                    path,
+                    interpolation,
+                    times,
+                    values,
+                });
+            }
+            for (skin, channels) in by_skin.into_iter().enumerate() {
+                if channels.is_empty() {
+                    continue;
+                }
+                let duration = channels
+                    .iter()
+                    .filter_map(|channel| channel.times.last().copied())
+                    .fold(0.0_f32, f32::max);
+                clips.push(Clip {
+                    name: name.clone(),
+                    duration,
+                    skin,
+                    channels,
+                });
+            }
+        }
+        Ok((clips, notes))
+    }
+}
+
+fn channel_path(name: &str) -> Option<ChannelPath> {
+    match name {
+        "translation" => Some(ChannelPath::Translation),
+        "rotation" => Some(ChannelPath::Rotation),
+        "scale" => Some(ChannelPath::Scale),
+        _ => None,
+    }
+}
+
+fn joint_in(skins: &[Skin], node: usize) -> Option<(usize, usize)> {
+    for (skin_index, skin) in skins.iter().enumerate() {
+        if let Some(joint) = skin.joints.iter().position(|joint| joint.node == node) {
+            return Some((skin_index, joint));
+        }
+    }
+    None
+}
+
+fn scalar_times(reader: &Reader<'_>, accessor: usize) -> Result<Vec<f32>, LoadError> {
+    let rows: Vec<[f32; 1]> = reader.floats(accessor)?;
+    Ok(rows.into_iter().map(|row| row[0]).collect())
+}
+
+fn flatten<const N: usize>(rows: Vec<[f32; N]>) -> Vec<f32> {
+    rows.into_iter().flatten().collect()
+}
+
+struct NodeTrs {
+    translation: [f32; 3],
+    rotation: [f32; 4],
+    scale: [f32; 3],
+}
+
+fn node_trs(node: &Value) -> Result<NodeTrs, LoadError> {
+    if node.get("matrix").is_some() {
+        return Ok(trs_from_matrix(&floats(node, "matrix", IDENTITY)?));
+    }
+    Ok(NodeTrs {
+        translation: floats(node, "translation", [0.0; 3])?,
+        rotation: floats(node, "rotation", [0.0, 0.0, 0.0, 1.0])?,
+        scale: floats(node, "scale", [1.0; 3])?,
+    })
+}
+
+fn trs_from_matrix(m: &[f32; 16]) -> NodeTrs {
+    let column = |c: usize| [m[c * 4], m[c * 4 + 1], m[c * 4 + 2]];
+    let length = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let c0 = column(0);
+    let c1 = column(1);
+    let c2 = column(2);
+    let mut scale_x = length(c0);
+    let scale_y = length(c1);
+    let scale_z = length(c2);
+    let cross = [
+        c1[1] * c2[2] - c1[2] * c2[1],
+        c1[2] * c2[0] - c1[0] * c2[2],
+        c1[0] * c2[1] - c1[1] * c2[0],
+    ];
+    let det = c0[0] * cross[0] + c0[1] * cross[1] + c0[2] * cross[2];
+    if det < 0.0 {
+        scale_x = -scale_x;
+    }
+    let inv = |scale: f32| {
+        if scale.abs() > 1.0e-8 {
+            1.0 / scale
+        } else {
+            0.0
+        }
+    };
+    let basis = |column: [f32; 3], scale: f32| {
+        let scale = inv(scale);
+        [column[0] * scale, column[1] * scale, column[2] * scale]
+    };
+    let rotation = quat_from_basis(basis(c0, scale_x), basis(c1, scale_y), basis(c2, scale_z));
+    NodeTrs {
+        translation: [m[12], m[13], m[14]],
+        rotation,
+        scale: [scale_x, scale_y, scale_z],
+    }
+}
+
+fn quat_from_basis(c0: [f32; 3], c1: [f32; 3], c2: [f32; 3]) -> [f32; 4] {
+    let trace = c0[0] + c1[1] + c2[2];
+    let (x, y, z, w) = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        let inv = 1.0 / s;
+        (
+            (c1[2] - c2[1]) * inv,
+            (c2[0] - c0[2]) * inv,
+            (c0[1] - c1[0]) * inv,
+            0.25 * s,
+        )
+    } else if c0[0] > c1[1] && c0[0] > c2[2] {
+        let s = (1.0 + c0[0] - c1[1] - c2[2]).sqrt() * 2.0;
+        let inv = 1.0 / s;
+        (
+            0.25 * s,
+            (c0[1] + c1[0]) * inv,
+            (c2[0] + c0[2]) * inv,
+            (c1[2] - c2[1]) * inv,
+        )
+    } else if c1[1] > c2[2] {
+        let s = (1.0 + c1[1] - c0[0] - c2[2]).sqrt() * 2.0;
+        let inv = 1.0 / s;
+        (
+            (c0[1] + c1[0]) * inv,
+            0.25 * s,
+            (c1[2] + c2[1]) * inv,
+            (c2[0] - c0[2]) * inv,
+        )
+    } else {
+        let s = (1.0 + c2[2] - c0[0] - c1[1]).sqrt() * 2.0;
+        let inv = 1.0 / s;
+        (
+            (c2[0] + c0[2]) * inv,
+            (c1[2] + c2[1]) * inv,
+            0.25 * s,
+            (c0[1] - c1[0]) * inv,
+        )
+    };
+    let length = (x * x + y * y + z * z + w * w).sqrt();
+    if length > 0.0 {
+        [x / length, y / length, z / length, w / length]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
     }
 }
 
@@ -1017,6 +1435,11 @@ fn flat_shaded(p: Primitive) -> Primitive {
             }
             if !p.tangents.is_empty() {
                 out.tangents.push(p.tangents[i as usize]);
+            }
+            if !p.joints.is_empty() {
+                let slot = usize::try_from(i).unwrap_or(0);
+                out.joints.push(p.joints[slot]);
+                out.weights.push(p.weights[slot]);
             }
         }
     }
