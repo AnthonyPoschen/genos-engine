@@ -313,7 +313,7 @@ float lamp_pick_u(uint idx, uint pixels, uint kept, bool fill_hit, bool reuse_pi
         uint r = ray - lighting_probe_rays();
         uint ent = r / LIGHTING_CACHE_RAYS;
         if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
-            uint gs = lighting_grad_list_slot(ckeys.key[LIGHTING_GRAD_LIST_AT + r - lighting_grad_first() * LIGHTING_CACHE_RAYS]);
+            uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + r - lighting_grad_first() * LIGHTING_CACHE_RAYS];
             return lighting_unit(ckeys.key[gs] ^ (floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + gs].w) * 0x85ebca6bu + 0x5bd1e995u));
         }
         uint slot = lighting_cache_batch_slot(ent);

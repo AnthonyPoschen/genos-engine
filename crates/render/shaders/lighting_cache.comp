@@ -84,16 +84,7 @@ void main() {
             if (ci >= n) {
                 break;
             }
-            uint raw = ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
-            uint tag = lighting_grad_list_tag(raw);
-            if (tag == 0xFu) {
-                continue;
-            }
-            if (tag >= 2u) {
-                lighting_sc_grad_take_mean(ci, tag);
-                continue;
-            }
-            uint gs = lighting_grad_list_slot(raw);
+            uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
             vec4 v = work.v[lighting_rad_at(lighting_probe_rays() + ci + lighting_grad_first() * LIGHTING_CACHE_RAYS)];
             if (ckeys.key[gs] == 0u || lighting_ray_none(v)) {
                 continue;
