@@ -15,7 +15,7 @@
 //! A shader is either a mesh-space grid, optionally displaced by a height map,
 //! or a screen-space pass.
 
-use genos_scene::{Scene, Shape, Solid};
+use genos_scene::{Scene, Shape, Solid, Vec3};
 
 /// Axis-aligned box in world space. Y is up.
 #[derive(Clone, Copy, Debug)]
@@ -221,33 +221,53 @@ impl Object {
 /// solid covers its turned corners.
 pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
     match part {
-        FixedPart::Floor => Some(Bounds {
-            center: [scene.floor.position.x, 0.0, scene.floor.position.z],
-            half: [scene.floor.half_x, 0.5, scene.floor.half_z],
-        }),
-        FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| Bounds {
-            center: [
-                scene.floor.position.x,
-                ceiling.height,
-                scene.floor.position.z,
-            ],
-            half: [scene.floor.half_x, 0.05, scene.floor.half_z],
-        }),
-        FixedPart::Wall(index) => scene.wall_at(*index).map(|wall| Bounds {
-            center: [
-                wall.position.x,
-                wall.base + wall.height * 0.5,
-                wall.position.z,
-            ],
-            half: [wall.half_x, wall.height * 0.5, wall.half_z],
-        }),
-        FixedPart::Solid(index) => scene.solid_at(*index).map(|solid| {
-            let reach = solid_reach(solid);
+        FixedPart::Floor => {
+            let place = scene.world_point(scene.floor_handle(), scene.floor.position);
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
+                half: [scene.floor.half_x, 0.5, scene.floor.half_z],
+            })
+        }
+        FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| {
+            let place = scene.world_point(scene.floor_handle(), scene.floor.position);
             Bounds {
-                center: [solid.position.x, solid.height * 0.5, solid.position.z],
-                half: [reach, solid.height * 0.5, reach],
+                center: [place.x, ceiling.height, place.z],
+                half: [scene.floor.half_x, 0.05, scene.floor.half_z],
             }
         }),
+        FixedPart::Wall(index) => {
+            let handle = scene.wall_handle(*index)?;
+            let wall = scene.wall_at(*index)?;
+            let place = scene.world_point(
+                handle,
+                Vec3::new(
+                    wall.position.x,
+                    wall.position.y + wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ),
+            );
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
+                half: [wall.half_x, wall.height * 0.5, wall.half_z],
+            })
+        }
+        FixedPart::Solid(index) => {
+            let handle = scene.solid_handle(*index)?;
+            let solid = scene.solid_at(*index)?;
+            let place = scene.world_point(
+                handle,
+                Vec3::new(
+                    solid.position.x,
+                    solid.position.y + solid.height * 0.5,
+                    solid.position.z,
+                ),
+            );
+            let reach = solid_reach(solid);
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
+                half: [reach, solid.height * 0.5, reach],
+            })
+        }
     }
 }
 
