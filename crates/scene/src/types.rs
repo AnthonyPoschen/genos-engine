@@ -3,6 +3,8 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
+use std::sync::RwLock;
+
 use genos_ecs::{SceneHandle, World};
 use genos_math::Vec3;
 
@@ -10,6 +12,66 @@ use crate::{
     DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, LightingSettings,
     MenuSettings, ReflectionSettings,
 };
+
+/// World translations and yaws in draw-list order, reused across a frame.
+///
+/// Slot 0 is the floor, then the walls, the solids, and the lights. Readers
+/// index a slot. The vecs keep their capacity, so a later frame does not allocate.
+#[derive(Clone)]
+pub(crate) struct PoseScratch {
+    pub(crate) clock: u32,
+    pub(crate) floor_x: u32,
+    pub(crate) floor_y: u32,
+    pub(crate) floor_z: u32,
+    pub(crate) origin: Vec<Vec3>,
+    pub(crate) yaw: Vec<f32>,
+    pub(crate) ready: Vec<u8>,
+    /// Parent slot, or `origin.len()` when the object is a root.
+    pub(crate) parent: Vec<usize>,
+}
+
+impl PoseScratch {
+    pub(crate) fn new() -> Self {
+        Self {
+            clock: 0,
+            floor_x: 0,
+            floor_y: 0,
+            floor_z: 0,
+            origin: Vec::new(),
+            yaw: Vec::new(),
+            ready: Vec::new(),
+            parent: Vec::new(),
+        }
+    }
+}
+
+/// Shared so a scene can be read from the frame thread. A clone copies the
+/// scratch instead of sharing the lock.
+pub(crate) struct PoseCache(RwLock<PoseScratch>);
+
+impl PoseCache {
+    pub(crate) fn new() -> Self {
+        Self(RwLock::new(PoseScratch::new()))
+    }
+
+    pub(crate) fn read(&self) -> std::sync::RwLockReadGuard<'_, PoseScratch> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn write(&self) -> std::sync::RwLockWriteGuard<'_, PoseScratch> {
+        self.0
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Clone for PoseCache {
+    fn clone(&self) -> Self {
+        Self(RwLock::new(self.read().clone()))
+    }
+}
 
 /// Share of the incoming light a white painted surface sends back out.
 pub const PAINT_ALBEDO: f32 = 0.8;
@@ -178,6 +240,9 @@ pub struct Scene {
     pub(crate) light_order: Vec<SceneHandle>,
     /// Parent writes a walk rejected because they would cycle.
     pub cycle_rejects: u32,
+    /// World pose of each draw-list row. Filled when the store clock or the
+    /// floor position changes, then read by index.
+    pub(crate) poses: PoseCache,
     /// None leaves the scene open to the sky.
     pub ceiling: Option<Ceiling>,
     /// None: a ray that leaves the scene brings nothing back, and the background is black.

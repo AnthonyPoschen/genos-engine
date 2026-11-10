@@ -222,47 +222,69 @@ impl Object {
 pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
     match part {
         FixedPart::Floor => {
-            let place = scene.world_point(scene.floor_handle(), scene.floor.position);
+            let half_x = scene.floor.half_x;
+            let half_z = scene.floor.half_z;
+            let place = scene.floor_translation();
             Some(Bounds {
                 center: [place.x, place.y, place.z],
-                half: [scene.floor.half_x, 0.5, scene.floor.half_z],
+                half: [half_x, 0.5, half_z],
             })
         }
-        FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| {
-            let place = scene.world_point(scene.floor_handle(), scene.floor.position);
-            Bounds {
-                center: [place.x, ceiling.height, place.z],
-                half: [scene.floor.half_x, 0.05, scene.floor.half_z],
-            }
-        }),
+        FixedPart::Ceiling => {
+            let half_x = scene.floor.half_x;
+            let half_z = scene.floor.half_z;
+            let height = scene.ceiling.as_ref()?.height;
+            let place = scene.floor_translation();
+            Some(Bounds {
+                center: [place.x, height, place.z],
+                half: [half_x, 0.05, half_z],
+            })
+        }
         FixedPart::Wall(index) => {
-            let handle = scene.wall_handle(*index)?;
-            let wall = scene.wall_at(*index)?;
-            let place = scene.world_point(
-                handle,
+            let wall = scene.wall_at(*index).cloned()?;
+            let place = scene.wall_point(
+                *index,
                 Vec3::new(
                     wall.position.x,
                     wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
             );
+            let yaw = scene.wall_yaw(*index);
+            let (half_x, half_z) = if yaw == 0.0 {
+                (wall.half_x, wall.half_z)
+            } else {
+                let (sin, cos) = yaw.sin_cos();
+                (
+                    wall.half_x * cos.abs() + wall.half_z * sin.abs(),
+                    wall.half_x * sin.abs() + wall.half_z * cos.abs(),
+                )
+            };
             Some(Bounds {
                 center: [place.x, place.y, place.z],
-                half: [wall.half_x, wall.height * 0.5, wall.half_z],
+                half: [half_x, wall.height * 0.5, half_z],
             })
         }
         FixedPart::Solid(index) => {
-            let handle = scene.solid_handle(*index)?;
-            let solid = scene.solid_at(*index)?;
-            let place = scene.world_point(
-                handle,
+            let solid = scene.solid_at(*index).cloned()?;
+            let place = scene.solid_point(
+                *index,
                 Vec3::new(
                     solid.position.x,
                     solid.position.y + solid.height * 0.5,
                     solid.position.z,
                 ),
             );
-            let reach = solid_reach(solid);
+            let yaw = scene.solid_yaw(*index);
+            let reach = if yaw.to_bits() == solid.yaw.to_bits() {
+                solid_reach(&solid)
+            } else {
+                let half = solid.size * 0.5;
+                match solid.shape {
+                    Shape::Circle => half,
+                    Shape::Square => half * (yaw.cos().abs() + yaw.sin().abs()),
+                }
+            };
             Some(Bounds {
                 center: [place.x, place.y, place.z],
                 half: [reach, solid.height * 0.5, reach],

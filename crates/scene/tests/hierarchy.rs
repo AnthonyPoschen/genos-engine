@@ -3,7 +3,8 @@
 #![expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
 
 use genos_scene::{
-    set_parent, Camera, Codimation, Easing, Floor, HierarchyError, Scene, Shape, Solid, Vec3,
+    set_parent, update, Actions, Camera, Codimation, Easing, Floor, HierarchyError, Scene, Shape,
+    Solid, Vec3,
 };
 
 fn solid_at(position: Vec3, yaw: f32) -> Solid {
@@ -96,4 +97,73 @@ fn codimate_handle_names_the_solid() {
     assert!(camera.codimate_handle(&scene, handle, motion.clone()));
     let stale = genos_ecs::SceneHandle::new(9, 1).expect("handle");
     assert!(!camera.codimate_handle(&scene, stale, motion));
+}
+
+#[test]
+fn despawn_keeps_the_child_at_its_world_position() {
+    let mut scene = room(vec![
+        solid_at(Vec3::new(1.0, 2.0, 3.0), std::f32::consts::FRAC_PI_2),
+        solid_at(Vec3::new(4.0, 0.0, 0.0), 0.0),
+    ]);
+    let parent = scene.solid_handle(0).expect("parent");
+    let child = scene.solid_handle(1).expect("child");
+    set_parent(&mut scene, child, parent).expect("link");
+    let before = scene.world_point(child, scene.solid(1).position);
+    scene.remove_solid(0);
+    let child = scene.solid_handle(0).expect("orphan");
+    let after = scene.world_point(child, scene.solid(0).position);
+    assert!(
+        (after.x - before.x).abs() < 1.0e-5 && (after.y - before.y).abs() < 1.0e-5,
+        "world x y moved from {before:?} to {after:?}"
+    );
+    assert!(
+        (after.z - before.z).abs() < 1.0e-5,
+        "world z moved from {before:?} to {after:?}"
+    );
+    assert!(scene
+        .object_world()
+        .get::<genos_scene::Parent>(child)
+        .is_none());
+    assert!(
+        (scene.solid(0).yaw - std::f32::consts::FRAC_PI_2).abs() < 1.0e-5,
+        "baked yaw {}",
+        scene.solid(0).yaw
+    );
+}
+
+#[test]
+fn a_codimated_child_stays_under_a_turned_parent() {
+    let mut scene = room(vec![
+        solid_at(Vec3::new(10.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2),
+        solid_at(Vec3::new(4.0, 0.0, 0.0), 0.0),
+    ]);
+    let parent = scene.solid_handle(0).expect("parent");
+    let child = scene.solid_handle(1).expect("child");
+    set_parent(&mut scene, child, parent).expect("link");
+    let before = scene.world_point(child, scene.solid(1).position);
+    let motion = Codimation::new(
+        vec![Vec3::new(4.0, 0.0, 0.0), Vec3::new(4.0, 0.0, 0.0)],
+        Easing::Linear,
+        1.0,
+    )
+    .expect("path");
+    let mut camera = Camera::new(0.0, 2.0, 8.0);
+    camera.attach_scene(&scene);
+    assert!(camera.codimate(&scene, 1, motion));
+    for _ in 0..30 {
+        update(&mut camera, &mut scene, &Actions::default(), 1.0 / 60.0);
+    }
+    let child = scene.solid_handle(1).expect("child");
+    let after = scene.world_point(child, scene.solid(1).position);
+    assert!(
+        (after.x - before.x).abs() < 1.0e-3
+            && (after.y - before.y).abs() < 1.0e-3
+            && (after.z - before.z).abs() < 1.0e-3,
+        "world moved from {before:?} to {after:?}"
+    );
+    let local = scene.solid(1).position;
+    assert!(
+        (local.x - 4.0).abs() < 1.0e-3 && local.y.abs() < 1.0e-3 && local.z.abs() < 1.0e-3,
+        "local drifted to {local:?}"
+    );
 }
