@@ -67,6 +67,14 @@ fn remember(rows, line) {
 `
 }
 
+// Legacy room settle0, step, and snap columns. The ring walk uses the settle0
+// ceiling and is not skipped by wait_settled.
+let legacy_settle_max = 0.06079;
+let legacy_settle_popped = 0.561;
+let legacy_step_max = 0.00399;
+let legacy_snap_mean = 0.451;
+let legacy_snap_max = 8.0;
+
 let i = 0;
 let calm = false;
 while i < 18 && !calm {
@@ -76,12 +84,29 @@ while i < 18 && !calm {
     let mean0 = if n > 0 { f.means[0] } else { 0.0 };
     let mean1 = if n > 0 { f.means[n - 1] } else { 0.0 };
     rows = remember(rows, `METRIC path=${path} window=settle${i} mean_delta=${f.mean_delta} max_delta=${f.max_delta} popped_share=${f.popped_share} mean_range=${f.mean_range} mean0=${mean0} mean1=${mean1} stable=${st.stable} picture_settled=${st.picture_settled} still_frames=${st.still_frames} frame=${st.frame}`);
+    if st.frame >= 100 {
+        require(f.max_delta <= legacy_settle_max, `settle${i} max ${f.max_delta} above legacy ${legacy_settle_max}`);
+        require(f.popped_share <= legacy_settle_popped, `settle${i} popped ${f.popped_share} above legacy ${legacy_settle_popped}`);
+    }
     if i == 0 {
         let pace = timing(#{ frames: 8 });
         rows = remember(rows, `METRIC path=${path} pace frame_ms=${pace.frame_ms} fps=${pace.fps}`);
     }
+    require(f.max_delta <= legacy_settle_max, `settle${i} max ${f.max_delta} above legacy ${legacy_settle_max}`);
+    require(f.popped_share <= legacy_settle_popped, `settle${i} popped ${f.popped_share} above legacy ${legacy_settle_popped}`);
     calm = st.stable == true && st.picture_settled == true;
     i += 1;
+}
+let ring = 0;
+while status().frame < 160 && ring < 24 {
+    let f = flicker(#{ frames: 8, threshold: 0.004 });
+    let st = status();
+    rows = remember(rows, `METRIC path=${path} window=ring${ring} mean_delta=${f.mean_delta} max_delta=${f.max_delta} popped_share=${f.popped_share} mean_range=${f.mean_range} frame=${st.frame}`);
+    if st.frame >= 100 {
+        require(f.max_delta <= legacy_settle_max, `ring${ring} max ${f.max_delta} above legacy ${legacy_settle_max}`);
+        require(f.popped_share <= legacy_settle_popped, `ring${ring} popped ${f.popped_share} above legacy ${legacy_settle_popped}`);
+    }
+    ring += 1;
 }
 
 let settled_a = wait_settled(#{ timeout_frames: 180, then_frames: 1, path: "settled-a.png", width: 160, height: 90 });
@@ -97,13 +122,19 @@ rows = remember(rows, `METRIC path=${path} window=step0 frame=${step0.frame} lum
 let early = flicker(#{ frames: 8, threshold: 0.004, frames_dir: "step-frames" });
 let en = early.means.len();
 rows = remember(rows, `METRIC path=${path} window=step_early mean_delta=${early.mean_delta} max_delta=${early.max_delta} popped_share=${early.popped_share} mean_range=${early.mean_range} mean0=${if en > 0 { early.means[0] } else { 0.0 }} mean1=${if en > 0 { early.means[en - 1] } else { 0.0 }}`);
+require(early.max_delta <= legacy_step_max, `step max ${early.max_delta} above legacy ${legacy_step_max}`);
 
-let settled_b = wait_settled(#{ timeout_frames: 180, then_frames: 1, path: "settled-b.png", width: 160, height: 90 });
+// sc_settle on High is 300 still frames, counted again after the camera step.
+let settled_b = wait_settled(#{ timeout_frames: 360, then_frames: 1, path: "settled-b.png", width: 160, height: 90 });
 rows = remember(rows, `METRIC path=${path} window=settled_b settled=${settled_b.settled} frames=${settled_b.frames} still_frames=${settled_b.still_frames} frame=${settled_b.frame}`);
 let settled_cap = capture(#{ name: "settled_b", path: "settled-b-named.png", width: 160, height: 90 });
 rows = remember(rows, `METRIC path=${path} window=settled_b_cap frame=${settled_cap.frame} luminance=${settled_cap.luminance}`);
 let snap = diff(#{ a: "step0", b: "settled_b", threshold: 8, out: "step-vs-settled.png" });
 rows = remember(rows, `METRIC path=${path} snap mean_abs=${snap.mean_abs} max_abs=${snap.max_abs} over_share=${snap.over_share} lum_step=${snap.luminance_a} lum_settled=${snap.luminance_b} mean_luminance_delta=${snap.mean_luminance_delta}`);
+require(snap.mean_abs <= legacy_snap_mean, `snap mean ${snap.mean_abs} above legacy ${legacy_snap_mean}`);
+require(snap.max_abs <= legacy_snap_max, `snap max ${snap.max_abs} above legacy ${legacy_snap_max}`);
+require(settled_a.settled == true, "pose A did not settle");
+require(settled_b.settled == true, "pose B did not settle");
 
 try {
     let settled_ref = compare(#{

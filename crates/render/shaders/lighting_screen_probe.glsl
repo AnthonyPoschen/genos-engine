@@ -8,11 +8,11 @@
 // 2048 returns that same read, and the skip is that read having a corner.
 // Own samples, a parent, a resample, a miss, and a trust gate that hands the
 // pixel back to the probes are not this. While a lamp is settling, compose
-// makes that exception itself (`lighting_settle_own_covered`): the live cell
-// is the picture, including a texel that already has samples. The exception
-// stays out of `lighting_sh_texel_detail_covers`. Place inlines that function,
-// and the ring walk there overflowed lavapipe's shader stack. Trust is not
-// the test. A mover is this when the world-cell read at its current position and true normal
+// makes that exception itself (`lighting_settle_own_covered`): a texel that
+// already has samples still skips the probe evaluate. The picture stays the
+// filtered field. The exception stays out of `lighting_sh_texel_detail_covers`.
+// Place inlines that function, and the ring walk there overflowed lavapipe's
+// shader stack. Trust is not the test. A mover is this when the world-cell read at its current position and true normal
 // accepts a corner: that read is what the pixel shows, and it does not seed.
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
@@ -27,9 +27,9 @@
 // filter still run unless surface_cache.sh_probe_retire is on and that
 // probe's bilinear footprint has no uncovered surface.
 // Same gates as lighting_sh_texel_detail_covers, except a fine texel that
-// already has samples still counts while a lamp is settling. Compose is the
-// only caller. Place keeps the strict function, so this loop is not inlined
-// into that shader.
+// already has samples still skips the probe read while a lamp is settling.
+// The colour is still the filtered field. Compose is the only caller. Place
+// keeps the strict function, so this loop is not inlined into that shader.
 bool lighting_settle_own_covered(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     if (lighting_world_mode() != 3u || !lighting_lamp_settling()) {
         return false;

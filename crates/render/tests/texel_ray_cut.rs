@@ -226,9 +226,9 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
         assert_eq!(row.seed_same, 1, "row {id} wrote the seed");
         assert_eq!(row.mean_same, 1, "row {id} wrote the texel mean");
     }
-    // A ring timestamp is a settling lamp. The live cell agrees, so the rays
-    // are cut. The picture during that settle is the cell, not a second relight.
-    let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK, LAMP];
+    // A ring entry that reaches the texel is a lamp change. The live cell still
+    // agrees within the sparse ratio. The rays are not cut.
+    let held_rows = [STABLE, SEED_DIFF, OWN_AGREE, BLACK, MIX_OK];
     for id in held_rows {
         let row = &rows[id];
         assert_eq!(row.held, 1, "row {id} should hold");
@@ -243,6 +243,11 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     assert_eq!(disagree.rays, 0);
     assert_eq!(disagree.looked, 8);
     assert_eq!(disagree.accepted, 8);
+    let lamp = &rows[LAMP];
+    assert_eq!(lamp.held, 0, "a lamp change that reaches the texel keeps its rays");
+    assert_eq!(lamp.rays, 0);
+    assert_eq!(lamp.looked, 8, "lamp row looked {}", lamp.looked);
+    assert_eq!(lamp.accepted, 8, "lamp row accepted {}", lamp.accepted);
     let future = &rows[FUTURE];
     assert_eq!(future.held, 0, "a later cell colour is not frozen on old samples");
     assert_eq!(future.rays, 0);
@@ -277,8 +282,8 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     let rays: u32 = rows.iter().map(|row| row.rays).sum();
     assert_eq!(word(&words, 0), held);
     assert_eq!(word(&words, 1), rays);
-    assert_eq!(held, 6);
-    assert_eq!(rays, 6 * FULL_SET);
+    assert_eq!(held, 5);
+    assert_eq!(rays, 5 * FULL_SET);
     assert_eq!(word(&words, 2), 0, "the gate does not list a young cell");
     assert_eq!(word(&words, 3), 0, "the gate does not list a world-cell refresh");
 }

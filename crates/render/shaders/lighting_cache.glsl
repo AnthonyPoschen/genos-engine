@@ -1410,20 +1410,6 @@ const float LIGHTING_SC_CHANGE_ALPHA = 1.0 / 24.0;
 // anywhere (1/8 a set), 1/8 near a mover or a moved lamp (1/2 a set).
 const float LIGHTING_WRC_CHANGE_ALPHA = 1.0 / 32.0;
 const float LIGHTING_WRC_LOCAL_ALPHA = 1.0 / 8.0;
-// Picture step while a lamp is settling. The ray mean still takes the set
-// whole. This is the world-cell change rate. A step of 0.08 left the room
-// settle0 max above the legacy max.
-const float LIGHTING_SETTLE_PICTURE_ALPHA = LIGHTING_WRC_CHANGE_ALPHA;
-// Rec.709 luma, the floor under a relative step, and the cell-vs-mean gate.
-// The hall one-set is about twice the cell. A planted mean beside its cell
-// is closer than two thirds and stays the mean.
-const vec3 LIGHTING_LUMA = vec3(0.2126, 0.7152, 0.0722);
-const float LIGHTING_LUMA_FLOOR = 1.0e-4;
-const float LIGHTING_SETTLE_MEAN_RATIO = 2.0 / 3.0;
-// A stored field steps one sixteenth of the gap. A still field under two
-// percent relative luma holds, so hash jitter does not crawl.
-const float LIGHTING_SETTLE_FIELD_STEP = 1.0 / 16.0;
-const float LIGHTING_SETTLE_FIELD_HOLD = 0.02;
 
 float lighting_sc_cap(uint slot) {
     if (lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > 0.2) {
@@ -1923,6 +1909,14 @@ const float LIGHTING_SC_SPARSE_OWN = 4.0;
 // S72K handover: interpolation fades out over this many own sets (weight K).
 const float LIGHTING_SC_HANDOVER = 16.0;
 const float LIGHTING_SC_HANDOVER_K = 2.0;
+// A detail seed is one prior sample. The texel's first set takes the other
+// half. Later sets converge to the sample mean. The first set does not
+// replace the cell, so a yaw does not show one noisy set.
+const float LIGHTING_SC_SEED_PRIOR = 0.5;
+// A stored field moves this far toward a later filter target on each push.
+// The first stored field is the target, so a fill shows at once. There is
+// no hold, so a small gap still moves and the field reaches the target.
+const float LIGHTING_FIELD_CATCH = 1.0 / 16.0;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -2248,14 +2242,9 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         if (v.w < LIGHTING_CACHE_HAS_W) {
             continue;
         }
-        // While a lamp is settling the stored mean is one set. The picture
-        // reads the short step written beside it. Rays still read the mean.
-        if (lighting_lamp_settling()) {
-            vec4 picture = cache.v[LIGHTING_SC_EST_AT + 2u * s];
-            if (picture.w > LIGHTING_CACHE_HAS_W) {
-                v.rgb = picture.rgb;
-            }
-        }
+        // The stored mean is the estimate. A lamp ring does not substitute a
+        // second, smoothed colour: the same mean is what rays read and what a
+        // pixel shows when this cell is the picture.
         if (lighting_sc_stale(s)) {
             continue;
         }
@@ -3220,10 +3209,10 @@ bool lighting_sh_lum_disagrees(float hi, float lo) {
 // later cell change is not frozen. A missing, empty, stale, back-facing, or
 // off-plane corner is not agreement. Corners that disagree by the sparse ratio
 // are a contact or a corner, and the texel keeps its rays. A stale texel, a
-// nearby move, and an object-local texel do not hold. A lamp that is settling,
-// including the drain flag and a recent ring entry, does not by itself keep
-// the rays: the live cell is the comparison, and while that lamp is settling
-// the cell is what the picture shows. A 25 cm cell does not hold: the world
+// nearby move, and an object-local texel do not hold. A lamp change that
+// reaches this texel since it was sampled does not hold: the sparse ratio
+// stays true across a small dim, and the texel would keep the old samples.
+// A 25 cm cell does not hold: the world
 // cache is the source this read does not write. Claim stays false. The seed,
 // the cell mean, and the harmonics are not stored.
 bool lighting_compact_hold_texel_rays(uint slot) {
@@ -3264,6 +3253,13 @@ bool lighting_compact_hold_texel_rays(uint slot) {
         if (lighting_sh_lum_disagrees(max(y_own, y_field), min(y_own, y_field))) {
             return false;
         }
+    }
+    // The sparse ratio does not see a 1.5% dim. A ring entry that reaches this
+    // texel keeps the rays until the ring expires. One sample is not enough:
+    // that sample can still be the light from before the change, and the cut
+    // would then freeze it.
+    if (lighting_wrc_lamp_changed(cache.v[3u * slot].xyz, 0u)) {
+        return false;
     }
     uint rays = lighting_sc_entries(slot, true) * LIGHTING_CACHE_RAYS;
     atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_HELD], 1u);
@@ -3427,11 +3423,11 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 // 2048 returns that same read, and the skip is that read having a corner.
 // Own samples, a parent, a resample, a miss, and a trust gate that hands the
 // pixel back to the probes are not this. While a lamp is settling, compose
-// makes that exception itself (`lighting_settle_own_covered`): the live cell
-// is the picture, including a texel that already has samples. The exception
-// stays out of this function. Place inlines it, and the ring walk here
-// overflowed lavapipe's shader stack. Trust is not the test. A mover is
-// this when the world-cell read at its current position and true normal
+// makes that exception itself (`lighting_settle_own_covered`): a texel that
+// already has samples still skips the probe evaluate. The picture stays the
+// filtered field. The exception stays out of this function. Place inlines it,
+// and the ring walk here overflowed lavapipe's shader stack. Trust is not
+// the test. A mover is this when the world-cell read at its current position and true normal
 // accepts a corner: that read is what the pixel shows, and it does not seed.
 // cells_only is not this test. The toggle is applied later, inside
 // lighting_world_irradiance_in, so a cells_only pixel can still count as a
@@ -3804,16 +3800,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // A mover is not seeded. An empty read falls through to the probe seed.
         bool detail_empty = cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && detail_empty;
-        // Drain and a recent lamp ring: the live cell is the picture, even
-        // when the texel already has samples. The read is the short step of
-        // the cell's sets, not the one-set mean the rays keep. Those samples
-        // are not shown and are not rewritten here. A quiet frame still shows
-        // them. This shares the one neighbour read below. A second call in
-        // this function overflowed lavapipe's shader stack on a full frame.
-        bool settle_show = lighting_sh_texel_detail_on() && !obj && split && lighting_lamp_settling() && !detail_empty;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
-        if (detail_candidate || settle_show) {
+        if (detail_candidate) {
             if (detail_candidate && LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
@@ -3852,32 +3841,17 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         bool corner_parent = false;
         if (detail_kept) {
             v = vec4(detail_rgb, 1.0);
-            // Settle shows the short cell step. A quiet empty texel shows the
-            // cell seed the neighbour read just wrote.
-            corner_path = settle_show ? 1u : 5u;
+            corner_path = 5u;
         } else if (mode == 3u) {
             corner_path = lighting_px_classify_shown(slot);
-            // No filtered field yet. The own mean is one settle set. Show the
-            // push target when the filter has a colour, so this frame matches
-            // the field the push stores. An empty filter shows the cell only
-            // when the cell is at most two thirds of the mean. Not on the
-            // settle_show path, so this is not a second read there.
+            // No stored field yet. This pixel was showing the neighbour read.
+            // The filter target is that read's detail, and it replaces the
+            // read through the stored field, not in one frame.
             if (corner_path == 6u && lighting_sh_texel_detail_on() && !obj && split) {
-                vec3 target = lighting_svgf_target(slot).rgb;
-                if (any(greaterThan(target, vec3(0.0)))) {
-                    v = vec4(target, 1.0);
-                    corner_path = 2u;
-                } else {
-                    vec4 cell = lighting_sh_read(q, n, false);
-                    float own_l = dot(v.rgb, LIGHTING_LUMA);
-                    float cell_l = dot(cell.rgb, LIGHTING_LUMA);
-                    // The hall one-set is about twice the cell. A planted mean
-                    // beside its cell is closer than that and stays the mean,
-                    // including a corner of a bilinear blend.
-                    if (cell.w > LIGHTING_CACHE_HAS_W && own_l > LIGHTING_LUMA_FLOOR && cell_l <= own_l * LIGHTING_SETTLE_MEAN_RATIO) {
-                        v = vec4(cell.rgb, 1.0);
-                        corner_path = 1u;
-                    }
+                vec4 cell = lighting_sh_read(q, n, false);
+                if (cell.w > LIGHTING_CACHE_HAS_W) {
+                    v = vec4(cell.rgb, 1.0);
+                    corner_path = 1u;
                 }
             }
         } else if (v.w > LIGHTING_CACHE_HAS_W) {
@@ -4774,7 +4748,9 @@ void lighting_svgf_push(uint slot) {
     // neighbour's) moved, when it leans on the WRC (W < 1: the cells change
     // without telling their texels), and otherwise one frame in
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
-    if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+    // A lamp ring updates the field every frame. The idle skip would leave the
+    // stored colour behind the filter for up to LIGHTING_PUSH_IDLE frames.
+    if (LIGHTING_DIRTY_ATROUS && !lighting_lamp_settling() && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
         && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
         // S72V10 trusts the field for two frames from this stamp. The idle skip
@@ -4791,23 +4767,26 @@ void lighting_svgf_push(uint slot) {
         return;
     }
     vec4 target = lighting_svgf_target(slot);
+    // The first stored field is the filter target, so a fill shows at once.
+    // A field that already exists moves toward a later target by the same
+    // fraction the world cells use while the light changes. There is no hold:
+    // a gap smaller than a percent still moves, and the stored field reaches
+    // the target. Compose shows this same target when nothing is stored yet.
     vec3 outc = target.rgb;
-    // The first frames after a yaw have no stored field, so compose shows this
-    // same target. Step the stored field toward a later target so a frame
-    // moves by a sixteenth of the gap. A still field is unchanged. Rays still
-    // read the mean.
     if (lighting_sh_texel_detail_on()) {
         vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
         if (!any(greaterThan(prev, vec3(0.0)))) {
-            prev = outc;
-        }
-        if (any(greaterThan(prev, vec3(0.0)))) {
-            // A settled texel jitters under the dirty-page epsilon. Stepping
-            // that jitter moves a still picture. Hold the stored field. A real
-            // handoff is well above this, so it still steps.
-            float prev_l = max(dot(prev, LIGHTING_LUMA), LIGHTING_LUMA_FLOOR);
-            float rel = dot(abs(outc - prev), LIGHTING_LUMA) / prev_l;
-            outc = rel < LIGHTING_SETTLE_FIELD_HOLD ? prev : mix(prev, outc, LIGHTING_SETTLE_FIELD_STEP);
+            vec4 cell = lighting_sh_read(cache.v[3u * slot].xyz, nb.xyz, false);
+            if (cell.w > LIGHTING_CACHE_HAS_W) {
+                // One prior sample, the same weight as the detail seed.
+                // Half the cell-to-target gap lands on this push. The next
+                // push takes half of what remains, so the yaw edge reaches
+                // the target without a one-frame swap.
+                prev = cell.rgb;
+                outc = mix(prev, outc, LIGHTING_SC_SEED_PRIOR);
+            }
+        } else {
+            outc = mix(prev, outc, LIGHTING_FIELD_CATCH);
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);
