@@ -14,11 +14,15 @@ pub struct SceneHandle {
 impl SceneHandle {
     /// A handle with this index and generation.
     ///
-    /// The store never returns generation `0`. A caller that builds a handle
-    /// for a save file uses the generation the file recorded.
+    /// Generation `0` is never issued and is rejected here. A caller that
+    /// builds a handle for a save file uses the generation the file recorded.
     #[must_use]
-    pub const fn new(index: u32, generation: u32) -> Self {
-        Self { index, generation }
+    pub const fn new(index: u32, generation: u32) -> Option<Self> {
+        if generation == 0 {
+            None
+        } else {
+            Some(Self { index, generation })
+        }
     }
 
     /// Slot in the handle table.

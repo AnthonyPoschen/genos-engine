@@ -38,16 +38,20 @@ impl std::error::Error for StoreError {}
 
 /// One changed component, ready for a replication pass.
 ///
-/// The bytes are [`Component::encode`] of that component only.
+/// A write carries [`Component::encode`] of that component only. A removal
+/// carries empty [`Self::bytes`]: an empty [`Self::component`] name means the
+/// object was despawned, and a name means that component was removed. That is
+/// the empty-bounds removal from ADR 0032. A component's own `encode` must
+/// write at least one byte so a payload is not read as a removal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ComponentDelta {
     /// Object that changed.
     pub handle: SceneHandle,
-    /// [`Component::component_name`].
+    /// [`Component::component_name`], or `""` when the object was despawned.
     pub component: &'static str,
-    /// Tick stored on the cell. Later writes have a greater tick until the clock wraps.
+    /// Tick stored on the cell. A later write is ahead of an earlier one until the clock wraps.
     pub tick: u32,
-    /// Canonical component bytes.
+    /// Canonical component bytes, or empty for a removal.
     pub bytes: Vec<u8>,
 }
 
@@ -61,16 +65,22 @@ pub struct Stats {
     /// Archetype tables, including empty ones left behind by a move.
     pub archetypes: u32,
     /// Next tick a write will store. Starts at 1. Skips 0 after a wrap.
+    ///
+    /// Store this after applying [`World::changes_since`]. The next call with
+    /// the stored value returns only the writes that happened after it.
     pub clock: u32,
     /// Writes refused because the handle was stale.
     pub stale_rejects: u32,
 }
 
 /// Exclusive access to one component. Dropping it after a write stores the tick.
+///
+/// A peek through [`Deref`] does not take a tick. [`DerefMut`] marks the guard
+/// dirty, and drop then stores the clock.
 pub struct Mut<'a, T> {
     value: &'a mut T,
     tick: &'a mut u32,
-    now: u32,
+    clock: &'a mut u32,
     dirty: bool,
 }
 
@@ -92,7 +102,7 @@ impl<T> DerefMut for Mut<'_, T> {
 impl<T> Drop for Mut<'_, T> {
     fn drop(&mut self) {
         if self.dirty {
-            *self.tick = self.now;
+            *self.tick = take_tick(self.clock);
         }
     }
 }
@@ -150,6 +160,7 @@ struct TypedCol<T> {
 trait Column: Send + Sync {
     fn len(&self) -> usize;
     fn swap_remove(&mut self, row: usize) -> bool;
+    fn pop_row(&mut self) -> bool;
     fn push_clone_from(&mut self, source: &dyn Column, row: usize) -> bool;
     fn changes(&self, since: u32) -> Vec<(usize, u32, Vec<u8>)>;
     fn as_any(&self) -> &dyn Any;
@@ -168,6 +179,10 @@ impl<T: Component> Column for TypedCol<T> {
             && swap_remove_vec(&mut self.ticks, row).is_some()
     }
 
+    fn pop_row(&mut self) -> bool {
+        self.values.pop().is_some() && self.ticks.pop().is_some()
+    }
+
     fn push_clone_from(&mut self, source: &dyn Column, row: usize) -> bool {
         let Some(source) = source.as_any().downcast_ref::<TypedCol<T>>() else {
             return false;
@@ -183,7 +198,7 @@ impl<T: Component> Column for TypedCol<T> {
     fn changes(&self, since: u32) -> Vec<(usize, u32, Vec<u8>)> {
         let mut out = Vec::new();
         for (row, (value, tick)) in self.values.iter().zip(&self.ticks).enumerate() {
-            if *tick > since {
+            if changed_since(*tick, since) {
                 out.push((row, *tick, value.to_bytes()));
             }
         }
@@ -217,19 +232,30 @@ struct Kind {
     name: &'static str,
     make: fn() -> Box<dyn Column>,
     apply: fn(&mut World, SceneHandle, &[u8]) -> Result<(), StoreError>,
+    remove: fn(&mut World, SceneHandle) -> Result<(), StoreError>,
+}
+
+#[derive(Clone)]
+struct Removal {
+    handle: SceneHandle,
+    /// Empty when the object itself was despawned.
+    component: &'static str,
+    tick: u32,
 }
 
 /// The scene store.
 ///
 /// Objects with the same component set share one table. Columns of that table
-/// are contiguous. A write stores the store clock on that cell and advances
-/// the clock. [`Self::changes_since`] returns those cells in handle-index
-/// order, then by component name.
+/// are contiguous. A write stores the current clock on that cell, then
+/// advances it. [`Self::clock`] is the next tick a write will store.
+/// [`Self::changes_since`] returns cells and removals whose tick is that
+/// cursor or newer, in handle-index order, then tick, then component name.
 pub struct World {
     slots: Vec<Slot>,
     free: BTreeSet<u32>,
     archetypes: Vec<Archetype>,
     kinds: Vec<Kind>,
+    removals: Vec<Removal>,
     clock: u32,
     stale_rejects: u32,
 }
@@ -247,6 +273,7 @@ impl Clone for World {
             free: self.free.clone(),
             archetypes: self.archetypes.iter().map(Archetype::cloned).collect(),
             kinds: self.kinds.clone(),
+            removals: self.removals.clone(),
             clock: self.clock,
             stale_rejects: self.stale_rejects,
         }
@@ -262,6 +289,7 @@ impl World {
             free: BTreeSet::new(),
             archetypes: vec![Archetype::empty()],
             kinds: Vec::new(),
+            removals: Vec::new(),
             clock: 1,
             stale_rejects: 0,
         }
@@ -271,11 +299,22 @@ impl World {
     ///
     /// [`Self::insert`] registers the type as well. Call this on a receiver
     /// that has not inserted `T` yet.
-    pub fn register<T: Component>(&mut self) {
-        self.ensure_kind::<T>();
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Unknown`] when the name is empty or another component
+    /// already registered it.
+    pub fn register<T: Component>(&mut self) -> Result<(), StoreError> {
+        self.ensure_kind::<T>()
     }
 
     /// The tick the next write will store.
+    ///
+    /// Sample this, then write. [`Self::changes_since`] of the sampled value
+    /// includes that write and every later one, and it does not skip an older
+    /// write whose tick is still at or after the cursor. After the deltas are
+    /// applied, store [`Self::clock`] again: that value is past the ticks just
+    /// consumed.
     #[must_use]
     pub const fn clock(&self) -> u32 {
         self.clock
@@ -378,6 +417,7 @@ impl World {
         slot.place = None;
         slot.generation = next_generation(slot.generation);
         self.free.insert(handle.index());
+        self.note_removal(handle, "");
         Ok(())
     }
 
@@ -396,7 +436,8 @@ impl World {
 
     /// Exclusive access. A write through the guard stores a new tick on drop.
     ///
-    /// A read through the guard does not. Forgetting the guard (instead of
+    /// A read through the guard does not take a tick, and neither does dropping
+    /// the guard without [`DerefMut`]. Forgetting the guard (instead of
     /// dropping it) skips the tick.
     ///
     /// # Errors
@@ -405,23 +446,24 @@ impl World {
     /// [`StoreError::Missing`] when the object has no `T`.
     pub fn get_mut<T: Component>(&mut self, handle: SceneHandle) -> Result<Mut<'_, T>, StoreError> {
         let (archetype, row) = self.place(handle)?;
-        if self.column::<T>(archetype).is_none() {
-            return Err(StoreError::Missing);
-        }
-        let now = self.clock;
-        self.clock = next_clock(now);
-        let column = self.column_mut::<T>(archetype).ok_or(StoreError::Missing)?;
-        let TypedCol { values, ticks, .. } = column;
-        let Some(value) = values.get_mut(row) else {
-            return Err(StoreError::Missing);
-        };
-        let Some(tick) = ticks.get_mut(row) else {
-            return Err(StoreError::Missing);
-        };
+        let World {
+            clock, archetypes, ..
+        } = self;
+        let arch = archetypes.get_mut(archetype).ok_or(StoreError::Missing)?;
+        let index = arch
+            .index_of(TypeId::of::<T>())
+            .ok_or(StoreError::Missing)?;
+        let column = arch.columns.get_mut(index).ok_or(StoreError::Missing)?;
+        let typed = column
+            .as_any_mut()
+            .downcast_mut::<TypedCol<T>>()
+            .ok_or(StoreError::Missing)?;
+        let value = typed.values.get_mut(row).ok_or(StoreError::Missing)?;
+        let tick = typed.ticks.get_mut(row).ok_or(StoreError::Missing)?;
         Ok(Mut {
             value,
             tick,
-            now,
+            clock,
             dirty: false,
         })
     }
@@ -447,7 +489,7 @@ impl World {
         handle: SceneHandle,
         value: T,
     ) -> Result<(), StoreError> {
-        self.ensure_kind::<T>();
+        self.ensure_kind::<T>()?;
         let (from, row) = self.place(handle)?;
         let type_id = TypeId::of::<T>();
         if self
@@ -467,8 +509,7 @@ impl World {
         };
         signature.insert(pos, type_id);
         let to = self.ensure_archetype(&signature)?;
-        let now = self.clock;
-        self.clock = next_clock(now);
+        let now = self.take_tick();
         self.move_row(from, row, to, Some((pos, value, now)))
     }
 
@@ -479,7 +520,7 @@ impl World {
     /// [`StoreError::Stale`] when the handle is not live.
     /// [`StoreError::Missing`] when the object has no `T`.
     pub fn remove<T: Component>(&mut self, handle: SceneHandle) -> Result<T, StoreError> {
-        self.ensure_kind::<T>();
+        self.ensure_kind::<T>()?;
         let (from, row) = self.place(handle)?;
         let value = self
             .column::<T>(from)
@@ -497,6 +538,7 @@ impl World {
         signature.remove(pos);
         let to = self.ensure_archetype(&signature)?;
         self.move_row::<T>(from, row, to, None)?;
+        self.note_removal(handle, T::component_name());
         Ok(value)
     }
 
@@ -551,9 +593,13 @@ impl World {
         out
     }
 
-    /// Components written after `tick`, sorted by handle index then name.
+    /// Components and removals at or after `tick`, sorted by handle index, then tick, then name.
     ///
-    /// A tick of `0` returns every write, because stored ticks start at 1.
+    /// Pass the value [`Self::clock`] returned before the writes. A cursor of
+    /// `0` returns every stored tick, including ones past the wrapping half,
+    /// because stored ticks start at 1 and `0` means "from the start". Any
+    /// other cursor uses a wrapping compare, so a tick just after `u32::MAX`
+    /// is still ahead of a cursor of `u32::MAX`.
     #[must_use]
     pub fn changes_since(&self, tick: u32) -> Vec<ComponentDelta> {
         let mut out = Vec::new();
@@ -572,11 +618,21 @@ impl World {
                 }
             }
         }
+        for removal in &self.removals {
+            if changed_since(removal.tick, tick) {
+                out.push(ComponentDelta {
+                    handle: removal.handle,
+                    component: removal.component,
+                    tick: removal.tick,
+                    bytes: Vec::new(),
+                });
+            }
+        }
         out.sort_by(|left, right| {
-            (left.handle.index(), left.component, left.tick).cmp(&(
+            (left.handle.index(), left.tick, left.component).cmp(&(
                 right.handle.index(),
-                right.component,
                 right.tick,
+                right.component,
             ))
         });
         out
@@ -592,6 +648,12 @@ impl World {
     /// [`StoreError::Decode`] when the bytes are not that component.
     /// [`StoreError::Stale`] when the handle is not live.
     pub fn apply_delta(&mut self, delta: &ComponentDelta) -> Result<(), StoreError> {
+        if delta.bytes.is_empty() {
+            if delta.component.is_empty() {
+                return self.despawn(delta.handle);
+            }
+            return self.remove_named(delta.handle, delta.component);
+        }
         let apply = self
             .kinds
             .iter()
@@ -631,14 +693,14 @@ impl World {
                 .get(slot_index)
                 .map(|slot| slot.generation)
                 .ok_or(StoreError::Full)?;
-            return Ok(SceneHandle::new(index, generation));
+            return SceneHandle::new(index, generation).ok_or(StoreError::Stale);
         }
         let index = u32::try_from(self.slots.len()).map_err(|_err| StoreError::Full)?;
         self.slots.push(Slot {
             generation: 1,
             place: None,
         });
-        Ok(SceneHandle::new(index, 1))
+        SceneHandle::new(index, 1).ok_or(StoreError::Stale)
     }
 
     fn note_stale(&mut self) {
@@ -667,17 +729,46 @@ impl World {
         Some((archetype, row))
     }
 
-    fn ensure_kind<T: Component>(&mut self) {
+    fn ensure_kind<T: Component>(&mut self) -> Result<(), StoreError> {
         let type_id = TypeId::of::<T>();
         if self.kinds.iter().any(|kind| kind.type_id == type_id) {
-            return;
+            return Ok(());
+        }
+        let name = T::component_name();
+        if name.is_empty() || self.kinds.iter().any(|kind| kind.name == name) {
+            return Err(StoreError::Unknown);
         }
         self.kinds.push(Kind {
             type_id,
-            name: T::component_name(),
+            name,
             make: make_column::<T>,
             apply: apply_component::<T>,
+            remove: remove_component::<T>,
         });
+        Ok(())
+    }
+
+    fn take_tick(&mut self) -> u32 {
+        take_tick(&mut self.clock)
+    }
+
+    fn note_removal(&mut self, handle: SceneHandle, component: &'static str) {
+        let tick = self.take_tick();
+        self.removals.push(Removal {
+            handle,
+            component,
+            tick,
+        });
+    }
+
+    fn remove_named(&mut self, handle: SceneHandle, name: &str) -> Result<(), StoreError> {
+        let remove = self
+            .kinds
+            .iter()
+            .find(|kind| kind.name == name)
+            .map(|kind| kind.remove)
+            .ok_or(StoreError::Unknown)?;
+        remove(self, handle)
     }
 
     fn ensure_archetype(&mut self, signature: &[TypeId]) -> Result<usize, StoreError> {
@@ -717,8 +808,7 @@ impl World {
         }) {
             return Err(StoreError::Missing);
         }
-        let now = self.clock;
-        self.clock = next_clock(now);
+        let now = self.take_tick();
         let column = self.column_mut::<T>(archetype).ok_or(StoreError::Missing)?;
         let Some(slot) = column.values.get_mut(row) else {
             return Err(StoreError::Missing);
@@ -766,26 +856,43 @@ impl World {
             .ok_or(StoreError::Missing)?;
         let dest_signature = dest.signature.clone();
         let source_signature = source.signature.clone();
+        let mut pushed = Vec::new();
         for (index, type_id) in dest_signature.iter().enumerate() {
             if fresh.as_ref().is_some_and(|(pos, _, _)| *pos == index) {
                 if *type_id != TypeId::of::<T>() {
+                    pop_rows(dest, &pushed);
                     return Err(StoreError::Unknown);
                 }
                 continue;
             }
             let src_index = match source_signature.binary_search(type_id) {
                 Ok(src_index) => src_index,
-                Err(_missing) => return Err(StoreError::Unknown),
+                Err(_missing) => {
+                    pop_rows(dest, &pushed);
+                    return Err(StoreError::Unknown);
+                }
             };
-            let source_column = source.columns.get(src_index).ok_or(StoreError::Unknown)?;
-            let dest_column = dest.columns.get_mut(index).ok_or(StoreError::Unknown)?;
-            if !dest_column.push_clone_from(source_column.as_ref(), row) {
+            let Some(source_column) = source.columns.get(src_index) else {
+                pop_rows(dest, &pushed);
+                return Err(StoreError::Unknown);
+            };
+            let copied = match dest.columns.get_mut(index) {
+                Some(dest_column) => dest_column.push_clone_from(source_column.as_ref(), row),
+                None => false,
+            };
+            if !copied {
+                pop_rows(dest, &pushed);
                 return Err(StoreError::Unknown);
             }
+            pushed.push(index);
         }
         if let Some((pos, value, tick)) = fresh {
-            let dest_column = dest.columns.get_mut(pos).ok_or(StoreError::Unknown)?;
-            if !push_typed(dest_column.as_mut(), value, tick) {
+            let copied = match dest.columns.get_mut(pos) {
+                Some(dest_column) => push_typed(dest_column.as_mut(), value, tick),
+                None => false,
+            };
+            if !copied {
+                pop_rows(dest, &pushed);
                 return Err(StoreError::Unknown);
             }
         }
@@ -858,6 +965,13 @@ fn make_column<T: Component>() -> Box<dyn Column> {
     })
 }
 
+fn remove_component<T: Component>(
+    world: &mut World,
+    handle: SceneHandle,
+) -> Result<(), StoreError> {
+    world.remove::<T>(handle).map(|_value| ())
+}
+
 fn apply_component<T: Component>(
     world: &mut World,
     handle: SceneHandle,
@@ -927,6 +1041,36 @@ fn swap_remove_vec<T>(values: &mut Vec<T>, row: usize) -> Option<T> {
     values.pop()
 }
 
+fn pop_rows(dest: &mut Archetype, pushed: &[usize]) {
+    for index in pushed.iter().rev() {
+        if let Some(column) = dest.columns.get_mut(*index) {
+            let _ = column.pop_row();
+        }
+    }
+}
+
+/// `true` when `tick` is the cursor or newer.
+///
+/// A cursor of `0` means every stored tick. Stored ticks start at 1, so this
+/// is the "from the start" cursor and it does not use the half-range cut.
+/// Any other cursor uses a wrapping compare: `tick - since` in the lower half
+/// of `u32` is still ahead, which is how a tick of `1` follows `u32::MAX`.
+fn changed_since(tick: u32, since: u32) -> bool {
+    if since == 0 {
+        return tick != 0;
+    }
+    tick.wrapping_sub(since) < (1_u32 << 31)
+}
+
+fn take_tick(clock: &mut u32) -> u32 {
+    if *clock == 0 {
+        *clock = 1;
+    }
+    let tick = *clock;
+    *clock = next_clock(tick);
+    tick
+}
+
 fn next_generation(generation: u32) -> u32 {
     match generation.wrapping_add(1) {
         0 => 1,
@@ -943,4 +1087,107 @@ fn next_clock(clock: u32) -> u32 {
 
 fn as_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
+mod tests {
+    use super::*;
+    use crate::{push_u32, read_u32, DecodeError};
+
+    #[derive(Clone)]
+    struct Health(u32);
+
+    impl Component for Health {
+        fn component_name() -> &'static str {
+            "health"
+        }
+
+        fn encode(&self, out: &mut Vec<u8>) {
+            push_u32(out, self.0);
+        }
+
+        fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+            let mut input = bytes;
+            let value = read_u32(&mut input)?;
+            if !input.is_empty() {
+                return Err(DecodeError::Trailing);
+            }
+            Ok(Self(value))
+        }
+    }
+
+    #[derive(Clone)]
+    struct Tag(u32);
+
+    impl Component for Tag {
+        fn component_name() -> &'static str {
+            "tag"
+        }
+
+        fn encode(&self, out: &mut Vec<u8>) {
+            push_u32(out, self.0);
+        }
+
+        fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+            let mut input = bytes;
+            let value = read_u32(&mut input)?;
+            if !input.is_empty() {
+                return Err(DecodeError::Trailing);
+            }
+            Ok(Self(value))
+        }
+    }
+
+    #[test]
+    fn a_tick_after_the_wrap_is_still_ahead_of_max() {
+        let mut world = World::new();
+        world.clock = u32::MAX;
+        let cursor = world.clock();
+        let handle = world.spawn_with(Health(1)).expect("spawn");
+        let first = world.changes_since(cursor);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tick, u32::MAX);
+        let after = world.clock();
+        assert_eq!(after, 1);
+        world.insert(handle, Tag(4)).expect("edit");
+        let next = world.changes_since(after);
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].tick, 1);
+        let across = world.changes_since(cursor);
+        assert_eq!(across.len(), 2, "the write before the wrap was skipped");
+        assert!(across.iter().any(|delta| delta.tick == u32::MAX));
+        assert!(across.iter().any(|delta| delta.tick == 1));
+    }
+
+    #[test]
+    fn copy_row_rolls_back_a_failed_push() {
+        let mut world = World::new();
+        let handle = world.spawn_with(Health(1)).expect("spawn");
+        world.insert(handle, Tag(2)).expect("tag");
+        let (from, row) = world.find(handle).expect("place");
+        world.archetypes.push(Archetype {
+            signature: world.archetypes[from].signature.clone(),
+            entities: Vec::new(),
+            columns: vec![
+                Box::new(TypedCol::<Health> {
+                    name: "health",
+                    values: Vec::new(),
+                    ticks: Vec::new(),
+                }),
+                Box::new(TypedCol::<Health> {
+                    name: "tag",
+                    values: Vec::new(),
+                    ticks: Vec::new(),
+                }),
+            ],
+        });
+        let to = world.archetypes.len() - 1;
+        let err = world.copy_row::<Tag>(from, row, to, None);
+        assert!(err.is_err());
+        assert_eq!(world.archetypes[to].columns[0].len(), 0);
+        assert_eq!(world.archetypes[to].entities.len(), 0);
+        assert_eq!(world.get::<Health>(handle).expect("health").0, 1);
+        assert_eq!(world.get::<Tag>(handle).expect("tag").0, 2);
+    }
 }

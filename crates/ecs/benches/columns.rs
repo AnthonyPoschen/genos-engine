@@ -58,7 +58,7 @@ fn main() -> ExitCode {
         eprintln!("sum {sum} != {expected}");
         return ExitCode::from(1);
     }
-    let cursor = world.clock().saturating_sub(1);
+    let cursor = world.clock();
     let Some(handle) = world.handles_with::<Marker>().first().copied() else {
         return ExitCode::from(1);
     };

@@ -43,22 +43,22 @@ One table of placed objects, each with a scene handle that a save file, an undo 
 
 ## 4. Options
 
-| | bevy_ecs | hecs | flecs-style relationships | Custom archetypes in `genos-scene` |
+| | bevy_ecs | hecs | flecs-style relationships | Custom archetypes in `genos-ecs` |
 |---|---|---|---|---|
 | Storage | Archetype tables | Archetype tables | Archetype tables plus a relation index | Archetype tables |
 | Id | `Entity` (index, generation) | `Entity` (index, generation) | `entity_t` | Scene handle `{ index: u32, generation: u32 }` |
 | Hierarchy | `ChildOf` since 0.15 | A component the caller adds | `ChildOf` as a relationship | A `Parent` component, one link |
 | Prefab | A scene and a spawn | A spawn the caller writes | `IsA` overrides | A prefab file and a `PrefabSource` component |
 | Change detection | Per-component tick | None | Component hooks, query order is graph order | A `u32` tick per column, copied from the bevy filter idea |
-| Who owns the world | The bevy crate, including its schedule | The hecs crate | A C runtime | `genos-scene`, which already owns `Scene` |
+| Who owns the world | The bevy crate, including its schedule | The hecs crate | A C runtime | `genos-ecs`. `genos-scene` keeps `Scene` |
 | Deterministic iteration | The caller's order | The caller's order | Relationship traversal order | Column order, then scene-handle order at the stage join |
-| Fit | Pulls the scheduler this repo is designing separately, and would own the scene type MCP and the renderer already use | The right storage, none of the handle, parent, tick, or file behavior, and the scene type would still move into that crate | A relation engine for two links, and a C ABI under ADR 0007 | The storage stays next to `Wall` and `Solid` |
+| Fit | Pulls the scheduler this repo is designing separately, and would own the scene type MCP and the renderer already use | The right storage, none of the handle, parent, tick, or file behavior, and the scene type would still move into that crate | A relation engine for two links, and a C ABI under ADR 0007 | The tables are their own crate. `Scene` stays with the renderer and MCP |
 
 ## 5. Recommendation
 
-Keep the scene in `genos-scene`. Store objects in archetype tables. Give every placed object a scene handle. Implement exactly two links, each as a component: `Parent` and `PrefabSource`. Emit change records from column ticks, in handle order.
+Keep `Scene`, the script, and the draw lists in `genos-scene`. The archetype tables live in `genos-ecs` (`crates/ecs`). Give every placed object a scene handle. Implement exactly two links, each as a component: `Parent` and `PrefabSource`. Emit change records from column ticks, in handle order.
 
-**Why archetypes, and why here.** A wall does not gain and drop components every frame, so the archetype move on add and remove stays rare. The columns a job walks are contiguous: every local transform at one depth, every light. That is the layout the [job system](job-system.md) reduces by index. Frykholm's packed column is the same idea without the archetype grouping; hecs and bevy show the grouping. Putting it in a new crate, or inside hecs, would split `Scene` away from the renderer and from MCP, which already take it by value.
+**Why archetypes, and why `genos-ecs`.** A wall does not gain and drop components every frame, so the archetype move on add and remove stays rare. The columns a job walks are contiguous: every local transform at one depth, every light. That is the layout the [job system](job-system.md) reduces by index. Frykholm's packed column is the same idea without the archetype grouping; hecs and bevy show the grouping. The tables live in `genos-ecs` so animation and replication can take the store without Rhai, the camera, or the lighting settings. `genos-scene` keeps `Scene`, which the renderer and MCP already take by value.
 
 **Why not the other three.** `bevy_ecs` would own the world and bring a schedule on top of the job system. hecs has the tables and stops there: the handle persistence, the parent, the tick, and the prefab file would be this design anyway, living outside the crate that owned the bytes. flecs relationships are the right model for a generic graph. This scene has two links. A query that walks a relation graph has an order the server hash would have to pin down. A `Parent` component iterated by depth, then by handle, has an order that is a sort.
 

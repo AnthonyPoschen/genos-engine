@@ -104,9 +104,10 @@ pub fn output_dir(options: &Options) -> PathBuf {
 
 /// Run the fixed check.
 ///
-/// `stale_accept` expects a despawned handle to accept a write. `skip_tick`
-/// expects an edit to leave the health tick unchanged. The store does neither,
-/// so the check fails while the mutation is on.
+/// `--mutate skip_tick` drops the edit, so no health delta is emitted.
+/// `--mutate stale_accept` treats the despawned handle as a successful write.
+/// The assertions stay the ones a correct store must pass, so either planted
+/// bug makes the check fail.
 ///
 /// # Errors
 ///
@@ -114,33 +115,34 @@ pub fn output_dir(options: &Options) -> PathBuf {
 pub fn run_check(mutate: Option<&str>) -> Result<Stats, String> {
     let mut world = World::new();
     let handle = world.spawn_with(Health(1)).map_err(|err| err.to_string())?;
-    let cursor = world.clock().saturating_sub(1);
-    world
-        .insert(handle, Health(2))
-        .map_err(|err| err.to_string())?;
+    let cursor = world.clock();
+    if mutate == Some("skip_tick") {
+        // Planted bug: the edit is discarded, so the cell keeps its old tick.
+    } else {
+        world
+            .insert(handle, Health(2))
+            .map_err(|err| err.to_string())?;
+    }
     let deltas = world.changes_since(cursor);
     let tick_moved = deltas.len() == 1
         && deltas
             .first()
-            .is_some_and(|delta| delta.component == "health");
-    if mutate == Some("skip_tick") {
-        if tick_moved {
-            return Err("skip_tick: the edit still advanced the health tick".into());
-        }
-    } else if !tick_moved {
+            .is_some_and(|delta| delta.component == "health" && !delta.bytes.is_empty());
+    if !tick_moved {
         return Err("an edit did not emit a health delta".into());
     }
     world.despawn(handle).map_err(|err| err.to_string())?;
-    let stale = world.insert(handle, Health(3));
-    if mutate == Some("stale_accept") {
-        if stale.is_err() {
-            return Err("stale_accept: the despawned handle was rejected".into());
-        }
-    } else if stale != Err(StoreError::Stale) {
+    let stale = if mutate == Some("stale_accept") {
+        // Planted bug: a despawned handle is treated as a successful write.
+        Ok(())
+    } else {
+        world.insert(handle, Health(3))
+    };
+    if stale != Err(StoreError::Stale) {
         return Err("a despawned handle accepted a write".into());
     }
     world.audit()?;
-    if mutate.is_none() && world.stats().stale_rejects != 1 {
+    if world.stats().stale_rejects != 1 {
         return Err("stale_rejects did not count the refused write".into());
     }
     Ok(world.stats())
