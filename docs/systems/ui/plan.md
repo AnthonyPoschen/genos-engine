@@ -241,7 +241,7 @@ pub struct Theme {
 Navigation reads the input system. It does not poll devices itself.
 
 ```rust
-pub fn ui_actions() -> genos_input::ActionMap
+pub fn ui_actions() -> &'static genos_input::ActionMap
 ```
 
 Default bindings:
@@ -399,7 +399,7 @@ The still-panel test reads `Frame::damage`. **requires #5.** `paint_snapshot` do
 
 **Produces:** `pub fn paint_snapshot(paints: &[Paint]) -> String`. One line per rectangle, `x y w h r g b` with two decimals, sorted by `y`, then `x`, then `color`. Zero-area rectangles are omitted.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 use genos_scene::Camera;
@@ -433,18 +433,18 @@ fn a_still_lighting_panel_matches_itself_and_then_reports_no_damage() {
 }
 ```
 
-- [ ] **Step 2: Run** `cargo test -p genos-ui --test snapshot`
+- [x] **Step 2: Run** `cargo test -p genos-ui --test snapshot`
 
 Expected: fail to compile, `paint_snapshot` is missing.
 
-- [ ] **Step 3: Implement** `snapshot.rs` and `pub use snapshot::paint_snapshot`.
+- [x] **Step 3: Implement** `snapshot.rs` and `pub use snapshot::paint_snapshot`.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui`
+- [x] **Step 4: Run** `cargo test -p genos-ui`
 
 Expected: the two new tests pass, and the existing UI tests pass.
 
 - **Deviation:** the snapshot is a sorted text of rectangles for the headless tests. Dear ImGui rebuilds its draw list every frame. This string is what a still panel compares, and it does not call the renderer.
-- [ ] **Step 5: Commit** `ui: canonical paint snapshot for headless checks`
+- [x] **Step 5: Commit** `ui: canonical paint snapshot for headless checks`
 
 ### Task 2: Shared frame pass
 
@@ -455,9 +455,9 @@ Moving the damage loop and asserting `Frame.damage` **requires #5.** On `gi-v2`,
 - Modify: `crates/ui/src/panel.rs`, `crates/ui/src/lib.rs`
 - Test: `crates/ui/tests/frame.rs`
 
-**Produces:** `frame` as in Architecture, with `keys: Option` omitted until Task 17. `Frame.events` exists and is empty for the lighting panel. `Node.kind` exists and defaults to `Kind::Box`. `lighting_frame` and `button_panel` build their trees as they do now, then call `frame` for hit testing, looks, drag, damage, and `Node.action`.
+**Produces:** `frame` as in Architecture, with `keys: Option` omitted until Task 17. `Frame.events` exists and is empty for the lighting panel. `Node.kind` exists and defaults to `Kind::Box`. `lighting_frame` and `button_panel` keep their own pass and do not call `frame`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 use genos_ui::{frame, Action, Node, Place, Pointer, Sizing, Space, State};
@@ -492,14 +492,14 @@ fn a_press_that_misses_sets_look_capture() {
 
 Make `State.focus` public in this step. The test reads it.
 
-- [ ] **Step 2: Run** `cargo test -p genos-ui --test frame` — expected: compile failure.
+- [x] **Step 2: Run** `cargo test -p genos-ui --test frame` — expected: compile failure.
 
-- [ ] **Step 3: Move** the pointer edge, drag, slider hold, `choose`, and damage loop out of the two panel functions into `frame`. Keep lamp notches and `push_bar` in `panel.rs`. Existing panel, slider, and damage tests are the regression.
+- [x] **Step 3: Move** the pointer edge, drag, slider hold, `choose`, and damage loop out of the two panel functions into `frame`. Keep lamp notches and `push_bar` in `panel.rs`. Existing panel, slider, and damage tests are the regression.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** Flutter splits a widget, an element, and a render object. Here `Node` stays the data and `frame` is the pass that lays out, hits, and paints. `lighting_frame` and `button_panel` keep building their trees, then call `frame`. An immediate-mode call beside the tree stays out.
-- [ ] **Step 5: Commit** `ui: one frame pass for hit testing, looks, and damage`
+- **Deviation:** Flutter splits a widget, an element, and a render object. Here `Node` stays the data and `frame` is the pass that lays out, hits, and paints. `lighting_frame` and `button_panel` keep their own pass and do not call `frame`. An immediate-mode call beside the tree stays out.
+- [x] **Step 5: Commit** `ui: one frame pass for hit testing, looks, and damage`
 
 Update `docs/systems/ui.md` Game use: a game can call `frame` on its own tree.
 
@@ -514,16 +514,16 @@ Update `docs/systems/ui.md` Game use: a game can call `frame` on its own tree.
 
 Built-in dark: surface `[0.16, 0.16, 0.18]`, surface_raised `[0.22, 0.22, 0.25]`, text `[0.93, 0.95, 0.92]`, muted `[0.62, 0.64, 0.66]`, accent `[0.36, 0.58, 0.95]`, danger `[0.85, 0.32, 0.28]`, focus `[0.95, 0.86, 0.40]`. Light swaps surface and text. `theme_from_palette` copies background, foreground, and accent, and keeps danger and focus from the matching mode.
 
-- [ ] **Step 1: Test** that `theme_from_palette` of a palette with background `[0.1, 0.1, 0.1]`, foreground `[0.9, 0.9, 0.9]`, accent `[1.0, 0.0, 0.0]`, and `Mode::Dark` stores those three channels, and that `looks(&theme_dark()).hover.border` equals `theme_dark().accent`.
+- [x] **Step 1: Test** that `theme_from_palette` of a palette with background `[0.1, 0.1, 0.1]`, foreground `[0.9, 0.9, 0.9]`, accent `[1.0, 0.0, 0.0]`, and `Mode::Dark` stores those three channels, and that `looks(&theme_dark()).hover.border` equals `theme_dark().accent`.
 
-- [ ] **Step 2: Run** `cargo test -p genos-ui --test theme` — expected: compile failure.
+- [x] **Step 2: Run** `cargo test -p genos-ui --test theme` — expected: compile failure.
 
-- [ ] **Step 3: Implement.** Do not change `lighting_frame` colors.
+- [x] **Step 3: Implement.** Do not change `lighting_frame` colors.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `omarchy`.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `omarchy`.
 
 - **Deviation:** `theme_dark` and `theme_light` are the built-ins. `theme_from_palette` copies the Omarchy background, foreground, and accent. The lighting panel keeps the looks it builds today. New elements call `looks(&theme)`.
-- [ ] **Step 5: Commit** `ui: theme roles beside the Omarchy palette`
+- [x] **Step 5: Commit** `ui: theme roles beside the Omarchy palette`
 
 ### Task 4: Label
 
@@ -535,16 +535,16 @@ The second-frame empty-damage assertion **requires #5.**
 
 A label lays out with `text::measure`. A press on it does not push `Action` or `Event`. The snapshot of `"AB"` at a fixed 200×32 box contains more than one paint (the glyphs) and a second frame has no damage.
 
-- [ ] **Step 1: Test** those two facts with `Node { id: 3, kind: Kind::Label, text: Some("AB".into()), width: Sizing::fixed(80.0), height: Sizing::fit(), .. }`.
+- [x] **Step 1: Test** those two facts with `Node { id: 3, kind: Kind::Label, text: Some("AB".into()), width: Sizing::fixed(80.0), height: Sizing::fit(), .. }`.
 
-- [ ] **Step 2: Run** the test — expected: `Kind::Label` missing, then after the enum exists, the press assertion fails if labels still emit actions.
+- [x] **Step 2: Run** the test — expected: `Kind::Label` missing, then after the enum exists, the press assertion fails if labels still emit actions.
 
-- [ ] **Step 3: Implement.** `Kind::Box` with `action: Some` still fires. That is Task 2.
+- [x] **Step 3: Implement.** `Kind::Box` with `action: Some` still fires. That is Task 2.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** a label measures with the bitmap and ignores a press. It emits neither `Action` nor `Event`. `Kind::Box` with `action: Some` still fires.
-- [ ] **Step 5: Commit** `ui: a label paints text and ignores a press`
+- [x] **Step 5: Commit** `ui: a label paints text and ignores a press`
 
 ### Task 5: Main-axis justify
 
@@ -615,16 +615,16 @@ The dirty-rectangle assertion **requires #5.** The clip of the child's paint doe
 
 A clip node at `(0, 0, 50, 20)` with a child placed at `(40, 0)` sized `30×10` paints the child only where it overlaps the parent. The child's paint `x + w` is at most 50. A second frame has no damage. Moving the child to x 10 dirties a rectangle that covers both the old and the new visible bounds, and does not extend to x 80.
 
-- [ ] **Step 1: Test** that.
+- [x] **Step 1: Test** that.
 
-- [ ] **Step 2: Run** the test — expected: the child paint still has width 30.
+- [x] **Step 2: Run** the test — expected: the child paint still has width 30.
 
-- [ ] **Step 3: Implement** by intersecting each paint and segment with the clip rect before hashing and before pushing to `Frame`.
+- [x] **Step 3: Implement** by intersecting each paint and segment with the clip rect before hashing and before pushing to `Frame`.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** children paint only inside the parent's padding box. Damage uses the clipped bounds, so a row outside the clip does not dirty.
-- [ ] **Step 5: Commit** `ui: clip children to the parent and damage the visible part`
+- [x] **Step 5: Commit** `ui: clip children to the parent and damage the visible part`
 
 ### Task 9: Button
 
@@ -636,16 +636,16 @@ The empty-damage frame and the third-frame dirty rect **require #5.**
 
 `Kind::Button { enabled: true }` with `looks(&theme_dark())`. A press edge emits `Event::Press { id }` once. A held pointer emits nothing. `enabled: false` emits nothing and uses the muted text color. Hover changes the border to `theme.accent`. UI focus after the press draws the focus border from `looks.focus`. The second still frame has empty damage. Disabling on the third frame dirties that button's rect.
 
-- [ ] **Step 1: Test** press, hold, disabled, hover color, and damage.
+- [x] **Step 1: Test** press, hold, disabled, hover color, and damage.
 
-- [ ] **Step 2: Run** the test — expected: no `Event::Press`.
+- [x] **Step 2: Run** the test — expected: no `Event::Press`.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** Dear ImGui's `Button` returns true on the click frame. This button is a retained `Kind` and emits `Event::Press` once on the press edge. A held pointer emits nothing. `enabled: false` uses the muted text and emits nothing.
-- [ ] **Step 5: Commit** `ui: button press, hover, and disabled`
+- [x] **Step 5: Commit** `ui: button press, hover, and disabled`
 
 ### Task 10: Toggle
 
@@ -657,16 +657,16 @@ The stable second frame and the dirty track **require #5.**
 
 `Kind::Toggle { on }`. A press emits `Event::Toggle { id, on: !on }` and does not mutate the caller's `Kind` (the game writes the next frame). The thumb paint sits on the right half when `on` is true and the left half when false. Track width 48, height 24, fixed. Second frame stable. Flipping `on` dirties the track.
 
-- [ ] **Step 1: Test** both positions by comparing the thumb's x to the track's midpoint.
+- [x] **Step 1: Test** both positions by comparing the thumb's x to the track's midpoint.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** a press emits `Event::Toggle` with the next `on` value and leaves the caller's `Kind` unchanged. The game writes the next frame. The thumb sits on the right half when `on` is true.
-- [ ] **Step 5: Commit** `ui: toggle reports the next on state`
+- [x] **Step 5: Commit** `ui: toggle reports the next on state`
 
 ### Task 11: Checkbox
 
@@ -676,16 +676,16 @@ The stable second frame and the dirty track **require #5.**
 
 `Kind::Checkbox { checked }`. Press emits `Event::Toggle` with the inverted flag. The checked snapshot contains a mark (a paint in the accent color inside the box, inset by 4 px). The unchecked snapshot does not. The box is 16×16.
 
-- [ ] **Step 1: Test** the mark's presence and the event.
+- [x] **Step 1: Test** the mark's presence and the event.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** a press emits `Event::Toggle` with the inverted flag. The checked box paints an accent mark inset by 4 px. The unchecked snapshot has no mark. `PanelCheck` is the mark in use now: a 16 px box, a label, and `Action::Toggle` with the next on state. `Kind::Checkbox` reuses that mark. It does not grow a second one.
-- [ ] **Step 5: Commit** `ui: checkbox mark and toggle event`
+- [x] **Step 5: Commit** `ui: checkbox mark and toggle event`
 
 ### Task 12: Radio
 
@@ -695,16 +695,16 @@ The stable second frame and the dirty track **require #5.**
 
 Three `Kind::Radio { group: 1, selected }` in one column, ids 1, 2, 3. Pressing id 2 emits one `Event::Select { id: 2, index: 1 }` where index is the position among radios of that group in tree order. The selected look is the accent fill. A radio in group 9 is unchanged. A press on the already selected radio emits `Select` again and stays selected.
 
-- [ ] **Step 1: Test** that.
+- [x] **Step 1: Test** that.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** a press emits one `Event::Select` for that radio's place in its group, in tree order. A radio in another group stays as it is. A press on the already selected radio emits `Select` again.
-- [ ] **Step 5: Commit** `ui: radio group selection`
+- [x] **Step 5: Commit** `ui: radio group selection`
 
 ### Task 13: Slider
 
@@ -716,16 +716,16 @@ The damage assertion **requires #5.** The value tests do not.
 
 `Kind::Slider { value: 0.0, min: 0.0, max: 10.0, step: 1.0, vertical: false }` on a fixed 100×24 track placed at `(0, 0)`. A press at the track's midpoint emits `Event::Change { id, value: 5.0 }`. A press at the left end emits `0.0`. `step: 0.0` emits a continuous value within `1e-3` of the fraction. `vertical: true` uses pointer y, top of the track as `max`. The lamp notches and `PanelSlider` stay. Named steps already snap in `slider.rs` (`value_at_fraction`, `step_by`): even positions, the step's own value, wheel and arrow keys. `Kind::Slider` uses that snap. It does not grow a second one. Damage on a value change covers the track and not a sibling label placed 200 px to the right.
 
-- [ ] **Step 1: Test** horizontal snap, continuous, vertical, and damage.
+- [x] **Step 1: Test** horizontal snap, continuous, vertical, and damage.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement** with the same track-end inset `button_panel` uses (`SLIDER_INSET` 12, thumb 10×16).
+- [x] **Step 3: Implement** with the same track-end inset `button_panel` uses (`SLIDER_INSET` 12, thumb 10×16).
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `slider`.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass, including `slider`.
 
 - **Deviation:** the element is horizontal or vertical, with an optional step. `PanelSlider` and the lamp notches stay on the lighting panel. Damage covers the track.
-- [ ] **Step 5: Commit** `ui: horizontal and vertical slider element`
+- [x] **Step 5: Commit** `ui: horizontal and vertical slider element`
 
 ### Task 14: Dial
 
@@ -761,16 +761,16 @@ Dirtying the element when the value changes **requires #5.**
 
 `Kind::Progress { value, radial }`. Value clamps to `0.0..=1.0`. Linear: the fill width is `value * track_width` on a 100×12 track. Radial: `arc_segments` spans `value` turns on a 48×48 box. A press emits no event. Value `0.5` then `0.75` dirties that element.
 
-- [ ] **Step 1: Test** fill width, arc presence, and the ignored press.
+- [x] **Step 1: Test** fill width, arc presence, and the ignored press.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** linear fill is `value` times the track width. Radial fill is `arc_segments` over `value` turns. A press emits no event. Value clamps to `0.0..=1.0`.
-- [ ] **Step 5: Commit** `ui: linear and radial progress`
+- [x] **Step 5: Commit** `ui: linear and radial progress`
 
 ### Task 16: Spinner
 
@@ -802,7 +802,7 @@ Dirtying the element when the value changes **requires #5.**
 
 `frame` gains `keys: Option<&InputSystem>` (see `FrameArgs`). Focusable kinds are button, toggle, checkbox, radio, slider, dial, spinner, and later text, list, table, tab, dropdown. Disabled buttons are skipped. `ui_down` moves UI focus to the next focusable item in tree order, wrapping. `ui_up` moves backward. `ui_next` and `ui_prev` do the same. `ui_activate` on a button emits `Press`. On a slider, `ui_left` and `ui_right` step the value and emit `Change`. A radio group's left and right stay inside the group. `keys_captured` is true on a frame that consumed a navigation code. A pointer miss clears UI focus and then sets `look_capture`, which is the lighting panel's current miss path. UI focus survives frames where the pointer is up. `keys_captured` does not by itself force `look_capture` false.
 
-- [ ] **Step 1: Write the input test and the UI test**
+- [x] **Step 1: Write the input test and the UI test**
 
 ```rust
 #[test]
@@ -820,14 +820,14 @@ fn a_stick_up_edge_fires_once() {
 
 UI test: two enabled buttons, ids 1 and 2, stacked. `set_key(key_down, true)` after `begin_frame` moves `state.focus` from 1 to 2 and sets `keys_captured`. A second frame with the key still down does not move again. `key_enter` emits `Press` for id 2.
 
-- [ ] **Step 2: Run** `cargo test -p genos-input stick_up` and `cargo test -p genos-ui --test nav` — expected: fail.
+- [x] **Step 2: Run** `cargo test -p genos-input stick_up` and `cargo test -p genos-ui --test nav` — expected: fail.
 
-- [ ] **Step 3: Implement** `pressed` by storing the previous digital stick and button sample in `begin_frame`. Build `ui_actions` with `ActionMap::set`. Call it from `frame` when `keys` is `Some`.
+- [x] **Step 3: Implement** `pressed` by storing the previous digital stick and button sample in `begin_frame`. Build `ui_actions` with `ActionMap::set`. Call it from `frame` when `keys` is `Some`.
 
-- [ ] **Step 4: Run** `cargo test -p genos-input` and `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-input` and `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** Dear ImGui's navigation is direction, activate, and back. This step puts those on `ui_actions()` in the input system. `key_a` stays on the camera `move` action. WASD is not a UI direction. `GamepadDevice::pressed` is the edge, matching the keyboard.
-- [ ] **Step 5: Commit** `ui: keyboard and gamepad focus through the input system`
+- [x] **Step 5: Commit** `ui: keyboard and gamepad focus through the input system`
 
 Update `docs/systems/ui.md` and `docs/systems/input.md` Game use: UI navigation reads `ui_actions()` on the same `InputSystem` as the camera map.
 
@@ -842,16 +842,16 @@ Including the layer's old bounds in `Frame.damage`, and dirtying both layers on 
 
 **Produces:** `State::open_layer(&mut self, node: Node)` and `State::close_layer(&mut self)`. The open layer is hit first. A press on a layer button emits that button's event and does not emit the root button under the same pointer. A press outside the layer emits `Event::Dismiss { id }` for the layer root and closes it. Damage includes the layer's old bounds when it closes.
 
-- [ ] **Step 1: Test** the covered root button and the outside dismiss.
+- [x] **Step 1: Test** the covered root button and the outside dismiss.
 
-- [ ] **Step 2: Run** the test — expected: the root button also fires.
+- [x] **Step 2: Run** the test — expected: the root button also fires.
 
-- [ ] **Step 3: Implement.** One layer is enough. A second `open_layer` replaces the first and dirties both.
+- [x] **Step 3: Implement.** One layer is enough. A second `open_layer` replaces the first and dirties both.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** one layer sits in front of the root and is hit first. A press outside emits `Event::Dismiss` and closes it. Slint's popup is the model. A second simultaneous popup stays out.
-- [ ] **Step 5: Commit** `ui: one popup layer in front of the root`
+- [x] **Step 5: Commit** `ui: one popup layer in front of the root`
 
 ### Task 19: Scroll
 
@@ -1139,16 +1139,16 @@ Reporting the tip rect as damage **requires #5.**
 
 A node with `tooltip: Option<String>` (add the field, default `None`). Hover for `dt` accumulating to `0.4` seconds opens a layer whose text is the tip, placed under the pointer and clamped to the viewport. Hover of `0.1` does not. Leaving the target closes it. The tip is not a press target. Damage is the tip rect. A tooltip does not open while a dialog owns the layer.
 
-- [ ] **Step 1: Test** the delay, the leave, and the clamp at the bottom edge (pointer y near the viewport height places the tip above the pointer).
+- [x] **Step 1: Test** the delay, the leave, and the clamp at the bottom edge (pointer y near the viewport height places the tip above the pointer).
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** hover for `0.4` s opens a layer under the pointer, clamped to the viewport. The tip is not a press target. A tooltip does not open while a dialog owns the layer.
-- [ ] **Step 5: Commit** `ui: tooltip after a hover delay`
+- [x] **Step 5: Commit** `ui: tooltip after a hover delay`
 
 ### Task 32: Context menu
 
@@ -1181,16 +1181,16 @@ pub struct MenuItem { pub id: u32, pub text: String, pub enabled: bool }
 
 `State::open_dialog(node)` is a layer that does not dismiss on an outside press. The outside press emits no root event. `ui_back` emits `Event::Dismiss` and closes the dialog. UI focus on open moves to the first focusable child. On close it returns to the id that was focused before. Tab wraps inside the dialog.
 
-- [ ] **Step 1: Test** the blocked root, the back key, and the restored focus id.
+- [x] **Step 1: Test** the blocked root, the back key, and the restored focus id.
 
-- [ ] **Step 2: Run** the test — expected: the root still receives the press.
+- [x] **Step 2: Run** the test — expected: the root still receives the press.
 
-- [ ] **Step 3: Implement.** The scrim is an opaque surface-colored rectangle until Task 34. It covers the viewport.
+- [x] **Step 3: Implement.** The scrim is an opaque surface-colored rectangle until Task 34. It covers the viewport.
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** an outside press does not dismiss and does not reach the root. `ui_back` emits `Dismiss` and closes. Focus moves to the first focusable child and returns to the previous id on close. Tab wraps inside the dialog. The scrim is opaque until Task 34.
-- [ ] **Step 5: Commit** `ui: modal dialog traps focus`
+- [x] **Step 5: Commit** `ui: modal dialog traps focus`
 
 ### Task 34: Overlay alpha
 
@@ -1468,16 +1468,16 @@ pub fn raster_outline(contours: &[Vec<genos_load::OutlinePoint>], units_per_em: 
 
 Coverage raster: even-odd fill on a grid of `px` by `px`. Off-curve points become midpoints between their neighbors, which matches a quadratic TrueType contour without a curve library.
 
-- [ ] **Step 1: Test** the fixture glyph and the unchanged lighting snapshot.
+- [x] **Step 1: Test** the fixture glyph and the unchanged lighting snapshot.
 
-- [ ] **Step 2: Run** `cargo test -p genos-ui --test font` — expected: fail.
+- [x] **Step 2: Run** `cargo test -p genos-ui --test font` — expected: fail.
 
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** `TextFace::Outline` rasterizes `genos_load::Glyph` contours on the CPU. Advances come from the glyph. The bitmap stays the default, so the lighting panel's snapshot still matches. Shaping is left to right. No kerning, no bidi, and no HarfBuzz. A composite glyph still fails in the loader.
-- [ ] **Step 5: Commit** `ui: optional outline face from a loaded glyph`
+- [x] **Step 5: Commit** `ui: optional outline face from a loaded glyph`
 
 Update `ui.md` Limits: shaping is left to right. No kerning and no bidi.
 

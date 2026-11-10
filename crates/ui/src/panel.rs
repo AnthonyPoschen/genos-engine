@@ -116,17 +116,18 @@ impl Pointer {
 #[derive(Clone, Debug)]
 pub struct State {
     pub panel_offset: [f32; 2],
-    pointer_x: f32,
-    pointer_y: f32,
-    down: bool,
-    dragging: bool,
+    pub(crate) pointer_x: f32,
+    pub(crate) pointer_y: f32,
+    pub(crate) down: bool,
+    pub(crate) dragging: bool,
     /// Axis of the slider held by the current press.
     sliding: Option<u8>,
     /// Game slider held by the current press.
-    held: Option<u32>,
+    pub(crate) held: Option<u32>,
     /// The current press missed the panel, so look capture stays on.
-    look_hold: bool,
-    focus: Option<u32>,
+    pub(crate) look_hold: bool,
+    /// The element id that receives keys. A press sets it. A miss clears it.
+    pub focus: Option<u32>,
     /// Dropdown whose list is open. The list paints over the rest of the panel.
     open_drop: Option<u32>,
     drop_highlight: usize,
@@ -152,6 +153,20 @@ pub struct State {
     /// Per-panel wheel and key policy. Empty means the older path, which takes
     /// keys and the pointer the way it did before policies existed.
     pub input: FocusManager,
+    /// Outline masks for [`crate::TextFace::Outline`]. `None` keeps the bitmap.
+    pub outline: Option<crate::outline::OutlineFont>,
+    /// Role colors for [`crate::frame`]. The lighting panel does not read this.
+    pub theme: crate::theme::Theme,
+    /// Popup, dialog, or tooltip in front of the root. One layer at a time.
+    pub(crate) layer: Option<crate::layers::OpenLayer>,
+    /// Node under the pointer while a tooltip delay runs.
+    pub(crate) tooltip_id: Option<u32>,
+    /// Seconds the pointer has stayed on `tooltip_id`.
+    pub(crate) tooltip_secs: f32,
+    /// Node `frame` last dragged. Its rect keeps [`Self::drag_offset`].
+    pub(crate) drag_id: Option<u32>,
+    /// Pixels added to `drag_id` after layout.
+    pub(crate) drag_offset: [f32; 2],
 }
 
 impl Default for State {
@@ -180,6 +195,13 @@ impl Default for State {
             panel_hover: false,
             scroll: 0.0,
             input: FocusManager::default(),
+            outline: None,
+            theme: crate::theme::theme_dark(),
+            layer: None,
+            tooltip_id: None,
+            tooltip_secs: 0.0,
+            drag_id: None,
+            drag_offset: [0.0, 0.0],
         }
     }
 }
@@ -256,6 +278,11 @@ impl State {
         self.focus
     }
 
+    /// True while [`crate::frame`] is moving a draggable node.
+    pub fn dragging(&self) -> bool {
+        self.dragging
+    }
+
     fn toggle_section(&mut self, id: u32) {
         self.section_seen.insert(id);
         if !self.collapsed_sections.remove(&id) {
@@ -289,6 +316,8 @@ pub struct Paint {
     pub w: f32,
     pub h: f32,
     pub color: [f32; 3],
+    /// 1 is opaque. 0 draws nothing. The outline face stores coverage here.
+    pub alpha: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +331,14 @@ pub struct Frame {
     pub tooltip: Option<String>,
     /// Events the panel took. A false field belongs to the game.
     pub consumed: Consumed,
+    /// Dirty rectangles. Empty until `DamageTracker` from PR #5 is on master.
+    pub damage: Vec<Rect>,
+    /// Events from [`crate::frame`]. The lighting panel leaves this empty.
+    pub events: Vec<crate::kind::Event>,
+    /// Radial marks from [`crate::frame`]. The lighting panel leaves this empty.
+    pub segments: Vec<crate::Segment>,
+    /// A navigation code changed focus or fired an event this frame.
+    pub keys_captured: bool,
 }
 
 /// Lay out the lighting panel and the lamp sun. Apply hover, press, and drag.
@@ -394,6 +431,10 @@ pub fn lighting_frame(
         look_capture,
         tooltip: None,
         consumed: Consumed::default(),
+        damage: Vec::new(),
+        events: Vec::new(),
+        segments: Vec::new(),
+        keys_captured: false,
     }
 }
 
@@ -1344,6 +1385,10 @@ pub fn show_menu_tab(state: &mut State, viewport: [f32; 2], pointer: Pointer) ->
         look_capture,
         tooltip: None,
         consumed: Consumed::default(),
+        damage: Vec::new(),
+        events: Vec::new(),
+        segments: Vec::new(),
+        keys_captured: false,
     }
 }
 
@@ -1561,7 +1606,7 @@ impl PageScroll {
         let mut rect = item.rect;
         if let Some(clip) = self.clip {
             if self.body.contains(&item.id) {
-                rect = intersect(rect, clip).unwrap_or(Rect {
+                rect = layout::intersect(rect, clip).unwrap_or(Rect {
                     x: 0.0,
                     y: 0.0,
                     w: 0.0,
@@ -1701,22 +1746,6 @@ fn sticky_item(items: &[Item], id: u32, panel_id: u32, strips: &[u32]) -> bool {
     false
 }
 
-fn intersect(a: Rect, b: Rect) -> Option<Rect> {
-    let x0 = a.x.max(b.x);
-    let y0 = a.y.max(b.y);
-    let x1 = (a.x + a.w).min(b.x + b.w);
-    let y1 = (a.y + a.h).min(b.y + b.h);
-    if x1 <= x0 || y1 <= y0 {
-        None
-    } else {
-        Some(Rect {
-            x: x0,
-            y: y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        })
-    }
-}
 
 struct PanelTargets<'a> {
     sections: &'a [u32],
@@ -2017,7 +2046,7 @@ fn finish_panel(
         };
         if let Some(clip) = clip {
             for paint in &mut part {
-                if let Some(rect) = intersect(
+                if let Some(rect) = layout::intersect(
                     Rect {
                         x: paint.x,
                         y: paint.y,
@@ -2080,6 +2109,10 @@ fn finish_panel(
         look_capture,
         tooltip,
         consumed,
+        damage: Vec::new(),
+        events: Vec::new(),
+        segments: Vec::new(),
+        keys_captured: false,
     }
 }
 
@@ -3046,6 +3079,7 @@ fn push_rect(out: &mut Vec<Paint>, rect: Rect, color: [f32; 3]) {
         w: rect.w,
         h: rect.h,
         color,
+        alpha: 1.0,
     });
 }
 
@@ -3102,5 +3136,6 @@ fn push_blot(out: &mut Vec<Paint>, blot: Blot, color: [f32; 3]) {
         w: blot.w,
         h: blot.h,
         color,
+        alpha: 1.0,
     });
 }

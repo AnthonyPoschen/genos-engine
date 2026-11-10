@@ -10,15 +10,24 @@
 //! lamp with notched sliders. On Omarchy, the lighting panel uses the current
 //! theme colors.
 
+mod arc;
+mod controls;
 mod dropdown;
 mod focus;
 mod fps;
+mod interact;
+mod kind;
+mod layers;
+mod nav;
 mod layout;
 pub mod omarchy;
+mod outline;
 mod panel;
 mod profile;
 mod slider;
+mod snapshot;
 mod text;
+mod theme;
 
 /// Idle, hover, and pressed colors. Pointer state picks one.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -72,9 +81,23 @@ pub enum Action {
     Toggle { id: u32, on: bool },
 }
 
+pub use arc::arc_segments;
 pub use focus::{Consumed, FocusManager, InputKind, InputPolicy};
+pub use interact::frame;
+pub use kind::{Event, Kind};
+pub use layers::LayerRole;
+pub use nav::ui_actions;
 pub use fps::FpsOverlay;
 pub use layout::{layout, Align, Direction, Node, Pad, Place, Rect, Sizing, Space};
+pub use outline::{
+    paint_node_text, raster_outline, shape_ltr, shape_outline, AtlasGlyph, OutlineFont, PlacedGlyph,
+    ShapedText,
+};
+pub use snapshot::paint_snapshot;
+pub use text::TextFace;
+pub use theme::{
+    apply_looks, looks, theme_dark, theme_from_palette, theme_light, Looks, Theme,
+};
 pub use panel::{
     apply_frame_action, apply_lamp, button_panel, button_panel_blocks, button_panel_sections,
     lighting_frame, show_menu_tab, Frame, Paint, PanelBlock, PanelButton, PanelCheck,

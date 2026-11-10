@@ -144,6 +144,21 @@ mod tests {
         assert_eq!(device::from_evdev(27), Some(InputCode::key_right_bracket));
     }
 
+    #[test]
+    fn a_stick_up_edge_fires_once() {
+        let mut input = InputSystem::new();
+        {
+            let pad = input.gamepad_mut(0).unwrap();
+            pad.view.connected = true;
+            pad.left_stick.y = 1.0;
+            assert!(pad.pressed(InputCode::gamepad_left_stick_up));
+        }
+        input.begin_frame();
+        let pad = input.gamepad(0).unwrap();
+        assert!(!pad.pressed(InputCode::gamepad_left_stick_up));
+        assert!(pad.down(InputCode::gamepad_left_stick_up));
+    }
+
     fn from_letter_evdev() -> InputCode {
         device::from_evdev(17).unwrap()
     }
