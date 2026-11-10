@@ -64,14 +64,15 @@ fn lighting_pipelines_build_quickly() {
         lighting.iter().all(|(name, _)| *name != "lighting sun compose"),
         "the sun compose is built on the first small step, not at startup: {times:?}"
     );
-    // Nine compute names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
-    // "atrous-plain" is timed, but its name does not start with "lighting",
-    // so it is outside this count. "lighting sun compose" is built on the
-    // first small sun step and is excluded by the assert above.
+    // Nine names in LIGHTING_PASS_NAMES, plus the gbuffer and the maintenance
+    // compose (built at startup when surface-cache writes are off). The three
+    // retired slots stay compiled so compose remains pass 7. "atrous-plain"
+    // is timed, and its name does not start with "lighting". "lighting sun
+    // compose" is built on the first small sun step and is excluded above.
     assert_eq!(
         lighting.len(),
-        10,
-        "nine compute pipelines plus the gbuffer; atrous-plain and screen-denoise are not prefixed lighting: {times:?}"
+        11,
+        "nine compute pipelines, the maintenance compose, and the gbuffer: {times:?}"
     );
     let screen = times
         .iter()
@@ -237,16 +238,8 @@ fn lighting_draws_emitted_light_and_bounces_it() {
     );
 }
 
-/// Rays per placed probe GI's screen probes held in the last frame drawn.
-fn samples_per_probe(renderer: &mut Renderer) -> f32 {
-    let [rays, probes] = renderer.lighting_probe_samples();
-    assert!(probes > 0, "the probes are placed");
-    rays as f32 / probes as f32
-}
-
-/// Draw the still hall until every probe holds all its strata (8 frames of 64
-/// rays), well before the frame settles and stops running the probes.
-fn fill_strata(
+/// Draw the still hall long enough for the world cache to take a round.
+fn settle_picture(
     window: &mut Window,
     renderer: &mut Renderer,
     world: &World,
@@ -256,11 +249,6 @@ fn fill_strata(
     for _ in 0..10 {
         picture = draw(window, renderer, world, camera);
     }
-    let held = samples_per_probe(renderer);
-    assert!(
-        held > 0.95 * 512.0,
-        "a still probe holds its last 8 strata ({held} rays)"
-    );
     picture
 }
 
@@ -268,14 +256,10 @@ fn changed_pixels(a: &[u8], b: &[u8]) -> usize {
     a.iter().zip(b).filter(|(x, y)| x.abs_diff(**y) > 2).count()
 }
 
-/// GI keeps visibility (ray hits), never light: a lamp that moves, and a sun or
-/// sky that changes, show in full on the next frame while every probe keeps all
-/// its kept rays, the far ones and the ones the lamp lights alike. A lamp that
-/// dims or turns off changes the lamp set, which resets the cache so no bounce
-/// from the old lamp lingers: those may refill from this frame's rays, but the
-/// change still shows at once.
+/// A lamp that moves, dims, or turns off, and a sun or sky that changes, show
+/// on the next frame. The world cache keeps the hit, not the old light.
 #[test]
-fn lighting_probes_keep_their_rays_when_the_light_changes() {
+fn lighting_changes_show_on_the_next_frame() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -302,33 +286,20 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
         color: [0.4, 0.5, 0.7],
     });
     let still_world = World::from_scene(base.clone());
-    // (what, scene, whether the probes must keep their rays)
-    let changes: [(&str, Scene, bool); 4] = [
-        ("a lamp moving", moved_lamp, true),
-        ("a lamp dimming", dimmed, false),
-        ("a lamp going off", off, false),
-        ("the sun and sky changing", sun, true),
+    let changes: [(&str, Scene); 4] = [
+        ("a lamp moving", moved_lamp),
+        ("a lamp dimming", dimmed),
+        ("a lamp going off", off),
+        ("the sun and sky changing", sun),
     ];
-    for (what, scene, keeps) in changes {
-        let before = fill_strata(window, renderer, &still_world, &camera);
+    for (what, scene) in changes {
+        let before = settle_picture(window, renderer, &still_world, &camera);
         let after = draw(
             window,
             renderer,
             &World::from_scene(scene),
             &camera,
         );
-        let held = samples_per_probe(renderer);
-        if keeps {
-            assert!(
-                held > 0.95 * 512.0,
-                "{what}: every probe keeps its rays, near the change or far from it ({held})"
-            );
-        } else {
-            assert!(
-                held >= 0.95 * 64.0,
-                "{what}: a lamp-set reset still traces this frame's rays ({held})"
-            );
-        }
         assert!(
             changed_pixels(&before, &after) > 0,
             "{what}: the first frame after the change shows it"
@@ -336,16 +307,10 @@ fn lighting_probes_keep_their_rays_when_the_light_changes() {
     }
 }
 
-/// An object that moves: the kept rays whose paths cross where it was or is are
-/// traced again in the same frame (lighting_trace.comp), so the probes keep almost all
-/// 512 rays (about 496 here when they were dropped until their stratum came round,
-/// and which rays a cell held changed every frame: flicker around moving objects).
-/// Strata traced from inside the moved object's bounds are traced again from the
-/// probe's place in the same frame (a fill, GENOS_LIGHTING_MOVED_DROP), which this
-/// counter does not count as kept: about 502 here, 512 with it off.
-/// The change shows at once.
+/// An object that moves shows on the same frame. The world cache relights the
+/// cells the move crosses.
 #[test]
-fn lighting_moving_object_retraces_the_rays_it_crosses() {
+fn lighting_moving_object_shows_on_the_same_frame() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -354,23 +319,17 @@ fn lighting_moving_object_retraces_the_rays_it_crosses() {
     let camera = Camera::opening();
     let mut moved = base.clone();
     moved.solids[0].position.x += 0.5;
-    let before = fill_strata(
+    let before = settle_picture(
         window,
         renderer,
         &World::from_scene(base),
         &camera,
     );
-    let full = samples_per_probe(renderer);
     let after = draw(
         window,
         renderer,
         &World::from_scene(moved),
         &camera,
-    );
-    let held = samples_per_probe(renderer);
-    assert!(
-        held > full - 14.0,
-        "the rays that cross the moved object are traced again, not dropped ({full} -> {held})"
     );
     assert!(
         changed_pixels(&before, &after) > 0,
@@ -378,40 +337,9 @@ fn lighting_moving_object_retraces_the_rays_it_crosses() {
     );
 }
 
-/// A camera that moves keeps a probe's strata only where reprojection holds: last
-/// frame's probes around the probe's old screen place lend the strata they traced
-/// on the probe's plane, within LIGHTING_REACH spacings of it. A slight turn keeps
-/// almost all rays; turning round to surfaces last frame never saw keeps few.
+/// A floor colour change shows on the next frame.
 #[test]
-fn lighting_camera_keeps_rays_only_where_reprojection_holds() {
-    let (_gpu, mut owner) = open();
-    let window = &mut *owner.window;
-    let renderer = &mut *owner.device;
-    let world = shipped_hall();
-    let camera = Camera::opening();
-    let p = camera.position;
-    let mut turned = Camera::opening();
-    turned.set_pose(p, camera.yaw + 0.002, camera.pitch);
-    let mut jumped = Camera::opening();
-    jumped.set_pose(p, camera.yaw + std::f32::consts::PI, camera.pitch);
-    fill_strata(window, renderer, &world, &camera);
-    let _ = draw(window, renderer, &world, &turned);
-    let held = samples_per_probe(renderer);
-    assert!(
-        held > 0.9 * 512.0,
-        "a slight turn keeps almost all kept rays ({held})"
-    );
-    fill_strata(window, renderer, &world, &camera);
-    let _ = draw(window, renderer, &world, &jumped);
-    let held = samples_per_probe(renderer);
-    assert!(held < 0.25 * 512.0, "turning round keeps few ({held})");
-}
-
-/// The traced world changing as a whole (here the floor's colour, which kept hits
-/// hold) drops every kept ray: each probe is back to this frame's 64 rays, then
-/// refills one stratum a frame.
-#[test]
-fn lighting_floor_change_drops_all_kept_rays() {
+fn lighting_floor_change_shows_on_the_next_frame() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -419,21 +347,17 @@ fn lighting_floor_change_drops_all_kept_rays() {
     let camera = Camera::opening();
     let mut floor = base.clone();
     floor.floor.color = [0.2, 0.6, 0.3];
-    fill_strata(
+    let before = settle_picture(
         window,
         renderer,
         &World::from_scene(base),
         &camera,
     );
     let changed = World::from_scene(floor);
-    let _ = draw(window, renderer, &changed, &camera);
-    let held = samples_per_probe(renderer);
-    assert!(held <= 64.5, "only this frame's rays are left ({held})");
-    let _ = draw(window, renderer, &changed, &camera);
-    let held = samples_per_probe(renderer);
+    let after = draw(window, renderer, &changed, &camera);
     assert!(
-        held > 64.5 && held <= 128.5,
-        "the next frame keeps the first and adds its own ({held})"
+        changed_pixels(&before, &after) > 0,
+        "the first frame after the floor change shows it"
     );
 }
 
@@ -2110,10 +2034,8 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     settings.shadows.enabled = true;
     settings.gi.enabled = true;
     settings.bounce.count = 1;
-    settings.probes.enabled = true;
-    settings.probes.rays = 4;
-    settings.probes.tile = 64;
-    settings.world_cache.enabled = false;
+    settings.probes.enabled = false;
+    settings.world_cache.enabled = true;
     settings.denoiser.enabled = false;
     settings.prefill = false;
     settings.compose_reuse = false;
@@ -2139,9 +2061,12 @@ fn lamp_pick_reuse_follows_a_moved_lamp() {
     world.scene.lights[1].position.x += 3.0;
     let _ = draw(window, renderer, &world, &camera);
     let moving = renderer.lighting_lamp_pick_counts();
+    // A turning frame stays on ReSTIR. Spatial merges of screen-probe threads
+    // are removed with those threads. The still frames below are the check:
+    // the held picture matches the full sum, and the view stops tracing.
     assert!(
-        moving.spatial > 0,
-        "radius 8 merged no neighbour (restir {} exact {})",
+        moving.restir > 0,
+        "a turn left ReSTIR (restir {} exact {})",
         moving.restir,
         moving.exact
     );

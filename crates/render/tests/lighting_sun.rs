@@ -66,8 +66,8 @@ fn a_small_sun_step_sets_the_shader_bit() {
     );
     assert_eq!(
         names.len(),
-        10,
-        "nine compute pipelines plus the gbuffer: {names:?}"
+        11,
+        "nine compute pipelines, the maintenance compose, and the gbuffer: {names:?}"
     );
 
     for _ in 0..3 {
@@ -76,7 +76,7 @@ fn a_small_sun_step_sets_the_shader_bit() {
     let frozen = renderer.lighting_sun_stats();
     assert!(!frozen.gpu_sun, "a frozen sun stays off the sun path: {frozen:?}");
     assert_eq!(frozen.host_frames, 0);
-    assert_eq!(lighting_names(renderer).len(), 10);
+    assert_eq!(lighting_names(renderer).len(), 11);
 
     // Full effort with no sun frames yet still writes the counter. The still
     // and moving benches never enter the path, so this is the proof the flag

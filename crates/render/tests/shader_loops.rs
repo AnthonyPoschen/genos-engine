@@ -7,7 +7,7 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 26] = [
+const SHADERS: [&str; 23] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
@@ -17,14 +17,11 @@ const SHADERS: [&str; 26] = [
     "lighting_screen_probe.glsl",
     "lighting_pack.glsl",
     "gbuffer.frag",
-    "lighting_place.comp",
     "lighting_trace.comp",
     "lighting_direct.comp",
-    "lighting_gather.comp",
     "lighting_compose.comp",
     "lighting_sun_compose.comp",
     "lighting_cache.comp",
-    "lighting_filter.comp",
     "lighting_compact.comp",
     "lighting_cache.glsl",
     "lighting_cache_slots.glsl",
