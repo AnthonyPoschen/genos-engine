@@ -20,6 +20,9 @@ void lighting_tex_put(uint slot, vec4 v) {
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
+    // Last frame's enqueued texels and lattices. This is the neighbour walk,
+    // one relight before compose loads the stored colour and the accept bit.
+    lighting_sh_store_drain(gid);
     if (gid >= LIGHTING_CACHE_BATCH) {
         return;
     }

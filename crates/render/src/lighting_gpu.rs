@@ -103,6 +103,24 @@ fn lighting_ckeys_words() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
 }
 
+/// Words through the lattice table. Matches `LIGHTING_SH_LATTICE_AT` plus one
+/// record per entry in `lighting_cache.glsl`: seen, two counts, two lists, ids.
+pub(super) fn lighting_sh_keys_words() -> u64 {
+    const STORE_CAP: u64 = 8192;
+    const LATTICE_CAP: u64 = 4096;
+    const STRIDE: u64 = 14;
+    let seen = lighting_atrous_ppm_at()
+        + LIGHTING_ATROUS_META_WORDS
+        + LIGHTING_SUN_WORDS
+        + LIGHTING_CACHE_SLOTS
+        + 3
+        + LIGHTING_CACHE_SLOTS
+        + LIGHTING_CACHE_SLOTS;
+    let list0 = seen + 2;
+    let lattice = list0 + 2 * STORE_CAP;
+    lattice + LATTICE_CAP * STRIDE
+}
+
 fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
@@ -311,13 +329,6 @@ pub(crate) struct Lighting {
     compose_writes: bool,
     /// Sun compose with the scene image and bloom.
     sun_hdr_pipe: Handle,
-    /// Detail neighbour walk. Built the first frame `sh_texel_detail` or
-    /// `sh_cells` is on. The default pipes compile that walk out.
-    compose_detail_pipe: Handle,
-    compose_hdr_detail_pipe: Handle,
-    compose_maint_detail_pipe: Handle,
-    sun_detail_pipe: Handle,
-    sun_hdr_detail_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
     /// walks every pixel; later frames walk the band.
     sun_bounce_live: bool,
@@ -590,11 +601,6 @@ impl Default for Lighting {
             compose_maint_pipe: std::ptr::null_mut(),
             compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
-            compose_detail_pipe: std::ptr::null_mut(),
-            compose_hdr_detail_pipe: std::ptr::null_mut(),
-            compose_maint_detail_pipe: std::ptr::null_mut(),
-            sun_detail_pipe: std::ptr::null_mut(),
-            sun_hdr_detail_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
@@ -1202,17 +1208,11 @@ impl Gpu {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
-                // +SLOTS: screen-owner election, past the sun block. See
-                // LIGHTING_SCREEN_OWNER_AT. Another SLOTS plus a 3-word header:
-                // the screen launch's tap-list dedup (LIGHTING_SCREEN_LIST_AT).
+                // Through the lattice table: screen owner, tap list, the seen
+                // words, the two enqueue lists, and the corner-slot records.
+                // lighting_sh_keys_words matches LIGHTING_SH_LATTICE_AT.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at()
-                        + LIGHTING_ATROUS_META_WORDS
-                        + LIGHTING_SUN_WORDS
-                        + LIGHTING_CACHE_SLOTS
-                        + 3
-                        + LIGHTING_CACHE_SLOTS)
-                        * 4,
+                    lighting_sh_keys_words() * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1585,63 +1585,6 @@ impl Gpu {
             Some(u32::from(self.lighting.compose_writes)),
         )?;
         self.note_pipeline_time("lighting compose hdr", start);
-        Ok(())
-    }
-
-    /// The detail modules keep the neighbour walk. Default High does not build them.
-    fn ensure_compose_detail(&mut self, sun: bool, hdr: bool) -> Result<(), String> {
-        if sun {
-            if hdr {
-                if self.lighting.sun_hdr_detail_pipe.is_null() {
-                    let start = Instant::now();
-                    self.lighting.sun_hdr_detail_pipe = self.make_compute_pipe(
-                        SUN_COMPOSE_HDR_DETAIL_SPV,
-                        self.lighting.layout,
-                        "lighting sun compose detail",
-                    )?;
-                    self.note_pipeline_time("lighting sun compose detail", start);
-                }
-            } else if self.lighting.sun_detail_pipe.is_null() {
-                let start = Instant::now();
-                self.lighting.sun_detail_pipe = self.make_compute_pipe(
-                    SUN_COMPOSE_DETAIL_SPV,
-                    self.lighting.layout,
-                    "lighting sun compose detail",
-                )?;
-                self.note_pipeline_time("lighting sun compose detail", start);
-            }
-            return Ok(());
-        }
-        if hdr {
-            if self.lighting.compose_hdr_detail_pipe.is_null() {
-                let start = Instant::now();
-                self.lighting.compose_hdr_detail_pipe = self.make_compute_pipe_spec(
-                    LIGHTING_COMPOSE_HDR_DETAIL_SPV,
-                    self.lighting.layout,
-                    "lighting compose hdr detail",
-                    Some(u32::from(self.lighting.compose_writes)),
-                )?;
-                self.note_pipeline_time("lighting compose hdr detail", start);
-            }
-        } else if self.lighting.compose_detail_pipe.is_null() {
-            let start = Instant::now();
-            self.lighting.compose_detail_pipe = self.make_compute_pipe_spec(
-                LIGHTING_COMPOSE_DETAIL_SPV,
-                self.lighting.layout,
-                "lighting compose detail",
-                Some(u32::from(self.lighting.compose_writes)),
-            )?;
-            self.note_pipeline_time("lighting compose detail", start);
-        }
-        if !self.lighting.compose_writes && self.lighting.compose_maint_detail_pipe.is_null() {
-            let start = Instant::now();
-            self.lighting.compose_maint_detail_pipe = self.make_compute_pipe(
-                LIGHTING_COMPOSE_MAINT_DETAIL_SPV,
-                self.lighting.layout,
-                "lighting compose maint detail",
-            )?;
-            self.note_pipeline_time("lighting compose maint detail", start);
-        }
         Ok(())
     }
 
@@ -3604,11 +3547,6 @@ impl Gpu {
         if !sun_compose {
             self.lighting.sun_bounce_live = false;
         }
-        let compose_detail = self.lighting.settings.surface_cache.sh_cells
-            || self.lighting.settings.surface_cache.sh_texel_detail;
-        if compose_detail {
-            self.ensure_compose_detail(sun_compose, hdr_compose)?;
-        }
         self.lighting.compose_kind = if sun_compose {
             COMPOSE_SUN
         } else if compose_full {
@@ -3803,24 +3741,12 @@ impl Gpu {
                     self.direct_pipe()
                 } else if pass == 7 && sun_compose {
                     if self.lighting.hdr.legacy_bytes {
-                        if compose_detail {
-                            self.lighting.sun_detail_pipe
-                        } else {
-                            self.lighting.sun_pipe
-                        }
-                    } else if compose_detail {
-                        self.lighting.sun_hdr_detail_pipe
+                        self.lighting.sun_pipe
                     } else {
                         self.lighting.sun_hdr_pipe
                     }
                 } else if pass == 7 && hdr_compose {
-                    if compose_detail {
-                        self.lighting.compose_hdr_detail_pipe
-                    } else {
-                        self.lighting.compose_hdr_pipe
-                    }
-                } else if pass == 7 && compose_detail {
-                    self.lighting.compose_detail_pipe
+                    self.lighting.compose_hdr_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.screen {
                     self.lighting.screen_pipe
                 } else if pass == 8 && self.lighting.settings.denoiser.plain() {
@@ -3828,11 +3754,7 @@ impl Gpu {
                 } else {
                     self.lighting.pipes[pass]
                 };
-                let maint_pipe = if compose_detail {
-                    self.lighting.compose_maint_detail_pipe
-                } else {
-                    self.lighting.compose_maint_pipe
-                };
+                let maint_pipe = self.lighting.compose_maint_pipe;
                 if pass == 7 && !sun_compose && !maint_pipe.is_null() {
                     // #142: the cache writes compose used to make, over the same
                     // pixels, before compose reads the cache (and clears the
@@ -4244,11 +4166,6 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
-                .chain(std::iter::once(&mut self.lighting.compose_detail_pipe))
-                .chain(std::iter::once(&mut self.lighting.compose_hdr_detail_pipe))
-                .chain(std::iter::once(&mut self.lighting.compose_maint_detail_pipe))
-                .chain(std::iter::once(&mut self.lighting.sun_detail_pipe))
-                .chain(std::iter::once(&mut self.lighting.sun_hdr_detail_pipe))
             {
                 if !pipe.is_null() {
                     (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
@@ -4332,6 +4249,10 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     }
     if settings.surface_cache.sh_cells {
         flags_all |= SH_CELLS;
+    } else {
+        // Bit 23 of sc_flags is the same word. Leaving it set keeps sh_cells
+        // on after the setting is turned off: head_hi bit 0 is that bit.
+        flags_all &= !SH_CELLS;
     }
     let budget_shift = settings.gi.budget_shift.min(7);
     let mut head_hi = ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
@@ -5000,10 +4921,8 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_DETAIL_SPV, LIGHTING_COMPOSE_HDR_DETAIL_SPV,
-        LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_DETAIL_SPV, LIGHTING_COMPOSE_MAINT_SPV,
-        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_DETAIL_SPV, SUN_COMPOSE_HDR_DETAIL_SPV, SUN_COMPOSE_HDR_SPV,
-        SUN_COMPOSE_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -5098,8 +5017,8 @@ mod sun_step {
         );
     }
 
-    /// The default compose modules do not call the neighbour walk. A runtime
-    /// branch left the walk in the pixel and the 4070 still paid for it.
+    /// Every compose specialization, including maintenance and the sun and HDR
+    /// compiles. Flags on and off are this same module: the walk is not in it.
     #[test]
     fn default_compose_does_not_call_the_neighbour_walk() {
         for (name, words) in [
@@ -5117,21 +5036,24 @@ mod sun_step {
                     "{name} still reaches {prefix}: {reached:?}"
                 );
             }
-        }
-        for (name, words) in [
-            ("compose detail", LIGHTING_COMPOSE_DETAIL_SPV),
-            ("compose maint detail", LIGHTING_COMPOSE_MAINT_DETAIL_SPV),
-            ("compose hdr detail", LIGHTING_COMPOSE_HDR_DETAIL_SPV),
-            ("sun compose detail", SUN_COMPOSE_DETAIL_SPV),
-            ("sun compose hdr detail", SUN_COMPOSE_HDR_DETAIL_SPV),
-        ] {
-            assert_spirv_1(name, words);
-            let reached = reachable_from_main(words);
+            let text = String::from_utf8_lossy(words);
             assert!(
-                reached.iter().any(|got| got.starts_with("lighting_sh_read(")),
-                "{name} dropped the detail neighbour read"
+                !text.contains("lighting_sh_gather") && !text.contains("lighting_sh_read"),
+                "{name} still names the neighbour walk"
             );
         }
+    }
+
+    #[test]
+    fn sh_cells_off_clears_flag_bit_23() {
+        let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        settings.experiments.sc_flags |= 1 << 23;
+        settings.surface_cache.sh_cells = false;
+        let off = super::lighting_change_head(&settings);
+        assert_eq!(off.head_hi & 1, 0, "bit 23 stayed set in head_hi");
+        settings.surface_cache.sh_cells = true;
+        let on = super::lighting_change_head(&settings);
+        assert_eq!(on.head_hi & 1, 1, "sh_cells did not set head_hi bit 0");
     }
 
     fn assert_spirv_1(name: &str, words: &[u8]) {

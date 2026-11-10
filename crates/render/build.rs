@@ -33,14 +33,7 @@ fn main() {
     let media = compile_media_modules(&out);
     let denoise = compile_denoise_modules(&out);
     let lighting = compile_lighting_modules(&out);
-    write_shader_glue(
-        &out,
-        &raster,
-        &media,
-        &denoise,
-        &lighting,
-        &reflection_spv,
-    );
+    write_shader_glue(&out, &raster, &media, &denoise, &lighting, &reflection_spv);
     rerun_shader_pieces();
 }
 
@@ -129,10 +122,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
     // Not embedded: catches errors in a piece no pass includes yet.
     let reflections_check = "shaders/reflections_check.comp";
     println!("cargo:rerun-if-changed={reflections_check}");
-    compile(
-        reflections_check,
-        &out.join("reflections_check.comp.spv"),
-    );
+    compile(reflections_check, &out.join("reflections_check.comp.spv"));
     // Not embedded: GPU parity fixture for pbr_brdf.glsl (tests/pbr_parity.rs).
     let pbr_check = "shaders/pbr_check.comp";
     println!("cargo:rerun-if-changed={pbr_check}");
@@ -208,26 +198,16 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
     .map(|(name, file)| {
         let src = format!("shaders/{file}");
         println!("cargo:rerun-if-changed={src}");
-        (*name, compile(&src, &out.join(format!("{file}.spv"))))
+        let dest = out.join(format!("{file}.spv"));
+        // Every compose compile, flags on or off, loads the cache relight.
+        // The neighbour walk is not in the module.
+        let spv = if *file == "lighting_compose.comp" || *file == "lighting_sun_compose.comp" {
+            compile_args(&src, &dest, &["-DGENOS_COMPOSE_NO_WALK=1"])
+        } else {
+            compile(&src, &dest)
+        };
+        (*name, spv)
     })
-    .chain([
-        (
-            "LIGHTING_COMPOSE_DETAIL_SPV",
-            compile_args(
-                "shaders/lighting_compose.comp",
-                &out.join("lighting_compose_detail.comp.spv"),
-                &["-DGENOS_COMPOSE_DETAIL=1"],
-            ),
-        ),
-        (
-            "SUN_COMPOSE_DETAIL_SPV",
-            compile_args(
-                "shaders/lighting_sun_compose.comp",
-                &out.join("lighting_sun_compose_detail.comp.spv"),
-                &["-DGENOS_COMPOSE_DETAIL=1"],
-            ),
-        ),
-    ])
     .collect()
 }
 
@@ -399,60 +379,35 @@ fn rerun_shader_pieces() {
 
 /// HDR compose stores scene radiance. The plain compile does not declare it.
 fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
-    let compose_hdr = compile_define(
+    let compose_hdr = compile_defines(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_hdr.comp.spv"),
-        "GENOS_HDR_COMPOSE",
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
     );
     // #142: the compose writes, run just before the read-only compose.
-    let maint = compile_glslc_define(
+    // The walk stays out of this compile too. Maintenance enqueues; the cache
+    // relight gathers.
+    let maint = compile_args(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_maint.comp.spv"),
-        "GENOS_COMPOSE_MAINT",
-    );
-    let maint_detail = compile_args(
-        "shaders/lighting_compose.comp",
-        &out.join("lighting_compose_maint_detail.comp.spv"),
-        &["-DGENOS_COMPOSE_MAINT", "-DGENOS_COMPOSE_DETAIL=1"],
+        &["-DGENOS_COMPOSE_MAINT", "-DGENOS_COMPOSE_NO_WALK=1"],
     );
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
         maint.display()
     ));
-    glue_text.push_str(&format!(
-        "pub static LIGHTING_COMPOSE_MAINT_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        maint_detail.display()
-    ));
-    let sun_hdr = compile_define(
+    let sun_hdr = compile_defines(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),
-        "GENOS_HDR_COMPOSE",
-    );
-    let compose_hdr_detail = compile_defines(
-        "shaders/lighting_compose.comp",
-        &out.join("lighting_compose_hdr_detail.comp.spv"),
-        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_DETAIL"],
-    );
-    let sun_hdr_detail = compile_defines(
-        "shaders/lighting_sun_compose.comp",
-        &out.join("lighting_sun_compose_hdr_detail.comp.spv"),
-        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_DETAIL"],
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
     );
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         compose_hdr.display()
     ));
     glue_text.push_str(&format!(
-        "pub static LIGHTING_COMPOSE_HDR_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        compose_hdr_detail.display()
-    ));
-    glue_text.push_str(&format!(
         "pub static SUN_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         sun_hdr.display()
-    ));
-    glue_text.push_str(&format!(
-        "pub static SUN_COMPOSE_HDR_DETAIL_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        sun_hdr_detail.display()
     ));
 }
 
@@ -470,7 +425,8 @@ fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> Path
 /// The lavapipe fixture only. Inlining the compose function at every mover
 /// shade makes the compiler heap exceed a 16 GB software-test budget.
 /// `DontInline` does not change the GLSL those functions run. The fixture
-/// keeps the neighbour walk. The default compose modules compile it out.
+/// keeps the neighbour walk. Every compose compile defines
+/// `GENOS_COMPOSE_NO_WALK` and does not.
 fn compile_texel_detail(
     src: &str,
     dest: &std::path::Path,
@@ -502,7 +458,8 @@ fn compile_texel_detail(
             if let Some(ctrl_i) = fn_ctrl {
                 if i - fn_start > 1000 {
                     let at = ctrl_i * 4;
-                    let ctrl = u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
+                    let ctrl =
+                        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));
                     let ctrl = (ctrl & !1) | 2;
                     bytes[at..at + 4].copy_from_slice(&ctrl.to_le_bytes());
                 }
@@ -515,19 +472,8 @@ fn compile_texel_detail(
     path
 }
 
-fn compose_dest(dest: &std::path::Path) -> bool {
-    dest.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.contains("compose"))
-}
-
 fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
     let mut args = vec![src];
-    // The default compose modules omit the detail neighbour walk. A detail
-    // compile passes GENOS_COMPOSE_DETAIL and keeps it.
-    if compose_dest(dest) && !extra.iter().any(|flag| flag.contains("GENOS_COMPOSE_DETAIL")) {
-        args.push("-DGENOS_COMPOSE_NO_DETAIL=1");
-    }
     args.extend(extra);
     args.extend(["-o", dest.to_str().unwrap()]);
     let status = Command::new("glslc").args(&args).status().expect("glslc");
@@ -544,11 +490,12 @@ fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
 
 fn compile_defines(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {
     let flags: Vec<String> = defines.iter().map(|define| format!("-D{define}")).collect();
-    let mut args = vec!["-V".to_string(), "--target-env".to_string(), "vulkan1.0".to_string()];
+    let mut args = vec![
+        "-V".to_string(),
+        "--target-env".to_string(),
+        "vulkan1.0".to_string(),
+    ];
     args.extend(flags);
-    if compose_dest(dest) && !defines.iter().any(|define| define.contains("GENOS_COMPOSE_DETAIL")) {
-        args.push("-DGENOS_COMPOSE_NO_DETAIL=1".to_string());
-    }
     args.push(src.to_string());
     args.push("-o".to_string());
     args.push(dest.to_str().unwrap().to_string());

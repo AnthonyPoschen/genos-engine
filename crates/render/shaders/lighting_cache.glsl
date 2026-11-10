@@ -2034,10 +2034,6 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
 }
-// The corner that already gathered sets this to the texel slot when that
-// neighbour read was empty. ~0u means this call has not gathered. A marked
-// seed then drops without a second walk. Unmarked seeds never match.
-uint lighting_sh_owner_empty = ~0u;
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
@@ -2049,7 +2045,7 @@ vec4 lighting_sc_seed(uint slot) {
     // drops a detail seed whose neighbour read is empty. The store itself
     // stays: a read-only compose cannot clear it, and has_seed still sees
     // the confidence. The sign is the detail mark. Sun word z is not.
-    // The walk is the one lighting_sh_read already did for this corner.
+    // Compose loads the cells-accept bit. It does not walk.
     if (lighting_sh_detail_seed_rejected(slot)) {
         return vec4(0.0);
     }
@@ -2212,6 +2208,8 @@ struct LightingShField {
 // `claim` stamps a corner this read accepted. It does not allocate. The seed
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
+// Compose compiles define GENOS_COMPOSE_NO_WALK and do not contain this walk.
+#ifndef GENOS_COMPOSE_NO_WALK
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     const float cs = LIGHTING_SH_CELL;
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
@@ -2290,19 +2288,267 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     built.accepted = accepted;
     return built;
 }
+#endif
 // The screen and seed read is the gather's value, including an empty read.
-// Compose's default modules do not call this. The detail module does.
+// Every compose compile defines GENOS_COMPOSE_NO_WALK and does not contain
+// this function. The cache relight stores the value; compose loads it.
+#ifndef GENOS_COMPOSE_NO_WALK
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     return lighting_sh_gather(p, n, claim).value;
 }
-// The stored detail seed stays while the neighbour read still has a corner.
-// A lamp change that leaves every corner empty must not keep showing the old
-// seed: compose is read-only, so it cannot rely on the write-path clear.
+#endif
+// The corner gather runs in the cache pass, once per texel or lattice, not
+// once per pixel. Compose is one relight behind that store.
+// Sun word w is the cells-accept bit. Sun word z stays the quarter scratch.
+// Seen words and the two lists sit past the screen list. A lattice record is
+// the key, the pack, g0, the stamp, and eight slot ids.
+const uint LIGHTING_SH_STORE_CAP = 8192u;
+// Past the screen list: PPM, the 391-word a-trous meta, the 8 sun words,
+// the owner table, the 3-word list header, and the list itself.
+const uint LIGHTING_SH_SEEN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 391u + 8u + LIGHTING_CACHE_SLOTS + 3u + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SH_STORE_COUNT0 = LIGHTING_SH_SEEN_AT + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SH_STORE_COUNT1 = LIGHTING_SH_STORE_COUNT0 + 1u;
+const uint LIGHTING_SH_STORE_LIST0 = LIGHTING_SH_STORE_COUNT1 + 1u;
+const uint LIGHTING_SH_STORE_LIST1 = LIGHTING_SH_STORE_LIST0 + LIGHTING_SH_STORE_CAP;
+const uint LIGHTING_SH_LATTICE_CAP = 4096u;
+const uint LIGHTING_SH_LATTICE_STRIDE = 14u;
+const uint LIGHTING_SH_LATTICE_AT = LIGHTING_SH_STORE_LIST1 + LIGHTING_SH_STORE_CAP;
+void lighting_sh_lattice_axes(vec3 p, vec3 n, out uint ax, out uint sgn, out vec3 g0, out vec3 an, out vec3 inset) {
+    ax = lighting_axis(n) >> 1u;
+    sgn = n[ax] < 0.0 ? 1u : 0u;
+    an = vec3(0.0);
+    an[ax] = sgn == 1u ? -1.0 : 1.0;
+    inset = LIGHTING_CELL_HALF * an;
+    vec3 uv = p / LIGHTING_SH_CELL - vec3(LIGHTING_CELL_HALF) - inset;
+    g0 = floor(uv);
+}
+uint lighting_sh_lattice_key(uint ax, uint sgn, vec3 g0) {
+    uint h = lighting_hash(floatBitsToUint(g0.x));
+    h = lighting_hash(h ^ floatBitsToUint(g0.y));
+    h = lighting_hash(h ^ floatBitsToUint(g0.z));
+    return lighting_hash(h ^ ax ^ (sgn << 8u));
+}
+uint lighting_sh_lattice_word(uint key) {
+    return LIGHTING_SH_LATTICE_AT + (key % LIGHTING_SH_LATTICE_CAP) * LIGHTING_SH_LATTICE_STRIDE;
+}
+// Loads of the eight corners. A missing id, or a corner the live gates leave
+// out, adds no weight. This is not a hash probe.
+vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
+    const float cs = LIGHTING_SH_CELL;
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
+    vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
+    vec3 fr = uv - floor(uv);
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint s = ids[k];
+        if (s == ~0u || s >= LIGHTING_CACHE_SLOTS) {
+            continue;
+        }
+        uint dx = k & 1u;
+        uint dy = (k >> 1u) & 1u;
+        uint dz = k >> 2u;
+        float tx = dx == 1u ? fr.x : 1.0 - fr.x;
+        float ty = dy == 1u ? fr.y : 1.0 - fr.y;
+        float tz = dz == 1u ? fr.z : 1.0 - fr.z;
+        float tri = tx * ty * tz;
+        if (tri <= 0.0) {
+            continue;
+        }
+        vec3 cn = cache.v[3u * s + 1u].xyz;
+        float facing = dot(cn, n);
+        if (facing <= 0.0) {
+            continue;
+        }
+        float plane = abs(dot(cache.v[3u * s].xyz - p, n));
+        if (plane > LIGHTING_CELL_HALF * cs) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s + 2u];
+        if (v.w < LIGHTING_CACHE_HAS_W || lighting_sc_stale(s)) {
+            continue;
+        }
+        float w = tri * facing;
+        sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        ws += w;
+    }
+    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
+}
+bool lighting_sh_lattice_load(vec3 p, vec3 n, out uint ids[8]) {
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
+    uint key = lighting_sh_lattice_key(ax, sgn, g0);
+    uint word = lighting_sh_lattice_word(key);
+    if (ckeys.key[word] != key) {
+        return false;
+    }
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        ids[k] = ckeys.key[word + 6u + k];
+    }
+    return true;
+}
+void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
+    if (!LIGHTING_SC_WRITES) {
+        return;
+    }
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
+    uint key = lighting_sh_lattice_key(ax, sgn, g0);
+    uint word = lighting_sh_lattice_word(key);
+    uint pack = ax | (sgn << 2u) | (claim ? 8u : 0u);
+    uint old = ckeys.key[word];
+    ckeys.key[word] = key;
+    ckeys.key[word + 1u] = pack;
+    ckeys.key[word + 2u] = floatBitsToUint(g0.x);
+    ckeys.key[word + 3u] = floatBitsToUint(g0.y);
+    ckeys.key[word + 4u] = floatBitsToUint(g0.z);
+    ckeys.key[word + 5u] = lighting_frame();
+    // A new record has no ids yet. The same key keeps the ids the cache pass
+    // filled, so compose in this frame still loads last relight's corners.
+    if (old != key) {
+        [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+            ckeys.key[word + 6u + k] = ~0u;
+        }
+    }
+}
+#ifndef GENOS_COMPOSE_NO_WALK
+void lighting_sh_lattice_fill_word(uint word) {
+    uint key = ckeys.key[word];
+    if (key == 0u) {
+        return;
+    }
+    uint pack = ckeys.key[word + 1u];
+    uint ax = pack & 3u;
+    uint sgn = (pack >> 2u) & 1u;
+    bool claim = (pack & 8u) != 0u;
+    vec3 g0 = vec3(uintBitsToFloat(ckeys.key[word + 2u]), uintBitsToFloat(ckeys.key[word + 3u]), uintBitsToFloat(ckeys.key[word + 4u]));
+    vec3 an = vec3(0.0);
+    an[ax] = sgn == 1u ? -1.0 : 1.0;
+    vec3 inset = LIGHTING_CELL_HALF * an;
+    const float cs = LIGHTING_SH_CELL;
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        uint dx = k & 1u;
+        uint dy = (k >> 1u) & 1u;
+        uint dz = k >> 2u;
+        vec3 idx = g0 + vec3(float(dx), float(dy), float(dz));
+        vec3 centre = (idx + vec3(LIGHTING_CELL_HALF) + inset) * cs;
+        uint s = lighting_cache_find_sized(centre, an, false, cs, centre);
+        if (s != ~0u && claim && LIGHTING_SC_WRITES) {
+            vec4 v = cache.v[3u * s + 2u];
+            if (v.w >= LIGHTING_CACHE_HAS_W && !lighting_sc_stale(s)) {
+                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+            }
+        }
+        ckeys.key[word + 6u + k] = s;
+    }
+}
+void lighting_sh_lattice_commit(vec3 p, vec3 n, bool claim) {
+    lighting_sh_lattice_request(p, n, claim);
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
+    lighting_sh_lattice_fill_word(lighting_sh_lattice_word(lighting_sh_lattice_key(ax, sgn, g0)));
+}
+#endif
+void lighting_sh_enqueue_texel(uint slot) {
+    if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    if (atomicExchange(ckeys.key[LIGHTING_SH_SEEN_AT + slot], lighting_frame()) == lighting_frame()) {
+        return;
+    }
+    uint phase = lighting_frame() & 1u;
+    uint count_at = phase == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1;
+    uint list_at = phase == 0u ? LIGHTING_SH_STORE_LIST0 : LIGHTING_SH_STORE_LIST1;
+    uint at = atomicAdd(ckeys.key[count_at], 1u);
+    if (at < LIGHTING_SH_STORE_CAP) {
+        ckeys.key[list_at + at] = slot;
+    }
+}
+bool lighting_sh_detail_accepts(uint slot) {
+    return slot < LIGHTING_CACHE_SLOTS && cache.v[LIGHTING_SC_SUN_AT + slot].w > 0.5;
+}
+#ifndef GENOS_COMPOSE_NO_WALK
+// The gathered colour of an empty fine texel, and whether that gather still
+// had a corner. An empty gather clears the confidence. Sun word z is not written.
+void lighting_sh_detail_store(uint slot) {
+    if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS || !lighting_sh_texel_detail_on()) {
+        return;
+    }
+    vec3 p;
+    vec3 n;
+    if (!lighting_sc_texel_world(slot, p, n)) {
+        return;
+    }
+    if (lighting_sc_lamp_touched(slot) || lighting_lamp_settling()) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
+        cache.v[LIGHTING_SC_SUN_AT + slot].w = 0.0;
+    }
+    vec4 detail = lighting_sh_read(p, n, false);
+    if (detail.w > LIGHTING_CACHE_HAS_W) {
+        lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = -abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z);
+        cache.v[LIGHTING_SC_SUN_AT + slot].w = 1.0;
+    } else {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
+        cache.v[LIGHTING_SC_SUN_AT + slot].w = 0.0;
+    }
+}
+void lighting_sh_store_drain(uint gid) {
+    uint phase = lighting_frame() & 1u;
+    uint prev = phase ^ 1u;
+    if (gid == 0u) {
+        ckeys.key[phase == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1] = 0u;
+    }
+    uint prev_count = ckeys.key[prev == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1];
+    if (gid < prev_count && gid < LIGHTING_SH_STORE_CAP) {
+        uint list_at = prev == 0u ? LIGHTING_SH_STORE_LIST0 : LIGHTING_SH_STORE_LIST1;
+        lighting_sh_detail_store(ckeys.key[list_at + gid]);
+    }
+    if (gid < LIGHTING_SH_LATTICE_CAP && lighting_frame() > 0u) {
+        uint word = LIGHTING_SH_LATTICE_AT + gid * LIGHTING_SH_LATTICE_STRIDE;
+        if (ckeys.key[word + 5u] + 1u == lighting_frame()) {
+            lighting_sh_lattice_fill_word(word);
+        }
+    }
+}
+#endif
+// Compose loads this. The cache relight is what calls the neighbour walk.
+vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_NO_WALK
+    if (LIGHTING_SC_WRITES) {
+        lighting_sh_lattice_request(pos, n, claim);
+    }
+    uint ids[8];
+    if (!lighting_sh_lattice_load(pos, n, ids)) {
+        return vec4(0.0);
+    }
+    return lighting_sh_blend_ids(ids, pos, n);
+#else
+    return lighting_sh_read(pos, n, claim);
+#endif
+}
+// The stored detail seed stays while the last gather still had a corner.
+// Compose loads the cells-accept bit. It does not walk.
 bool lighting_sh_detail_owner_lit(uint slot) {
-    // GENOS_COMPOSE_NO_DETAIL is the default compose compile. The walk is not
-    // in that module. The detail module, and every other shader, keep it.
-#ifdef GENOS_COMPOSE_NO_DETAIL
-    return false;
+#ifdef GENOS_COMPOSE_NO_WALK
+    return lighting_sh_detail_accepts(slot);
 #else
     vec3 p;
     vec3 n;
@@ -2323,11 +2569,6 @@ bool lighting_sh_detail_seed_rejected(uint slot) {
     }
     if (!(cache.v[LIGHTING_SC_SPARSE_AT + slot].z < 0.0)) {
         return false;
-    }
-    // The corner's gather already ran. Matching the slot means that read was
-    // empty, so this return does not walk the eight cells again.
-    if (slot == lighting_sh_owner_empty) {
-        return true;
     }
     return !lighting_sh_detail_owner_lit(slot);
 }
@@ -2354,7 +2595,7 @@ vec4 lighting_sc_shown(uint slot) {
         // The denoiser-off shortcut used to drop every seed and walk the parent.
         // A cell detail seed is the texel's light until it has its own samples,
         // with the denoiser on or off.
-        if (lighting_sh_texel_detail_on() && slot != lighting_sh_owner_empty && lighting_sh_detail_owner_lit(slot)) {
+        if (lighting_sh_texel_detail_on() && lighting_sh_detail_owner_lit(slot)) {
             vec4 detail = lighting_sc_seed(slot);
             if (detail.w > 0.0) {
                 return vec4(detail.rgb, 1.0);
@@ -2374,7 +2615,7 @@ vec4 lighting_sc_shown(uint slot) {
         if (lighting_sc_svgf()) {
             // No own samples yet: the owning-cell seed is what shows, including
             // over a field the push wrote from the old estimators.
-            if (lighting_sh_texel_detail_on() && own.w < LIGHTING_CACHE_HAS_W && slot != lighting_sh_owner_empty && lighting_sh_detail_owner_lit(slot)) {
+            if (lighting_sh_texel_detail_on() && own.w < LIGHTING_CACHE_HAS_W && lighting_sh_detail_owner_lit(slot)) {
                 vec4 detail = lighting_sc_seed(slot);
                 if (detail.w > 0.0) {
                     return vec4(detail.rgb, 1.0);
@@ -2603,7 +2844,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
             vec3 an = abs(n);
             bool slanted = max(an.x, max(an.y, an.z)) < LIGHTING_SH_HIT_SLANT;
             if (slanted && hsize < LIGHTING_SH_HIT_SPAN * LIGHTING_SH_CELL) {
-#ifndef GENOS_COMPOSE_NO_DETAIL
+#ifndef GENOS_COMPOSE_NO_WALK
                 vec4 b = lighting_sh_read(pos, n, false);
                 if (b.w > LIGHTING_CACHE_HAS_W) {
                     return b.rgb * keep;
@@ -3243,6 +3484,9 @@ bool lighting_sh_lum_disagrees(float hi, float lo) {
 // is the source this read does not write. Claim stays false. The seed, the
 // cell mean, and the harmonics are not stored.
 bool lighting_compact_hold_texel_rays(uint slot) {
+#ifdef GENOS_COMPOSE_NO_WALK
+    return false;
+#else
     if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
     }
@@ -3286,6 +3530,7 @@ bool lighting_compact_hold_texel_rays(uint slot) {
     atomicAdd(gstats.diag[LIGHTING_DIAG_TEXEL_CUT], rays);
     atomicAdd(gstats.waiting, 1u);
     return true;
+#endif
 }
 // S65C: how much the lamps that moved since frame `updated` changed the
 // unshadowed light at p (sum over moved lamps of brightest channel times
@@ -3451,8 +3696,62 @@ const bool LIGHTING_SC_KEEP_NEAR = true;
 // This is not the ray-cut hold. A corner split past LIGHTING_SC_SPARSE_RATIO
 // can still be covered. The hold is luminance agreement of one texel.
 bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
-#ifdef GENOS_COMPOSE_NO_DETAIL
-    return false;
+#ifdef GENOS_COMPOSE_NO_WALK
+    if (lighting_world_mode() != 3u) {
+        return false;
+    }
+    if (obj) {
+        uint ids[8];
+        return lighting_sh_texel_detail_on() && lighting_sh_lattice_load(pos, n, ids)
+            && lighting_sh_blend_ids(ids, pos, n).w > LIGHTING_CACHE_HAS_W;
+    }
+    if (lighting_sc_slanted(n)) {
+        uint ids[8];
+        return lighting_sh_on() && lighting_sh_lattice_load(pos, n, ids)
+            && lighting_sh_blend_ids(ids, pos, n).w > LIGHTING_CACHE_HAS_W;
+    }
+    if (!lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
+        return false;
+    }
+    if ((lighting_sc_flags() & (32u | 512u)) != 0u) {
+        return false;
+    }
+    if (!lighting_sc_light_quiet() && (lighting_sc_flags() & 1048576u) == 0u) {
+        return false;
+    }
+    if (!LIGHTING_SC_KEEP_NEAR && lighting_near_change(pos)) {
+        return false;
+    }
+    float size = lighting_cell_size(wpos);
+    if (size > 0.2) {
+        return false;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec2 uv = vec2(dot(pos, ta), dot(pos, tb)) / size - 0.5;
+    vec2 g0 = floor(uv);
+    vec2 f = uv - g0;
+    bool any = false;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        if (bil <= 0.0) {
+            continue;
+        }
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
+        vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));
+        uint slot = lighting_cache_find_sized(q, n, false, size, pos);
+        if (slot == ~0u || cache.v[3u * slot + 2u].w >= LIGHTING_CACHE_HAS_W || lighting_sc_stale(slot)) {
+            return false;
+        }
+        if (!lighting_sh_detail_accepts(slot)) {
+            return false;
+        }
+        any = true;
+    }
+    return any;
 #else
     if (lighting_world_mode() != 3u) {
         return false;
@@ -3637,13 +3936,6 @@ uint lighting_px_probe_skipped = 0u;
 const uint LIGHTING_DIAG_PROBE_SKIP = 0u;
 const uint LIGHTING_DIAG_PROBE_EVAL = 1u;
 const uint LIGHTING_DIAG_PROBE_READS = 2u;
-// The corner records an empty neighbour read so the seed return does not walk
-// again. The default compose compile does not call the walk.
-void lighting_compose_find_begin() {
-    lighting_sh_owner_empty = ~0u;
-}
-void lighting_compose_find_end() {
-}
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     uint mode = lighting_world_mode();
@@ -3656,16 +3948,14 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // true normal. It does not enter the object-local texel loop, does not
     // seed, and does not stamp (claim stays false). An empty read has w = 0,
     // so compose keeps the probes. Detail off still uses the object frame below.
-#ifndef GENOS_COMPOSE_NO_DETAIL
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         lighting_obj_salt = 0.0;
-        vec4 sh = lighting_sh_read(pos, n, false);
+        vec4 sh = lighting_sh_compose_lattice(pos, n, false);
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
             return vec4(sh.rgb, 1.0);
         }
         return sh;
     }
-#endif
     vec3 lpos = pos;
     vec3 ln = n;
     if (om != ~0u) {
@@ -3711,11 +4001,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     // off, the per-axis bilinear read (lighting_sc_wrc_now).
     if (mode == 3u && (lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
         if (lighting_sh_on()) {
-#ifndef GENOS_COMPOSE_NO_DETAIL
-            return vec4(lighting_sh_read(pos, n, true).rgb, 1.0);
-#else
-            return vec4(lighting_sc_wrc_now(pos, n).rgb, 1.0);
-#endif
+            return vec4(lighting_sh_compose_lattice(pos, n, true).rgb, 1.0);
         }
         if (LIGHTING_SC_WRITES) {
             uint c = lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
@@ -3730,11 +4016,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // instead of the probes (a mover's stay on the probes).
         if (lighting_sh_on() && !obj) {
             // Claim stays off. A slant that accepts cells must not allocate,
-            // and an empty read must not stamp.
-#ifndef GENOS_COMPOSE_NO_DETAIL
-            return lighting_sh_read(pos, n, false);
+            // and an empty read must not stamp. Compose loads the stored
+            // corner ids and tilts them. The hash walk is the cache relight.
+#ifdef GENOS_COMPOSE_NO_WALK
+            return lighting_sh_compose_lattice(pos, n, false);
 #else
-            return vec4(0.0);
+            return lighting_sh_read(pos, n, false);
 #endif
         }
         return vec4(0.0);
@@ -3795,16 +4082,23 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
-        lighting_sh_owner_empty = ~0u;
-#ifndef GENOS_COMPOSE_NO_DETAIL
         if (detail_candidate) {
+#ifdef GENOS_COMPOSE_NO_WALK
+            if (LIGHTING_SC_WRITES) {
+                lighting_sh_enqueue_texel(slot);
+            }
+            if (lighting_sh_detail_accepts(slot)) {
+                vec4 detail = lighting_sc_seed(slot);
+                if (detail.w > 0.0) {
+                    detail_rgb = detail.rgb;
+                    detail_kept = true;
+                }
+            }
+#else
             if (LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
             vec4 detail = lighting_sh_read(q, n, false);
-            if (!(detail.w > LIGHTING_CACHE_HAS_W)) {
-                lighting_sh_owner_empty = slot;
-            }
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 if (LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
@@ -3816,8 +4110,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 detail_rgb = detail.rgb;
                 detail_kept = true;
             }
-        }
 #endif
+        }
         if (!detail_kept && !detail_candidate && LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {

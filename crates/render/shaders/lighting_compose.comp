@@ -2,9 +2,10 @@
 // Picture compose. Do not call scene_candidates_skip or include a work-tube
 // here. That walk, compiled into this dispatch, is what made a moving frame's
 // compose tens of milliseconds and the NVIDIA compiler sit for minutes. The
-// default compile (GENOS_COMPOSE_NO_DETAIL) does not contain the detail
-// neighbour walk. The detail module is bound when sh_texel_detail or sh_cells
-// is on. A small sun step uses lighting_sun_compose.comp instead.
+// Every compose compile defines GENOS_COMPOSE_NO_WALK. The neighbour walk is
+// the cache relight, one frame before this pass loads the stored colour and
+// the cells-accept bit. A small sun step uses lighting_sun_compose.comp and
+// the same define.
 // GI final pass: per pixel, emitted light, then direct irradiance plus the
 // screen probes' irradiance
 // (the 4 nearest probes, weighted by plane distance and normal; the light cache

@@ -26,8 +26,8 @@
 #   66d817ce  later lighting-v3 head on restir-di-d2-port-52fc. ~180 ms.
 #   be27e751  restir-live-history-proof-c1ce when this fix branched. ~180 ms.
 #
-# This fix should bring compose back near ~4 ms with GI on and sh_texel_detail
-# off, and well under 180 ms with the flag on: one walk, not four.
+# The neighbour walk is gone from every compose compile. The cache relight
+# stores the gather one frame before compose loads it. Time flags off and on.
 
 set -eu
 
