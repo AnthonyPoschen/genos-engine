@@ -50,7 +50,30 @@ struct OpenJoystick {
     file: File,
     state: JsState,
     name: String,
-    glyphs: GlyphSet,
+    layout: JsLayout,
+}
+
+const MAX_JS_AXES: usize = 16;
+
+/// One joydev index mapped to a control. Built once, from the family table or
+/// from `JSIOCGBTNMAP` / `JSIOCGAXMAP`.
+#[derive(Clone, Copy, Debug)]
+struct JsLayout {
+    buttons: [Option<InputCode>; MAX_GAMEPAD_BUTTONS],
+    axes: [JsAxis; MAX_JS_AXES],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsAxis {
+    None,
+    LeftX,
+    LeftY,
+    RightX,
+    RightY,
+    LeftTrigger,
+    RightTrigger,
+    DpadX,
+    DpadY,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -531,11 +554,12 @@ fn open_joystick(slot: usize) -> Option<OpenJoystick> {
     set_nonblock(&mut file).ok()?;
     let name = joystick_name(&file, slot);
     let glyphs = glyph_set_from_name(&name);
+    let layout = read_layout(&file, glyphs);
     let mut stick = OpenJoystick {
         file,
         state: JsState::new(),
         name,
-        glyphs,
+        layout,
     };
     drain_joystick(&mut stick).ok()?;
     Some(stick)
@@ -543,16 +567,10 @@ fn open_joystick(slot: usize) -> Option<OpenJoystick> {
 
 /// `JSIOCGNAME(128)` from `linux/joystick.h`.
 fn joystick_name(file: &File, slot: usize) -> String {
-    use std::os::fd::AsRawFd;
     let mut buf = [0u8; 128];
-    let rc = unsafe {
-        extern "C" {
-            fn ioctl(fd: i32, request: usize, ...) -> i32;
-        }
-        // SAFETY: `fd` is the open joystick. The request reads the device name
-        // into `buf`. A failure leaves the buffer zeroed and we use the slot name.
-        ioctl(file.as_raw_fd(), 0x8080_6a13, buf.as_mut_ptr())
-    };
+    // SAFETY: `fd` is the open joystick. The request reads the device name
+    // into `buf`. A failure leaves the buffer zeroed and we use the slot name.
+    let rc = js_ioctl(file, 0x8080_6a13, buf.as_mut_ptr());
     if rc <= 0 {
         return format!("gamepad {slot}");
     }
@@ -571,8 +589,7 @@ fn drain_joystick(stick: &mut OpenJoystick) -> Result<(), ()> {
     loop {
         match stick.file.read(&mut buf) {
             Ok(8) => {
-                let glyphs = stick.glyphs;
-                apply_js_event(&buf, &mut stick.state, glyphs);
+                apply_js_event(&buf, &mut stick.state, &stick.layout);
             }
             Ok(0) => return Err(()),
             Ok(_) => return Err(()),
@@ -598,12 +615,183 @@ fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     Ok(())
 }
 
-fn apply_js_event(buf: &[u8; 8], state: &mut JsState, glyphs: GlyphSet) {
+fn js_ioctl(file: &File, request: usize, arg: *mut u8) -> i32 {
+    use std::os::fd::AsRawFd;
+    unsafe {
+        extern "C" {
+            fn ioctl(fd: i32, request: usize, ...) -> i32;
+        }
+        // SAFETY: `fd` is an open joystick. `request` is a `JSIOC*` read and
+        // `arg` points at a buffer sized for that request. A negative return
+        // leaves the buffer unchanged.
+        ioctl(file.as_raw_fd(), request, arg)
+    }
+}
+
+fn js_u8(file: &File, request: usize) -> Option<usize> {
+    let mut count = 0u8;
+    if js_ioctl(file, request, &raw mut count) < 0 {
+        return None;
+    }
+    Some(usize::from(count))
+}
+
+/// `JSIOCGBUTTONS` then `JSIOCGBTNMAP`. The map is the evdev code at each
+/// joydev index. A failure keeps the family table.
+fn read_button_codes(file: &File) -> Option<([u16; MAX_GAMEPAD_BUTTONS], usize)> {
+    let count = js_u8(file, 0x8001_6a12)?;
+    let mut raw = [0u16; 512];
+    if js_ioctl(file, 0x8400_6a34, raw.as_mut_ptr().cast()) < 0 {
+        return None;
+    }
+    let n = count.min(MAX_GAMEPAD_BUTTONS);
+    let mut out = [0u16; MAX_GAMEPAD_BUTTONS];
+    out[..n].copy_from_slice(&raw[..n]);
+    Some((out, n))
+}
+
+/// `JSIOCGAXES` then `JSIOCGAXMAP`. `ABS_X` is code 0, so the count is the
+/// length. A failure keeps the family axes.
+fn read_axis_codes(file: &File) -> Option<([u8; MAX_JS_AXES], usize)> {
+    let count = js_u8(file, 0x8001_6a11)?;
+    let mut raw = [0u8; 64];
+    if js_ioctl(file, 0x8040_6a32, raw.as_mut_ptr().cast()) < 0 {
+        return None;
+    }
+    let n = count.min(MAX_JS_AXES);
+    let mut out = [0u8; MAX_JS_AXES];
+    out[..n].copy_from_slice(&raw[..n]);
+    Some((out, n))
+}
+
+fn read_layout(file: &File, glyphs: GlyphSet) -> JsLayout {
+    let mut layout = layout_for(glyphs);
+    if let Some((codes, count)) = read_button_codes(file) {
+        layout.buttons = [None; MAX_GAMEPAD_BUTTONS];
+        for index in 0..count {
+            layout.buttons[index] = evdev_button(codes[index], glyphs);
+        }
+    }
+    if let Some((codes, count)) = read_axis_codes(file) {
+        layout.axes = [JsAxis::None; MAX_JS_AXES];
+        for index in 0..count {
+            layout.axes[index] = evdev_axis(codes[index], glyphs);
+        }
+    }
+    layout
+}
+
+fn layout_for(glyphs: GlyphSet) -> JsLayout {
+    let mut buttons = [None; MAX_GAMEPAD_BUTTONS];
+    for number in 0..MAX_GAMEPAD_BUTTONS {
+        buttons[number] = button_from_family(glyphs, number as u8);
+    }
+    JsLayout {
+        buttons,
+        axes: if glyphs == GlyphSet::SteamDeck {
+            deck_axes()
+        } else {
+            standard_axes()
+        },
+    }
+}
+
+/// `ABS_X`, `ABS_Y`, `ABS_Z` trigger, `ABS_RX`, `ABS_RY`, `ABS_RZ` trigger,
+/// `ABS_HAT0X`, `ABS_HAT0Y`. This is the xpad order.
+fn standard_axes() -> [JsAxis; MAX_JS_AXES] {
+    let mut axes = [JsAxis::None; MAX_JS_AXES];
+    axes[0] = JsAxis::LeftX;
+    axes[1] = JsAxis::LeftY;
+    axes[2] = JsAxis::LeftTrigger;
+    axes[3] = JsAxis::RightX;
+    axes[4] = JsAxis::RightY;
+    axes[5] = JsAxis::RightTrigger;
+    axes[6] = JsAxis::DpadX;
+    axes[7] = JsAxis::DpadY;
+    axes
+}
+
+/// The Deck sets no `ABS_Z` or `ABS_RZ`. Sticks are `ABS_X/Y` and `ABS_RX/RY`.
+/// `ABS_HAT0` and `ABS_HAT1` are the trackpads. `ABS_HAT2X` is the right
+/// trigger and `ABS_HAT2Y` is the left trigger, joydev indices 8 and 9.
+fn deck_axes() -> [JsAxis; MAX_JS_AXES] {
+    let mut axes = [JsAxis::None; MAX_JS_AXES];
+    axes[0] = JsAxis::LeftX;
+    axes[1] = JsAxis::LeftY;
+    axes[2] = JsAxis::RightX;
+    axes[3] = JsAxis::RightY;
+    axes[8] = JsAxis::RightTrigger;
+    axes[9] = JsAxis::LeftTrigger;
+    axes
+}
+
+#[cfg(test)]
+fn layout_from_bitmap(glyphs: GlyphSet, buttons: &[u16], axes: &[u8]) -> JsLayout {
+    let mut layout = JsLayout {
+        buttons: [None; MAX_GAMEPAD_BUTTONS],
+        axes: [JsAxis::None; MAX_JS_AXES],
+    };
+    for (index, code) in buttons.iter().enumerate().take(MAX_GAMEPAD_BUTTONS) {
+        layout.buttons[index] = evdev_button(*code, glyphs);
+    }
+    for (index, code) in axes.iter().enumerate().take(MAX_JS_AXES) {
+        layout.axes[index] = evdev_axis(*code, glyphs);
+    }
+    layout
+}
+
+/// Evdev code at a joydev index. On the Deck, `BTN_X` (`0x133`) is the
+/// physical west face and `BTN_Y` (`0x134`) is the physical north face.
+fn evdev_button(code: u16, glyphs: GlyphSet) -> Option<InputCode> {
+    let deck = glyphs == GlyphSet::SteamDeck;
+    Some(match code {
+        0x126 if deck => InputCode::gamepad_capture,
+        0x130 => InputCode::gamepad_face_south,
+        0x131 => InputCode::gamepad_face_east,
+        0x133 if deck => InputCode::gamepad_face_west,
+        0x133 => InputCode::gamepad_face_north,
+        0x134 if deck => InputCode::gamepad_face_north,
+        0x134 => InputCode::gamepad_face_west,
+        0x136 => InputCode::gamepad_left_shoulder,
+        0x137 => InputCode::gamepad_right_shoulder,
+        0x138 => InputCode::gamepad_left_trigger,
+        0x139 => InputCode::gamepad_right_trigger,
+        0x13a => InputCode::gamepad_select,
+        0x13b => InputCode::gamepad_start,
+        0x13c => InputCode::gamepad_home,
+        0x13d => InputCode::gamepad_left_stick_press,
+        0x13e => InputCode::gamepad_right_stick_press,
+        0x220 => InputCode::gamepad_dpad_up,
+        0x221 => InputCode::gamepad_dpad_down,
+        0x222 => InputCode::gamepad_dpad_left,
+        0x223 => InputCode::gamepad_dpad_right,
+        _ => return None,
+    })
+}
+
+fn evdev_axis(code: u8, glyphs: GlyphSet) -> JsAxis {
+    let deck = glyphs == GlyphSet::SteamDeck;
+    match code {
+        0x00 => JsAxis::LeftX,
+        0x01 => JsAxis::LeftY,
+        0x02 => JsAxis::LeftTrigger,
+        0x03 => JsAxis::RightX,
+        0x04 => JsAxis::RightY,
+        0x05 => JsAxis::RightTrigger,
+        0x10 if !deck => JsAxis::DpadX,
+        0x11 if !deck => JsAxis::DpadY,
+        0x14 => JsAxis::RightTrigger,
+        0x15 => JsAxis::LeftTrigger,
+        _ => JsAxis::None,
+    }
+}
+
+fn apply_js_event(buf: &[u8; 8], state: &mut JsState, layout: &JsLayout) {
     let value = i16::from_ne_bytes([buf[4], buf[5]]);
     let kind = buf[6] & !0x80;
-    let number = buf[7];
+    let number = usize::from(buf[7]);
     if kind == 1 {
-        if let Some(code) = code_from_js_button(glyphs, number) {
+        if let Some(code) = layout.buttons.get(number).copied().flatten() {
             set_js_button(&mut state.buttons, code, value != 0);
         }
         return;
@@ -611,19 +799,23 @@ fn apply_js_event(buf: &[u8; 8], state: &mut JsState, glyphs: GlyphSet) {
     if kind != 2 {
         return;
     }
+    let Some(role) = layout.axes.get(number).copied() else {
+        return;
+    };
     let norm = if value < 0 {
         value as f32 / 32768.0
     } else {
         value as f32 / 32767.0
     };
-    match number {
-        0 => state.left.x = norm,
-        1 => state.left.y = -norm,
-        2 => state.left_trigger = trigger_from_axis(norm),
-        3 => state.right.x = norm,
-        4 => state.right.y = -norm,
-        5 => state.right_trigger = trigger_from_axis(norm),
-        6 => {
+    match role {
+        JsAxis::None => {}
+        JsAxis::LeftX => state.left.x = norm,
+        JsAxis::LeftY => state.left.y = -norm,
+        JsAxis::RightX => state.right.x = norm,
+        JsAxis::RightY => state.right.y = -norm,
+        JsAxis::LeftTrigger => state.left_trigger = trigger_from_axis(norm),
+        JsAxis::RightTrigger => state.right_trigger = trigger_from_axis(norm),
+        JsAxis::DpadX => {
             set_js_button(
                 &mut state.buttons,
                 InputCode::gamepad_dpad_left,
@@ -635,7 +827,7 @@ fn apply_js_event(buf: &[u8; 8], state: &mut JsState, glyphs: GlyphSet) {
                 norm >= 0.5,
             );
         }
-        7 => {
+        JsAxis::DpadY => {
             set_js_button(&mut state.buttons, InputCode::gamepad_dpad_up, norm <= -0.5);
             set_js_button(
                 &mut state.buttons,
@@ -643,7 +835,6 @@ fn apply_js_event(buf: &[u8; 8], state: &mut JsState, glyphs: GlyphSet) {
                 norm >= 0.5,
             );
         }
-        _ => {}
     }
 }
 
@@ -652,22 +843,51 @@ fn trigger_from_axis(norm: f32) -> f32 {
     f32::midpoint(norm, 1.0).clamp(0.0, 1.0)
 }
 
-/// joydev numbers the buttons that are actually set, from `BTN_MISC` upward.
+/// Family table used when `JSIOCGBTNMAP` fails. joydev numbers the buttons
+/// that are set, from `BTN_JOYSTICK` upward and then the lower codes.
 ///
 /// xpad sets `BTN_X` (`0x133`) for the west face and does not set the trigger
 /// buttons, so index 2 is west and the clicks are 9 and 10. hid-playstation
 /// sets `BTN_NORTH` before `BTN_WEST` and also sets `BTN_TL2` / `BTN_TR2`, so
-/// index 2 is north and the clicks land at 11 and 12. A Steam Deck and a
-/// generic pad follow the Linux gamepad spec without those trigger buttons:
-/// index 2 is north and select stays at 6.
-fn code_from_js_button(glyphs: GlyphSet, number: u8) -> Option<InputCode> {
+/// index 2 is north and the clicks land at 11 and 12. A generic pad without
+/// those trigger buttons keeps select at 6. The Deck follows `hid-steam`:
+/// the pad touches and the quick-access button come first, so south is index
+/// 3 and select is index 11.
+fn button_from_family(glyphs: GlyphSet, number: u8) -> Option<InputCode> {
     match glyphs {
         GlyphSet::Xbox => xpad_button(number),
         GlyphSet::PlayStation => playstation_button(number),
-        GlyphSet::SteamDeck | GlyphSet::GenericGamepad | GlyphSet::KeyboardMouse => {
-            spec_button(number)
-        }
+        GlyphSet::SteamDeck => deck_button(number),
+        GlyphSet::GenericGamepad | GlyphSet::KeyboardMouse => spec_button(number),
     }
+}
+
+/// `drivers/hid/hid-steam.c` for `STEAM_QUIRK_DECK`. Index 0 is `BTN_THUMB`
+/// (left pad touch) and index 1 is `BTN_THUMB2` (right pad touch). Index 2
+/// is `BTN_BASE` (quick access). `BTN_X` is the physical west face and
+/// `BTN_Y` is the physical north face. Grip codes have no `InputCode`.
+fn deck_button(number: u8) -> Option<InputCode> {
+    Some(match number {
+        2 => InputCode::gamepad_capture,
+        3 => InputCode::gamepad_face_south,
+        4 => InputCode::gamepad_face_east,
+        5 => InputCode::gamepad_face_west,
+        6 => InputCode::gamepad_face_north,
+        7 => InputCode::gamepad_left_shoulder,
+        8 => InputCode::gamepad_right_shoulder,
+        9 => InputCode::gamepad_left_trigger,
+        10 => InputCode::gamepad_right_trigger,
+        11 => InputCode::gamepad_select,
+        12 => InputCode::gamepad_start,
+        13 => InputCode::gamepad_home,
+        14 => InputCode::gamepad_left_stick_press,
+        15 => InputCode::gamepad_right_stick_press,
+        16 => InputCode::gamepad_dpad_up,
+        17 => InputCode::gamepad_dpad_down,
+        18 => InputCode::gamepad_dpad_left,
+        19 => InputCode::gamepad_dpad_right,
+        _ => return None,
+    })
 }
 
 fn xpad_button(number: u8) -> Option<InputCode> {
@@ -760,26 +980,27 @@ mod tests {
 
     #[test]
     fn js_axes_fill_sticks_triggers_and_the_dpad() {
+        let layout = layout_for(GlyphSet::Xbox);
         let mut state = JsState::new();
-        apply_js_event(&packet(2, 0, 16_384), &mut state, GlyphSet::Xbox);
-        apply_js_event(&packet(2, 1, 32_767), &mut state, GlyphSet::Xbox);
+        apply_js_event(&packet(2, 0, 16_384), &mut state, &layout);
+        apply_js_event(&packet(2, 1, 32_767), &mut state, &layout);
         assert!(state.left.x > 0.4 && state.left.x < 0.6);
         assert!(state.left.y < -0.9);
-        apply_js_event(&packet(2, 2, -32_767), &mut state, GlyphSet::Xbox);
-        apply_js_event(&packet(2, 5, 32_767), &mut state, GlyphSet::Xbox);
+        apply_js_event(&packet(2, 2, -32_767), &mut state, &layout);
+        apply_js_event(&packet(2, 5, 32_767), &mut state, &layout);
         assert!(state.left_trigger < 0.01);
         assert!((state.right_trigger - 1.0).abs() < 0.02);
-        apply_js_event(&packet(2, 7, -32_767), &mut state, GlyphSet::Xbox);
+        apply_js_event(&packet(2, 7, -32_767), &mut state, &layout);
         assert_eq!(
             state.buttons[gamepad_button_index(InputCode::gamepad_dpad_up).unwrap()],
             ButtonState::Down
         );
-        apply_js_event(&packet(1, 0, 1), &mut state, GlyphSet::Xbox);
+        apply_js_event(&packet(1, 0, 1), &mut state, &layout);
         assert_eq!(
             state.buttons[gamepad_button_index(InputCode::gamepad_face_south).unwrap()],
             ButtonState::Down
         );
-        apply_js_event(&packet(1, 0, 0), &mut state, GlyphSet::Xbox);
+        apply_js_event(&packet(1, 0, 0), &mut state, &layout);
         assert_eq!(
             state.buttons[gamepad_button_index(InputCode::gamepad_face_south).unwrap()],
             ButtonState::Up
@@ -962,13 +1183,39 @@ mod tests {
             Some(InputCode::gamepad_right_stick_press)
         );
 
+        assert_eq!(pressed(GlyphSet::SteamDeck, 0), None);
+        assert_eq!(pressed(GlyphSet::SteamDeck, 1), None);
         assert_eq!(
             pressed(GlyphSet::SteamDeck, 2),
-            Some(InputCode::gamepad_face_north)
+            Some(InputCode::gamepad_capture)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 3),
+            Some(InputCode::gamepad_face_south)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 5),
+            Some(InputCode::gamepad_face_west)
         );
         assert_eq!(
             pressed(GlyphSet::SteamDeck, 6),
+            Some(InputCode::gamepad_face_north)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 9),
+            Some(InputCode::gamepad_left_trigger)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 10),
+            Some(InputCode::gamepad_right_trigger)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 11),
             Some(InputCode::gamepad_select)
+        );
+        assert_eq!(
+            pressed(GlyphSet::SteamDeck, 16),
+            Some(InputCode::gamepad_dpad_up)
         );
         assert_eq!(
             pressed(GlyphSet::GenericGamepad, 2),
@@ -978,6 +1225,83 @@ mod tests {
             pressed(GlyphSet::GenericGamepad, 10),
             Some(InputCode::gamepad_right_stick_press)
         );
+    }
+
+    #[test]
+    fn steam_deck_axes_keep_the_trackpads_off_the_sticks() {
+        let layout = layout_for(GlyphSet::SteamDeck);
+        let mut state = JsState::new();
+        apply_js_event(&packet(2, 2, 32_767), &mut state, &layout);
+        assert!(state.right.x > 0.9);
+        assert!(state.left_trigger < 0.01);
+        assert!(state.right_trigger < 0.01);
+        apply_js_event(&packet(2, 4, 32_767), &mut state, &layout);
+        apply_js_event(&packet(2, 6, 32_767), &mut state, &layout);
+        assert!(state.right.y.abs() < 0.01);
+        assert!(state.left.x.abs() < 0.01);
+        assert_eq!(
+            state.buttons[gamepad_button_index(InputCode::gamepad_dpad_right).unwrap()],
+            ButtonState::Up
+        );
+        apply_js_event(&packet(2, 8, 32_767), &mut state, &layout);
+        apply_js_event(&packet(2, 9, 32_767), &mut state, &layout);
+        assert!((state.right_trigger - 1.0).abs() < 0.02);
+        assert!((state.left_trigger - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn a_button_bitmap_keeps_select_on_btn_select() {
+        let with_triggers = [
+            0x130u16, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d,
+            0x13e,
+        ];
+        let layout = layout_from_bitmap(GlyphSet::GenericGamepad, &with_triggers, &[]);
+        assert_eq!(layout.buttons[6], Some(InputCode::gamepad_left_trigger));
+        assert_eq!(layout.buttons[8], Some(InputCode::gamepad_select));
+        assert_eq!(layout.buttons[9], Some(InputCode::gamepad_start));
+        assert_eq!(layout.buttons[10], Some(InputCode::gamepad_home));
+        assert_eq!(
+            layout.buttons[11],
+            Some(InputCode::gamepad_left_stick_press)
+        );
+        assert_eq!(
+            layout.buttons[12],
+            Some(InputCode::gamepad_right_stick_press)
+        );
+
+        let without_triggers = [
+            0x130u16, 0x131, 0x133, 0x134, 0x136, 0x137, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
+        ];
+        let layout = layout_from_bitmap(GlyphSet::GenericGamepad, &without_triggers, &[]);
+        assert_eq!(layout.buttons[6], Some(InputCode::gamepad_select));
+        assert_eq!(layout.buttons[8], Some(InputCode::gamepad_home));
+        assert_eq!(layout.buttons[9], Some(InputCode::gamepad_left_stick_press));
+    }
+
+    #[test]
+    fn a_deck_bitmap_matches_hid_steam() {
+        let buttons = [
+            0x121u16, 0x122, 0x126, 0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a,
+            0x13b, 0x13c, 0x13d, 0x13e, 0x220, 0x221, 0x222, 0x223, 0x224, 0x225, 0x226, 0x227,
+        ];
+        let axes = [0x00u8, 0x01, 0x03, 0x04, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15];
+        let layout = layout_from_bitmap(GlyphSet::SteamDeck, &buttons, &axes);
+        assert_eq!(layout.buttons[0], None);
+        assert_eq!(layout.buttons[1], None);
+        assert_eq!(layout.buttons[2], Some(InputCode::gamepad_capture));
+        assert_eq!(layout.buttons[3], Some(InputCode::gamepad_face_south));
+        assert_eq!(layout.buttons[5], Some(InputCode::gamepad_face_west));
+        assert_eq!(layout.buttons[6], Some(InputCode::gamepad_face_north));
+        assert_eq!(layout.buttons[9], Some(InputCode::gamepad_left_trigger));
+        assert_eq!(layout.buttons[10], Some(InputCode::gamepad_right_trigger));
+        assert_eq!(layout.buttons[11], Some(InputCode::gamepad_select));
+        assert_eq!(layout.buttons[16], Some(InputCode::gamepad_dpad_up));
+        assert_eq!(layout.buttons[20], None);
+        assert_eq!(layout.axes[2], JsAxis::RightX);
+        assert_eq!(layout.axes[4], JsAxis::None);
+        assert_eq!(layout.axes[6], JsAxis::None);
+        assert_eq!(layout.axes[8], JsAxis::RightTrigger);
+        assert_eq!(layout.axes[9], JsAxis::LeftTrigger);
     }
 
     #[test]
@@ -1023,7 +1347,7 @@ mod tests {
                 file,
                 state,
                 name,
-                glyphs,
+                layout: layout_for(glyphs),
             });
         }
         input.poll_gamepads();
@@ -1040,8 +1364,9 @@ mod tests {
     }
 
     fn pressed(glyphs: GlyphSet, number: u8) -> Option<InputCode> {
+        let layout = layout_for(glyphs);
         let mut state = JsState::new();
-        apply_js_event(&packet(1, number, 1), &mut state, glyphs);
+        apply_js_event(&packet(1, number, 1), &mut state, &layout);
         let codes = [
             InputCode::gamepad_face_south,
             InputCode::gamepad_face_east,
@@ -1054,8 +1379,13 @@ mod tests {
             InputCode::gamepad_select,
             InputCode::gamepad_start,
             InputCode::gamepad_home,
+            InputCode::gamepad_capture,
             InputCode::gamepad_left_stick_press,
             InputCode::gamepad_right_stick_press,
+            InputCode::gamepad_dpad_up,
+            InputCode::gamepad_dpad_down,
+            InputCode::gamepad_dpad_left,
+            InputCode::gamepad_dpad_right,
         ];
         codes.into_iter().find(|code| {
             gamepad_button_index(*code)
