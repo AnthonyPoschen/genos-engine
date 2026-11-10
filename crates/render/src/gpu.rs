@@ -9057,6 +9057,9 @@ impl Gpu {
     }
 
     fn finish_teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
         if self.teardown < 2 {
             self.destroy_lighting();
             self.teardown = 2;
@@ -9072,6 +9075,12 @@ impl Gpu {
         if self.teardown < 5 {
             self.destroy_surface_handle();
             self.teardown = 5;
+        }
+        // A quit drop can reach here with `exit_release` set and the device
+        // still alive. Destroying it now is the same wait the quit skipped.
+        if self.exit_release {
+            let _ = self.release_instead_of_driver_destroy();
+            return;
         }
         if self.teardown < 6 {
             self.destroy_device_handle();

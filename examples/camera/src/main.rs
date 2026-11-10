@@ -154,6 +154,7 @@ fn run() -> Result<i32, String> {
     let mut time_of_day = None;
     let mut block_ms = None;
     let mut close_early = false;
+    let mut full_destroy = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -287,6 +288,7 @@ fn run() -> Result<i32, String> {
                 )?);
             }
             "--lifecycle-close-early" => close_early = true,
+            "--lifecycle-full-destroy" => full_destroy = true,
             other if genos_window::block_ms_needs_value(other) == Some(false) => {
                 block_ms = Some(genos_window::parse_block_ms(other, None)?);
             }
@@ -296,6 +298,11 @@ fn run() -> Result<i32, String> {
 
     let block_ms = genos_window::block_ms_mirror(block_ms);
     let close_early = genos_window::close_early_mirror(close_early);
+    // The validation gate passes this so vkDestroyDevice and vkDestroyInstance
+    // still run and object-leak reports fire. The quit-gap run omits it.
+    if genos_window::full_destroy_mirror(full_destroy) {
+        genos_window::request_full_driver_destroy();
+    }
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
