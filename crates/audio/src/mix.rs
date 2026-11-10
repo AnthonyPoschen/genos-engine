@@ -4,12 +4,21 @@
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 
 //! Mix loaded PCM into one device-rate stereo buffer.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use genos_load::Pcm;
 use genos_math::Vec3;
+
+static ALLOCATING_MIX_ENTRIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many times [`mix`] has run. The device thread must not move this.
+#[must_use]
+pub fn allocating_mix_entries() -> u64 {
+    ALLOCATING_MIX_ENTRIES.load(Ordering::Relaxed)
+}
 
 use crate::space::{distance_gain, doppler_ratio, pan_gains, transmission_gain};
 
@@ -56,6 +65,7 @@ pub fn mix(
     device_rate: u32,
     frames: usize,
 ) -> Vec<i16> {
+    ALLOCATING_MIX_ENTRIES.fetch_add(1, Ordering::Relaxed);
     if device_rate == 0 || frames == 0 {
         return Vec::new();
     }
@@ -82,19 +92,22 @@ fn write_mix(
         window.fill(0.0);
         if device_rate != 0 {
             for source in sources {
-                render_source(window, source, listener, barriers, device_rate, base);
+                let (_, _, step) = levels(source, listener, barriers, device_rate);
+                let cursor0 = f64_from_usize(base) * step;
+                let _ = render_source(
+                    window,
+                    source,
+                    listener,
+                    barriers,
+                    device_rate,
+                    1.0,
+                    cursor0,
+                );
             }
         }
         let start = base.saturating_mul(2);
         quantize_into(window, &mut out[start..start + window.len()]);
         base += count;
-    }
-}
-
-fn quantize_into(acc: &[f32], out: &mut [i16]) {
-    let count = acc.len().min(out.len());
-    for index in 0..count {
-        out[index] = acc[index].round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }
 
@@ -114,37 +127,49 @@ pub fn mix_into(
         return;
     }
     for source in sources {
-        render_source(out, source, listener, barriers, device_rate, 0);
+        let _ = render_source(out, source, listener, barriers, device_rate, 1.0, 0.0);
     }
 }
 
-fn render_source(
+/// Quantize a `mix_into` buffer into interleaved `i16`.
+pub(crate) fn quantize_into(acc: &[f32], out: &mut [i16]) {
+    let count = acc.len().min(out.len());
+    for index in 0..count {
+        out[index] = acc[index].round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+pub(crate) fn render_source(
     acc: &mut [f32],
     source: &Source<'_>,
     listener: &Listener,
     barriers: &[Barrier],
     device_rate: u32,
-    frame_base: usize,
-) {
+    gain: f32,
+    cursor0: f64,
+) -> f64 {
     let channels = source.pcm.channels as usize;
-    if source.pcm.sample_rate == 0 || (channels != 1 && channels != 2) {
-        return;
+    if source.pcm.sample_rate == 0 || (channels != 1 && channels != 2) || device_rate == 0 {
+        return cursor0;
     }
     let source_frames = source.pcm.samples.len() / channels;
     if source_frames == 0 {
-        return;
+        return cursor0;
     }
     let frames = acc.len() / 2;
     let (level_l, level_r, step) = levels(source, listener, barriers, device_rate);
+    let mut produced = 0usize;
     for frame in 0..frames {
-        let cursor = f64_from_usize(frame_base + frame) * step;
+        let cursor = cursor0 + f64_from_usize(frame) * step;
         if !source.looping && cursor >= source_frames as f64 {
             break;
         }
         let (left, right) = read_pair(source, cursor, source_frames);
-        acc[frame * 2] += left * level_l;
-        acc[frame * 2 + 1] += right * level_r;
+        acc[frame * 2] += left * level_l * gain;
+        acc[frame * 2 + 1] += right * level_r * gain;
+        produced = frame + 1;
     }
+    cursor0 + f64_from_usize(produced) * step
 }
 
 fn levels(

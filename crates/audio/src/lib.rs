@@ -10,11 +10,22 @@
 //! reads the resident scene and does not present a swapchain image.
 
 mod device;
+mod engine;
 mod mix;
+mod path;
 mod poly;
+mod ring;
 mod space;
 
-pub use device::submit;
+#[cfg(target_os = "linux")]
+pub use device::AlsaDevice;
+#[cfg(target_os = "macos")]
+pub use device::CoreAudioDevice;
+#[cfg(target_os = "windows")]
+pub use device::WasapiDevice;
+pub use engine::{start_with, AudioStats, Stream};
 pub use genos_math::Vec3;
-pub use mix::{mix, mix_into, Barrier, Listener, Source};
+pub use mix::{allocating_mix_entries, mix, mix_into, Barrier, Listener, Source};
+pub use path::{DevicePath, FakeCapture, FakeDevice, NullDevice, OpenedDevice};
+pub use ring::Command;
 pub use space::SPEED_OF_SOUND;
