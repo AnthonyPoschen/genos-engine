@@ -197,6 +197,20 @@ const PLANT_NESTED: u8 = 3;
 const PLANT_SLACK: u8 = 4;
 const PLANT_MISLABEL: u8 = 5;
 
+static PROCESS_SEAT: AtomicU32 = AtomicU32::new(0);
+
+/// `seat_enter` holds Slack for every scheduler in the process.
+pub fn note_seat_enter() {
+    PROCESS_SEAT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// `seat_leave` releases one process seat. Extra releases stay at zero.
+pub fn note_seat_leave() {
+    let _ = PROCESS_SEAT.try_update(Ordering::Relaxed, Ordering::Relaxed, |seat| {
+        Some(seat.saturating_sub(1))
+    });
+}
+
 impl Scheduler {
     /// Build from settings and a clock.
     #[must_use]
@@ -374,7 +388,8 @@ impl Scheduler {
             return Ok(0.0);
         }
         if class == Class::Slack {
-            let fenced = self.seat.load(Ordering::Relaxed) > 0;
+            let fenced =
+                self.seat.load(Ordering::Relaxed) > 0 || PROCESS_SEAT.load(Ordering::Relaxed) > 0;
             let forced = fenced && self.plant.load(Ordering::Relaxed) == PLANT_SLACK;
             if forced {
                 self.slack_during_fence.fetch_add(

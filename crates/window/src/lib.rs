@@ -26,6 +26,7 @@ pub use lifecycle::{
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
+    set_seat_notifier,
     PumpStep, StallMeter, PUMP_BUDGET,
 };
 
