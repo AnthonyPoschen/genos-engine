@@ -64,10 +64,13 @@ fn a_small_sun_step_sets_the_shader_bit() {
         !names.iter().any(|name| name == "lighting sun compose"),
         "startup does not build the sun compose: {names:?}"
     );
+    // Nine names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
+    // compose-maint and sh-drain are timed, and their names do not start
+    // with "lighting". The frozen count is 10.
     assert_eq!(
         names.len(),
-        11,
-        "nine compute pipelines, the maintenance compose, and the gbuffer: {names:?}"
+        10,
+        "nine compute pipelines plus the gbuffer: {names:?}"
     );
 
     for _ in 0..3 {
@@ -76,7 +79,7 @@ fn a_small_sun_step_sets_the_shader_bit() {
     let frozen = renderer.lighting_sun_stats();
     assert!(!frozen.gpu_sun, "a frozen sun stays off the sun path: {frozen:?}");
     assert_eq!(frozen.host_frames, 0);
-    assert_eq!(lighting_names(renderer).len(), 11);
+    assert_eq!(lighting_names(renderer).len(), 10);
 
     // Full effort with no sun frames yet still writes the counter. The still
     // and moving benches never enter the path, so this is the proof the flag
