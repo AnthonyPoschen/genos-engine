@@ -49,3 +49,5 @@ WASAPI and CoreAudio are not run from this Linux machine.
 ## Decisions
 
 [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. Loading stays decode-only. See [Loading](loading.md).
+
+[ADR 0040](../adr/0040-audio.md) and [the audio plan](audio/plan.md) propose the callback mixer, the buses, paged clips, and the cooked `.gaud` record. They are proposed. Anthony reviews them before any code. This record stays the shipped mix until a stage in that plan changes it.

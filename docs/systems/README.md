@@ -42,6 +42,7 @@ Each record uses these headings:
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
 - [Job system](job-system.md): a fiber-free work-stealing pool, serial when the server or a replay needs one order. Proposed.
+- [Audio plan](audio/plan.md): the device path, the lock-free mixer, voices and buses, spatialization, cooked `.gaud`, and `debug/audio`. Proposed. [ADR 0040](../adr/0040-audio.md). Anthony reviews it before any code.
 - [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Proposed.
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Accepted. Speculative contacts, swept time of impact, and the hot-swap are in the physics step. `slice_chunk` is not.

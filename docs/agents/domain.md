@@ -44,6 +44,8 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── fog-and-volumetric-lighting-design.md
     │   ├── loading.md
     │   ├── audio.md
+    │   ├── audio/
+    │   │   └── plan.md
     │   └── scripting.md
     ├── goals/
     │   └── mvp-scene.md
