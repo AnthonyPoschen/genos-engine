@@ -2298,22 +2298,22 @@ vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
 }
 #endif
 bool lighting_sh_detail_owner_lit(uint slot);
-// The corner gather runs in the cache pass, once per texel or lattice, not
-// once per pixel. Compose is one relight behind that store.
-// Sun word w is the cells-accept bit. Sun word z stays the quarter scratch.
-// Seen words and the two lists sit past the screen list. A lattice record is
-// the key, the pack, g0, the stamp, and eight slot ids.
+// The corner gather runs once per texel or lattice, before compose, not once
+// per pixel. Compose loads. Sun word w is the cells-accept bit. Sun word z
+// stays the quarter scratch.
+// Seen words, sixteen distance bins, and the lattice table sit past the screen
+// list. A lattice record is the key, the pack, g0, the stamp, and eight slot ids.
 const uint LIGHTING_SH_STORE_CAP = 8192u;
+const uint LIGHTING_SH_STORE_BINS = 16u;
 // Past the screen list: PPM, the 391-word a-trous meta, the 8 sun words,
 // the owner table, the 3-word list header, and the list itself.
 const uint LIGHTING_SH_SEEN_AT = LIGHTING_COMPOSE_AT + 4u + 2u * LIGHTING_COMPOSE_CAP + 5u * LIGHTING_CACHE_SLOTS + 391u + 8u + LIGHTING_CACHE_SLOTS + 3u + LIGHTING_CACHE_SLOTS;
-const uint LIGHTING_SH_STORE_COUNT0 = LIGHTING_SH_SEEN_AT + LIGHTING_CACHE_SLOTS;
-const uint LIGHTING_SH_STORE_COUNT1 = LIGHTING_SH_STORE_COUNT0 + 1u;
-const uint LIGHTING_SH_STORE_LIST0 = LIGHTING_SH_STORE_COUNT1 + 1u;
-const uint LIGHTING_SH_STORE_LIST1 = LIGHTING_SH_STORE_LIST0 + LIGHTING_SH_STORE_CAP;
-const uint LIGHTING_SH_LATTICE_CAP = 4096u;
+const uint LIGHTING_SH_BIN_COUNT = LIGHTING_SH_SEEN_AT + LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SH_BIN_LIST = LIGHTING_SH_BIN_COUNT + LIGHTING_SH_STORE_BINS;
+const uint LIGHTING_SH_LATTICE_CAP = 16384u;
+const uint LIGHTING_SH_LATTICE_PROBE = 16u;
 const uint LIGHTING_SH_LATTICE_STRIDE = 14u;
-const uint LIGHTING_SH_LATTICE_AT = LIGHTING_SH_STORE_LIST1 + LIGHTING_SH_STORE_CAP;
+const uint LIGHTING_SH_LATTICE_AT = LIGHTING_SH_BIN_LIST + LIGHTING_SH_STORE_BINS * LIGHTING_SH_STORE_CAP;
 void lighting_sh_lattice_axes(vec3 p, vec3 n, out uint ax, out uint sgn, out vec3 g0, out vec3 an, out vec3 inset) {
     ax = lighting_axis(n) >> 1u;
     sgn = n[ax] < 0.0 ? 1u : 0u;
@@ -2329,8 +2329,28 @@ uint lighting_sh_lattice_key(uint ax, uint sgn, vec3 g0) {
     h = lighting_hash(h ^ floatBitsToUint(g0.z));
     return lighting_hash(h ^ ax ^ (sgn << 8u));
 }
-uint lighting_sh_lattice_word(uint key) {
-    return LIGHTING_SH_LATTICE_AT + (key % LIGHTING_SH_LATTICE_CAP) * LIGHTING_SH_LATTICE_STRIDE;
+// Log-distance shell. Bin 0 is inside one metre. Farther shells are the next
+// powers of two, and the last bin holds everything past that.
+uint lighting_sh_dist_bin(vec3 p) {
+    float d = length(p - scene.eye.xyz);
+    if (d < 1.0) {
+        return 0u;
+    }
+    return min(uint(floor(log2(d))), LIGHTING_SH_STORE_BINS - 1u);
+}
+uint lighting_sh_lattice_find(uint key) {
+    if (key == 0u) {
+        return ~0u;
+    }
+    uint mask = LIGHTING_SH_LATTICE_CAP - 1u;
+    uint home = key & mask;
+    for (uint i = 0u; i < LIGHTING_SH_LATTICE_PROBE; i++) {
+        uint s = (home + i) & mask;
+        if (ckeys.key[LIGHTING_SH_LATTICE_AT + s * LIGHTING_SH_LATTICE_STRIDE] == key) {
+            return s;
+        }
+    }
+    return ~0u;
 }
 // Loads of the eight corners. A missing id, or a corner the live gates leave
 // out, adds no weight. This is not a hash probe.
@@ -2387,15 +2407,64 @@ bool lighting_sh_lattice_load(vec3 p, vec3 n, out uint ids[8]) {
     vec3 an;
     vec3 inset;
     lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
-    uint key = lighting_sh_lattice_key(ax, sgn, g0);
-    uint word = lighting_sh_lattice_word(key);
-    if (ckeys.key[word] != key) {
+    uint slot = lighting_sh_lattice_find(lighting_sh_lattice_key(ax, sgn, g0));
+    if (slot == ~0u) {
         return false;
     }
+    uint word = LIGHTING_SH_LATTICE_AT + slot * LIGHTING_SH_LATTICE_STRIDE;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
         ids[k] = ckeys.key[word + 6u + k];
     }
     return true;
+}
+// Picture compose does not write the table. Maintenance and the live compiles do.
+// A second key that shares the home probes the next free slot. A nearer key
+// may replace a farther one in that window. It does not clear a different key
+// by taking its only slot.
+#if !defined(GENOS_COMPOSE_NO_WALK) || defined(GENOS_COMPOSE_MAINT)
+uint lighting_sh_lattice_bind(uint key, uint bin) {
+    if (!LIGHTING_SC_WRITES || key == 0u) {
+        return ~0u;
+    }
+    uint mask = LIGHTING_SH_LATTICE_CAP - 1u;
+    uint home = key & mask;
+    for (uint pass = 0u; pass < 2u; pass++) {
+        for (uint i = 0u; i < LIGHTING_SH_LATTICE_PROBE; i++) {
+            uint s = (home + i) & mask;
+            uint word = LIGHTING_SH_LATTICE_AT + s * LIGHTING_SH_LATTICE_STRIDE;
+            uint cur = ckeys.key[word];
+            if (cur == key) {
+                return s;
+            }
+            bool take = false;
+            uint expect = 0u;
+            if (pass == 0u && cur == 0u) {
+                take = true;
+            } else if (pass == 1u && cur != 0u) {
+                uint ob = ckeys.key[word + 1u] >> 4u;
+                if (ob > bin) {
+                    take = true;
+                    expect = cur;
+                }
+            }
+            if (!take) {
+                continue;
+            }
+            uint prev = atomicCompSwap(ckeys.key[word], expect, key);
+            if (prev == key) {
+                return s;
+            }
+            if (prev != expect) {
+                continue;
+            }
+            ckeys.key[word + 1u] = bin << 4u;
+            [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+                ckeys.key[word + 6u + k] = ~0u;
+            }
+            return s;
+        }
+    }
+    return ~0u;
 }
 void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
     if (!LIGHTING_SC_WRITES) {
@@ -2407,24 +2476,23 @@ void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
     vec3 an;
     vec3 inset;
     lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
-    uint key = lighting_sh_lattice_key(ax, sgn, g0);
-    uint word = lighting_sh_lattice_word(key);
-    uint pack = ax | (sgn << 2u) | (claim ? 8u : 0u);
-    uint old = ckeys.key[word];
-    ckeys.key[word] = key;
+    uint bin = lighting_sh_dist_bin(p);
+    uint slot = lighting_sh_lattice_bind(lighting_sh_lattice_key(ax, sgn, g0), bin);
+    if (slot == ~0u) {
+        return;
+    }
+    uint word = LIGHTING_SH_LATTICE_AT + slot * LIGHTING_SH_LATTICE_STRIDE;
+    uint pack = ax | (sgn << 2u) | (claim ? 8u : 0u) | (bin << 4u);
     ckeys.key[word + 1u] = pack;
     ckeys.key[word + 2u] = floatBitsToUint(g0.x);
     ckeys.key[word + 3u] = floatBitsToUint(g0.y);
     ckeys.key[word + 4u] = floatBitsToUint(g0.z);
     ckeys.key[word + 5u] = lighting_frame();
-    // A new record has no ids yet. The same key keeps the ids the cache pass
-    // filled, so compose in this frame still loads last relight's corners.
-    if (old != key) {
-        [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
-            ckeys.key[word + 6u + k] = ~0u;
-        }
-    }
 }
+#else
+void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
+}
+#endif
 #ifndef GENOS_COMPOSE_NO_WALK
 void lighting_sh_lattice_fill_word(uint word) {
     uint key = ckeys.key[word];
@@ -2464,32 +2532,51 @@ void lighting_sh_lattice_commit(vec3 p, vec3 n, bool claim) {
     vec3 an;
     vec3 inset;
     lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
-    lighting_sh_lattice_fill_word(lighting_sh_lattice_word(lighting_sh_lattice_key(ax, sgn, g0)));
+    uint slot = lighting_sh_lattice_find(lighting_sh_lattice_key(ax, sgn, g0));
+    if (slot != ~0u) {
+        lighting_sh_lattice_fill_word(LIGHTING_SH_LATTICE_AT + slot * LIGHTING_SH_LATTICE_STRIDE);
+    }
 }
 #endif
-void lighting_sh_enqueue_texel(uint slot) {
+void lighting_sh_enqueue_texel(uint slot, vec3 at) {
     if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS) {
         return;
     }
     if (atomicExchange(ckeys.key[LIGHTING_SH_SEEN_AT + slot], lighting_frame()) == lighting_frame()) {
         return;
     }
-    uint phase = lighting_frame() & 1u;
-    uint count_at = phase == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1;
-    uint list_at = phase == 0u ? LIGHTING_SH_STORE_LIST0 : LIGHTING_SH_STORE_LIST1;
-    uint at = atomicAdd(ckeys.key[count_at], 1u);
-    if (at < LIGHTING_SH_STORE_CAP) {
-        ckeys.key[list_at + at] = slot;
+    uint bin = lighting_sh_dist_bin(at);
+    uint index = atomicAdd(ckeys.key[LIGHTING_SH_BIN_COUNT + bin], 1u);
+    if (index < LIGHTING_SH_STORE_CAP) {
+        ckeys.key[LIGHTING_SH_BIN_LIST + bin * LIGHTING_SH_STORE_CAP + index] = slot;
     }
+}
+// The first LIGHTING_SH_STORE_CAP entries, near shells first. Within a shell
+// the order is the order maintenance enqueued them.
+uint lighting_sh_store_pick(uint gid) {
+    if (gid >= LIGHTING_SH_STORE_CAP) {
+        return ~0u;
+    }
+    uint left = gid;
+    for (uint bin = 0u; bin < LIGHTING_SH_STORE_BINS; bin++) {
+        uint n = min(ckeys.key[LIGHTING_SH_BIN_COUNT + bin], LIGHTING_SH_STORE_CAP);
+        if (left < n) {
+            return ckeys.key[LIGHTING_SH_BIN_LIST + bin * LIGHTING_SH_STORE_CAP + left];
+        }
+        left -= n;
+    }
+    return ~0u;
 }
 bool lighting_sh_detail_accepts(uint slot) {
     return slot < LIGHTING_CACHE_SLOTS && cache.v[LIGHTING_SC_SUN_AT + slot].w > LIGHTING_CACHE_HAS_W;
 }
 #ifndef GENOS_COMPOSE_NO_WALK
-// The gathered colour of an empty fine texel, and whether that gather still
-// had a corner. An empty gather clears the confidence. Sun word z is not written.
+// The handover seed of an empty fine texel, gathered at the texel centre, and
+// whether that gather still had a corner. The picture is the lattice blend at
+// the pixel corner, not this rgb9e5 seed. An empty gather clears the confidence.
+// Sun word z is not written. Flag 134217728 keeps the seed as the mean.
 void lighting_sh_detail_store(uint slot) {
-    if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS || !lighting_sh_texel_detail_on()) {
+    if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS || !lighting_sh_texel_detail_on() || !lighting_sc_seed_split()) {
         return;
     }
     vec3 p;
@@ -2501,7 +2588,8 @@ void lighting_sh_detail_store(uint slot) {
         cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
         cache.v[LIGHTING_SC_SUN_AT + slot].w = 0.0;
     }
-    vec4 detail = lighting_sh_read(p, n, false);
+    vec3 at = lighting_sc_centre(p, n, LIGHTING_SC_TEXEL);
+    vec4 detail = lighting_sh_read(at, n, false);
     if (detail.w > LIGHTING_CACHE_HAS_W) {
         lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
         cache.v[LIGHTING_SC_SPARSE_AT + slot].z = -abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].z);
@@ -2512,19 +2600,13 @@ void lighting_sh_detail_store(uint slot) {
     }
 }
 void lighting_sh_store_drain(uint gid) {
-    uint phase = lighting_frame() & 1u;
-    uint prev = phase ^ 1u;
-    if (gid == 0u) {
-        ckeys.key[phase == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1] = 0u;
+    uint slot = lighting_sh_store_pick(gid);
+    if (slot != ~0u) {
+        lighting_sh_detail_store(slot);
     }
-    uint prev_count = ckeys.key[prev == 0u ? LIGHTING_SH_STORE_COUNT0 : LIGHTING_SH_STORE_COUNT1];
-    if (gid < prev_count && gid < LIGHTING_SH_STORE_CAP) {
-        uint list_at = prev == 0u ? LIGHTING_SH_STORE_LIST0 : LIGHTING_SH_STORE_LIST1;
-        lighting_sh_detail_store(ckeys.key[list_at + gid]);
-    }
-    if (gid < LIGHTING_SH_LATTICE_CAP && lighting_frame() > 0u) {
+    if (gid < LIGHTING_SH_LATTICE_CAP) {
         uint word = LIGHTING_SH_LATTICE_AT + gid * LIGHTING_SH_LATTICE_STRIDE;
-        if (ckeys.key[word + 5u] + 1u == lighting_frame()) {
+        if (ckeys.key[word] != 0u && ckeys.key[word + 5u] == lighting_frame()) {
             lighting_sh_lattice_fill_word(word);
         }
     }
@@ -3762,7 +3844,7 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             return false;
         }
 #ifdef GENOS_COMPOSE_NO_WALK
-        if (!lighting_sh_detail_accepts(slot)) {
+        if (lighting_sh_compose_lattice(q, n, false).w <= LIGHTING_CACHE_HAS_W) {
             return false;
         }
 #else
@@ -4041,14 +4123,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (detail_candidate) {
 #ifdef GENOS_COMPOSE_NO_WALK
             if (LIGHTING_SC_WRITES) {
-                lighting_sh_enqueue_texel(slot);
+                lighting_sh_enqueue_texel(slot, q);
             }
-            if (lighting_sh_detail_accepts(slot)) {
-                vec4 detail = lighting_sc_seed(slot);
-                if (detail.w > 0.0) {
-                    detail_rgb = detail.rgb;
-                    detail_kept = true;
-                }
+            vec4 detail = lighting_sh_compose_lattice(q, n, false);
+            if (detail.w > LIGHTING_CACHE_HAS_W) {
+                detail_rgb = detail.rgb;
+                detail_kept = true;
             }
 #else
             if (LIGHTING_SC_WRITES && (lighting_sc_lamp_touched(slot) || lighting_lamp_settling())) {

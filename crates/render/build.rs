@@ -344,6 +344,7 @@ fn rerun_shader_pieces() {
         "probe_retire_prod.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
+        "lighting_sh_drain.comp",
         "scene.vert",
         "overlay.frag",
         "depth_mask.frag",
@@ -385,8 +386,7 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
         &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
     );
     // #142: the compose writes, run just before the read-only compose.
-    // The walk stays out of this compile too. Maintenance enqueues; the cache
-    // relight gathers.
+    // The walk stays out of this compile. Maintenance enqueues. The drain gathers.
     let maint = compile_args(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_maint.comp.spv"),
@@ -395,6 +395,15 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
         maint.display()
+    ));
+    // The neighbour walk lives here, after maintenance and before compose.
+    let drain = compile(
+        "shaders/lighting_sh_drain.comp",
+        &out.join("lighting_sh_drain.comp.spv"),
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_SH_DRAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        drain.display()
     ));
     let sun_hdr = compile_defines(
         "shaders/lighting_sun_compose.comp",

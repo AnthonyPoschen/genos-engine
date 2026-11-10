@@ -112,6 +112,12 @@ const vec3 PROD_RO_STALE = vec3(524.1875, 0.0, 4.1875);
 const vec3 PROD_RO_EMPTY = vec3(532.1875, 0.0, 4.1875);
 const vec3 PROD_PARITY_POS = vec3(900.0, 0.0, 900.0);
 const vec3 PROD_PARITY_SLANT = vec3(908.0, 0.0, 900.0);
+const vec3 PROD_REVEAL = vec3(1200.0, 0.0, 1200.0);
+const vec3 PROD_JUMP = vec3(1400.0, 0.0, 1200.0);
+const vec3 PROD_FAR_AT = vec3(0.0, 0.0, 1024.0);
+const uint PROD_FAR_BASE = 100000u;
+const uint PROD_NEAR_SLOT = 900000u;
+const uint PROD_COLLIDE = 17u;
 
 void prod_u(uint i, uint v) {
     outc.px[i] = v;
@@ -812,9 +818,10 @@ void prod_readonly() {
     }
 }
 
-// The cache relight's store, compared with the live gather on the same cells.
-// Mutating the cell afterwards leaves the stored colour: compose is one
-// relight late. The slant loads the stored corner ids and tilts them.
+// The handover seed, compared with the live gather on the same cells.
+// Mutating the cell afterwards leaves that rgb9e5 snapshot. The picture is
+// the lattice blend, filled in this invocation. The slant loads the stored
+// corner ids and tilts them.
 void prod_store_parity() {
     prod_head(0u);
     vec3 pos = PROD_PARITY_POS;
@@ -861,6 +868,87 @@ void prod_store_parity() {
     prod_f(at + 13u, slant_live.r);
     prod_f(at + 14u, slant_live.g);
     prod_f(at + 15u, slant_live.b);
+}
+
+void prod_fill_query(vec3 p, vec3 n) {
+    lighting_sh_lattice_request(p, n, false);
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
+    uint slot = lighting_sh_lattice_find(lighting_sh_lattice_key(ax, sgn, g0));
+    if (slot != ~0u) {
+        lighting_sh_store_drain(slot);
+    }
+}
+
+// Same invocation as the enqueue and the request. A previous-phase drain, a
+// modulo bucket, or a dispatch-order cap fails one of these rows.
+void prod_frame_contract() {
+    prod_head(0u);
+    uint home = lighting_sh_lattice_bind(PROD_COLLIDE, 0u);
+    uint next = lighting_sh_lattice_bind(PROD_COLLIDE + LIGHTING_SH_LATTICE_CAP, 0u);
+    float collision = 0.0;
+    if (home != ~0u && next != ~0u && home != next
+        && lighting_sh_lattice_find(PROD_COLLIDE) == home
+        && lighting_sh_lattice_find(PROD_COLLIDE + LIGHTING_SH_LATTICE_CAP) == next) {
+        collision = 1.0;
+    }
+    vec3 q = prod_texel(PROD_REVEAL, PROD_UP);
+    uint cell = prod_owner(q, PROD_UP, PROD_RED, PROD_CELL_N);
+    uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
+    prod_fill_query(q, PROD_UP);
+    vec4 shown = lighting_sh_compose_lattice(q, PROD_UP, false);
+    vec4 live = lighting_sh_read(q, PROD_UP, false);
+    if (cell != ~0u) {
+        cache.v[3u * cell + 2u].rgb = PROD_GREEN;
+    }
+    prod_fill_query(q, PROD_UP);
+    vec4 refreshed = lighting_sh_compose_lattice(q, PROD_UP, false);
+    vec3 jq = prod_texel(PROD_JUMP, PROD_UP);
+    prod_owner(jq, PROD_UP, PROD_BLUE, PROD_CELL_N);
+    prod_fill_query(jq, PROD_UP);
+    vec4 tele = lighting_sh_compose_lattice(jq, PROD_UP, false);
+    lighting_sh_enqueue_texel(texel, q);
+    float listed = lighting_sh_store_pick(0u) == texel ? 1.0 : 0.0;
+    for (uint bin = 0u; bin < LIGHTING_SH_STORE_BINS; bin++) {
+        ckeys.key[LIGHTING_SH_BIN_COUNT + bin] = 0u;
+    }
+    for (uint i = 0u; i < LIGHTING_SH_STORE_CAP; i++) {
+        lighting_sh_enqueue_texel(PROD_FAR_BASE + i, PROD_FAR_AT);
+    }
+    lighting_sh_enqueue_texel(PROD_NEAR_SLOT, vec3(0.0));
+    float near_kept = 0.0;
+    float overflow = 0.0;
+    uint last_far = PROD_FAR_BASE + LIGHTING_SH_STORE_CAP - 1u;
+    for (uint g = 0u; g < LIGHTING_SH_STORE_CAP; g++) {
+        uint s = lighting_sh_store_pick(g);
+        if (s == PROD_NEAR_SLOT) {
+            near_kept = 1.0;
+        }
+        if (s == last_far) {
+            overflow = 1.0;
+        }
+    }
+    uint at = PROD_TRAILER_AT + PROD_TRAILER + 16u;
+    prod_f(at, shown.r);
+    prod_f(at + 1u, shown.g);
+    prod_f(at + 2u, shown.b);
+    prod_f(at + 3u, live.r);
+    prod_f(at + 4u, live.g);
+    prod_f(at + 5u, live.b);
+    prod_f(at + 6u, refreshed.r);
+    prod_f(at + 7u, refreshed.g);
+    prod_f(at + 8u, refreshed.b);
+    prod_f(at + 9u, tele.r);
+    prod_f(at + 10u, tele.g);
+    prod_f(at + 11u, tele.b);
+    prod_f(at + 12u, collision);
+    prod_f(at + 13u, near_kept);
+    prod_f(at + 14u, overflow);
+    prod_f(at + 15u, listed);
 }
 
 void main() {
@@ -978,6 +1066,7 @@ void main() {
         prod_f(at + 16u, texel == ~0u ? 0.0 : (cache.v[LIGHTING_SC_SPARSE_AT + texel].z < 0.0 ? 1.0 : 0.0));
     }
     prod_store_parity();
+    prod_frame_contract();
     } else {
         prod_readonly();
     }

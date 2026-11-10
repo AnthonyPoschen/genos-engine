@@ -22,7 +22,7 @@ use genos_window::{ShutdownDevice, Window};
 const STRIDE: usize = 17;
 const ROWS: usize = 34;
 const TRAILER: usize = 36;
-const PARITY: usize = 16;
+const PARITY: usize = 32;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -881,6 +881,47 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(
         near(blended, slant),
         "the loaded tilt {blended:?} wanted the flags-on slant {slant:?}"
+    );
+    let reveal = [parity[16], parity[17], parity[18]];
+    let reveal_live = [parity[19], parity[20], parity[21]];
+    assert!(
+        near(reveal, reveal_live),
+        "same-frame lattice {reveal:?} left the live read {reveal_live:?}"
+    );
+    assert!(
+        near(reveal, red),
+        "a new texel showed {reveal:?}, wanted the cell {red:?}"
+    );
+    let refreshed = [parity[22], parity[23], parity[24]];
+    assert!(
+        near(refreshed, green),
+        "refilling the lattice showed {refreshed:?}, wanted {green:?}"
+    );
+    let tele = [parity[25], parity[26], parity[27]];
+    let blue = [0.0, 0.0, 7.0];
+    assert!(
+        near(tele, blue),
+        "a teleported query showed {tele:?}, wanted {blue:?}"
+    );
+    assert!(
+        (parity[28] - 1.0).abs() <= ABS,
+        "two keys in one home: {}",
+        parity[28]
+    );
+    assert!(
+        (parity[29] - 1.0).abs() <= ABS,
+        "the near slot was dropped: {}",
+        parity[29]
+    );
+    assert!(
+        parity[30].abs() <= ABS,
+        "the farthest slot survived the cap: {}",
+        parity[30]
+    );
+    assert!(
+        (parity[31] - 1.0).abs() <= ABS,
+        "the enqueue was not visible this invocation: {}",
+        parity[31]
     );
 }
 

@@ -103,21 +103,25 @@ fn lighting_ckeys_words() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
 }
 
-/// Words through the lattice table. Matches `LIGHTING_SH_LATTICE_AT` plus one
-/// record per entry in `lighting_cache.glsl`: seen, two counts, two lists, ids.
-pub(super) fn lighting_sh_keys_words() -> u64 {
-    const STORE_CAP: u64 = 8192;
-    const LATTICE_CAP: u64 = 4096;
-    const STRIDE: u64 = 14;
-    let seen = lighting_atrous_ppm_at()
+/// Words through the lattice table. Matches `LIGHTING_SH_LATTICE_AT` in
+/// `lighting_cache.glsl`: seen, sixteen bin counts, sixteen lists, then ids.
+pub(super) fn lighting_sh_bin_count_at() -> u64 {
+    lighting_atrous_ppm_at()
         + LIGHTING_ATROUS_META_WORDS
         + LIGHTING_SUN_WORDS
         + LIGHTING_CACHE_SLOTS
         + 3
         + LIGHTING_CACHE_SLOTS
-        + LIGHTING_CACHE_SLOTS;
-    let list0 = seen + 2;
-    let lattice = list0 + 2 * STORE_CAP;
+        + LIGHTING_CACHE_SLOTS
+}
+
+pub(super) fn lighting_sh_keys_words() -> u64 {
+    const STORE_BINS: u64 = 16;
+    const STORE_CAP: u64 = 8192;
+    const LATTICE_CAP: u64 = 16384;
+    const STRIDE: u64 = 14;
+    let lists = lighting_sh_bin_count_at() + STORE_BINS;
+    let lattice = lists + STORE_BINS * STORE_CAP;
     lattice + LATTICE_CAP * STRIDE
 }
 
@@ -324,6 +328,9 @@ pub(crate) struct Lighting {
     /// offers), dispatched over compose's blocks just before it. Null when the
     /// kill switch keeps them in compose.
     compose_maint_pipe: Handle,
+    /// Same-frame gather of the bins and lattices maintenance just wrote.
+    /// Null when the kill switch keeps the writes inside compose.
+    sh_drain_pipe: Handle,
     /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
     /// constant 0, writes compiled into compose and no maintenance pass.
     compose_writes: bool,
@@ -599,6 +606,7 @@ impl Default for Lighting {
             meter_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
             compose_maint_pipe: std::ptr::null_mut(),
+            sh_drain_pipe: std::ptr::null_mut(),
             compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
@@ -894,6 +902,13 @@ impl Gpu {
                 "lighting compose maint",
             )?;
             self.note_pipeline_time("lighting compose maint", start);
+            let start = Instant::now();
+            self.lighting.sh_drain_pipe = self.make_compute_pipe(
+                LIGHTING_SH_DRAIN_SPV,
+                self.lighting.layout,
+                "lighting sh drain",
+            )?;
+            self.note_pipeline_time("lighting sh drain", start);
         }
         let start = Instant::now();
         self.lighting.atrous_plain = self.make_compute_pipe(
@@ -2034,6 +2049,45 @@ impl Gpu {
                     }
                 }
             }
+        }
+    }
+
+    /// Clear the distance bins, run maintenance, then gather what it enqueued.
+    /// The sun path and the compose-writes kill switch leave this empty.
+    /// The gather stays on the cache timestamp, not in compose.
+    fn dispatch_sh_prep(&mut self, sun_compose: bool, compose_full: bool, gx: u32, gy: u32) {
+        let maint = self.lighting.compose_maint_pipe;
+        let drain = self.lighting.sh_drain_pipe;
+        if sun_compose || maint.is_null() || drain.is_null() {
+            return;
+        }
+        const BINS: u64 = 16;
+        const LATTICE_CAP: u32 = 16384;
+        // SAFETY: the command buffer, the key buffer, and both pipelines are the
+        // lighting frame's live handles. The fill, the dispatches, and the
+        // barriers are the same calls the compose loop already records.
+        unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_sh_bin_count_at() * 4,
+                BINS * 4,
+                0,
+            );
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, maint);
+            if compose_full {
+                (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
+            } else {
+                (self.fns.cmd_dispatch_indirect)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_compose_at() * 4,
+                );
+            }
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, drain);
+            (self.fns.cmd_dispatch)(self.cmd, LATTICE_CAP / 64, 1, 1);
         }
     }
 
@@ -3734,6 +3788,19 @@ impl Gpu {
                         k_pc.as_ptr() as *const c_void,
                     );
                 }
+                // Pass 9 is the same-frame gather. It is not one of the nine pipes.
+                // Maintenance enqueues, then the drain fills, then compose loads.
+                if pass == SH_PREP_PASS {
+                    self.dispatch_sh_prep(sun_compose, compose_full, gx, gy);
+                    self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
+                    if let Some(pool) = stamps {
+                        let at = first + 1 + k as u32;
+                        if at < first + RESTIR_STAMP_AT {
+                            (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
+                        }
+                    }
+                    continue;
+                }
                 // Pass 7 is compose: the sun path binds its own pipeline.
                 // Pass 8 is a-trous: the plain kernel has no adaptive branch.
                 // Adaptive uses the scalar shader that still reads the bit.
@@ -3755,7 +3822,8 @@ impl Gpu {
                     self.lighting.pipes[pass]
                 };
                 let maint_pipe = self.lighting.compose_maint_pipe;
-                if pass == 7 && !sun_compose && !maint_pipe.is_null() {
+                // World mode 3 gathered in pass 9. Other modes still write here.
+                if pass == 7 && !sun_compose && !maint_pipe.is_null() && self.lighting.settings.world_mode() != 3 {
                     // #142: the cache writes compose used to make, over the same
                     // pixels, before compose reads the cache (and clears the
                     // G-buffer record this pass reads).
@@ -4165,6 +4233,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.meter_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
+                .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
@@ -4922,7 +4991,7 @@ mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
         LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
-        LIGHTING_COMPOSE_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
+        LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -5042,6 +5111,12 @@ mod sun_step {
                 "{name} still names the neighbour walk"
             );
         }
+        assert_spirv_1("sh drain", LIGHTING_SH_DRAIN_SPV);
+        let drain = reachable_from_main(LIGHTING_SH_DRAIN_SPV);
+        assert!(
+            drain.iter().any(|got| got.starts_with("lighting_sh_gather(")),
+            "the gather dispatch lost the neighbour walk: {drain:?}"
+        );
     }
 
     #[test]

@@ -21,6 +21,8 @@ pub(crate) const B_ATROUS: u8 = 8;
 pub(crate) const B_CACHE_RAYS: u8 = 9;
 pub(crate) const B_HIT: u8 = 10;
 pub(crate) const B_SHADOWS: u8 = 11;
+/// Gather of the texels and lattices maintenance enqueued. Not a pipe index.
+pub(crate) const SH_PREP_PASS: usize = 9;
 
 pub(crate) const LIGHTING_BUCKET_NAMES: [&str; BUCKETS] = [
     "compact",
@@ -384,6 +386,13 @@ impl LightGroups {
     }
 }
 
+fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
+    if settings.world_mode() == 3 {
+        out.push(SH_PREP_PASS, gx, gy, B_CACHE);
+    }
+    out.push(7, gx, gy, B_COMPOSE);
+}
+
 /// The group list for this frame. `probe_ray_count` is probes × rays.
 pub(crate) fn light_groups(
     settings: &LightingSettings,
@@ -415,7 +424,7 @@ pub(crate) fn light_groups(
         && settings.world_mode() == 3;
     if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if frozen && probe_only(settings) {
         // Still probe-only holds the probes and the cache rays. Pixel direct and
         // compose remain, the same idle a settled surface-cache frame records.
@@ -426,7 +435,12 @@ pub(crate) fn light_groups(
             out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
             out.pixel_only = 1;
         }
-        out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+        push_picture(
+            &mut out,
+            settings,
+            w.div_ceil(8).max(1),
+            h.div_ceil(8).max(1),
+        );
     } else if !round && full && !settings.cache_round_this_frame(frame) {
         out.push(1, probes.div_ceil(64), 1, B_PLACE);
         out.push(4, probes.div_ceil(64), 1, B_GATHER);
@@ -436,7 +450,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if round
         && full
         && settings.cache_rays_this_frame(frame)
@@ -467,7 +481,7 @@ pub(crate) fn light_groups(
         out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
         push_denoise(settings, w, h, slots, &mut out);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else {
         gated(
             settings,
@@ -610,7 +624,12 @@ fn gated(
     if buckets.atrous {
         push_denoise(settings, w, h, slots, out);
     }
-    out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+    push_picture(
+        out,
+        settings,
+        w.div_ceil(8).max(1),
+        h.div_ceil(8).max(1),
+    );
 }
 
 /// Sun height 0..1 from a directional lamp. Rays travel along `direction`;
@@ -722,9 +741,13 @@ mod probe_still_tests {
         assert_eq!(quiet.pixel_only, 0);
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        assert_eq!(quiet.counts[B_CACHE as usize], 1);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
-        assert_eq!(quiet.groups.len(), 2);
+        assert_eq!(quiet.groups.len(), 3);
+        assert_eq!(quiet.groups[1].0, SH_PREP_PASS);
+        assert_eq!(quiet.tags[1], B_CACHE);
+        assert_eq!(quiet.groups[2].0, 7);
     }
 
     #[test]

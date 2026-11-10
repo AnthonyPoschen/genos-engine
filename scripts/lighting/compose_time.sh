@@ -26,8 +26,9 @@
 #   66d817ce  later lighting-v3 head on restir-di-d2-port-52fc. ~180 ms.
 #   be27e751  restir-live-history-proof-c1ce when this fix branched. ~180 ms.
 #
-# The neighbour walk is gone from every compose compile. The cache relight
-# stores the gather one frame before compose loads it. Time flags off and on.
+# The neighbour walk is gone from every compose compile. Maintenance enqueues,
+# a gather dispatch on the cache timestamp fills the lattice, and compose loads
+# it in the same frame. compose_ms is that load. Time flags off and on.
 
 set -eu
 
