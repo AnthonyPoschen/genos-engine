@@ -365,6 +365,7 @@ dependencies = [
 name = "genos-scene"
 version = "0.1.0"
 dependencies = [
+ "genos-ecs",
  "genos-math",
  "genos-physics",
  "rhai",
