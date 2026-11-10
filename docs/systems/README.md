@@ -32,6 +32,7 @@ Each record uses these headings:
 - [Reflections design](reflections-design.md): specular reflections, planar mirrors, portals, and water ([ADR 0019](../adr/0019-reflections.md), accepted).
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
+- [Animation](animation.md) owns glTF skins, clip sampling, blends, the state machine, root motion, and the foot IK hook ([ADR 0038](../adr/0038-animation-adopts-design-and-fills-gaps.md)).
 - [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
 - [Scripting](scripting.md) owns Rhai for games and mods.
