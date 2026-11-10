@@ -1051,6 +1051,7 @@ impl Gpu {
                 buffer: targets.scene.buffer,
                 memory: targets.scene.memory,
                 size: targets.scene.size,
+                align: targets.scene.align,
             }
         };
         self.write_buffer(&scene, bytes)
