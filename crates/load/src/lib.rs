@@ -8,7 +8,6 @@
 //! Decoders read bytes. They do not open a window, an audio device, or a socket.
 //! [`FileSource`] and [`MemorySource`] share one decode path.
 
-mod animation;
 mod bin;
 mod cache;
 mod cooked;
@@ -34,7 +33,6 @@ mod ttf;
 mod vram;
 mod wav;
 
-pub use animation::{Animation, Transform, TransformKey};
 pub use cache::{object_path, store_import, store_object, write_atomic};
 pub use cooked::{
     cooked_path, decode_geometry, decode_images, textures_path, CookedError, CookedGeometry,
@@ -45,13 +43,13 @@ pub use emitters::{
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
 pub use error::LoadError;
-pub use gskin::{
-    decode_skin, encode_skin, skin_path, DecodedSkin, EncodedSkin, SkinCook, SkinPrimitive,
-    GSKIN_MAGIC, GSKIN_VERSION,
-};
 pub use gltf::{
     image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
     PbrMaterial, Primitive, Sampler, TextureSlot,
+};
+pub use gskin::{
+    decode_skin, encode_skin, skin_path, DecodedSkin, EncodedSkin, SkinCook, SkinPrimitive,
+    GSKIN_MAGIC, GSKIN_VERSION,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;
@@ -166,11 +164,6 @@ pub fn load_mesh(source: &dyn ByteSource) -> Result<Mesh, LoadError> {
 /// Decode a text material description.
 pub fn load_material(source: &dyn ByteSource) -> Result<Material, LoadError> {
     material::decode_material(&read(source)?)
-}
-
-/// Decode a text animation clip.
-pub fn load_animation(source: &dyn ByteSource) -> Result<Animation, LoadError> {
-    animation::decode_animation(&read(source)?)
 }
 
 /// Decode a 16-bit PCM WAV.
