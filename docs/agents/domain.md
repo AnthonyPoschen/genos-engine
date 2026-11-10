@@ -37,6 +37,8 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── fracture.md
     │   ├── physics/
     │   │   └── plan.md
+    │   ├── core-networking/
+    │   │   └── topologies.md
     │   ├── renderer.md
     │   ├── ui.md
     │   ├── lighting/ (README.md, debug-standard.md, experiments/)

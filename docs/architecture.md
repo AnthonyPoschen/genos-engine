@@ -115,4 +115,4 @@ A file path and a memory block share the decoders. `genos-load-check` calls the 
 
 ## Out of this proof
 
-The editor, more scenes, and audio playback wait. Gameplay networking waits. The camera serves a loopback agent endpoint for the live scene. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).
+The editor, more scenes, and audio playback wait. Gameplay networking waits: [ADR 0040](adr/0040-multiplayer-topologies.md) records a dedicated authority and a listen-server, and leaves relay, NAT punch, and host migration for later. That decision opens no socket. The camera serves a loopback agent endpoint for the live scene. Fit for Omarchy belongs to the editor. See [ADR 0006](adr/0006-editor-is-linux-first.md).

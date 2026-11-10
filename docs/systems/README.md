@@ -4,7 +4,7 @@ A system record is the living note for one engine system. An ADR records a decis
 
 Read the record before you write a game feature that uses the system. Read it before you change or rewrite the system.
 
-Every new system is designed with networking in mind. Its plan states the five lines in the [agent rubric](../agent-rubric.md): replicated state, authority, prediction or rollback, determinism, and headless server. The commit that first implements the system copies those lines into the system record. The session, the socket, and the snapshot codec belong to the [core-networking plan](core-networking/plan.md). When a name in that file differs from another plan, that file wins.
+Every new system is designed with networking in mind. Its plan states the five lines in the [agent rubric](../agent-rubric.md): replicated state, authority, prediction or rollback, determinism, and headless server. The commit that first implements the system copies those lines into the system record. The session, the socket, and the snapshot codec belong to the core-networking plan (PR #14). That file is not on master. [ADR 0040](../adr/0040-multiplayer-topologies.md) revises where the replicated columns live and which topologies the engine runs. Where ADR 0040 and that plan disagree, the ADR wins. The plan's codec rates, the interest rule, and the pawn-only prediction stay.
 
 Engine-feature settings follow [the settings principles](../engine/settings-principles.md). Lighting is the reference example. Quality tiers are in [quality settings](../engine/quality-settings.md).
 
@@ -42,6 +42,7 @@ Each record uses these headings:
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
 - [Job system](job-system.md): a fiber-free work-stealing pool, serial when the server or a replay needs one order. Proposed.
+- [Multiplayer topologies](core-networking/topologies.md): a dedicated authority and a listen-server at launch. Relay, NAT punch, and host migration come later ([ADR 0040](../adr/0040-multiplayer-topologies.md)). Proposed. This change opens no socket.
 - [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Proposed.
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Accepted. Speculative contacts, swept time of impact, and the hot-swap are in the physics step. `slice_chunk` is not.

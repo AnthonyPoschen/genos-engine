@@ -81,7 +81,7 @@ Three ids, three owners. They share a shape and they are not interchangeable.
 |---|---|---|
 | Scene handle | This design | The save file, the undo stack, MCP, Rhai, the parent pointer |
 | `BodyId` | Physics plan P2 | The physics world. A component on the object stores it. `insert` still returns `usize` until P2 |
-| `NetId` | The core-networking plan, as the [physics plan](physics/plan.md) names it | The snapshot. Server-assigned. Storage and hash order are `NetId` order |
+| `NetId` | [ADR 0040](../adr/0040-multiplayer-topologies.md). The physics plan named this id first | The snapshot. The authority runtime assigns it. Storage and hash order are `NetId` order |
 
 For an object that came from the shared scene file, the server's `NetId` is that file's scene handle, so two peers that loaded the same file agree before any spawn message. A runtime spawn gets a server `NetId` that is not a client-local index. The client stores that `NetId` on the component and applies the snapshot by it. Local vec order is not on the wire.
 
@@ -203,13 +203,15 @@ The [job system](job-system.md) sets the frame ceiling: Must work ≤ 6.0 ms wal
 
 ## 14. Networking
 
-`docs/systems/core-networking/plan.md` is not in the tree. The names below are the ones the [physics plan](physics/plan.md) assigns to that file. A name there wins when it lands. This crate does not open a socket.
+The socket and the snapshot rates live in the core-networking plan (PR #14), which is not on master. [ADR 0040](../adr/0040-multiplayer-topologies.md) and [the topologies note](core-networking/topologies.md) revise two points: the replicated columns are these tables, and the authority runtime may be a listen-server. Where they disagree with that plan, the ADR wins. This crate does not open a socket.
 
-- Replicated state: for each replicated object, the `NetId`, the quantized root pose the physics plan already lists, the parent `NetId`, and the prefab content hash. Local transforms of cosmetic children stay on the client. The scene handle is the save id; on the wire the id is `NetId`.
-- Authority: the server assigns `NetId` and is the only writer of a replicated root. An owning client predicts the view body through the physics plan, not through this table.
-- Prediction / rollback: the owned view body only, by replaying `step`. Hierarchy under that body recomputes after the replay and is not in the checksum. Other objects interpolate from snapshots. Rhai does not run inside the replay.
-- Determinism: the same spawns, the same `.gscene` bytes, and `step` at 1/60 produce the same world transforms in handle order in one process. The parallel hierarchy reduce matches that order. Cross-machine `f32` identity is not required; the snapshot compares quantized poses.
-- Headless server: no window, no Vulkan, no audio. `emit_change_records` is false. The tick uses the job system's serial mode. The server still holds the table, the handles, and the bodies.
+Replication reads the columns below. It does not add a second entity store. The minimum that has to exist before a snapshot is E1 (the handle), E3 (the columns), the writer tick from E5, E6 (the prefab hash), E8 (`NetId`), and a `MeshRef` of the source `AssetId`. E2, E4, and E7 are not on that path. The topologies note is the list, and the outfit swap there is the test that `MeshRef` sends the source SHA-256.
+
+- Replicated state: for each replicated object, the `NetId`, the quantized root pose the physics plan already lists, the parent `NetId`, the prefab content hash, and `MeshRef` as the source `AssetId` plus a mesh index. Local transforms of cosmetic children stay on the client. The scene handle is the save id; on the wire the id is `NetId`.
+- Authority: the authority runtime assigns `NetId` and is the only writer of a replicated root. That runtime is headless, or a listen-server. An owning client predicts the view body through the physics plan, not through this table. A guest does not write a column.
+- Prediction / rollback: the owned view body only, by replaying `step`. Hierarchy under that body recomputes after the replay and is not in the checksum. Other objects interpolate from snapshots. `MeshRef` is not in the replay. Rhai does not run inside the replay.
+- Determinism: the same spawns, the same `.gscene` bytes, and `step` at 1/60 produce the same world transforms in handle order in one process. The parallel hierarchy reduce matches that order. Cross-machine `f32` identity is not required; the snapshot compares quantized poses and `AssetId` bytes.
+- Headless server: no window, no Vulkan, no audio. `emit_change_records` is false. The tick uses the job system's serial mode. The server still holds the table, the handles, and the bodies. A listen-server is the player process and is not this headless build.
 
 ## 15. Failure modes and probes
 

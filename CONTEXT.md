@@ -20,6 +20,18 @@ _Avoid_: User, developer, customer
 The person who plays a game in the runtime.
 _Avoid_: User, client
 
+**Authority runtime**:
+The runtime that writes replicated components. It is a headless process, or a listen-server inside a player runtime.
+_Avoid_: The game, the agent endpoint
+
+**Player runtime**:
+The runtime a player is playing. It predicts the body it has input authority for and interpolates the others.
+_Avoid_: The player, the agent endpoint
+
+**Listen-server**:
+A player runtime that also runs the authority tick. The other player runtimes connect to it. It is the only writer of replicated components.
+_Avoid_: Shared authority, lockstep
+
 **Game**:
 A product the runtime runs.
 _Avoid_: Title, server, slot
@@ -83,6 +95,10 @@ _Avoid_: Viewport, spectator
 **Scene handle**:
 A stable name for one floor, wall, solid, or light in the live scene. The floor name is `floor`.
 _Avoid_: Entity id
+
+**NetId**:
+The replication id of one scene object: an index plus a generation, assigned by the authority runtime. Snapshots apply by this id. For an object from the shared scene file the bits match that file's scene handle. The two names stay distinct.
+_Avoid_: Entity id, vec index
 
 **Agent endpoint**:
 The loopback MCP session on the running camera. An agent reads and edits the live scene there.
@@ -215,6 +231,10 @@ _Avoid_: Billboard, sprite
 **Asset**:
 Data a game holds after a load. An image, a mesh, PCM samples, and a font are assets.
 _Avoid_: Resource, content
+
+**AssetId**:
+The SHA-256 of one source file's bytes. The import document and the cooked-record header store it. A snapshot names this id and does not carry the mesh bytes. The cook trailer's hash is a separate value.
+_Avoid_: Cook hash, path
 
 **Byte source**:
 The supplier of bytes for one load. A file path and a memory block are byte sources.
