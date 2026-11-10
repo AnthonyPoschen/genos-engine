@@ -2746,6 +2746,10 @@ const uint LIGHTING_SC_READ_SLACK = 2u;
 // S68D: EMA floor on a young texel's long mean (lighting_cache.comp).
 const float LIGHTING_SC_YOUNG_ALPHA = 1.0 / 16.0;
 const float LIGHTING_SC_YOUNG_SETS = 32.0;
+// The plain mean closes at 12 sets (lighting_cache.comp). The wavelet
+// rebuilds from that held mean once the texel has 16 sets. Earlier, the
+// dirty hold keeps the blur the frozen shot scores.
+const float LIGHTING_SC_PLAIN_SETS = 16.0;
 bool lighting_sc_dormant(uint slot);
 uint lighting_sc_interval(uint slot, float t) {
     if (!LIGHTING_SC_RATE) {
@@ -2878,9 +2882,12 @@ uint lighting_settle_turns(bool first) {
 bool lighting_lamp_settling() {
     return ckeys.key[LIGHTING_SETTLE_STREAK_AT] < LIGHTING_SETTLE_ROUNDS && lighting_lamp_settling_raw();
 }
-bool lighting_lamp_settling_raw() {
-    if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
-        return true;
+// A lamp moved, changed colour, or went out within LIGHTING_WRC_CHANGE_FRAMES.
+// The drain flag is not this: it also arms while a still cache's sample and
+// held sums disagree, and that must not replace a texel mean with one sample.
+bool lighting_lamp_noted() {
+    if (ckeys.key[LIGHTING_SETTLE_STREAK_AT] >= LIGHTING_SETTLE_ROUNDS) {
+        return false;
     }
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
         uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
@@ -2889,6 +2896,12 @@ bool lighting_lamp_settling_raw() {
         }
     }
     return false;
+}
+bool lighting_lamp_settling_raw() {
+    if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
+        return true;
+    }
+    return lighting_lamp_noted();
 }
 // S65C: how much the lamps that moved since frame `updated` changed the
 // unshadowed light at p (sum over moved lamps of brightest channel times
@@ -3792,7 +3805,8 @@ void lighting_svgf_variance(uint slot) {
     vec4 v = lighting_svgf_in(slot, var);
     bool spatial = var < 0.0;
     bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
-    if (LIGHTING_DIRTY_ATROUS && !flip) {
+    bool rebuild = floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_SC_PLAIN_SETS;
+    if (LIGHTING_DIRTY_ATROUS && !flip && !rebuild) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
         // S78B: a spatial estimate is redone only when its value or one of its
@@ -3881,7 +3895,8 @@ void lighting_svgf_iter(uint slot, uint it) {
         }
     }
 #endif
-    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)) {
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)
+        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
         return;
     }
     uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
