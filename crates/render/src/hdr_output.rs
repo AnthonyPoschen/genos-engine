@@ -1,15 +1,16 @@
 //! CPU references the HDR passes call. The display pass and the swapchain pick call these.
 //!
+//! Scalar curves (EV100, exposure, the Karis weight, PQ, the nit map) are
+//! [`genos_math::tonemap`]. This file re-exports them and does not keep a second copy.
 //! `AgX` follows Eary Chow's `AgX_LUT_Gen` (`AgX_Base_Rec2020` then the sRGB cube path):
-//! `Rec.709` to `Rec.2020`, lower guard, inset, log2 from −10 to +6.5 around 0.18,
-//! sigmoid, power 2.4, 40% hue mix, outset, back to `Rec.709`, power 2.4 code.
+//! `Rec.709` to `Rec.2020`, lower guard, inset, [`genos_math::tonemap::agx_curve`],
+//! 40% hue mix, outset, back to `Rec.709`, power 2.4 code.
 
-/// ITU-R BT.2408 graphics white.
-pub const GRAPHICS_WHITE_NITS: f64 = 203.0;
-/// Sigmoid top when the surface reports no peak. BT.2408's HDR reference.
-pub const HDR_PEAK_NITS: f64 = 1000.0;
-/// scRGB code 1.0. Graphics white is `GRAPHICS_WHITE_NITS / SCRGB_NITS_PER_CODE` (2.5375, written 2.54).
-pub const SCRGB_NITS_PER_CODE: f64 = 80.0;
+pub use genos_math::tonemap::{
+    camera_ev100, ev100_from_luminance, exposure_from_ev100, exposure_with_compensation,
+    karis_weight, nits_from_display, pq_st2084, step_exposure, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS,
+    SCRGB_NITS_PER_CODE,
+};
 
 pub const FORMAT_BGRA8: i32 = 44;
 pub const FORMAT_RGBA8: i32 = 37;
@@ -20,11 +21,6 @@ pub const COLOR_SPACE_SRGB: i32 = 0;
 pub const COLOR_SPACE_SCRGB: i32 = 1_000_104_002;
 pub const COLOR_SPACE_HDR10: i32 = 1_000_104_008;
 
-const MID_GREY: f64 = 0.18;
-const LOG_MIN: f64 = -10.0;
-const LOG_MAX: f64 = 6.5;
-const SIGMOID_SLOPE: f64 = 2.4;
-const SIGMOID_POWER: f64 = 1.5;
 const HUE_MIX: f64 = 0.40;
 const GUARD_Y: [f64; 3] = [
     0.258_923_535_568_984_8,
@@ -402,21 +398,6 @@ pub fn pack_f32(value: f64) -> f32 {
 }
 
 #[must_use]
-pub fn ev100_from_luminance(luminance: f64) -> f64 {
-    (luminance * (100.0 / 12.5)).log2()
-}
-
-#[must_use]
-pub fn exposure_from_ev100(ev100: f64) -> f64 {
-    1.0 / (1.2 * ev100.exp2())
-}
-
-#[must_use]
-pub fn camera_ev100(aperture: f64, shutter: f64, iso: f64) -> f64 {
-    ((aperture * aperture) / shutter * 100.0 / iso).log2()
-}
-
-#[must_use]
 pub fn exposure_from_camera(aperture: f64, shutter: f64, iso: f64) -> f64 {
     exposure_from_ev100(camera_ev100(aperture, shutter, iso))
 }
@@ -493,32 +474,6 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
     acc / f64::from(seen) + 8.0_f64.log2()
 }
 
-/// Exposure after a compensation in stops. `+1` doubles the scale.
-#[must_use]
-pub fn exposure_with_compensation(ev100: f64, compensation: f64) -> f64 {
-    exposure_from_ev100(ev100 - compensation)
-}
-
-/// One adaptation step. Holds when the relative gap is under 0.001.
-/// `tau_down` is the scene getting brighter (scale falling).
-#[must_use]
-pub fn step_exposure(scale: f64, target: f64, dt: f64, tau_down: f64, tau_up: f64) -> f64 {
-    if !target.is_finite() || target < 0.0 {
-        return scale;
-    }
-    if !scale.is_finite() || scale <= 0.0 {
-        return target;
-    }
-    let rel = (target - scale).abs() / scale.abs().max(1.0e-6);
-    if rel < 0.001 {
-        return scale;
-    }
-    let tau = if target < scale { tau_down } else { tau_up };
-    let tau = if tau > 0.0 { tau } else { dt.abs().max(1.0e-6) };
-    let gain = 1.0 - (-dt.abs() / tau).exp();
-    scale + (target - scale) * gain
-}
-
 /// Max relative change over 8 identical frames, starting on the target.
 #[must_use]
 pub fn exposure_still_change() -> f64 {
@@ -584,12 +539,6 @@ fn adapt_four_stops() -> (f64, f64) {
         }
     }
     (t90, overshoot)
-}
-
-/// Karis weight `1 / (1 + Y)` for one 2×2 box. Rec.709 `Y`.
-#[must_use]
-pub fn karis_weight(luma: f64) -> f64 {
-    1.0 / (1.0 + luma.max(0.0))
 }
 
 /// First-downsample response of one white pixel of `centre` in a field of zeros.
@@ -913,19 +862,6 @@ pub struct Image {
     pub height: usize,
 }
 
-/// SMPTE ST 2084 inverse EOTF. Nits in, code in 0..1 out. Zero nits is `c1^m2`, not a hard 0.
-#[must_use]
-pub fn pq_st2084(nits: f64) -> f64 {
-    let c1 = 3424.0 / 4096.0;
-    let c2 = 2413.0 / 128.0;
-    let c3 = 2392.0 / 128.0;
-    let m1 = 2610.0 / 16384.0;
-    let m2 = 2523.0 / 32.0;
-    let y = (nits / 10_000.0).max(0.0);
-    let y_m = if y == 0.0 { 0.0 } else { y.powf(m1) };
-    ((c1 + c2 * y_m) / (1.0 + c3 * y_m)).powf(m2)
-}
-
 /// Lattice edge. Log2 from [`AGX_LOG_MIN`] to [`AGX_LOG_MAX`], inclusive.
 pub const AGX_LUT_N: usize = 32;
 /// Lowest log2 the `AgX` lattice stores.
@@ -1005,22 +941,6 @@ pub fn graphics_white_linear() -> f64 {
         let white = agx_display_linear([1.0, 1.0, 1.0]);
         white[0].max(white[1]).max(white[2]).clamp(1.0e-4, 0.999)
     })
-}
-
-/// Piecewise nits. Graphics white is 203. The sigmoid top is [`HDR_PEAK_NITS`].
-#[must_use]
-pub fn nits_from_display(display: f64, white: f64) -> f64 {
-    if !display.is_finite() || display <= 0.0 {
-        return 0.0;
-    }
-    let white = white.clamp(1.0e-4, 0.999);
-    let d = display.min(1.0);
-    if d <= white {
-        d / white * GRAPHICS_WHITE_NITS
-    } else {
-        let t = (d - white) / (1.0 - white);
-        GRAPHICS_WHITE_NITS + t * (HDR_PEAK_NITS - GRAPHICS_WHITE_NITS)
-    }
 }
 
 /// Rec.709 display linear to Rec.2020, still linear.
@@ -1220,16 +1140,10 @@ fn agx_base_rec2020(color: [f64; 3]) -> [f64; 3] {
     let guarded = compensate_low_side(color);
     let inset = mul(INSET, guarded);
     let pre = rgb_to_hsv(inset);
-    let logged = [
-        log_encode(inset[0]),
-        log_encode(inset[1]),
-        log_encode(inset[2]),
-    ];
-    let curved = [sigmoid(logged[0]), sigmoid(logged[1]), sigmoid(logged[2])];
     let linear = [
-        power_fwd(curved[0]),
-        power_fwd(curved[1]),
-        power_fwd(curved[2]),
+        genos_math::tonemap::agx_curve(inset[0]),
+        genos_math::tonemap::agx_curve(inset[1]),
+        genos_math::tonemap::agx_curve(inset[2]),
     ];
     let mut post = rgb_to_hsv(linear);
     post[0] = lerp_hue(pre[0], post[0], HUE_MIX);
@@ -1263,70 +1177,6 @@ fn compensate_low_side(rgb: [f64; 3]) -> [f64; 3] {
         1.0
     };
     [shifted[0] * ratio, shifted[1] * ratio, shifted[2] * ratio]
-}
-
-fn log_encode(x: f64) -> f64 {
-    if x <= 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    let lg2 = (x / MID_GREY).log2();
-    (lg2 - LOG_MIN) / (LOG_MAX - LOG_MIN)
-}
-
-fn sigmoid(x: f64) -> f64 {
-    let x_pivot = (-LOG_MIN) / (LOG_MAX - LOG_MIN);
-    let y_pivot = MID_GREY.powf(1.0 / SIGMOID_SLOPE);
-    let toe_x = linear_breakpoint(0.0, SIGMOID_SLOPE, x_pivot);
-    let toe_y = linear_breakpoint(0.0, SIGMOID_SLOPE, y_pivot);
-    let shoulder_x = linear_breakpoint(0.0, SIGMOID_SLOPE, x_pivot);
-    let shoulder_y = linear_breakpoint(0.0, SIGMOID_SLOPE, y_pivot);
-    let scale_toe = -scale_factor(1.0 - 0.0, 1.0 - 0.0, 1.0 - toe_x, 1.0 - toe_y);
-    let scale_shoulder = scale_factor(1.0, 1.0, shoulder_x, shoulder_y);
-    let intercept = toe_y - SIGMOID_SLOPE * toe_x;
-    if x < toe_x {
-        exponential_curve(x, scale_toe, toe_x, toe_y)
-    } else if x <= shoulder_x {
-        SIGMOID_SLOPE * x + intercept
-    } else {
-        exponential_curve(x, scale_shoulder, shoulder_x, shoulder_y)
-    }
-}
-
-fn linear_breakpoint(numerator: f64, slope: f64, coordinate: f64) -> f64 {
-    numerator / (slope * slope + 1.0).sqrt() + coordinate
-}
-
-fn scale_factor(limit_x: f64, limit_y: f64, transition_x: f64, transition_y: f64) -> f64 {
-    let span_x = limit_x - transition_x;
-    let span_y = limit_y - transition_y;
-    let term_a = (SIGMOID_SLOPE * span_x).powf(-SIGMOID_POWER);
-    let term_b = (SIGMOID_SLOPE * span_x / span_y).powf(SIGMOID_POWER) - 1.0;
-    (term_a * term_b).powf(-1.0 / SIGMOID_POWER)
-}
-
-fn exponential_curve(x: f64, scale: f64, transition_x: f64, transition_y: f64) -> f64 {
-    let inner = SIGMOID_SLOPE * (x - transition_x) / scale;
-    scale * exponential(inner) + transition_y
-}
-
-fn exponential(x: f64) -> f64 {
-    x / (1.0 + signed_pow(x, SIGMOID_POWER)).powf(1.0 / SIGMOID_POWER)
-}
-
-fn signed_pow(x: f64, power: f64) -> f64 {
-    if x < 0.0 {
-        -(-x).powf(power)
-    } else {
-        x.powf(power)
-    }
-}
-
-fn power_fwd(x: f64) -> f64 {
-    if x <= 0.0 {
-        0.0
-    } else {
-        x.powf(2.4)
-    }
 }
 
 fn encode_power(x: f64) -> f64 {
@@ -1552,5 +1402,92 @@ mod tests {
         }
         assert_eq!(histogram_ev100_from_counts(&[]), 0.0);
         assert_eq!(histogram_ev100_from_counts(&[0, 0, 0]), 0.0);
+    }
+
+    #[test]
+    fn scalar_curves_are_genos_math() {
+        let ev: fn(f64) -> f64 = ev100_from_luminance;
+        let math_ev: fn(f64) -> f64 = genos_math::tonemap::ev100_from_luminance;
+        assert!(std::ptr::fn_addr_eq(ev, math_ev));
+        let exposure: fn(f64) -> f64 = exposure_from_ev100;
+        let math_exposure: fn(f64) -> f64 = genos_math::tonemap::exposure_from_ev100;
+        assert!(std::ptr::fn_addr_eq(exposure, math_exposure));
+        let camera: fn(f64, f64, f64) -> f64 = camera_ev100;
+        let math_camera: fn(f64, f64, f64) -> f64 = genos_math::tonemap::camera_ev100;
+        assert!(std::ptr::fn_addr_eq(camera, math_camera));
+        let compensation: fn(f64, f64) -> f64 = exposure_with_compensation;
+        let math_compensation: fn(f64, f64) -> f64 = genos_math::tonemap::exposure_with_compensation;
+        assert!(std::ptr::fn_addr_eq(compensation, math_compensation));
+        let step: fn(f64, f64, f64, f64, f64) -> f64 = step_exposure;
+        let math_step: fn(f64, f64, f64, f64, f64) -> f64 = genos_math::tonemap::step_exposure;
+        assert!(std::ptr::fn_addr_eq(step, math_step));
+        let karis: fn(f64) -> f64 = karis_weight;
+        let math_karis: fn(f64) -> f64 = genos_math::tonemap::karis_weight;
+        assert!(std::ptr::fn_addr_eq(karis, math_karis));
+        let pq: fn(f64) -> f64 = pq_st2084;
+        let math_pq: fn(f64) -> f64 = genos_math::tonemap::pq_st2084;
+        assert!(std::ptr::fn_addr_eq(pq, math_pq));
+        let nits: fn(f64, f64) -> f64 = nits_from_display;
+        let math_nits: fn(f64, f64) -> f64 = genos_math::tonemap::nits_from_display;
+        assert!(std::ptr::fn_addr_eq(nits, math_nits));
+        assert_eq!(
+            GRAPHICS_WHITE_NITS.to_bits(),
+            genos_math::tonemap::GRAPHICS_WHITE_NITS.to_bits()
+        );
+        assert_eq!(
+            HDR_PEAK_NITS.to_bits(),
+            genos_math::tonemap::HDR_PEAK_NITS.to_bits()
+        );
+        assert_eq!(
+            SCRGB_NITS_PER_CODE.to_bits(),
+            genos_math::tonemap::SCRGB_NITS_PER_CODE.to_bits()
+        );
+    }
+
+    /// `AgX_LUT_Gen` sRGB-cube samples. The per-channel curve is `agx_curve`.
+    #[test]
+    fn agx_rec709_matches_the_published_cube_samples() {
+        let samples = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            (
+                [0.18, 0.18, 0.18],
+                [
+                    0.489_437_089_573_878_3,
+                    0.489_437_089_573_878_3,
+                    0.489_437_089_573_878_3,
+                ],
+            ),
+            (
+                [1.0, 1.0, 1.0],
+                [
+                    0.783_034_430_557_485_1,
+                    0.783_034_430_557_484_8,
+                    0.783_034_430_557_484_9,
+                ],
+            ),
+            (
+                [1.0, 0.0, 0.0],
+                [
+                    0.865_962_537_870_047_6,
+                    0.264_522_664_434_557_24,
+                    0.177_858_573_873_015_76,
+                ],
+            ),
+            (
+                [16.0, 16.0, 16.0],
+                [
+                    0.999_184_949_265_366_5,
+                    0.999_184_949_265_366_4,
+                    0.999_184_949_265_366_3,
+                ],
+            ),
+        ];
+        for (scene, want) in samples {
+            let got = agx_rec709(scene);
+            for (left, right) in got.iter().zip(want.iter()) {
+                assert!((left - right).abs() < 1.0e-9, "{scene:?} -> {got:?}");
+            }
+            assert!(got.iter().all(|channel| channel.is_finite()));
+        }
     }
 }

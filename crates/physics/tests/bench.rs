@@ -1,6 +1,24 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::undocumented_unsafe_blocks,
+        reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
+    )
+)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -73,4 +91,22 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         direction.x + matrix.cols[0] + world.bodies[0].position.y
     );
     assert_eq!(allocs, 0, "timed math and physics allocated {allocs} times");
+
+    // The allocation counter is process-global, so the vehicle steps stay in this test.
+    let mut thruster = genos_physics::thruster_world();
+    let mut ground = genos_physics::chassis_rest_world(10.0);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let before_vehicle = ALLOCS.load(Ordering::Relaxed);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let vehicle_allocs = ALLOCS.load(Ordering::Relaxed) - before_vehicle;
+    println!("vehicle_allocs={vehicle_allocs}");
+    assert_eq!(
+        vehicle_allocs, 0,
+        "vehicle step allocated {vehicle_allocs} times"
+    );
+    let velocity = thruster.bodies[0].velocity;
+    assert!(velocity.x.is_finite() && velocity.y.is_finite() && velocity.z.is_finite());
+    assert_eq!(ground.step_stats.wheel_rays, 4);
 }

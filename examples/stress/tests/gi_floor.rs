@@ -30,14 +30,14 @@ use genos_window::Window;
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 540;
 
-fn open() -> (MutexGuard, Window, Renderer) {
+fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     static GPU: Mutex<()> = Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -45,7 +45,9 @@ type MutexGuard = std::sync::MutexGuard<'static, ()>;
 fn hall_frame(preset_name: &str) -> Vec<u8> {
     let preset = LightingPreset::parse(preset_name)
         .unwrap_or_else(|| panic!("preset is medium or high, got {preset_name}"));
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut settings = LightingSettings::preset(preset);
     settings
         .set_key("denoise_launch", "hash")

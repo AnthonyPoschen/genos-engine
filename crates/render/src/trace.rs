@@ -141,6 +141,37 @@ pub fn direct_light_in(
     sum
 }
 
+/// Each lamp that reaches `origin` unshadowed: the unit direction toward it and
+/// the irradiance it lands with (cosine included, the picture's lamp unit). The
+/// sum of the irradiances is [`direct_light_in`]. The reference tracer weights
+/// each lamp by a specular lobe with these.
+pub fn lamps_in(
+    scene: &Scene,
+    surfaces: &dyn Surfaces,
+    origin: [f32; 3],
+    normal: [f32; 3],
+) -> Vec<([f32; 3], [f32; 3])> {
+    if surfaces.inside(origin) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for light in &scene.lights {
+        let (toward, dist2, target) = lamp_toward(light, origin);
+        let nd = dot(toward, normal);
+        if nd <= 0.0 || surfaces.blocked(origin, target) {
+            continue;
+        }
+        let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);
+        out.push((toward, scale(light.color, scale_l)));
+    }
+    out
+}
+
+/// True when `p` is strictly inside `solid` (the test [`Surfaces::inside`] uses).
+pub fn solid_contains(solid: &Solid, p: [f32; 3]) -> bool {
+    inside_solid(p, solid)
+}
+
 fn lamp_toward(light: &genos_scene::Light, origin: [f32; 3]) -> ([f32; 3], f32, [f32; 3]) {
     let span = light.direction.length_squared();
     if span > 1.0e-8 {

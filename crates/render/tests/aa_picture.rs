@@ -13,14 +13,14 @@ use genos_render::{identity_pose, Antialias, Bounds, DrawKind, Object, Renderer,
 use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Vec3};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn silhouette_world() -> World {
@@ -140,15 +140,17 @@ fn max_delta(a: &[u8], b: &[u8], width: u32, x0: i32, y0: i32, x1: i32, y1: i32)
 
 #[test]
 fn the_picture_switches_filters_and_off_matches_again() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let world = silhouette_world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     assert_eq!(renderer.antialias(), Antialias::Off);
 
-    let _warmup = draw(&mut window, &mut renderer, &world, &camera);
-    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let _warmup = draw(window, renderer, &world, &camera);
+    let off = draw(window, renderer, &world, &camera);
 
     let edge = [-0.6, 1.35, 0.0];
     let (edge_x, edge_y) = project(&camera, width, height, edge);
@@ -180,9 +182,9 @@ fn the_picture_switches_filters_and_off_matches_again() {
     assert!(face_x > 8 && face_y > 8 && face_x < width as i32 - 8 && face_y < height as i32 - 8);
 
     renderer.set_antialias(Antialias::Fxaa);
-    let fxaa = draw(&mut window, &mut renderer, &world, &camera);
+    let fxaa = draw(window, renderer, &world, &camera);
     renderer.set_antialias(Antialias::Off);
-    let again = draw(&mut window, &mut renderer, &world, &camera);
+    let again = draw(window, renderer, &world, &camera);
 
     let fxaa_step = max_adjacent_step(&fxaa, width, x0, y0, x1, y1);
     let fxaa_face = max_delta(

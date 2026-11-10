@@ -13,7 +13,7 @@ use genos_math::Vec3;
 
 use crate::dump::Dump;
 use crate::metrics::{frames_to_ref, grid_worst, ref_err_near, GateLimits};
-use crate::reservoir::m_as_f32;
+use crate::reservoir::{f32_from_f64, m_as_f32};
 use crate::restir::{Config, Session};
 use crate::shade::{brute, luminance, Scene};
 
@@ -191,7 +191,7 @@ fn time_one_step(spec: &EvalSpec) -> Result<f32, String> {
     let started = Instant::now();
     let _ = session.step();
     let millis = started.elapsed().as_secs_f64() * 1000.0;
-    Ok(narrow_ms(millis))
+    Ok(f32_from_f64(millis))
 }
 
 fn variance(values: &[f32]) -> f32 {
@@ -205,10 +205,6 @@ fn variance(values: &[f32]) -> f32 {
         .map(|value| (value - mean) * (value - mean))
         .sum::<f32>()
         / scale
-}
-
-fn narrow_ms(value: f64) -> f32 {
-    genos_math::f32_from_f64(value)
 }
 
 /// Text form of a report, one JSON object.

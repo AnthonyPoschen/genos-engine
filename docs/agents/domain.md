@@ -22,6 +22,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   └── domain.md
     ├── engine/
     │   ├── assets.md
+    │   ├── quality-settings.md
     │   └── settings-principles.md
     ├── architecture.md
     ├── lighting/ (GLOSSARY.md, RENAMES.md, research/)
@@ -43,6 +44,7 @@ This repository has one context. There is no `CONTEXT-MAP.md`.
     │   ├── fog-and-volumetric-lighting-design.md
     │   ├── loading.md
     │   ├── audio.md
+    │   ├── audio-design.md
     │   └── scripting.md
     ├── goals/
     │   └── mvp-scene.md

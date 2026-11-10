@@ -49,8 +49,8 @@ crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
 crates/lighting-ref/ package genos-lighting-ref
-crates/restir-ref/   package genos-restir-ref
-crates/restir-gpu/   package genos-restir-gpu
+crates/restir-ref/  package genos-restir-ref
+crates/restir-gpu/  package genos-restir-gpu
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
 crates/audio/       package genos-audio
@@ -58,7 +58,7 @@ crates/audio-check/ package genos-audio-check
 examples/camera/    package genos-camera
 ```
 
-`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
+`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device. The plan keeps that mix as the only DSP and keeps each device output as a write of the finished buffer ([ADR 0041](adr/0041-one-audio-mix-device-outputs-only.md), [audio design](systems/audio-design.md)).
 
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
 
@@ -66,7 +66,7 @@ examples/camera/    package genos-camera
 
 `genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `reflections-check` is a binary in that crate: analytic gates for specular reflections, mirrors, portals, and water. It writes `./genos-debug/reflections/metrics.json`. The optics it grades live are `genos-math` `optics`, and the GLSL mirror is compiled with the renderer. The reflection passes are not in this crate. See [the reflections design](systems/reflections-design.md). `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
-`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs, and hot-swaps a broken fracture asset. `genos-fracture` cooks that asset offline. The camera capsule calls the physics step. The cook does not run inside `step`.
+`genos-math` stores positions, directions, and rotations, the headless exposure curves (`tonemap`), and the proposed bloom chain (`bloom`, ADR 0028). The renderer does not call `bloom`. `genos-physics` steps gravity, a move wish, contact, and springs, and hot-swaps a broken fracture asset. `genos-fracture` cooks that asset offline. The camera capsule calls the physics step. The cook does not run inside `step`.
 
 `genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
 

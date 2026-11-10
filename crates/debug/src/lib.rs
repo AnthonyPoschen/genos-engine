@@ -7,6 +7,7 @@
 //! tests. See `docs/systems/debugging.md`.
 
 pub mod commands;
+pub use genos_fog_ref as fog_ref;
 pub mod gi_metrics;
 pub mod image;
 pub mod knobs;

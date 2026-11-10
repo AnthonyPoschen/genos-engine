@@ -316,7 +316,7 @@ struct Reading {
     steps: u32,
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
@@ -324,7 +324,7 @@ fn main() {
             2
         }
     };
-    std::process::exit(code);
+    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
 fn run() -> Result<i32, String> {

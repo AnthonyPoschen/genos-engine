@@ -15,14 +15,14 @@ use genos_scene::{viewport_uv, Camera, Floor, Light, Scene, Vec3};
 use genos_ui::{apply_frame_action, id, lighting_frame, PictureMode, Pointer, State};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn silhouette_world() -> World {
@@ -43,7 +43,12 @@ fn silhouette_world() -> World {
         }],
         ceiling: None,
         sky: None,
-        lighting: genos_scene::LightingSettings::default(),
+        // Still pictures are compared byte for byte. Production ReSTIR
+        // resamples a quiet frame, so this fixture stays on the exact sum.
+        lighting: genos_scene::LightingSettings {
+            restir_di: false,
+            ..genos_scene::LightingSettings::default()
+        },
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
@@ -141,26 +146,28 @@ fn press_mode(mode_id: u32) -> PictureMode {
 
 #[test]
 fn the_panel_press_selects_the_next_picture() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = silhouette_world();
     let camera = Camera::new(0.0, 4.0, 0.0);
     assert_eq!(renderer.antialias(), Antialias::Off);
-    let _warmup = draw(&mut window, &mut renderer, &world, &camera);
-    let off = draw(&mut window, &mut renderer, &world, &camera);
+    let _warmup = draw(window, renderer, &world, &camera);
+    let off = draw(window, renderer, &world, &camera);
 
     let selected = press_mode(id::AA_FXAA);
     assert_eq!(selected, PictureMode::Fxaa);
     renderer.set_antialias(Antialias::from_picture(selected.code()));
-    let from_press = draw(&mut window, &mut renderer, &world, &camera);
+    let from_press = draw(window, renderer, &world, &camera);
     renderer.set_antialias(Antialias::Fxaa);
-    let explicit = draw(&mut window, &mut renderer, &world, &camera);
+    let explicit = draw(window, renderer, &world, &camera);
     assert_eq!(from_press, explicit, "the panel press did not select FXAA");
     assert_ne!(from_press, off, "FXAA left the unfiltered picture");
 
     let selected = press_mode(id::AA_OFF);
     assert_eq!(selected, PictureMode::Off);
     renderer.set_antialias(Antialias::from_picture(selected.code()));
-    let restored = draw(&mut window, &mut renderer, &world, &camera);
+    let restored = draw(window, renderer, &world, &camera);
     assert_eq!(restored, off, "off did not restore the unfiltered picture");
 
     let width = renderer.width();
@@ -187,9 +194,9 @@ fn the_panel_press_selects_the_next_picture() {
 
     let (overlay, panel) = panel_overlay(width as f32, height as f32);
     renderer.set_antialias(Antialias::Off);
-    let off_ui = draw_overlay(&mut window, &mut renderer, &world, &camera, &overlay);
+    let off_ui = draw_overlay(window, renderer, &world, &camera, &overlay);
     renderer.set_antialias(Antialias::from_picture(PictureMode::Fxaa.code()));
-    let fxaa_ui = draw_overlay(&mut window, &mut renderer, &world, &camera, &overlay);
+    let fxaa_ui = draw_overlay(window, renderer, &world, &camera, &overlay);
     let off_panel = rect_bytes(&off_ui, width, panel);
     assert_eq!(
         rect_bytes(&fxaa_ui, width, panel),

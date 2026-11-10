@@ -310,7 +310,37 @@ fn engine(run: &ScriptRun, report: Rc<RefCell<Report>>) -> Engine {
     );
     let dir = run.report_dir.display().to_string();
     engine.register_fn("out_dir", move || dir.clone());
+    let report_dir = run.report_dir.clone();
+    engine.register_fn(
+        "save_text",
+        move |name: &str, body: &str| -> Result<(), Box<EvalAltResult>> {
+            let path = report_file(&report_dir, name)
+                .map_err(|err| -> Box<EvalAltResult> { err.into() })?;
+            std::fs::write(&path, body).map_err(|err| -> Box<EvalAltResult> {
+                format!("{}: {err}", path.display()).into()
+            })?;
+            Ok(())
+        },
+    );
     engine
+}
+
+/// A report file named by the script. One path component, so the script
+/// cannot write outside the report directory.
+fn report_file(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+        || name == "."
+        || name == ".."
+    {
+        return Err("save_text name is one file name".into());
+    }
+    if Path::new(name).components().count() != 1 {
+        return Err("save_text name is one file name".into());
+    }
+    Ok(dir.join(name))
 }
 
 fn as_f64(v: &Dynamic) -> f64 {
@@ -579,6 +609,45 @@ mod tests {
         assert_eq!(wait_timeout_s(1), 120.0);
         assert_eq!(wait_timeout_s(600), 600.0);
         assert_eq!(wait_timeout_s(10_000), 3600.0);
+    }
+
+    #[test]
+    fn save_text_stays_inside_the_report_directory() {
+        let dir = Path::new("report");
+        assert_eq!(
+            report_file(dir, "resolved-room-a.txt").ok().as_deref(),
+            Some(dir.join("resolved-room-a.txt").as_path())
+        );
+        assert!(report_file(dir, "../secret").is_err());
+        assert!(report_file(dir, "nested/name.txt").is_err());
+        assert!(report_file(dir, "").is_err());
+    }
+
+    /// Rhai's `replace` mutates and returns (). Interpolating the call drops
+    /// the text. A local binding keeps the mutated string, including `sc_settle`.
+    #[test]
+    fn replacing_inside_an_interpolation_drops_the_settings_text() {
+        let engine = Engine::new();
+        let dropped = engine
+            .eval::<String>(
+                r#"
+                let settings = #{ text: "sc_settle=0\nbounces=unlimited\n" };
+                `resolved ${settings.text.replace("\n", " || ")}`
+                "#,
+            )
+            .map_err(|err| err.to_string());
+        assert_eq!(dropped.as_deref(), Ok("resolved "));
+        let kept = engine
+            .eval::<String>(
+                r#"
+                let settings = #{ text: "sc_settle=0\nbounces=unlimited\n" };
+                let flat = settings.text;
+                flat.replace("\n", " || ");
+                flat
+                "#,
+            )
+            .map_err(|err| err.to_string());
+        assert_eq!(kept.as_deref(), Ok("sc_settle=0 || bounces=unlimited || "));
     }
 
     #[test]

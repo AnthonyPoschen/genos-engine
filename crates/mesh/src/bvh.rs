@@ -1,10 +1,31 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_range_loop,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! A binned-SAH bounding volume hierarchy over triangles.
 //!
@@ -76,7 +97,8 @@ impl Bvh {
         self.nodes.len()
     }
 
-    /// The nearest hit with `T_MIN < t < t_max`.
+    /// The nearest hit with `T_MIN < t < t_max`. Equal `t` goes to the lower
+    /// triangle index, so the answer does not depend on the tree's shape.
     pub fn intersect(
         &self,
         tris: &[MeshTriangle],
@@ -87,9 +109,17 @@ impl Bvh {
         let mut best: Option<RayHit> = None;
         let mut limit = t_max;
         self.walk(origin, dir, &mut limit, &mut |i, limit| {
-            if let Some(hit) = hit_triangle(&tris[i as usize], i, origin, dir, *limit) {
-                *limit = hit.t;
-                best = Some(hit);
+            // After a hit, a tie at exactly `limit` is still a candidate.
+            let reach = if best.is_some() {
+                limit.next_up()
+            } else {
+                *limit
+            };
+            if let Some(hit) = hit_triangle(&tris[i as usize], i, origin, dir, reach) {
+                if best.is_none_or(|b| hit.t < b.t || i < b.triangle) {
+                    *limit = hit.t;
+                    best = Some(hit);
+                }
             }
             false
         });
@@ -334,14 +364,19 @@ fn build_node(
         let mut right_n = [0usize; BINS];
         let (mut acc, mut n) = (Aabb::EMPTY, 0);
         for b in (1..BINS).rev() {
-            acc = acc.union(&bin_box[b]);
+            // An empty bin's box is EMPTY, and `union` with EMPTY spans everything.
+            if bin_n[b] > 0 {
+                acc = acc.union(&bin_box[b]);
+            }
             n += bin_n[b];
             right_area[b] = acc.half_area();
             right_n[b] = n;
         }
         let (mut acc, mut n) = (Aabb::EMPTY, 0);
         for b in 0..BINS - 1 {
-            acc = acc.union(&bin_box[b]);
+            if bin_n[b] > 0 {
+                acc = acc.union(&bin_box[b]);
+            }
             n += bin_n[b];
             if n == 0 || right_n[b + 1] == 0 {
                 continue;

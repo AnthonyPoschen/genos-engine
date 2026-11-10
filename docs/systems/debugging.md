@@ -170,15 +170,19 @@ because a mapped window missed `xdg_wm_base.ping`.
 The ping is answered only inside the seat dispatch. A scene load runs on
 `genos-scene-load` and the frame draws a loading picture. Device waits and
 pipeline compiles keep a side thread answering pings, and that thread is joined
-before the next present. Quit joins the script thread (it is still freeing the
-rhai engine after the report and the `quit` reply), stops the MCP listener,
-idles the device while the window is mapped, destroys the device on the frame
-thread, then destroys the window and exits. The old scene is dropped on
-`genos-retire`.
+before the next present. Quit is the app lifecycle in `crates/window`: it stops
+the script and the MCP listener without a blind join, polls GPU fences, destroys
+the device, unmaps the window, and then exits. Dropping the device outside that
+lifecycle panics and does not wait idle. The event thread dispatches the
+seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
-pump gap (a synchronous load, a device wait, or a teardown). The probes are the
-Perf row, `get_event_loop`, and the headless pump test in `genos-window`.
+pump gap (a synchronous load, a device wait, or a teardown). A phase line at
+or above 100 ms names that shutdown step. The probes are the Perf row,
+`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
+`lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
+That test plants a 2000 ms fence inside the drain so lavapipe's instant fences
+cannot hide a blocked phase.
 
 ### Debug menu
 
@@ -265,6 +269,18 @@ the picture still blended toward it; frame counts from before that commit
 (light_settle, room_switch, reference_views settle frames) read lower and are not
 comparable with later ones. `temporal_flicker` measured that blend tail as flicker.
 
+`status` and `wait` do not share a present. The frame thread takes the queue
+once, at the start of a present. A command that replies then returns to the
+script while that present is still open, and the next command is taken on a
+later present. `wait`'s `accepted` is the count when it was taken. `frame` is
+`accepted` plus the requested count. A `status` from the previous command reads
+one present lower than `accepted`. `wait_settled` with `then_frames` keeps the
+tail inside that job, so the saved present is the settle present plus
+`then_frames`, and the pixels written on that present carry that same id. A
+`capture` with `frame` saves that present or rejects it. A present already
+drawn is rejected. The targeted present with no pixels is rejected and is not
+replaced by a later one.
+
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
@@ -339,7 +355,9 @@ under their own key. The CPU proof runs at nice and half the cores
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
 are targets GI is working towards (the room's 48 px swim and light structure):
-a miss prints MISS and fails nothing.
+a miss prints MISS and fails nothing. The room row's blotch PASS stays 0.023.
+The ADR 0039 cache-only mean of 0.014 is a separate command, `genos-stress room-blotch`
+([room blotch](lighting/room-blotch.md)). A PASS from gi-check is not that gate.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
   640x360, clock paused, each compared with a 320x180 reference
