@@ -147,11 +147,20 @@ void main() {
         return;
     }
     if (mode == 7u) {
-        // Texel sizes (debug_view.rs ViewMode::Texels).
-        vec2 ts = lighting_sc_debug_size(pos, n);
-        vec3 col = ts.x < 0.09 ? vec3(1.0, 0.2, 0.2) : (ts.x < 0.2 ? vec3(0.2, 1.0, 0.2) : (ts.x < 0.4 ? vec3(0.25, 0.4, 1.0) : vec3(1.0, 0.3, 1.0)));
-        float lit = 0.55 + 0.45 * abs(dot(n, vec3(0.3, 0.8, 0.5)));
-        shown = col * lit * (ts.y >= 4.0 ? 1.0 : 0.35);
+        // Population record (debug_view.rs ViewMode::Texels). No dither: the
+        // bytes are the record. R's low 7 bits are the own-mean luma (0-127)
+        // and its high bit is set when the cache ray origin is inside geometry.
+        // G is the seed luma. B's low 7 bits are the set count (0-127). B's
+        // high bit is set when the cell is coarser than the 12.5 cm texel.
+        vec4 pop = lighting_sc_debug_population(pos, n);
+        float size = pop.x >= 1.0 ? pop.x - 1.0 : pop.x;
+        uint sets_u = uint(min(max(pop.y, 0.0), 127.0));
+        uint coarse = size >= 0.2 ? 128u : 0u;
+        uint own_b = uint(min(clamp(pop.z, 0.0, 1.0) * 127.0 + 0.5, 127.0));
+        if (pop.x >= 1.0) {
+            own_b |= 128u;
+        }
+        shown = vec3(float(own_b) / 255.0, clamp(pop.w, 0.0, 1.0), float(sets_u | coarse) / 255.0);
         outc.px[index] = pack_rgb(shown);
         return;
     }

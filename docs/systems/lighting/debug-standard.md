@@ -68,7 +68,7 @@ Repeat for `s2-strafe`, `s3-approach`, `s4-many-movers`, `s5-aba`, and `s6-settl
 
 The lighting MCP server listens on port 8766. `--mcp-port N` overrides it. `GENOS_MCP_PORT` applies only when that argument was omitted. `genos-stress` stays on 8765.
 
-`--unfilled` selects the existing texels view (`ViewMode::Texels`). Slots with fewer than four sets are dim. There is no separate unfilled detector.
+`--unfilled` selects the existing texels view (`ViewMode::Texels`). That view is the population record, not a size tint. Red's low 7 bits are the texel's own-mean luma (0–127) and its high bit is set when the cache ray origin (the stored point plus 2 cm along the stored normal) is inside geometry. Green is the seed luma. Blue's low 7 bits are the set count (0–127) and its high bit is set when the cell is coarser than the 12.5 cm texel. The bytes are exact: this view does not dither. There is no separate unfilled detector.
 
 Screenshots, dumps, and logs go to `./genos-debug/shots/`, `./genos-debug/logs/`, and `./genos-debug/dumps/` unless `--out` is set. A capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays unless `ui` is true. `--ui` keeps them in a `--frames` PNG. `DebugSettings.ui` is the same switch, default false. When `GENOS_LIGHTING_DUMP` is set, dumps go to `<out>/dumps` if `--out` was passed or if `GENOS_LIGHTING_DUMP_DIR` was not already set. Nothing defaults to `$HOME`.
 
