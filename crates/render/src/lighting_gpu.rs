@@ -113,8 +113,6 @@ pub(crate) struct Lighting {
     hdr_params: Buffer,
     /// HDR10 or scRGB: RGBA16F codes, then one BGRA word per pixel. Empty on SDR.
     hdr_encode: Buffer,
-    /// Shared 16-byte descriptor stand-in. AgX is evaluated, so the lattice is not resident.
-    agx_lut: Buffer,
     /// Bloom mip pyramid. Finest level is RGBA16F. Later levels are RGB16F pairs. No full-resolution image.
     bloom: Buffer,
     /// Last still-check share from the GPU meter. Zero until a comparison exists.
@@ -450,7 +448,6 @@ impl Default for Lighting {
             scene_host: Buffer::empty(),
             hdr_params: Buffer::empty(),
             hdr_encode: Buffer::empty(),
-            agx_lut: Buffer::empty(),
             bloom: Buffer::empty(),
             still_pop: 0.0,
             meter_dev: Buffer::empty(),
@@ -662,7 +659,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -1085,7 +1082,6 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
-        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
         let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
@@ -1096,7 +1092,6 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut hdr_encode);
-        self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut meter_dev);
         self.destroy_buffer(&mut meter_host);
@@ -1187,10 +1182,8 @@ impl Gpu {
         // Transfer-dst so the pyramid can write the bloom intensity word.
         // Eight floats: scale, mode, bloom, output, white, peak, format, bloom divisor.
         self.lighting.hdr_params = self.make_buffer(chain.params_bytes, 0x20 | 0x2, Memory::Upload)?;
-        // The stand-in is the only buffer empty bindings may name. Counted once.
-        self.lighting.agx_lut = self.make_buffer(chain.lut_bytes, 0x20, Memory::Upload)?;
         let encode_bytes = if probe {
-            pixels.saturating_mul(16)
+            pixels.saturating_mul(12)
         } else {
             chain.encode_bytes
         };
@@ -1295,7 +1288,6 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
-                (15, self.lighting.agx_lut.buffer),
                 (16, self.bound_or_standin(&self.lighting.bloom)),
                 (17, self.bound_or_standin(&self.lighting.hdr_encode)),
                 (18, self.bound_or_standin(&self.lighting.meter_dev)),
@@ -2715,13 +2707,33 @@ impl Gpu {
         self.hdr_output_word() > 0.0
     }
 
-    /// Empty post bindings name the 16-byte stand-in. That buffer is `lut_bytes`.
+    /// Empty post bindings name the params buffer. That buffer is already in the total.
     fn bound_or_standin(&self, buffer: &Buffer) -> Handle {
         if buffer.buffer.is_null() {
-            self.lighting.agx_lut.buffer
+            self.lighting.hdr_params.buffer
         } else {
             buffer.buffer
         }
+    }
+
+    /// Potato and Low stay on SDR. Low on a Deck OLED may take listed HDR10.
+    /// A higher preset with bloom off is not Potato: the encode grade uses that shape.
+    fn present_locks_sdr(&self, hdr10_listed: bool) -> bool {
+        if self.lighting.hdr.legacy_bytes {
+            return true;
+        }
+        let preset = self.lighting.settings.preset;
+        let named = matches!(
+            preset,
+            genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+        );
+        named
+            && crate::hdr_output::post_locks_sdr(
+                &self.lighting.hdr,
+                preset,
+                crate::hdr_output::deck_panel(),
+                hdr10_listed,
+            )
     }
 
     /// 0 keeps the 8-bit picture. 1 is HDR10. 2 is scRGB. Forced SDR stays 0.
@@ -2731,11 +2743,7 @@ impl Gpu {
         let force_sdr = if self.lighting.budget_hdr {
             !crate::hdr_output::post_encode_resident(&self.lighting.hdr)
         } else {
-            self.lighting.hdr.legacy_bytes
-                || matches!(
-                    self.lighting.settings.preset,
-                    genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
-                )
+            self.present_locks_sdr(self.hdr_output == crate::hdr_output::HdrSwapchain::Hdr10)
         };
         if force_sdr {
             return 0.0;
@@ -3897,7 +3905,6 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
-        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
         let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
         let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
@@ -3917,7 +3924,6 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut hdr_encode);
-        self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
         self.destroy_buffer(&mut meter_dev);
         self.destroy_buffer(&mut meter_host);

@@ -519,7 +519,7 @@ impl Renderer {
         self.hdr_ms()
     }
 
-    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, params, meter.
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting
@@ -528,7 +528,6 @@ impl Renderer {
             .saturating_add(lighting.scene_host.size)
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
-            .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
             .saturating_add(lighting.meter_dev.size)
             .saturating_add(lighting.meter_host.size);
@@ -553,7 +552,7 @@ impl Renderer {
                 scene_host: buffer(&lighting.scene_host),
                 bloom: buffer(&lighting.bloom),
                 encode: buffer(&lighting.hdr_encode),
-                lut: buffer(&lighting.agx_lut),
+                lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
                 params: buffer(&lighting.hdr_params),
                 meter: buffer(&lighting.meter_dev),
                 meter_host: buffer(&lighting.meter_host),
@@ -561,7 +560,7 @@ impl Renderer {
         )
     }
 
-    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    /// Post-chain bytes as MiB. The ceiling is the preset row in the HDR pipeline record.
     pub fn post_vram_device(&self) -> f64 {
         self.hdr_vram_bytes() / (1024.0 * 1024.0)
     }
@@ -2931,11 +2930,27 @@ impl Gpu {
                 color_space,
             });
         }
-        let force_sdr = self.lighting.hdr.legacy_bytes
-            || matches!(
-                self.lighting.settings.preset,
+        let hdr10_listed = listed.iter().any(|item| {
+            (item.format == crate::hdr_output::FORMAT_A2B10
+                || item.format == crate::hdr_output::FORMAT_A2R10)
+                && item.color_space == crate::hdr_output::COLOR_SPACE_HDR10
+        });
+        let force_sdr = if self.lighting.hdr.legacy_bytes {
+            true
+        } else {
+            let preset = self.lighting.settings.preset;
+            let named = matches!(
+                preset,
                 genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
             );
+            named
+                && crate::hdr_output::post_locks_sdr(
+                    &self.lighting.hdr,
+                    preset,
+                    crate::hdr_output::deck_panel(),
+                    hdr10_listed,
+                )
+        };
         crate::hdr_output::surface_choice(
             sdr_format,
             &listed,

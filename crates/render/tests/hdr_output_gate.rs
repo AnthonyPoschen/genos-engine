@@ -56,7 +56,8 @@ const OVERSHOOT_MAX: f64 = 0.02;
 const FIREFLY_MAX: f64 = 1.0;
 const COMMUTE_MAX: f64 = 0.01;
 const DEVICE_MS_MAX: f64 = 1.5;
-const DEVICE_VRAM_MAX: f64 = 96.0;
+/// Published High and Ultra SDR ceiling. The 1440p rows check each preset.
+const PICTURE_VRAM_MAX: f64 = 37.50;
 /// Mean |picture − AgX(exposure × (scene + bloom × k))| on lit pixels.
 /// Sits above 8-bit dither and below a skipped `AgX`, a wrong lattice, a ×4 bloom add,
 /// and an exposure that stays at 1.
@@ -289,7 +290,7 @@ fn live_metrics() -> Vec<Metric> {
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         collected_ms("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
-        at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
+        at_most("post_vram_device", gpu_post_vram(), PICTURE_VRAM_MAX),
         equal("passes_fallback", chain_passes(LightingPreset::Potato), 0.0),
         equal("passes_low", chain_passes(LightingPreset::Low), 7.0),
         equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
@@ -373,7 +374,7 @@ fn proof_good() -> Vec<Metric> {
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 0.40, DEVICE_MS_MAX),
-        at_most("post_vram_device", 37.5, DEVICE_VRAM_MAX),
+        at_most("post_vram_device", 37.5, PICTURE_VRAM_MAX),
     ]
 }
 
@@ -423,7 +424,7 @@ fn proof_broken() -> Vec<Metric> {
         at_most("pq_st2084", pq_error(|nits| nits / 10_000.0), PQ_MAX),
         equal("scrgb_code", eighty_nit_paper_white(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 5.0, DEVICE_MS_MAX),
-        at_most("post_vram_device", 4_000.0, DEVICE_VRAM_MAX),
+        at_most("post_vram_device", 4_000.0, PICTURE_VRAM_MAX),
     ]
 }
 
@@ -459,7 +460,7 @@ fn eighty_nit_paper_white(_nits: f64) -> f64 {
 }
 
 fn collected_ms(name: &'static str, value: f64, device_ceiling: f64) -> Metric {
-    let status = if value.is_finite() && value > 0.0 {
+    let status = if value.is_finite() && value > 0.0 && value <= device_ceiling {
         Status::Pass
     } else {
         Status::Fail
@@ -1344,7 +1345,7 @@ fn gpu_post_vram() -> f64 {
     if mib.is_finite() && mib > 0.0 {
         mib
     } else {
-        DEVICE_VRAM_MAX + 1.0
+        PICTURE_VRAM_MAX + 1.0
     }
 }
 
@@ -1796,7 +1797,7 @@ fn empty_grab() -> Grab {
         exposure_want: wanted_exposure(),
         gap_x4: 0.0,
         post_ms: 0.0,
-        post_vram: DEVICE_VRAM_MAX + 1.0,
+        post_vram: PICTURE_VRAM_MAX + 1.0,
         lattice: 1.0,
         hot: 1.0,
     }
