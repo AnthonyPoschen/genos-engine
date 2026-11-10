@@ -2,7 +2,8 @@
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
 //! This stage applies the wheeled ground spring-damper, steady aircraft lift,
-//! drag, and thrust, and the space thrusters. Sea is not a field.
+//! drag, and thrust, including both on one landing chassis, and the space
+//! thrusters. Sea is not a field.
 //! A thruster writes force and torque through [`integrate_wrench`]. The existing
 //! gyroscopic step then consumes that angular velocity. There is no second integrator.
 
@@ -141,25 +142,10 @@ pub fn thruster_world() -> World {
 }
 
 fn g1_vehicle(chassis: usize) -> Vehicle {
-    let wheel = |local_position: Vec3| Wheel {
-        local_position,
-        direction: Vec3::new(0.0, -1.0, 0.0),
-        rest_length: 0.4,
-        min_length: 0.1,
-        max_length: 0.6,
-        hz: 4.0,
-        damping_ratio: 0.7,
-    };
-    let wheels = [
-        wheel(Vec3::new(1.0, 0.0, 0.5)),
-        wheel(Vec3::new(1.0, 0.0, -0.5)),
-        wheel(Vec3::new(-1.0, 0.0, 0.5)),
-        wheel(Vec3::new(-1.0, 0.0, -0.5)),
-    ];
     Vehicle {
         chassis,
         ground: Some(GroundContact::Wheeled(WheeledGround {
-            wheels,
+            wheels: g1_wheels(0.6),
             lengths: [0.4, 0.4, 0.4, 0.4],
         })),
         aircraft: None,
@@ -186,6 +172,73 @@ pub fn aero_trim_world() -> World {
         chassis: index,
         ground: None,
         aircraft: Some(trim_aircraft(1_000.0, world.gravity)),
+        space: None,
+    });
+    world
+}
+
+fn g1_wheels(max_length: f32) -> [Wheel; 4] {
+    let wheel = |local_position: Vec3| Wheel {
+        local_position,
+        direction: Vec3::new(0.0, -1.0, 0.0),
+        rest_length: 0.4,
+        min_length: 0.1,
+        max_length,
+        hz: 4.0,
+        damping_ratio: 0.7,
+    };
+    [
+        wheel(Vec3::new(1.0, 0.0, 0.5)),
+        wheel(Vec3::new(1.0, 0.0, -0.5)),
+        wheel(Vec3::new(-1.0, 0.0, 0.5)),
+        wheel(Vec3::new(-1.0, 0.0, -0.5)),
+    ]
+}
+
+/// The T1 miss fixture: the A1 aircraft plus four wheels of `max_length` 0.5.
+///
+/// There is no plane. Every ray misses. Pose and velocity match [`aero_trim_world`].
+#[must_use]
+pub fn gear_miss_world() -> World {
+    let mut world = aero_trim_world();
+    if let Some(vehicle) = world.vehicles.first_mut() {
+        vehicle.ground = Some(GroundContact::Wheeled(WheeledGround {
+            wheels: g1_wheels(0.5),
+            lengths: [0.4, 0.4, 0.4, 0.4],
+        }));
+    }
+    world
+}
+
+/// The T1 shared-weight fixture. Mass is 1 000 kg, so each spring carries less
+/// than G1. `cl` stays the A1 trim constant. `thrust_max` is the drag at 20 m/s.
+#[must_use]
+pub fn gear_plane_world() -> World {
+    let mut world = World::new(GRAVITY);
+    world.sleep_time = 10.0;
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    let mut body = Body::cuboid(
+        Vec3::new(0.0, 0.45, 0.0),
+        1_000.0,
+        Vec3::new(1.2, 0.15, 0.7),
+    );
+    body.friction = 0.6;
+    body.restitution = 0.0;
+    body.motion = MotionQuality::Discrete;
+    body.velocity = Vec3::new(20.0, 0.0, 0.0);
+    let index = world.insert(body);
+    let mut aircraft = trim_aircraft(1_000.0, world.gravity);
+    let speed = 20.0_f32;
+    let q = 0.5 * aircraft.air_density * (speed * speed);
+    let cd = aircraft.cd0 + aircraft.induced * (aircraft.cl * aircraft.cl);
+    aircraft.thrust_max = (q * aircraft.wing_area) * cd;
+    world.vehicles.push(Vehicle {
+        chassis: index,
+        ground: Some(GroundContact::Wheeled(WheeledGround {
+            wheels: g1_wheels(0.6),
+            lengths: [0.4, 0.4, 0.4, 0.4],
+        })),
+        aircraft: Some(aircraft),
         space: None,
     });
     world
@@ -270,8 +323,10 @@ pub(crate) fn wake_sleeping_thrusters(world: &mut World) {
 
 /// Domain forces, after gravity and before the chassis is integrated.
 ///
-/// Order is aircraft, then space, then ground. [`integrate_wrench`] is the
-/// velocity update the thruster uses. Aircraft force acts at the centre of mass.
+/// Order is aircraft, then space, then ground, including aircraft and ground
+/// together on a landing chassis. [`integrate_wrench`] is the velocity update
+/// the thruster uses. Aircraft force acts at the centre of mass. The aircraft
+/// sample runs before the thruster and before the ground push.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
@@ -338,9 +393,9 @@ fn apply_aircraft(world: &mut World, index: usize, dt: f32) {
 /// Lift, drag, and thrust. `None` means the input cannot produce a finite force.
 fn aircraft_force(aircraft: &Aircraft, body: &Body, gravity: Vec3, dt: f32) -> Option<Vec3> {
     // `apply_forces` has already added `gravity * dt`. Dynamic pressure uses the
-    // velocity from before that increment: that is the speed in the trim
-    // association, and drag is zero when that speed is zero. A spring increment
-    // on the same body is outside this stage.
+    // velocity from before that increment, and from before the thruster and the
+    // ground push: `apply` runs aircraft, then space, then ground. Drag is zero
+    // when that speed is zero.
     let air = body.velocity - gravity * dt;
     if !finite_aircraft(aircraft) || !finite_vec(air) {
         return None;

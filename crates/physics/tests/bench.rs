@@ -121,6 +121,17 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         "aircraft wake step allocated {wake_allocs} times"
     );
 
+    let mut landing = genos_physics::gear_plane_world();
+    step(&mut landing, 1.0 / 60.0);
+    let before_landing = ALLOCS.load(Ordering::Relaxed);
+    step(&mut landing, 1.0 / 60.0);
+    let landing_allocs = ALLOCS.load(Ordering::Relaxed) - before_landing;
+    println!("landing_allocs={landing_allocs}");
+    assert_eq!(
+        landing_allocs, 0,
+        "gear and wing step allocated {landing_allocs} times"
+    );
+
     let mut thruster = genos_physics::thruster_world();
     let mut ground = genos_physics::chassis_rest_world(10.0);
     step(&mut thruster, 1.0 / 60.0);

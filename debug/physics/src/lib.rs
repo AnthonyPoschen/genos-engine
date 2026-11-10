@@ -522,6 +522,65 @@ mod tests {
     }
 
     #[test]
+    fn gear_miss_matches_the_aircraft_and_casts_four_rays() {
+        let scene = find("gear_miss").unwrap_or(&SCENES[0]);
+        let mut session = Session::load(scene);
+        assert_eq!(session.scene.name, "gear_miss");
+        let record = session.step();
+        assert_eq!(record.wheel_rays, 4);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("gear_miss");
+        assert!(line.contains("\"wheel_rays\":4"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        session.run(119);
+        let body = session.world.bodies[0];
+        assert_eq!(body.position.y.to_bits(), 100.0_f32.to_bits());
+        assert_eq!(body.velocity.x.to_bits(), 50.0_f32.to_bits());
+        assert_eq!(body.velocity.y.to_bits(), 0.0_f32.to_bits());
+        assert_eq!(body.angular_velocity, genos_math::Vec3::ZERO);
+        assert_eq!(session.world.step_stats.wheel_rays, 4);
+        assert!(!body.motor);
+        assert!(replay(scene, 120).is_ok(), "gear_miss replay diverged");
+        assert!(
+            checkpoint(scene, 20, 120).is_ok(),
+            "gear_miss checkpoint diverged"
+        );
+    }
+
+    #[test]
+    fn gear_plane_shares_the_weight() {
+        let scene = find("gear_plane").unwrap_or(&SCENES[0]);
+        let mut session = Session::load(scene);
+        assert_eq!(session.scene.name, "gear_plane");
+        session.run(180);
+        let body = session.world.bodies[session.world.vehicles[0].chassis];
+        let height_error = (body.position.y - 0.386_954).abs();
+        assert!(
+            height_error < 0.02,
+            "centre y {} is {height_error} m from 0.386954",
+            body.position.y
+        );
+        assert!(
+            body.velocity.y.abs() < 0.05,
+            "vertical speed {}",
+            body.velocity.y
+        );
+        assert!(
+            (body.velocity.x - 20.0).abs() < 0.05,
+            "forward speed {}",
+            body.velocity.x
+        );
+        assert_eq!(session.world.step_stats.wheel_rays, 4);
+        assert!(!body.motor);
+        assert!(body.spring.is_none());
+        assert!(replay(scene, 180).is_ok(), "gear_plane replay diverged");
+        assert!(
+            checkpoint(scene, 30, 180).is_ok(),
+            "gear_plane checkpoint diverged"
+        );
+    }
+
+    #[test]
     fn json_line_names_the_scene_and_hash() {
         let mut session = Session::load(&SCENES[0]);
         let line = session.step().json("ship_lanes");
