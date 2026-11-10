@@ -385,6 +385,40 @@ impl Renderer {
         self.gpu.read_host(slot)
     }
 
+    /// Swapchain size the device allocated. A requested size can differ when the compositor clamps it.
+    pub fn picture_extent(&self) -> (u32, u32) {
+        (self.gpu.extent_w, self.gpu.extent_h)
+    }
+
+    /// Rebuild the post chain for `hdr`. GI targets follow Potato so the check does not also build the High cache.
+    ///
+    /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
+    /// except Potato and Low settings, which stay SDR.
+    pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.gpu.lighting.settings =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        self.gpu.lighting.hdr = hdr;
+        self.gpu.lighting.budget_hdr = true;
+        let result = self.gpu.make_lighting_targets();
+        self.gpu.lighting.budget_hdr = false;
+        result
+    }
+
+    /// Ask the next frames to write the display-pass bloom tent and lattice samples.
+    pub fn set_bloom_probe(&mut self, on: bool) {
+        self.gpu.lighting.bloom_probe = on;
+    }
+
+    /// Bloom tent from the last display pass, before the intensity scale.
+    pub fn read_bloom_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_bloom_probe()
+    }
+
+    /// `agx_eval` at 64 lattice inputs, from the last display pass.
+    pub fn read_agx_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_agx_probe()
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         if !extent_needed(self.width, self.height, width, height) {
             return Ok(());
@@ -499,6 +533,32 @@ impl Renderer {
             .saturating_add(lighting.meter_dev.size)
             .saturating_add(lighting.meter_host.size);
         bytes as f64
+    }
+
+    /// Sum of `VkMemoryRequirements.size` for the post buffers, when each size is
+    /// the logical size or that size rounded up to the buffer's alignment.
+    ///
+    /// This is the number [`Self::hdr_vram_bytes`] reports. `None` means a buffer
+    /// is a different size from the chain.
+    pub fn post_device_bytes(&self, chain: &crate::hdr_output::PostChain) -> Option<u64> {
+        let lighting = &self.gpu.lighting;
+        let buffer = |source: &Buffer| crate::hdr_output::PostBuffer {
+            size: source.size,
+            align: source.align,
+        };
+        crate::hdr_output::post_device_bytes(
+            chain,
+            crate::hdr_output::PostDevice {
+                scene: buffer(&lighting.scene_lin),
+                scene_host: buffer(&lighting.scene_host),
+                bloom: buffer(&lighting.bloom),
+                encode: buffer(&lighting.hdr_encode),
+                lut: buffer(&lighting.agx_lut),
+                params: buffer(&lighting.hdr_params),
+                meter: buffer(&lighting.meter_dev),
+                meter_host: buffer(&lighting.meter_host),
+            },
+        )
     }
 
     /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
@@ -797,8 +857,10 @@ impl Renderer {
     }
 
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_color()
+        self.gpu.copy_last_picture(false)?;
+        let pixels = self.gpu.read_color()?;
+        self.gpu.free_picture_host();
+        Ok(pixels)
     }
 
     /// Scene-referred radiance of the last compose, before the display transform.
@@ -806,12 +868,14 @@ impl Renderer {
     /// Empty when lighting has not allocated the image. Each texel goes through
     /// [`scene_read_from_rgba`], which calls [`scene_referred`].
     pub fn read_scene(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_scene_host()
+        self.gpu.copy_last_picture(true)?;
+        let scene = self.gpu.read_scene_host()?;
+        self.gpu.free_picture_host();
+        Ok(scene)
     }
 
     /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
-    /// intensity scale. The mip chain sits past this image and is not returned.
+    /// intensity scale. The stored chain is the mip pyramid; this tents the finest mip up.
     pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
         self.gpu.read_bloom_host()
     }
@@ -1002,7 +1066,11 @@ impl Renderer {
         self.gpu.record_and_submit(&matrix)?;
         let pixels = if readback {
             self.gpu.wait_gpu()?;
-            Some(self.gpu.read_color()?)
+            let pixels = self.gpu.read_color()?;
+            if !self.keep_pictures {
+                self.gpu.free_picture_host();
+            }
+            Some(pixels)
         } else {
             None
         };
@@ -1718,7 +1786,10 @@ struct Image {
 struct Buffer {
     buffer: Handle,
     memory: Handle,
+    /// `VkMemoryRequirements.size`. At least the size asked for, and a multiple of `align`.
     size: u64,
+    /// `VkMemoryRequirements.alignment`. Zero on an empty buffer.
+    align: u64,
 }
 
 struct StreamSource {
@@ -3123,12 +3194,6 @@ impl Gpu {
                 "image list",
             )?;
 
-            let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
-                8
-            } else {
-                4
-            };
-            let bytes = self.extent_w as u64 * self.extent_h as u64 * bpp;
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
                     self.format,
@@ -3142,7 +3207,7 @@ impl Gpu {
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
-                self.hosts[slot] = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+                self.hosts[slot] = Buffer::empty();
             }
             self.color = copy_image(&self.colors[0]);
             self.depth = copy_image(&self.depths[0]);
@@ -3620,6 +3685,7 @@ impl Gpu {
             self.copy_color_to_swapchain(swap);
             // The host copy is a whole picture over the bus; only a readback pays it.
             if self.copy_picture {
+                self.ensure_picture_host()?;
                 self.copy_color_to_buffer();
             }
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
@@ -4178,7 +4244,14 @@ impl Gpu {
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;
-        self.host = saved;
+        let freed = self.hosts[slot].buffer;
+        let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+        self.destroy_buffer(&mut host);
+        self.host = if saved.buffer.is_null() || saved.buffer == freed {
+            Buffer::empty()
+        } else {
+            saved
+        };
         Ok(pixels)
     }
 
@@ -4229,8 +4302,9 @@ impl Gpu {
     ///
     /// Reuses that frame's command buffer and fence; the next frame on this flight
     /// waits for the fence as usual.
-    fn copy_last_picture(&mut self) -> Result<(), String> {
+    fn copy_last_picture(&mut self, with_scene: bool) -> Result<(), String> {
         self.wait_gpu()?;
+        self.ensure_picture_host()?;
         unsafe {
             let fences = [self.fence];
             check(
@@ -4240,7 +4314,9 @@ impl Gpu {
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             self.copy_color_to_buffer();
-            self.copy_scene_for_readback();
+            if with_scene {
+                self.copy_scene_for_readback();
+            }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
             #[repr(C)]
             struct Submit {
@@ -4305,10 +4381,11 @@ impl Gpu {
     }
 
     /// BGRA8 picture of an HDR frame. The swapchain holds PQ or fp16 words, so
-    /// the display pass also stores the SDR bytes in each encode texel's fourth word.
+    /// the display pass stores the SDR bytes after the packed fp16 image.
     fn read_color_of_hdr(&self, bytes: usize) -> Result<Vec<u8>, String> {
         let pixels = bytes / 4;
-        let need = pixels.saturating_mul(16);
+        let tail = pixels.saturating_mul(8);
+        let need = tail.saturating_add(bytes);
         let memory = self.lighting.hdr_encode.memory;
         let size = self.lighting.hdr_encode.size;
         if memory.is_null() || usize::try_from(size).unwrap_or(0) < need {
@@ -4322,27 +4399,73 @@ impl Gpu {
                 "map hdr readback",
             )?;
             let words = mapped as *const u8;
-            for index in 0..pixels {
-                let src = words.add(index * 16 + 12);
-                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(index * 4), 4);
-            }
+            std::ptr::copy_nonoverlapping(words.add(tail), out.as_mut_ptr(), bytes);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(out)
     }
 
-    /// Device scene image to the host buffer. The fence has already waited.
-    fn copy_scene_for_readback(&mut self) {
-        let src = self.lighting.scene_lin.buffer;
-        let dst = self.lighting.scene_host.buffer;
-        if src.is_null() || dst.is_null() {
+    fn picture_host_bytes(&self) -> u64 {
+        let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
+            8
+        } else {
+            4
+        };
+        u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(bpp)
+    }
+
+    /// The picture readback buffer is allocated for the copy and freed after the read.
+    fn ensure_picture_host(&mut self) -> Result<(), String> {
+        let bytes = self.picture_host_bytes();
+        if bytes == 0 {
+            return Ok(());
+        }
+        let slot = self.flight;
+        if self.hosts[slot].size < bytes {
+            let next = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+            let mut old = std::mem::replace(&mut self.hosts[slot], next);
+            self.destroy_buffer(&mut old);
+        }
+        self.host = copy_buffer(&self.hosts[slot]);
+        Ok(())
+    }
+
+    fn free_picture_host(&mut self) {
+        let handle = self.host.buffer;
+        if handle.is_null() {
             return;
         }
-        let size = self
-            .lighting
-            .scene_lin
-            .size
-            .min(self.lighting.scene_host.size);
+        for slot in 0..2 {
+            if self.hosts[slot].buffer == handle {
+                let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+                self.destroy_buffer(&mut host);
+            }
+        }
+        self.host = Buffer::empty();
+    }
+
+    /// Device scene image to the host buffer. The fence has already waited.
+    /// The host buffer is allocated here and freed by [`Self::read_scene_host`].
+    fn copy_scene_for_readback(&mut self) {
+        let src = self.lighting.scene_lin.buffer;
+        let need = self.lighting.scene_lin.size;
+        if src.is_null() || need == 0 {
+            return;
+        }
+        if self.lighting.scene_host.buffer.is_null() || self.lighting.scene_host.size < need {
+            let Ok(host) = self.make_buffer(need, 0x2, Memory::Readback) else {
+                return;
+            };
+            let mut old = std::mem::replace(&mut self.lighting.scene_host, host);
+            self.destroy_buffer(&mut old);
+        }
+        let dst = self.lighting.scene_host.buffer;
+        if dst.is_null() {
+            return;
+        }
+        let size = need.min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -4368,32 +4491,46 @@ impl Gpu {
         }
     }
 
-    fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
-        let pixels = self.extent_w as usize * self.extent_h as usize;
-        let bytes = pixels.saturating_mul(16);
+    fn read_scene_host(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        let bytes = u64::try_from(pixels.saturating_mul(8)).unwrap_or(0);
+        let empty = crate::hdr_output::SceneRead {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+            distance_m: Vec::new(),
+        };
         if bytes == 0
             || self.lighting.scene_host.memory.is_null()
-            || self.lighting.scene_host.size < bytes as u64
+            || self.lighting.scene_host.size < bytes
         {
-            return Ok(crate::hdr_output::SceneRead {
-                width: 0,
-                height: 0,
-                rgb: Vec::new(),
-                distance_m: Vec::new(),
-            });
+            return Ok(empty);
         }
-        let values = read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.scene_host.memory,
-            pixels.saturating_mul(4),
-        )?;
-        Ok(crate::hdr_output::scene_read_from_rgba(
-            self.extent_w,
-            self.extent_h,
-            &values,
-        ))
+        let size = usize::try_from(bytes).unwrap_or(0);
+        let mut raw = vec![0u8; size];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.scene_host.memory,
+                0,
+                bytes,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(empty);
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), size);
+            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
+        }
+        let values = crate::hdr_output::rgba_f32_from_rgba16f(&raw, pixels);
+        let read = crate::hdr_output::scene_read_from_rgba(self.extent_w, self.extent_h, &values);
+        let mut host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
+        self.destroy_buffer(&mut host);
+        Ok(read)
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -6752,6 +6889,7 @@ impl Gpu {
             let mut req = [0u8; 24];
             (self.fns.buffer_reqs)(self.device, buffer, req.as_mut_ptr());
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let align = u64::from_ne_bytes(req[8..16].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
             let memory = self.alloc(req_size, bits, memory)?;
             check(
@@ -6762,6 +6900,7 @@ impl Gpu {
                 buffer,
                 memory,
                 size: req_size,
+                align,
             })
         }
     }
@@ -8490,6 +8629,7 @@ fn copy_buffer(buffer: &Buffer) -> Buffer {
         buffer: buffer.buffer,
         memory: buffer.memory,
         size: buffer.size,
+        align: buffer.align,
     }
 }
 
@@ -8509,6 +8649,7 @@ impl Buffer {
             buffer: std::ptr::null_mut(),
             memory: std::ptr::null_mut(),
             size: 0,
+            align: 0,
         }
     }
 }

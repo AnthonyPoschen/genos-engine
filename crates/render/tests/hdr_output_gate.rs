@@ -21,7 +21,8 @@ use genos_render::{
     hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
     pack_f32,
     pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
-    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, HdrSwapchain,
+    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, post_chain,
+    HdrSwapchain,
     HDR_PEAK_NITS,
     Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
     COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
@@ -289,6 +290,40 @@ fn live_metrics() -> Vec<Metric> {
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         collected_ms("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
         at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
+        equal("passes_fallback", chain_passes(LightingPreset::Potato), 0.0),
+        equal("passes_low", chain_passes(LightingPreset::Low), 7.0),
+        equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
+        equal("passes_high", chain_passes(LightingPreset::High), 11.0),
+        equal("passes_ultra", chain_passes_ultra(), 13.0),
+        equal("base_low", chain_base(LightingPreset::Low), 640.0),
+        equal("base_medium", chain_base(LightingPreset::Medium), 1280.0),
+        equal("base_high", chain_base(LightingPreset::High), 1280.0),
+        equal("base_ultra", chain_base_ultra(), 1280.0),
+        equal("coarse_low", chain_coarse(LightingPreset::Low), 80.0),
+        equal("coarse_medium", chain_coarse(LightingPreset::Medium), 80.0),
+        equal("coarse_high", chain_coarse(LightingPreset::High), 40.0),
+        equal("coarse_ultra", chain_coarse_ultra(), 20.0),
+        at_most("gpu_bloom_high", gpu_bloom_at(6), GPU_BLOOM_MAX),
+        at_most("gpu_bloom_ultra", gpu_bloom_at(7), GPU_BLOOM_MAX),
+        at_most("gpu_agx_high", gpu_agx_at(6), GPU_AGX_MAX),
+        at_most("gpu_agx_ultra", gpu_agx_at(7), GPU_AGX_MAX),
+        at_most("agx_lattice", pictures().base.lattice, 1.0e-3),
+        at_most("hot_bloom", pictures().base.hot, 0.1),
+        vram_1440("vram_1440_fallback_sdr", 0, 0, 28.13),
+        vram_1440("vram_1440_fallback_hdr10", 0, 1, 28.13),
+        vram_1440("vram_1440_fallback_scrgb", 0, 2, 28.13),
+        vram_1440("vram_1440_low_sdr", 1, 0, 37.46),
+        vram_1440("vram_1440_low_hdr10", 1, 1, 37.46),
+        vram_1440("vram_1440_low_scrgb", 1, 2, 37.46),
+        vram_1440("vram_1440_medium_sdr", 2, 0, 37.49),
+        vram_1440("vram_1440_medium_hdr10", 2, 1, 79.68),
+        vram_1440("vram_1440_medium_scrgb", 2, 2, 79.68),
+        vram_1440("vram_1440_high_sdr", 3, 0, 37.50),
+        vram_1440("vram_1440_high_hdr10", 3, 1, 79.69),
+        vram_1440("vram_1440_high_scrgb", 3, 2, 79.69),
+        vram_1440("vram_1440_ultra_sdr", 4, 0, 37.50),
+        vram_1440("vram_1440_ultra_hdr10", 4, 1, 79.69),
+        vram_1440("vram_1440_ultra_scrgb", 4, 2, 79.69),
     ]
 }
 
@@ -1109,64 +1144,190 @@ struct Grab {
     gap_x4: f64,
     post_ms: f64,
     post_vram: f64,
+    lattice: f64,
+    hot: f64,
+}
+
+struct PictureSet {
+    base: Grab,
+    high: Grab,
+    ultra: Grab,
+}
+
+fn pictures() -> &'static PictureSet {
+    static GRAB: OnceLock<PictureSet> = OnceLock::new();
+    GRAB.get_or_init(capture_pictures)
 }
 
 fn gpu_grab() -> &'static Grab {
-    static GRAB: OnceLock<Grab> = OnceLock::new();
-    GRAB.get_or_init(capture_gpu)
+    &pictures().base
 }
 
-fn capture_gpu() -> Grab {
+fn grab_at(levels: u32) -> &'static Grab {
+    let set = pictures();
+    if levels >= 7 {
+        &set.ultra
+    } else if levels >= 6 {
+        &set.high
+    } else {
+        &set.base
+    }
+}
+
+fn capture_pictures() -> PictureSet {
+    let fail = PictureSet {
+        base: empty_grab(),
+        high: empty_grab(),
+        ultra: empty_grab(),
+    };
     let scene = match load_hall() {
         Ok(scene) => scene,
-        Err(err) => return fail_grab(&err),
+        Err(err) => {
+            eprintln!("hdr gate gpu: {err}");
+            return fail;
+        }
     };
-    let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
-    world.scene.hdr = gpu_settings();
     let opened = open_grade_renderer();
     let mut owner = match opened {
         Ok(owner) => owner,
-        Err(err) => return fail_grab(&err),
+        Err(err) => {
+            eprintln!("hdr gate gpu: {err}");
+            return fail;
+        }
     };
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
+    renderer.set_bloom_probe(true);
     let camera = Camera::opening();
-    if let Err(err) = draw_once(window, renderer, &world, &camera) {
-        return fail_grab(&err);
-    }
-    // The second frame is a different lamp, so a pyramid of the previous
-    // frame does not match this frame's bloom.
+    let base = match capture_levels(window, renderer, &scene, &camera, GPU_BLOOM_LEVELS, true) {
+        Ok(grab) => grab,
+        Err(err) => return {
+            eprintln!("hdr gate gpu: {err}");
+            fail
+        },
+    };
+    let high = match capture_levels(window, renderer, &scene, &camera, 6, false) {
+        Ok(grab) => grab,
+        Err(err) => {
+            eprintln!("hdr gate gpu high: {err}");
+            return PictureSet {
+                base,
+                high: fail_grab(&err),
+                ultra: fail_grab(&err),
+            };
+        }
+    };
+    let ultra = match capture_levels(window, renderer, &scene, &camera, 7, false) {
+        Ok(grab) => grab,
+        Err(err) => {
+            eprintln!("hdr gate gpu ultra: {err}");
+            return PictureSet {
+                base,
+                high,
+                ultra: fail_grab(&err),
+            };
+        }
+    };
+    PictureSet { base, high, ultra }
+}
+
+fn capture_levels(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    scene: &genos_scene::Scene,
+    camera: &Camera,
+    levels: u32,
+    with_hot: bool,
+) -> Result<Grab, String> {
+    let mut world = World::from_scene(scene.clone());
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.hdr = gpu_settings(levels);
+    draw_once(window, renderer, &world, camera)?;
     if let Some(light) = world.scene.lights.first_mut() {
         light.color = [6.0, 0.3, 0.1];
     }
-    let pixels = match draw_once(window, renderer, &world, &camera) {
-        Ok(pixels) => pixels,
-        Err(err) => return fail_grab(&err),
-    };
-    let scene2 = match renderer.read_scene() {
-        Ok(scene) => scene,
-        Err(err) => return fail_grab(&err),
-    };
-    let bloom_buf = match renderer.read_bloom() {
-        Ok(bloom) => bloom,
-        Err(err) => return fail_grab(&err),
-    };
-    let bloom_add = match renderer.read_hdr_encode() {
-        Ok(encoded) => encoded,
-        Err(err) => return fail_grab(&err),
-    };
-    let mut grab = finish_grab(renderer, pixels, &scene2, bloom_buf, bloom_add);
+    let pixels = draw_once(window, renderer, &world, camera)?;
+    let scene2 = renderer.read_scene()?;
+    let bloom_buf = renderer.read_bloom()?;
+    let bloom_add = renderer.read_bloom_probe()?;
+    let lattice_buf = renderer.read_agx_probe()?;
+    let mut grab = finish_grab(renderer, pixels, &scene2, bloom_buf, bloom_add, levels);
+    grab.lattice = lattice_delta(&lattice_buf);
+    if with_hot {
+        grab.hot = hot_bloom(window, renderer, &mut world, camera)?;
+    }
     let mut post_ms = renderer.post_ms_device();
-    if post_ms <= 0.0 {
-        if draw_once(window, renderer, &world, &camera).is_err() {
-            return fail_grab("the timestamp frame returned no readback");
-        }
+    if post_ms <= 0.0 && with_hot {
+        let _ = draw_once(window, renderer, &world, camera)?;
         post_ms = renderer.post_ms_device();
     }
     grab.post_ms = post_ms;
     grab.post_vram = renderer.post_vram_device();
-    grab
+    Ok(grab)
+}
+
+fn lattice_delta(samples: &[f32]) -> f64 {
+    if samples.len() < 64 * 4 {
+        return 1.0;
+    }
+    let mut sum = 0.0;
+    let mut seen = 0.0;
+    for index in 0..32 {
+        let want = genos_render::agx_lut_texel(index, index, index);
+        sum += lattice_err(samples, index, want);
+        seen += 3.0;
+    }
+    let last = genos_render::AGX_LUT_N.saturating_sub(1);
+    for index in 0..32 {
+        let want = genos_render::agx_lut_texel(index, 0, last);
+        sum += lattice_err(samples, 32 + index, want);
+        seen += 3.0;
+    }
+    if seen == 0.0 {
+        1.0
+    } else {
+        sum / seen
+    }
+}
+
+fn lattice_err(samples: &[f32], index: usize, want: [f64; 3]) -> f64 {
+    let base = index.saturating_mul(4);
+    let mut err = 0.0;
+    for (channel, want_c) in want.iter().enumerate() {
+        let got = f64::from(samples.get(base.saturating_add(channel)).copied().unwrap_or(0.0));
+        if !got.is_finite() {
+            return 1.0;
+        }
+        err += (got - want_c).abs();
+    }
+    err
+}
+
+fn hot_bloom(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &mut World,
+    camera: &Camera,
+) -> Result<f64, String> {
+    if let Some(light) = world.scene.lights.first_mut() {
+        light.color = [1.0e6, 1.0e6, 1.0e6];
+    }
+    let _ = draw_once(window, renderer, world, camera)?;
+    let _ = draw_once(window, renderer, world, camera)?;
+    let scene = renderer.read_scene()?;
+    let bloom = renderer.read_bloom()?;
+    if scene.rgb.iter().any(|v| !v.is_finite()) || bloom.iter().any(|v| !v.is_finite()) {
+        return Ok(1.0);
+    }
+    let scene_peak = scene.rgb.iter().copied().fold(0.0_f64, f64::max);
+    if scene_peak > 65504.0 + 1.0 {
+        return Ok(1.0);
+    }
+    let bloom_peak = bloom.iter().copied().fold(0.0_f32, f32::max);
+    if bloom_peak <= 0.0 {
+        return Ok(1.0);
+    }
+    Ok(f64::from(bloom_peak) / 1.0e6)
 }
 
 fn gpu_post_ms() -> f64 {
@@ -1194,6 +1355,145 @@ fn load_hall() -> Result<genos_scene::Scene, String> {
     )))
 }
 
+fn preset_chain(preset: LightingPreset) -> genos_render::PostChain {
+    post_chain(
+        2560,
+        1440,
+        &HdrSettings::for_preset(preset),
+        false,
+    )
+}
+
+fn chain_passes(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).passes)
+}
+
+fn chain_passes_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false).passes)
+}
+
+fn chain_base(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).base_w)
+}
+
+fn chain_base_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false).base_w)
+}
+
+fn chain_coarse(preset: LightingPreset) -> f64 {
+    f64::from(preset_chain(preset).coarse_w)
+}
+
+fn chain_coarse_ultra() -> f64 {
+    f64::from(post_chain(2560, 1440, &HdrSettings::ultra(), false).coarse_w)
+}
+
+struct Budget {
+    ok: bool,
+    /// Bytes at 1440p. Index is preset (fallback, low, medium, high, ultra),
+    /// then output mode (SDR, HDR10, scRGB).
+    bytes: [[f64; 3]; 5],
+}
+
+fn budget() -> &'static Budget {
+    static CELL: OnceLock<Budget> = OnceLock::new();
+    CELL.get_or_init(measure_budget)
+}
+
+fn empty_budget() -> Budget {
+    Budget {
+        ok: false,
+        bytes: [[0.0; 3]; 5],
+    }
+}
+
+fn measure_budget() -> Budget {
+    match measure_budget_device() {
+        Ok(budget) => budget,
+        Err(err) => {
+            eprintln!("hdr gate 1440: {err}");
+            empty_budget()
+        }
+    }
+}
+
+fn measure_budget_device() -> Result<Budget, String> {
+    let mut window = Window::open_proof(2560, 1440)?;
+    let frame = window.pump();
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let renderer = &mut *owner.device;
+    let (width, height) = renderer.picture_extent();
+    if width != 2560 || height != 1440 {
+        return Err(format!("swapchain is {width}x{height}, wanted 2560x1440"));
+    }
+    let presets = [
+        (HdrSettings::for_preset(LightingPreset::Potato), "fallback"),
+        (HdrSettings::for_preset(LightingPreset::Low), "low"),
+        (HdrSettings::for_preset(LightingPreset::Medium), "medium"),
+        (HdrSettings::for_preset(LightingPreset::High), "high"),
+        (HdrSettings::ultra(), "ultra"),
+    ];
+    let modes = [
+        OutputMode::Sdr,
+        OutputMode::Hdr10,
+        OutputMode::Scrgb,
+    ];
+    let mut bytes = [[0.0; 3]; 5];
+    for (index, (base, name)) in presets.into_iter().enumerate() {
+        for (mode_index, mode) in modes.into_iter().enumerate() {
+            let mut hdr = base.clone();
+            hdr.output = mode;
+            renderer.layout_post(hdr.clone())?;
+            let (got_w, got_h) = renderer.picture_extent();
+            if got_w != 2560 || got_h != 1440 {
+                return Err(format!("{name} extent {got_w}x{got_h}"));
+            }
+            let got = renderer.hdr_vram_bytes();
+            let encode = genos_render::post_encode_resident(&hdr);
+            let chain = post_chain(got_w, got_h, &hdr, encode);
+            let Some(device_bytes) = renderer.post_device_bytes(&chain) else {
+                return Err(format!("{name} {mode:?} device {got} does not match the chain"));
+            };
+            let want = genos_render::bytes_to_mib(device_bytes) * 1024.0 * 1024.0;
+            if (got - want).abs() > 0.5 {
+                return Err(format!("{name} {mode:?} device {got} formula {want}"));
+            }
+            if let Some(row) = bytes.get_mut(index) {
+                if let Some(slot) = row.get_mut(mode_index) {
+                    *slot = got;
+                }
+            }
+        }
+    }
+    Ok(Budget { ok: true, bytes })
+}
+
+fn vram_1440(name: &'static str, preset: usize, mode: usize, ceiling_mib: f64) -> Metric {
+    let sample = budget();
+    let got = sample
+        .bytes
+        .get(preset)
+        .and_then(|row| row.get(mode))
+        .copied()
+        .unwrap_or(0.0);
+    let ceiling = genos_render::mib_ceiling_bytes(ceiling_mib);
+    let status = if sample.ok && got <= ceiling {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    let value = if sample.ok { got } else { ceiling + 1.0 };
+    Metric {
+        name,
+        value: Some(value),
+        threshold: ceiling,
+        compare: Compare::AtMost,
+        status,
+    }
+}
+
 fn open_grade_renderer() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(160, 90)?;
     let frame = window.pump();
@@ -1214,7 +1514,7 @@ fn draw_once(
         .ok_or_else(|| "the frame returned no readback".to_string())
 }
 
-fn gpu_settings() -> HdrSettings {
+fn gpu_settings(levels: u32) -> HdrSettings {
     let mut hdr = HdrSettings::for_preset(LightingPreset::High);
     hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
     hdr.ev100 = GPU_EV100;
@@ -1224,7 +1524,7 @@ fn gpu_settings() -> HdrSettings {
     hdr.display = genos_scene::DisplayTransform::Agx;
     hdr.bloom = true;
     hdr.bloom_intensity = GPU_BLOOM_K;
-    hdr.bloom_levels = GPU_BLOOM_LEVELS;
+    hdr.bloom_levels = levels;
     hdr.output = OutputMode::Sdr;
     hdr.legacy_bytes = false;
     hdr
@@ -1478,6 +1778,10 @@ fn capture_legacy_mode() -> LegacyModeGrab {
 
 fn fail_grab(why: &str) -> Grab {
     eprintln!("hdr gate gpu: {why}");
+    empty_grab()
+}
+
+fn empty_grab() -> Grab {
     Grab {
         ok: false,
         width: 0,
@@ -1493,6 +1797,8 @@ fn fail_grab(why: &str) -> Grab {
         gap_x4: 0.0,
         post_ms: 0.0,
         post_vram: DEVICE_VRAM_MAX + 1.0,
+        lattice: 1.0,
+        hot: 1.0,
     }
 }
 
@@ -1502,10 +1808,11 @@ fn finish_grab(
     scene2: &genos_render::SceneRead,
     bloom_buf: Vec<f32>,
     bloom_add: Vec<f32>,
+    levels: u32,
 ) -> Grab {
     let width = usize::try_from(scene2.width).unwrap_or(0);
     let height = usize::try_from(scene2.height).unwrap_or(0);
-    let bloom_ref = reference_pyramid(&scene2.rgb, width, height, GPU_BLOOM_LEVELS);
+    let bloom_ref = reference_pyramid(&scene2.rgb, width, height, levels);
     let (format, _) = renderer.hdr_surface();
     let exposure_want = wanted_exposure();
     let gap_x4 = formula_gap(&scene2.rgb, &bloom_ref, exposure_want);
@@ -1524,6 +1831,8 @@ fn finish_grab(
         gap_x4,
         post_ms: 0.0,
         post_vram: 0.0,
+        lattice: 1.0,
+        hot: 1.0,
     }
 }
 
@@ -1548,6 +1857,35 @@ fn gpu_exposure_error(broken: bool) -> f64 {
 fn gpu_bloom_error(broken: bool) -> f64 {
     let grab = gpu_grab();
     if !grab.ok {
+        return 1.0;
+    }
+    let scale = if broken { 2.0 } else { 1.0 };
+    if grab.bloom_add.is_empty() {
+        return 1.0;
+    }
+    let pyramid = bloom_delta(&grab.bloom_buf, &grab.bloom_ref, scale);
+    let added = bloom_delta(&grab.bloom_add, &grab.bloom_ref, scale);
+    pyramid.max(added)
+}
+
+fn gpu_bloom_at(levels: u32) -> f64 {
+    let grab = grab_at(levels);
+    if !grab.ok {
+        return 1.0;
+    }
+    gpu_bloom_of(grab, false)
+}
+
+fn gpu_agx_at(levels: u32) -> f64 {
+    let grab = grab_at(levels);
+    if !grab.ok {
+        return 1.0;
+    }
+    picture_error(grab, false)
+}
+
+fn gpu_bloom_of(grab: &Grab, broken: bool) -> f64 {
+    if grab.bloom_add.is_empty() {
         return 1.0;
     }
     let scale = if broken { 2.0 } else { 1.0 };

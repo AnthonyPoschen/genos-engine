@@ -169,6 +169,13 @@ impl HdrSettings {
         settings
     }
 
+    /// High plus the seventh bloom level. ADR 0027's Ultra. Not a lighting preset.
+    pub fn ultra() -> Self {
+        let mut settings = Self::for_preset(LightingPreset::High);
+        settings.bloom_levels = 7;
+        settings
+    }
+
     pub fn cli_from(args: &[String]) -> Result<HdrCli, String> {
         let mut cli = HdrCli::default();
         let mut index = 0;
@@ -559,6 +566,7 @@ mod tests {
         assert!(high.bloom);
         assert_eq!(high.bloom_intensity.to_bits(), 0.05_f64.to_bits());
         assert_eq!(high.bloom_levels, 6);
+        assert_eq!(HdrSettings::ultra().bloom_levels, 7);
         let low = HdrSettings::for_preset(LightingPreset::Low);
         assert!(low.bloom);
         assert_eq!(low.bloom_intensity.to_bits(), 0.05_f64.to_bits());
