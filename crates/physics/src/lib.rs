@@ -32,7 +32,8 @@
 //! Gravity is along -Y. There is no air drag. Shapes are a sphere, a capsule,
 //! a box, a plane, and a mesh reduced to a few convex pieces.
 //! A vehicle is optional state on one chassis body. An empty vehicle list
-//! leaves this step unchanged.
+//! leaves this step unchanged. A wide orbit, when set, replaces that chassis
+//! linear pose after the gyroscopic step.
 
 mod broadphase;
 mod ccd;
@@ -44,8 +45,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    chassis_rest_world, thruster_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle,
-    Wheel, WheeledGround,
+    chassis_rest_world, circular_orbit_world, thruster_world, Aircraft, GroundContact, Orbit,
+    SpaceCraft, Thruster, Vehicle, Wheel, WheeledGround, WidePos, ORBIT_GM, ORBIT_RADIUS_M,
 };
 
 pub use destruction::{
@@ -464,14 +465,17 @@ pub struct World {
     islands: island::Islands,
     /// Chassis payloads. Empty from [`World::new`]. A wheel is not a body.
     pub vehicles: Vec<vehicle::Vehicle>,
+    /// Frame subtracted from a wide orbit position to make the `f32` pose.
+    pub origin: vehicle::WidePos,
 }
 
-/// Two worlds are equal when their bodies, gravity, and vehicles are.
+/// Two worlds are equal when their bodies, gravity, vehicles, and origin are.
 impl PartialEq for World {
     fn eq(&self, other: &Self) -> bool {
         self.bodies == other.bodies
             && self.gravity == other.gravity
             && self.vehicles == other.vehicles
+            && self.origin == other.origin
     }
 }
 
@@ -495,7 +499,15 @@ impl World {
             broadphase: broadphase::Broadphase::new(),
             islands: island::Islands::new(),
             vehicles: Vec::new(),
+            origin: vehicle::WidePos::ZERO,
         }
+    }
+
+    /// Rebase every `f32` pose into `origin`, then write each orbit from its wide state.
+    ///
+    /// The wide state stays absolute. A non-finite origin is ignored.
+    pub fn shift_origin(&mut self, origin: vehicle::WidePos) {
+        vehicle::shift_origin(self, origin);
     }
 
     /// Store one body. Returns its index in `bodies`.
@@ -682,6 +694,9 @@ pub fn step(world: &mut World, dt: f32) {
         world.speculative_margin,
         &mut world.step_stats,
     );
+    if !world.vehicles.is_empty() {
+        vehicle::sync_orbits(world, dt);
+    }
     // The narrow phase is built once. Later passes move the stored local
     // points with the bodies and separate again, without another SAT.
     world.broadphase.prepare(&world.bodies);

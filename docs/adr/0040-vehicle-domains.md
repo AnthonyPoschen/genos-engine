@@ -1,12 +1,12 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, and S1, the thruster force, are in the step as trials. Aircraft forces, the landing stage, the orbit, and sea are not in those trials.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, S1, the thruster force, and S2, the wide orbit, are in the step as trials. Aircraft forces, the landing stage, and sea are not in those trials.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
 ## Context
 
-The pipeline plan sketches a wheeled car (P27–P31) and a thruster plus a wide orbit (P32). Those boxes were merged with the plan. They are not a reviewed vehicle decision. [ADR 0033](0033-physics-scale-broadphase-and-sleep.md) says vehicles are not decided there. No open pull request implements a vehicle.
+The pipeline plan sketches a wheeled car (P27–P31) and a thruster plus a wide orbit (P32). Those boxes were merged with the plan. They are not a reviewed vehicle decision. [ADR 0033](0033-physics-scale-broadphase-and-sleep.md) says vehicles are not decided there. G1, the four-wheel ground payload, S1, the thruster force, and S2, the wide orbit, are trial pull requests. This proposal stays proposed. Aircraft forces, the landing stage, and sea are not in those trials.
 
 Master already has the pieces a vehicle has to live on:
 
@@ -25,15 +25,15 @@ Anthony's scope for this decision: ground, aircraft, and space are first-class. 
 2. The common record is the chassis index plus three optional payloads: ground, aircraft, and space. Wheels exist only inside the ground payload. Throttle and steer exist only inside the payload that uses them. The common record has no wheel list and no shared stick.
 3. Ground's first payload is four wheel rays and a spring-damper along each ray. The spring-damper is an explicit force, using the frequency and damping ratio from Erin Catto's soft constraint (`ω = 2π hz`, `k = m ω²`, `c = 2 ζ m ω`). It is not a P10 sub-step and it is not `Body.spring`.
 4. Aircraft's first payload is steady lift, drag, and thrust through the centre of mass. Lift coefficient is a stored constant. Angle of attack is not read.
-5. Space's first payload is a short list of thrusters. Force is `throttle * max_force` along the local direction. Torque is `r × F` on the chassis. The existing integrator consumes that torque. There is no second integrator and no wide-orbit state.
+5. Space's first payload is a short list of thrusters. Force is `throttle * max_force` along the local direction. Torque is `r × F` on the chassis. The existing integrator consumes that torque. That payload has no second attitude integrator. S2 adds a wide orbit on the same payload: velocity Verlet in `f64` for the linear state only. The gyroscopic step still owns orientation. The orbit does not replace `World.gravity` for any other body.
 6. Two payloads may be set together only in the landing stage: aircraft plus wheeled ground. Force order is aircraft, then space, then ground. Space combined with either other payload is outside this proposal.
 7. Sea is not decided. The representation, if a later ADR accepts it, is buoyancy from displaced volume plus quadratic water drag, both applied to the chassis body. It is not a ground variant and it has no wheels. This ADR does not add the field.
-8. The first code, after acceptance, lands as separate stages. G1, A1, and S1 each have a fixture and none of them requires the other. T1 waits until G1 and A1 are both in the tree. S2 (the plan's orbit) waits until wide positions exist. Sea has no stage.
+8. The first code, after acceptance, lands as separate stages. G1, A1, and S1 each have a fixture and none of them requires the other. T1 waits until G1 and A1 are both in the tree. S2 is the plan's orbit. Its wide position is the orbit state, not a `genos-math` vector. Sea has no stage.
 9. An empty vehicle list leaves `step` as it is. `World::new` stays a const function. A later step of a world with no vehicles still does not allocate.
 
 ## Types
 
-These structs are the shape of the implementing commit. They are not in the crate now.
+These structs are the shape of the implementing commit. G1 and S1 are in the crate as trials. S2 adds `WidePos` and `Orbit` on the space payload.
 
 ```rust
 pub struct Vehicle {
@@ -78,9 +78,22 @@ pub struct Thruster {
     pub throttle: f32,
 }
 
+pub struct WidePos {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+pub struct Orbit {
+    pub position: WidePos,
+    pub velocity: WidePos,
+    pub gm: f64,
+}
+
 pub struct SpaceCraft {
     pub thrusters: [Thruster; 8],
     pub count: u8,
+    pub orbit: Option<Orbit>,
 }
 ```
 
@@ -109,12 +122,13 @@ That field is not part of `Vehicle` under this proposal.
 - A thruster's world force is `orientation * normalize(local_direction) * throttle * max_force`. World torque is `(orientation * local_position) × force`. The same `velocity` and `angular_velocity` update as the suspension force consumes it. Gravity is `World.gravity`. The space payload does not zero it. The S1 fixture sets gravity to zero. Aircraft lift, drag, and thrust use that linear update with zero torque.
 - Domain code does not set `Body.spring` or `Body.motor`. A parked chassis can sleep under the existing rule. While it sleeps, the wheel-ray count is 0 and suspension force is 0. An aircraft with `throttle > 0`, or a thruster with `throttle > 0`, holds the chassis awake the way a motor does. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. That wake runs before gravity and before the wrench, so the ignition step integrates both. A closed, zero, or non-finite thruster does not wake it.
 - Force order in the existing dynamic loop, after `apply_forces` and before `integrate_body`: aircraft, space, ground. Torque is added to `angular_velocity` before `implicit_gyroscopic`. Swept motion still integrates inside `ccd.rs`.
-- Wheel index order and thruster index order are the only orders. No `atan2` and no hash-map walk. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
+- Wheel index order and thruster index order are the only orders. No `atan2` and no hash-map walk. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths. An orbit also matches the `f64` bits of its wide position, wide velocity, and `GM`.
+- An orbit's acceleration is `-GM * r / |r|³`. The step integrates that with velocity Verlet and does not read `Body.position` as the state. The chassis pose is the wide position minus `World.origin`, written as `f32`. A subnormal metre becomes zero. A body with no orbit is not pulled. `World.gravity` is not added onto `GM` and is not cleared. A sleeping chassis is not integrated. The helper does not allocate. Thruster force is not added into the wide velocity.
 - A world with no vehicles does no vehicle work. The allocation bench stays green.
 
 ## Stages and fixtures
 
-G1 and S1 are in the tree as trials. This ADR stays proposed. A1 and T1 are not implemented. S2, the orbit, is not implemented. `dt` is `1/60` s. `GRAVITY` is `(0, -9.81, 0)`.
+G1, S1, and S2 are in the tree as trials. This ADR stays proposed. A1 and T1 are not implemented. `dt` is `1/60` s except the S2 radius gate, which is 200 steps of 1 s. `GRAVITY` is `(0, -9.81, 0)`.
 
 | Stage | Payload | Waits on | Fixture |
 | --- | --- | --- | --- |
@@ -122,7 +136,7 @@ G1 and S1 are in the tree as trials. This ADR stays proposed. A1 and T1 are not 
 | A1 | `Aircraft` only | acceptance | `a_trimmed_aircraft_holds_altitude_and_speed` |
 | S1 | `SpaceCraft` only | in the step as a trial | `a_thruster_in_zero_gravity_matches_force_and_torque` |
 | T1 | aircraft and wheeled ground | G1 and A1 | `a_gear_that_misses_matches_the_aircraft`, `a_gear_on_the_plane_shares_the_weight` |
-| S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
+| S2 | orbit | in the step as a trial | `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 | Sea | none | a later ADR | none |
 
 P28 (tyre slip) and P29 (gearbox and open differential) stay in the plan, unchanged, and they wait on G1. This ADR does not restate them. Shape-cast wheels, anti-roll bars, and Pacejka stay out.
@@ -172,6 +186,21 @@ Box inertia is `Ixx = m/3 (hy² + hz²)`. Here `I = 2000/3` kg·m² on each axis
 
 `debug/physics --scene thruster` runs the offset case for 60 steps.
 
+### S2. Wide orbit
+
+Mass 1 000 kg, box half extents `(1, 1, 1)`, `Discrete`. `World.gravity` is zero. No ground payload and no aircraft payload. No live thruster. The wide position starts at `(1e7, 0, 0)` m. The wide velocity is `(0, sqrt(GM / r), 0)`. `GM = 3.986e14` m³/s². A second body at wide x = `1e7 + 1000` has no orbit.
+
+`a_circular_orbit_at_1e7_metres_keeps_its_radius`, 200 steps of 1 s.
+
+- The wide radius stays within 0.05 m of `1e7`.
+- The unshifted `f32` pose does not. Its radius error is greater than 0.05 m.
+- `shift_origin` onto the ship's wide position leaves the chassis `f32` position within 1 m of the origin.
+- The second body stays at its start pose. `wheel_rays == 0`. A second run matches the wide state bit for bit.
+
+`a_zero_gm_coast_leaves_the_circular_radius` is the negative control. The same speed with `GM = 0` leaves the 0.05 m band. The coast radius is `hypot(1e7, speed * 200)`.
+
+`debug/physics --scene orbit` runs this fixture at the harness step of `1/60` s for 200 steps. The JSON line gains `orbit_radius_m`. The hash gains the wide position, the wide velocity, and `GM` when an orbit is stored, and it mixes `World.origin` on every scene.
+
 ### T1. Gear on an aircraft
 
 `a_gear_that_misses_matches_the_aircraft`. The A1 aircraft, plus four wheels with `max_length = 0.5` and the G1 spring numbers. No plane. Centre `y` is 100, so every ray misses. After 120 steps the chassis pose and velocity match the A1 twin bit for bit, and `wheel_rays == 4`.
@@ -208,6 +237,10 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | A wheel ray is treated as swept collision | `MotionQuality::Discrete` | `ccd_applied`, `toi_failed`, `pair_slices` on the G1 fixture |
 | Trim drift or a surprise moment | `cl`, `thrust_max`, `induced` | `aero_trim` and the A1 bit match |
 | A thruster misses force or torque | `max_force`, local position | `thruster` and the S1 bounds |
+| An orbit leaves its radius | `GM`, wide position | `a_circular_orbit_at_1e7_metres_keeps_its_radius`, `orbit` |
+| A coast is counted as circular | `GM = 0` | `a_zero_gm_coast_leaves_the_circular_radius` |
+| The helper pulls another body | no orbit on that body | the second body in the S2 fixture |
+| The `f32` pose is used as the state | origin shift | unshifted pose error above 0.05 m, then `shift_origin` |
 | Gear that misses still pushes | `max_length` | `a_gear_that_misses_matches_the_aircraft` |
 | Two runs diverge | actuator order | the second world in each fixture |
 
@@ -217,7 +250,7 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 
 Gameplay networking still waits. This proposal does not open a socket, does not define `InputFrame`, and does not add a snapshot codec. The core-networking plan owns those. The five lines the implementing commit copies into `docs/systems/physics.md`:
 
-- Replicated state: the chassis uses the same quantized pose and velocity as any dynamic body. G1 adds each wheel's suspension length as `i16`. A1 adds throttle as `i16`. S1 adds each thruster throttle as `i16`. Contact scratch, slip, the lift sample, and the thruster force stay local. Sea is absent, so draft and drag are not on the wire.
+- Replicated state: the chassis uses the same quantized pose and velocity as any dynamic body. G1 adds each wheel's suspension length as `i16`. A1 adds throttle as `i16`. S1 adds each thruster throttle as `i16`. S2 keeps the wide position, the wide velocity, `GM`, and the origin local. Contact scratch, slip, the lift sample, and the thruster force stay local. Sea is absent, so draft and drag are not on the wire.
 - Authority: the server runs `step` and owns the chassis pose. The owning client sends input. Clients do not accept one another's vehicle state.
 - Prediction / rollback: none. A driven chassis is interpolated. Predicting it would roll back contacts with the world.
 - Determinism: one process, `step` on one thread, fixed `1/60` s, the force order above. Two runs match bits. The wire compares quantized values. Cross-platform bit identity is not required.
@@ -228,7 +261,8 @@ Gameplay networking still waits. This proposal does not open a socket, does not 
 - Erin Catto, "Soft Constraints: Reinventing The Spring" (GDC 2011), the mapping `ω = 2π f`, `k = m ω²`, `c = 2 ζ m ω`. Departure: the force is applied along the wheel ray on the chassis. It is not a constraint row, and the world is not sub-stepped. P10 is not in `step`.
 - Jolt `VehicleConstraint` / `WheeledVehicleController`: the wheel is not a body. Departure: G1 has no constraint object in the contact solver. Cylinder casts, anti-roll, slip, and the drivetrain are not in G1. The plan's `WheelCast::Shape` waits.
 - John D. Anderson, *Introduction to Flight*, the definitions `q = ½ ρ V²`, `L = q S CL`, `D = q S CD`. Departure: `CL` is constant, angle of attack is not sampled, there is no control derivative, and every aircraft force acts at the centre of mass.
-- Euler's equation for a rigid body, torque `r × F`, integrated by the implicit gyroscopic step already accepted in ADR 0034 (Catto, "Numerical Methods for Rigid Body Dynamics", 2015). Departure from plan P32: S1 does not integrate `WidePos`, does not use velocity Verlet, and does not take a gravitational parameter. The orbit fixture stays S2.
+- Euler's equation for a rigid body, torque `r × F`, integrated by the implicit gyroscopic step already accepted in ADR 0034 (Catto, "Numerical Methods for Rigid Body Dynamics", 2015). Departure from plan P32: S1 does not integrate `WidePos`, does not use velocity Verlet, and does not take a gravitational parameter.
+- William C. Swope, Hans C. Andersen, Peter H. Berens, and Kent R. Wilson, Journal of Chemical Physics, 1982, velocity Verlet, in the form the physics plan already writes: `v += a dt / 2`, `x += v dt`, `a = -GM r / |r|³`, `v += a dt / 2`. Departure from that plan's gravity field: S2 is one `GM` on the chassis. It does not pull another body. Uniform gravity is not added onto that chassis and is not cleared for a body with no orbit. Attitude stays with the gyroscopic step. `shift_origin` rebases `f32` poses and refits the existing trees. Contact stays in `f32`. P52 is not this stage.
 - Archimedes, *On Floating Bodies*: the buoyant force equals the weight of the displaced liquid. Quadratic drag is `½ ρ Cd A v²`. Departure, and only inside the undecided sea section: an upright box, drag at the centre, no free surface. Sea itself is not accepted.
 
 ## Rejected
@@ -245,7 +279,7 @@ Gameplay networking still waits. This proposal does not open a socket, does not 
 
 ## Consequences
 
-`docs/systems/physics.md` records that a vehicle is not in the step. The commit that implements a stage updates the game use, the limits, and the five networking lines, and it adds the public words (`vehicle`, chassis payload, wheel ray) to `CONTEXT.md`.
+`docs/systems/physics.md` records G1, S1, and S2 in the step as trials, with the game use, the limits, and the five networking lines. `CONTEXT.md` has the public words those trials added. This proposal stays proposed. A later stage updates those same records for what it adds.
 
 Existing scenes stay the regression floor: resting pile, hull edges, ship lanes, the 10k static grid, sleep islands, and `cargo test -p genos-physics`. A vehicle stage that needs a looser assertion on those tests is wrong.
 

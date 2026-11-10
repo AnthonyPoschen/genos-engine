@@ -38,13 +38,15 @@ pub struct StepRecord {
     pub solver_bodies: u32,
     pub wheel_rays: u32,
     pub vehicle_count: u32,
+    /// Wide radius of the first orbit, or 0 when the scene has none.
+    pub orbit_radius_m: f64,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{}}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{},\"orbit_radius_m\":{:.6}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -68,11 +70,14 @@ impl StepRecord {
             self.solver_bodies,
             self.wheel_rays,
             self.vehicle_count,
+            self.orbit_radius_m,
         )
     }
 }
 
 /// FNV-1a over every body's pose and velocities, then each wheel length.
+/// An orbit also mixes its wide position, wide velocity, and gravitational parameter.
+/// `World.origin` is mixed on every world.
 #[must_use]
 pub fn state_hash(world: &World) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -104,14 +109,53 @@ pub fn state_hash(world: &World) -> u64 {
             mix_f32(&mut hash, length);
         }
     }
+    for vehicle in &world.vehicles {
+        let Some(orbit) = vehicle.space.and_then(|space| space.orbit) else {
+            continue;
+        };
+        for value in [
+            orbit.position.x,
+            orbit.position.y,
+            orbit.position.z,
+            orbit.velocity.x,
+            orbit.velocity.y,
+            orbit.velocity.z,
+            orbit.gm,
+        ] {
+            mix_f64(&mut hash, value);
+        }
+    }
+    mix_f64(&mut hash, world.origin.x);
+    mix_f64(&mut hash, world.origin.y);
+    mix_f64(&mut hash, world.origin.z);
     hash
 }
 
 fn mix_f32(hash: &mut u64, value: f32) {
-    for byte in value.to_bits().to_le_bytes() {
-        *hash ^= u64::from(byte);
+    mix_bytes(hash, &value.to_bits().to_le_bytes());
+}
+
+fn mix_f64(hash: &mut u64, value: f64) {
+    mix_bytes(hash, &value.to_bits().to_le_bytes());
+}
+
+fn mix_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
         *hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
+}
+
+fn orbit_radius_m(world: &World) -> f64 {
+    let Some(orbit) = world
+        .vehicles
+        .iter()
+        .find_map(|vehicle| vehicle.space.and_then(|space| space.orbit))
+    else {
+        return 0.0;
+    };
+    let position = orbit.position;
+    (position.x * position.x + position.y * position.y + position.z * position.z).sqrt()
 }
 
 /// One loaded scene stepping on a fixed step from step 0.
@@ -159,6 +203,7 @@ impl Session {
             hash: state_hash(&self.world),
             wheel_rays: stats.wheel_rays,
             vehicle_count: stats.vehicle_count,
+            orbit_radius_m: orbit_radius_m(&self.world),
             contact_points: stats.contact_points,
             sleeping_bodies: stats.sleeping_bodies,
             pair_tests: stats.pair_tests,
@@ -456,6 +501,51 @@ mod tests {
         };
         ground.lengths[0] += 0.01;
         assert_ne!(state_hash(&session.world), before);
+    }
+
+    #[test]
+    fn orbit_scene_keeps_its_radius_and_replays() {
+        let scene = find("orbit").unwrap_or(&SCENES[0]);
+        assert_eq!(scene.name, "orbit");
+        assert_eq!(scene.steps, 200);
+        let mut session = Session::load(scene);
+        let parked = session.world.bodies[1].position;
+        session.run(200);
+        assert_eq!(session.steps, 200);
+        let record = session.records[199];
+        let error = (record.orbit_radius_m - 1.0e7).abs();
+        assert!(
+            error <= 0.05,
+            "orbit radius {} error {error}",
+            record.orbit_radius_m
+        );
+        assert_eq!(session.world.bodies[1].position, parked);
+        assert_eq!(session.world.bodies[1].velocity, genos_math::Vec3::ZERO);
+        assert_eq!(record.wheel_rays, 0);
+        assert_eq!(record.vehicle_count, 1);
+        let line = record.json("orbit");
+        assert!(line.contains("\"orbit_radius_m\":"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        let before = record.hash;
+        session.world.origin.x += 1.0;
+        assert_ne!(state_hash(&session.world), before);
+        session.world.origin.x -= 1.0;
+        assert_eq!(state_hash(&session.world), before);
+        let Some(space) = session.world.vehicles[0].space.as_mut() else {
+            assert!(session.world.vehicles[0].space.is_some());
+            return;
+        };
+        let Some(orbit) = space.orbit.as_mut() else {
+            assert!(space.orbit.is_some());
+            return;
+        };
+        orbit.gm = 0.0;
+        assert_ne!(state_hash(&session.world), before);
+        assert!(replay(scene, 30).is_ok(), "orbit replay diverged");
+        assert!(
+            checkpoint(scene, 10, 25).is_ok(),
+            "orbit checkpoint diverged"
+        );
     }
 
     #[test]
