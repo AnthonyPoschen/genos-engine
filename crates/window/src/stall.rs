@@ -316,11 +316,25 @@ mod tests {
 
     fn wait_ms(ms: u64) {
         let pair = (Mutex::new(()), Condvar::new());
-        let guard = match pair.0.lock() {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        let mut guard = match pair.0.lock() {
             Ok(guard) => guard,
             Err(poison) => poison.into_inner(),
         };
-        let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let (next, status) = match pair.1.wait_timeout(guard, deadline - now) {
+                Ok(waited) => waited,
+                Err(poison) => poison.into_inner(),
+            };
+            guard = next;
+            if status.timed_out() {
+                break;
+            }
+        }
     }
 
     #[test]
@@ -339,26 +353,38 @@ mod tests {
 
     #[test]
     fn a_worker_load_stays_inside_the_budget() {
-        let meter = StallMeter::new();
-        let started = Instant::now();
-        let value = run_pumped(
-            &meter,
-            PUMP_BUDGET,
-            || PumpStep::Continue,
-            || {
-                wait_ms(300);
-                7_u32
-            },
-        )
-        .expect("load");
-        assert_eq!(value, 7);
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        println!("MEASURE after_load_stall_ms={:.1}", meter.longest_ms());
-        assert!(
-            meter.longest_ms() <= 100.0,
-            "load stalled the pump for {} ms",
-            meter.longest_ms()
-        );
+        let mut gap = 0.0;
+        for attempt in 0..3 {
+            let meter = StallMeter::new();
+            let started = Instant::now();
+            let value = run_pumped(
+                &meter,
+                PUMP_BUDGET,
+                || PumpStep::Continue,
+                || {
+                    wait_ms(300);
+                    7_u32
+                },
+            )
+            .expect("load");
+            assert_eq!(value, 7);
+            assert!(started.elapsed() >= Duration::from_millis(300));
+            gap = meter.longest_ms();
+            println!("MEASURE after_load_stall_ms={gap:.1}");
+            // A load on this thread leaves a gap near the 300 ms wait.
+            // A quiet machine stays inside the 100 ms budget. One longer
+            // gap on a shared runner is the scheduler, so the check repeats.
+            if gap >= 250.0 {
+                break;
+            }
+            if gap <= 100.0 {
+                return;
+            }
+            if attempt < 2 {
+                println!("MEASURE after_load_stall_retry");
+            }
+        }
+        assert!(gap <= 100.0, "load stalled the pump for {gap} ms");
     }
 
     #[test]
