@@ -654,12 +654,17 @@ void main() {
         }
     }
 #ifdef GENOS_RESTIR_DI
-    // One reservoir sample: p(y) * V(y) * W, W = w_sum / (M * p_hat). The raw
-    // sample is the graded colour. The 32-frame mean is stored later and is
-    // not written into e.
+    // One reservoir sample: p(y) * V(y) * W, W = w_sum / (M * p_hat).
+    // The graded colour is the mean of the unbiased sample. The raw sample
+    // is one frame of that mean. Bitterli shows the current sample; a still
+    // surface keeps the mean so the picture can converge. A lamp change or a
+    // failed reprojection drops it. The sun and the flame stay in e.
     vec3 e_restir = vec3(0.0);
+    vec3 spec_restir = vec3(0.0);
+    bool restir_sampled = false;
     if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
+        restir_sampled = true;
         if (lamp_pick_diag()) {
             atomicAdd(gstats.diag[59u], 1u);
         }
@@ -702,7 +707,8 @@ void main() {
                     vec3 cx = cross(ns, halfv);
                     float ncross = dot(cx, cx);
                     float vdh = dot(view, halfv);
-                    spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * e_restir;
+                    spec_restir = pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * e_restir;
+                    spec += spec_restir;
                 }
             }
         }
@@ -713,9 +719,6 @@ void main() {
         e = vec3(0.0);
         e_sun = vec3(0.0);
         spec = vec3(0.0);
-#ifdef GENOS_RESTIR_DI
-        e_restir = vec3(0.0);
-#endif
     }
     if (tdl != ~0u && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         uint ts = tdl & 0x3FFFFFFFu;
@@ -750,13 +753,24 @@ void main() {
         }
     }
 #ifdef GENOS_RESTIR_DI
-    // Optional 32-frame mean of the raw reservoir sample. The picture stays e.
-    // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel.
+    // Cumulative mean of the unbiased reservoir sample, visibility included.
+    // The three floats are the slot this shade already wrote. No second
+    // buffer and no second ray: the shadow ray above is the one the sample
+    // already traces. History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9),
+    // one pixel, and drops when the reservoir resets (word 15) or any lamp
+    // changed (word 39). At RESTIR_MEAN_CAP the mean stays, so a still
+    // surface stops moving.
+    // The lobe off, the sample is irradiance. The lobe on, it is this frame's
+    // Appendix B outgoing radiance. Averaging irradiance and then showing this
+    // frame's lobe leaves the picture on one lamp. The noise gate has its own
+    // mean and does not read this one. A bounce-only frame does not write it
+    // into the picture and does not fold a zero into the stored mean.
     if (restir_pix && lamp_pix) {
         uint mean_px = 0u;
         float z_ignore = 0.0;
         uint mean_prev = 0u;
-        vec3 mean_e = e_restir;
+        vec3 drawn = lobe ? spec_restir : e_restir;
+        vec3 mean_e = drawn;
         if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject(pos, n, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
@@ -765,10 +779,17 @@ void main() {
                 mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
             }
         }
-        uint mean_n = min(mean_prev + 1u, RESTIR_MEAN_CAP);
-        vec3 e_mean = e_restir;
-        if (mean_prev > 0u) {
-            e_mean = mean_e + (e_restir - mean_e) / float(mean_n);
+        vec3 e_mean = drawn;
+        uint mean_n = 1u;
+        if (mean_prev >= RESTIR_MEAN_CAP) {
+            e_mean = mean_e;
+            mean_n = RESTIR_MEAN_CAP;
+        } else if (!restir_sampled && mean_prev > 0u) {
+            e_mean = mean_e;
+            mean_n = mean_prev;
+        } else if (mean_prev > 0u) {
+            mean_n = mean_prev + 1u;
+            e_mean = mean_e + (drawn - mean_e) / float(mean_n);
         }
         LampReservoir mr;
         mr.lamp = 0u;
@@ -778,6 +799,14 @@ void main() {
         uint mslot = lamp_res_slot_now();
         lamp_res_store(idx, mslot, mr);
         lamp_geo_store(idx, mslot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR_MEAN, floatBitsToUint(e_mean.b)));
+        bool bounce_only = (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u;
+        if (!bounce_only && !lamp_pick_hold_off() && (restir_sampled || mean_prev > 0u)) {
+            if (lobe) {
+                spec = spec - spec_restir + e_mean;
+            } else {
+                e = e - e_restir + e_mean;
+            }
+        }
     }
 #endif
     // Hold off: the displayed colour is the running mean of the unbiased sample.

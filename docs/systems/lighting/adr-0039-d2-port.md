@@ -81,11 +81,7 @@ The C5 head widens that test. At `67dfc320`, `restir_live.comp` sets `RESTIR_DEP
 
 ## Review choice 2 — shaded-colour mean
 
-**Unresolved.**
-
-At `67dfc320` the live shade stores a running mean of the shaded sample, cap `RESTIR_MEAN_CAP` 32, tag `LAMP_GEO_RESTIR_MEAN`, and that mean is the colour on screen (commit `af94ef8`; #120 comment, 30 Oct 23:25). The product mean on this tree (`LAMP_PICK_MEAN_CAP`, 4096) is the noise-gate bit only. The lighting README says production does not set that bit, and that the mean is the gate only.
-
-Porting the 32-frame mean must not make it the graded picture. Recommendation, pending Anthony: store the raw reservoir shade and the mean as two outputs. Near, turn, and `grid_worst` stay on the raw picture. An averaged diagnostic is not a pass of those gates.
+**Resolved.** The graded picture is the cumulative mean of the unbiased sample, cap 4096 (the same length as the noise-gate mean), frozen at the cap. It resets on a failed reprojection or any lamp change (restir header word 39). The 32-frame mean on `67dfc320` (commit `af94ef8`) was the frozen grain and is not this mean. The reservoir M cap and the per-frame candidates stay. The noise-gate hold-off bit is still its own mean and is not the product path.
 
 ## Gates, unchanged
 

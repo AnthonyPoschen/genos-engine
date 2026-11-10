@@ -24,10 +24,11 @@ const uint LAMP_PICK_EXACT_LIT = 8u;
 // Record kind in the geo word. A cleared slot is all ones, which is neither.
 const uint LAMP_GEO_RESTIR = 0u;
 const uint LAMP_GEO_EXACT = 2u;
-// Diagnostic mean of a ReSTIR DI sample. Not the colour on screen.
+// Mean of the unbiased ReSTIR DI sample. This is the graded colour.
 const uint LAMP_GEO_RESTIR_MEAN = 3u;
-// Frames in that mean. The graded picture stays the raw sample.
-const uint RESTIR_MEAN_CAP = 32u;
+// Samples in that mean. Past this the colour stays, so a still surface
+// converges. Same length as LAMP_PICK_MEAN_CAP. A 32-frame cap froze the grain.
+const uint RESTIR_MEAN_CAP = 4096u;
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;
