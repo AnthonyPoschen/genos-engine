@@ -28,6 +28,7 @@ members = [
     "debug/scene-lib",
     "debug/lighting",
     "debug/physics",
+    "debug/animation",
 ]
 
 [workspace.lints.rust]

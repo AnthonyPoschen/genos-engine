@@ -1,0 +1,16 @@
+[package]
+name = "genos-animation-debug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-animation"
+path = "src/main.rs"
+
+[dependencies]
+genos-json = { path = "../../crates/json" }
+genos-load = { path = "../../crates/load" }
