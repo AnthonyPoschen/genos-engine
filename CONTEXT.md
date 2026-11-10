@@ -144,6 +144,10 @@ _Avoid_: Shared stick, component
 A segment from a wheel's attach point along its chassis-frame direction, from the minimum length to the maximum length, excluding the chassis. G1 hits a plane or a box. A mesh is a miss. The suspension force is a spring-damper along that ray.
 _Avoid_: Speculative contact, time of impact
 
+**Thruster**:
+A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
+_Avoid_: Rocket body, orbit
+
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
 _Avoid_: Joint, spring
