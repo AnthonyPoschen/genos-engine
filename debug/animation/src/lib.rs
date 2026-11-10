@@ -249,6 +249,7 @@ mod tests {
                     translation: [0.0, 1.0, 0.0],
                     rotation: [0.0, 0.0, 0.0, 1.0],
                     scale: [1.0, 1.0, 1.0],
+                    ancestor: IDENTITY_BIND,
                     node: 4,
                 }],
                 notes: Vec::new(),
@@ -257,6 +258,7 @@ mod tests {
                 name: "move".into(),
                 duration: 1.0,
                 skin: 0,
+                animation: 0,
                 channels: vec![Channel {
                     joint: 0,
                     path: ChannelPath::Translation,

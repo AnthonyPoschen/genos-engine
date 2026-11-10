@@ -102,6 +102,9 @@ pub fn encode_skin(cook: &SkinCook) -> Result<EncodedSkin, CookedError> {
             for value in joint.scale {
                 w.f32(value);
             }
+            for value in joint.ancestor {
+                w.f32(value);
+            }
         }
         w.len(skin.notes.len());
         for note in &skin.notes {
@@ -229,6 +232,7 @@ fn read_skins(r: &mut R<'_>) -> Result<Vec<Skin>, CookedError> {
                 translation: r.f32s()?,
                 rotation: r.f32s()?,
                 scale: r.f32s()?,
+                ancestor: r.f32s()?,
                 node: 0,
             });
         }
@@ -282,6 +286,8 @@ fn read_clips(r: &mut R<'_>) -> Result<Vec<Clip>, CookedError> {
             name,
             duration,
             skin,
+            // The glTF animation index is an import note. The record does not store it.
+            animation: 0,
             channels,
         });
     }
@@ -358,6 +364,7 @@ fn parent_first(skin: &Skin) -> Result<(Skin, Vec<u16>, bool), CookedError> {
                 translation: joint.translation,
                 rotation: joint.rotation,
                 scale: joint.scale,
+                ancestor: joint.ancestor,
                 node: joint.node,
             }
         })
@@ -397,6 +404,7 @@ fn remap_clips(clips: &[Clip], remaps: &[Vec<u16>]) -> Result<Vec<Clip>, CookedE
             name: clip.name.clone(),
             duration: clip.duration,
             skin: clip.skin,
+            animation: clip.animation,
             channels,
         });
     }
@@ -604,6 +612,7 @@ mod tests {
             translation: [0.0, 1.0, 0.0],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0, 1.0, 1.0],
+            ancestor: IDENTITY_BIND,
             node: 0,
         }
     }
@@ -616,13 +625,21 @@ mod tests {
             inputs: vec![(String::new(), [7; 32])],
             skins: vec![Skin {
                 name: Some("body".into()),
-                joints: vec![joint("knee", 1), joint("hips", -1)],
+                joints: vec![
+                    {
+                        let mut knee = joint("knee", 1);
+                        knee.ancestor[13] = 5.0;
+                        knee
+                    },
+                    joint("hips", -1),
+                ],
                 notes: vec!["skins[0] inverse bind missing".into()],
             }],
             clips: vec![Clip {
                 name: "move".into(),
                 duration: 1.0,
                 skin: 0,
+                animation: 0,
                 channels: vec![Channel {
                     joint: 0,
                     path: ChannelPath::Translation,
@@ -646,6 +663,7 @@ mod tests {
         assert_eq!(decoded.skins[0].joints[0].parent, -1);
         assert_eq!(decoded.skins[0].joints[1].name, "knee");
         assert_eq!(decoded.skins[0].joints[1].parent, 0);
+        assert_eq!(decoded.skins[0].joints[1].ancestor[13], 5.0);
         assert_eq!(decoded.clips[0].channels[0].joint, 1);
         assert_eq!(decoded.primitives[0].joints[0], [1, 0, 1, 1]);
         assert!(decoded

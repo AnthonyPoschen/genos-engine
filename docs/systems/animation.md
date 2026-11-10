@@ -11,7 +11,7 @@ Play glTF skinned characters with blended clips, a data-driven state machine, ro
 | Text TRS clip, slerp sampling | done (one node) | `Animation::sample` in `crates/load/src/animation.rs` |
 | Scripted motion | done | `crates/scene/src/codimation.rs`, `.rhai`. This is not a clip. |
 | glTF skins, joints, clips | loaded | `crates/load/src/gltf.rs` reads skins, `JOINTS_0` through `JOINTS_3`, and linear/step clips. A non-joint ancestor stays on `Joint.ancestor` and is not baked into the rest TRS. A kept weight sum that is not 1 is divided by that sum. A channel aimed at a node that is not in `skin.joints` is still omitted. Morph targets stay unsupported. |
-| glTF skins in the cook | written | `.gskin` (`GSK1`) beside `.gcook`. A bad trailer stays the rigid mesh. |
+| glTF skins in the cook | written | `.gskin` (`GSK1`) beside `.gcook`. A bad trailer stays the rigid mesh. The ancestor matrix is in the joint record. |
 | Skinning, blending, state machine, GPU skin | missing | No compute skin pass yet. |
 
 ## 3. Prior art
