@@ -13,4 +13,6 @@ genos-physics = { path = "../physics" }
 rhai = "=1.26.0"
 
 [dev-dependencies]
+genos-audio = { path = "../audio" }
+genos-load = { path = "../load" }
 genos-physics = { path = "../physics" }
