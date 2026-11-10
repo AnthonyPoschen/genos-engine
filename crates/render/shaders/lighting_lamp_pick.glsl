@@ -32,10 +32,9 @@ const uint LAMP_GEO_RESTIR_MEAN = 3u;
 const uint RESTIR_MEAN_CAP = 4096u;
 // No stored lamp. A real lamp index still fits in the low 16 bits.
 const uint RESTIR_MEAN_NO_LAMP = 0xffffu;
-// Unshadowed target luma, relative. A still lamp round-trips the 12-bit
-// log under this, so a quiet floor does not drop its mean.
-const float RESTIR_MEAN_TARGET_REL = 1.10;
 
+// 12-bit log luma. One code is 2^(1/64), about 1.1%. A still lamp
+// round-trips the same code. A wider ratio would keep a different integrand.
 uint restir_mean_quant(float luma) {
     if (!(luma > 1.0e-8)) {
         return 0u;
@@ -44,19 +43,8 @@ uint restir_mean_quant(float luma) {
     return uint(clamp(floor(q + 0.5), 1.0, 4095.0));
 }
 
-float restir_mean_dequant(uint q) {
-    if (q == 0u) {
-        return 0.0;
-    }
-    return exp2(float(q) / 64.0 - 24.0);
-}
-
 bool restir_mean_target_moved(uint stored_q, float luma) {
-    float then_l = restir_mean_dequant(stored_q);
-    float now_l = max(luma, 0.0);
-    float hi = max(then_l, now_l);
-    float lo = min(then_l, now_l);
-    return hi > 1.0e-6 && hi > lo * RESTIR_MEAN_TARGET_REL;
+    return restir_mean_quant(luma) != stored_q;
 }
 
 // Lamp in 0..15, visibility in bit 16, 12-bit log luma in bits 17..28.
@@ -211,7 +199,10 @@ float lamp_pick_depth(vec3 pos) {
 // Motion vector into the previous frame. The returned pixel is in bounds.
 // Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
 // A mover bound does not reject on its own. GI off has no last camera.
-bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_now) {
+// `only_px` of ~0u accepts any in-bounds pixel. Any other value returns
+// before the geo load when the pixel is not that one, so a one-slot mean
+// does not read a neighbour this dispatch is writing.
+bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixel, out float z_now) {
     hist_pixel = 0u;
     z_now = 0.0;
     if (!lighting_gi_on()) {
@@ -241,6 +232,9 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     hist_pixel = uint(floor(px.y)) * pc.dims.x + uint(floor(px.x));
+    if (only_px != ~0u && hist_pixel != only_px) {
+        return false;
+    }
     uvec4 geo = lamp_geo_load(hist_pixel, lamp_res_slot_prev());
     float z_prev = uintBitsToFloat(geo.x);
     if (!(z_prev > 0.0)) {
@@ -255,6 +249,10 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     return true;
+}
+
+bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_now) {
+    return lamp_pick_reproject_at(pos, nrm, ~0u, hist_pixel, z_now);
 }
 
 // Unshadowed point lamps and the flame. Suns stay out of this sum.

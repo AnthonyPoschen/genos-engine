@@ -783,7 +783,11 @@ void main() {
         vec3 drawn = lobe ? spec_restir : e_restir;
         vec3 mean_e = drawn;
         uint prev_pack = RESTIR_MEAN_NO_LAMP;
-        if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject(pos, n, mean_px, z_ignore)) {
+        // One slot is read and written in this dispatch. History is this
+        // pixel only, and the geo load stops before a neighbour. Two slots
+        // leave the previous frame alone, so a reprojected neighbour is safe.
+        uint mean_only = lamp_res_one_slot() ? idx : ~0u;
+        if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
                 LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
@@ -795,6 +799,7 @@ void main() {
         // Re-trace the stored sample before the cap. A moving occluder passes
         // reprojection and changes no lamp, and a frozen mean would keep the
         // old shadow. The shade ray is reused when the lamp matches.
+        bool mean_dropped = false;
         if (mean_prev > 0u) {
             uint old_lamp = prev_pack & 0xffffu;
             bool old_vis = (prev_pack & 0x10000u) != 0u;
@@ -827,6 +832,7 @@ void main() {
                     }
                 }
                 if (vis_now != old_vis || restir_mean_target_moved(old_q, luma_now)) {
+                    mean_dropped = true;
                     mean_prev = 0u;
                     mean_e = drawn;
                 }
@@ -843,6 +849,11 @@ void main() {
         } else if (mean_prev > 0u) {
             mean_n = mean_prev + 1u;
             e_mean = mean_e + (drawn - mean_e) / float(mean_n);
+        } else if (mean_dropped && !restir_sampled) {
+            // The stored sample changed and this frame drew none. Count 1
+            // of black would be a sample that was not taken.
+            e_mean = vec3(0.0);
+            mean_n = 0u;
         }
         LampReservoir mr;
         if (restir_sampled) {

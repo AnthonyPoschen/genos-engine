@@ -222,6 +222,33 @@ fn curve(
     out
 }
 
+/// The shader's 12-bit log luma. One code is `2^(1/64)`.
+fn log_code(luma: f32) -> u32 {
+    if !(luma > 1.0e-8) {
+        return 0;
+    }
+    let q = (luma.log2() + 24.0) * 64.0;
+    let rounded = (q + 0.5).floor().clamp(1.0, 4095.0);
+    let mut code = 0_u32;
+    let mut step = 0.0_f32;
+    while step < rounded && code < 4095 {
+        code += 1;
+        step += 1.0;
+    }
+    code
+}
+
+#[test]
+fn a_log_step_is_a_different_integrand() {
+    let center = 2.0_f32.powf(2000.0 / 64.0 - 24.0);
+    assert_eq!(log_code(center), 2000);
+    let step = 2.0_f32.powf(1.0 / 64.0);
+    assert!(step < 1.02, "one code is about 1.1%, not a ten percent band");
+    assert_eq!(log_code(center * step), 2001);
+    assert_ne!(log_code(center * 1.10), 2000);
+    assert_eq!(log_code(0.0), 0);
+}
+
 fn frames_until(errs: &[f64]) -> String {
     errs.iter()
         .position(|e| *e <= 0.10)
@@ -264,7 +291,13 @@ fn report(label: &str, errs: &[f64], open_mean: f64, closed_mean: f64, pixels: u
 fn lock_the_drop_before_the_cap() {
     let direct = include_str!("../shaders/lighting_direct.comp");
     let pick = include_str!("../shaders/lighting_lamp_pick.glsl");
-    assert!(pick.contains("const float RESTIR_MEAN_TARGET_REL = 1.10;"));
+    assert!(
+        !pick.contains("RESTIR_MEAN_TARGET_REL"),
+        "a ratio band keeps a different integrand in the mean"
+    );
+    assert!(pick.contains("return restir_mean_quant(luma) != stored_q;"));
+    assert!(direct.contains("lamp_pick_reproject_at"));
+    assert!(direct.contains("mean_dropped && !restir_sampled"));
     assert!(direct.contains("restir_mean_target_moved"));
     let drop_at = direct
         .find("restir_mean_target_moved")
