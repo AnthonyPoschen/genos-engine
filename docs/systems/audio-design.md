@@ -292,7 +292,7 @@ The mix follows these, and the departures are in ADR 0041.
 - Doppler is the still-air ratio already in `space.rs`: `(c + listener) / (c - source)` along the line between them, `c = 343`.
 - Transmission is Beer-Lambert through the overlapped thickness, the product the fog design uses for optical depth, applied here to occluder boxes. The code already implements it. This plan does not change the formula.
 - Schroeder, JAES 1962, for the zone tail. No geometric early reflections.
-- Cephes `sinf` and `expf` for the two transcendental calls the mix needs. Pan's `cos` comes from the sine polynomial.
+- Cephes `sinf`, `cosf`, and `expf` for pan and transmission, with the published range reduction. No fused multiply-add.
 - Giacomoni, Moseley, and Vachharajani, PPoPP 2008, for the single-producer command ring.
 - Bencina, "Real-time audio programming 101", for what the device thread is allowed to do.
 - IMA ADPCM reference step table, for the cooked clip. The decoder is in this repository.

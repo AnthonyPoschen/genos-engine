@@ -140,10 +140,7 @@ fn wrap_index(index: usize, len: usize, delta: i32) -> usize {
 }
 
 fn bound(code: InputCode) -> BoundInput {
-    BoundInput {
-        code,
-        activation_threshold: None,
-    }
+    BoundInput::new(code)
 }
 
 fn move_focus(state: &mut State, items: &[Item], delta: i32) {

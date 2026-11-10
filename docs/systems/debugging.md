@@ -7,7 +7,7 @@ outside, the same way every time: over the MCP port, from a script file, or head
 on a box. Lighting quality is judged against ground truth, not by eye alone.
 
 Every engine system ships a dedicated debug binary under `debug/<system>/`
-(`debug/lighting`, `debug/physics`, `debug/networking`, `debug/ui`,
+(`debug/lighting`, `debug/physics`, `debug/input`, `debug/networking`, `debug/ui`,
 `debug/assets`, and the same folder for any other system). The binary covers
 that system's features. The agent rubric scores this.
 
