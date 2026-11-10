@@ -599,10 +599,13 @@ fn gate_lighting(preset: Option<LightingPreset>, specular: bool) -> LightingSett
     } else {
         let mut settings = LightingSettings::preset(LightingPreset::High);
         settings.bounce.count = 1;
-        settings.probes.enabled = true;
+        // Pixel reuse of the direct shade needs the work buffer the world cache
+        // allocates. The graded view is direct, so that cache is not the bounce
+        // on screen.
+        settings.probes.enabled = false;
         settings.probes.rays = 4;
         settings.probes.tile = 64;
-        settings.world_cache.enabled = false;
+        settings.world_cache.enabled = true;
         settings.denoiser.enabled = false;
         settings.prefill = false;
         settings.gi.enabled = true;
