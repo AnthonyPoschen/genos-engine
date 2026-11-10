@@ -22,7 +22,7 @@ use genos_scene::{
     view_proj, Camera, Floor, LightingPreset, LightingSettings, ParticleSettings, Scene, Vec3, Wall,
     DEFAULT_SEED,
 };
-use genos_window::{Lifecycle, Window};
+use genos_window::{Lifecycle, ShutdownDevice, Window};
 
 const DT: f32 = 1.0 / 60.0;
 const POS_ABS: f64 = 1.0e-3;
@@ -345,6 +345,141 @@ fn the_sim_dispatch_is_wider_than_one_invocation() {
         "sim_parts init={:.3} death={:.3} emit={:.3} compact={:.3} sim={:.3}",
         parts[0], parts[1], parts[2], parts[3], life.device.particle_stats().sim_ms
     );
+}
+
+#[test]
+fn the_block_scan_covers_a_partial_group_and_the_third_level() {
+    let (_w, _h, mut life) = open();
+    // 65 block sums: two scan groups, and the second group holds one value.
+    let partial = scan_values(65);
+    let (got, total) = life
+        .device
+        .particle_exclusive_scan(&partial)
+        .expect("partial scan");
+    assert_eq!(got, exclusive_prefix(&partial));
+    assert_eq!(
+        total,
+        partial.iter().fold(0u32, |sum, value| sum.wrapping_add(*value))
+    );
+    // 4097 block sums: 65 level-1 groups and 2 level-2 groups, so the top
+    // scan is the third level, and the last group at each level is partial.
+    let deep = scan_values(64 * 64 + 1);
+    let (got, total) = life
+        .device
+        .particle_exclusive_scan(&deep)
+        .expect("third level");
+    assert_eq!(got, exclusive_prefix(&deep), "third-level exclusive prefix");
+    assert_eq!(
+        total,
+        deep.iter().fold(0u32, |sum, value| sum.wrapping_add(*value))
+    );
+}
+
+fn scan_values(count: usize) -> Vec<u32> {
+    (0..count)
+        .map(|index| u32::try_from(index % 5).unwrap_or(0) + 1)
+        .collect()
+}
+
+fn exclusive_prefix(values: &[u32]) -> Vec<u32> {
+    let mut sum = 0u32;
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        out.push(sum);
+        sum = sum.wrapping_add(*value);
+    }
+    out
+}
+
+#[test]
+fn an_out_of_date_acquire_does_not_wait_the_reset_fence() {
+    let (_w, _h, mut life) = open();
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let settings = emitter(8, 4);
+    draw(&mut life, &world(settings.clone()), &camera);
+    life.device.fail_next_acquire();
+    let err = life
+        .device
+        .draw(&world(settings.clone()), &camera, false)
+        .expect_err("acquire was submitted");
+    assert!(
+        err.contains("out of date"),
+        "acquire failed for another reason: {err}"
+    );
+    draw(&mut life, &world(settings), &camera);
+}
+
+#[test]
+fn the_teardown_drains_before_lighting_is_freed() {
+    if std::env::var("GENOS_FX_SYNC_CHILD").ok().as_deref() == Some("teardown") {
+        teardown_body();
+        return;
+    }
+    teardown_body();
+    let log = teardown_child();
+    assert!(
+        layer_loaded(&log),
+        "validation layer did not load:\n{log}"
+    );
+    assert!(
+        !log.contains("VUID-vkDestroyBuffer-buffer-00922"),
+        "teardown freed a buffer that was still in use:\n{log}"
+    );
+    assert!(
+        !log.contains("currently in use"),
+        "teardown freed a resource that was still in use:\n{log}"
+    );
+}
+
+fn teardown_body() {
+    let (_w, _h, mut life) = open();
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let _ = life.window.pump();
+    life.device.set_particle_dt(DT);
+    // No readback, so this flight is still live when lighting is destroyed.
+    life.device
+        .draw(&world(emitter(8, 4)), &camera, false)
+        .expect("draw");
+    assert_eq!(life.device.next_phase(), "destroy_yield");
+    assert!(!life.device.teardown_drained());
+    assert!(!life.device.destroy_step());
+    assert_eq!(life.device.next_phase(), "destroy_lighting");
+    assert!(!life.device.teardown_drained());
+    assert!(!life.device.destroy_step());
+    assert!(
+        life.device.teardown_drained(),
+        "lighting was freed before the queues were drained"
+    );
+    assert!(
+        !life.device.freed_before_drain(),
+        "a buffer was freed before the teardown drain"
+    );
+    assert!(
+        life.device.teardown_frees() > 0,
+        "the lighting step freed nothing, so the order check did not run"
+    );
+}
+
+fn teardown_child() -> String {
+    let exe = std::env::current_exe().expect("test exe");
+    let output = std::process::Command::new(exe)
+        .args([
+            "--exact",
+            "the_teardown_drains_before_lighting_is_freed",
+            "--nocapture",
+        ])
+        .env("GENOS_FX_SYNC_CHILD", "teardown")
+        .env("VK_INSTANCE_LAYERS", "VK_LAYER_KHRONOS_validation")
+        .env("VK_LOADER_DEBUG", "error,warn,layer")
+        .output()
+        .expect("teardown child");
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        use std::fmt::Write as _;
+        let _ = write!(text, "\nchild exit status: {}", output.status);
+    }
+    text
 }
 
 #[test]

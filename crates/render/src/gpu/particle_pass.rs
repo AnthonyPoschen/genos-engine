@@ -544,6 +544,157 @@ impl Gpu {
         );
     }
 
+    /// Exclusive prefix of `values`, from the same multi-level scan the frame uses.
+    ///
+    /// `values.len()` is the block-sum count, not the particle budget, so a
+    /// third level and a partial last group fit in a small buffer. The second
+    /// value is state word 10, the scan total.
+    pub(super) fn particle_exclusive_scan(
+        &mut self,
+        values: &[u32],
+    ) -> Result<(Vec<u32>, u32), String> {
+        let wide = u32::try_from(values.len()).unwrap_or(0);
+        if wide == 0 {
+            return Ok((Vec::new(), 0));
+        }
+        self.ensure_particle_pass(64, 4)?;
+        let level1 = sim_groups(wide).max(1);
+        let level2 = sim_groups(level1).max(1);
+        let words = u64::from(wide)
+            .saturating_mul(2)
+            .saturating_add(u64::from(level1).saturating_mul(2))
+            .saturating_add(u64::from(level2).saturating_mul(2));
+        let bytes = words.saturating_mul(4);
+        let mut device = self.make_buffer(bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        let mut staging = self.make_buffer(bytes, 0x1 | 0x2, Memory::Readback)?;
+        let mut raw = Vec::new();
+        for value in values {
+            raw.extend_from_slice(&value.to_ne_bytes());
+        }
+        self.write_buffer(&staging, &raw)?;
+        let slot = self.flight.min(1);
+        let (pipe, layout, set, params, saved) = {
+            let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
+            let flight = &pass.flights[slot];
+            (
+                pass.compute_pipe,
+                pass.compute_layout,
+                flight.compute_set,
+                copy_buffer_handle(&flight.params),
+                pass.scan.buffer,
+            )
+        };
+        // The shader returns before the scan when the uniform budget is zero.
+        self.write_buffer_at(&params, 52, &64u32.to_ne_bytes())?;
+        let scanned = self.run_exclusive_scan(wide, &device, &staging, pipe, layout, set);
+        let _ = write_storage_bindings_from(self, set, 8, &[saved]);
+        self.destroy_buffer(&mut device);
+        self.destroy_buffer(&mut staging);
+        let exclusive = scanned?;
+        let state = {
+            let pass = self.particle_pass.as_ref().ok_or("particle pass missing")?;
+            copy_buffer_handle(&pass.state)
+        };
+        let total = read_u32_at(self, &state, 40)?;
+        Ok((exclusive, total))
+    }
+
+    fn run_exclusive_scan(
+        &mut self,
+        wide: u32,
+        device: &Buffer,
+        staging: &Buffer,
+        pipe: Handle,
+        layout: Handle,
+        set: Handle,
+    ) -> Result<Vec<u32>, String> {
+        write_storage_bindings_from(self, set, 8, &[device.buffer])?;
+        self.bind_flight();
+        let slot = self.flight;
+        if self.flight_live[slot] {
+            self.wait_fence(self.fence, "scan fence")?;
+            self.flight_live[slot] = false;
+        }
+        let fences = [self.fence];
+        let count_bytes = u64::from(wide).saturating_mul(4);
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset scan fence",
+            )?;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset scan cmd")?;
+        }
+        self.begin_reused(self.cmd)?;
+        self.buffer_barrier(staging.buffer, 0x4000, TRANSFER_STAGE, 0x4000, 0x800);
+        copy_regions(self, staging.buffer, device.buffer, 0, 0, count_bytes);
+        self.buffer_barrier(
+            device.buffer,
+            TRANSFER_STAGE,
+            COMPUTE_STAGE,
+            TRANSFER_WRITE,
+            SHADER_ACCESS,
+        );
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+            (self.fns.cmd_bind_set)(self.cmd, 1, layout, 0, 1, &set, 0, std::ptr::null());
+        }
+        self.scan_tree(layout, 0, wide, false);
+        self.buffer_barrier(
+            device.buffer,
+            COMPUTE_STAGE,
+            TRANSFER_STAGE,
+            SHADER_ACCESS,
+            0x800,
+        );
+        copy_regions(self, device.buffer, staging.buffer, count_bytes, 0, count_bytes);
+        self.buffer_barrier(staging.buffer, TRANSFER_STAGE, 0x4000, TRANSFER_WRITE, 0x2000);
+        unsafe {
+            check((self.fns.end_cmd)(self.cmd), "end scan cmd")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "scan submit",
+            )?;
+        }
+        self.flight_live[slot] = true;
+        self.wait_fence(self.fence, "scan wait")?;
+        self.flight_live[slot] = false;
+        let bytes = read_range(self, staging, 0, usize::try_from(count_bytes).unwrap_or(0))?;
+        let mut out = Vec::with_capacity(usize::try_from(wide).unwrap_or(0));
+        for chunk in bytes.chunks_exact(4) {
+            out.push(u32::from_ne_bytes(chunk.try_into().unwrap_or([0; 4])));
+        }
+        Ok(out)
+    }
+
     pub(super) fn record_particle_draw(&mut self) {
         if !self.particle_stamped || self.particle_drawn || self.keep_pass.is_null() {
             return;
@@ -1395,6 +1546,38 @@ impl super::Renderer {
     /// on to time the old fence.
     pub fn set_particle_cpu_fence(&mut self, on: bool) {
         self.gpu.particle_cpu_fence = on;
+    }
+
+    /// The next frame resets its fence and returns out of date before submit.
+    pub fn fail_next_acquire(&mut self) {
+        self.gpu.fail_next_acquire();
+    }
+
+    /// The teardown drain ran before a buffer or image was freed.
+    #[must_use]
+    pub fn teardown_drained(&self) -> bool {
+        self.gpu.teardown_drained()
+    }
+
+    /// A teardown free happened before the drain.
+    #[must_use]
+    pub fn freed_before_drain(&self) -> bool {
+        self.gpu.freed_before_drain()
+    }
+
+    /// Non-null buffers and images freed after the drain.
+    #[must_use]
+    pub fn teardown_frees(&self) -> u32 {
+        self.gpu.teardown_frees()
+    }
+
+    /// Exclusive prefix from the particle block scan, and the scan total.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the scan cannot be submitted or read back.
+    pub fn particle_exclusive_scan(&mut self, values: &[u32]) -> Result<(Vec<u32>, u32), String> {
+        self.gpu.particle_exclusive_scan(values)
     }
 
     /// Last completed particle step. Times are 0 before a frame, or when the
@@ -2439,6 +2622,29 @@ fn zero_host_buffer(gpu: &Gpu, buffer: &Buffer) -> Result<(), String> {
         (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
     }
     Ok(())
+}
+
+fn copy_regions(gpu: &Gpu, src: Handle, dst: Handle, src_off: u64, dst_off: u64, size: u64) {
+    #[repr(C)]
+    struct Region {
+        src: u64,
+        dst: u64,
+        size: u64,
+    }
+    let region = Region {
+        src: src_off,
+        dst: dst_off,
+        size,
+    };
+    unsafe {
+        (gpu.fns.cmd_copy_buffer)(
+            gpu.cmd,
+            src,
+            dst,
+            1,
+            &region as *const Region as *const u8,
+        );
+    }
 }
 
 fn read_timestamp(gpu: &Gpu, pool: Handle, query: u32) -> Option<u64> {

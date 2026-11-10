@@ -3752,6 +3752,10 @@ impl Gpu {
     }
 
     fn destroy_lighting(&mut self) {
+        // First GPU free of teardown. `wait_lighting_world` returns without
+        // waiting once `lifecycle_release` is set, and the 48 ms drain may
+        // have given up while this frame and the world submission are queued.
+        self.drain_for_teardown();
         self.wait_lighting_world();
         self.lighting.world_busy = false;
         let mut world_stats = std::mem::replace(&mut self.lighting.world_stats, Buffer::empty());

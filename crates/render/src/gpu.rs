@@ -873,7 +873,11 @@ impl Renderer {
         let overlay_count = overlay_verts.len() as u32;
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
-        self.gpu.wait_flight(slot)?;
+        // A reset fence with no submit is not live. Waiting it hangs. An
+        // OUT_OF_DATE acquire leaves the slot in that state.
+        if self.gpu.flight_live[slot] {
+            self.gpu.wait_flight(slot)?;
+        }
         self.gpu.bind_flight();
         let mut dynamic = Vec::new();
         let mut draws = Vec::new();
@@ -979,7 +983,10 @@ impl Renderer {
             // The particle image is one shared buffer. Both frames can sample it.
             let (width, height) = self.memory.image_size();
             let bytes = pack::image_bytes(width, height, self.memory.image_pixels());
-            self.gpu.wait_flight(1 - slot)?;
+            let earlier = 1 - slot;
+            if self.gpu.flight_live[earlier] {
+                self.gpu.wait_flight(earlier)?;
+            }
             self.gpu.upload_image(&bytes)?;
             self.memory.clear_image_upload();
         }
@@ -1664,6 +1671,16 @@ struct Gpu {
     /// Frame-slot fence has a submit that has not been waited. A reset fence
     /// with no submit stays false: polling it would wait forever.
     flight_live: [bool; 2],
+    /// Test hook. The next acquire resets the fence and returns out of date
+    /// without submitting, which is the hang the live check exists for.
+    fail_next_acquire: bool,
+    /// Live flights were waited and the device idled before this teardown frees.
+    teardown_drained: std::cell::Cell<bool>,
+    /// A buffer or image was freed during teardown before that drain.
+    freed_before_drain: std::cell::Cell<bool>,
+    /// Non-null buffers and images freed after the drain. Zero means the
+    /// lighting step freed nothing the test can see.
+    teardown_frees: std::cell::Cell<u32>,
     /// Presents the driver accepted (success or suboptimal).
     presented: u64,
     /// The lifecycle is draining and destroying. Lighting waits must not block.
@@ -2559,6 +2576,10 @@ impl Gpu {
                 froxel_wrote: false,
                 submit_pending: false,
                 flight_live: [false, false],
+                fail_next_acquire: false,
+                teardown_drained: std::cell::Cell::new(false),
+                freed_before_drain: std::cell::Cell::new(false),
+                teardown_frees: std::cell::Cell::new(0),
                 presented: 0,
                 lifecycle_release: false,
                 torn_down: false,
@@ -3613,8 +3634,12 @@ impl Gpu {
         }
         self.bind_flight();
         let slot = self.flight;
-        self.wait_fence(self.fence, "wait fence")?;
-        self.flight_live[slot] = false;
+        // The fence is reset below, before acquire. OUT_OF_DATE returns without
+        // a submit, so this slot is not live and the next call must not wait.
+        if self.flight_live[slot] {
+            self.wait_fence(self.fence, "wait fence")?;
+            self.flight_live[slot] = false;
+        }
         // The other flight stays on the GPU. Particle compute waits its writes
         // with a pipeline barrier, not this fence. The hook below times the old fence.
         if self.particle_cpu_fence && self.particle_pass.is_some() {
@@ -3649,6 +3674,10 @@ impl Gpu {
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
             )?;
+            if self.fail_next_acquire {
+                self.fail_next_acquire = false;
+                return Err("out of date".into());
+            }
             let mut index = 0u32;
             let acquire = (self.fns.acquire)(
                 self.device,
@@ -4280,9 +4309,28 @@ impl Gpu {
 
     fn wait_all_inflight(&mut self) -> Result<(), String> {
         for slot in 0..2 {
-            self.wait_flight(slot)?;
+            if self.flight_live[slot] {
+                self.wait_flight(slot)?;
+            }
         }
         Ok(())
+    }
+
+    pub(crate) fn teardown_drained(&self) -> bool {
+        self.teardown_drained.get()
+    }
+
+    pub(crate) fn freed_before_drain(&self) -> bool {
+        self.freed_before_drain.get()
+    }
+
+    pub(crate) fn teardown_frees(&self) -> u32 {
+        self.teardown_frees.get()
+    }
+
+    /// The next frame resets its fence and returns out of date before submit.
+    pub(crate) fn fail_next_acquire(&mut self) {
+        self.fail_next_acquire = true;
     }
 
     fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
@@ -8520,6 +8568,31 @@ impl Gpu {
         }
     }
 
+    /// Live flight fences, then every queue. Lighting is the first resource
+    /// this teardown frees, and `wait_lighting_world` returns without waiting
+    /// once shutdown has started, so this runs before that free. The 48 ms
+    /// drain poll may already have given up. A fence that was reset and not
+    /// submitted is not live.
+    fn drain_for_teardown(&mut self) {
+        if self.device.is_null() || !self.lifecycle_release || self.teardown_drained.get() {
+            return;
+        }
+        self.retire_live_flights();
+        self.idle_device();
+        self.teardown_drained.set(true);
+    }
+
+    fn note_teardown_free(&self, live: bool) {
+        if !live || !self.lifecycle_release {
+            return;
+        }
+        if self.teardown_drained.get() {
+            self.teardown_frees.set(self.teardown_frees.get().saturating_add(1));
+        } else {
+            self.freed_before_drain.set(true);
+        }
+    }
+
     fn retire_live_flights(&mut self) {
         for slot in 0..2 {
             if !self.flight_live[slot] {
@@ -8537,18 +8610,14 @@ impl Gpu {
     /// driver round-trips the Wayland socket before it returns, and a client
     /// that does not read the socket waits out the driver timeout.
     fn destroy_swapchain(&mut self) {
+        // Lighting already drained. A teardown that skipped it still has to
+        // finish the queues before the swapchain images go away.
+        self.drain_for_teardown();
         if self.device.is_null() || self.swapchain.is_null() {
             self.swapchain = std::ptr::null_mut();
             self.swap_images.clear();
             return;
         }
-        // The drain poll gives up after 48 ms. A 1M frame is longer than that,
-        // and destroying the swapchain while the frame is still queued does not
-        // return on the 4070. Wait the fences we submitted, then the queues,
-        // before the swapchain goes away. A fence that was reset and not
-        // submitted is not live, so it is not waited.
-        self.retire_live_flights();
-        self.idle_device();
         let swapchain = self.swapchain;
         self.swapchain = std::ptr::null_mut();
         unsafe {
@@ -8558,6 +8627,7 @@ impl Gpu {
     }
 
     fn destroy_image(&self, image: &mut Image) {
+        self.note_teardown_free(!image.image.is_null() || !image.view.is_null() || !image.memory.is_null());
         unsafe {
             if !image.view.is_null() {
                 (self.fns.destroy_image_view)(self.device, image.view, std::ptr::null());
@@ -8573,6 +8643,7 @@ impl Gpu {
     }
 
     fn destroy_buffer(&self, buffer: &mut Buffer) {
+        self.note_teardown_free(!buffer.buffer.is_null() || !buffer.memory.is_null());
         unsafe {
             if !buffer.buffer.is_null() {
                 (self.fns.destroy_buffer)(self.device, buffer.buffer, std::ptr::null());
@@ -8751,7 +8822,9 @@ impl Gpu {
             1 => {
                 // The seat thread dispatches while the driver call runs. On a
                 // real device these calls wait for the compositor, and a missed
-                // ping makes that wait hit the driver timeout.
+                // ping makes that wait hit the driver timeout. Lighting is the
+                // first free. `destroy_lighting` drains the queues before it
+                // frees, including when the 48 ms poll already gave up.
                 block(|| self.destroy_lighting());
                 self.teardown = 2;
                 false
@@ -8940,13 +9013,10 @@ impl Gpu {
             return;
         }
         self.lifecycle_release = true;
-        // Finish the queues before freeing what they still reference. An
-        // in-flight particle dispatch (the other flight) otherwise keeps the
-        // device busy after its buffers are gone, and vkDeviceWaitIdle at the
-        // end of teardown does not return. A fence that was reset and not
-        // submitted is not live.
-        self.retire_live_flights();
-        self.idle_device();
+        // Finish the queues before freeing what they still reference. Lighting
+        // already did this. A path that skipped it still must not free over a
+        // live frame. A fence that was reset and not submitted is not live.
+        self.drain_for_teardown();
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
         teardown_phase("drop_stages", || self.drop_stages());
