@@ -1,12 +1,14 @@
 name: lint
 
+# Repository variable GE_RUNNER=house selects the house runner. Any other
+# value, including an unset variable, keeps ubuntu-latest.
 on:
   pull_request:
   push:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -15,7 +17,7 @@ jobs:
       - name: shader and Wayland tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config
+          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config build-essential python3-pip
       - name: cargo-deny 0.20.2
         run: |
           curl -fsSL -o /tmp/cargo-deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
@@ -27,28 +29,28 @@ jobs:
         run: ./scripts/lint.sh
 
   quit-gap:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Wayland, Weston, and lavapipe
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config mesa-vulkan-drivers weston
+          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config mesa-vulkan-drivers weston build-essential python3-pip
       - name: build the windowed binaries
         run: cargo build -p genos-camera -p genos-stress -p genos-lighting
       - name: quit gap under headless Weston
         run: cargo test -p genos-window --test lifecycle_quit -- --test-threads=1 --nocapture
 
   noise-gate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: lavapipe and a headless Weston
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
       - name: s7 at 96x54
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
@@ -69,7 +71,7 @@ jobs:
           cargo test --locked -p genos-stress --test noise_gate -- --test-threads=1
 
   unit-tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +79,7 @@ jobs:
       - name: lavapipe and a headless Weston
         run: |
           sudo apt-get update
-          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
       - name: cargo test (workspace, lavapipe)
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
