@@ -27,8 +27,45 @@ const uint LAMP_GEO_EXACT = 2u;
 // Mean of the unbiased ReSTIR DI sample. This is the graded colour.
 const uint LAMP_GEO_RESTIR_MEAN = 3u;
 // Samples in that mean. Past this the colour stays, so a still surface
-// converges. Same length as LAMP_PICK_MEAN_CAP. A 32-frame cap froze the grain.
+// converges, until the stored sample's visibility or target changes.
+// Same length as LAMP_PICK_MEAN_CAP. A 32-frame cap froze the grain.
 const uint RESTIR_MEAN_CAP = 4096u;
+// No stored lamp. A real lamp index still fits in the low 16 bits.
+const uint RESTIR_MEAN_NO_LAMP = 0xffffu;
+// Unshadowed target luma, relative. A still lamp round-trips the 12-bit
+// log under this, so a quiet floor does not drop its mean.
+const float RESTIR_MEAN_TARGET_REL = 1.10;
+
+uint restir_mean_quant(float luma) {
+    if (!(luma > 1.0e-8)) {
+        return 0u;
+    }
+    float q = (log2(luma) + 24.0) * 64.0;
+    return uint(clamp(floor(q + 0.5), 1.0, 4095.0));
+}
+
+float restir_mean_dequant(uint q) {
+    if (q == 0u) {
+        return 0.0;
+    }
+    return exp2(float(q) / 64.0 - 24.0);
+}
+
+bool restir_mean_target_moved(uint stored_q, float luma) {
+    float then_l = restir_mean_dequant(stored_q);
+    float now_l = max(luma, 0.0);
+    float hi = max(then_l, now_l);
+    float lo = min(then_l, now_l);
+    return hi > 1.0e-6 && hi > lo * RESTIR_MEAN_TARGET_REL;
+}
+
+// Lamp in 0..15, visibility in bit 16, 12-bit log luma in bits 17..28.
+// LAMP_ALL would wipe the reservoir, so a missing lamp stays RESTIR_MEAN_NO_LAMP.
+uint restir_mean_pack(uint lamp, bool vis, float luma) {
+    uint id = lamp < RESTIR_MEAN_NO_LAMP ? lamp : RESTIR_MEAN_NO_LAMP;
+    uint bit = vis ? 0x10000u : 0u;
+    return id | bit | (restir_mean_quant(luma) << 17u);
+}
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;

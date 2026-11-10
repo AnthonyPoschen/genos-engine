@@ -657,11 +657,14 @@ void main() {
     // One reservoir sample: p(y) * V(y) * W, W = w_sum / (M * p_hat).
     // The graded colour is the mean of the unbiased sample. The raw sample
     // is one frame of that mean. Bitterli shows the current sample; a still
-    // surface keeps the mean so the picture can converge. A lamp change or a
-    // failed reprojection drops it. The sun and the flame stay in e.
+    // surface keeps the mean so the picture can converge. A lamp change, a
+    // failed reprojection, or a change in this sample's visibility or
+    // unshadowed target drops it. The sun and the flame stay in e.
     vec3 e_restir = vec3(0.0);
     vec3 spec_restir = vec3(0.0);
     bool restir_sampled = false;
+    float restir_luma = 0.0;
+    bool restir_vis = false;
     if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         restir_sampled = true;
@@ -676,15 +679,19 @@ void main() {
         vec3 rlight = lamp_light(rl, origin, n, two_sided, rt);
         if (rlight.r + rlight.g + rlight.b > 0.0) {
             // Same pixel-ray probe as the shade loop (diag 48). A shadows-off
-            // frame does not trace and does not count.
+            // frame does not trace and does not count. The unshadowed luma
+            // stays even when the ray is blocked: the mean compares that
+            // target, and the visibility bit, with the stored sample.
             bool shadows_on = (gstats.ctrl_bits & 2u) != 0u;
             bool rvis = true;
+            restir_luma = rlight.r + rlight.g + rlight.b;
             if (shadows_on) {
                 rvis = !trace_occluded(origin, rt);
                 if (lamp_pick_diag()) {
                     atomicAdd(gstats.diag[48u], 1u);
                 }
             }
+            restir_vis = rvis;
             if (rvis) {
                 e_restir = rlight * restir_w;
                 e += e_restir;
@@ -755,11 +762,15 @@ void main() {
 #ifdef GENOS_RESTIR_DI
     // Cumulative mean of the unbiased reservoir sample, visibility included.
     // The three floats are the slot this shade already wrote. No second
-    // buffer and no second ray: the shadow ray above is the one the sample
-    // already traces. History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9),
-    // one pixel, and drops when the reservoir resets (word 15) or any lamp
-    // changed (word 39). At RESTIR_MEAN_CAP the mean stays, so a still
-    // surface stops moving.
+    // buffer. The shadow ray above re-traces the stored sample when the
+    // reservoir kept that lamp. A different lamp traces the stored one once.
+    // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
+    // drops when the reservoir resets (word 15), any lamp changed (word 39),
+    // or the re-traced sample's visibility or unshadowed target changed.
+    // That check runs before the cap, so a frozen mean still drops. At
+    // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
+    // moving. The mean of one fixed integrand stays unbiased: temporal
+    // correlation changes the variance. Mixing two visibilities was the bias.
     // The lobe off, the sample is irradiance. The lobe on, it is this frame's
     // Appendix B outgoing radiance. Averaging irradiance and then showing this
     // frame's lobe leaves the picture on one lamp. The noise gate has its own
@@ -771,12 +782,54 @@ void main() {
         uint mean_prev = 0u;
         vec3 drawn = lobe ? spec_restir : e_restir;
         vec3 mean_e = drawn;
+        uint prev_pack = RESTIR_MEAN_NO_LAMP;
         if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject(pos, n, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
                 LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
                 mean_prev = pr.m;
                 mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
+                prev_pack = pr.lamp;
+            }
+        }
+        // Re-trace the stored sample before the cap. A moving occluder passes
+        // reprojection and changes no lamp, and a frozen mean would keep the
+        // old shadow. The shade ray is reused when the lamp matches.
+        if (mean_prev > 0u) {
+            uint old_lamp = prev_pack & 0xffffu;
+            bool old_vis = (prev_pack & 0x10000u) != 0u;
+            uint old_q = prev_pack >> 17u;
+            if (old_lamp != RESTIR_MEAN_NO_LAMP && old_lamp < restir_words[0u]) {
+                float luma_now = 0.0;
+                bool vis_now = false;
+                if (restir_sampled && restir_lamp == old_lamp) {
+                    luma_now = restir_luma;
+                    vis_now = restir_vis;
+                } else {
+                    // A different lamp from the one stored. One shadow ray,
+                    // and only when that lamp still reaches this point.
+                    uint la = restir_words[1u] + old_lamp * 8u;
+                    Lamp old_l;
+                    old_l.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
+                    old_l.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
+                    vec3 old_target;
+                    vec3 old_light = lamp_light(old_l, origin, n, two_sided, old_target);
+                    luma_now = old_light.r + old_light.g + old_light.b;
+                    if (luma_now > 0.0) {
+                        if ((gstats.ctrl_bits & 2u) == 0u) {
+                            vis_now = true;
+                        } else {
+                            vis_now = !trace_occluded(origin, old_target);
+                            if (lamp_pick_diag()) {
+                                atomicAdd(gstats.diag[48u], 1u);
+                            }
+                        }
+                    }
+                }
+                if (vis_now != old_vis || restir_mean_target_moved(old_q, luma_now)) {
+                    mean_prev = 0u;
+                    mean_e = drawn;
+                }
             }
         }
         vec3 e_mean = drawn;
@@ -792,7 +845,13 @@ void main() {
             e_mean = mean_e + (drawn - mean_e) / float(mean_n);
         }
         LampReservoir mr;
-        mr.lamp = 0u;
+        if (restir_sampled) {
+            mr.lamp = restir_mean_pack(restir_lamp, restir_vis, restir_luma);
+        } else if (mean_prev > 0u) {
+            mr.lamp = prev_pack;
+        } else {
+            mr.lamp = RESTIR_MEAN_NO_LAMP;
+        }
         mr.m = mean_n;
         mr.w_sum = e_mean.r;
         mr.target = e_mean.g;

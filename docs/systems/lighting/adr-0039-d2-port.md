@@ -81,7 +81,7 @@ The C5 head widens that test. At `67dfc320`, `restir_live.comp` sets `RESTIR_DEP
 
 ## Review choice 2 — shaded-colour mean
 
-**Resolved.** The graded picture is the cumulative mean of the unbiased sample, cap 4096 (the same length as the noise-gate mean), frozen at the cap. It resets on a failed reprojection or any lamp change (restir header word 39). The 32-frame mean on `67dfc320` (commit `af94ef8`) was the frozen grain and is not this mean. The reservoir M cap and the per-frame candidates stay. The noise-gate hold-off bit is still its own mean and is not the product path.
+**Resolved.** The graded picture is the cumulative mean of the unbiased sample, cap 4096 (the same length as the noise-gate mean), frozen at the cap until the stored sample changes. It resets on a failed reprojection, any lamp change (restir header word 39), or a change in that sample's visibility or unshadowed target. A frozen mean still drops on that change. The 32-frame mean on `67dfc320` (commit `af94ef8`) was the frozen grain and is not this mean. The reservoir M cap and the per-frame candidates stay. The noise-gate hold-off bit is still its own mean and is not the product path.
 
 ## Gates, unchanged
 
