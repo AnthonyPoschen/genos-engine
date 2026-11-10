@@ -5,6 +5,7 @@
 
 #import <GameController/GameController.h>
 
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@ struct GenosPadSlot {
 };
 
 static struct GenosPadSlot slots[GENOS_PAD_SLOTS];
+static pthread_mutex_t slots_lock = PTHREAD_MUTEX_INITIALIZER;
 static id connect_obs;
 static id disconnect_obs;
 static int started;
@@ -59,7 +61,9 @@ static int index_of(GCController *controller) {
 
 static void assign_slot(GCController *controller) {
     int slot;
+    pthread_mutex_lock(&slots_lock);
     if (!controller || !controller.extendedGamepad || index_of(controller) >= 0) {
+        pthread_mutex_unlock(&slots_lock);
         return;
     }
     for (slot = 0; slot < GENOS_PAD_SLOTS; slot++) {
@@ -70,17 +74,23 @@ static void assign_slot(GCController *controller) {
         [controller retain];
         slots[slot].named = 0;
         slots[slot].name[0] = 0;
+        pthread_mutex_unlock(&slots_lock);
         return;
     }
+    pthread_mutex_unlock(&slots_lock);
 }
 
 static void clear_slot(GCController *controller) {
-    int slot = index_of(controller);
+    int slot;
+    pthread_mutex_lock(&slots_lock);
+    slot = index_of(controller);
     if (slot < 0) {
+        pthread_mutex_unlock(&slots_lock);
         return;
     }
     [slots[slot].controller release];
     memset(&slots[slot], 0, sizeof(slots[slot]));
+    pthread_mutex_unlock(&slots_lock);
 }
 
 static void note_connection(NSNotification *note, int connected) {
@@ -186,12 +196,14 @@ int genos_gamecontroller_poll(struct GenosPadSample *out, int cap) {
         ensure_started();
         memset(out, 0, (size_t)cap * sizeof(*out));
         limit = cap < GENOS_PAD_SLOTS ? cap : GENOS_PAD_SLOTS;
+        pthread_mutex_lock(&slots_lock);
         for (slot = 0; slot < limit; slot++) {
             if (!slots[slot].controller) {
                 continue;
             }
             fill(&out[slot], &slots[slot]);
         }
+        pthread_mutex_unlock(&slots_lock);
     }
     return cap;
 }

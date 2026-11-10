@@ -34,10 +34,12 @@ fn main() {
 fn build_macos() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let obj = out.join("cocoa_shim.o");
+    let touch = out.join("touch_log.o");
     let archive = out.join("libgenos_cocoa.a");
     let cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
     let archiver = std::env::var("AR").unwrap_or_else(|_| "ar".to_string());
     let obj_path = obj.display().to_string();
+    let touch_path = touch.display().to_string();
     let archive_path = archive.display().to_string();
     run(
         &cc,
@@ -54,13 +56,27 @@ fn build_macos() {
             &obj_path,
         ],
     );
-    run(&archiver, &["crs", &archive_path, &obj_path]);
+    run(
+        &cc,
+        &[
+            "-c",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "src/touch_log.c",
+            "-o",
+            &touch_path,
+        ],
+    );
+    run(&archiver, &["crs", &archive_path, &obj_path, &touch_path]);
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=genos_cocoa");
     println!("cargo:rustc-link-lib=framework=Cocoa");
     println!("cargo:rustc-link-lib=framework=QuartzCore");
     println!("cargo:rustc-link-lib=framework=CoreGraphics");
     println!("cargo:rerun-if-changed=src/cocoa_shim.m");
+    println!("cargo:rerun-if-changed=src/touch_log.c");
+    println!("cargo:rerun-if-changed=src/touch_log.h");
     println!("cargo:rerun-if-changed=src/genos_pump.h");
 }
 

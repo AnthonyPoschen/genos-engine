@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "genos_pump.h"
+#include "touch_log.h"
 
 struct GenosCocoa {
     NSWindow *window;
@@ -41,10 +42,7 @@ struct GenosCocoa {
     int mouse_left;
     int mouse_right;
     int mouse_middle;
-    struct GenosTouch events[GENOS_TOUCH_CAP];
-    int event_count;
-    struct GenosTouch active[GENOS_TOUCH_CAP];
-    int active_count;
+    struct GenosTouchLog touch;
     uint8_t keys_down[256];
     int pointer_locked;
     int clicked_while_focused;
@@ -160,47 +158,11 @@ static void clear_keys(struct GenosCocoa *win) {
 }
 
 static void push_touch(struct GenosCocoa *win, uint64_t id, float x, float y, int phase) {
-    int i;
-    if (win->event_count < GENOS_TOUCH_CAP) {
-        struct GenosTouch *sample = &win->events[win->event_count];
-        sample->id = id;
-        sample->x = x;
-        sample->y = y;
-        sample->phase = phase;
-        win->event_count += 1;
-    }
-    if (phase == GENOS_TOUCH_ENDED || phase == GENOS_TOUCH_CANCELLED) {
-        for (i = 0; i < win->active_count; i++) {
-            if (win->active[i].id == id) {
-                win->active[i] = win->active[win->active_count - 1];
-                win->active_count -= 1;
-                return;
-            }
-        }
-        return;
-    }
-    for (i = 0; i < win->active_count; i++) {
-        if (win->active[i].id == id) {
-            win->active[i].x = x;
-            win->active[i].y = y;
-            return;
-        }
-    }
-    if (win->active_count >= GENOS_TOUCH_CAP) {
-        return;
-    }
-    win->active[win->active_count].id = id;
-    win->active[win->active_count].x = x;
-    win->active[win->active_count].y = y;
-    win->active[win->active_count].phase = GENOS_TOUCH_MOVED;
-    win->active_count += 1;
+    genos_touch_log_push(&win->touch, id, x, y, phase);
 }
 
 static void cancel_touch(struct GenosCocoa *win) {
-    while (win->active_count > 0) {
-        struct GenosTouch sample = win->active[0];
-        push_touch(win, sample.id, sample.x, sample.y, GENOS_TOUCH_CANCELLED);
-    }
+    genos_touch_log_cancel(&win->touch);
 }
 
 static double view_scale(struct GenosCocoa *win) {
@@ -319,7 +281,6 @@ static void handle_event(struct GenosCocoa *win, NSEvent *event) {
     if (!win || !event || event.window != win->window) {
         return;
     }
-    note_touches(win, event);
     switch (event.type) {
     case NSEventTypeKeyDown:
         set_evdev(win, evdev_from_mac(event.keyCode), 1);
@@ -376,6 +337,17 @@ static void handle_event(struct GenosCocoa *win, NSEvent *event) {
                 (int)llround((win->view.bounds.size.height - point.y) * scale)
             );
         }
+        break;
+    case NSEventTypeGesture:
+    case NSEventTypeMagnify:
+    case NSEventTypeSwipe:
+    case NSEventTypeRotate:
+    case NSEventTypeBeginGesture:
+    case NSEventTypeEndGesture:
+    case NSEventTypeSmartMagnify:
+    case NSEventTypePressure:
+    case NSEventTypeDirectTouch:
+        note_touches(win, event);
         break;
     case NSEventTypeScrollWheel:
         if (event.hasPreciseScrollingDeltas) {
@@ -614,7 +586,6 @@ int genos_window_extra_size(void) {
 }
 
 int genos_window_copy_extra(struct GenosCocoa *win, struct GenosExtra *out) {
-    int i;
     if (!out) {
         return -1;
     }
@@ -624,21 +595,7 @@ int genos_window_copy_extra(struct GenosCocoa *win, struct GenosExtra *out) {
     }
     out->mouse_right = win->mouse_right;
     out->mouse_middle = win->mouse_middle;
-    if (win->event_count > 0) {
-        int count = win->event_count;
-        if (count > GENOS_TOUCH_CAP) {
-            count = GENOS_TOUCH_CAP;
-        }
-        out->touch_count = count;
-        memcpy(out->touch, win->events, (size_t)count * sizeof(win->events[0]));
-        win->event_count = 0;
-        return 0;
-    }
-    out->touch_count = win->active_count;
-    for (i = 0; i < win->active_count && i < GENOS_TOUCH_CAP; i++) {
-        out->touch[i] = win->active[i];
-        out->touch[i].phase = GENOS_TOUCH_MOVED;
-    }
+    out->touch_count = genos_touch_log_copy(&win->touch, out->touch);
     return 0;
 }
 
