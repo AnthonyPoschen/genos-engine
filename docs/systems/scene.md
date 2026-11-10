@@ -92,11 +92,11 @@ A new room is a new script. Register a new function on the Rhai host before a sc
 
 ## Limits
 
-The capsule does not jump or crouch. The step does not turn it. There is one room script. There is no scene graph. The scene types have no entity id. The agent endpoint assigns a handle, and that handle stays until removal.
+The capsule does not jump or crouch. The step does not turn it. There is one room script. A placed object may name a parent handle. The world translation is the parent's world transform times the local position. Scale stays `(1, 1, 1)`. The scene types have no entity id. The agent endpoint assigns a handle, and that handle stays until removal.
 
 The endpoint listens on `127.0.0.1` only. The endpoint stops when that camera process exits. An edit is not written to the script.
 
-A codimation translates one solid. It does not rotate or scale that solid. The script cannot author a path. A slice longer than the collider can still pass through it. The picture places a wall or a square solid from `position.x`, `position.z`, and `height`. The picture does not follow `position.y`.
+A codimation translates one solid. It does not rotate or scale that solid. The script cannot author a path. A slice longer than the collider can still pass through it. The picture places a wall or a square solid from its world translation, including Y, plus `height` (and a wall's `base`). A root with no parent and a zero Y keeps the previous picture.
 
 This crate does not march light. The ground-plane march is in the renderer.
 

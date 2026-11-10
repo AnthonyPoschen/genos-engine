@@ -39,6 +39,7 @@ impl Scene {
             wall_order: Vec::new(),
             solid_order: Vec::new(),
             light_order: Vec::new(),
+            cycle_rejects: 0,
             ceiling: None,
             sky: None,
             lighting: LightingSettings::default(),
@@ -274,6 +275,12 @@ impl Scene {
     #[must_use]
     pub fn solid_handle(&self, index: usize) -> Option<SceneHandle> {
         self.solid_order.get(index).copied()
+    }
+
+    /// Draw-list index of a solid handle.
+    #[must_use]
+    pub fn solid_index(&self, handle: SceneHandle) -> Option<usize> {
+        self.solid_order.iter().position(|item| *item == handle)
     }
 
     #[must_use]

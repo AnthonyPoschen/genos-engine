@@ -81,7 +81,7 @@ The view a game uses to look at the world.
 _Avoid_: Viewport, spectator
 
 **Scene handle**:
-A stable name for one placed object. It is an index plus a generation. A stale generation misses after the slot is reused. The floor's handle is index 0, generation 1, and its MCP string stays `floor`.
+A stable name for one placed object. It is an index plus a generation. A stale generation misses after the slot is reused. The floor's handle is index 0, generation 1, and its MCP string stays `floor`. A handle may name a parent. The world translation is that parent's world transform times the local position.
 _Avoid_: Entity id
 
 **Prefab**:
