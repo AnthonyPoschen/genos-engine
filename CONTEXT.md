@@ -133,7 +133,7 @@ One update that moves bodies by gravity, contact, and springs. A speculative bod
 _Avoid_: Lighting ray, cascade
 
 **Vehicle**:
-Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies.
+Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies. The aircraft payload applies steady lift, drag, and thrust at the centre of mass. Its lift coefficient is stored. Angle of attack is not read. The landing trial sets that payload and wheeled ground together. Space combined with either is outside the current trial.
 _Avoid_: Body id, pawn
 
 **Chassis payload**:

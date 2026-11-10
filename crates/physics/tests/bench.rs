@@ -50,6 +50,13 @@ unsafe impl GlobalAlloc for CountAlloc {
 #[global_allocator]
 static GLOBAL: CountAlloc = CountAlloc;
 
+fn second_step_allocs(world: &mut World) -> usize {
+    step(world, 1.0 / 60.0);
+    let before = ALLOCS.load(Ordering::Relaxed);
+    step(world, 1.0 / 60.0);
+    ALLOCS.load(Ordering::Relaxed) - before
+}
+
 #[test]
 fn timed_math_and_physics_batch_does_not_allocate() {
     const BATCH: u32 = 10_000;
@@ -94,22 +101,46 @@ fn timed_math_and_physics_batch_does_not_allocate() {
 
     // The allocation counter is process-global, so the vehicle steps stay in this test.
     let mut tyre = genos_physics::locked_wheel_world();
-    step(&mut tyre, 1.0 / 60.0);
-    let before_tyre = ALLOCS.load(Ordering::Relaxed);
-    step(&mut tyre, 1.0 / 60.0);
-    let tyre_allocs = ALLOCS.load(Ordering::Relaxed) - before_tyre;
+    let tyre_allocs = second_step_allocs(&mut tyre);
     println!("tyre_allocs={tyre_allocs}");
     assert_eq!(tyre_allocs, 0, "tyre step allocated {tyre_allocs} times");
 
     let mut drive = genos_physics::first_gear_world();
-    step(&mut drive, 1.0 / 60.0);
-    let before_drive = ALLOCS.load(Ordering::Relaxed);
-    step(&mut drive, 1.0 / 60.0);
-    let drive_allocs = ALLOCS.load(Ordering::Relaxed) - before_drive;
+    let drive_allocs = second_step_allocs(&mut drive);
     println!("drive_allocs={drive_allocs}");
     assert_eq!(
         drive_allocs, 0,
         "gearbox step allocated {drive_allocs} times"
+    );
+
+    let mut aircraft = genos_physics::aero_trim_world();
+    let aircraft_allocs = second_step_allocs(&mut aircraft);
+    println!("aircraft_allocs={aircraft_allocs}");
+    assert_eq!(
+        aircraft_allocs, 0,
+        "trimmed aircraft step allocated {aircraft_allocs} times"
+    );
+
+    let mut sleeper = genos_physics::aero_trim_world();
+    sleeper.bodies[0].sleeping = true;
+    sleeper.bodies[0].velocity = Vec3::ZERO;
+    let wake_allocs = second_step_allocs(&mut sleeper);
+    println!("aircraft_wake_allocs={wake_allocs}");
+    assert!(
+        !sleeper.bodies[0].sleeping,
+        "the allocation sleeper stayed asleep"
+    );
+    assert_eq!(
+        wake_allocs, 0,
+        "aircraft wake step allocated {wake_allocs} times"
+    );
+
+    let mut landing = genos_physics::gear_plane_world();
+    let landing_allocs = second_step_allocs(&mut landing);
+    println!("landing_allocs={landing_allocs}");
+    assert_eq!(
+        landing_allocs, 0,
+        "gear and wing step allocated {landing_allocs} times"
     );
 
     let mut thruster = genos_physics::thruster_world();

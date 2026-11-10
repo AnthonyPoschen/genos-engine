@@ -333,10 +333,12 @@ impl Gpu {
             clear_count: u32,
             clears: *const f32,
         }
-        let pass = if self.reflection.pass_override.is_null() {
-            self.render_pass
-        } else {
+        let pass = if !self.reflection.pass_override.is_null() {
             self.reflection.pass_override
+        } else if self.store_scene_depth && !self.render_pass_store.is_null() {
+            self.render_pass_store
+        } else {
+            self.render_pass
         };
         let rp = RpBegin {
             s_type: 43,
@@ -451,10 +453,16 @@ impl Gpu {
             clear_count: u32,
             clears: *const f32,
         }
+        self.prepare_kept_depth();
+        let pass = if self.store_scene_depth && !self.keep_pass_store.is_null() {
+            self.keep_pass_store
+        } else {
+            self.keep_pass
+        };
         let rp = RpBegin {
             s_type: 43,
             next: std::ptr::null(),
-            pass: self.keep_pass,
+            pass,
             fb: self.framebuffer,
             area: Rect {
                 offset: Offset { x: 0, y: 0 },

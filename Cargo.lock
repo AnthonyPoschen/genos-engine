@@ -262,6 +262,17 @@ name = "genos-mesh"
 version = "0.1.0"
 
 [[package]]
+name = "genos-particles"
+version = "0.1.0"
+dependencies = [
+ "genos-debug",
+ "genos-mcp",
+ "genos-render",
+ "genos-scene",
+ "genos-window",
+]
+
+[[package]]
 name = "genos-physics"
 version = "0.1.0"
 dependencies = [

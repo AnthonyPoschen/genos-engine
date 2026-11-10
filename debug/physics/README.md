@@ -28,6 +28,9 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
 | `locked_wheel` | That chassis at the settled height, 10 m/s, wheels locked, slip curve on, 60 steps. | `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls` |
 | `first_gear` | That chassis at rest, throttle 1, gear 0, ratio 3, open differential, 120 steps. | `first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel` |
+| `aero_trim` | 1 000 kg aircraft trimmed at 50 m/s and 100 m for 120 steps. | `a_trimmed_aircraft_holds_altitude_and_speed` |
+| `gear_miss` | A1 aircraft plus four wheel rays that miss, for 120 steps. | `a_gear_that_misses_matches_the_aircraft` |
+| `gear_plane` | 1 000 kg aircraft on four springs at 20 m/s, awake for 180 steps. | `a_gear_on_the_plane_shares_the_weight` |
 | `thruster` | 1 000 kg cube, one offset thruster, gravity zero, 60 steps. | `a_thruster_in_zero_gravity_matches_force_and_torque` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
@@ -59,9 +62,12 @@ A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
 
 `chassis_rest` is the G1 trial, `locked_wheel` is the P28 slip curve, `first_gear`
-is the P29 gearbox and open differential, and `thruster` is the S1 trial from
-[ADR 0040](../../docs/adr/0040-vehicle-domains.md). The thruster scene starts
-awake. A chassis that begins that scene asleep, with the thruster already open,
-wakes on the first step. The ADR stays proposed. A1 would add `aero_trim` on
-this same headless path. That scene is not here. Sea has no scene. S1 does not
-add an orbit scene. Steering is not a scene here.
+is the P29 gearbox and open differential, `aero_trim` is the A1 trial,
+`gear_miss` with `gear_plane` is the T1 trial, and `thruster` is the S1 trial
+from [ADR 0040](../../docs/adr/0040-vehicle-domains.md). `aero_trim` starts
+awake. A chassis that begins that scene asleep, with the trim throttle already
+open and its velocity cleared, wakes on the first step and takes that step's
+gravity. `thruster` starts awake. A chassis that begins that scene asleep, with
+the thruster already open, wakes on the first step. The ADR stays proposed.
+An idle space payload does not change a landing chassis. A live thruster does.
+Sea has no scene. S1 does not add an orbit scene. Steering is not a scene here.
