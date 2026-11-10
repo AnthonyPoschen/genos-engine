@@ -11,9 +11,10 @@
 
 mod device;
 mod mix;
+mod poly;
 mod space;
 
 pub use device::submit;
 pub use genos_math::Vec3;
-pub use mix::{mix, Barrier, Listener, Source};
+pub use mix::{mix, mix_into, Barrier, Listener, Source};
 pub use space::SPEED_OF_SOUND;
