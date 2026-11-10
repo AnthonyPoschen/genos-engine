@@ -20,6 +20,16 @@ void main() {
     if (lighting_dense()) {
         // S70A: the args pass (one group, after the counts are in).
         if (slot == 0u) {
+            if (lighting_coverage_first()) {
+                uint wsum = gstats.diag[8];
+                uint tw = gstats.diag[9];
+                uint under = gstats.diag[10];
+                float mean = wsum > 0u ? float(tw) / float(wsum) : 0.0;
+                ckeys.key[LIGHTING_COVERAGE_HOLD_AT] = (mean >= 2.0 * LIGHTING_DN_MIN_SETS && under > 0u) ? 1u : 0u;
+                gstats.diag[8] = 0u;
+                gstats.diag[9] = 0u;
+                gstats.diag[10] = 0u;
+            }
             lighting_write_args();
         }
         return;
@@ -112,6 +122,18 @@ void main() {
         // LIGHTING_WRC_YOUNG sets are the reveal burst: young, whole sets. New fine
         // texels start from the WRC (lighting_sc_resample) and take their turn.
         bool wrc = cache.v[3u * slot + 1u].w > 0.2;
+        // coverage_first: near-weighted set mean of on-screen fine texels, and
+        // how many of them are still under the 8-set minimum. The args pass
+        // reads this and the next round's hold bit. Off, these words stay put.
+        if (lighting_coverage_first() && !wrc && on_screen) {
+            float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
+            float wt = 1.0 / (1.0 + d);
+            atomicAdd(gstats.diag[8], uint(wt * 1000.0 + 0.5));
+            atomicAdd(gstats.diag[9], uint(t * wt * 1000.0 + 0.5));
+            if (t < LIGHTING_DN_MIN_SETS - 0.5) {
+                atomicAdd(gstats.diag[10], 1u);
+            }
+        }
         // S62B: the burst ends at what the cell can hold now (under changing
         // light lighting_sc_count keeps it to the light window, 8 samples, which never
         // reached LIGHTING_WRC_YOUNG = 16: every needed cell stayed a burst and took
@@ -136,6 +158,17 @@ void main() {
             // and the texels on screen go every round; the rest in turns.
             bool first = wrc || lighting_sc_pixel_fresh(shown, LIGHTING_SETTLE_SCREEN_FRAMES);
             uint ms = wrc ? 1u : lighting_sc_entries(slot, true);
+            if (lighting_coverage_first() && !wrc) {
+                // Under the minimum: one quarter, not a whole 64-ray set.
+                // At the minimum while coverage is short: yield this round.
+                if (lighting_coverage_hold() && t >= LIGHTING_DN_MIN_SETS - 0.5 && !near) {
+                    atomicAdd(gstats.waiting, 1u);
+                    return;
+                }
+                if (t < LIGHTING_DN_MIN_SETS - 0.5) {
+                    ms = 1u;
+                }
+            }
             atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
             if (first) {
                 atomicAdd(ckeys.key[LIGHTING_SETTLE_FIRST_AT], ms);
@@ -436,6 +469,28 @@ void main() {
                 w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
             }
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
+            // cap_fill: at the ceiling, maintain. One trickle quarter, not a
+            // new whole set. Default off, so this return does not run.
+            if (lighting_cap_fill() && !wrc && t >= lighting_sc_cap(slot) - 0.5 && !near) {
+                uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
+                if (at < LIGHTING_SC_TRICKLE) {
+                    ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
+                    atomicAdd(gstats.pad2, 1u);
+                }
+                return;
+            }
+            // coverage_first: texels under 8 go on the young list, one quarter
+            // each. Texels already at 8 wait while any on-screen texel is short.
+            if (lighting_coverage_first() && !wrc && t < LIGHTING_DN_MIN_SETS - 0.5) {
+                atomicAdd(gstats.due, 1u);
+                uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], 1u);
+                ckeys.key[2u * LIGHTING_CACHE_SLOTS - at] = slot;
+                return;
+            }
+            if (lighting_coverage_hold() && !wrc && t >= LIGHTING_DN_MIN_SETS - 0.5 && !near) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
             // Whole 64-ray sets until settled, and above the trickle threshold.
             bool full = !settled_now || chg >= LIGHTING_SC_TRICKLE_THR || (est.x > 0.0 && est.y > LIGHTING_SC_FULL_INC);
             // A non-zero dormant floor traces one fresh 16-ray entry, not a 64-ray set.
@@ -468,8 +523,23 @@ void main() {
             }
             return;
         }
+        if (lighting_cap_fill() && !wrc && t >= lighting_sc_cap(slot) - 0.5 && !near) {
+            uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
+            if (at < LIGHTING_SC_TRICKLE) {
+                ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
+                atomicAdd(gstats.pad2, 1u);
+            }
+            return;
+        }
         bool young = young_now;
         uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
+        if (lighting_coverage_first() && !wrc && t < LIGHTING_DN_MIN_SETS - 0.5) {
+            m = 1u;
+        }
+        if (lighting_coverage_hold() && !wrc && !near && t >= LIGHTING_DN_MIN_SETS - 0.5) {
+            atomicAdd(gstats.waiting, 1u);
+            return;
+        }
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
             uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);

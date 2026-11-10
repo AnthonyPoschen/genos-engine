@@ -644,6 +644,8 @@ fn experiment_defaults_match_the_old_environment_defaults() {
         assert!(x.fill);
         assert!(x.young_only);
         assert_eq!(x.world_cap, 0);
+        assert!(!x.coverage_first);
+        assert!(!x.cap_fill);
         assert_eq!(x.sc_settle, 0);
         assert_eq!(x.sc_flags, LIGHTING_DEFAULT_SC_FLAGS);
         assert_eq!(x.toggles, 0);

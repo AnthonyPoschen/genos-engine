@@ -3022,6 +3022,20 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// coverage_first hold word (head 3.w bit 20). 1 while the last round's
+// near-weighted mean was at least 16 sets and an on-screen texel was under 8.
+const uint LIGHTING_COVERAGE_HOLD_AT = LIGHTING_ARGS_AT + 15u;
+// coverage_first (head 3.w bit 20) and cap_fill (bit 21). Both default off.
+// head 3.w is a float, exact through bit 23.
+bool lighting_coverage_first() {
+    return (uint(work.v[lighting_change_at() + 3u].w) & 1048576u) != 0u;
+}
+bool lighting_coverage_hold() {
+    return lighting_coverage_first() && (ckeys.key[LIGHTING_COVERAGE_HOLD_AT] & 1u) != 0u;
+}
+bool lighting_cap_fill() {
+    return (uint(work.v[lighting_change_at() + 3u].w) & 2097152u) != 0u;
+}
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
 // the listing's 0.1 floor and still clamps. The hold path does not read this.
@@ -3439,6 +3453,11 @@ bool lighting_sc_settled(uint slot, float t) {
     if (cache.v[3u * slot + 1u].w > 0.2) {
         // A WRC cell: settled at its cap (or the window under changing light).
         return floor(t) >= LIGHTING_WRC_CAP - 0.5;
+    }
+    // cap_fill (default off): the configured cap is the settle point. The
+    // perceptual stop below stays the production rule when the bit is clear.
+    if (lighting_cap_fill()) {
+        return floor(t) >= lighting_sc_cap(slot) - 0.5;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.

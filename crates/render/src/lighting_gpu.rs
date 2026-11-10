@@ -5023,6 +5023,16 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     if settings.surface_cache.sh_probe_retire {
         head_hi |= SH_PROBE_RETIRE;
     }
+    // coverage_first and cap_fill are default-off experiment bits. head 3.w is
+    // stored as f32, so these stay at or below bit 23 (exact integer).
+    const COVERAGE_FIRST: u32 = 1 << 20;
+    const CAP_FILL: u32 = 1 << 21;
+    if settings.experiments.coverage_first {
+        head_hi |= COVERAGE_FIRST;
+    }
+    if settings.experiments.cap_fill {
+        head_hi |= CAP_FILL;
+    }
     LightingChangeHead {
         flags: flags_all & ((1 << 23) - 1),
         mode_cap: world * 1000 + cap,
@@ -5828,6 +5838,13 @@ mod sun_step {
         settings.surface_cache.sh_cells = true;
         let on = super::lighting_change_head(&settings);
         assert_eq!(on.head_hi & 1, 1, "sh_cells did not set head_hi bit 0");
+        assert_eq!(on.head_hi & (1 << 20), 0, "coverage_first defaults off");
+        assert_eq!(on.head_hi & (1 << 21), 0, "cap_fill defaults off");
+        settings.experiments.coverage_first = true;
+        settings.experiments.cap_fill = true;
+        let both = super::lighting_change_head(&settings);
+        assert_eq!(both.head_hi & (1 << 20), 1 << 20);
+        assert_eq!(both.head_hi & (1 << 21), 1 << 21);
     }
 
     fn assert_spirv_1(name: &str, words: &[u8]) {
