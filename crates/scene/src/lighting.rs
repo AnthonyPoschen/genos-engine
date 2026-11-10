@@ -632,6 +632,16 @@ pub struct LightingExperimentSettings {
     /// cache texel (mode 3) averages, 1 to 999. `0` keeps the mode's default
     /// (32 for mode 2, 64 for mode 3).
     pub world_cap: u32,
+    /// Key `coverage_first`. Default off. Once the near-camera-weighted mean
+    /// set count of on-screen fine texels reaches twice `LIGHTING_DN_MIN_SETS`,
+    /// texels under that minimum are scheduled ahead of texels already there,
+    /// and a texel under the minimum takes one 16-ray quarter per round.
+    pub coverage_first: bool,
+    /// Key `cap_fill`. Default off. An explicit `world_cap` (and the mode
+    /// default when this is on with `world_cap` 0) is the settle point: the
+    /// 8-set perceptual stop does not fire, and a texel at the cap is
+    /// maintained instead of taking a new whole set every round.
+    pub cap_fill: bool,
     /// Key `sc_settle`. Surface cache: frames still before the debug tools
     /// call the picture settled. `0` uses the change counter.
     pub sc_settle: u32,
@@ -652,6 +662,8 @@ impl Default for LightingExperimentSettings {
             fill: true,
             young_only: true,
             world_cap: 0,
+            coverage_first: false,
+            cap_fill: false,
             sc_settle: 0,
             sc_flags: LIGHTING_DEFAULT_SC_FLAGS,
             toggles: 0,
@@ -1440,6 +1452,8 @@ impl LightingSettings {
         let _ = writeln!(out, "fill={}", bit(x.fill));
         let _ = writeln!(out, "young_only={}", bit(x.young_only));
         let _ = writeln!(out, "world_cap={}", x.world_cap);
+        let _ = writeln!(out, "coverage_first={}", bit(x.coverage_first));
+        let _ = writeln!(out, "cap_fill={}", bit(x.cap_fill));
         let _ = writeln!(out, "sc_settle={}", x.sc_settle);
         let _ = writeln!(out, "sc_flags={}", x.sc_flags);
         let _ = writeln!(out, "toggles={}", toggles_text(x.toggles));
@@ -1550,6 +1564,8 @@ impl LightingSettings {
             "fill" => self.experiments.fill = on(value)?,
             "young_only" => self.experiments.young_only = on(value)?,
             "world_cap" => self.experiments.world_cap = num_u32(value)?.min(999),
+            "coverage_first" => self.experiments.coverage_first = on(value)?,
+            "cap_fill" => self.experiments.cap_fill = on(value)?,
             "sc_settle" => self.experiments.sc_settle = num_u32(value)?,
             "sc_flags" => {
                 self.experiments.sc_flags = value
@@ -1795,6 +1811,8 @@ impl LightingSettings {
             ("GENOS_LIGHTING_FILL", "fill"),
             ("GENOS_LIGHTING_YOUNG_ONLY", "young_only"),
             ("GENOS_LIGHTING_WORLD_CAP", "world_cap"),
+            ("GENOS_LIGHTING_COVERAGE_FIRST", "coverage_first"),
+            ("GENOS_LIGHTING_CAP_FILL", "cap_fill"),
             ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
             ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
             ("GENOS_LIGHTING_TOGGLES", "toggles"),

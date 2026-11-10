@@ -123,6 +123,12 @@ Role: SCHED · Literature: GIBS recycling heuristic (§1.4) · More detail: [`li
 **Trickle**: the lowest relight tier. Settled entries that are still slightly inconsistent get an occasional relight.
 Role: SCHED · Literature: GIBS variance-driven ray count (§1.12, partial) · More detail: S65A in [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp); S78H
 
+**Coverage-first** (`coverage_first`, default off): once the near-camera-weighted mean set count of on-screen fine texels reaches twice the 8-set minimum, texels under 8 are scheduled ahead of texels at 8 or more, until every on-screen fine texel has 8. A texel under 8 takes one 16-ray quarter per round. Refinement of texels already at 8 waits while any on-screen texel is still under 8.
+Role: SCHED · Literature: Lumen page refinement (coverage before detail) · More detail: [../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md](../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md)
+
+**Cap fill** (`cap_fill`, default off): the texel's set cap is the settle point. The 8-set perceptual stop does not fire, and a texel that has reached the cap is maintained on the trickle list instead of taking a new whole set every round. `world_cap` 0 with this on fills to the mode default (64 on High).
+Role: SCHED · Literature: — · More detail: [../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md](../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md)
+
 **Pre-fill**: gives a newly seen entry a usable value on the frame it appears (coarse-to-fine), so the picture never shows missing light. Required by rule.
 Role: SCHED · Literature: — (GIBS shows holes and fills them by spawning; Lumen falls back to WRC) · More detail: experiments S72D, S73A
 
