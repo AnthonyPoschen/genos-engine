@@ -3,12 +3,12 @@
 //! A console crate implements [`DevicePath`] and passes it to [`crate::start_with`].
 //! This repository does not name that crate.
 
-use std::cell::UnsafeCell;
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64")
 )))]
 use std::cell::Cell;
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 

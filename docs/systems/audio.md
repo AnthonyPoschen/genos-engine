@@ -28,6 +28,7 @@ The crate is `crates/audio`, package `genos-audio`.
 - `start_with` in `src/engine.rs` runs the `genos-audio` thread. It mixes one quantum and writes a `DevicePath`. ALSA, WASAPI, and CoreAudio stay open. The command ring holds 256 commands. A full ring drops the newest and counts `audio_command_drop`. The listener is a latest-wins slot.
 - The frame copies `listener_state` from `crates/scene` into that slot. `genos-audio` does not depend on `genos-scene`.
 - `cook_ima` in `crates/load/src/adpcm.rs` writes the cooked record. A clip over 2 seconds and over 256 KiB is disk-fed: `genos-audio-io` decodes into a 200 ms ring. An empty ring fades 64 frames and counts `audio_underrun`.
+- `apply_reverb` in `src/reverb.rs` adds one Schroeder tail. The listener's smallest containing zone wins. Low, and a listener outside every zone, leave the dry buffer unchanged.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
 
 `crates/audio-check` calls `mix`. It does not copy the mixer.
@@ -42,7 +43,7 @@ A running game calls `start_with` and `Stream::push`. After the camera step it c
 
 ## Limits
 
-There is no HRTF, no elevation cue, and no surround layout. There is no reflection, reverb, diffraction, air absorption, or frequency-dependent wall filter.
+There is no HRTF, no elevation cue, and no surround layout. There is no reflection, diffraction, air absorption, or frequency-dependent wall filter. A reverb zone is one Schroeder tail. Low does not step it.
 
 The loader does not open a device. The cooked clip is IMA ADPCM. Voice chat, MIDI, and synthesis are not in this crate.
 
@@ -50,7 +51,7 @@ The transmission pass reads the resident occluder bounds and absorption. The cam
 
 WASAPI and CoreAudio are not run from this Linux machine.
 
-Buses, reverb zones, and a console write are the plan in [the audio design](audio-design.md).
+Buses and a console write are the plan in [the audio design](audio-design.md).
 
 `cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. A second digest, `tests/golden/paths.sha256`, covers loop wrap, a Doppler cursor that wraps, a non-trivial exp reduction, an `i16` clip, and two voices. Those tests do not open a device.
 
