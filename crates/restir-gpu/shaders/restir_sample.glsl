@@ -33,6 +33,7 @@ uint uniform_index(uint n) {
     }
 }
 
+#ifndef RESTIR_NO_INITIAL
 void sample_cdf(const float weights[64], uint n, out uint index, out float pdf, out bool hit) {
     float sum = 0.0;
     for (uint i = 0u; i < n; i++) {
@@ -72,6 +73,7 @@ void sample_cdf(const float weights[64], uint n, out uint index, out float pdf, 
     index = 0u;
     pdf = 0.0;
 }
+#endif
 
 void stream_update(inout uint lamp, inout float w_sum, inout uint m, uint next_lamp, float stream) {
     float unit = next_f32();

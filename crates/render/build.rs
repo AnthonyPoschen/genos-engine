@@ -307,9 +307,6 @@ fn compile_restir_live(out: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         &wide,
         &["-DRESTIR_SPATIAL_ONLY"],
     );
-    // The neighbour draw's swap table stays out of the merge. Inlining it
-    // puts that private array in the same live range as the p-hat scalars.
-    dont_inline_function(&spatial, "restir_pick_four");
     (live, spatial, wide)
 }
 
@@ -332,63 +329,6 @@ fn compile_restir_variant(src: &str, dest: &std::path::Path, defines: &[&str]) -
         panic!("glslangValidator failed for {src} {defines:?}");
     }
     dest.to_path_buf()
-}
-
-/// `DontInline` on one function. The control word is a hint the driver keeps
-/// so a private array in that function does not join the caller's live range.
-fn dont_inline_function(path: &std::path::Path, name: &str) {
-    let mut bytes = std::fs::read(path).expect("restir spirv");
-    let n = bytes.len() / 4;
-    let word = |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().expect("spirv word"));
-    let mut id = None;
-    let mut i = 5usize;
-    while i < n {
-        let header = word(&bytes, i);
-        let count = usize::try_from(header >> 16).expect("spirv word count");
-        let op = header & 0xffff;
-        if count == 0 || i + count > n {
-            panic!("restir spirv is truncated");
-        }
-        if op == 5 && count >= 3 {
-            let mut text = Vec::new();
-            for w in (i + 2)..(i + count) {
-                text.extend_from_slice(&word(&bytes, w).to_le_bytes());
-            }
-            if text
-                .split(|c| *c == 0)
-                .next()
-                .is_some_and(|s| s.starts_with(name.as_bytes()) && s.get(name.len()) == Some(&b'('))
-            {
-                id = Some(word(&bytes, i + 1));
-            }
-        }
-        i += count;
-    }
-    let Some(id) = id else {
-        panic!("restir spirv has no function {name}");
-    };
-    i = 5;
-    let mut found = false;
-    while i < n {
-        let header = word(&bytes, i);
-        let count = usize::try_from(header >> 16).expect("spirv word count");
-        let op = header & 0xffff;
-        if count == 0 || i + count > n {
-            panic!("restir spirv is truncated");
-        }
-        if op == 54 && count >= 4 && word(&bytes, i + 2) == id {
-            let at = (i + 3) * 4;
-            let ctrl = word(&bytes, i + 3);
-            let ctrl = (ctrl & !1) | 2;
-            bytes[at..at + 4].copy_from_slice(&ctrl.to_le_bytes());
-            found = true;
-        }
-        i += count;
-    }
-    if !found {
-        panic!("restir spirv function {name} has no OpFunction");
-    }
-    std::fs::write(path, &bytes).expect("write restir spirv");
 }
 
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {

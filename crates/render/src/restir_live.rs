@@ -775,6 +775,75 @@ mod tests {
         }
     }
 
+    /// Lengths of arrays stored in a function, not buffer structs.
+    fn spirv_private_array_lengths(bytes: &[u8]) -> Vec<u32> {
+        let words = bytes.len() / 4;
+        let word = |index: usize| {
+            let start = index.saturating_mul(4);
+            let Some(raw) = bytes.get(start..start + 4) else {
+                return 0;
+            };
+            u32::from_le_bytes(raw.try_into().unwrap_or([0; 4]))
+        };
+        let mut constants = std::collections::HashMap::<u32, u32>::new();
+        let mut arrays = std::collections::HashMap::<u32, u32>::new();
+        let mut pointers = std::collections::HashMap::<u32, (u32, u32)>::new();
+        let mut variables = Vec::new();
+        let mut index = 5usize;
+        while index < words {
+            let header = word(index);
+            let count = usize::try_from(header >> 16).unwrap_or(0);
+            let op = header & 0xffff;
+            if count == 0 || index.saturating_add(count) > words {
+                break;
+            }
+            if op == 43 && count >= 4 {
+                constants.insert(word(index + 2), word(index + 3));
+            } else if op == 28 && count >= 4 {
+                let length = constants.get(&word(index + 3)).copied().unwrap_or(u32::MAX);
+                arrays.insert(word(index + 1), length);
+            } else if op == 32 && count >= 4 {
+                pointers.insert(word(index + 1), (word(index + 2), word(index + 3)));
+            } else if op == 59 && count >= 4 {
+                variables.push((word(index + 1), word(index + 3)));
+            }
+            index = index.saturating_add(count);
+        }
+        variables
+            .iter()
+            .filter_map(|(ty, storage)| {
+                // Function storage is 7. The variable's type is a pointer.
+                if *storage != 7 {
+                    return None;
+                }
+                let (_, pointee) = pointers.get(ty)?;
+                arrays.get(pointee).copied()
+            })
+            .collect()
+    }
+
+    /// The scalar spatial module has no 16/17/32 private arrays. The wide
+    /// module still has the swap table and the 17-wide merge lists.
+    #[test]
+    fn the_restir_scalar_spatial_module_has_no_swap_table() {
+        let scalar = include_bytes!(concat!(env!("OUT_DIR"), "/restir_spatial.comp.spv"));
+        let wide = include_bytes!(concat!(env!("OUT_DIR"), "/restir_spatial_wide.comp.spv"));
+        let scalar_lengths = spirv_private_array_lengths(scalar);
+        assert!(
+            scalar_lengths.iter().all(|len| *len < 16),
+            "scalar spatial SPIR-V still has a private array: {scalar_lengths:?}"
+        );
+        let wide_lengths = spirv_private_array_lengths(wide);
+        assert!(
+            wide_lengths.contains(&32),
+            "wide spatial SPIR-V lost the swap table: {wide_lengths:?}"
+        );
+        assert!(
+            wide_lengths.contains(&17),
+            "wide spatial SPIR-V lost the 17-wide lists: {wide_lengths:?}"
+        );
+    }
+
     #[test]
     fn the_swap_table_matches_neighbor_count_and_stays_in_32_entries() {
         let live = include_str!("../shaders/restir_live.comp");
@@ -880,14 +949,6 @@ mod tests {
         assert!(
             world_at < bit_at,
             "bit 21 is set only after the world submit"
-        );
-        assert!(
-            gpu.contains("self.lighting.restir_spatial_pipe"),
-            "spatial must be its own pipeline"
-        );
-        assert!(
-            gpu.contains("restir_spatial_neighbors > 4"),
-            "the product neighbour count stays on the scalar spatial pipeline"
         );
         assert_restir_words_under_restir_pix(direct);
     }

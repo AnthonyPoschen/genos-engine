@@ -1316,6 +1316,26 @@ impl Renderer {
         self.gpu.lighting_lamp_pick_counts()
     }
 
+    /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
+    /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
+    pub fn restir_spatial_bound(&self) -> u8 {
+        self.gpu.lighting.restir_spatial_bound
+    }
+
+    /// One spatial dispatch on fixed reservoirs. `neighbors` is the count the
+    /// product frame would bind: 0–4 is `restir-spatial`, above 4 is
+    /// `restir-spatial-wide`. The shader still reads header word 13, so a
+    /// scalar bind with a larger word leaves the input sample.
+    pub fn restir_merge_oracle(
+        &mut self,
+        neighbors: u32,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        self.gpu.restir_merge_oracle(neighbors, scene, gbuf, restir)
+    }
+
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
     pub fn lighting_restir_prepare_failures(&self) -> u32 {
         self.gpu.lighting_restir_prepare_failures()

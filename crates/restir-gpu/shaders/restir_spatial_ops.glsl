@@ -23,6 +23,7 @@ float phat_at(uint recv, uint lamp, uint n) {
     return restir_phat(recv, lamp);
 }
 
+#ifndef RESTIR_SPATIAL_CAP
 uint neighbor_count(uint index, uint receivers, out uint picked[16]) {
     uint width = RESTIR_WIDTH;
     if (width == 0u || RESTIR_SPATIAL_NEIGHBORS == 0u || RESTIR_SPATIAL_RADIUS == 0u) {
@@ -176,3 +177,4 @@ void balance_list(
     m = count;
     target = tq;
 }
+#endif
