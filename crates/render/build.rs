@@ -186,7 +186,15 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
     .map(|(name, file)| {
         let src = format!("shaders/{file}");
         println!("cargo:rerun-if-changed={src}");
-        (*name, compile(&src, &out.join(format!("{file}.spv"))))
+        let dest = out.join(format!("{file}.spv"));
+        // Every compose compile, flags on or off, loads the cache relight.
+        // The neighbour walk is not in the module.
+        let spv = if *file == "lighting_compose.comp" || *file == "lighting_sun_compose.comp" {
+            compile_args(&src, &dest, &["-DGENOS_COMPOSE_NO_WALK=1"])
+        } else {
+            compile(&src, &dest)
+        };
+        (*name, spv)
     })
     .collect()
 }
@@ -358,6 +366,7 @@ fn rerun_shader_pieces() {
         "probe_retire_prod.comp",
         "froxel_compose.glsl",
         "lighting_check.comp",
+        "lighting_sh_drain.comp",
         "scene.vert",
         "overlay.frag",
         "depth_mask.frag",
@@ -393,15 +402,35 @@ fn rerun_shader_pieces() {
 
 /// HDR compose stores scene radiance. The plain compile does not declare it.
 fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
-    let compose_hdr = compile_define(
+    let compose_hdr = compile_defines(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_hdr.comp.spv"),
-        "GENOS_HDR_COMPOSE",
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
     );
-    let sun_hdr = compile_define(
+    // #142: the compose writes, run just before the read-only compose.
+    // The walk stays out of this compile. Maintenance enqueues. The drain gathers.
+    let maint = compile_args(
+        "shaders/lighting_compose.comp",
+        &out.join("lighting_compose_maint.comp.spv"),
+        &["-DGENOS_COMPOSE_MAINT", "-DGENOS_COMPOSE_NO_WALK=1"],
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_COMPOSE_MAINT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        maint.display()
+    ));
+    // The neighbour walk lives here, after maintenance and before compose.
+    let drain = compile(
+        "shaders/lighting_sh_drain.comp",
+        &out.join("lighting_sh_drain.comp.spv"),
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_SH_DRAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        drain.display()
+    ));
+    let sun_hdr = compile_defines(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),
-        "GENOS_HDR_COMPOSE",
+        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
     );
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
@@ -425,9 +454,10 @@ fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> Path
 }
 
 /// The lavapipe fixture only. Inlining the compose function at every mover
-/// shade makes the compiler heap exceed a 16 GB software-test budget. The
-/// production compose module is not marked. `DontInline` does not change the
-/// `GLSL` those functions run.
+/// shade makes the compiler heap exceed a 16 GB software-test budget.
+/// `DontInline` does not change the GLSL those functions run. The fixture
+/// keeps the neighbour walk. Every compose compile defines
+/// `GENOS_COMPOSE_NO_WALK` and does not.
 fn compile_texel_detail(
     src: &str,
     dest: &std::path::Path,
@@ -486,20 +516,26 @@ fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
 
 /// glslc's wrapper does not forward `-D`. The plain a-trous kernel needs the macro.
 fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
+    compile_defines(src, dest, &[define])
+}
+
+fn compile_defines(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {
+    let flags: Vec<String> = defines.iter().map(|define| format!("-D{define}")).collect();
+    let mut args = vec![
+        "-V".to_string(),
+        "--target-env".to_string(),
+        "vulkan1.0".to_string(),
+    ];
+    args.extend(flags);
+    args.push(src.to_string());
+    args.push("-o".to_string());
+    args.push(dest.to_str().unwrap().to_string());
     let status = Command::new("glslangValidator")
-        .args([
-            "-V",
-            "--target-env",
-            "vulkan1.0",
-            &format!("-D{define}"),
-            src,
-            "-o",
-            dest.to_str().unwrap(),
-        ])
+        .args(&args)
         .status()
         .expect("glslangValidator");
     if !status.success() {
-        panic!("glslangValidator failed for {src} -D{define}");
+        panic!("glslangValidator failed for {src} {defines:?}");
     }
     dest.to_path_buf()
 }

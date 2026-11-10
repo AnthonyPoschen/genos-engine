@@ -14,14 +14,15 @@
 )]
 
 use genos_render::{
-    GpuKind, LightingPreset, LightingSettings, Renderer, TexelDetailPlant, lighting_change_head,
-    release_software_compiler_heap,
+    lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset,
+    LightingSettings, Renderer,
 };
 use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
 const ROWS: usize = 34;
-const TRAILER: usize = 40;
+const TRAILER: usize = 36;
+const PARITY: usize = 32;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -80,7 +81,7 @@ fn motion_slant() -> [f32; 3] {
 }
 
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER
+    8 + ROWS * STRIDE + TRAILER + PARITY
 }
 
 #[expect(
@@ -759,7 +760,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "decoy same {}",
         motion.mark
     );
-    let trail = &words[8 + ROWS * STRIDE..];
+    let trail = &words[8 + ROWS * STRIDE..8 + ROWS * STRIDE + TRAILER];
     assert_eq!(trail.len(), TRAILER);
     let orange = [9.0, 1.0, 0.0];
     let blue_tilt = motion_slant();
@@ -869,6 +870,78 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(
         reads, 16,
         "the detail-off hit row has no probe; every other evaluated row reads one"
+    );
+
+    let parity = &words[8 + ROWS * STRIDE + TRAILER..];
+    assert_eq!(parity.len(), PARITY);
+    let stored = [parity[0], parity[1], parity[2]];
+    let live = [parity[3], parity[4], parity[5]];
+    assert!(
+        near(stored, live),
+        "the stored gather {stored:?} left the live read {live:?}"
+    );
+    assert!(near(stored, red), "stored seed {stored:?} wanted {red:?}");
+    assert!((parity[6] - 1.0).abs() <= ABS, "cells-accept {}", parity[6]);
+    let late = [parity[7], parity[8], parity[9]];
+    assert!(
+        near(late, green),
+        "the next gather {late:?} wanted {green:?}: the store is one relight late"
+    );
+    assert!(
+        !near(stored, late),
+        "the stored colour moved with the cell in the same pass"
+    );
+    let blended = [parity[10], parity[11], parity[12]];
+    let slant_live = [parity[13], parity[14], parity[15]];
+    let slant = slant_colour();
+    assert!(
+        near(blended, slant_live),
+        "loaded corner ids {blended:?} left the live slant {slant_live:?}"
+    );
+    assert!(
+        near(blended, slant),
+        "the loaded tilt {blended:?} wanted the flags-on slant {slant:?}"
+    );
+    let reveal = [parity[16], parity[17], parity[18]];
+    let reveal_live = [parity[19], parity[20], parity[21]];
+    assert!(
+        near(reveal, reveal_live),
+        "same-frame lattice {reveal:?} left the live read {reveal_live:?}"
+    );
+    assert!(
+        near(reveal, red),
+        "a new texel showed {reveal:?}, wanted the cell {red:?}"
+    );
+    let refreshed = [parity[22], parity[23], parity[24]];
+    assert!(
+        near(refreshed, green),
+        "refilling the lattice showed {refreshed:?}, wanted {green:?}"
+    );
+    let tele = [parity[25], parity[26], parity[27]];
+    let blue = [0.0, 0.0, 7.0];
+    assert!(
+        near(tele, blue),
+        "a teleported query showed {tele:?}, wanted {blue:?}"
+    );
+    assert!(
+        (parity[28] - 1.0).abs() <= ABS,
+        "two keys in one home: {}",
+        parity[28]
+    );
+    assert!(
+        (parity[29] - 1.0).abs() <= ABS,
+        "the near slot was dropped: {}",
+        parity[29]
+    );
+    assert!(
+        parity[30].abs() <= ABS,
+        "the farthest slot survived the cap: {}",
+        parity[30]
+    );
+    assert!(
+        (parity[31] - 1.0).abs() <= ABS,
+        "the enqueue was not visible this invocation: {}",
+        parity[31]
     );
 }
 

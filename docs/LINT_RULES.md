@@ -298,7 +298,7 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
-| `build` | 3 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, and `GENOS_HDR_COMPOSE` (the HDR compose shader compile). |
+| `build` | 5 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, `GENOS_HDR_COMPOSE`, `GENOS_COMPOSE_MAINT`, and `GENOS_COMPOSE_NO_WALK` (shader compile defines, not process environment variables). |
 
 Do not add a new `kind = "todo"`. Add a `mirror` whose `detail` is the flag, or do not read the variable.
 
