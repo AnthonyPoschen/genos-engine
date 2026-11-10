@@ -203,13 +203,16 @@ impl TouchSurface {
         let dx = point.x - contact.origin_x;
         let dy = point.y - contact.origin_y;
         let length = dx.hypot(dy);
+        if self.in_pinch_pair(point.id) {
+            return;
+        }
         if length >= SWIPE_MIN {
             self.gestures.push(Gesture::Swipe {
                 id: point.id,
                 x: dx / length,
                 y: dy / length,
             });
-        } else if length <= TAP_SLOP && !self.in_pinch_pair(point.id) {
+        } else if length <= TAP_SLOP {
             self.gestures.push(Gesture::Tap {
                 id: point.id,
                 x: point.x,
@@ -466,6 +469,52 @@ mod tests {
         );
         let scale = scale.unwrap();
         assert!((scale - 1.2).abs() < 1.0e-4, "24/20, got {scale}");
+    }
+
+    #[test]
+    fn a_pinch_finger_does_not_also_swipe() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.set_2d("look", Action2dBinding::default());
+        map.set_gesture("look", Some(GestureKind::Swipe)).unwrap();
+        map.set_sensitivity("look", 0.5).unwrap();
+        input.set_touch_points(&[
+            point(1, 0.0, 0.0, TouchPhase::Began),
+            point(2, 80.0, 0.0, TouchPhase::Began),
+        ]);
+        input.begin_frame();
+        input.set_touch_points(&[
+            point(1, 0.0, 80.0, TouchPhase::Ended),
+            point(2, 80.0, 0.0, TouchPhase::Moved),
+        ]);
+        assert!(
+            !input
+                .gestures()
+                .iter()
+                .any(|gesture| matches!(gesture, Gesture::Swipe { .. })),
+            "a pinch finger must not arm a swipe, got {:?}",
+            input.gestures()
+        );
+        assert!(map.axis_2d(&input, "look").x.abs() < 1.0e-4);
+        assert!(map.axis_2d(&input, "look").y.abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn swipe_sensitivity_scales_before_the_clamp() {
+        let mut input = InputSystem::new();
+        let mut map = ActionMap::new();
+        map.set_2d("look", Action2dBinding::default());
+        map.set_gesture("look", Some(GestureKind::Swipe)).unwrap();
+        map.set_sensitivity("look", 0.5).unwrap();
+        input.set_touch_points(&[point(1, 0.0, 0.0, TouchPhase::Began)]);
+        input.begin_frame();
+        input.set_touch_points(&[point(1, 0.0, 80.0, TouchPhase::Ended)]);
+        let axis = map.axis_2d(&input, "look");
+        assert!(
+            (axis.y - 0.5).abs() < 1.0e-4,
+            "unit swipe times 0.5, got {axis:?}"
+        );
+        assert!(axis.x.abs() < 1.0e-4, "no sideways travel, got {axis:?}");
     }
 
     #[test]
