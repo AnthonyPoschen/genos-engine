@@ -563,6 +563,9 @@ const uint LIGHTING_WRC_RING_W = 10u;
 const float LIGHTING_KEEP_ALL = 1.0;
 const float LIGHTING_KEEP_NONE = 0.0;
 const float LIGHTING_LAMP_STILL = 1.0e-3;
+// A lamp range (color.w) change below this is the same lamp. The snapshot
+// note and the pending read share it, so they agree on the change frame.
+const float LIGHTING_LAMP_RANGE_EPS = 1.0e-3;
 const uint LIGHTING_WRC_SNAP_LAMPS = 128u;
 const uint LIGHTING_WRC_SNAP_AT = LIGHTING_SC_HIST_AT + 160u;
 const uint LIGHTING_WRC_CHG_AT = LIGHTING_SC_HIST_AT + 680u;
@@ -3778,7 +3781,7 @@ bool lighting_lamps_pending() {
         uint col = lighting_hash(floatBitsToUint(l.color.r) ^ lighting_hash(floatBitsToUint(l.color.g) ^ lighting_hash(floatBitsToUint(l.color.b)))) | 1u;
         bool moved = ckeys.key[LIGHTING_WRC_SNAP_COL_AT + i] != col
             || length(o - l.pos.xyz) > LIGHTING_LAMP_STILL
-            || abs(ow - l.color.w) > 1.0e-3;
+            || abs(ow - l.color.w) > LIGHTING_LAMP_RANGE_EPS;
         if (moved && (l.color.w > 0.0 || ow > 0.0)) {
             return true;
         }
@@ -3810,7 +3813,7 @@ void lighting_wrc_note_lamps() {
         // bound) the half step still undershot to 60 of 85 (R28 g5), the relit
         // cells gathering too little while the rest refill.
         float keep = in_place && new_max > LIGHTING_KEEP_NONE ? LIGHTING_KEEP_ALL : LIGHTING_KEEP_NONE;
-        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > LIGHTING_LAMP_STILL || abs(o.w - l.color.w) > 1.0e-3;
+        bool moved = fresh || recoloured || length(o.xyz - l.pos.xyz) > LIGHTING_LAMP_STILL || abs(o.w - l.color.w) > LIGHTING_LAMP_RANGE_EPS;
         // A lamp that went out (range to 0) is a change too: its light leaves.
         if (moved && (l.color.w > 0.0 || (!fresh && o.w > 0.0))) {
             vec3 a = fresh ? l.pos.xyz : o.xyz;
