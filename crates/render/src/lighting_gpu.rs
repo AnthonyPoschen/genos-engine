@@ -297,13 +297,6 @@ pub(crate) struct Lighting {
     meter_pipe: Handle,
     /// Compose with the scene image and bloom. The plain pipe stays free of them.
     compose_hdr_pipe: Handle,
-    /// #142: compose's surface-cache writes (claims, stamps, fills, seeds,
-    /// offers), dispatched over compose's blocks just before it. Null when the
-    /// kill switch keeps them in compose.
-    compose_maint_pipe: Handle,
-    /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
-    /// constant 0, writes compiled into compose and no maintenance pass.
-    compose_writes: bool,
     /// Sun compose with the scene image and bloom.
     sun_hdr_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
@@ -434,10 +427,6 @@ pub struct SettleStats {
 }
 
 impl Default for Lighting {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-    )]
     fn default() -> Self {
         Self {
             ready: false,
@@ -546,8 +535,6 @@ impl Default for Lighting {
             bloom_pipe: std::ptr::null_mut(),
             meter_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
-            compose_maint_pipe: std::ptr::null_mut(),
-            compose_writes: std::env::var("GENOS_COMPOSE_SC_WRITES").is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
@@ -806,19 +793,13 @@ impl Gpu {
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
-            // Pass 7 is compose: specialization constant 0 (#142 kill switch).
-            let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
+            // Pass 7 is compose. Specialization constant 0 is the surface-cache
+            // writes (claims, stamps, fills, seeds, offers). They stay in this
+            // one pipeline: a second "lighting compose maint" compile was the
+            // read-only split, and the startup gate counts ten lighting pipelines.
+            let spec = (k == 7).then_some(1u32);
             self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
-        }
-        if !self.lighting.compose_writes {
-            let start = Instant::now();
-            self.lighting.compose_maint_pipe = self.make_compute_pipe(
-                LIGHTING_COMPOSE_MAINT_SPV,
-                self.lighting.layout,
-                "lighting compose maint",
-            )?;
-            self.note_pipeline_time("lighting compose maint", start);
         }
         let start = Instant::now();
         self.lighting.atrous_plain = self.make_compute_pipe(
@@ -1490,7 +1471,7 @@ impl Gpu {
             LIGHTING_COMPOSE_HDR_SPV,
             self.lighting.layout,
             "lighting compose hdr",
-            Some(u32::from(self.lighting.compose_writes)),
+            Some(1u32),
         )?;
         self.note_pipeline_time("lighting compose hdr", start);
         Ok(())
@@ -3449,22 +3430,6 @@ impl Gpu {
                 } else {
                     self.lighting.pipes[pass]
                 };
-                if pass == 7 && !sun_compose && !self.lighting.compose_maint_pipe.is_null() {
-                    // #142: the cache writes compose used to make, over the same
-                    // pixels, before compose reads the cache (and clears the
-                    // G-buffer record this pass reads).
-                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.compose_maint_pipe);
-                    if compose_full {
-                        (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
-                    } else {
-                        (self.fns.cmd_dispatch_indirect)(
-                            self.cmd,
-                            self.lighting.cache_keys.buffer,
-                            lighting_compose_at() * 4,
-                        );
-                    }
-                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
-                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
@@ -3823,7 +3788,6 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.bloom_pipe))
                 .chain(std::iter::once(&mut self.lighting.meter_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
-                .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {

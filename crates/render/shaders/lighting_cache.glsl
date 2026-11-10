@@ -21,10 +21,9 @@
 // (w: cell size, 0 until claimed), irradiance (w: times relit, up to
 // LIGHTING_CACHE_MATURE; 0 unlit).
 
-// #142 read-only compose: LIGHTING_SC_WRITES false compiles the lookups with no
-// claims, stamps, seeds or fills (compose's pure lookup). Every other pass keeps
-// them. lighting_compose.comp sets it from specialization constant 0; its
-// GENOS_COMPOSE_MAINT compile does the writes just before compose.
+// Compose sets LIGHTING_SC_WRITES from specialization constant 0 (on). The
+// other passes leave it at this default, so they keep claims, stamps, seeds
+// and fills. There is no second maintenance compile of compose.
 #ifndef LIGHTING_SC_WRITES
 #define LIGHTING_SC_WRITES true
 #endif
@@ -3112,13 +3111,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     // as zero finished sets. Only the compose display path tallies.
     float unfilled_cov = 0.0;
     float unfilled_sets = 0.0;
-    // #142: the maintenance compile does the writes; compose (its read-only
-    // compile, or the kill switch's writing one) keeps the tally.
-#ifdef GENOS_COMPOSE_MAINT
-    bool tally = false;
-#else
+    // The display path tallies unfilled corners. Compose writes the cache
+    // itself (LIGHTING_SC_WRITES); there is no separate maintenance compile.
     bool tally = lighting_sc_display && mode == 3u && lighting_unfilled_count();
-#endif
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u)) + 0.5;
         vec3 q = pos + ta * (c.x * size - dot(pos, ta)) + tb * (c.y * size - dot(pos, tb));

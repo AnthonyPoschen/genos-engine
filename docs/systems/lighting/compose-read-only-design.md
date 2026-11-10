@@ -1,6 +1,6 @@
 # Read-only compose: removing the High quit stall (#142)
 
-Status: proposal for review. No shader code yet. Evidence: #142 comments 6550259859 and 6550314968, and `ge-4070-verify-28oct.md` (1 Nov, Tasks 4–5). Comment 6549812392's `sum += bil*v.rgb` trigger is superseded: the WORLD=1/2 stalls were flaky.
+Status: the separate maintenance pipeline was removed. Compose writes the surface cache again (specialization constant 0 on) so startup builds one compose pipeline. The NVIDIA compile cost this split was measured to avoid is open again.
 
 ## Problem
 

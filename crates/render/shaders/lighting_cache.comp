@@ -347,10 +347,15 @@ void main() {
                     // hints only nominate checks (lighting_compact.comp).
                     float lam = lighting_sc_lambda(slot);
                     k = (1.0 - lam) * k + lam;
-                    // Settling: the round's set whole here too. A-SVGF's lambda
-                    // ignored the hint, so a texel kept ~all its old light per
-                    // round and every WRC sample reading it drained ~2.5 %.
-                    if (hint >= 1.0) {
+                    // A converged texel has to drop a lamp that went out.
+                    // A-SVGF's lambda ignored the settle hint, so the texel
+                    // kept ~all its old light (~2.5 % a round) and the cells
+                    // that read it never drained (d3b8ebbb). Take this set
+                    // whole only once the young plain mean is over: under 16
+                    // sets, 1/(t+1) is already the least-noise estimate, and
+                    // one sample there is the cell blotch the hash wavelet
+                    // holds on a still floor.
+                    if (hint >= 1.0 && t >= 16.0) {
                         k = 1.0;
                     }
                 } else {
