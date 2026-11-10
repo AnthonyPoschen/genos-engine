@@ -7,6 +7,7 @@ set -euo pipefail
 packages=(
     build-essential pkg-config git
     glslc                                         # shaders (crates/render, crates/gpuref)
+    glslang-tools                                 # glslangValidator (crates/render/build.rs)
     libwayland-dev wayland-protocols libxkbcommon-dev  # crates/window
     libvulkan1 mesa-vulkan-drivers vulkan-tools   # lavapipe (software Vulkan)
     weston                                        # headless Wayland compositor

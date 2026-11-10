@@ -56,13 +56,16 @@ A settled true at frame 900 is a real settle on the last frame.
 ```sh
 genos-stress room-blotch grade --refs DIR --out ./genos-debug/room-blotch
 genos-stress room-blotch grade --refs DIR --out ./genos-debug/room-blotch --capture
+genos-stress room-blotch grade --refs DIR --out ./genos-debug/room-blotch --capture --sh-path on
 genos-stress room-blotch trace --pose room-a --threads 4 --out DIR [--promote DIR]
 genos-stress room-blotch trace --pose room-a --threads 4 --seconds 2400 --out DIR [--promote DIR]
 ```
 
 `--out` defaults to `./genos-debug/room-blotch`. It does not write under `$HOME`. `--refs` is required. Grade never writes a `.ref` and refuses a destination path that contains `reference-cache`. `--threads` wins over `GENOS_REFERENCE_THREADS`; when both are omitted the trace uses 4. `--seconds` is 900 or 2400. Omitted means 900 on grade and on trace. There is no environment variable for it, so a parent environment cannot change the stop. `--promote` copies only after the isolated file passes the same judge, including the same `--seconds`. `GENOS_REFERENCE_GPU=1` is refused.
 
-`--capture` runs one proof window at 640×360 with `--freeze-sun`, `--lighting-toggles cells_only`, and `--lighting-cache-async off`, then grades. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every deprecated `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, and `GENOS_COMPOSE_SC_WRITES`, then sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1`. A parent value in that set does not reach the child. `GENOS_COMPOSE_SC_WRITES` is included because the renderer reads it outside the lighting settings catalogue and it changes surface-cache compose writes. Names outside that set, such as `GENOS_GPU_TIMES` and `GENOS_SCENE_DELTA`, are left as the parent set them.
+`--capture` runs one proof window at 640×360 with `--freeze-sun`, `--lighting-toggles cells_only`, and `--lighting-cache-async off`, then grades. The child drops `GENOS_REFERENCE_GPU`, every `GENOS_LIGHTING_*` name, every deprecated `GENOS_GI2_*` alias, `GENOS_GI_DEBUG`, `GENOS_COMPOSE_SC_WRITES`, and `GENOS_RESTIR_DI`, then sets `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS=1`. A parent value in that set does not reach the child. `GENOS_COMPOSE_SC_WRITES` is included because the renderer reads it outside the lighting settings catalogue and it changes surface-cache compose writes. Names outside that set, such as `GENOS_GPU_TIMES` and `GENOS_SCENE_DELTA`, are left as the parent set them.
+
+`--sh-path on` is the ADR 0039 detail measurement. After the catalogue clear it also sets `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL=1`, `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT=1`, and `GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE=1`. Omitted and `--sh-path off` leave those three unset, so the preset default stays off. The argument does not change that default. The 0.014 gate is the same either way. The resolved settings files are the proof of which path the capture drew.
 
 The trace is one CPU analytic pass: 64 bounces, 320×180 shapes, noise 0.01, max 262144 spp, and the `--seconds` stop (900 unless the command says 2400). It refuses a dirty worktree so the sidecar commit matches the binary. An isolated file is reused only when it passes the judge for that same stop. A 900 sidecar does not pass a 2400 request, and a 2400 sidecar does not pass a 900 request. Reuse does not rewrite `seconds_budget_bits`. Noise above 0.01 stays unaccepted at either stop, including at 262144 spp.
 

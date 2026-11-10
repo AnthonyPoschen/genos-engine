@@ -2389,8 +2389,11 @@ fn run_case(
     let blotch = picture
         .blotch
         .map_or_else(|| "none".to_string(), |value| format!("{value:.3}"));
+    let resolved = host.renderer.lighting_settings();
+    let bounce_ratio = linger_share(picture.live_bounce, picture.ref_bounce)
+        .map_or_else(|err| err, |ratio| format!("{ratio:.4}"));
     let detail = format!(
-        "lit bounce denominator {} direct {:?} bounce n {} direct n {} cells live {} cells ref {} median {} median_lit {} fine {fine} blotch {blotch}",
+        "bounce {bounce_ratio} lit bounce denominator {} direct {:?} bounce n {} direct n {} cells live {} cells ref {} median {} median_lit {} fine {fine} blotch {blotch} sh_texel_detail {} sh_texel_ray_cut {} sh_probe_retire {}",
         picture.ref_bounce,
         direct_oracle(picture.live_direct, picture.ref_direct).ok(),
         picture.bounce_n,
@@ -2398,7 +2401,10 @@ fn run_case(
         cells.coarse.live,
         cells.coarse.reference,
         cells.coarse.median,
-        cells.coarse.median_lit
+        cells.coarse.median_lit,
+        u8::from(resolved.surface_cache.sh_texel_detail),
+        u8::from(resolved.surface_cache.sh_texel_ray_cut),
+        u8::from(resolved.surface_cache.sh_probe_retire),
     );
     keep(
         &artifacts,
