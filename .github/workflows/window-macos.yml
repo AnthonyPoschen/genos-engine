@@ -11,4 +11,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Cocoa window and GameController
-        run: cargo test -p genos-window -p genos-input --lib -- --test-threads=1
+        run: |
+          cargo test -p genos-window -p genos-input --lib -- --test-threads=1
+          cargo test -p genos-window --test cocoa_smoke

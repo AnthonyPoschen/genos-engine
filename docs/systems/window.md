@@ -39,7 +39,7 @@ The crate is `crates/window`, package `genos-window`.
 - The app lifecycle is in `src/lifecycle.rs`.
 - The Wayland seat, the pointer lock, and fullscreen are in `src/wayland_shim.c`.
 - The Win32 window, DPI awareness, pointer clip, and fullscreen are in `src/win32_shim.c`. `display` is the `HINSTANCE`. `surface` is the `HWND`.
-- The Cocoa window, the `CAMetalLayer`, and pointer capture are in `src/cocoa_shim.m`. `display` and `surface` are both the layer. The content size in points is the requested pixels divided by `backingScaleFactor`. Touch samples come from gesture and direct-touch events.
+- The Cocoa window, the `CAMetalLayer`, and pointer capture are in `src/cocoa_shim.m`. `display` and `surface` are both the layer. The content size in points is the requested pixels divided by `backingScaleFactor`. Touch samples come from gesture and direct-touch events. The smoke binary is `tests/cocoa_smoke.rs` with no libtest harness, so its `main` is the process main thread.
 - The touch log is in `src/touch_log.c`. Eight samples is the cap. A down stays when a move arrives in the same pump, and a lift is stored after it. A lift wins a slot over a move.
 
 ## App lifecycle
