@@ -2,9 +2,15 @@ name: lint
 
 # Repository variable GE_RUNNER=house selects the house runner. Any other
 # value, including an unset variable, keeps ubuntu-latest.
+#
+# push is only the long-lived bases. A pull-request branch already runs
+# these jobs on pull_request; a push of the same sha would start them again.
 on:
   pull_request:
   push:
+    branches:
+      - master
+      - lighting-v3
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
