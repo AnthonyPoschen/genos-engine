@@ -5,7 +5,7 @@
 //! window misses that ping. [`PUMP_BUDGET`] is the longest stretch this
 //! process allows between dispatches.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,12 @@ pub struct StallMeter {
     last_ns: AtomicU64,
     /// `f64::to_bits` of the longest gap in milliseconds.
     longest_bits: AtomicU64,
+    /// Longest stretch on the pump thread from the mark until the worker wait.
+    own_ns: AtomicU64,
+    /// How many times the pump thread waited on the worker.
+    waits: AtomicU32,
+    /// The timeout the pump thread requested for each wait.
+    slice_ns: AtomicU64,
 }
 
 impl StallMeter {
@@ -28,6 +34,9 @@ impl StallMeter {
             origin: Instant::now(),
             last_ns: AtomicU64::new(0),
             longest_bits: AtomicU64::new(0.0_f64.to_bits()),
+            own_ns: AtomicU64::new(0),
+            waits: AtomicU32::new(0),
+            slice_ns: AtomicU64::new(0),
         })
     }
 
@@ -70,6 +79,48 @@ impl StallMeter {
                 return;
             }
         }
+    }
+
+    #[cfg(test)]
+    fn pump_own(&self) -> Duration {
+        Duration::from_nanos(self.own_ns.load(Ordering::Relaxed))
+    }
+
+    #[cfg(test)]
+    fn pump_waits(&self) -> u32 {
+        self.waits.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn pump_slice(&self) -> Duration {
+        Duration::from_nanos(self.slice_ns.load(Ordering::Relaxed))
+    }
+
+    fn begin_pump(&self, slice: Duration) {
+        self.own_ns.store(0, Ordering::Relaxed);
+        self.waits.store(0, Ordering::Relaxed);
+        self.slice_ns.store(nanos_u64(slice), Ordering::Relaxed);
+    }
+
+    fn note_own(&self, spent: Duration) {
+        let next = nanos_u64(spent);
+        loop {
+            let current = self.own_ns.load(Ordering::Relaxed);
+            if next <= current {
+                return;
+            }
+            if self
+                .own_ns
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    fn note_wait(&self) {
+        self.waits.fetch_add(1, Ordering::Relaxed);
     }
 
     fn note_ms(&self, gap_ms: f64) {
@@ -261,11 +312,17 @@ pub fn run_pumped<T: Send + 'static>(
         return Err("scene load thread did not start".into());
     }
     let slice = slice_of(budget);
+    meter.begin_pump(slice);
     loop {
+        // Time this thread until the wait. A late wakeup inside the receive
+        // is not pump work.
+        let started = Instant::now();
         meter.mark();
         if pump() == PumpStep::Close {
             return Err("window closed during load".into());
         }
+        meter.note_own(started.elapsed());
+        meter.note_wait();
         match rx.recv_timeout(slice) {
             Ok(value) => {
                 meter.mark();
@@ -365,14 +422,61 @@ mod tests {
         .expect("load");
         assert_eq!(value, 7);
         assert!(started.elapsed() >= Duration::from_millis(300));
-        let gap = meter.longest_ms();
-        println!("MEASURE after_load_stall_ms={gap:.1}");
-        // The pump waits half the budget (50 ms) between marks. A quiet
-        // machine stays inside the 100 ms product budget. A shared macOS
-        // runner has come back from that wait at about 110–120 ms: the slice
-        // plus scheduling, not the 300 ms load. A load on this thread is one
-        // gap near that 300 ms. 250 ms is the line between those.
-        assert!(gap < 250.0, "load stalled the pump for {gap} ms");
+        let own = meter.pump_own();
+        let own_ms = own.as_secs_f64() * 1000.0;
+        println!(
+            "MEASURE pump_own_ms={own_ms:.1} waits={} slice_ms={:.1}",
+            meter.pump_waits(),
+            meter.pump_slice().as_secs_f64() * 1000.0
+        );
+        // `own` stops when the receive starts. A late wakeup inside that
+        // receive is not this thread's work. The seat budget stays 100 ms.
+        // An empty callback has nothing to spend, so 30 ms here is the load.
+        assert!(
+            pump_work_inside_budget(own),
+            "pump thread worked for {own:?}, budget is {PUMP_BUDGET:?}"
+        );
+        assert_eq!(meter.pump_slice(), PUMP_BUDGET / 2);
+        assert!(
+            meter.pump_waits() > 1,
+            "one wait covered the load ({})",
+            meter.pump_waits()
+        );
+    }
+
+    #[test]
+    fn a_load_on_the_pump_thread_fails_the_budget() {
+        for load_ms in [30_u64, 300] {
+            let meter = StallMeter::new();
+            let value = run_pumped(
+                &meter,
+                PUMP_BUDGET,
+                || {
+                    wait_ms(load_ms);
+                    PumpStep::Continue
+                },
+                || 7_u32,
+            )
+            .expect("load");
+            assert_eq!(value, 7);
+            let own = meter.pump_own();
+            let own_ms = own.as_secs_f64() * 1000.0;
+            println!("MEASURE pump_leak_ms={own_ms:.1} load_ms={load_ms}");
+            assert!(
+                own >= Duration::from_millis(load_ms),
+                "pump clock hid a {load_ms} ms load, got {own:?}"
+            );
+            assert!(
+                !pump_work_inside_budget(own),
+                "{load_ms} ms on the pump thread stayed inside the budget ({own:?})"
+            );
+        }
+    }
+
+    /// The pump thread's own time. The 100 ms seat budget still applies, and
+    /// 30 ms of work with the receive excluded is the load on this thread.
+    fn pump_work_inside_budget(own: Duration) -> bool {
+        own < PUMP_BUDGET && own < Duration::from_millis(30)
     }
 
     #[test]
