@@ -1,6 +1,15 @@
-#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::format_push_string,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 use crate::code::InputCode;
 use crate::device::Axis2d;
@@ -10,6 +19,19 @@ use crate::system::InputSystem;
 pub struct BoundInput {
     pub code: InputCode,
     pub activation_threshold: Option<f32>,
+    /// Scale applied after the stick deadzone. `1` leaves the value alone.
+    pub sensitivity: f32,
+}
+
+impl BoundInput {
+    #[must_use]
+    pub fn new(code: InputCode) -> Self {
+        Self {
+            code,
+            activation_threshold: None,
+            sensitivity: 1.0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -53,6 +75,193 @@ impl ActionMap {
         self.insert(name, ActionKind::Axis2d(binding));
     }
 
+    /// Replace the button bindings for `name`, or add the action.
+    pub fn rebind(&mut self, name: &str, codes: Vec<BoundInput>) {
+        self.set(name, codes);
+    }
+
+    /// Replace the axis bindings for `name`, or add the action.
+    pub fn rebind_2d(&mut self, name: &str, binding: Action2dBinding) {
+        self.set_2d(name, binding);
+    }
+
+    /// Replace one side of a 2D action. A missing action becomes a 2D action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `name` is a button action or `side` is unknown.
+    pub fn rebind_side(
+        &mut self,
+        name: &str,
+        side: &str,
+        codes: Vec<BoundInput>,
+    ) -> Result<(), String> {
+        if !self.actions.iter().any(|action| action.name == name) {
+            self.set_2d(name, Action2dBinding::default());
+        }
+        let action = self
+            .actions
+            .iter_mut()
+            .find(|action| action.name == name)
+            .ok_or_else(|| format!("unknown action {name}"))?;
+        let ActionKind::Axis2d(binding) = &mut action.kind else {
+            return Err(format!("{name} is a button action"));
+        };
+        let slot = match side {
+            "left" => &mut binding.left,
+            "right" => &mut binding.right,
+            "up" => &mut binding.up,
+            "down" => &mut binding.down,
+            "vectors" => &mut binding.vectors,
+            _ => return Err(format!("unknown axis side {side}")),
+        };
+        *slot = codes;
+        Ok(())
+    }
+
+    /// Set every binding on `name` to the same sensitivity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is missing or the value is not finite.
+    pub fn set_sensitivity(&mut self, name: &str, sensitivity: f32) -> Result<(), String> {
+        let sensitivity = finite_sensitivity(sensitivity)?;
+        let action = self
+            .actions
+            .iter_mut()
+            .find(|action| action.name == name)
+            .ok_or_else(|| format!("unknown action {name}"))?;
+        match &mut action.kind {
+            ActionKind::Codes(codes) => {
+                for code in codes {
+                    code.sensitivity = sensitivity;
+                }
+            }
+            ActionKind::Axis2d(binding) => {
+                for codes in [
+                    &mut binding.left,
+                    &mut binding.right,
+                    &mut binding.up,
+                    &mut binding.down,
+                    &mut binding.vectors,
+                ] {
+                    for code in codes {
+                        code.sensitivity = sensitivity;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Enable or disable one action. A disabled action reads as off.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is missing.
+    pub fn set_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        let action = self
+            .actions
+            .iter_mut()
+            .find(|action| action.name == name)
+            .ok_or_else(|| format!("unknown action {name}"))?;
+        action.enabled = enabled;
+        Ok(())
+    }
+
+    /// Overlay one settings key. A bare name replaces button bindings.
+    /// `move.left` replaces one axis side. `look.sensitivity` scales that action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown field, an unknown code, or a button action
+    /// used with an axis side.
+    pub fn set_key(&mut self, key: &str, value: &str) -> Result<(), String> {
+        let key = key.trim();
+        let value = value.trim();
+        if let Some((name, field)) = key.split_once('.') {
+            match field {
+                "sensitivity" => {
+                    let sensitivity = value
+                        .parse::<f32>()
+                        .map_err(|_| format!("sensitivity is a number, got {value}"))?;
+                    self.set_sensitivity(name, sensitivity)?;
+                }
+                "enabled" => self.set_enabled(name, parse_enabled(value)?)?,
+                "left" | "right" | "up" | "down" | "vectors" => {
+                    self.rebind_side(name, field, parse_code_list(value)?)?;
+                }
+                _ => return Err(format!("unknown action field {key}")),
+            }
+            return Ok(());
+        }
+        if value.is_empty() {
+            return Err(format!("{key} has no bindings"));
+        }
+        self.rebind(key, parse_code_list(value)?);
+        Ok(())
+    }
+
+    /// Settings lines for the actions. Scalars such as the deadzone live on
+    /// [`crate::InputSettings`].
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        for action in &self.actions {
+            match &action.kind {
+                ActionKind::Codes(codes) => {
+                    out.push_str(&format!("{}={}\n", action.name, format_code_list(codes)));
+                }
+                ActionKind::Axis2d(binding) => {
+                    for (side, codes) in [
+                        ("left", &binding.left),
+                        ("right", &binding.right),
+                        ("up", &binding.up),
+                        ("down", &binding.down),
+                        ("vectors", &binding.vectors),
+                    ] {
+                        out.push_str(&format!(
+                            "{}.{}={}\n",
+                            action.name,
+                            side,
+                            format_code_list(codes)
+                        ));
+                    }
+                }
+            }
+            if !action.enabled {
+                out.push_str(&format!("{}.enabled=0\n", action.name));
+            }
+        }
+        out
+    }
+
+    /// Build a map from settings lines. An empty text is an empty map.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first `set_key` error.
+    pub fn parse_text(text: &str) -> Result<Self, String> {
+        let mut map = Self::new();
+        for raw in text.split(['\n', ';']) {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("use key=value, got {line}"));
+            };
+            map.set_key(key, value)?;
+        }
+        Ok(map)
+    }
+
+    /// The settings lines. This is the probe for the bindings in force.
+    #[must_use]
+    pub fn dump(&self) -> String {
+        self.to_text()
+    }
+
     pub fn down(&self, input: &InputSystem, name: &str) -> bool {
         let Some(action) = self.find(name) else {
             return false;
@@ -79,8 +288,8 @@ impl ActionMap {
                 let mut out = Axis2d::default();
                 for bound in codes {
                     if let Some(value) = code_axis_2d(input, bound.code) {
-                        out.x += value.x;
-                        out.y += value.y;
+                        out.x += value.x * bound.sensitivity;
+                        out.y += value.y * bound.sensitivity;
                     }
                 }
                 clamp_axis(out)
@@ -138,11 +347,11 @@ impl ActionMap {
                 map.set_2d(
                     name,
                     Action2dBinding {
-                        left: codes_after(chunk, "\"left\":").unwrap_or_default(),
-                        right: codes_after(chunk, "\"right\":").unwrap_or_default(),
-                        up: codes_after(chunk, "\"up\":").unwrap_or_default(),
-                        down: codes_after(chunk, "\"down\":").unwrap_or_default(),
-                        vectors: codes_after(chunk, "\"vectors\":").unwrap_or_default(),
+                        left: codes_after(chunk, "\"left\":")?,
+                        right: codes_after(chunk, "\"right\":")?,
+                        up: codes_after(chunk, "\"up\":")?,
+                        down: codes_after(chunk, "\"down\":")?,
+                        vectors: codes_after(chunk, "\"vectors\":")?,
                     },
                 );
             }
@@ -200,33 +409,32 @@ pub fn character_controller() -> ActionMap {
 }
 
 fn bound(code: InputCode) -> BoundInput {
-    BoundInput {
-        code,
-        activation_threshold: None,
-    }
+    BoundInput::new(code)
 }
 
 fn eval_2d(input: &InputSystem, binding: &Action2dBinding) -> Axis2d {
     let mut out = Axis2d::default();
-    if binding.left.iter().any(|item| code_down(input, item.code)) {
-        out.x -= 1.0;
-    }
-    if binding.right.iter().any(|item| code_down(input, item.code)) {
-        out.x += 1.0;
-    }
-    if binding.up.iter().any(|item| code_down(input, item.code)) {
-        out.y += 1.0;
-    }
-    if binding.down.iter().any(|item| code_down(input, item.code)) {
-        out.y -= 1.0;
-    }
+    out.x -= direction_scale(&binding.left, input);
+    out.x += direction_scale(&binding.right, input);
+    out.y += direction_scale(&binding.up, input);
+    out.y -= direction_scale(&binding.down, input);
     for item in &binding.vectors {
         if let Some(value) = code_axis_2d(input, item.code) {
-            out.x += value.x;
-            out.y += value.y;
+            out.x += value.x * item.sensitivity;
+            out.y += value.y * item.sensitivity;
         }
     }
     clamp_axis(out)
+}
+
+/// The strongest pressed binding on this side. Nothing pressed is zero.
+fn direction_scale(items: &[BoundInput], input: &InputSystem) -> f32 {
+    items
+        .iter()
+        .filter(|item| code_down(input, item.code))
+        .map(|item| item.sensitivity)
+        .max_by(f32::total_cmp)
+        .unwrap_or(0.0)
 }
 
 fn code_down(input: &InputSystem, code: InputCode) -> bool {
@@ -263,10 +471,14 @@ fn write_codes(out: &mut String, codes: &[BoundInput]) {
         if index > 0 {
             out.push(',');
         }
-        out.push_str(&format!(
-            "{{\"code\":\"{}\"}}",
-            crate::code::name(code.code)
-        ));
+        out.push_str("{\"code\":\"");
+        out.push_str(crate::code::name(code.code));
+        out.push('"');
+        if (code.sensitivity - 1.0).abs() > 1.0e-4 {
+            out.push_str(",\"sensitivity\":");
+            out.push_str(&format_number(code.sensitivity));
+        }
+        out.push('}');
     }
 }
 
@@ -283,7 +495,70 @@ fn codes_after(chunk: &str, label: &str) -> Result<Vec<BoundInput>, String> {
             continue;
         }
         let code = crate::code::parse(name).ok_or_else(|| format!("unknown code {name}"))?;
-        codes.push(bound(code));
+        let mut item = bound(code);
+        if let Some(after) = part.split("\"sensitivity\":").nth(1) {
+            let number = after.split([',', '}']).next().unwrap_or("").trim();
+            item.sensitivity = number
+                .parse::<f32>()
+                .map_err(|_| format!("bad sensitivity {number}"))
+                .and_then(finite_sensitivity)?;
+        }
+        codes.push(item);
     }
     Ok(codes)
+}
+
+fn format_code_list(codes: &[BoundInput]) -> String {
+    let mut out = String::new();
+    for (index, code) in codes.iter().enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        out.push_str(crate::code::name(code.code));
+        if (code.sensitivity - 1.0).abs() > 1.0e-4 {
+            out.push('*');
+            out.push_str(&format_number(code.sensitivity));
+        }
+    }
+    out
+}
+
+fn parse_code_list(value: &str) -> Result<Vec<BoundInput>, String> {
+    let mut codes = Vec::new();
+    for token in value.split_whitespace() {
+        let (code_name, scale) = token
+            .split_once('*')
+            .map_or((token, None), |(name, scale)| (name, Some(scale)));
+        let code =
+            crate::code::parse(code_name).ok_or_else(|| format!("unknown code {code_name}"))?;
+        let mut item = bound(code);
+        if let Some(scale) = scale {
+            let sensitivity = scale
+                .parse::<f32>()
+                .map_err(|_| format!("bad sensitivity {scale}"))?;
+            item.sensitivity = finite_sensitivity(sensitivity)?;
+        }
+        codes.push(item);
+    }
+    Ok(codes)
+}
+
+fn parse_enabled(value: &str) -> Result<bool, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Ok(true),
+        "0" | "false" | "off" | "no" => Ok(false),
+        _ => Err(format!("enabled is on or off, got {value}")),
+    }
+}
+
+fn finite_sensitivity(value: f32) -> Result<f32, String> {
+    if !value.is_finite() {
+        return Err("sensitivity must be finite".into());
+    }
+    Ok(value.clamp(-8.0, 8.0))
+}
+
+pub(crate) fn format_number(value: f32) -> String {
+    let rounded = (value * 10_000.0).round() / 10_000.0;
+    format!("{rounded}")
 }

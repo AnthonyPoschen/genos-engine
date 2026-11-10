@@ -1,7 +1,28 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::bool_comparison, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::manual_assert_eq, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::bool_comparison,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::manual_assert_eq,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Pull-based input component.
 //!
@@ -12,13 +33,18 @@ mod action;
 mod bindings;
 mod code;
 mod device;
+mod settings;
 mod system;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
 pub use bindings::{debug_keys, Chord, KeyBindings};
 pub use code::{name, parse, InputCode};
-pub use device::{Axis2d, DeviceKind, DeviceView, DEFAULT_STICK_DEADZONE, FIRST_GAMEPAD_ID};
-pub use system::InputSystem;
+pub use device::{
+    glyph_set_from_name, Axis2d, DeviceKind, DeviceView, GlyphSet, DEFAULT_STICK_DEADZONE,
+    FIRST_GAMEPAD_ID,
+};
+pub use settings::InputSettings;
+pub use system::{DeviceChange, InputSystem};
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,19 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unused_self, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unused_self,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 use crate::code::InputCode;
 
@@ -12,6 +24,58 @@ pub const MAX_GAMEPAD_BUTTONS: usize = 32;
 pub const FIRST_GAMEPAD_ID: u32 = 100;
 pub const DEFAULT_STICK_DEADZONE: f32 = 0.08;
 pub const DEFAULT_ACTIVATION_THRESHOLD: f32 = 0.5;
+
+/// Picture family for the device the player is using.
+///
+/// The UI reads this from [`crate::InputSystem::active_glyphs`] and from a
+/// [`crate::DeviceChange`]. Names come from the gamepad's reported name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlyphSet {
+    KeyboardMouse,
+    Xbox,
+    PlayStation,
+    SteamDeck,
+    GenericGamepad,
+}
+
+impl GlyphSet {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::KeyboardMouse => "keyboard_mouse",
+            Self::Xbox => "xbox",
+            Self::PlayStation => "playstation",
+            Self::SteamDeck => "steam_deck",
+            Self::GenericGamepad => "generic_gamepad",
+        }
+    }
+}
+
+/// Classify a gamepad name. Steam Deck is checked before Xbox so a Deck that
+/// reports both still keeps Deck pictures. An Xbox-emulated Deck reports an
+/// Xbox name and gets Xbox pictures, which match that emulation.
+#[must_use]
+pub fn glyph_set_from_name(name: &str) -> GlyphSet {
+    let n = name.to_ascii_lowercase();
+    if n.contains("steam deck") || n.contains("steamdeck") || n.contains("jupiter") {
+        GlyphSet::SteamDeck
+    } else if n.contains("xbox")
+        || n.contains("x-box")
+        || n.contains("xinput")
+        || n.contains("microsoft")
+    {
+        GlyphSet::Xbox
+    } else if n.contains("dualshock")
+        || n.contains("dualsense")
+        || n.contains("playstation")
+        || n.contains("sony")
+        || n.contains("wireless controller")
+    {
+        GlyphSet::PlayStation
+    } else {
+        GlyphSet::GenericGamepad
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ButtonState {
@@ -172,6 +236,7 @@ pub struct GamepadDevice {
     pub left_stick_deadzone: f32,
     pub right_stick_deadzone: f32,
     pub activation_threshold: f32,
+    pub glyphs: GlyphSet,
 }
 
 impl GamepadDevice {
@@ -192,6 +257,7 @@ impl GamepadDevice {
             left_stick_deadzone: DEFAULT_STICK_DEADZONE,
             right_stick_deadzone: DEFAULT_STICK_DEADZONE,
             activation_threshold: DEFAULT_ACTIVATION_THRESHOLD,
+            glyphs: GlyphSet::GenericGamepad,
         }
     }
 
@@ -201,7 +267,16 @@ impl GamepadDevice {
 
     pub fn down(&self, code: InputCode) -> bool {
         if let Some(index) = gamepad_button_index(code) {
-            return self.buttons[index] == ButtonState::Down;
+            if self.buttons[index] == ButtonState::Down {
+                return true;
+            }
+            // Face and shoulder buttons are bits. Triggers are also an axis,
+            // and that axis still counts when the bit was not set.
+            return match code {
+                InputCode::gamepad_left_trigger => self.left_trigger >= self.activation_threshold,
+                InputCode::gamepad_right_trigger => self.right_trigger >= self.activation_threshold,
+                _ => false,
+            };
         }
         match code {
             InputCode::gamepad_left_stick_up => self.left_stick.y >= self.activation_threshold,
@@ -212,8 +287,6 @@ impl GamepadDevice {
             InputCode::gamepad_right_stick_down => self.right_stick.y <= -self.activation_threshold,
             InputCode::gamepad_right_stick_left => self.right_stick.x <= -self.activation_threshold,
             InputCode::gamepad_right_stick_right => self.right_stick.x >= self.activation_threshold,
-            InputCode::gamepad_left_trigger => self.left_trigger >= self.activation_threshold,
-            InputCode::gamepad_right_trigger => self.right_trigger >= self.activation_threshold,
             _ => false,
         }
     }

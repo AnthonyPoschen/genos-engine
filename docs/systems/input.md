@@ -16,9 +16,21 @@ One keyboard, one mouse, and stable gamepad slots stay. A disconnected pad keeps
 
 The stick deadzone is per axis. The default is `DEFAULT_STICK_DEADZONE` (`0.08`). A value inside the deadzone becomes zero. A larger tilt stays unchanged. A full tilt still reaches `1`. `InputSystem::set_stick_deadzone` sets every slot. `GamepadDevice::set_stick_deadzone` sets one stick. The connected pad rests near `0.07` on an axis, so `0.06` still let that rest through.
 
-Linux reads `/dev/input/jsN`. The first poll opens each present device and keeps that file. A later poll reads new events from the open file.
+A binding has a sensitivity. The default is `1`. The deadzone runs first, then the sensitivity scales what is left. `2` on a half tilt reaches `1`. The result is still clamped to `-1..=1`. `InputSettings` key `mouse_sensitivity` scales `add_mouse_delta`. The default is `1`.
 
-Axis 0 and axis 1 are the left stick. Axis 3 and axis 4 are the right stick. The Y axis is negated. Axis 2 and axis 5 are triggers. The character map does not use the triggers.
+Linux reads `/dev/input/jsN`. The first poll opens each present device and keeps that file. A later poll reads new events from the open file. `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` are the writes a platform uses. The Linux poll is one caller of those writes.
+
+Axis 0 and axis 1 are the left stick. Axis 3 and axis 4 are the right stick. The Y axis is negated. Axis 2 and axis 5 are triggers that rest at `-1` and reach `1`; that range is stored as `0..=1`. Button numbers `0` to `10` are south, east, west, north, the shoulders, select, start, home, and the stick clicks. Axis 6 and axis 7 are the d-pad. The character map does not use the triggers.
+
+The picture family is a glyph set: keyboard and mouse, Xbox, PlayStation, Steam Deck, or a generic gamepad. The name on the slot picks the family. `Steam Deck` is checked before Xbox. A Deck that reports an Xbox name gets Xbox pictures, because that is the device it is emulating. `active_glyphs` is the family to draw. `take_device_changes` returns connections and family changes since the last take. A tilt inside the deadzone does not change the family. Disconnecting the active pad selects another connected pad, or the keyboard.
+
+`InputSettings` is the settings value. `to_text` and `parse` round-trip it. `set_key` overlays one line. `save` and `load` read that text from a file. A file that starts with `{` is the action-map JSON. `stick_deadzone` and `mouse_sensitivity` are keys. An action name replaces button bindings (`release=key_b mouse_right`). `move.left` replaces one side. `code*2` sets that binding's sensitivity. `look.sensitivity` sets every binding on that action. `dump` on the settings and on `InputSystem` is the probe.
+
+Replicated state: none. Bindings are local settings. Device state is not replicated.
+Authority: the local runtime owns the devices.
+Prediction / rollback: none. The pull is the current frame.
+Determinism: action evaluation is a pure function of the device state and the map. The Linux poll is not deterministic.
+Headless server: the map and the settings file load with no devices. `poll_gamepads` finds nothing and leaves the slots disconnected.
 
 The input crate does not depend on the window or the renderer.
 
@@ -26,27 +38,29 @@ The input crate does not depend on the window or the renderer.
 
 The crate is `crates/input`, package `genos-input`.
 
-- `InputSystem` in `src/system.rs` owns the devices and the gamepad poll.
+- `InputSystem` in `src/system.rs` owns the devices, the gamepad poll, and the glyph-set changes.
 - `InputCode` in `src/code.rs` owns the names and the values.
-- `character_controller` in `src/action.rs` owns the first action map.
-- `GamepadDevice` in `src/device.rs` owns the stick deadzone.
+- `character_controller` in `src/action.rs` owns the first action map. `InputSettings` in `src/settings.rs` owns the settings file.
+- `GamepadDevice` in `src/device.rs` owns the stick deadzone. `glyph_set_from_name` owns the picture family.
 
 ## Game use
 
 Call `character_controller()` for the first player. The map has these actions:
 
 - `move` reads `WASD`, `IJKL`, and the left stick.
-- `look` reads mouse motion and the right stick.
+- `look` reads the right stick. Mouse motion stays on `MouseDevice` (`mouse.dx`, `mouse.dy`), scaled by `mouse_sensitivity`.
 - `capture` reads the left mouse button.
 - `release` reads Escape.
 
-Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone before the poll that must use the new value.
+Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone before the poll that must use the new value. Rebind with `rebind`, `rebind_2d`, or `InputSettings::set_key`, then `save`. Read `active_glyphs` after `take_device_changes` when the pictures should follow the device.
 
 ## Limits
 
-Windows, macOS, and X11 device reads are not in this crate yet. The behavior source for those reads is `input-zig`, listed in [Architecture](../architecture.md).
+Windows, macOS, and X11 device reads are not in this crate yet. The behavior source for those reads is `input-zig`, listed in [Architecture](../architecture.md). Those platforms call `set_key`, `add_mouse_delta`, and `connect_gamepad`. They do not grow a second map.
 
-The action map does not load a player-authored JSON file at runtime yet. `to_json` and the parser exist for the map shape.
+Touch is not a device. `input-zig` has no touch code, and this crate does not add one.
+
+`gilrs` is not a dependency. [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps the joystick read in this crate.
 
 `KeyBindings` names the debug keys. `builtin` is grave or F1 for the menu, F or F3 for the frame-rate plate, U or F8 for the unfilled count, and shift-U or shift-F8 for the tint. `tab_next` is `]`. `tab_prev` is `[`. `tab_focus_next` is Tab and `tab_focus_prev` is shift-Tab, for when the pointer is over the menu. The first key is the one a board without function keys uses. `apply_text` replaces chords from `action key [key...]` lines. `+key_u` means shift. `debug_keys` reads `GENOS_DEBUG_KEYS` when that path is set, then those lines win. A game calls `pressed` with the action name. It does not test `key_f1` itself.
 
