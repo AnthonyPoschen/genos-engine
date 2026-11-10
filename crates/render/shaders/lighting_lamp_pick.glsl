@@ -1,29 +1,28 @@
 // Weighted point-lamp picking for the direct shade loop (lighting_direct.comp).
 //
-// The sun is not a sample. Point lamps and the flame use Talbot, Cline, and
-// Egbert, EGSR 2005: systematic samples along the unshadowed prefix. Unbiased
-// pixel reuse combines reservoirs with pairwise MIS (Bitterli et al. 2022;
-// Wyman, SIGGRAPH 2023). The Jacobian is 1 (point lamps). The biased path is
-// Bitterli et al. 2020 section 3 plus the M clamp, not Algorithm 6. This file
-// does not trace. The shade loop's one trace_occluded is the only shadow ray.
+// Production screen pixels are the C1-C5 ReSTIR sample, not this file.
+// The sun is not a sample. Hits use Talbot, Cline, and Egbert, EGSR 2005:
+// systematic samples along the unshadowed prefix. The noise gate's random
+// path draws fresh candidates here and does not merge a neighbour. The
+// labelled exact sum walks every point lamp. This file does not trace.
+// The shade loop's one trace_occluded is the only shadow ray.
 //
-// Low keeps one reservoir (temporal only, radius 0). Medium and High keep
-// the current and previous slots. Each slot is two uvec4s: the reservoir, then
-// depth along that frame's forward, the packed normal, the record kind, and
-// the shaded direct (rgb9e5). Kind 2 is the exact sum, kind 1 a trusted copy
-// of one, kind 0 a ReSTIR sample. The high 8 bits of `m` are the hold count;
-// the merge reads the low 24 bits. Deviations from the papers are listed in
-// docs/systems/lighting/README.md. The CPU twin is crates/render/src/lamp_pick.rs.
+// Each slot is two uvec4s: the reservoir, then depth along that frame's
+// forward, the packed normal, the record kind, and the shaded direct.
+// Kind 2 is the exact sum, kind 0 a noise-gate sample, kind 3 the stored
+// ReSTIR mean. The high 8 bits of `m` are the hold count. Deviations from
+// the papers are listed in docs/systems/lighting/README.md. The CPU twin
+// of the checker merge stays in crates/render/src/lamp_pick.rs.
 
 // A settled exact record carries this in the high 8 bits of `m`, so the next
 // quiet held frame takes the S78J early-out. Matches LAMP_PICK_HOLD_FRAMES.
 const uint LIGHTING_DIRECT_HOLD = 32u;
-// At this many positive point lamps, or fewer, a pixel shades the sum. Above
-// it, one visibility sample is cheaper than the sum. Matches EXACT_LIT_LAMPS.
+// At this many positive point lamps, or fewer, the noise-gate reuse row
+// shades the sum. Production pixels do not: they take the ReSTIR sample.
+// Matches EXACT_LIT_LAMPS.
 const uint LAMP_PICK_EXACT_LIT = 8u;
 // Record kind in the geo word. A cleared slot is all ones, which is neither.
 const uint LAMP_GEO_RESTIR = 0u;
-const uint LAMP_GEO_COPY = 1u;
 const uint LAMP_GEO_EXACT = 2u;
 // Diagnostic mean of a ReSTIR DI sample. Not the colour on screen.
 const uint LAMP_GEO_RESTIR_MEAN = 3u;
@@ -100,7 +99,9 @@ bool lamp_pick_diag() {
 }
 
 // The noise gate sets this so a still view keeps tracing the random path.
-// Production leaves it clear: a quiet held view shades the exact sum and holds.
+// Production leaves it clear and does not take this hold: a restir product
+// pixel shades the reservoir on a quiet frame. Bit 19 skips this signature
+// hold so a failed prepare shades the labelled exact sum.
 bool lamp_pick_hold_off() {
     return ((pc.lamp.y >> 18u) & 1u) != 0u;
 }
@@ -216,158 +217,6 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     return true;
-}
-
-uint lamp_pick_find(LampList list, uint count, uint lamp) {
-    if (lamp == LAMP_ALL) {
-        return ~0u;
-    }
-    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
-            break;
-        }
-        if (lamp_list_index(list, k) == lamp) {
-            return k;
-        }
-    }
-    return ~0u;
-}
-
-float lamp_pick_phat(LampList list, uint count, uint lamp, vec3 origin, vec3 nrm, bool two_sided) {
-    uint k = lamp_pick_find(list, count, lamp);
-    if (k == ~0u) {
-        return 0.0;
-    }
-    vec3 target;
-    vec3 light = lamp_light(lamp_list_get(list, k), origin, nrm, two_sided, target);
-    return light.r + light.g + light.b;
-}
-
-// phat_q_* is the unshadowed luminance at the current pixel. phat_hist_* is
-// that luminance at the reservoir's source pixel. Same-pixel history passes
-// the same pair twice.
-LampReservoir lamp_pick_merge(
-    LampReservoir canonical,
-    LampReservoir history,
-    float phat_q_can,
-    float phat_q_hist,
-    float phat_hist_can,
-    float phat_hist_hist,
-    bool unbiased,
-    uint history_cap,
-    float u
-) {
-    canonical.m = lamp_res_samples(canonical);
-    history.m = lamp_res_samples(history);
-    if (canonical.m == 0u || canonical.lamp == LAMP_ALL) {
-        if (history.m == 0u) {
-            return lamp_res_empty();
-        }
-        return history;
-    }
-    uint hist_m = history.m;
-    if (!unbiased) {
-        hist_m = min(history.m, max(history_cap, 1u));
-    }
-    float phat_can = max(phat_q_can, 0.0);
-    float phat_h = 0.0;
-    if (history.lamp != LAMP_ALL) {
-        phat_h = max(phat_q_hist, 0.0);
-    }
-    float w_can = 0.0;
-    if (canonical.target > 0.0 && phat_can > 0.0) {
-        w_can = canonical.w_sum * phat_can / canonical.target;
-    }
-    float w_hist = 0.0;
-    if (hist_m > 0u && history.target > 0.0 && phat_h > 0.0) {
-        float clamped = float(hist_m) / float(max(history.m, 1u));
-        w_hist = history.w_sum * phat_h / history.target * clamped;
-    }
-    float wsum = 0.0;
-    uint lamp = LAMP_ALL;
-    float target = 0.0;
-    if (w_can > 0.0) {
-        wsum = w_can;
-        lamp = canonical.lamp;
-        target = phat_can;
-    }
-    if (w_hist > 0.0) {
-        wsum += w_hist;
-        if (wsum > 0.0 && u < w_hist / wsum) {
-            lamp = history.lamp;
-            target = phat_h;
-        }
-    }
-    if (lamp == LAMP_ALL || target <= 0.0) {
-        return lamp_res_empty();
-    }
-    bool selected_can = lamp == canonical.lamp;
-    float phat_q_sel = selected_can ? phat_can : phat_h;
-    float phat_hist_sel = selected_can ? phat_hist_can : phat_hist_hist;
-    bool can_counts = canonical.m > 0u && phat_q_sel > 0.0;
-    bool hist_counts = hist_m > 0u && phat_hist_sel > 0.0;
-    uint z = unbiased
-        ? canonical.m * uint(can_counts) + hist_m * uint(hist_counts)
-        : canonical.m + hist_m;
-    if (z == 0u) {
-        z = 1u;
-    }
-    uint m_out = min(canonical.m + hist_m, 0x00ffffffu);
-    LampReservoir outr;
-    outr.lamp = lamp;
-    outr.w_sum = float(m_out) * wsum / float(z);
-    outr.m = m_out;
-    outr.target = target;
-    return outr;
-}
-
-// Pairwise MIS. J = 1. Identical domains with the same W keep W.
-// phat_q_* is the unshadowed luminance at the current pixel.
-// phat_hist_* is that luminance at the history pixel.
-LampReservoir lamp_pick_pairwise(
-    LampReservoir canonical,
-    LampReservoir history,
-    float phat_q_can,
-    float phat_q_hist,
-    float phat_hist_can,
-    float phat_hist_hist,
-    float u
-) {
-    canonical.m = lamp_res_samples(canonical);
-    history.m = lamp_res_samples(history);
-    if (canonical.m == 0u || canonical.lamp == LAMP_ALL) {
-        if (history.m == 0u) {
-            return lamp_res_empty();
-        }
-        return history;
-    }
-    float mass_c = float(canonical.m) * lamp_res_w(canonical) * max(phat_q_can, 0.0);
-    float mass_h = 0.0;
-    if (history.m > 0u && history.lamp != LAMP_ALL) {
-        mass_h = float(history.m) * lamp_res_w(history) * max(phat_q_hist, 0.0);
-    }
-    float area = mass_c + mass_h;
-    if (area <= 0.0) {
-        return lamp_res_empty();
-    }
-    bool pick_h = mass_h > 0.0 && u < mass_h / area;
-    float phat_q_sel = pick_h ? max(phat_q_hist, 0.0) : max(phat_q_can, 0.0);
-    float phat_src = pick_h ? max(phat_hist_hist, 0.0) : max(phat_q_can, 0.0);
-    float phat_other = pick_h ? max(phat_q_hist, 0.0) : max(phat_hist_can, 0.0);
-    uint m_sel = pick_h ? history.m : canonical.m;
-    uint m_other = pick_h ? canonical.m : history.m;
-    float denom = float(m_sel) * phat_src + float(m_other) * phat_other;
-    if (phat_q_sel <= 0.0 || phat_src <= 0.0 || denom <= 0.0) {
-        return lamp_res_empty();
-    }
-    float w_new = area * phat_src / (phat_q_sel * denom);
-    uint m_out = min(canonical.m + history.m, 0x00ffffffu);
-    LampReservoir outr;
-    outr.lamp = pick_h ? history.lamp : canonical.lamp;
-    outr.w_sum = w_new * float(m_out) * phat_q_sel;
-    outr.m = m_out;
-    outr.target = phat_q_sel;
-    return outr;
 }
 
 // Unshadowed point lamps and the flame. Suns stay out of this sum.

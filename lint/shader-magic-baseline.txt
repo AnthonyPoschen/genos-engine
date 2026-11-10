@@ -12,7 +12,7 @@ crates/render/shaders/lighting_check.comp 4
 crates/render/shaders/lighting_common.glsl 46
 crates/render/shaders/lighting_compact.comp 41
 crates/render/shaders/lighting_compose.comp 35
-crates/render/shaders/lighting_direct.comp 42
+crates/render/shaders/lighting_direct.comp 38
 crates/render/shaders/lighting_filter.comp 10
 crates/render/shaders/lighting_gather.comp 27
 crates/render/shaders/lighting_lamp_pick.glsl 5

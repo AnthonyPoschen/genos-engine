@@ -3,7 +3,8 @@
 
 //! Live ReSTIR DI (ADR 0022 stage C5) against brute direct on the gate scenes.
 //!
-//! The flag stays off for every other test. This file turns it on and grades
+//! The brute rows keep `restir_di` off, which is the labelled exact sum.
+//! This file turns it on and grades
 //! `ref_err_near` the way `docs/systems/lighting/restir-di-plan.md` defines it:
 //! `sum(w |Y-Yref|) / sum(w Yref)` with `w = 1 / max(distance, 0.5)`.
 
@@ -31,6 +32,10 @@ fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Render
 }
 
 fn direct_settings(restir: bool) -> LightingSettings {
+    direct_neighbors(restir, 4)
+}
+
+fn direct_neighbors(restir: bool, neighbors: u32) -> LightingSettings {
     let mut settings = LightingSettings::preset(LightingPreset::Potato);
     settings.direct.max_lights = 0;
     settings.direct.refresh_frames = 1;
@@ -46,6 +51,7 @@ fn direct_settings(restir: bool) -> LightingSettings {
     settings.lamp_pick.radius = 0;
     settings.compose_reuse = false;
     settings.restir_di = restir;
+    settings.restir_spatial_neighbors = neighbors;
     settings
 }
 
@@ -185,11 +191,11 @@ fn settle(
     renderer: &mut Renderer,
     world: &World,
     camera: &Camera,
-    restir: bool,
+    settings: LightingSettings,
     warmup: u32,
     average: u32,
 ) -> (Vec<f64>, Vec<f64>) {
-    renderer.set_lighting_settings(direct_settings(restir));
+    renderer.set_lighting_settings(settings);
     renderer.set_debug_view(DebugView {
         mode: ViewMode::Direct,
         lamp: 0,
@@ -223,14 +229,20 @@ fn assert_flag_off(window: &mut Window, renderer: &mut Renderer, world: &World, 
     );
 }
 
-fn assert_gate(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
-    let (brute, distance) = settle(window, renderer, world, camera, false, 2, 1);
+fn assert_gate(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &World,
+    camera: &Camera,
+    neighbors: u32,
+) {
+    let (brute, distance) = settle(window, renderer, world, camera, direct_neighbors(false, neighbors), 2, 1);
     assert!(
         image_mean(&brute) > 1.0e-3,
         "the gate floor is lit, mean {}",
         image_mean(&brute)
     );
-    let (live, _) = settle(window, renderer, world, camera, true, WARMUP, GATE_AVG);
+    let (live, _) = settle(window, renderer, world, camera, direct_neighbors(true, neighbors), WARMUP, GATE_AVG);
     let gate_err = ref_err_near(&live, &brute, &distance);
     assert!(
         gate_err <= REF_ERR,
@@ -238,7 +250,13 @@ fn assert_gate(window: &mut Window, renderer: &mut Renderer, world: &World, came
     );
     assert!(
         names_have_restir(renderer),
-        "the flag-on frame builds restir-di and restir-direct"
+        "the flag-on frame builds restir-di, restir-spatial, restir-spatial-wide, and restir-direct"
+    );
+    let bound = renderer.restir_spatial_bound();
+    let expect_bound = if neighbors > 4 { 2 } else { 1 };
+    assert_eq!(
+        bound, expect_bound,
+        "neighbours {neighbors} must bind the matching spatial pipeline"
     );
     let still_a = grab(window, renderer, world, camera);
     let still_b = grab(window, renderer, world, camera);
@@ -250,8 +268,8 @@ fn assert_gate(window: &mut Window, renderer: &mut Renderer, world: &World, came
 }
 
 fn assert_shadow(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
-    let (shadow_brute, shadow_distance) = settle(window, renderer, world, camera, false, 2, 1);
-    let (shadow_live, _) = settle(window, renderer, world, camera, true, WARMUP, SHADOW_AVG);
+    let (shadow_brute, shadow_distance) = settle(window, renderer, world, camera, direct_settings(false), 2, 1);
+    let (shadow_live, _) = settle(window, renderer, world, camera, direct_settings(true), WARMUP, SHADOW_AVG);
     let shadow_err = ref_err_near(&shadow_live, &shadow_brute, &shadow_distance);
     assert!(
         shadow_err <= REF_ERR,
@@ -261,7 +279,7 @@ fn assert_shadow(window: &mut Window, renderer: &mut Renderer, world: &World, ca
 
 fn assert_turn(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
     let turned = pose(2.2, 2.4, 0.55);
-    let (turned_brute, turned_distance) = settle(window, renderer, world, &turned, false, 2, 1);
+    let (turned_brute, turned_distance) = settle(window, renderer, world, &turned, direct_settings(false), 2, 1);
     renderer.set_lighting_settings(direct_settings(true));
     let before = luma_image(&grab(window, renderer, world, camera).rgb);
     for _ in 0..WARMUP {
@@ -274,12 +292,46 @@ fn assert_turn(window: &mut Window, renderer: &mut Renderer, world: &World, came
         immediate < stuck * 0.75,
         "the turn kept the old picture: first {immediate:.4}, old-versus-new {stuck:.4}"
     );
-    let (settled, _) = settle(window, renderer, world, &turned, true, WARMUP, GATE_AVG);
+    let (settled, _) = settle(window, renderer, world, &turned, direct_settings(true), WARMUP, GATE_AVG);
     let turned_err = ref_err_near(&settled, &turned_brute, &turned_distance);
     assert!(
         turned_err <= REF_ERR,
         "turned ref_err_near {turned_err:.4} above {REF_ERR}"
     );
+}
+
+fn one_gate_picture() -> Vec<f64> {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let gate = world_from(&RestirScene::gate(), false);
+    let camera = pose(0.0, 4.0, 0.0);
+    renderer.set_lighting_settings(direct_settings(true));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let mut last = Vec::new();
+    for _ in 0..6 {
+        last = luma_image(&grab(window, renderer, &gate, &camera).rgb);
+    }
+    last
+}
+
+/// Two fresh renders of the same frames. A store/load race that lavapipe runs
+/// in order still has to match here; the 4070 is where that race used to move
+/// the picture between runs.
+#[test]
+fn the_same_seed_renders_the_same_picture_twice() {
+    let first = one_gate_picture();
+    let second = one_gate_picture();
+    assert_eq!(first.len(), second.len());
+    for (i, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "pixel {i} changed between identical runs: {a} then {b}"
+        );
+    }
 }
 
 #[test]
@@ -290,14 +342,30 @@ fn restir_di_matches_brute_direct_on_the_gate_scenes() {
     let gate = world_from(&RestirScene::gate(), false);
     let camera = pose(0.0, 4.0, 0.0);
     assert_flag_off(window, renderer, &gate, &camera);
-    assert_gate(window, renderer, &gate, &camera);
+    assert_gate(window, renderer, &gate, &camera, 4);
     let shadow = world_from(&RestirScene::shadow(), true);
     assert_shadow(window, renderer, &shadow, &camera);
     assert_turn(window, renderer, &shadow, &camera);
 }
 
+#[path = "support/restir_merge_oracle.rs"]
+mod restir_merge_oracle;
+
+/// The wide pipeline, on its own renderer so its history does not leak into the
+/// four-neighbour shadow row.
+#[test]
+fn restir_di_matches_brute_with_eight_spatial_neighbours() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let gate = world_from(&RestirScene::gate(), false);
+    let camera = pose(0.0, 4.0, 0.0);
+    assert_gate(window, renderer, &gate, &camera, 8);
+}
+
 fn names_have_restir(renderer: &Renderer) -> bool {
     let times = renderer.pipeline_times();
-    times.iter().any(|(name, _)| name == "restir-di")
-        && times.iter().any(|(name, _)| name == "restir-direct")
+    ["restir-di", "restir-spatial", "restir-spatial-wide", "restir-direct"]
+        .iter()
+        .all(|name| times.iter().any(|(built, _)| built == name))
 }

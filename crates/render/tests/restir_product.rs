@@ -159,24 +159,30 @@ fn assert_quiet(counts: &LampPickCounts, what: &str) {
 }
 
 fn assert_flag_off(window: &mut Window, renderer: &mut Renderer, camera: &Camera) {
-    let dark = hall(0);
+    let lit = hall(4);
     renderer.set_lighting_settings(product(false));
-    draw(window, renderer, &dark, camera);
+    draw(window, renderer, &lit, camera);
+    let turned = pose(0.35);
+    draw(window, renderer, &lit, &turned);
     let off = names(renderer);
     assert!(
         off.iter().all(|name| !name.contains("restir")),
-        "flag off built a ReSTIR pipeline: {off:?}"
+        "the exact reference built a ReSTIR pipeline: {off:?}"
     );
     let off_counts = renderer.lighting_lamp_pick_counts();
+    assert!(
+        off_counts.exact > 0,
+        "restir_di off did not shade the exact sum ({off_counts:?})"
+    );
     assert_eq!(
         (
-            off_counts.exact,
+            off_counts.restir,
             off_counts.restir_point_adds,
             off_counts.history_accepts,
             off_counts.history_rejects
         ),
         (0, 0, 0, 0),
-        "flag off counted a ReSTIR shade ({off_counts:?})"
+        "restir_di off counted a ReSTIR shade ({off_counts:?})"
     );
 }
 
@@ -364,7 +370,8 @@ fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, 
     );
 }
 
-/// Flag off builds no ReSTIR pipeline. Flag on, product shade, every lamp
+/// `restir_di` off is the labelled exact sum and builds no ReSTIR pipeline.
+/// Flag on, product shade, every lamp
 /// count leaves `exact` at 0 and adds no near point lamp in the direct loop.
 /// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
 /// sample. The labelled exact gate still sums and does not take that loop.
@@ -394,4 +401,183 @@ fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     let mismatch = assert_lift(window, renderer, &lit, &still, &held);
     assert_wall(window, renderer, &mismatch);
     assert_exact_gate(window, renderer, &lit, &still);
+}
+
+/// GI on and probes on, so the quiet-view hold is armed. Rays stay small.
+fn quiet_restir(mode: LampPickMode) -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::Gi1Bounce);
+    settings.lamp_pick.mode = mode;
+    settings.probes.rays = 4;
+    settings.sky = false;
+    settings.ambient.mode = AmbientMode::Off;
+    settings.denoiser.enabled = false;
+    settings.prefill = false;
+    settings.restir_di = true;
+    settings.direct.max_lights = 4;
+    settings
+}
+
+/// `gi-1bounce` is mode Hits. A quiet frame used to return before the reservoir.
+#[test]
+fn gi_1bounce_quiet_frames_read_the_reservoir() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));
+    draw(window, renderer, &world, &camera);
+    let first = renderer.lighting_lamp_pick_counts();
+    assert!(
+        first.restir > 0,
+        "the first gi-1bounce frame did not read the reservoir ({first:?})"
+    );
+    draw(window, renderer, &world, &camera);
+    draw(window, renderer, &world, &camera);
+    let quiet = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "gi-1bounce quiet exact {} restir {}",
+        quiet.exact, quiet.restir
+    );
+    assert_eq!(
+        quiet.exact, 0,
+        "a quiet gi-1bounce frame shaded the exact sum ({quiet:?})"
+    );
+    assert!(
+        quiet.restir > 0,
+        "a quiet gi-1bounce frame skipped the reservoir ({quiet:?})"
+    );
+}
+
+/// A forced prepare failure is the labelled exact sum. The next reservoir
+/// frame does not keep that hold. Mode hits used to return the previous
+/// reservoir colour from the quiet-view hold once bit 21 was clear.
+#[test]
+fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    // GI and probes arm the hold. Reuse writes the exact counter. Hits does
+    // not: the full walk is the ray count, which the hold would leave at 0.
+    for mode in [LampPickMode::Reuse, LampPickMode::Hits] {
+        renderer.force_restir_prepare_failure(false);
+        renderer.set_lighting_settings(quiet_restir(mode));
+        draw(window, renderer, &world, &camera);
+        draw(window, renderer, &world, &camera);
+        let live = renderer.lighting_lamp_pick_counts();
+        let failures = renderer.lighting_restir_prepare_failures();
+        assert!(
+            live.restir > 0,
+            "{mode:?} did not shade the reservoir ({live:?})"
+        );
+        renderer.force_restir_prepare_failure(true);
+        draw(window, renderer, &world, &camera);
+        let failed = renderer.lighting_lamp_pick_counts();
+        eprintln!(
+            "restir prepare fail {mode:?} rays {} exact {} restir {} failures {}",
+            failed.pixels,
+            failed.exact,
+            failed.restir,
+            renderer.lighting_restir_prepare_failures()
+        );
+        assert!(
+            renderer.lighting_restir_prepare_failures() > failures,
+            "{mode:?} did not count the forced failure"
+        );
+        assert_eq!(
+            failed.restir, 0,
+            "{mode:?} still counted a reservoir sample ({failed:?})"
+        );
+        assert!(
+            failed.pixels > live.pixels,
+            "{mode:?} kept the previous colour instead of the labelled sum ({failed:?} vs {live:?})"
+        );
+        if mode == LampPickMode::Reuse {
+            assert!(
+                failed.exact > 0,
+                "reuse did not shade the labelled exact sum ({failed:?})"
+            );
+        }
+        renderer.force_restir_prepare_failure(false);
+        draw(window, renderer, &world, &camera);
+        let again = renderer.lighting_lamp_pick_counts();
+        eprintln!(
+            "restir after fail {mode:?} exact {} restir {}",
+            again.exact, again.restir
+        );
+        assert_eq!(
+            again.exact, 0,
+            "{mode:?} kept the exact hold into a restir frame ({again:?})"
+        );
+        assert!(
+            again.restir > 0,
+            "{mode:?} did not read the reservoir after the failure ({again:?})"
+        );
+        if mode == LampPickMode::Hits {
+            assert!(
+                failed.pixels > 0,
+                "a hits prepare failure held the previous colour ({failed:?})"
+            );
+        }
+    }
+}
+
+/// Restir off, mode Reuse. The second quiet frame holds the exact record, so
+/// its pixel shadow rays drop. Bit 19 used to cancel that hold. A Hits prepare
+/// failure is not mode 4, so it still traces.
+#[test]
+fn a_quiet_restir_off_reuse_frame_drops_its_shadow_rays() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    let mut off = quiet_restir(LampPickMode::Reuse);
+    off.restir_di = false;
+    renderer.set_lighting_settings(off);
+    draw(window, renderer, &world, &camera);
+    let traced = renderer.lighting_lamp_pick_counts();
+    draw(window, renderer, &world, &camera);
+    let held = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "restir-off reuse rays {} then {}",
+        traced.pixels, held.pixels
+    );
+    assert!(
+        traced.pixels > 0,
+        "the first restir-off reuse frame traced no shadow rays ({traced:?})"
+    );
+    assert!(
+        held.pixels < traced.pixels / 2,
+        "the second quiet restir-off reuse frame retraced ({held:?} vs {traced:?})"
+    );
+    renderer.force_restir_prepare_failure(true);
+    renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));
+    draw(window, renderer, &world, &camera);
+    let failed = renderer.lighting_lamp_pick_counts();
+    eprintln!("hits prepare failure rays {}", failed.pixels);
+    assert!(
+        failed.pixels > 0,
+        "a hits prepare failure did not trace ({failed:?})"
+    );
 }

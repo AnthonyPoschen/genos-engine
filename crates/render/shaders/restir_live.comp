@@ -108,6 +108,35 @@ vec3 g_surf_pos;
 vec3 g_surf_n;
 bool g_surf_two;
 
+uint restir_scale() {
+    uint s = restir_hdr(46u);
+    // 0 and anything outside 1..4 are full resolution. A stale word must not
+    // turn the product default into a half-resolution grid.
+    if (s < 1u || s > 4u) {
+        return 1u;
+    }
+    return s;
+}
+
+// Header 7 is the reservoir grid. Header 46 is screen pixels per edge.
+// The gbuffer pixel is the one whose centre is the reservoir pixel's ray.
+// Scale 1 is that screen pixel. Scale 2 is the top-left of the 2×2.
+uvec2 restir_screen_px(uint pixel) {
+    uint width = restir_hdr(7u);
+    uint scale = restir_scale();
+    uint x = (pixel % width) * scale;
+    uint y = (pixel / width) * scale;
+    uint screen_w = restir_hdr(48u);
+    uint screen_h = restir_hdr(49u);
+    if (screen_w != 0u && x >= screen_w) {
+        x = screen_w - 1u;
+    }
+    if (screen_h != 0u && y >= screen_h) {
+        y = screen_h - 1u;
+    }
+    return uvec2(x, y);
+}
+
 bool restir_surface_of(uint recv, out vec3 pos, out vec3 n, out bool two_sided) {
     if (recv != g_surf_recv) {
         g_surf_recv = recv;
@@ -119,7 +148,7 @@ bool restir_surface_of(uint recv, out vec3 pos, out vec3 n, out bool two_sided) 
         uint height = restir_hdr(8u);
         if (width != 0u && recv < width * height) {
             vec3 albedo;
-            g_surf_ok = lighting_surface(uvec2(recv % width, recv / width), g_surf_pos, g_surf_n, albedo, g_surf_two);
+            g_surf_ok = lighting_surface(restir_screen_px(recv), g_surf_pos, g_surf_n, albedo, g_surf_two);
         }
     }
     pos = g_surf_pos;
@@ -180,10 +209,126 @@ float restir_phat(uint recv, uint lamp) {
     return restir_phat_at(pos, n, two_sided, lamp);
 }
 
+// The product proposal is the light tree. initial_at's 64-bin weight array
+// is the checker's other proposal and is not compiled into this pass.
+// The spatial shader is a second pipeline (RESTIR_SPATIAL_ONLY). It does not
+// carry the tree, and the product cap does not carry the 17-wide merge lists.
+#ifndef RESTIR_SPATIAL_ONLY
+#define RESTIR_TREE_ONLY
 #include "restir_tree.glsl"
+#else
+#define RESTIR_TREE_ONLY
+#define RESTIR_NO_INITIAL
+const uint PROPOSAL_TREE = 2u;
+const uint PROPOSAL_TREE_FAULT = 3u;
+#endif
 #include "restir_sample.glsl"
 #include "restir_merge.glsl"
 #include "restir_spatial_ops.glsl"
+
+// One cell of the in-bounds Chebyshev window, centre skipped. `i` is the
+// index neighbor_count would have stored in its pool.
+uint restir_window_cell(uint i, uint x0, uint y0, uint span_x, uint width, uint centre) {
+    uint cell = i >= centre ? i + 1u : i;
+    return (y0 + cell / span_x) * width + (x0 + cell % span_x);
+}
+
+// Same partial Fisher-Yates as neighbor_count. The swap table holds the
+// slots that moved, not the whole window, so this pass does not carry a
+// 256-wide array. `take` calls of uniform_index, then those cells. A short
+// rejection draw returned fewer neighbours and a different set each time
+// the stream shifted, which is the dabaff8e picture gap.
+// The scalar pipeline does not compile this. Its four draws stay in vectors
+// so a 32-entry table cannot land in that module at all.
+#if defined(RESTIR_SPATIAL_ONLY) && !defined(RESTIR_SPATIAL_CAP)
+uint restir_pick_neighbors(uint index, uint receivers, out uint picked[16]) {
+    uint width = restir_hdr(7u);
+    uint take = restir_hdr(13u);
+    uint reach = restir_hdr(14u);
+    if (width == 0u || take == 0u || reach == 0u) {
+        return 0u;
+    }
+    uint height = receivers / width;
+    if (height == 0u) {
+        return 0u;
+    }
+    uint x = index % width;
+    uint y = index / width;
+    uint x0 = x > reach ? x - reach : 0u;
+    uint y0 = y > reach ? y - reach : 0u;
+    uint x1 = min(x + reach, width - 1u);
+    uint y1 = min(y + reach, height - 1u);
+    uint span_x = x1 - x0 + 1u;
+    uint span_y = y1 - y0 + 1u;
+    uint cells = span_x * span_y;
+    if (cells <= 1u) {
+        return 0u;
+    }
+    uint pool_n = cells - 1u;
+    uint centre = (y - y0) * span_x + (x - x0);
+    if (take > pool_n) {
+        take = pool_n;
+    }
+    if (take > 16u) {
+        take = 16u;
+    }
+    uint sw_i[32];
+    uint sw_v[32];
+    for (uint s = 0u; s < 32u; s++) {
+        sw_i[s] = 0u;
+        sw_v[s] = 0u;
+    }
+    uint nswap = 0u;
+    for (uint slot = 0u; slot < take; slot++) {
+        uint span = pool_n - slot;
+        uint pick = slot + uniform_index(span);
+        uint a = 0u;
+        uint b = 0u;
+        bool a_hit = false;
+        bool b_hit = false;
+        for (uint s = 0u; s < nswap; s++) {
+            if (sw_i[s] == slot) {
+                a = sw_v[s];
+                a_hit = true;
+            }
+            if (sw_i[s] == pick) {
+                b = sw_v[s];
+                b_hit = true;
+            }
+        }
+        if (!a_hit) {
+            a = restir_window_cell(slot, x0, y0, span_x, width, centre);
+        }
+        if (!b_hit) {
+            b = restir_window_cell(pick, x0, y0, span_x, width, centre);
+        }
+        bool wrote_slot = false;
+        bool wrote_pick = false;
+        for (uint s = 0u; s < nswap; s++) {
+            if (sw_i[s] == slot) {
+                sw_v[s] = b;
+                wrote_slot = true;
+            }
+            if (sw_i[s] == pick) {
+                sw_v[s] = a;
+                wrote_pick = true;
+            }
+        }
+        if (!wrote_slot) {
+            sw_i[nswap] = slot;
+            sw_v[nswap] = b;
+            nswap += 1u;
+        }
+        if (!wrote_pick && pick != slot) {
+            sw_i[nswap] = pick;
+            sw_v[nswap] = a;
+            nswap += 1u;
+        }
+        picked[slot] = b;
+    }
+    return take;
+}
+#endif
 
 void restir_rng(uint pixel, uint pass_id) {
     uint64_t seed = uint64_t(restir_hdr(17u)) | (uint64_t(restir_hdr(18u)) << 32ul);
@@ -237,10 +382,9 @@ bool restir_pixel_surface(uint pixel, out vec3 pos, out vec3 nrm) {
     if (width == 0u || pixel >= width * height) {
         return false;
     }
-    uvec2 p = uvec2(pixel % width, pixel / width);
     vec3 albedo;
     bool two_sided;
-    return lighting_surface(p, pos, nrm, albedo, two_sided);
+    return lighting_surface(restir_screen_px(pixel), pos, nrm, albedo, two_sided);
 }
 
 bool restir_depth_normal(float z_ref, float z_other, vec3 n_ref, vec3 n_other) {
@@ -280,9 +424,27 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     }
     uint width = restir_hdr(7u);
     uint height = restir_hdr(8u);
+    // Project in screen pixels, then fold into the reservoir cell. Scale 1
+    // is the old reservoir-pixel ray. The history ray is the gbuffer pixel
+    // this cell sampled, so a still view compares the same depth.
+    uint scale = restir_scale();
+    // Scale 1 projects in reservoir pixels, the aa44b042 ray. Screen words
+    // apply only when a cell covers more than one pixel.
+    uint proj_w = width;
+    uint proj_h = height;
+    if (scale > 1u) {
+        uint screen_w = restir_hdr(48u);
+        uint screen_h = restir_hdr(49u);
+        if (screen_w != 0u) {
+            proj_w = screen_w;
+        }
+        if (screen_h != 0u) {
+            proj_h = screen_h;
+        }
+    }
     vec2 ndc = vec2(dot(rel, right) / (z * t * aspect), dot(rel, up) / (z * t));
-    vec2 px = vec2((ndc.x + 1.0) * RESTIR_NDC_HALF * float(width), (1.0 - ndc.y) * RESTIR_NDC_HALF * float(height));
-    if (px.x < 0.0 || px.y < 0.0 || px.x >= float(width) || px.y >= float(height)) {
+    vec2 px = vec2((ndc.x + 1.0) * RESTIR_NDC_HALF * float(proj_w), (1.0 - ndc.y) * RESTIR_NDC_HALF * float(proj_h));
+    if (px.x < 0.0 || px.y < 0.0 || px.x >= float(proj_w) || px.y >= float(proj_h)) {
         return false;
     }
     uint stride = restir_hdr(19u);
@@ -290,6 +452,9 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     // The reprojected pixel only. A neighbour search would keep history the
     // product depth test rejects. A miss drops the history.
     ivec2 base = ivec2(floor(px));
+    if (scale > 1u) {
+        base = ivec2(int(uint(base.x) / scale), int(uint(base.y) / scale));
+    }
     for (uint i = 0u; i < RESTIR_TEMPORAL_TRIES; i++) {
         ivec2 q = base + RESTIR_TEMPORAL_OFFSETS[i];
         if (q.x < 0 || q.y < 0 || q.x >= int(width) || q.y >= int(height)) {
@@ -299,8 +464,9 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
         uint geo = prev + cand * stride;
         float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
         vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
-        vec2 centre = vec2(q) + RESTIR_NDC_HALF;
-        vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(width)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(height)));
+        uvec2 sp = restir_screen_px(cand);
+        vec2 centre = vec2(sp) + RESTIR_NDC_HALF;
+        vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(proj_w)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(proj_h)));
         vec3 dir_h = fwd + ndc_h.x * t * aspect * right + ndc_h.y * t * up;
         // Compare at the candidate's own ray: this frame's surface plane
         // (pos, nrm) hit along the history pixel's ray, against the stored depth.
@@ -316,31 +482,18 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
     return false;
 }
 
-void restir_initial(uint pixel) {
-    uint n = restir_hdr(0u);
-    if (restir_hdr(10u) < 2u && n > 64u) {
-        n = 64u;
-    }
-    float weights[64];
-    uint lamp;
-    float w_sum;
-    uint m;
-    float target;
-    initial_at(pixel, n, lamp, w_sum, m, target, weights);
+#ifndef RESTIR_SPATIAL_ONLY
+void restir_initial(uint pixel, out uint lamp, out float w_sum, out uint m, out float target) {
+    initial_tree(pixel, lamp, w_sum, m, target);
     restir_store4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
 }
 
-void restir_temporal(uint pixel) {
+void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float target) {
     uint n = restir_hdr(0u);
     bool tree = restir_hdr(10u) >= 2u;
     if (!tree && n > 64u) {
         n = 64u;
     }
-    uint lamp;
-    float w_sum;
-    uint m;
-    float target;
-    restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
     vec3 pos;
     vec3 nrm;
     bool surfaced = restir_pixel_surface(pixel, pos, nrm);
@@ -429,6 +582,361 @@ void restir_temporal(uint pixel) {
     restir_words[at + 5u] = packed;
 }
 
+void restir_temporal(uint pixel) {
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
+    restir_temporal_from(pixel, lamp, w_sum, m, target);
+}
+#endif
+
+void restir_canon_at(uint at, out uint lamp, out float w, out uint m, out float target) {
+    restir_load4(at, lamp, w, m, target);
+    if (is_empty(lamp, m)) {
+        lamp = LAMP_EMPTY;
+        m = RESTIR_CANDIDATES;
+    }
+}
+
+float restir_slot_mass(uint lamp, float w, uint m, float target, float tq) {
+    if (is_empty(lamp, m) || !(tq > 0.0)) {
+        return 0.0;
+    }
+    return m_as_f(m) * reservoir_w(lamp, w, m, target) * tq;
+}
+
+bool restir_neighbor_ok(uint source, uint next, uint stride, float z_here, vec3 nrm) {
+    float z_stored = uintBitsToFloat(restir_words[next + source * stride + 4u]);
+    if (!(z_here > 0.0) || !(z_stored > 0.0)) {
+        return false;
+    }
+    float gap = abs(z_here - z_stored);
+    if (gap / z_here > RESTIR_DEPTH_REL && gap > RESTIR_DEPTH_ABS) {
+        return false;
+    }
+    vec3 npos;
+    vec3 nn;
+    if (!restir_pixel_surface(source, npos, nn)) {
+        return false;
+    }
+    float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
+    return restir_depth_normal(z_here, z_n, nrm, nn);
+}
+
+#if defined(RESTIR_SPATIAL_CAP)
+// Product neighbours (4). The draws stay in vectors, not a private array:
+// the wide pipeline's 32-entry swap table is not in this module. A 17-wide
+// list is private memory: at 1440p that was several GB of spill and the 8 ms
+// spatial pass. No visibility ray. p-hat is unshadowed lamp_light, same as
+// balance_list.
+uint restir_swap_read(uint nswap, uint key, uvec4 i0, uvec4 v0, uvec4 i1, uvec4 v1, out bool hit) {
+    hit = false;
+    uint val = 0u;
+    if (nswap > 0u && i0.x == key) { val = v0.x; hit = true; }
+    if (nswap > 1u && i0.y == key) { val = v0.y; hit = true; }
+    if (nswap > 2u && i0.z == key) { val = v0.z; hit = true; }
+    if (nswap > 3u && i0.w == key) { val = v0.w; hit = true; }
+    if (nswap > 4u && i1.x == key) { val = v1.x; hit = true; }
+    if (nswap > 5u && i1.y == key) { val = v1.y; hit = true; }
+    if (nswap > 6u && i1.z == key) { val = v1.z; hit = true; }
+    if (nswap > 7u && i1.w == key) { val = v1.w; hit = true; }
+    return val;
+}
+
+void restir_swap_write(inout uint nswap, uint key, uint neu, inout uvec4 i0, inout uvec4 v0, inout uvec4 i1, inout uvec4 v1) {
+    bool wrote = false;
+    if (nswap > 0u && i0.x == key) { v0.x = neu; wrote = true; }
+    if (nswap > 1u && i0.y == key) { v0.y = neu; wrote = true; }
+    if (nswap > 2u && i0.z == key) { v0.z = neu; wrote = true; }
+    if (nswap > 3u && i0.w == key) { v0.w = neu; wrote = true; }
+    if (nswap > 4u && i1.x == key) { v1.x = neu; wrote = true; }
+    if (nswap > 5u && i1.y == key) { v1.y = neu; wrote = true; }
+    if (nswap > 6u && i1.z == key) { v1.z = neu; wrote = true; }
+    if (nswap > 7u && i1.w == key) { v1.w = neu; wrote = true; }
+    if (wrote || nswap >= 8u) {
+        return;
+    }
+    if (nswap == 0u) { i0.x = key; v0.x = neu; }
+    else if (nswap == 1u) { i0.y = key; v0.y = neu; }
+    else if (nswap == 2u) { i0.z = key; v0.z = neu; }
+    else if (nswap == 3u) { i0.w = key; v0.w = neu; }
+    else if (nswap == 4u) { i1.x = key; v1.x = neu; }
+    else if (nswap == 5u) { i1.y = key; v1.y = neu; }
+    else if (nswap == 6u) { i1.z = key; v1.z = neu; }
+    else { i1.w = key; v1.w = neu; }
+    nswap += 1u;
+}
+
+// Header word 13 above 4 is the wide pipeline. This one keeps four slots.
+// A larger count returns no neighbours and draws nothing, so binding it
+// anyway leaves the temporal sample instead of dropping the rest of the shuffle.
+void restir_pick_four(uint index, uint receivers, out uint nbor, out uint p0, out uint p1, out uint p2, out uint p3) {
+    nbor = 0u;
+    p0 = 0u;
+    p1 = 0u;
+    p2 = 0u;
+    p3 = 0u;
+    uint width = restir_hdr(7u);
+    uint take = restir_hdr(13u);
+    uint reach = restir_hdr(14u);
+    if (width == 0u || take == 0u || take > 4u || reach == 0u) {
+        return;
+    }
+    uint height = receivers / width;
+    if (height == 0u) {
+        return;
+    }
+    uint x = index % width;
+    uint y = index / width;
+    uint x0 = x > reach ? x - reach : 0u;
+    uint y0 = y > reach ? y - reach : 0u;
+    uint x1 = min(x + reach, width - 1u);
+    uint y1 = min(y + reach, height - 1u);
+    uint span_x = x1 - x0 + 1u;
+    uint span_y = y1 - y0 + 1u;
+    uint cells = span_x * span_y;
+    if (cells <= 1u) {
+        return;
+    }
+    uint pool_n = cells - 1u;
+    uint centre = (y - y0) * span_x + (x - x0);
+    if (take > pool_n) {
+        take = pool_n;
+    }
+    uvec4 si0 = uvec4(0u);
+    uvec4 sv0 = uvec4(0u);
+    uvec4 si1 = uvec4(0u);
+    uvec4 sv1 = uvec4(0u);
+    uint nswap = 0u;
+    for (uint slot = 0u; slot < take; slot++) {
+        uint span = pool_n - slot;
+        uint pick = slot + uniform_index(span);
+        bool a_hit = false;
+        bool b_hit = false;
+        uint a = restir_swap_read(nswap, slot, si0, sv0, si1, sv1, a_hit);
+        uint b = restir_swap_read(nswap, pick, si0, sv0, si1, sv1, b_hit);
+        if (!a_hit) {
+            a = restir_window_cell(slot, x0, y0, span_x, width, centre);
+        }
+        if (!b_hit) {
+            b = restir_window_cell(pick, x0, y0, span_x, width, centre);
+        }
+        restir_swap_write(nswap, slot, b, si0, sv0, si1, sv1);
+        if (pick != slot) {
+            restir_swap_write(nswap, pick, a, si0, sv0, si1, sv1);
+        }
+        if (slot == 0u) {
+            p0 = b;
+        } else if (slot == 1u) {
+            p1 = b;
+        } else if (slot == 2u) {
+            p2 = b;
+        } else {
+            p3 = b;
+        }
+    }
+    nbor = take;
+}
+
+void restir_apply_cap(
+    uint pixel, uint next, uint stride, uint n,
+    uint nkeep, uint a0, uint a1, uint a2, uint a3, float unit,
+    inout uint out_lamp, inout float out_w, inout uint out_m, inout float out_target
+) {
+    uint nslots = nkeep + 1u;
+    uint l0;
+    uint l1 = LAMP_EMPTY;
+    uint l2 = LAMP_EMPTY;
+    uint l3 = LAMP_EMPTY;
+    uint l4 = LAMP_EMPTY;
+    float w0;
+    float w1 = 0.0;
+    float w2 = 0.0;
+    float w3 = 0.0;
+    float w4 = 0.0;
+    uint m0;
+    uint m1 = 0u;
+    uint m2 = 0u;
+    uint m3 = 0u;
+    uint m4 = 0u;
+    float t0;
+    float t1 = 0.0;
+    float t2 = 0.0;
+    float t3 = 0.0;
+    float t4 = 0.0;
+    float q0;
+    float q1 = 0.0;
+    float q2 = 0.0;
+    float q3 = 0.0;
+    float q4 = 0.0;
+    restir_canon_at(next + pixel * stride, l0, w0, m0, t0);
+    q0 = phat_at(pixel, l0, n);
+    if (nkeep >= 1u) {
+        restir_canon_at(next + a0 * stride, l1, w1, m1, t1);
+        q1 = phat_at(pixel, l1, n);
+    }
+    if (nkeep >= 2u) {
+        restir_canon_at(next + a1 * stride, l2, w2, m2, t2);
+        q2 = phat_at(pixel, l2, n);
+    }
+    if (nkeep >= 3u) {
+        restir_canon_at(next + a2 * stride, l3, w3, m3, t3);
+        q3 = phat_at(pixel, l3, n);
+    }
+    if (nkeep >= 4u) {
+        restir_canon_at(next + a3 * stride, l4, w4, m4, t4);
+        q4 = phat_at(pixel, l4, n);
+    }
+    if (nslots == 2u && m0 == 0u) {
+        if (is_empty(l1, m1)) {
+            store_empty(out_lamp, out_w, out_m, out_target);
+        } else {
+            out_lamp = l1;
+            out_w = w1;
+            out_m = m1;
+            out_target = t1;
+        }
+        return;
+    }
+    float mass0 = restir_slot_mass(l0, w0, m0, t0, q0);
+    float mass1 = restir_slot_mass(l1, w1, m1, t1, q1);
+    float mass2 = restir_slot_mass(l2, w2, m2, t2, q2);
+    float mass3 = restir_slot_mass(l3, w3, m3, t3, q3);
+    float mass4 = restir_slot_mass(l4, w4, m4, t4, q4);
+    float area = mass0;
+    if (nslots > 1u) {
+        area += mass1;
+    }
+    if (nslots > 2u) {
+        area += mass2;
+    }
+    if (nslots > 3u) {
+        area += mass3;
+    }
+    if (nslots > 4u) {
+        area += mass4;
+    }
+    if (area <= 0.0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    int selected = -1;
+    if (nslots == 2u) {
+        if (mass1 > 0.0 && unit < mass1 / area) {
+            selected = 1;
+        } else if (mass0 > 0.0) {
+            selected = 0;
+        } else if (mass1 > 0.0) {
+            selected = 1;
+        }
+    } else {
+        float mark = unit * area;
+        float acc = 0.0;
+        int last = -1;
+        if (mass0 > 0.0) {
+            last = 0;
+            acc += mass0;
+            if (mark < acc) {
+                selected = 0;
+            }
+        }
+        if (selected < 0 && nslots > 1u && mass1 > 0.0) {
+            last = 1;
+            acc += mass1;
+            if (mark < acc) {
+                selected = 1;
+            }
+        }
+        if (selected < 0 && nslots > 2u && mass2 > 0.0) {
+            last = 2;
+            acc += mass2;
+            if (mark < acc) {
+                selected = 2;
+            }
+        }
+        if (selected < 0 && nslots > 3u && mass3 > 0.0) {
+            last = 3;
+            acc += mass3;
+            if (mark < acc) {
+                selected = 3;
+            }
+        }
+        if (selected < 0 && nslots > 4u && mass4 > 0.0) {
+            last = 4;
+            acc += mass4;
+            if (mark < acc) {
+                selected = 4;
+            }
+        }
+        if (selected < 0) {
+            selected = last;
+        }
+    }
+    if (selected < 0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    uint sel_lamp = l0;
+    float tq = q0;
+    uint sel_src = pixel;
+    if (selected == 1) {
+        sel_lamp = l1;
+        tq = q1;
+        sel_src = a0;
+    } else if (selected == 2) {
+        sel_lamp = l2;
+        tq = q2;
+        sel_src = a1;
+    } else if (selected == 3) {
+        sel_lamp = l3;
+        tq = q3;
+        sel_src = a2;
+    } else if (selected == 4) {
+        sel_lamp = l4;
+        tq = q4;
+        sel_src = a3;
+    }
+    float t_src = max(phat_at(sel_src, sel_lamp, n), 0.0);
+    tq = max(tq, 0.0);
+    if (tq <= 0.0 || t_src <= 0.0) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    float denom = 0.0;
+    uint count = 0u;
+    if (m0 != 0u) {
+        count += m0;
+        denom += m_as_f(m0) * max(phat_at(pixel, sel_lamp, n), 0.0);
+    }
+    if (nslots > 1u && m1 != 0u) {
+        count += m1;
+        denom += m_as_f(m1) * max(phat_at(a0, sel_lamp, n), 0.0);
+    }
+    if (nslots > 2u && m2 != 0u) {
+        count += m2;
+        denom += m_as_f(m2) * max(phat_at(a1, sel_lamp, n), 0.0);
+    }
+    if (nslots > 3u && m3 != 0u) {
+        count += m3;
+        denom += m_as_f(m3) * max(phat_at(a2, sel_lamp, n), 0.0);
+    }
+    if (nslots > 4u && m4 != 0u) {
+        count += m4;
+        denom += m_as_f(m4) * max(phat_at(a3, sel_lamp, n), 0.0);
+    }
+    if (denom <= 0.0 || count == 0u) {
+        store_empty(out_lamp, out_w, out_m, out_target);
+        return;
+    }
+    float w_new = area * t_src / (tq * denom);
+    out_lamp = sel_lamp;
+    out_w = w_new * m_as_f(count) * tq;
+    out_m = count;
+    out_target = tq;
+}
+
 void restir_spatial(uint pixel) {
     uint width = restir_hdr(7u);
     uint height = restir_hdr(8u);
@@ -449,9 +957,103 @@ void restir_spatial(uint pixel) {
     vec3 nrm;
     bool surfaced = restir_pixel_surface(pixel, pos, nrm);
     float z_here = surfaced ? dot(pos - scene.eye.xyz, scene.view_forward.xyz) : 0.0;
-    if (restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
+    bool skip = false;
+    if (restir_hdr(47u) != 0u && width != 0u) {
+        uint x = pixel % width;
+        uint y = pixel / width;
+        skip = ((x + y) & 1u) != 0u;
+    }
+    // Word 13 above 4 belongs to restir-spatial-wide. Merging here would keep
+    // four of the shuffle and drop the rest after those draws were consumed.
+    if (!skip && surfaced && restir_hdr(13u) > 0u && restir_hdr(13u) <= 4u && restir_hdr(14u) != 0u && width != 0u) {
+        uint nbor;
+        uint p0;
+        uint p1;
+        uint p2;
+        uint p3;
+        restir_pick_four(pixel, receivers, nbor, p0, p1, p2, p3);
+        float unit = next_f32();
+        uint nkeep = 0u;
+        uint a0 = 0u;
+        uint a1 = 0u;
+        uint a2 = 0u;
+        uint a3 = 0u;
+        if (nbor > 0u && restir_neighbor_ok(p0, next, stride, z_here, nrm)) {
+            a0 = p0;
+            nkeep = 1u;
+        }
+        if (nbor > 1u && restir_neighbor_ok(p1, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p1;
+            } else {
+                a1 = p1;
+            }
+            nkeep += 1u;
+        }
+        if (nbor > 2u && restir_neighbor_ok(p2, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p2;
+            } else if (nkeep == 1u) {
+                a1 = p2;
+            } else {
+                a2 = p2;
+            }
+            nkeep += 1u;
+        }
+        if (nbor > 3u && restir_neighbor_ok(p3, next, stride, z_here, nrm)) {
+            if (nkeep == 0u) {
+                a0 = p3;
+            } else if (nkeep == 1u) {
+                a1 = p3;
+            } else if (nkeep == 2u) {
+                a2 = p3;
+            } else {
+                a3 = p3;
+            }
+            nkeep += 1u;
+        }
+        if (nkeep != 0u) {
+            restir_apply_cap(
+                pixel, next, stride, n, nkeep, a0, a1, a2, a3, unit,
+                out_lamp, out_w, out_m, out_target);
+        }
+    }
+    restir_store4(restir_hdr(6u) + pixel * 4u, out_lamp, out_w, out_m, out_target);
+}
+#elif defined(RESTIR_SPATIAL_ONLY)
+void restir_spatial(uint pixel) {
+    uint width = restir_hdr(7u);
+    uint height = restir_hdr(8u);
+    uint receivers = width * height;
+    uint n = restir_hdr(0u);
+    uint stride = restir_hdr(19u);
+    uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(next + pixel * stride, lamp, w_sum, m, target);
+    uint out_lamp = lamp;
+    float out_w = w_sum;
+    uint out_m = m;
+    float out_target = target;
+    vec3 pos;
+    vec3 nrm;
+    bool surfaced = restir_pixel_surface(pixel, pos, nrm);
+    float z_here = surfaced ? dot(pos - scene.eye.xyz, scene.view_forward.xyz) : 0.0;
+    // Header 47: odd reservoir pixels keep the temporal sample. The copy
+    // pass writes the even neighbour's spatial result into them afterwards.
+    bool skip = false;
+    if (restir_hdr(47u) != 0u && width != 0u) {
+        uint x = pixel % width;
+        uint y = pixel / width;
+        skip = ((x + y) & 1u) != 0u;
+    }
+    // No surface: the temporal sample is the result. Skipping the shuffle
+    // does not change it (a rejected neighbour never reaches the merge).
+    if (!skip && surfaced && restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
         uint picked[16];
-        uint nbor = neighbor_count(pixel, receivers, picked);
+        uint nbor = restir_pick_neighbors(pixel, receivers, picked);
         float unit = next_f32();
         if (nbor != 0u) {
             uint src_recv[17];
@@ -470,14 +1072,11 @@ void restir_spatial(uint pixel) {
             in_tq[0] = phat_at(pixel, lamp, n);
             for (uint s = 0u; s < nbor; s++) {
                 uint source = picked[s];
-                vec3 npos;
-                vec3 nn;
-                bool ok = surfaced && restir_pixel_surface(source, npos, nn);
-                if (ok) {
-                    float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
-                    ok = restir_depth_normal(z_here, z_n, nrm, nn);
-                }
-                if (!ok) {
+                // The temporal pass stored this frame's view depth in the same
+                // buffer. A depth miss fails the live test too, so the gbuffer
+                // fetch and p-hat are skipped. A depth hit still uses the live
+                // surface, including its full-precision normal.
+                if (!restir_neighbor_ok(source, next, stride, z_here, nrm)) {
                     continue;
                 }
                 src_recv[nslots] = source;
@@ -499,6 +1098,35 @@ void restir_spatial(uint pixel) {
     }
     restir_store4(restir_hdr(6u) + pixel * 4u, out_lamp, out_w, out_m, out_target);
 }
+#endif
+
+void restir_checker_copy(uint pixel) {
+    if (restir_hdr(47u) == 0u) {
+        return;
+    }
+    uint width = restir_hdr(7u);
+    if (width == 0u) {
+        return;
+    }
+    uint x = pixel % width;
+    uint y = pixel / width;
+    if (((x + y) & 1u) == 0u) {
+        return;
+    }
+    uint src = pixel;
+    if (x > 0u) {
+        src = pixel - 1u;
+    } else if (y > 0u) {
+        src = pixel - width;
+    }
+    uint at = restir_hdr(6u);
+    uint lamp;
+    float w_sum;
+    uint m;
+    float target;
+    restir_load4(at + src * 4u, lamp, w_sum, m, target);
+    restir_store4(at + pixel * 4u, lamp, w_sum, m, target);
+}
 
 void main() {
     uint width = restir_hdr(7u);
@@ -510,11 +1138,32 @@ void main() {
     uint pass_id = (pc.lamp.y >> 22u) & 3u;
     g_surf_recv = 0xffffffffu;
     restir_rng(pixel, pass_id);
-    if (pass_id == 0u) {
-        restir_initial(pixel);
-    } else if (pass_id == 1u) {
-        restir_temporal(pixel);
-    } else {
+    // Header 50 clear: temporal follows initial in this invocation and
+    // reseeds with pass 1, the same stream a split temporal dispatch draws.
+    // The sample stays in registers. Reloading it from the buffer raced the
+    // store on the 4070 and the picture moved with frame pacing.
+    // Header 50 set: pass 1 is the temporal dispatch, after the host barrier.
+    // Spatial is a separate pipeline so this entry point does not keep the
+    // merge lists live across the tree walk.
+#ifdef RESTIR_SPATIAL_ONLY
+    if (pass_id == 2u) {
         restir_spatial(pixel);
+    } else {
+        restir_checker_copy(pixel);
     }
+#else
+    if (pass_id == 0u) {
+        uint lamp;
+        float w_sum;
+        uint m;
+        float target;
+        restir_initial(pixel, lamp, w_sum, m, target);
+        if (restir_hdr(50u) == 0u) {
+            restir_rng(pixel, 1u);
+            restir_temporal_from(pixel, lamp, w_sum, m, target);
+        }
+    } else if (pass_id == 1u && restir_hdr(50u) != 0u) {
+        restir_temporal(pixel);
+    }
+#endif
 }

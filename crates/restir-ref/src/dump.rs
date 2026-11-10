@@ -582,14 +582,6 @@ fn usize_field(value: &Value, key: &str) -> Result<usize, String> {
     Ok(usize::try_from(raw).unwrap_or(0))
 }
 
-#[allow(
-    clippy::as_conversions,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "the current math crate keeps this narrowing private; same cast as media::narrow"
-)]
 fn narrow(value: f64) -> f32 {
-    value as f32
+    genos_math::f32_from_f64(value)
 }
