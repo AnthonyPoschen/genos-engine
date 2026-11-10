@@ -505,6 +505,24 @@ pub struct SurfaceCacheSettings {
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
     /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
+    /// Key `surface_cache.sh_cells` (ADR 0039 stage 2, prototype, default off). 25 cm world
+    /// cells keep a colour SH-L1 of the light their relight rays bring in (the
+    /// same rays, no new ones). An axis-aligned ray hit, including the value
+    /// stored as a display seed, tilts the one owning cell. At the axis that
+    /// tilt is the cell's mean, and the hit does not blend its neighbours. A
+    /// slanted screen pixel's lattice read is empty, because an axis is used
+    /// only when its component has magnitude 1, and compose then keeps the
+    /// probes. That empty read does not claim or stamp a cell: a stamp would
+    /// mark the cell read and keep it on the relight list before any ray hit
+    /// it. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    pub sh_cells: bool,
+    /// Key `surface_cache.sh_texel_seed` (ADR 0039 stage 3, default off).
+    /// An empty world texel takes its first fill from the one owning 25 cm
+    /// cell's colour SH-L1, stored as a low-confidence seed beside its own
+    /// samples. The cell is not claimed or written. A lamp change drops the
+    /// seed. Off keeps the stage 2 parent, hit, and probe seeds. The shader
+    /// also requires `sh_cells`. Head 3.w bit 17.
+    pub sh_texel_seed: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -527,11 +545,16 @@ pub const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
 pub const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
 pub const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
 pub const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
-const LIGHTING_TOGGLE_NAMES: [(&str, u32); 4] = [
+/// Cache-only view (ADR 0039 stage 0/2): every pixel shows the light of the
+/// 25 cm world cells at its point, with no texels and no probes, so the
+/// cells' own blotch can be scored against the path-traced reference.
+pub const LIGHTING_TOGGLE_CELLS_ONLY: u32 = 16;
+const LIGHTING_TOGGLE_NAMES: [(&str, u32); 5] = [
     ("freeze_cache", LIGHTING_TOGGLE_FREEZE_CACHE),
     ("direct_only", LIGHTING_TOGGLE_DIRECT_ONLY),
     ("bounce_only", LIGHTING_TOGGLE_BOUNCE_ONLY),
     ("freeze_probes", LIGHTING_TOGGLE_FREEZE_PROBES),
+    ("cells_only", LIGHTING_TOGGLE_CELLS_ONLY),
 ];
 
 /// Experiment and debug knobs of the lighting frame. Every preset uses the
@@ -564,7 +587,7 @@ pub struct LightingExperimentSettings {
     /// `surface_cache.blend` still forces bits 20 and 30.
     pub sc_flags: u32,
     /// Key `toggles`. Debug isolate words, comma separated: `freeze_cache`,
-    /// `direct_only`, `bounce_only`, `freeze_probes`, or `none`.
+    /// `direct_only`, `bounce_only`, `freeze_probes`, `cells_only`, or `none`.
     pub toggles: u32,
 }
 
@@ -774,6 +797,8 @@ impl LightingSettings {
                 firefly_sigma: 8.0,
                 ray_budget: 0,
                 dormant_rays: 0,
+                sh_cells: false,
+                sh_texel_seed: false,
                 drain_sigma: 4.0,
             },
             bounce: BounceSettings {
@@ -1176,6 +1201,16 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.sh_cells={}",
+            bit(self.surface_cache.sh_cells)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_texel_seed={}",
+            bit(self.surface_cache.sh_texel_seed)
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
@@ -1359,6 +1394,8 @@ impl LightingSettings {
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
+            "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
+            "surface_cache.sh_texel_seed" => self.surface_cache.sh_texel_seed = on(value)?,
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1590,6 +1627,14 @@ impl LightingSettings {
             ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
             ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
             ("GENOS_LIGHTING_TOGGLES", "toggles"),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS",
+                "surface_cache.sh_cells",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_SEED",
+                "surface_cache.sh_texel_seed",
+            ),
         ];
         for (var, key) in keys {
             if key == "direct_specular" && launch.direct_specular.is_some() {

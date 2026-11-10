@@ -126,6 +126,13 @@ void main() {
     vec3 e = vec3(0.0);
     float es = 0.0;
     float el = 0.0;
+    // ADR 0039 stage 2 (lighting_sh_on): a 25 cm cell's SH-L1 from the same
+    // rays, unweighted by the cosine: sum L (band 0) and sum L dir (band 1).
+    bool sh = wrc_cell && lighting_sh_on();
+    vec3 s0 = vec3(0.0);
+    vec3 sx = vec3(0.0);
+    vec3 sy = vec3(0.0);
+    vec3 sz = vec3(0.0);
     [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
         vec4 v = work.v[lighting_rad_at(first + k)];
         if (lighting_ray_none(v)) {
@@ -141,6 +148,12 @@ void main() {
             cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rkey), uintBitsToFloat(qk));
         }
         e += lk * c;
+        if (sh) {
+            s0 += lk;
+            sx += lk * dir.x;
+            sy += lk * dir.y;
+            sz += lk * dir.z;
+        }
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
         es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
     }
@@ -175,6 +188,8 @@ void main() {
     }
     e *= LIGHTING_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
+    // The held harmonics follow the held mean's sun/sky rescale (ls below).
+    float sh_ls = 1.0;
     if (lighting_world_mode() == 3u) {
         // S63A: carry the history's sun/sky share to the sun and sky of now,
         // then blend this set's share into it.
@@ -189,6 +204,7 @@ void main() {
         float now = lighting_ls_now();
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);
         if (old.w > 0.5 && abs(ls - 1.0) > 1.0e-3) {
+            sh_ls = ls;
             old.rgb *= ls;
             cache.v[3u * slot + 2u].rgb = old.rgb;
             vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
@@ -258,6 +274,27 @@ void main() {
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
+        if (sh) {
+            // Same weights as the mean (2 pi / rays a ray), same blend alpha.
+            float wr = LIGHTING_TAU / rays;
+            vec3 n0 = s0 * (wr * LIGHTING_SH_Y0);
+            vec3 nx = sx * (wr * LIGHTING_SH_Y1);
+            vec3 ny = sy * (wr * LIGHTING_SH_Y1);
+            vec3 nz = sz * (wr * LIGHTING_SH_Y1);
+            if (old.w >= LIGHTING_CACHE_HAS_W) {
+                vec3 o0;
+                vec3 ox;
+                vec3 oy;
+                vec3 oz;
+                lighting_sh_get(slot, o0, ox, oy, oz);
+                float a = min(wa, 1.0);
+                n0 = mix(o0 * sh_ls, n0, a);
+                nx = mix(ox * sh_ls, nx, a);
+                ny = mix(oy * sh_ls, ny, a);
+                nz = mix(oz * sh_ls, nz, a);
+            }
+            lighting_sh_put(slot, n0, nx, ny, nz);
+        }
         // S76B: a refresh is the cell's check (lighting_wrc_check_take).
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
@@ -265,6 +302,11 @@ void main() {
         return;
     }
     if (lighting_world_mode() == 3u) {
+        // ADR 0039 stage 3: the same lamp-change clear as the display path.
+        // A world cell is not a texel and has already returned above.
+        if (lighting_sh_texel_seed_on() && lighting_sc_lamp_touched(slot)) {
+            lighting_sc_clear_seed(slot);
+        }
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
         float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);

@@ -9,6 +9,7 @@ mod gpu;
 mod hdr_output;
 #[cfg(test)]
 mod lamp_pick;
+pub mod lighting_sh;
 mod material_stream;
 mod mesh;
 mod mesh_field;

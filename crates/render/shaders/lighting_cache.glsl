@@ -211,9 +211,13 @@ const uint CHG_W_HOPS = 29u;     // sum of hop depth of woken probes (chain size
 uint lighting_bounce_path = 2u;
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
 uint lighting_toggles() {
-    return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 15u;
+    return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 31u;
 }
 const uint LIGHTING_TOGGLE_FREEZE_CACHE = 1u;
+// Cache-only view (ADR 0039): pixels show the 25 cm world cells, no texels or probes.
+const uint LIGHTING_TOGGLE_CELLS_ONLY = 16u;
+// ADR 0039 stage 2 cost counter: cell lookups by SH-L1 reads (chg slot 30).
+const uint CHG_SH_LOOKUPS = 30u;
 const uint LIGHTING_TOGGLE_BOUNCE_ONLY = 4u;
 const uint LIGHTING_TOGGLE_FREEZE_PROBES = 8u;
 void lighting_chg(uint i, uint v) {
@@ -605,6 +609,25 @@ const float LIGHTING_SC_TEXEL = 0.125;
 // Ray-hit patches (flag 256): one size too, LIGHTING_SC_HIT (was 25 cm doubling past
 // 8 m from the eye).
 const float LIGHTING_SC_HIT = 0.25;
+// ADR 0039 stage 2: the SH-L1 cells are the ray-hit cells (one knob for both;
+// a low-spec preset changes LIGHTING_SC_HIT, never a literal).
+const float LIGHTING_SH_CELL = LIGHTING_SC_HIT;
+// A slanted ray hit (largest |n| below this) may take the lattice read.
+// An axis-aligned hit, including the display seed of one, tilts the owning
+// cell only. At the axis that tilt is the cell's mean, master's read. A
+// neighbour blend would be the seed's history through a turn. 99.97 % of the
+// SH lookups were axis-aligned ray hits (simplify-s2 step 7).
+const float LIGHTING_SH_HIT_SLANT = 0.999;
+// fp16 pack clamp (half max is ~65504; stay under so packHalf2x16 stays finite).
+const float LIGHTING_SH_HALF_CLAMP = 65000.0;
+// Skip a lattice axis when |n_a| is below this (weight would be tiny).
+const float LIGHTING_SH_AXIS_MIN = 0.35;
+// SH tilt read only when the hit cell is under this many LIGHTING_SH_CELL.
+const float LIGHTING_SH_HIT_SPAN = 1.2;
+// Cell/texel w threshold: has light (shared with the mean path's 0.5).
+const float LIGHTING_CACHE_HAS_W = 0.5;
+// Half a cell on the lattice (UV centre offset).
+const float LIGHTING_CELL_HALF = 0.5;
 // Sets a texel inside a change, or under a light that is changing, averages over
 // (a short running mean on one fixed set: quick, and no flicker).
 const float LIGHTING_SC_MOVING = 2.0;
@@ -854,6 +877,8 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
 // The whole search window is checked for the key before anything is claimed: a
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
 // second, unlit copy of that patch.
+// ADR 0039 stage 2 SH-L1 store (defined with the SH reads below), for the claim's reset.
+void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -894,6 +919,10 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
                 cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
+            }
+            // ADR 0039 stage 2: no harmonics from the slot's last owner.
+            if (lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u) {
+                lighting_sh_put(slot, vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
             }
             lighting_compose_cover(slot);
             return slot;
@@ -1902,6 +1931,9 @@ const float LIGHTING_SC_SPARSE_OWN = 4.0;
 // S72K handover: interpolation fades out over this many own sets (weight K).
 const float LIGHTING_SC_HANDOVER = 16.0;
 const float LIGHTING_SC_HANDOVER_K = 2.0;
+// S72N first-fill confidence, and the ADR 0039 stage 3 cell seed. A low preset
+// changes `LIGHTING_SH_CELL` (`LIGHTING_SC_HIT`), not this weight.
+const float LIGHTING_SC_SEED_CONF = 0.25;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -1992,6 +2024,12 @@ bool lighting_sc_seed_split() {
 bool lighting_sc_has_seed(uint slot) {
     return cache.v[LIGHTING_SC_SPARSE_AT + slot].z > 0.0;
 }
+void lighting_sc_clear_seed(uint slot) {
+    if (!LIGHTING_SC_WRITES) {
+        return;
+    }
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
+}
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2015,7 +2053,7 @@ vec4 lighting_sc_own_shown(uint slot);
 // S72V10: the 25 cm WRC cells' light as of now, bilinear over the coplanar
 // cells with sets (no recursion into lighting_sc_shown); w 1 when any.
 vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
-    const float cs = 0.25;
+    const float cs = LIGHTING_SC_HIT;
     uint ax = lighting_axis(n) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
@@ -2041,6 +2079,174 @@ vec4 lighting_sc_wrc_now(vec3 p, vec3 n) {
         sum += bil * v.rgb * lighting_sc_sun_gain(s);
         ws += bil;
     }
+    return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
+}
+// ADR 0039 stage 2 (`surface_cache.sh_cells`, flag 8388608): a 25 cm world
+// cell also keeps the colour SH-L1 of the light its relight rays brought in
+// (lighting_cache.comp; the same rays, no new ones), blended with the same
+// alpha as its mean. c0 = sum w Y0 L, c1 = sum w Y1 L dir, w = 2 pi / rays,
+// twelve values: c0.rgb, c1x.rgb, c1y.rgb, c1z.rgb. fp16 (LIGHTING_SH_HALF,
+// lighting_cache_slots.glsl): six words a slot, four in LIGHTING_SH_AT, two in
+// half a vec4 of LIGHTING_SH_B_AT (slots paired). fp32: three vec4 a slot.
+// crates/render/src/lighting_sh.rs is the CPU reference and its tests.
+const uint LIGHTING_SH_AT = 23u * LIGHTING_CACHE_SLOTS;
+const uint LIGHTING_SH_B_AT = 24u * LIGHTING_CACHE_SLOTS;
+// fp32 only (LIGHTING_SH_HALF false): the third region.
+const uint LIGHTING_SH_C_AT = 25u * LIGHTING_CACHE_SLOTS;
+const float LIGHTING_SH_Y0 = 0.2820948;
+const float LIGHTING_SH_Y1 = 0.4886025;
+const float LIGHTING_SH_A1 = 2.0943951;
+bool lighting_sh_on() {
+    return lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u;
+}
+// ADR 0039 stage 3. Head 3.w bit 17 (bits 0-8 are flags 23-31, 9-11 the budget
+// shift, 12-16 the isolate toggles). Off unless SH cells are on too.
+bool lighting_sh_texel_seed_on() {
+    return lighting_sh_on() && (uint(work.v[lighting_change_at() + 3u].w) & 131072u) != 0u;
+}
+uint lighting_sh_half2(float a, float b) {
+    return packHalf2x16(clamp(vec2(a, b), vec2(-LIGHTING_SH_HALF_CLAMP), vec2(LIGHTING_SH_HALF_CLAMP)));
+}
+void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
+    if (!LIGHTING_SH_HALF) {
+        cache.v[LIGHTING_SH_AT + slot] = vec4(c0, cx.r);
+        cache.v[LIGHTING_SH_B_AT + slot] = vec4(cx.gb, cy.rg);
+        cache.v[LIGHTING_SH_C_AT + slot] = vec4(cy.b, cz);
+        return;
+    }
+    cache.v[LIGHTING_SH_AT + slot] = uintBitsToFloat(uvec4(
+        lighting_sh_half2(c0.r, c0.g), lighting_sh_half2(c0.b, cx.r),
+        lighting_sh_half2(cx.g, cx.b), lighting_sh_half2(cy.r, cy.g)));
+    vec2 w = uintBitsToFloat(uvec2(lighting_sh_half2(cy.b, cz.r), lighting_sh_half2(cz.g, cz.b)));
+    if ((slot & 1u) == 0u) {
+        cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].xy = w;
+    } else {
+        cache.v[LIGHTING_SH_B_AT + (slot >> 1u)].zw = w;
+    }
+}
+void lighting_sh_get(uint slot, out vec3 c0, out vec3 cx, out vec3 cy, out vec3 cz) {
+    if (!LIGHTING_SH_HALF) {
+        vec4 a = cache.v[LIGHTING_SH_AT + slot];
+        vec4 b = cache.v[LIGHTING_SH_B_AT + slot];
+        vec4 c = cache.v[LIGHTING_SH_C_AT + slot];
+        c0 = a.xyz;
+        cx = vec3(a.w, b.xy);
+        cy = vec3(b.zw, c.x);
+        cz = c.yzw;
+        return;
+    }
+    uvec4 a = floatBitsToUint(cache.v[LIGHTING_SH_AT + slot]);
+    vec4 bv = cache.v[LIGHTING_SH_B_AT + (slot >> 1u)];
+    uvec2 b = floatBitsToUint((slot & 1u) == 0u ? bv.xy : bv.zw);
+    vec2 h0 = unpackHalf2x16(a.x);
+    vec2 h1 = unpackHalf2x16(a.y);
+    vec2 h2 = unpackHalf2x16(a.z);
+    vec2 h3 = unpackHalf2x16(a.w);
+    vec2 h4 = unpackHalf2x16(b.x);
+    vec2 h5 = unpackHalf2x16(b.y);
+    c0 = vec3(h0, h1.x);
+    cx = vec3(h1.y, h2);
+    cy = vec3(h3, h4.x);
+    cz = vec3(h4.y, h5);
+}
+// The tilt read (lighting_sh.rs ShL1::tilt): the cell's exact mean e (taken
+// about its relight normal `axis`) plus the band-1 change from that normal to
+// n. Exactly the mean at n == axis, so a surface facing along the cell's
+// normal reads what the per-axis path reads; plain L1 would read a narrow
+// lamp at 0.75 of its light there. Linear in the harmonics, so the shared
+// blend alpha keeps it consistent. Clamped at 0. The arithmetic is
+// `lighting_texel_seed_tilt`, which the lavapipe check runs.
+#include "lighting_texel_seed.glsl"
+vec3 lighting_sh_tilt(uint slot, vec3 e, vec3 axis, vec3 n) {
+    vec3 c0;
+    vec3 cx;
+    vec3 cy;
+    vec3 cz;
+    lighting_sh_get(slot, c0, cx, cy, cz);
+    return lighting_texel_seed_tilt(e, axis, n, cx, cy, cz);
+}
+// Sun fraction of the last owning-cell seed. The seed's w is 1 when a cell
+// had light, so a zero sun share is not "no seed".
+float lighting_texel_seed_sunfrac = 0.0;
+// ADR 0039 stage 3. The empty texel's seed is this one cell's tilt. The lookup
+// does not claim, and it does not stamp or write the cell. An axis-aligned
+// texel does not blend neighbours (the stage 2 owner fix).
+vec4 lighting_sh_owning_texel_seed(vec3 p, vec3 n) {
+    lighting_texel_seed_sunfrac = 0.0;
+    uint s = lighting_cache_find_sized(p, n, false, LIGHTING_SH_CELL, p);
+    if (s == ~0u) {
+        return vec4(0.0);
+    }
+    vec4 e = cache.v[3u * s + 2u];
+    if (e.w < LIGHTING_CACHE_HAS_W) {
+        return vec4(0.0);
+    }
+    lighting_texel_seed_sunfrac = lighting_sc_sunfrac_now(s);
+    vec3 rgb = lighting_sh_tilt(s, e.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
+    return vec4(rgb, 1.0);
+}
+// The 25 cm cells' light at p facing n, read at the true normal: for each
+// axis n leans along (weight n_a^2), the four cells around p on that axis's
+// lattice (moved onto the plane through p facing n), bilinear, each read by
+// lighting_sh_tilt. A cell whose point is off the plane by more than half a
+// cell is on another surface (the far side of a thin wall, a corner) and is
+// left out. w 1 when any cell had light. `claim` (writing compiles only,
+// the compose maintenance pass) claims the cell under p when the lattice
+// accepts an axis, a component of magnitude 1. A slanted normal accepts
+// none, so the read stays empty and does not allocate or stamp a cell.
+// Stamping it would mark the cell read (growing_wrc) before any ray hit it.
+vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
+    const float cs = LIGHTING_SH_CELL;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    uint looks = 0u;
+    bool did_claim = false;
+    [[dont_unroll]] for (uint ax = 0u; ax < 3u; ax++) {
+        if (abs(n[ax]) < 1.0) {
+            continue;
+        }
+        if (claim && !did_claim && LIGHTING_SC_WRITES) {
+            uint claimed = lighting_cache_find_sized(p, n, true, cs, p);
+            if (claimed != ~0u) {
+                cache.v[3u * claimed].w = uintBitsToFloat(lighting_frame());
+            }
+            did_claim = true;
+        }
+        float wa = n[ax] * n[ax];
+        vec3 an = vec3(0.0);
+        an[ax] = n[ax] < 0.0 ? -1.0 : 1.0;
+        uint ua = (ax + 1u) % 3u;
+        uint ub = (ax + 2u) % 3u;
+        vec2 uv = vec2(p[ua], p[ub]) / cs - LIGHTING_CELL_HALF;
+        vec2 g0 = floor(uv);
+        vec2 fr = uv - g0;
+        [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+            vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
+            float bil = ((k & 1u) == 1u ? fr.x : 1.0 - fr.x) * ((k >> 1u) == 1u ? fr.y : 1.0 - fr.y);
+            if (bil <= 0.0) {
+                continue;
+            }
+            vec3 q = p;
+            q[ua] = (c.x + LIGHTING_CELL_HALF) * cs;
+            q[ub] = (c.y + LIGHTING_CELL_HALF) * cs;
+            q[ax] = p[ax] - ((q[ua] - p[ua]) * n[ua] + (q[ub] - p[ub]) * n[ub]) / n[ax];
+            looks += 1u;
+            uint s = lighting_cache_find_sized(q, an, false, cs, p);
+            if (s == ~0u || abs(dot(cache.v[3u * s].xyz - p, n)) > LIGHTING_CELL_HALF * cs) {
+                continue;
+            }
+            vec4 v = cache.v[3u * s + 2u];
+            if (v.w < LIGHTING_CACHE_HAS_W) {
+                continue;
+            }
+            if (LIGHTING_SC_WRITES) {
+                cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+            }
+            sum += wa * bil * lighting_sh_tilt(s, v.rgb, cache.v[3u * s + 1u].xyz, n) * lighting_sc_sun_gain(s);
+            ws += wa * bil;
+        }
+    }
+    lighting_chg(CHG_SH_LOOKUPS, looks);
     return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
 }
 vec4 lighting_sc_shown(uint slot) {
@@ -2285,6 +2491,24 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
+        // ADR 0039 stage 2. A slanted hit may read the lattice, then the
+        // owning cell tilted from its axis mean to the true normal. An
+        // axis-aligned hit keeps that cell. Compose leaves lighting_sc_display
+        // set while it seeds a new texel, and that seed is the texel's history
+        // until its own rays replace it, so a display bilinear of the
+        // neighbour would move the energy the cell measured (axis_aligned_floor_seed
+        // in lighting_sh.rs). Mover-frame cells keep the per-axis read.
+        if (lighting_sh_on() && lighting_obj_salt < 0.5) {
+            vec3 an = abs(n);
+            bool slanted = max(an.x, max(an.y, an.z)) < LIGHTING_SH_HIT_SLANT;
+            if (slanted && hsize < LIGHTING_SH_HIT_SPAN * LIGHTING_SH_CELL) {
+                vec4 b = lighting_sh_read(pos, n, false);
+                if (b.w > LIGHTING_CACHE_HAS_W) {
+                    return b.rgb * keep;
+                }
+            }
+            return lighting_sh_tilt(slot, e.rgb, cache.v[3u * slot + 1u].xyz, n) * lighting_sc_sun_gain(slot) * keep;
+        }
         return e.rgb * lighting_sc_sun_gain(slot) * keep;
     }
     return e.rgb;
@@ -3092,7 +3316,27 @@ float lighting_sc_debug_variance(vec3 pos, vec3 n) {
 }
 vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     uint mode = lighting_world_mode();
+    // Cache-only view (toggle cells_only): the 25 cm cells alone, black where
+    // none is lit, never texels or probes. SH cells read at the true normal;
+    // off, the per-axis bilinear read (lighting_sc_wrc_now).
+    if (mode == 3u && (lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
+        if (lighting_sh_on()) {
+            return vec4(lighting_sh_read(pos, n, true).rgb, 1.0);
+        }
+        if (LIGHTING_SC_WRITES) {
+            uint c = lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
+            if (c != ~0u) {
+                cache.v[3u * c].w = uintBitsToFloat(lighting_frame());
+            }
+        }
+        return vec4(lighting_sc_wrc_now(pos, n).rgb, 1.0);
+    }
     if (lighting_sc_slanted(n)) {
+        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal
+        // instead of the probes (a mover's stay on the probes).
+        if (lighting_sh_on() && !obj) {
+            return lighting_sh_read(pos, n, true);
+        }
         return vec4(0.0);
     }
     uint ax = lighting_axis(n) >> 1u;
@@ -3132,6 +3376,27 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
         }
         bool split = mode == 3u && lighting_sc_seed_split() && size <= 0.2;
+        // ADR 0039 stage 3: a lamp change drops the seed. Own samples stay.
+        // Off leaves the stage 2 seed where it was.
+        if (LIGHTING_SC_WRITES && lighting_sh_texel_seed_on() && !obj && lighting_sc_lamp_touched(slot)) {
+            lighting_sc_clear_seed(slot);
+        }
+        // The resample below stores a bilinear of other sizes, and
+        // lighting_sc_shown returns that seed at weight 1, so the owning cell
+        // has to be stored first. A miss leaves the slot empty and the
+        // resample still runs. Off, a mover, or a texel that already has its
+        // own samples does not enter.
+        // kept is set only when this call stored the owning cell. A miss,
+        // the setting off, a mover, and an own sample leave it clear, so
+        // their later seeds stay the stage 2 ones.
+        bool kept = false;
+        if (LIGHTING_SC_WRITES && split && lighting_sh_texel_seed_on() && !obj && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W && !lighting_sc_has_seed(slot)) {
+            vec4 shs = lighting_sh_owning_texel_seed(q, n);
+            if (shs.w > LIGHTING_CACHE_HAS_W) {
+                lighting_sc_set_seed(slot, shs.rgb, LIGHTING_SC_SEED_CONF, lighting_texel_seed_sunfrac);
+                kept = true;
+            }
+        }
         if (LIGHTING_SC_WRITES && mode == 3u && (lighting_sc_flags() & 524288u) != 0u && cache.v[3u * slot + 2u].w < 0.5 && !(split && lighting_sc_has_seed(slot))) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
@@ -3154,14 +3419,18 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             continue;
         }
         if (v.w < 0.5 && mode == 3u) {
+            // Denoise off makes lighting_sc_shown return empty, so this walk
+            // still feeds the pixel. It must not replace an owning-cell seed
+            // stored above. A miss leaves kept clear, so the parent seed
+            // still replaces that resample.
             if (split) {
                 // S72N: the coarser cells bilinear (a nearest parent showed its
                 // 50 cm / 1 m squares), kept as a low-confidence seed.
                 v = lighting_sc_parent_bilerp(q, n, size);
-                if (v.w > 0.5) {
+                if (v.w > 0.5 && !kept) {
                     lighting_sc_set_seed(slot, v.rgb, 0.25, lighting_bilerp_sunfrac);
                 }
-            } else {
+            } else if (v.w < LIGHTING_CACHE_HAS_W) {
                 v = lighting_sc_parent(q, n, size);
             }
         }
@@ -3171,10 +3440,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec3 hc = lighting_cache_irradiance(q, n);
             if (any(greaterThan(hc, vec3(0.0)))) {
                 v = vec4(hc, 1.0);
-                if (split) {
+                if (split && !kept) {
                     lighting_sc_set_seed(slot, hc, 0.25, lighting_hit_sunfrac);
                 }
-            } else if (split && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
+            } else if (split && !kept && lighting_px_probes.x >= 0.0 && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // S72N: the S72M probe seed, as a seed (not an own set).
                 lighting_sc_set_seed(slot, lighting_px_probes, 0.25, 0.0);
                 v = vec4(lighting_px_probes, 1.0);
@@ -4013,7 +4282,7 @@ void lighting_svgf_push(uint slot) {
     // Coarse: the WRC cells (2x size) bilinear, their filtered values and masks.
     vec3 p = cache.v[3u * slot].xyz;
     vec3 n = nb.xyz;
-    float cs = 0.25;
+    float cs = LIGHTING_SC_HIT;
     uint ax = lighting_axis(n) >> 1u;
     uint ua = (ax + 1u) % 3u;
     uint ub = (ax + 2u) % 3u;
