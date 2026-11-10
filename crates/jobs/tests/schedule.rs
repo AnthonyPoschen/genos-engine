@@ -132,25 +132,38 @@ fn conflicting_writes_stay_in_index_order() {
 
 #[test]
 fn soon_defers_when_must_meets_the_budget() {
-    let report = budget_frame();
+    let (_scheduler, report) = budget_frame();
     assert!(report.stages[0].slots[2].is_none());
     assert_eq!(report.stats.deferred, 1);
 }
 
 #[test]
 fn must_still_runs_and_counts_over_budget() {
-    let report = budget_frame();
+    let (scheduler, report) = budget_frame();
     assert_eq!(report.stages[0].slots[0], Some(1));
     assert_eq!(report.stages[0].slots[1], Some(3));
     assert_eq!(report.stats.over_budget, 1);
     assert!(report.stats.must_wall_ms > 6.0);
+    let counters = scheduler.counters();
+    assert_eq!(
+        counters.must_wall_ms.to_bits(),
+        report.stats.must_wall_ms.to_bits()
+    );
+    assert_eq!(
+        counters.soon_wall_ms.to_bits(),
+        report.stats.soon_wall_ms.to_bits()
+    );
+    assert_eq!(
+        counters.slack_wall_ms.to_bits(),
+        report.stats.slack_wall_ms.to_bits()
+    );
 }
 
-fn budget_frame() -> genos_jobs::Report<u64> {
+fn budget_frame() -> (genos_jobs::Scheduler, genos_jobs::Report<u64>) {
     let clock = Arc::new(ManualClock::new(0.0));
     let scheduler = Scheduler::new(settings(Order::Serial, 0), ManualClock::handle(&clock));
     let moved = Arc::clone(&clock);
-    scheduler
+    let report = scheduler
         .run(vec![
             job(0, 0, Class::Must, move || {
                 moved.set(7.0);
@@ -159,7 +172,8 @@ fn budget_frame() -> genos_jobs::Report<u64> {
             job(0, 1, Class::Must, || 3),
             job(0, 2, Class::Soon, || 4),
         ])
-        .unwrap()
+        .unwrap();
+    (scheduler, report)
 }
 
 #[test]

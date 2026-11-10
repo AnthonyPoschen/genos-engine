@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -148,7 +148,7 @@ pub struct Stats {
     pub panics: u32,
     /// Successful steals.
     pub steals: u32,
-    /// Slack jobs skipped because a seat was held.
+    /// Slack jobs that ran while a seat was held. Stays 0 when the seat skips Slack.
     pub slack_during_fence: u32,
     /// Summed milliseconds per label.
     pub labels: Vec<(&'static str, f64)>,
@@ -178,11 +178,17 @@ pub struct Scheduler {
     deferred: AtomicU32,
     over_budget: AtomicU32,
     slack_during_fence: AtomicU32,
+    must_wall: AtomicU64,
+    soon_wall: AtomicU64,
+    slack_wall: AtomicU64,
     /// Planted bug for `debug/jobs --mutate`. `0` is correct code.
     plant: AtomicU8,
     /// Fail [`Self::run`]'s worker spawn once this many workers exist.
     /// `usize::MAX` spawns every worker. Tests use a small value.
     spawn_fail_after: AtomicUsize,
+    /// When set, that spawn failure waits until a started worker has entered
+    /// its job. Production leaves this clear.
+    wait_for_entered: AtomicBool,
 }
 
 const PLANT_UNORDERED: u8 = 1;
@@ -212,8 +218,12 @@ impl Scheduler {
             deferred: AtomicU32::new(0),
             over_budget: AtomicU32::new(0),
             slack_during_fence: AtomicU32::new(0),
+            must_wall: AtomicU64::new(0),
+            soon_wall: AtomicU64::new(0),
+            slack_wall: AtomicU64::new(0),
             plant: AtomicU8::new(0),
             spawn_fail_after: AtomicUsize::new(usize::MAX),
+            wait_for_entered: AtomicBool::new(false),
         }
     }
 
@@ -259,10 +269,17 @@ impl Scheduler {
 
     /// Counters for the last frame, including a failed [`Self::run`].
     ///
-    /// The next [`Self::run`] clears them first. A nested run does not.
+    /// Wall times are the class totals from that frame, the same numbers
+    /// [`Report::stats`] carries after a successful run. The next
+    /// [`Self::run`] clears them first. A nested run does not.
     #[must_use]
     pub fn counters(&self) -> Stats {
-        self.snapshot(0.0, 0.0, 0.0, &[])
+        self.snapshot(
+            load_ms(&self.must_wall),
+            load_ms(&self.soon_wall),
+            load_ms(&self.slack_wall),
+            &[],
+        )
     }
 
     /// Run one frame.
@@ -300,9 +317,18 @@ impl Scheduler {
                 let wall =
                     self.run_class(class, class_jobs, &mut slots, &mut labels, frame_start)?;
                 match class {
-                    Class::Must => must_wall += wall,
-                    Class::Soon => soon_wall += wall,
-                    Class::Slack => slack_wall += wall,
+                    Class::Must => {
+                        must_wall += wall;
+                        store_ms(&self.must_wall, must_wall);
+                    }
+                    Class::Soon => {
+                        soon_wall += wall;
+                        store_ms(&self.soon_wall, soon_wall);
+                    }
+                    Class::Slack => {
+                        slack_wall += wall;
+                        store_ms(&self.slack_wall, slack_wall);
+                    }
                     Class::Pumped => {}
                 }
             }
@@ -407,6 +433,7 @@ impl Scheduler {
                 BatchLimits {
                     workers: self.workers,
                     spawn_fail_after: self.spawn_fail_after.load(Ordering::Relaxed),
+                    wait_for_entered: self.wait_for_entered.load(Ordering::Relaxed),
                 },
                 Arc::clone(&self.clock),
                 &self.steals,
@@ -425,6 +452,9 @@ impl Scheduler {
         self.deferred.store(0, Ordering::Relaxed);
         self.over_budget.store(0, Ordering::Relaxed);
         self.slack_during_fence.store(0, Ordering::Relaxed);
+        store_ms(&self.must_wall, 0.0);
+        store_ms(&self.soon_wall, 0.0);
+        store_ms(&self.slack_wall, 0.0);
     }
 
     fn relabel<T>(&self, jobs: Vec<Job<T>>) -> Vec<Job<T>> {
@@ -517,10 +547,18 @@ fn take_batch<T: Send + 'static>(jobs: &mut [Option<Job<T>>], batch: &[usize]) -
 }
 
 fn join_workers<T>(handles: Vec<thread::JoinHandle<()>>, share: &Share<T>) {
-    share.remaining.store(0, Ordering::Release);
+    share.stop.store(true, Ordering::Release);
     for handle in handles {
         let _ = handle.join();
     }
+}
+
+fn store_ms(slot: &AtomicU64, ms: f64) {
+    slot.store(ms.to_bits(), Ordering::Relaxed);
+}
+
+fn load_ms(slot: &AtomicU64) -> f64 {
+    f64::from_bits(slot.load(Ordering::Relaxed))
 }
 
 fn invoke<T>(clock: &dyn Clock, work: Box<dyn FnOnce() -> T + Send>) -> (Option<T>, f64, bool) {
@@ -539,6 +577,7 @@ fn invoke<T>(clock: &dyn Clock, work: Box<dyn FnOnce() -> T + Send>) -> (Option<
 struct BatchLimits {
     workers: usize,
     spawn_fail_after: usize,
+    wait_for_entered: bool,
 }
 
 fn run_batch<T: Send + 'static>(
@@ -581,6 +620,8 @@ fn run_batch<T: Send + 'static>(
     }
     let share = Share {
         remaining: Arc::new(AtomicUsize::new(count)),
+        stop: Arc::new(AtomicBool::new(false)),
+        entered: Arc::new(AtomicBool::new(false)),
         written: Arc::new(Mutex::new(Vec::new())),
         labels: Arc::new(Mutex::new(Vec::new())),
         clock,
@@ -590,6 +631,11 @@ fn run_batch<T: Send + 'static>(
     let mut handles = Vec::new();
     for id in 1..runners {
         if handles.len() >= limits.spawn_fail_after {
+            if limits.wait_for_entered {
+                while !share.entered.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            }
             join_workers(handles, &share);
             return Err(ScheduleError::Spawn);
         }
@@ -637,6 +683,10 @@ fn run_batch<T: Send + 'static>(
 
 struct Share<T> {
     remaining: Arc<AtomicUsize>,
+    /// Shutdown. Distinct from `remaining`, which only counts finished jobs.
+    stop: Arc<AtomicBool>,
+    /// A worker has entered `invoke`. Tests wait on this before shutdown.
+    entered: Arc<AtomicBool>,
     written: Arc<Mutex<Vec<(usize, T)>>>,
     labels: Arc<Mutex<Vec<(&'static str, f64)>>>,
     clock: Arc<dyn Clock>,
@@ -648,6 +698,8 @@ impl<T> Share<T> {
     fn clone_handles(&self) -> Self {
         Self {
             remaining: Arc::clone(&self.remaining),
+            stop: Arc::clone(&self.stop),
+            entered: Arc::clone(&self.entered),
             written: Arc::clone(&self.written),
             labels: Arc::clone(&self.labels),
             clock: Arc::clone(&self.clock),
@@ -663,14 +715,14 @@ fn worker_loop<T: Send>(
     share: &Share<T>,
 ) {
     loop {
-        if share.remaining.load(Ordering::Acquire) == 0 {
+        if stopped(share) {
             break;
         }
         let unit = if let Some(unit) = owner.pop() {
             unit
         } else if let Some(unit) = steal_any(all, owner, &share.steals) {
             unit
-        } else if share.remaining.load(Ordering::Acquire) == 0 {
+        } else if stopped(share) {
             break;
         } else {
             thread::yield_now();
@@ -678,6 +730,7 @@ fn worker_loop<T: Send>(
         };
         let index = unit.index;
         let label = unit.label;
+        share.entered.store(true, Ordering::Release);
         let (value, elapsed, panicked) = invoke(share.clock.as_ref(), unit.work);
         push_label(&share.labels, label, elapsed);
         if panicked {
@@ -685,8 +738,16 @@ fn worker_loop<T: Send>(
         } else if let Some(value) = value {
             lock(&share.written).push((index, value));
         }
-        share.remaining.fetch_sub(1, Ordering::Release);
+        let _ = share
+            .remaining
+            .try_update(Ordering::Release, Ordering::Relaxed, |left| {
+                Some(left.saturating_sub(1))
+            });
     }
+}
+
+fn stopped<T>(share: &Share<T>) -> bool {
+    share.stop.load(Ordering::Acquire) || share.remaining.load(Ordering::Acquire) == 0
 }
 
 fn steal_any<T>(
@@ -770,14 +831,17 @@ fn mix(hash: u64, value: u64) -> u64 {
 #[cfg(test)]
 mod spawn_tests {
     use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
 
     use super::Scheduler;
     use crate::{Class, Job, JobSettings, ManualClock, Order, ScheduleError};
 
     #[test]
     fn a_failed_spawn_joins_the_workers_already_started() {
-        let scheduler = Scheduler::new(
+        let scheduler = Arc::new(Scheduler::new(
             JobSettings {
                 workers: 4,
                 order: Order::Parallel,
@@ -785,8 +849,9 @@ mod spawn_tests {
                 slack: false,
             },
             Arc::new(ManualClock::new(0.0)),
-        );
+        ));
         scheduler.spawn_fail_after.store(1, Ordering::Relaxed);
+        scheduler.wait_for_entered.store(true, Ordering::Relaxed);
         let jobs = (0..4u32)
             .map(|index| Job {
                 stage: 0,
@@ -794,14 +859,27 @@ mod spawn_tests {
                 class: Class::Must,
                 label: "move",
                 access: Vec::new(),
-                work: Box::new(move || u64::from(index)),
+                work: Box::new(move || {
+                    let (_tx, hold) = mpsc::channel::<()>();
+                    assert!(hold.recv_timeout(Duration::from_millis(400)).is_err());
+                    u64::from(index)
+                }),
             })
             .collect();
-        let err = scheduler.run(jobs).unwrap_err();
+        let (tx, rx) = mpsc::channel();
+        let runner = Arc::clone(&scheduler);
+        thread::spawn(move || {
+            let _ = tx.send(runner.run(jobs));
+        });
+        let err = rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap()
+            .unwrap_err();
         assert!(matches!(err, ScheduleError::Spawn));
         scheduler
             .spawn_fail_after
             .store(usize::MAX, Ordering::Relaxed);
+        scheduler.wait_for_entered.store(false, Ordering::Relaxed);
         let report = scheduler
             .run(vec![
                 Job {
