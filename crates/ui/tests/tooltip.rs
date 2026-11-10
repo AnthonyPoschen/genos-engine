@@ -2,7 +2,7 @@
 
 //! A tooltip opens after a hover delay and is not a press target.
 
-use genos_ui::{frame, Node, Place, Pointer, Sizing, Space, State};
+use genos_ui::{frame, Node, Place, Pointer, Sizing, Space, State, PANEL_ID};
 
 fn target() -> Node {
     let mut node = Node::new(1);
@@ -98,4 +98,50 @@ fn a_dialog_blocks_the_tip() {
         None,
     );
     assert!(!shows_tip(&frame));
+}
+
+#[test]
+fn an_open_tip_follows_the_pointer_onto_another_node() {
+    let first = target();
+    let mut second = target();
+    second.id = 2;
+    second.tooltip = Some("OTHER".into());
+    second.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], [80.0, 0.0]));
+    let mut root = Node::new(9);
+    root.children = vec![first, second];
+    let mut state = State::default();
+    let opened = frame(
+        &root,
+        &mut state,
+        Space::Screen,
+        [200.0, 100.0],
+        None,
+        Pointer::at(4.0, 4.0, false),
+        0.4,
+        None,
+    );
+    let tip = opened
+        .shown
+        .iter()
+        .find(|row| row.text.as_deref() == Some("TIP"))
+        .expect("tip");
+    assert!(tip.id < PANEL_ID, "tip id {} is inside the chrome band", tip.id);
+    let moved = frame(
+        &root,
+        &mut state,
+        Space::Screen,
+        [200.0, 100.0],
+        None,
+        Pointer::at(84.0, 4.0, false),
+        0.0,
+        None,
+    );
+    assert!(moved.shown.iter().any(|row| row.text.as_deref() == Some("OTHER")));
+    assert!(!moved.shown.iter().any(|row| row.text.as_deref() == Some("TIP")));
+    let other = moved
+        .shown
+        .iter()
+        .find(|row| row.text.as_deref() == Some("OTHER"))
+        .expect("other");
+    assert!(other.rect.x >= 80.0, "x {}", other.rect.x);
 }

@@ -101,14 +101,18 @@ pub fn raster_outline(
     let mut pixels = vec![0_u8; side as usize * side as usize];
     let mut min_x = f32::MAX;
     let mut max_x = 0.0_f32;
+    let mut polys = Vec::new();
     for contour in contours {
         let poly = flatten(contour, scale, side as f32);
         for point in &poly {
             min_x = min_x.min(point[0]);
             max_x = max_x.max(point[0]);
         }
-        fill_even_odd(&mut pixels, side, &poly);
+        if poly.len() >= 3 {
+            polys.push(poly);
+        }
     }
+    fill_even_odd(&mut pixels, side, &polys);
     let advance = if min_x > max_x { 0.0 } else { max_x - min_x };
     AtlasGlyph {
         advance,
@@ -155,7 +159,9 @@ pub fn paint_node_text(
                 return Vec::new();
             };
             let shaped = shape_outline(font, text, node_width(node));
-            outline_quads(&shaped, font, origin, color)
+            let mut paints = Vec::new();
+            outline_quads(&mut paints, &shaped, font, origin, color);
+            paints
         }
     }
 }
@@ -186,13 +192,25 @@ fn bitmap_paints(text: &str, origin: [f32; 2], max_width: Option<f32>, color: [f
         .collect()
 }
 
+pub(crate) fn paint_outline_into(
+    out: &mut Vec<Paint>,
+    font: &OutlineFont,
+    text: &str,
+    origin: [f32; 2],
+    max_width: f32,
+    color: [f32; 3],
+) {
+    let shaped = shape_outline(font, text, Some(max_width));
+    outline_quads(out, &shaped, font, origin, color);
+}
+
 fn outline_quads(
+    out: &mut Vec<Paint>,
     shaped: &ShapedText,
     font: &OutlineFont,
     origin: [f32; 2],
     color: [f32; 3],
-) -> Vec<Paint> {
-    let mut out = Vec::new();
+) {
     for glyph in &shaped.glyphs {
         let Some(mask) = font.masks.get(&glyph.ch) else {
             continue;
@@ -210,7 +228,6 @@ fn outline_quads(
             alpha: coverage,
         });
     }
-    out
 }
 
 fn coverage(mask: &AtlasGlyph) -> f32 {
@@ -401,8 +418,8 @@ fn push_quad(poly: &mut Vec<[f32; 2]>, start: [f32; 2], ctrl: [f32; 2], end: [f3
     }
 }
 
-fn fill_even_odd(pixels: &mut [u8], side: u32, poly: &[[f32; 2]]) {
-    if poly.len() < 3 {
+fn fill_even_odd(pixels: &mut [u8], side: u32, polys: &[Vec<[f32; 2]>]) {
+    if polys.is_empty() {
         return;
     }
     let side_usize = side as usize;
@@ -410,7 +427,13 @@ fn fill_even_odd(pixels: &mut [u8], side: u32, poly: &[[f32; 2]]) {
         for col in 0..side_usize {
             let x = col as f32 + 0.5;
             let y = row as f32 + 0.5;
-            if even_odd(x, y, poly) {
+            let mut inside = false;
+            for poly in polys {
+                if even_odd(x, y, poly) {
+                    inside = !inside;
+                }
+            }
+            if inside {
                 pixels[row * side_usize + col] = 255;
             }
         }
@@ -455,5 +478,26 @@ mod tests {
         let center = 8 * 16 + 8;
         assert_eq!(mask.pixels.get(center).copied(), Some(255));
         assert_eq!(mask.pixels.first().copied(), Some(0));
+    }
+
+    #[test]
+    fn a_hole_in_the_fixture_glyph_stays_clear() {
+        let outer = vec![
+            OutlinePoint { x: 128, y: 128, on_curve: true },
+            OutlinePoint { x: 896, y: 128, on_curve: true },
+            OutlinePoint { x: 896, y: 896, on_curve: true },
+            OutlinePoint { x: 128, y: 896, on_curve: true },
+        ];
+        let hole = vec![
+            OutlinePoint { x: 384, y: 384, on_curve: true },
+            OutlinePoint { x: 640, y: 384, on_curve: true },
+            OutlinePoint { x: 640, y: 640, on_curve: true },
+            OutlinePoint { x: 384, y: 640, on_curve: true },
+        ];
+        let mask = raster_outline(&[outer, hole], 1024, 16.0);
+        let at = |col: usize, row: usize| mask.pixels[row * 16 + col];
+        assert_eq!(at(8, 8), 0, "the hole filled");
+        assert_eq!(at(3, 8), 255, "the ring stayed empty");
+        assert_eq!(at(0, 0), 0);
     }
 }

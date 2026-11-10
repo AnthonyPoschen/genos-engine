@@ -163,6 +163,10 @@ pub struct State {
     pub(crate) tooltip_id: Option<u32>,
     /// Seconds the pointer has stayed on `tooltip_id`.
     pub(crate) tooltip_secs: f32,
+    /// Node `frame` last dragged. Its rect keeps [`Self::drag_offset`].
+    pub(crate) drag_id: Option<u32>,
+    /// Pixels added to `drag_id` after layout.
+    pub(crate) drag_offset: [f32; 2],
 }
 
 impl Default for State {
@@ -196,6 +200,8 @@ impl Default for State {
             layer: None,
             tooltip_id: None,
             tooltip_secs: 0.0,
+            drag_id: None,
+            drag_offset: [0.0, 0.0],
         }
     }
 }
@@ -270,6 +276,11 @@ impl State {
     /// The control inside the focused panel that arrows move.
     pub fn focused_control(&self) -> Option<u32> {
         self.focus
+    }
+
+    /// True while [`crate::frame`] is moving a draggable node.
+    pub fn dragging(&self) -> bool {
+        self.dragging
     }
 
     fn toggle_section(&mut self, id: u32) {

@@ -35,9 +35,16 @@ pub fn frame(
     keys: Option<&InputSystem>,
 ) -> Frame {
     let press_edge = pointer.down && !state.down;
-    let root_items = layout::layout(root, space, viewport, camera);
-    settle_tooltip(state, &root_items, pointer, viewport, dt);
-    let layer_items = state.layer.as_ref().map(|layer| {
+    if state.dragging && pointer.down && !press_edge {
+        state.drag_offset[0] += pointer.x - state.pointer_x;
+        state.drag_offset[1] += pointer.y - state.pointer_y;
+    }
+    let mut root_items = layout::layout(root, space, viewport, camera);
+    if let Some(id) = state.drag_id {
+        shift_subtree(&mut root_items, id, state.drag_offset);
+    }
+    settle_tooltip(state, root, &root_items, pointer, viewport, dt);
+    let mut layer_items = state.layer.as_ref().map(|layer| {
         layout::layout(&layer.node, Space::Screen, viewport, camera)
     });
     let role = state.layer.as_ref().map(|layer| layer.role);
@@ -45,8 +52,8 @@ pub fn frame(
     let layer_hit = layer_items
         .as_ref()
         .and_then(|items| hit_at(items, pointer.x, pointer.y))
-        .cloned();
-    let root_hit = hit_at(&root_items, pointer.x, pointer.y).cloned();
+        .map(|item| item.id);
+    let root_hit = hit_at(&root_items, pointer.x, pointer.y).map(|item| item.id);
     let mut events = Vec::new();
     let mut actions = Vec::new();
     let mut look_capture = false;
@@ -54,28 +61,38 @@ pub fn frame(
     if press_edge {
         match role {
             Some(LayerRole::Popup) => {
-                if let Some(item) = layer_hit.as_ref() {
-                    state.focus = Some(item.id);
+                if let Some(id) = layer_hit {
+                    state.focus = Some(id);
                     state.look_hold = false;
-                    on_press(item, layer_items.as_deref().unwrap_or(&[]), pointer, state, &mut events, &mut actions);
+                    if let Some(items) = layer_items.as_ref() {
+                        if let Some(item) = items.iter().find(|item| item.id == id) {
+                            on_press(item, items, pointer, state, &mut events, &mut actions);
+                        }
+                    }
                 } else if let Some(id) = layer_root {
                     events.push(Event::Dismiss { id });
                     state.close_layer();
                 }
             }
             Some(LayerRole::Dialog) => {
-                if let Some(item) = layer_hit.as_ref() {
-                    state.focus = Some(item.id);
+                if let Some(id) = layer_hit {
+                    state.focus = Some(id);
                     state.look_hold = false;
-                    on_press(item, layer_items.as_deref().unwrap_or(&[]), pointer, state, &mut events, &mut actions);
+                    if let Some(items) = layer_items.as_ref() {
+                        if let Some(item) = items.iter().find(|item| item.id == id) {
+                            on_press(item, items, pointer, state, &mut events, &mut actions);
+                        }
+                    }
                 }
             }
             Some(LayerRole::Tooltip) | None => {
-                if let Some(item) = root_hit.as_ref() {
-                    state.focus = Some(item.id);
+                if let Some(id) = root_hit {
+                    state.focus = Some(id);
                     state.look_hold = false;
                     state.held = None;
-                    on_press(item, &root_items, pointer, state, &mut events, &mut actions);
+                    if let Some(item) = root_items.iter().find(|item| item.id == id) {
+                        on_press(item, &root_items, pointer, state, &mut events, &mut actions);
+                    }
                 } else {
                     state.focus = None;
                     state.dragging = false;
@@ -106,12 +123,13 @@ pub fn frame(
             }
         }
         if !keys_captured {
-            let pool: &[Item] = if role == Some(LayerRole::Dialog) {
+            let on_layer = matches!(role, Some(LayerRole::Dialog | LayerRole::Popup));
+            let pool: &[Item] = if on_layer {
                 layer_items.as_deref().unwrap_or(&root_items)
             } else {
                 &root_items
             };
-            if nav::apply(input, state, pool, &mut events) {
+            if nav::apply(input, state, pool, &mut events) || (on_layer && nav::took_key(input)) {
                 keys_captured = true;
             }
         }
@@ -126,12 +144,14 @@ pub fn frame(
     let mut shown = Vec::new();
     let mut paints = Vec::new();
     let mut segments = Vec::new();
+    let font = state.outline.as_ref();
     paint_items(
-        &root_items,
+        &mut root_items,
         pointer,
-        root_hit.as_ref().map(|hit| hit.id),
+        root_hit,
         focus,
         &theme,
+        font,
         &mut shown,
         &mut paints,
         &mut segments,
@@ -147,11 +167,11 @@ pub fn frame(
         });
     }
     if layer_open {
-        if let Some(items) = &layer_items {
+        if let Some(items) = layer_items.as_mut() {
             let hit_id = if role == Some(LayerRole::Tooltip) {
                 None
             } else {
-                layer_hit.as_ref().map(|hit| hit.id)
+                layer_hit
             };
             paint_items(
                 items,
@@ -159,6 +179,7 @@ pub fn frame(
                 hit_id,
                 focus,
                 &theme,
+                font,
                 &mut shown,
                 &mut paints,
                 &mut segments,
@@ -187,7 +208,14 @@ pub fn frame(
     }
 }
 
-fn settle_tooltip(state: &mut State, items: &[Item], pointer: Pointer, viewport: [f32; 2], dt: f32) {
+fn settle_tooltip(
+    state: &mut State,
+    root: &Node,
+    items: &[Item],
+    pointer: Pointer,
+    viewport: [f32; 2],
+    dt: f32,
+) {
     if state
         .layer
         .as_ref()
@@ -196,28 +224,47 @@ fn settle_tooltip(state: &mut State, items: &[Item], pointer: Pointer, viewport:
         state.close_tooltip();
         return;
     }
-    let hovered = hit_at(items, pointer.x, pointer.y).filter(|item| item.tooltip.is_some());
-    let Some(item) = hovered else {
+    let hovered = hit_at(items, pointer.x, pointer.y).filter(|item| item.has_tooltip);
+    let Some(item_id) = hovered.map(|item| item.id) else {
         state.close_tooltip();
         return;
     };
-    if state.tooltip_id == Some(item.id) {
+    let open_tip = state
+        .layer
+        .as_ref()
+        .is_some_and(|layer| layer.role == LayerRole::Tooltip);
+    let previous = state.tooltip_id;
+    if previous == Some(item_id) {
         state.tooltip_secs += dt.max(0.0);
+    } else if open_tip {
+        state.tooltip_id = Some(item_id);
     } else {
-        state.tooltip_id = Some(item.id);
+        state.tooltip_id = Some(item_id);
         state.tooltip_secs = dt.max(0.0);
     }
     if state.tooltip_secs < TIP_DELAY {
         return;
     }
-    if state.layer.is_some() {
+    if state
+        .layer
+        .as_ref()
+        .is_some_and(|layer| layer.role != LayerRole::Tooltip)
+    {
         return;
     }
-    let Some(text) = item.tooltip.clone() else {
+    if open_tip && previous == Some(item_id) {
+        return;
+    }
+    let Some(text) = layout::find(root, item_id).and_then(|node| node.tooltip.as_deref()) else {
         return;
     };
+    let node = layers::tooltip_node(text, [pointer.x, pointer.y], viewport, &state.theme);
+    if let Some(layer) = state.layer.as_mut().filter(|layer| layer.role == LayerRole::Tooltip) {
+        layer.node = node;
+        return;
+    }
     state.layer = Some(OpenLayer {
-        node: layers::tooltip_node(&text, [pointer.x, pointer.y], viewport, &state.theme),
+        node,
         role: LayerRole::Tooltip,
         focus_before: state.focus,
     });
@@ -230,25 +277,26 @@ fn hit_at(items: &[Item], x: f32, y: f32) -> Option<&Item> {
 }
 
 fn paint_items(
-    items: &[Item],
+    items: &mut [Item],
     pointer: Pointer,
     hit: Option<u32>,
     focus: Option<u32>,
     theme: &crate::theme::Theme,
+    font: Option<&crate::outline::OutlineFont>,
     shown: &mut Vec<Shown>,
     paints: &mut Vec<Paint>,
     segments: &mut Vec<Segment>,
 ) {
     for item in items {
         let look = pick_look(item, pointer.down, hit, focus);
+        let painted = controls::paint_item(item, look, theme, font);
         shown.push(Shown {
             id: item.id,
             rect: item.rect,
             look,
             idle: item.idle,
-            text: item.text.clone(),
+            text: item.text.take(),
         });
-        let painted = controls::paint_item(item, look, theme);
         for paint in painted.paints {
             if let Some(paint) = clip_paint(paint, item.clip_to) {
                 paints.push(paint);
@@ -364,6 +412,10 @@ fn on_press(
             if let Some(action) = item.action {
                 actions.push(action);
             } else if item.draggable {
+                if state.drag_id != Some(item.id) {
+                    state.drag_id = Some(item.id);
+                    state.drag_offset = [0.0, 0.0];
+                }
                 state.dragging = true;
             }
         }
@@ -386,6 +438,38 @@ fn slide_held(items: &[Item], pointer: Pointer, state: &State, events: &mut Vec<
     if (value - *current).abs() > 1.0e-4 {
         events.push(Event::Change { id, value });
     }
+}
+
+fn shift_subtree(items: &mut [Item], root: u32, delta: [f32; 2]) {
+    for index in 0..items.len() {
+        if !in_subtree(items, items[index].id, root) {
+            continue;
+        }
+        let child = items[index].id != root;
+        items[index].rect.x += delta[0];
+        items[index].rect.y += delta[1];
+        items[index].content.x += delta[0];
+        items[index].content.y += delta[1];
+        if child {
+            if let Some(clip) = items[index].clip_to.as_mut() {
+                clip.x += delta[0];
+                clip.y += delta[1];
+            }
+        }
+    }
+}
+
+fn in_subtree(items: &[Item], mut id: u32, root: u32) -> bool {
+    for _ in 0..=items.len() {
+        if id == root {
+            return true;
+        }
+        let Some(parent) = items.iter().find(|item| item.id == id).and_then(|item| item.parent) else {
+            return false;
+        };
+        id = parent;
+    }
+    false
 }
 
 fn pick_look(item: &Item, down: bool, hit: Option<u32>, focus: Option<u32>) -> Look {

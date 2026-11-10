@@ -25,11 +25,21 @@ pub struct OpenLayer {
 }
 
 /// Id of the tooltip label `frame` builds. It is not a game node.
-pub const TIP_ID: u32 = u32::MAX;
+///
+/// Panel chrome owns `u32::MAX - 4095` and up (`PANEL_ID`). This id sits below that band.
+pub const TIP_ID: u32 = u32::MAX - 12_000;
 
 impl State {
     /// Open a popup. A press outside it emits [`crate::Event::Dismiss`] and closes it.
+    ///
+    /// A second call while a popup is open replaces the node and leaves focus where it is.
     pub fn open_layer(&mut self, node: Node) {
+        if let Some(layer) = self.layer.as_mut() {
+            if layer.role == LayerRole::Popup {
+                layer.node = node;
+                return;
+            }
+        }
         self.close_layer();
         self.layer = Some(OpenLayer {
             node,
@@ -39,7 +49,15 @@ impl State {
     }
 
     /// Open a dialog. An outside press does not reach the root and does not close it.
+    ///
+    /// A second call while a dialog is open replaces the node and does not move focus.
     pub fn open_dialog(&mut self, node: Node) {
+        if let Some(layer) = self.layer.as_mut() {
+            if layer.role == LayerRole::Dialog {
+                layer.node = node;
+                return;
+            }
+        }
         self.close_layer();
         let focus_before = self.focus;
         self.focus = first_focusable(&node).or(focus_before);

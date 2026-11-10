@@ -241,7 +241,7 @@ pub struct Theme {
 Navigation reads the input system. It does not poll devices itself.
 
 ```rust
-pub fn ui_actions() -> genos_input::ActionMap
+pub fn ui_actions() -> &'static genos_input::ActionMap
 ```
 
 Default bindings:
@@ -498,7 +498,7 @@ Make `State.focus` public in this step. The test reads it.
 
 - [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
-- **Deviation:** Flutter splits a widget, an element, and a render object. Here `Node` stays the data and `frame` is the pass that lays out, hits, and paints. `lighting_frame` and `button_panel` keep building their trees, then call `frame`. An immediate-mode call beside the tree stays out.
+- **Deviation:** Flutter splits a widget, an element, and a render object. Here `Node` stays the data and `frame` is the pass that lays out, hits, and paints. `lighting_frame` and `button_panel` keep their own pass and do not call `frame`. An immediate-mode call beside the tree stays out.
 - [x] **Step 5: Commit** `ui: one frame pass for hit testing, looks, and damage`
 
 Update `docs/systems/ui.md` Game use: a game can call `frame` on its own tree.

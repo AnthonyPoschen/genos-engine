@@ -66,3 +66,31 @@ fn an_outline_label_paints_a_quad_and_the_lighting_panel_stays_on_the_bitmap() {
     assert!(second.damage.is_empty(), "{:?}", second.damage);
     assert!(first.paints.iter().all(|paint| paint.alpha == 1.0));
 }
+
+#[test]
+fn frame_paints_an_outline_face_from_state() {
+    let font = load_font(&FileSource::new(fixture())).expect("glyph.ttf");
+    let outline = genos_ui::OutlineFont::rasterize(&font, 16.0, "A");
+    let mut node = Node::new(3);
+    node.face = TextFace::Outline;
+    node.text = Some("A".into());
+    node.width = Sizing::fixed(80.0);
+    node.height = Sizing::fixed(20.0);
+    let mut state = State::default();
+    state.outline = Some(outline);
+    let painted = genos_ui::frame(
+        &node,
+        &mut state,
+        genos_ui::Space::Screen,
+        [200.0, 40.0],
+        None,
+        Pointer::default(),
+        0.0,
+        None,
+    );
+    assert!(
+        painted.paints.iter().any(|paint| paint.alpha > 0.0 && paint.alpha < 1.0),
+        "frame did not paint the outline: {:?}",
+        painted.paints.iter().map(|paint| paint.alpha).collect::<Vec<_>>()
+    );
+}

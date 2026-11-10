@@ -3,8 +3,9 @@
 use crate::arc;
 use crate::kind::Kind;
 use crate::layout::{Item, Rect};
+use crate::outline::{self, OutlineFont};
 use crate::slider;
-use crate::text;
+use crate::text::{self, TextFace};
 use crate::theme::Theme;
 use crate::Paint;
 use crate::Segment;
@@ -19,7 +20,12 @@ pub(crate) struct Painted {
     pub segments: Vec<Segment>,
 }
 
-pub(crate) fn paint_item(item: &Item, look: crate::Look, theme: &Theme) -> Painted {
+pub(crate) fn paint_item(
+    item: &Item,
+    look: crate::Look,
+    theme: &Theme,
+    font: Option<&OutlineFont>,
+) -> Painted {
     let mut paints = Vec::new();
     push_rect(&mut paints, item.rect, fill(item, look, theme));
     push_border(&mut paints, item.rect, look.border);
@@ -46,15 +52,31 @@ pub(crate) fn paint_item(item: &Item, look: crate::Look, theme: &Theme) -> Paint
     }
     if let Some(text) = &item.text {
         let color = text_color(item, theme);
-        for blot in text::blots(text, item.content.x, item.content.y, item.content.w.max(1.0)) {
-            paints.push(Paint {
-                x: blot.x,
-                y: blot.y,
-                w: blot.w,
-                h: blot.h,
-                color,
-                alpha: 1.0,
-            });
+        match item.face {
+            TextFace::Bitmap => {
+                for blot in text::blots(text, item.content.x, item.content.y, item.content.w.max(1.0)) {
+                    paints.push(Paint {
+                        x: blot.x,
+                        y: blot.y,
+                        w: blot.w,
+                        h: blot.h,
+                        color,
+                        alpha: 1.0,
+                    });
+                }
+            }
+            TextFace::Outline => {
+                if let Some(font) = font {
+                    outline::paint_outline_into(
+                        &mut paints,
+                        font,
+                        text,
+                        [item.content.x, item.content.y],
+                        item.content.w.max(1.0),
+                        color,
+                    );
+                }
+            }
         }
     }
     Painted {

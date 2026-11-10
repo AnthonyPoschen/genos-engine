@@ -2,6 +2,9 @@
 //!
 //! `key_a` stays on the camera move action. Shift-Tab is the previous control.
 //! [`genos_input::ActionMap`] has no chord, so Tab plus a held shift is read here.
+//! The map is built once. A frame does not allocate a new one.
+
+use std::sync::OnceLock;
 
 use genos_input::{ActionMap, BoundInput, InputCode, InputSystem};
 
@@ -13,8 +16,15 @@ use crate::panel::State;
 use crate::slider;
 
 /// Navigation actions. `ui_next` is Tab. Shift-Tab is handled in [`apply`].
+///
+/// The map is process-wide and built on the first call.
 #[must_use]
-pub fn ui_actions() -> ActionMap {
+pub fn ui_actions() -> &'static ActionMap {
+    static MAP: OnceLock<ActionMap> = OnceLock::new();
+    MAP.get_or_init(build_ui_actions)
+}
+
+fn build_ui_actions() -> ActionMap {
     let mut map = ActionMap::new();
     map.set(
         "ui_left",
@@ -104,6 +114,18 @@ pub(crate) fn apply(
 
 pub(crate) fn back(input: &InputSystem) -> bool {
     ui_actions().pressed(input, "ui_back")
+}
+
+/// True when this frame pressed a UI navigation code.
+pub(crate) fn took_key(input: &InputSystem) -> bool {
+    let map = ui_actions();
+    map.pressed(input, "ui_left")
+        || map.pressed(input, "ui_right")
+        || map.pressed(input, "ui_up")
+        || map.pressed(input, "ui_down")
+        || map.pressed(input, "ui_activate")
+        || map.pressed(input, "ui_back")
+        || map.pressed(input, "ui_next")
 }
 
 fn wrap_index(index: usize, len: usize, delta: i32) -> usize {

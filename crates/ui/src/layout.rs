@@ -243,7 +243,10 @@ pub struct Item {
     pub action: Option<Action>,
     /// Ancestor clip. `None` means the item is not clipped.
     pub clip_to: Option<Rect>,
-    pub tooltip: Option<String>,
+    /// Bitmap unless the node set [`TextFace::Outline`].
+    pub face: TextFace,
+    /// The node has tip text. The string stays on the node so layout does not copy it.
+    pub has_tooltip: bool,
 }
 
 struct Spec {
@@ -300,6 +303,18 @@ fn project(camera: &Camera, viewport: [f32; 2], point: [f32; 3]) -> Option<[f32;
     let aspect = viewport[0] / viewport[1].max(1.0);
     let uv = viewport_uv(camera, aspect, point)?;
     Some([uv[0] * viewport[0], uv[1] * viewport[1]])
+}
+
+pub(crate) fn find(node: &Node, id: u32) -> Option<&Node> {
+    if node.id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn expand_grow(sizing: Sizing, basis: f32, parent: f32) -> f32 {
@@ -371,15 +386,8 @@ fn axis_place(
     }
 }
 
-fn layout_node(
-    node: &Node,
-    rect: Rect,
-    parent: Option<u32>,
-    inherited: Option<Rect>,
-    out: &mut Vec<Item>,
-) {
-    let content = inset(rect, node.pad);
-    out.push(Item {
+fn placed_item(node: &Node, rect: Rect, content: Rect, parent: Option<u32>, clip_to: Option<Rect>) -> Item {
+    Item {
         id: node.id,
         parent,
         rect,
@@ -392,9 +400,21 @@ fn layout_node(
         pressed: node.pressed,
         draggable: node.draggable,
         action: node.action,
-        clip_to: inherited,
-        tooltip: node.tooltip.clone(),
-    });
+        clip_to,
+        face: node.face,
+        has_tooltip: node.tooltip.is_some(),
+    }
+}
+
+fn layout_node(
+    node: &Node,
+    rect: Rect,
+    parent: Option<u32>,
+    inherited: Option<Rect>,
+    out: &mut Vec<Item>,
+) {
+    let content = inset(rect, node.pad);
+    out.push(placed_item(node, rect, content, parent, inherited));
     let child_clip = if node.clip {
         Some(match inherited {
             Some(outer) => intersect(outer, content).unwrap_or(Rect {

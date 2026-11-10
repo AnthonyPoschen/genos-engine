@@ -94,3 +94,29 @@ fn tab_wraps_inside_the_dialog() {
     );
     assert_eq!(state.focus, Some(2));
 }
+
+#[test]
+fn replacing_a_dialog_keeps_the_focused_control() {
+    let root = button(1, 10.0);
+    let mut state = State::default();
+    state.focus = Some(1);
+    state.open_dialog(dialog());
+    assert_eq!(state.focus, Some(2));
+    state.focus = Some(3);
+    let mut next = dialog();
+    next.children[0].text = Some("NOW".into());
+    state.open_dialog(next);
+    assert_eq!(state.focus, Some(3));
+    let shown = frame(
+        &root,
+        &mut state,
+        Space::Screen,
+        [240.0, 80.0],
+        None,
+        Pointer::default(),
+        0.0,
+        None,
+    );
+    assert!(shown.shown.iter().any(|row| row.text.as_deref() == Some("NOW")));
+    assert_eq!(state.focus, Some(3));
+}
