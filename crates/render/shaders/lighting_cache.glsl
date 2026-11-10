@@ -4091,6 +4091,32 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
 }
+// The texels view's population record. x is the cell size in metres, plus 1
+// when the cache ray origin (the stored point plus 2 cm along the stored
+// normal, the same offset lighting_ray uses) is inside geometry. y is the
+// own set count (0 on a hash miss). z is that texel's own-mean luma. w is the
+// seed luma, 0 when lighting_sc_seed has nothing. A seed does not write the
+// own-sample count, so z and w stay apart: a texel living on a seed has y near
+// 0 and w above 0.
+vec4 lighting_sc_debug_population(vec3 pos, vec3 n) {
+    float size = lighting_cell_size(pos);
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u) {
+        return vec4(size, 0.0, 0.0, 0.0);
+    }
+    vec3 tp;
+    vec3 tn;
+    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * 0.02)) {
+        size += 1.0;
+    }
+    float gain = lighting_sc_sun_gain(s);
+    vec3 own = max(cache.v[3u * s + 2u].rgb, vec3(0.0)) * gain;
+    float own_l = dot(own, vec3(0.2126, 0.7152, 0.0722));
+    vec4 seed = lighting_sc_seed(s);
+    float seed_l = dot(max(seed.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+    float sets = floor(max(cache.v[3u * s + 2u].w, 0.0));
+    return vec4(size, sets, own_l, seed_l);
+}
 // Debug view "variance": short-term relative standard deviation of the cache
 // entry under the pixel. -1 is a missing or unallocated entry. 0 is quiet.
 float lighting_sc_debug_variance(vec3 pos, vec3 n) {

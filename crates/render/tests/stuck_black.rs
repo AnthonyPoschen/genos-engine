@@ -117,4 +117,16 @@ fn eight_zero_sets_are_not_resolved() {
     );
     assert!(indirect.contains("lighting_sh_compose_lattice(pos, n, false)"));
     assert!(indirect.contains("if (!(coarse.w > LIGHTING_CACHE_HAS_W))"));
+
+    let pop = function_body(cache, "vec4 lighting_sc_debug_population(vec3 pos, vec3 n)");
+    assert!(pop.contains("lighting_sc_seed(s)"), "the record keeps the seed apart from the mean");
+    assert!(pop.contains("3u * s + 2u"), "the record reads the own-sample count");
+    assert!(pop.contains("scene_inside(tp + tn * 0.02)"), "the record flags a ray origin inside geometry");
+    let compose = include_str!("../shaders/lighting_compose.comp");
+    let sun = include_str!("../shaders/lighting_sun_compose.comp");
+    for src in [compose, sun] {
+        assert!(src.contains("lighting_sc_debug_population(pos, n)"));
+        assert!(src.contains("size >= 0.2 ? 128u : 0u"));
+        assert!(src.contains("own_b |= 128u"));
+    }
 }
