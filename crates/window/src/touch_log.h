@@ -3,7 +3,8 @@
 
 #include "genos_pump.h"
 
-/* One slot per finger for this pump, plus the fingers still down. */
+/* This pump's samples, plus the fingers still down.
+ * A move does not replace a down. A lift is stored after that down. */
 struct GenosTouchLog {
     struct GenosTouch events[GENOS_TOUCH_CAP];
     int event_count;

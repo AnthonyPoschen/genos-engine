@@ -34,6 +34,25 @@ static int evict_moved(const struct GenosTouchLog *log) {
     return -1;
 }
 
+/* Keep a lift. Drop a move when the eight slots are full. A down is replaced
+ * only when nothing else can make room, so the lift still leaves this pump. */
+static void store_lift(struct GenosTouchLog *log, int began, uint64_t id, float x, float y, int phase) {
+    int victim;
+    if (log->event_count < GENOS_TOUCH_CAP) {
+        write_sample(&log->events[log->event_count], id, x, y, phase);
+        log->event_count += 1;
+        return;
+    }
+    victim = evict_moved(log);
+    if (victim >= 0) {
+        write_sample(&log->events[victim], id, x, y, phase);
+        return;
+    }
+    if (began >= 0) {
+        write_sample(&log->events[began], id, x, y, phase);
+    }
+}
+
 void genos_touch_log_push(struct GenosTouchLog *log, uint64_t id, float x, float y, int phase) {
     int slot;
     int active;
@@ -41,15 +60,19 @@ void genos_touch_log_push(struct GenosTouchLog *log, uint64_t id, float x, float
         return;
     }
     slot = find_id(log->events, log->event_count, id);
-    if (slot >= 0) {
-        write_sample(&log->events[slot], id, x, y, phase);
-    } else if (log->event_count < GENOS_TOUCH_CAP) {
-        write_sample(&log->events[log->event_count], id, x, y, phase);
-        log->event_count += 1;
-    } else if (phase == GENOS_TOUCH_ENDED || phase == GENOS_TOUCH_CANCELLED) {
-        int victim = evict_moved(log);
-        if (victim >= 0) {
-            write_sample(&log->events[victim], id, x, y, phase);
+    /* A move leaves a down where it began. The position is updated below. */
+    if (!(slot >= 0 && log->events[slot].phase == GENOS_TOUCH_BEGAN && phase == GENOS_TOUCH_MOVED)) {
+        if (phase == GENOS_TOUCH_ENDED || phase == GENOS_TOUCH_CANCELLED) {
+            int began = -1;
+            if (slot >= 0 && log->events[slot].phase == GENOS_TOUCH_BEGAN) {
+                began = slot;
+            }
+            store_lift(log, began, id, x, y, phase);
+        } else if (slot >= 0) {
+            write_sample(&log->events[slot], id, x, y, phase);
+        } else if (log->event_count < GENOS_TOUCH_CAP) {
+            write_sample(&log->events[log->event_count], id, x, y, phase);
+            log->event_count += 1;
         }
     }
     if (phase == GENOS_TOUCH_ENDED || phase == GENOS_TOUCH_CANCELLED) {

@@ -65,6 +65,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
@@ -89,6 +90,24 @@ const BOX_LEG_SECONDS: f32 = 8.0;
 const FIRST_FRAME_SECONDS: f32 = 1.0 / 60.0;
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
+
+/// Wait until `duration` has passed. A condvar timeout is the wait, matching
+/// `wait_unpumped` in the renderer. A park can return at once if the token is set.
+fn wait_deadline(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
+    }
+}
 
 /// Elapsed seconds since `previous`. The first frame uses [`FIRST_FRAME_SECONDS`].
 fn frame_seconds(previous: Option<Instant>, now: Instant) -> f32 {
@@ -473,9 +492,9 @@ fn run() -> Result<i32, String> {
             break;
         }
         if frame.minimized {
-            // The window pump returns at once when the queue is empty. A deadline
-            // wait keeps a minimized frame from spinning a core.
-            std::thread::park_timeout(Duration::from_millis(16));
+            // The window pump returns at once when the queue is empty. The same
+            // condvar deadline as `wait_unpumped` keeps the frame from spinning.
+            wait_deadline(Duration::from_millis(16));
             continue;
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
