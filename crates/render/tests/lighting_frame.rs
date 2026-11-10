@@ -1186,7 +1186,13 @@ fn floor_camera(cam: &FloorCam) -> Camera {
 /// A wall blocks the sun. The floor beyond it is bounce only: sky, the lit
 /// wall, and a small emitter beside the patch.
 fn shadow_floor_world() -> World {
-    let dir = std::env::temp_dir().join("genos-shadow-floor-test");
+    // A private bake each call. The two warmup tests used to share
+    // genos-shadow-floor-test, and a torn `.gbake` from that race is a
+    // different emitter than the one the other shot traced.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("genos-shadow-floor-{n}"));
     std::fs::create_dir_all(&dir).expect("shadow dir");
     let glow = genos_load::load_gltf_file(concat!(
         env!("CARGO_MANIFEST_DIR"),

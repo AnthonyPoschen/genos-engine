@@ -219,9 +219,11 @@ fn emission_adds_and_is_not_reflected() {
     assert_eq!(shade(&m, c, [10.0; 3]), [4.0, 2.0, 1.0]);
 }
 
-/// The cases are unit vectors. f32 is the shader input. Rounding matches a
-/// numeric cast. The bits stay off the lossy-cast ceiling: that ceiling is
-/// counted per file, and this file is new on the lighting-v3 merge.
+/// The cases are unit vectors. f32 is the shader input. Normal numbers round
+/// the way a numeric cast does. Subnormals flush to signed zero, so this is
+/// not a bit-identical conversion. The bits stay off the lossy-cast ceiling:
+/// that ceiling is counted per file, and this file is new on the lighting-v3
+/// merge.
 fn unit_f32(v: [f64; 3]) -> [f32; 3] {
     [narrow_f32(v[0]), narrow_f32(v[1]), narrow_f32(v[2])]
 }
