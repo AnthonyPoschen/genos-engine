@@ -39,13 +39,14 @@ pub struct StepRecord {
     pub wheel_rays: u32,
     pub vehicle_count: u32,
     pub tyre_contacts: u32,
+    pub drive_wheels: u32,
 }
 
 impl StepRecord {
     #[must_use]
     pub fn json(&self, scene: &str) -> String {
         format!(
-            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{},\"tyre_contacts\":{}}}",
+            "{{\"scene\":\"{scene}\",\"step\":{},\"step_us\":{},\"bodies\":{},\"ccd_applied\":{},\"toi_failed\":{},\"toi_deferred\":{},\"pair_slices\":{},\"dynamic_pair_impulses\":{},\"linear_energy\":{:.6},\"rotational_energy\":{:.6},\"max_speed\":{:.6},\"min_y\":{:.6},\"hash\":\"{:016x}\",\"contact_points\":{},\"sleeping_bodies\":{},\"pair_tests\":{},\"broadphase_builds\":{},\"tree_nodes\":{},\"islands\":{},\"awake_bodies\":{},\"solver_bodies\":{},\"wheel_rays\":{},\"vehicle_count\":{},\"tyre_contacts\":{},\"drive_wheels\":{}}}",
             self.step,
             self.step_us,
             self.bodies,
@@ -70,6 +71,7 @@ impl StepRecord {
             self.wheel_rays,
             self.vehicle_count,
             self.tyre_contacts,
+            self.drive_wheels,
         )
     }
 }
@@ -163,6 +165,7 @@ impl Session {
             wheel_rays: stats.wheel_rays,
             vehicle_count: stats.vehicle_count,
             tyre_contacts: stats.tyre_contacts,
+            drive_wheels: stats.drive_wheels,
             contact_points: stats.contact_points,
             sleeping_bodies: stats.sleeping_bodies,
             pair_tests: stats.pair_tests,
@@ -451,7 +454,9 @@ mod tests {
         assert!(line.contains("\"wheel_rays\":4"));
         assert!(line.contains("\"vehicle_count\":1"));
         assert_eq!(record.tyre_contacts, 0);
+        assert_eq!(record.drive_wheels, 0);
         assert!(line.contains("\"tyre_contacts\":0"));
+        assert!(line.contains("\"drive_wheels\":0"));
         assert!(genos_mcp::parse(&line).is_ok());
         let before = record.hash;
         let Some(genos_physics::GroundContact::Wheeled(ref mut ground)) =
@@ -518,6 +523,61 @@ mod tests {
             return false;
         };
         wheel.omega = omega;
+        true
+    }
+
+    #[test]
+    fn first_gear_drives_and_counts_driven_wheels() {
+        let Some(scene) = find("first_gear") else {
+            assert!(find("first_gear").is_some());
+            return;
+        };
+        let mut session = Session::load(scene);
+        let mut twin = Session::load(scene);
+        let first = session.step();
+        let twin_first = twin.step();
+        assert_eq!(first.drive_wheels, 4);
+        assert_eq!(first.wheel_rays, 4);
+        assert_eq!(first.hash, twin_first.hash);
+        let line = first.json("first_gear");
+        assert!(line.contains("\"drive_wheels\":4"));
+        assert!(genos_mcp::parse(&line).is_ok());
+        for _ in 1..120 {
+            session.step();
+            twin.step();
+        }
+        let last = session.records.last().copied();
+        let twin_last = twin.records.last().copied();
+        let (Some(last), Some(twin_last)) = (last, twin_last) else {
+            assert!(session.records.last().is_some());
+            return;
+        };
+        assert_eq!(last.hash, twin_last.hash);
+        assert!(last.max_speed > 1.0, "first gear speed {}", last.max_speed);
+        assert_eq!(last.drive_wheels, 4);
+
+        let mut open = Session::load(scene);
+        assert!(set_clutch(&mut open.world, 0.0), "first gear has no clutch");
+        let opened = open.step();
+        assert_eq!(opened.drive_wheels, 0);
+        assert!(
+            opened.max_speed < 1.0,
+            "open clutch speed {}",
+            opened.max_speed
+        );
+    }
+
+    fn set_clutch(world: &mut genos_physics::World, clutch: f32) -> bool {
+        let Some(vehicle) = world.vehicles.first_mut() else {
+            return false;
+        };
+        let Some(genos_physics::GroundContact::Wheeled(ref mut ground)) = vehicle.ground else {
+            return false;
+        };
+        let Some(drive) = ground.drive.as_mut() else {
+            return false;
+        };
+        drive.clutch = clutch;
         true
     }
 
