@@ -14,14 +14,15 @@
 )]
 
 use genos_render::{
-    lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset, LightingSettings,
-    Renderer,
+    lighting_change_head, release_software_compiler_heap, GpuKind, LightingPreset,
+    LightingSettings, Renderer,
 };
 use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
 const ROWS: usize = 34;
 const TRAILER: usize = 36;
+const PARITY: usize = 32;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -80,7 +81,7 @@ fn motion_slant() -> [f32; 3] {
 }
 
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER
+    8 + ROWS * STRIDE + TRAILER + PARITY
 }
 
 #[expect(
@@ -304,7 +305,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "a mover on a lit cell showed {:?}, wanted the cell, not the probe {probe:?} and not the world-texel seed {green:?}",
         mover.shown
     );
-    assert!(mover.reads.abs() <= ABS, "covered mover probe reads {}", mover.reads);
+    assert!(
+        mover.reads.abs() <= ABS,
+        "covered mover probe reads {}",
+        mover.reads
+    );
     assert!((mover.skipped - 1.0).abs() <= ABS);
     assert!(
         near(mover.seed, green),
@@ -312,7 +317,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         mover.seed
     );
     assert!((mover.conf - 0.25).abs() <= ABS, "conf {}", mover.conf);
-    assert!(mover.mark.abs() <= ABS, "the planted seed is not a detail mark");
+    assert!(
+        mover.mark.abs() <= ABS,
+        "the planted seed is not a detail mark"
+    );
     assert!(near(mover.cell, red), "mover cell {:?}", mover.cell);
     assert!((mover.cell_same - 1.0).abs() <= ABS);
 
@@ -376,7 +384,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the probe seed must clear the detail mark, mark {}",
         quiet_empty.mark
     );
-    assert!(quiet_empty.reads >= 1.0, "the empty owner still needs probes");
+    assert!(
+        quiet_empty.reads >= 1.0,
+        "the empty owner still needs probes"
+    );
     assert!(quiet_empty.skipped.abs() <= ABS);
     assert!(
         near(quiet_empty.cell, [0.0; 3]),
@@ -410,7 +421,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "an unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}. Sun word z is not the detail mark",
         scratch.shown
     );
-    assert!(near(scratch.seed, parent_rgb), "scratch seed {:?}", scratch.seed);
+    assert!(
+        near(scratch.seed, parent_rgb),
+        "scratch seed {:?}",
+        scratch.seed
+    );
     assert!(scratch.mark.abs() <= ABS, "scratch mark {}", scratch.mark);
     assert!(scratch.reads >= 1.0);
     assert!(scratch.skipped.abs() <= ABS);
@@ -447,7 +462,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!(mixed.reads.abs() <= ABS, "the blend still read probes");
     assert!((mixed.skipped - 1.0).abs() <= ABS);
-    assert!((mixed.cell_same - 1.0).abs() <= ABS, "a corner cell was written");
+    assert!(
+        (mixed.cell_same - 1.0).abs() <= ABS,
+        "a corner cell was written"
+    );
     assert!(near(mixed.cell, red), "primary corner {:?}", mixed.cell);
     assert!((mixed.mark - 1.0).abs() <= ABS, "blend mark {}", mixed.mark);
 
@@ -483,7 +501,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the far side of a thin wall showed {:?}, wanted the near red, not the leak {leak:?}",
         facing.shown
     );
-    assert!(!near(facing.shown, leak), "thin-wall leak {:?}", facing.shown);
+    assert!(
+        !near(facing.shown, leak),
+        "thin-wall leak {:?}",
+        facing.shown
+    );
     assert!(facing.reads.abs() <= ABS);
     assert!((facing.skipped - 1.0).abs() <= ABS);
     assert!((facing.cell_same - 1.0).abs() <= ABS);
@@ -540,7 +562,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the back of a thin wall showed {:?}, wanted green, not the front red",
         side.shown
     );
-    assert!(!near(side.shown, red), "the opposite side read the front cell");
+    assert!(
+        !near(side.shown, red),
+        "the opposite side read the front cell"
+    );
     assert!(side.reads.abs() <= ABS);
     assert!((side.skipped - 1.0).abs() <= ABS);
     assert!(near(side.cell, green), "back cell {:?}", side.cell);
@@ -550,7 +575,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(hit.head_hi, off.head_hi, "detail off, SH cells on");
     assert_eq!(off.mode_cap / 1000, 3, "world mode 3");
     assert_eq!(off.flags & 32, 0, "flag 32 is clear");
-    assert_eq!(off.flags & 256, 256, "flag 256 keeps the hit patch at 25 cm");
+    assert_eq!(
+        off.flags & 256,
+        256,
+        "flag 256 keeps the hit patch at 25 cm"
+    );
     assert_eq!(off.flags & 33_554_432, 0, "flag 33554432 is clear");
     assert!(
         near(hit.shown, red),
@@ -572,7 +601,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "hit-seed confidence {}, not a resample or probe seed",
         hit.conf
     );
-    assert!(hit.reads.abs() <= ABS, "no probe was valid, reads {}", hit.reads);
+    assert!(
+        hit.reads.abs() <= ABS,
+        "no probe was valid, reads {}",
+        hit.reads
+    );
     assert!(hit.skipped.abs() <= ABS);
     assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
     assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
@@ -586,7 +619,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!(detail_off_mover.reads >= 1.0);
     assert!(detail_off_mover.skipped.abs() <= ABS);
-    assert!(detail_off_mover.conf.abs() <= ABS, "detail off stored a seed");
+    assert!(
+        detail_off_mover.conf.abs() <= ABS,
+        "detail off stored a seed"
+    );
     assert!(near(detail_off_mover.cell, red));
     assert!((detail_off_mover.cell_same - 1.0).abs() <= ABS);
 
@@ -620,7 +656,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "a stale cell under a mover showed {:?}, wanted the probe",
         stale_mover.shown
     );
-    assert!(near(stale_mover.cell, red), "stale mover cell {:?}", stale_mover.cell);
+    assert!(
+        near(stale_mover.cell, red),
+        "stale mover cell {:?}",
+        stale_mover.cell
+    );
     assert!(stale_mover.reads >= 1.0);
     assert!(stale_mover.skipped.abs() <= ABS);
     assert!((stale_mover.cell_same - 1.0).abs() <= ABS);
@@ -636,10 +676,22 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "lamp off stayed on the stored mean {:?}",
         lamp_mover.shown
     );
-    assert!(lamp_mover.reads.abs() <= ABS, "lamp-off reads {}", lamp_mover.reads);
+    assert!(
+        lamp_mover.reads.abs() <= ABS,
+        "lamp-off reads {}",
+        lamp_mover.reads
+    );
     assert!((lamp_mover.skipped - 1.0).abs() <= ABS);
-    assert!(near(lamp_mover.cell, red), "lamp off rewrote the cell {:?}", lamp_mover.cell);
-    assert!(lamp_mover.conf.abs() <= ABS, "lamp off stored a seed {:?}", lamp_mover.seed);
+    assert!(
+        near(lamp_mover.cell, red),
+        "lamp off rewrote the cell {:?}",
+        lamp_mover.cell
+    );
+    assert!(
+        lamp_mover.conf.abs() <= ABS,
+        "lamp off stored a seed {:?}",
+        lamp_mover.seed
+    );
     assert!((lamp_mover.cell_same - 1.0).abs() <= ABS);
 
     let mover_mix = &rows[28];
@@ -703,20 +755,38 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         motion.seed
     );
     assert!((motion.cell_same - 1.0).abs() <= ABS);
-    assert!((motion.mark - 1.0).abs() <= ABS, "decoy same {}", motion.mark);
-    let trail = &words[8 + ROWS * STRIDE..];
+    assert!(
+        (motion.mark - 1.0).abs() <= ABS,
+        "decoy same {}",
+        motion.mark
+    );
+    let trail = &words[8 + ROWS * STRIDE..8 + ROWS * STRIDE + TRAILER];
     assert_eq!(trail.len(), TRAILER);
     let orange = [9.0, 1.0, 0.0];
     let blue_tilt = motion_slant();
-    assert!(near([trail[0], trail[1], trail[2]], red), "pose A {:?}", &trail[0..3]);
+    assert!(
+        near([trail[0], trail[1], trail[2]], red),
+        "pose A {:?}",
+        &trail[0..3]
+    );
     assert!(trail[3].abs() <= ABS, "pose A reads {}", trail[3]);
     assert!((trail[4] - 1.0).abs() <= ABS, "pose A skip {}", trail[4]);
-    assert!((trail[5] - 1.0).abs() <= ABS, "pose A allocated a world texel");
+    assert!(
+        (trail[5] - 1.0).abs() <= ABS,
+        "pose A allocated a world texel"
+    );
     assert!((trail[6] - 1.0).abs() <= ABS, "pose A mutated the cell");
-    assert!(near([trail[7], trail[8], trail[9]], blue), "pose B {:?}", &trail[7..10]);
+    assert!(
+        near([trail[7], trail[8], trail[9]], blue),
+        "pose B {:?}",
+        &trail[7..10]
+    );
     assert!(trail[10].abs() <= ABS, "pose B reads {}", trail[10]);
     assert!((trail[11] - 1.0).abs() <= ABS);
-    assert!((trail[12] - 1.0).abs() <= ABS, "pose B allocated a world texel");
+    assert!(
+        (trail[12] - 1.0).abs() <= ABS,
+        "pose B allocated a world texel"
+    );
     assert!((trail[13] - 1.0).abs() <= ABS, "leaving A mutated a cell");
     assert!(
         near([trail[14], trail[15], trail[16]], blue_tilt),
@@ -730,14 +800,28 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(!near([trail[14], trail[15], trail[16]], blue));
     assert!(trail[17].abs() <= ABS);
     assert!((trail[18] - 1.0).abs() <= ABS);
-    assert!(near([trail[19], trail[20], trail[21]], orange), "+X {:?}", &trail[19..22]);
+    assert!(
+        near([trail[19], trail[20], trail[21]], orange),
+        "+X {:?}",
+        &trail[19..22]
+    );
     assert!(trail[22].abs() <= ABS);
     assert!((trail[23] - 1.0).abs() <= ABS);
-    assert!(near([trail[24], trail[25], trail[26]], green), "yawed -Z {:?}", &trail[24..27]);
-    assert!(!near([trail[24], trail[25], trail[26]], orange), "yaw kept the old axis");
+    assert!(
+        near([trail[24], trail[25], trail[26]], green),
+        "yawed -Z {:?}",
+        &trail[24..27]
+    );
+    assert!(
+        !near([trail[24], trail[25], trail[26]], orange),
+        "yaw kept the old axis"
+    );
     assert!(trail[27].abs() <= ABS);
     assert!((trail[28] - 1.0).abs() <= ABS);
-    assert!((trail[29] - 1.0).abs() <= ABS, "the object-local decoy was written");
+    assert!(
+        (trail[29] - 1.0).abs() <= ABS,
+        "the object-local decoy was written"
+    );
     assert!(
         near([trail[30], trail[31], trail[32]], red),
         "the vacated surface showed {:?}, wanted its own red cell",
@@ -766,6 +850,78 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(
         reads, 16,
         "the detail-off hit row has no probe; every other evaluated row reads one"
+    );
+
+    let parity = &words[8 + ROWS * STRIDE + TRAILER..];
+    assert_eq!(parity.len(), PARITY);
+    let stored = [parity[0], parity[1], parity[2]];
+    let live = [parity[3], parity[4], parity[5]];
+    assert!(
+        near(stored, live),
+        "the stored gather {stored:?} left the live read {live:?}"
+    );
+    assert!(near(stored, red), "stored seed {stored:?} wanted {red:?}");
+    assert!((parity[6] - 1.0).abs() <= ABS, "cells-accept {}", parity[6]);
+    let late = [parity[7], parity[8], parity[9]];
+    assert!(
+        near(late, green),
+        "the next gather {late:?} wanted {green:?}: the store is one relight late"
+    );
+    assert!(
+        !near(stored, late),
+        "the stored colour moved with the cell in the same pass"
+    );
+    let blended = [parity[10], parity[11], parity[12]];
+    let slant_live = [parity[13], parity[14], parity[15]];
+    let slant = slant_colour();
+    assert!(
+        near(blended, slant_live),
+        "loaded corner ids {blended:?} left the live slant {slant_live:?}"
+    );
+    assert!(
+        near(blended, slant),
+        "the loaded tilt {blended:?} wanted the flags-on slant {slant:?}"
+    );
+    let reveal = [parity[16], parity[17], parity[18]];
+    let reveal_live = [parity[19], parity[20], parity[21]];
+    assert!(
+        near(reveal, reveal_live),
+        "same-frame lattice {reveal:?} left the live read {reveal_live:?}"
+    );
+    assert!(
+        near(reveal, red),
+        "a new texel showed {reveal:?}, wanted the cell {red:?}"
+    );
+    let refreshed = [parity[22], parity[23], parity[24]];
+    assert!(
+        near(refreshed, green),
+        "refilling the lattice showed {refreshed:?}, wanted {green:?}"
+    );
+    let tele = [parity[25], parity[26], parity[27]];
+    let blue = [0.0, 0.0, 7.0];
+    assert!(
+        near(tele, blue),
+        "a teleported query showed {tele:?}, wanted {blue:?}"
+    );
+    assert!(
+        (parity[28] - 1.0).abs() <= ABS,
+        "two keys in one home: {}",
+        parity[28]
+    );
+    assert!(
+        (parity[29] - 1.0).abs() <= ABS,
+        "the near slot was dropped: {}",
+        parity[29]
+    );
+    assert!(
+        parity[30].abs() <= ABS,
+        "the farthest slot survived the cap: {}",
+        parity[30]
+    );
+    assert!(
+        (parity[31] - 1.0).abs() <= ABS,
+        "the enqueue was not visible this invocation: {}",
+        parity[31]
     );
 }
 
@@ -830,7 +986,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "the detail mark stays, mark {}",
         stale.mark
     );
-    assert!((stale.world_w - 1.0).abs() <= ABS, "trust {}", stale.world_w);
+    assert!(
+        (stale.world_w - 1.0).abs() <= ABS,
+        "trust {}",
+        stale.world_w
+    );
     assert!(stale.reads >= 1.0, "the empty owner still needs probes");
     assert!(stale.skipped.abs() <= ABS);
     assert!(near(stale.cell, [0.0; 3]));
@@ -841,7 +1001,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "an unmarked parent seed showed {:?}, wanted {parent_rgb:?}",
         parent.shown
     );
-    assert!(near(parent.seed, parent_rgb), "stored parent {:?}", parent.seed);
+    assert!(
+        near(parent.seed, parent_rgb),
+        "stored parent {:?}",
+        parent.seed
+    );
     assert!(parent.mark.abs() <= ABS);
     assert!(parent.reads >= 1.0);
     assert!(parent.skipped.abs() <= ABS);
@@ -892,7 +1056,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "read-only unmarked parent with sun scratch 40 showed {:?}, wanted {parent_rgb:?}, not the probe",
         alias.shown
     );
-    assert!(near(alias.seed, parent_rgb), "stored parent {:?}", alias.seed);
+    assert!(
+        near(alias.seed, parent_rgb),
+        "stored parent {:?}",
+        alias.seed
+    );
     assert!(alias.mark.abs() <= ABS, "sun scratch is not a detail mark");
     assert!(alias.reads >= 1.0);
     assert!(alias.skipped.abs() <= ABS);
@@ -928,7 +1096,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     );
     assert!(moved.reads.abs() <= ABS);
     assert!((moved.skipped - 1.0).abs() <= ABS);
-    assert!(moved.own.abs() <= ABS, "a world texel appeared, own {}", moved.own);
+    assert!(
+        moved.own.abs() <= ABS,
+        "a world texel appeared, own {}",
+        moved.own
+    );
     assert!(moved.conf.abs() <= ABS);
     assert!((moved.cell_same - 1.0).abs() <= ABS);
 
@@ -984,7 +1156,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         0,
         "this dispatch presents nothing"
     );
-    assert_eq!(words[2].to_bits(), 4, "covered owner plus three covered mover poses");
+    assert_eq!(
+        words[2].to_bits(),
+        4,
+        "covered owner plus three covered mover poses"
+    );
     assert_eq!(words[3].to_bits(), 8, "the other read-only rows evaluate");
     assert_eq!(
         words[4].to_bits(),

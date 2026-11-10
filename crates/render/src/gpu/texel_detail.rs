@@ -22,7 +22,7 @@ const CACHE_BYTES: u64 = SLOTS * 392;
 // One screen probe shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
-const OUT_FLOATS: usize = 8 + 34 * 17 + 36;
+const OUT_FLOATS: usize = 8 + 34 * 17 + 36 + 32;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
@@ -74,26 +74,13 @@ impl Drop for TexelDetailPlant {
 }
 
 fn plant_file(kind: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "genos-texel-{kind}-{}.bin",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("genos-texel-{kind}-{}.bin", std::process::id()))
 }
 
 fn ckeys_bytes() -> u64 {
-    let compose_at = 2 * SLOTS
-        + 2
-        + 17_600
-        + 16
-        + 3 * 65_536
-        + 1024
-        + 32_768
-        + 16
-        + 5 * SLOTS
-        + 5 * 65_537
-        + 6 * 65_536
-        + 16;
-    (compose_at + 4 + 2 * 65_535 + 5 * SLOTS) * 4
+    // The parity block writes a lattice record. The table sits past the
+    // screen list, so the fixture buffer is the production key allocation.
+    super::lighting_sh_keys_words() * 4
 }
 
 impl Gpu {
@@ -669,7 +656,8 @@ impl Gpu {
         size: u64,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
         unsafe {
             let mut mapped = std::ptr::null_mut();
             check(
@@ -689,8 +677,10 @@ impl Gpu {
         size: u64,
         path: &std::path::Path,
     ) -> Result<(), String> {
-        let bytes = usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
-        let mut file = std::fs::File::open(path).map_err(|err| format!("read {}: {err}", path.display()))?;
+        let bytes =
+            usize::try_from(size).map_err(|err| format!("texel detail buffer size: {err}"))?;
+        let mut file =
+            std::fs::File::open(path).map_err(|err| format!("read {}: {err}", path.display()))?;
         let file_len = file
             .metadata()
             .map_err(|err| format!("stat {}: {err}", path.display()))?
@@ -731,7 +721,13 @@ impl Gpu {
         )
     }
 
-    fn submit_texel(&mut self, reader: bool, lamp_x: u32, row: u32, rows: u32) -> Result<(), String> {
+    fn submit_texel(
+        &mut self,
+        reader: bool,
+        lamp_x: u32,
+        row: u32,
+        rows: u32,
+    ) -> Result<(), String> {
         let (pipe, layout, set, cmd, fence) = {
             let Some(state) = self.texel_detail.as_ref() else {
                 return Err("texel detail production check is not created".into());

@@ -20,6 +20,8 @@ void lighting_tex_put(uint slot, vec4 v) {
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
+    // The neighbour walk is the gather dispatch before compose, not this
+    // relight. This pass does not touch the bin lists or the lattice table.
     if (gid >= LIGHTING_CACHE_BATCH) {
         return;
     }
