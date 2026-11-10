@@ -3650,7 +3650,24 @@ impl Gpu {
                 self.lighting.settings.restir_di,
                 self.lighting.shade_gate,
             );
+            let first = slot as u32 * LIGHTING_STAMPS;
+            let stamps = self
+                .gpu_times
+                .as_mut()
+                .filter(|t| !t.lighting_pool.is_null())
+                .map(|t| {
+                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
+                    t.lighting_pool
+                });
+            if let Some(pool) = stamps {
+                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
+                // GPU time of the prefix upload. The close stamp is after prepare.
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT);
+            }
             let restir_on = self.prepare_restir_di(w, h, changes.as_ref());
+            if let Some(pool) = stamps {
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT + 1);
+            }
             if restir_on {
                 pc[9] |= 1 << 21;
             } else {
@@ -3687,21 +3704,16 @@ impl Gpu {
                 pc.as_ptr() as *const c_void,
             );
             // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
-            let stamps = self
-                .gpu_times
-                .as_mut()
-                .filter(|t| !t.lighting_pool.is_null())
-                .map(|t| {
-                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
-                    t.lighting_pool
-                });
-            let first = slot as u32 * LIGHTING_STAMPS;
-            if let Some(pool) = stamps {
-                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
-            }
+            // The query reset and the prepare-open stamp are above prepare.
             if restir_on {
                 let pool = stamps.unwrap_or(std::ptr::null_mut());
                 self.dispatch_restir_di(slot, &pc, pool, first);
+                // Shade reads the spatial store (header word 6). A 1440p pass is
+                // one dispatch; without this barrier the 4070 starts the direct
+                // shade while that store is still in flight, and the picture
+                // changes with the overlap. Lavapipe runs the dispatches in
+                // order, so the race does not show there.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20);
             }
             if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);

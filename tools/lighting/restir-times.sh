@@ -3,10 +3,11 @@
 # Lavapipe timestamps are not a 4070 result. This script does not run unless
 # GENOS_RESTIR_TIMES=1, so a lavapipe clone does not spend a bench on it.
 #
-# The light line is direct + hit light + the ReSTIR stamps. With
+# The light line is direct + hit light + the ReSTIR pass stamps. With
 # restir_split_passes at 0 (the default), restir_temporal is empty and
 # restir_initial is initial and temporal together. restir_spatial includes
-# the checkerboard copy when that knob is 1.
+# the checkerboard copy when that knob is 1. restir_prepare is the prefix
+# upload and is not inside `light`. restir_shade is the direct dispatch.
 #
 # GENOS_RESTIR_COST=1 prints iteration counts and dispatch count on the first frames.
 # 1440p is one dispatch a pass. The five numeric defaults below are the code defaults.

@@ -262,6 +262,10 @@ uint restir_pick_neighbors(uint index, uint receivers, out uint picked[16]) {
     }
     uint sw_i[32];
     uint sw_v[32];
+    for (uint s = 0u; s < 32u; s++) {
+        sw_i[s] = 0u;
+        sw_v[s] = 0u;
+    }
     uint nswap = 0u;
     for (uint slot = 0u; slot < take; slot++) {
         uint span = pool_n - slot;
@@ -601,7 +605,9 @@ void restir_spatial(uint pixel) {
         uint y = pixel / width;
         skip = ((x + y) & 1u) != 0u;
     }
-    if (!skip && restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
+    // No surface: the temporal sample is the result. Skipping the shuffle
+    // does not change it (a rejected neighbour never reaches the merge).
+    if (!skip && surfaced && restir_hdr(13u) != 0u && restir_hdr(14u) != 0u && width != 0u) {
         uint picked[16];
         uint nbor = restir_pick_neighbors(pixel, receivers, picked);
         float unit = next_f32();
@@ -622,9 +628,21 @@ void restir_spatial(uint pixel) {
             in_tq[0] = phat_at(pixel, lamp, n);
             for (uint s = 0u; s < nbor; s++) {
                 uint source = picked[s];
+                // The temporal pass stored this frame's view depth in the same
+                // buffer. A depth miss fails the live test too, so the gbuffer
+                // fetch and p-hat are skipped. A depth hit still uses the live
+                // surface, including its full-precision normal.
+                float z_stored = uintBitsToFloat(restir_words[next + source * stride + 4u]);
+                if (!(z_here > 0.0) || !(z_stored > 0.0)) {
+                    continue;
+                }
+                float gap = abs(z_here - z_stored);
+                if (gap / z_here > RESTIR_DEPTH_REL && gap > RESTIR_DEPTH_ABS) {
+                    continue;
+                }
                 vec3 npos;
                 vec3 nn;
-                bool ok = surfaced && restir_pixel_surface(source, npos, nn);
+                bool ok = restir_pixel_surface(source, npos, nn);
                 if (ok) {
                     float z_n = dot(npos - scene.eye.xyz, scene.view_forward.xyz);
                     ok = restir_depth_normal(z_here, z_n, nrm, nn);

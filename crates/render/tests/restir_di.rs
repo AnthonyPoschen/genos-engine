@@ -283,6 +283,40 @@ fn assert_turn(window: &mut Window, renderer: &mut Renderer, world: &World, came
     );
 }
 
+fn one_gate_picture() -> Vec<f64> {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let gate = world_from(&RestirScene::gate(), false);
+    let camera = pose(0.0, 4.0, 0.0);
+    renderer.set_lighting_settings(direct_settings(true));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let mut last = Vec::new();
+    for _ in 0..6 {
+        last = luma_image(&grab(window, renderer, &gate, &camera).rgb);
+    }
+    last
+}
+
+/// Two fresh renders of the same frames. A store/load race that lavapipe runs
+/// in order still has to match here; the 4070 is where that race used to move
+/// the picture between runs.
+#[test]
+fn the_same_seed_renders_the_same_picture_twice() {
+    let first = one_gate_picture();
+    let second = one_gate_picture();
+    assert_eq!(first.len(), second.len());
+    for (i, (a, b)) in first.iter().zip(second.iter()).enumerate() {
+        assert!(
+            a.to_bits() == b.to_bits(),
+            "pixel {i} changed between identical runs: {a} then {b}"
+        );
+    }
+}
+
 #[test]
 fn restir_di_matches_brute_direct_on_the_gate_scenes() {
     let (_gpu, mut owner) = open();

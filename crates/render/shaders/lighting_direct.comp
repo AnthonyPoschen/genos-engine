@@ -300,12 +300,12 @@ void main() {
             // mode off and mode hits. A quiet view must not return last frame's
             // colour and skip that sample. The signature hold is the success
             // path: bit 19 is clear on a frame whose prepare bound the reservoir,
-            // so the clear below does not run. Bit 19 is the labelled exact sum
-            // (a failed prepare, or restir off on a mode that used to sample).
-            // It clears only this signature hold, so mode hits shades that sum
-            // instead of the previous reservoir colour. Mode 4 may still hold a
-            // stored exact record. A stored exact record cannot survive into a
-            // reservoir frame.
+            // so the clear below does not run. Bit 19 is a failed prepare, or
+            // restir off on a mode that used to sample. It clears the signature
+            // hold for every mode except 4, so mode hits shades the sum instead
+            // of the previous reservoir colour. Mode 4 keeps a stored exact
+            // record (the quiet labelled-exact hold). A stored exact record
+            // cannot survive into a reservoir frame.
             bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
                 && ((pc.lamp.y >> 18u) & 7u) == 0u;
             bool hold = !restir_product && pc.lamp.x != 4u;
@@ -320,7 +320,10 @@ void main() {
                     lamp_geo_store(idx, lamp_res_slot_now(), geo);
                 }
             }
-            if (hold && ((pc.lamp.y >> 19u) & 1u) != 0u) {
+            // Mode 4 is the exact-record hold. Bit 19 must not cancel it: a
+            // restir-off reuse frame sets that bit, and clearing the hold
+            // retraced the full sum on every quiet frame.
+            if (hold && pc.lamp.x != 4u && ((pc.lamp.y >> 19u) & 1u) != 0u) {
                 hold = false;
             }
             if (hold) {
