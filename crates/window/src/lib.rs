@@ -52,6 +52,7 @@
 //! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
 //! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
 
+mod cocoa_keys;
 mod events;
 mod lifecycle;
 mod stall;
@@ -417,7 +418,7 @@ impl Window {
         let rc =
             unsafe { genos_window_set_pointer_capture(self.raw, if captured { 1 } else { 0 }) };
         if rc != 0 {
-            Err("Wayland pointer lock failed".into())
+            Err(pointer_lock_failed().into())
         } else {
             Ok(())
         }
@@ -436,9 +437,28 @@ fn open_failed() -> String {
     {
         "Win32 window failed to open".to_string()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        "Cocoa window failed to open".to_string()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         "Wayland window failed to open".to_string()
+    }
+}
+
+fn pointer_lock_failed() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Win32 pointer lock failed"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Cocoa pointer lock failed"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "Wayland pointer lock failed"
     }
 }
 

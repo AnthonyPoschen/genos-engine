@@ -85,7 +85,7 @@ The stage list for the camera frame follows `examples/camera/src/main.rs`. Names
 
 `Renderer::draw` stays on the thread that opened the device (`Renderer::open`). A task that needs a GPU buffer fills a `Vec` the draw copies, the same way the physics plan's `PoseBuffer` is a `Vec` the renderer can copy later.
 
-A pumped load stays `run_pumped` in `crates/window/src/stall.rs`. The frame thread pumps inside `PUMP_BUDGET` (100 ms) while `genos-scene-load` reads the file. Moving that read onto a pool worker is a later step. The pump loop stays in the window crate either way, because a join inside `Renderer::draw` cannot answer a ping.
+A pumped load stays `run_pumped` in `crates/window/src/stall.rs`. The frame thread pumps inside `PUMP_BUDGET` (100 ms) while `genos-scene-load` reads the file. That 100 ms is the pump thread's own time, from the dispatch mark through the pump callback until the wait for the worker. The wait is half the budget. A late wakeup inside it is not pump work, and one wait that covers the whole load is a stall. Moving that read onto a pool worker is a later step. The pump loop stays in the window crate either way, because a join inside `Renderer::draw` cannot answer a ping.
 
 ## 7. Script thread and MCP threads
 

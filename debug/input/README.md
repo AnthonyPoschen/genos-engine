@@ -27,11 +27,11 @@ points (pixels).
 
 ## Window backends
 
-Wayland and Win32 write keys, the pointer, and touch through
+Wayland, Win32, and Cocoa write keys, the pointer, and touch through
 `Window::write_devices` (`set_key`, `set_mouse_button`, `add_mouse_delta`,
 `set_touch_points`). Windows pads go through XInput inside `poll_gamepads`.
-macOS and X11 device reads are still the windowing work, not this binary.
-Those backends call the same writes:
+macOS pads go through GameController. X11 device reads are still the
+windowing work, not this binary. That backend calls the same writes:
 
 - `InputSystem::begin_frame` once, then the writes, then the game reads actions.
 - `set_key` or `apply_evdev_keys` for the keyboard.

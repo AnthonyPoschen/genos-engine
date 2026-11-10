@@ -33,19 +33,20 @@ mod action;
 mod bindings;
 mod code;
 mod device;
+mod gamecontroller;
 mod settings;
 #[cfg_attr(
-    all(target_os = "windows", not(test)),
+    all(any(target_os = "windows", target_os = "macos"), not(test)),
     allow(
         dead_code,
-        reason = "the Linux joystick decoder still runs in the Windows tests"
+        reason = "the Linux joystick decoder still runs in the Windows and macOS tests"
     )
 )]
 #[cfg_attr(
-    target_os = "windows",
+    any(target_os = "windows", target_os = "macos"),
     allow(
         unfulfilled_lint_expectations,
-        reason = "the Linux joystick code those expects cover is not compiled on Windows"
+        reason = "the Linux joystick code those expects cover is not compiled on Windows or macOS"
     )
 )]
 mod system;
