@@ -36,6 +36,14 @@ layout(std430, set = 0, binding = 10) buffer Cache {
     vec4 v[];
 } cache;
 
+// Schedules and filter phases hash this, not the storage slot. Two cells that
+// probe the same window take slots in workgroup order, so a hash of the slot
+// relit the same cell on different frames from run to run.
+uint lighting_sc_id(uint slot) {
+    uint key = ckeys.key[slot];
+    return key == 0u ? slot : key;
+}
+
 // Per frame, read back by the CPU to tell when the light has settled: the largest
 // relative change of a relit patch (millionths), patches relit, live patches.
 layout(std430, set = 0, binding = 11) buffer CacheStats {
@@ -1553,7 +1561,7 @@ vec3 lighting_sc_regularise(uint slot, vec3 value) {
     float vlum = dot(value, lw);
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    float rot = edge_aware ? 0.7853982 * float(lighting_hash(slot * 0x27d4eb2du) & 1u) : 0.0;
+    float rot = edge_aware ? 0.7853982 * float(lighting_hash(lighting_sc_id(slot) * 0x27d4eb2du) & 1u) : 0.0;
     [[dont_unroll]] for (uint d = 0u; d < 4u; d++) {
         [[dont_unroll]] for (uint l = 0u; l < 4u; l++) {
             uint i = l * 4u + d;
@@ -1666,7 +1674,7 @@ void lighting_sc_recon(uint slot) {
         ref_se2 = lighting_sc_l2_var(slot, ref) / t;
     }
     bool edge = false;
-    float rot = 0.3926991 * float(lighting_hash(slot * 0x27d4eb2du) & 1u);
+    float rot = 0.3926991 * float(lighting_hash(lighting_sc_id(slot) * 0x27d4eb2du) & 1u);
     [[dont_unroll]] for (uint d = 0u; d < 8u; d++) {
         float a = 0.7853982 * float(d) + rot;
         vec3 dir = cos(a) * ta + sin(a) * tb;
@@ -2746,9 +2754,9 @@ const uint LIGHTING_SC_READ_SLACK = 2u;
 // S68D: EMA floor on a young texel's long mean (lighting_cache.comp).
 const float LIGHTING_SC_YOUNG_ALPHA = 1.0 / 16.0;
 const float LIGHTING_SC_YOUNG_SETS = 32.0;
-// The plain mean closes at 12 sets (lighting_cache.comp). The wavelet
-// rebuilds from that held mean once the texel has 16 sets. Earlier, the
-// dirty hold keeps the blur the frozen shot scores.
+// The plain mean closes at 16 sets (lighting_cache.comp). From then on the
+// wavelet rebuilds from that mean every frame, so the dirty hold does not
+// keep the wide spatial estimate after the texel has its own sets.
 const float LIGHTING_SC_PLAIN_SETS = 16.0;
 bool lighting_sc_dormant(uint slot);
 uint lighting_sc_interval(uint slot, float t) {
@@ -4011,7 +4019,7 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
-        && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+        && ((lighting_hash(lighting_sc_id(slot) ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
         // S72V10 trusts the field for two frames from this stamp. The idle skip
         // does not rewrite the field, so while the camera is held the stamp stays
         // current and compose keeps showing that field instead of dropping it
@@ -4240,7 +4248,7 @@ bool lighting_sc_check_turn(uint slot) {
         return true;
     }
     uint k = (dem + room - 1u) / room;
-    return ((lighting_hash(slot ^ 0x7feb352du) + lighting_round()) % k) == 0u;
+    return ((lighting_hash(lighting_sc_id(slot) ^ 0x7feb352du) + lighting_round()) % k) == 0u;
 }
 void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);

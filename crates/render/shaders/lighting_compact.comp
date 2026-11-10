@@ -52,7 +52,7 @@ void main() {
     if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
         uint last0 = floatBitsToUint(cache.v[3u * slot].w);
         bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
-        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(slot ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
+        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(lighting_sc_id(slot) ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
             return;
         }
     }
@@ -91,7 +91,7 @@ void main() {
         // Flag 1048576: a dormant texel (converged, its sets agree with its mean)
         // is relit one sweep in LIGHTING_SC_DORMANT, by slot, to notice change.
         if ((lighting_sc_flags() & 1048576u) != 0u && growing && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {
-            growing = ((lighting_hash(slot) + lighting_round()) % lighting_sc_dormant_period()) == 0u;
+            growing = ((lighting_hash(lighting_sc_id(slot)) + lighting_round()) % lighting_sc_dormant_period()) == 0u;
         }
         // Flag 1024: while the light changes only the patches ray hits read (25 cm
         // and up, flag 256) are relit, as in the other modes; pixels show the probes.
@@ -140,7 +140,7 @@ void main() {
             if (first) {
                 atomicAdd(ckeys.key[LIGHTING_SETTLE_FIRST_AT], ms);
             }
-            if (((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns(first)) != 0u) {
+            if (((lighting_hash(lighting_sc_id(slot) ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns(first)) != 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -325,7 +325,7 @@ void main() {
             // those groups apart (dawn camouflage).
             if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= 3.5 && !lighting_sc_local_change(slot, mover_ic)) {
                 uint per = lighting_ic_period(slot);
-                if (per > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
+                if (per > 1u && ((lighting_hash(lighting_sc_id(slot) ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
                     lighting_dg(31u, 1u);
                     atomicAdd(gstats.waiting, 1u);
                     return;
@@ -351,7 +351,7 @@ void main() {
             // the texels of a page commit on different rounds and their counts
             // spread; a page never steps as one.
             if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
-                && ((lighting_hash(slot ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
+                && ((lighting_hash(lighting_sc_id(slot) ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -370,7 +370,7 @@ void main() {
                 // Same phase as the IC gate: the periods are powers of two, so the
                 // two gates nest and the texel is relit one round in max(per,
                 // every). With independent phases 3 texels in 4 never pass both.
-                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(slot ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
+                if (sup >= LIGHTING_SC_L2_FLAT && every > 1u && ((lighting_hash(lighting_sc_id(slot) ^ 0x68e31da4u) + lighting_round()) % every) != 0u) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }

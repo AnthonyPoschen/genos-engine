@@ -22,6 +22,12 @@ use genos_window::Window;
 
 fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Lavapipe runs shader invocations on several host threads. The surface
+    // cache's lit-from offer, probe seed and vec4 component stores are plain
+    // writes, so the hash shot and the screen shot of one test can disagree
+    // and one of them drops the floor blotch. One thread runs those stores in
+    // program order. A hardware driver does not read this variable.
+    std::env::set_var("LP_NUM_THREADS", "1");
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
@@ -1222,7 +1228,13 @@ fn floor_camera(cam: &FloorCam) -> Camera {
 /// A wall blocks the sun. The floor beyond it is bounce only: sky, the lit
 /// wall, and a small emitter beside the patch.
 fn shadow_floor_world() -> World {
-    let dir = std::env::temp_dir().join("genos-shadow-floor-test");
+    // A private bake each call. The two warmup tests used to share
+    // genos-shadow-floor-test, and a torn `.gbake` from that race is a
+    // different emitter than the one the other shot traced.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("genos-shadow-floor-{n}"));
     std::fs::create_dir_all(&dir).expect("shadow dir");
     let glow = genos_load::load_gltf_file(concat!(
         env!("CARGO_MANIFEST_DIR"),
