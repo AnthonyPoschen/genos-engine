@@ -930,6 +930,7 @@ mod tests {
             mesh: 0,
             node_name: None,
             transform: identity_pose(),
+            skin: None,
         });
         scene
     }
@@ -1026,6 +1027,7 @@ mod tests {
             mesh: 0,
             node_name: None,
             transform: identity_pose(),
+            skin: None,
         });
         empty_world().add_gltf(&scene, &identity_pose(), false);
     }

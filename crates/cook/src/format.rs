@@ -111,6 +111,8 @@ pub fn decode(bytes: &[u8]) -> Result<Cooked, CookError> {
                 material: (material != NONE)
                     .then(|| usize::try_from(material).ok())
                     .flatten(),
+                joints: Vec::new(),
+                weights: Vec::new(),
             });
         }
         meshes.push(CookedMesh {
@@ -130,6 +132,7 @@ pub fn decode(bytes: &[u8]) -> Result<Cooked, CookError> {
             mesh,
             node_name,
             transform,
+            skin: None,
         });
     }
     let mut unsupported = Vec::new();
