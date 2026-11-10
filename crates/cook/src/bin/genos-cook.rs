@@ -13,8 +13,9 @@
 //! for normals, full mips), with the same up-to-date rule. Off by default.
 //!
 //! `genos-cook --verify DIR` is the load-time check: it hashes every record,
-//! texture record and object the manifest names, decodes each record, and
-//! prints the timings.
+//! texture record, skin record and object the manifest names, decodes each
+//! record, and prints the timings. A skinned source also writes
+//! `DIR/cooked/<asset>.gskin` and a `skin=` token.
 //!
 //! `genos-cook --compare FILE` cooks one file in memory and compares the loaded
 //! record with a direct `load_gltf_file`, printing both times. Exit 1 on a difference.
@@ -25,7 +26,7 @@ use std::time::Instant;
 use genos_bake::{BakeMode, BakeSettings};
 use genos_cook::{
     cook, cook_asset, cooked_path, decode, encode, load_cooked, load_textures, map_by_cost,
-    package, textures_path, AssetCook, Manifest, Outcome, Threads,
+    package_files, textures_path, AssetCook, Manifest, Outcome, PackageFile, Threads,
 };
 
 fn main() -> std::process::ExitCode {
@@ -71,7 +72,7 @@ fn run() -> Result<(), String> {
                 );
             }
             "-h" | "--help" => {
-                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] [--threads N] FILE ...\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
+                println!("genos-cook [--out DIR] [--texel METRES] [--voxels-per-side N] [--textures] [--threads N] FILE ...\nA skinned source also writes DIR/cooked/<asset>.gskin and a skin= manifest token.\ngenos-cook --verify DIR\ngenos-cook --compare FILE ...");
                 return Ok(());
             }
             other if other.starts_with("--") => return Err(format!("unknown option {other}")),
@@ -123,7 +124,14 @@ fn cook_all(
     );
     let mut records = Vec::new();
     for (file, result) in files.iter().zip(cooked) {
-        let (AssetCook { record, textures }, cook_ms) = result?;
+        let (
+            AssetCook {
+                record,
+                textures,
+                skin,
+            },
+            cook_ms,
+        ) = result?;
         let (outcome, path) = record;
         let size = std::fs::metadata(&path).map_or(0, |m| m.len());
         println!(
@@ -135,10 +143,25 @@ fn cook_all(
         let gtex = textures
             .map(|(outcome, path)| report_textures(file, outcome, &path))
             .transpose()?;
-        records.push((load_cooked(&path).map_err(|e| e.to_string())?, gtex));
+        let skin_hash = skin
+            .map(|(_, path)| std::fs::read(&path).map(|bytes| genos_load::sha256(&bytes)))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        records.push((
+            load_cooked(&path).map_err(|e| e.to_string())?,
+            gtex,
+            skin_hash,
+        ));
     }
-    let entries: Vec<_> = records.iter().map(|(c, g)| (c, *g)).collect();
-    let text = package(&entries).text();
+    let entries: Vec<PackageFile<'_>> = records
+        .iter()
+        .map(|(cooked, gtex, skin)| PackageFile {
+            cooked,
+            gtex: *gtex,
+            skin: *skin,
+        })
+        .collect();
+    let text = package_files(&entries).text();
     genos_load::write_atomic(&out.join("package.manifest"), text.as_bytes())
         .map_err(|e| e.to_string())?;
     println!(
