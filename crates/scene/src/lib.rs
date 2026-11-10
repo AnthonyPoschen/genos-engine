@@ -48,7 +48,7 @@ pub use lighting::{
     LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
-pub use objects::{move_placed, publish, Placed};
+pub use objects::{move_placed, publish, Placed, Published};
 pub use reflections::{
     check_reflection_arg, reflection_flag_needs_value, Caustics, ReflectionCli, ReflectionEnv,
     ReflectionSettings, ReflectionTracer,
