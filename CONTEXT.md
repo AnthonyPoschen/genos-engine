@@ -235,3 +235,35 @@ _Avoid_: Sleep group, simulation island
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline
+
+**Navigator**:
+A scene object that follows a path on a navigation mesh or a volume graph. The crowd budgets count navigators.
+_Avoid_: Agent, pawn, bot
+
+**Navigation mesh**:
+The walkable polygon mesh baked from collision geometry for one navigation profile.
+_Avoid_: Nav graph
+
+**Navigation tile**:
+One square of a navigation mesh. A dirty tile can be baked again without baking the rest of the mesh.
+_Avoid_: Chunk
+
+**Navigation profile**:
+The radius, height, step, and slope a navigation mesh is baked for. A walker and a ground vehicle use different profiles.
+_Avoid_: Agent size
+
+**Off-mesh link**:
+A jump, a ladder, or a door that connects two polygons without a walkable edge between them.
+_Avoid_: Portal
+
+**Corridor**:
+The polygon sequence a path query returns, and the corner string a navigator follows inside it.
+_Avoid_: Spline
+
+**Crowd**:
+The navigators that steer around each other on one navigation mesh.
+_Avoid_: Agent simulation
+
+**Volume graph**:
+The nodes and edges a flying or space navigator searches. It is not a navigation mesh.
+_Avoid_: Voxel field
