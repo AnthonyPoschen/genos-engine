@@ -343,7 +343,10 @@ bool lighting_sc_expired(uint last, uint shown) {
     return int(lighting_frame() - last) > int(LIGHTING_CACHE_LIFE) && !lighting_sc_pixel_fresh(shown, 60);
 }
 void lighting_compose_cover(uint slot) {
-    if (!LIGHTING_SC_WRITES || !lighting_sc_display || slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
+    // The picture compile does not write the cache. It still has to record the
+    // blocks that read this slot, or a later field change never marks them and
+    // a held picture keeps the old shade until the next full compose.
+    if (!lighting_sc_display || slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
         return;
     }
     uvec2 b = lighting_compose_px >> 3u;
@@ -5088,7 +5091,14 @@ void lighting_svgf_push(uint slot) {
                 outc = mix(prev, outc, LIGHTING_SC_SEED_PRIOR);
             }
         } else {
-            outc = mix(prev, outc, LIGHTING_FIELD_CATCH);
+            // Quiet texels step 1/16 toward the target. A lamp that moved or
+            // went out leaves none of the stored field: lighting_lamp_keep is
+            // 0, and holding the 1/16 step is the multi-frame tail.
+            float catch_up = LIGHTING_FIELD_CATCH;
+            if (lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
+                catch_up = 1.0;
+            }
+            outc = mix(prev, outc, catch_up);
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);
