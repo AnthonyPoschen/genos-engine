@@ -392,6 +392,25 @@ fn exclusive_prefix(values: &[u32]) -> Vec<u32> {
 }
 
 #[test]
+fn the_sim_stores_are_device_memory() {
+    let (_w, _h, mut life) = open();
+    let camera = Camera::new(0.0, 2.0, 0.0);
+    let world = world(emitter(8, 4));
+    for _ in 0..3 {
+        draw(&mut life, &world, &camera);
+    }
+    assert!(
+        life.device.particle_stores_are_device_local(),
+        "slots, the dead ring, and the compact are host memory"
+    );
+    let positions = life.device.particle_positions().expect("positions");
+    assert!(
+        !positions.is_empty(),
+        "the device compact was not copied back"
+    );
+}
+
+#[test]
 fn an_out_of_date_acquire_does_not_wait_the_reset_fence() {
     let (width, height, mut life) = open();
     let camera = Camera::new(0.0, 2.0, 0.0);

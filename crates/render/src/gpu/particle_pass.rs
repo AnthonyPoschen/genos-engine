@@ -1,8 +1,9 @@
 //! Stage-1 particle compute and the indirect draw in the keep pass.
 //!
-//! The compute buffer stays on the device. The CPU reads it only after a
-//! readback frame, for the lavapipe agreement test. A frame that does not
-//! ask for a picture does not map the positions.
+//! Slots, the dead ring, and the compact are device memory. A host-cached
+//! store made every particle walk cross the bus: that is the linear death
+//! time, and the cached compact is what made that span swing. The CPU copies
+//! the compact only when the frame asked for a picture, after the sim stamps.
 
 use std::ffi::c_void;
 
@@ -37,6 +38,9 @@ const RING_SRC_STAGE: u32 = COMPUTE_STAGE | TRANSFER_STAGE;
 const RING_DST_STAGE: u32 = COMPUTE_STAGE;
 const RING_SRC_ACCESS: u32 = SHADER_ACCESS | TRANSFER_WRITE;
 const RING_DST_ACCESS: u32 = SHADER_ACCESS;
+/// Slots, the dead ring, and the compact. Host-cached readback made the
+/// per-particle walk cross the bus.
+const SIM_STORE: Memory = Memory::Device;
 /// Threads per sim workgroup. Matches `particles.comp` `local_size_x`.
 const SIM_GROUP: u32 = 64;
 const MODE_INIT: u32 = 0;
@@ -106,6 +110,8 @@ struct Flight {
     compute_pool: Handle,
     compute_set: Handle,
     compact: Buffer,
+    /// Host copy of `compact`, filled only when this frame copies the picture.
+    compact_host: Buffer,
     indirect: Buffer,
     /// Alive and spawned, copied at the end of this flight's compute.
     stats: Buffer,
@@ -117,8 +123,11 @@ pub(super) struct Pass {
     budget: u32,
     /// Persistent sim. One copy. The next compute waits the previous one with a barrier.
     state: Buffer,
+    /// Device memory. Host-cached slots are the linear death cost.
     slots: Buffer,
     dead: Buffer,
+    /// Slots, the dead ring, and both compacts were allocated in device memory.
+    device_stores: bool,
     /// Four bytes filled every dispatch. Its own transfer barrier orders it.
     /// The ring barrier is the compute memory barrier.
     canary: Buffer,
@@ -203,6 +212,10 @@ impl Gpu {
         let slot = self.flight.min(1);
         let other = 1 - slot;
         self.ensure_particle_pass(job.budget, depth_bytes)?;
+        if self.copy_picture {
+            let bytes = u64::from(job.budget).saturating_mul(COMPACT_STRIDE);
+            self.ensure_compact_host(slot, bytes)?;
+        }
         let sample_image = job.depth_collision
             && self.uploaded_depth_size() == (0, 0)
             && self.particle_depth_retained[other];
@@ -310,6 +323,10 @@ impl Gpu {
         // destination would chain into the next flight's host-to-compute
         // barrier and hide a missing ring barrier.
         memory_barrier(self, COMPUTE_STAGE, 0x8 | 0x2 | 0x1000, 0x40, 0x20 | 0x1 | 0x800);
+        if self.copy_picture {
+            // After the sim stamps. The device compact stays the draw source.
+            self.copy_compact_host(slot, u64::from(job.budget).saturating_mul(COMPACT_STRIDE));
+        }
         // The previous visit of this flight copied the same bytes. The fence
         // orders it; this barrier is the one synchronization validation sees.
         self.buffer_barrier(stats, 0x1000, 0x1000, 0x1000, 0x1000);
@@ -901,13 +918,22 @@ impl Gpu {
             / 1.0e6
     }
 
+    pub(super) fn particle_stores_are_device_local(&self) -> bool {
+        self.particle_pass
+            .as_ref()
+            .is_some_and(|pass| pass.device_stores)
+    }
+
     pub(super) fn particle_positions(&self) -> Result<Vec<[f32; 3]>, String> {
         let Some(pass) = self.particle_pass.as_ref() else {
             return Ok(Vec::new());
         };
         let budget = pass.budget;
         let state = copy_buffer_handle(&pass.state);
-        let compact = copy_buffer_handle(&pass.flights[self.particle_submitted.min(1)].compact);
+        let compact = copy_buffer_handle(&pass.flights[self.particle_submitted.min(1)].compact_host);
+        if compact.buffer.is_null() {
+            return Err("compact readback is missing; the frame did not copy the picture".into());
+        }
         let alive = read_u32_at(self, &state, 16).unwrap_or(0).min(budget);
         let mut out = Vec::with_capacity(usize::try_from(alive).unwrap_or(0));
         for index in 0..alive {
@@ -993,10 +1019,12 @@ impl Gpu {
             flight0.params,
             flight0.depth,
             flight0.compact,
+            flight0.compact_host,
             flight0.indirect,
             flight1.params,
             flight1.depth,
             flight1.compact,
+            flight1.compact_host,
             flight1.indirect,
         ];
         for buffer in &mut buffers {
@@ -1107,8 +1135,8 @@ impl Gpu {
         let slots = u64::from(budget);
         let state = self.make_buffer(STATE_BYTES, 0x20 | 0x1, Memory::Readback)?;
         zero_host_buffer(self, &state)?;
-        let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, Memory::Readback)?;
-        let dead = self.make_buffer(slots * 4, 0x20, Memory::Readback)?;
+        let slot_buf = self.make_buffer(slots * SLOT_STRIDE, 0x20, SIM_STORE)?;
+        let dead = self.make_buffer(slots * 4, 0x20, SIM_STORE)?;
         let canary = self.make_buffer(4, 0x2, Memory::Device)?;
         let touch = self.make_buffer(4, 0x20 | 0x2, Memory::Device)?;
         let sink = self.make_buffer(4, 0x20, Memory::Device)?;
@@ -1119,7 +1147,7 @@ impl Gpu {
         for _ in 0..2 {
             let params = self.make_buffer(PARAMS_BYTES, 0x20, Memory::Upload)?;
             let depth = self.make_buffer(depth_bytes, 0x20, Memory::Upload)?;
-            let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20, Memory::Readback)?;
+            let compact = self.make_buffer(slots * COMPACT_STRIDE, 0x20 | 0x1, SIM_STORE)?;
             let indirect = self.make_buffer(INDIRECT_BYTES, 0x20 | 0x100, Memory::Readback)?;
             let stats = self.make_buffer(8, 0x2, Memory::Readback)?;
             self.write_buffer(&indirect, &zero_bytes(INDIRECT_BYTES)?)?;
@@ -1185,6 +1213,7 @@ impl Gpu {
             state,
             slots: slot_buf,
             dead,
+            device_stores: SIM_STORE == Memory::Device,
             canary,
             touch,
             sink,
@@ -1196,6 +1225,7 @@ impl Gpu {
                     compute_pool: compute.1,
                     compute_set: compute.2,
                     compact: compact0,
+                    compact_host: Buffer::empty(),
                     indirect: indirect0,
                     stats: stats0,
                     draw_pool: draw.1,
@@ -1208,6 +1238,7 @@ impl Gpu {
                     compute_pool: pool1,
                     compute_set: set1,
                     compact: compact1,
+                    compact_host: Buffer::empty(),
                     indirect: indirect1,
                     stats: stats1,
                     draw_pool: draw_pool1,
@@ -1233,6 +1264,50 @@ impl Gpu {
             scan,
             bytes,
         })
+    }
+
+    fn ensure_compact_host(&mut self, slot: usize, bytes: u64) -> Result<(), String> {
+        if bytes == 0 {
+            return Ok(());
+        }
+        let fits = self.particle_pass.as_ref().is_some_and(|pass| {
+            let host = &pass.flights[slot].compact_host;
+            !host.buffer.is_null() && host.size >= bytes
+        });
+        if fits {
+            return Ok(());
+        }
+        let mut host = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+        let mut old = {
+            let Some(pass) = self.particle_pass.as_mut() else {
+                self.destroy_buffer(&mut host);
+                return Err("particle pass missing".into());
+            };
+            std::mem::swap(&mut pass.flights[slot].compact_host, &mut host);
+            pass.bytes = flight_buffer_bytes(pass);
+            host
+        };
+        if !old.buffer.is_null() {
+            self.destroy_buffer(&mut old);
+        }
+        Ok(())
+    }
+
+    fn copy_compact_host(&mut self, slot: usize, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        let (src, dst) = {
+            let Some(pass) = self.particle_pass.as_ref() else {
+                return;
+            };
+            let flight = &pass.flights[slot];
+            (flight.compact.buffer, flight.compact_host.buffer)
+        };
+        if src.is_null() || dst.is_null() {
+            return;
+        }
+        copy_regions(self, src, dst, 0, 0, bytes);
     }
 
     fn grow_particle_depth(&mut self, depth_bytes: u64) -> Result<(), String> {
@@ -1282,6 +1357,104 @@ impl Gpu {
         if self.particle_query_ready[submitted] {
             self.collect_particle_stats_slot(submitted);
         }
+        self.copy_compact_after_finish(submitted)
+    }
+
+    /// One transfer of the device compact after the flight fence. Frames that
+    /// already copied the picture have this mirror; frames that did not still
+    /// need it when the CPU asks for positions.
+    fn copy_compact_after_finish(&mut self, slot: usize) -> Result<(), String> {
+        let bytes = {
+            let Some(pass) = self.particle_pass.as_ref() else {
+                return Ok(());
+            };
+            if pass.budget == 0 {
+                return Ok(());
+            }
+            u64::from(pass.budget).saturating_mul(COMPACT_STRIDE)
+        };
+        self.ensure_compact_host(slot, bytes)?;
+        let (src, dst) = {
+            let Some(pass) = self.particle_pass.as_ref() else {
+                return Ok(());
+            };
+            let flight = &pass.flights[slot];
+            (flight.compact.buffer, flight.compact_host.buffer)
+        };
+        if src.is_null() || dst.is_null() {
+            return Ok(());
+        }
+        let saved_cmd = self.cmd;
+        let saved_fence = self.fence;
+        self.cmd = self.cmds[slot];
+        self.fence = self.fences[slot];
+        let copied = self.submit_compact_copy(slot, src, dst, bytes);
+        self.cmd = saved_cmd;
+        self.fence = saved_fence;
+        copied
+    }
+
+    fn submit_compact_copy(
+        &mut self,
+        slot: usize,
+        src: Handle,
+        dst: Handle,
+        bytes: u64,
+    ) -> Result<(), String> {
+        if self.flight_live[slot] {
+            self.wait_flight(slot)?;
+            self.flight_live[slot] = false;
+        }
+        let fences = [self.fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset compact fence",
+            )?;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset compact cmd")?;
+        }
+        self.begin_reused(self.cmd)?;
+        self.buffer_barrier(src, COMPUTE_STAGE | 0x8, TRANSFER_STAGE, SHADER_ACCESS, 0x800);
+        copy_regions(self, src, dst, 0, 0, bytes);
+        unsafe {
+            check((self.fns.end_cmd)(self.cmd), "end compact copy")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let cmd = [self.cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 0,
+                waits: std::ptr::null(),
+                stages: std::ptr::null(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 0,
+                signals: std::ptr::null(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "compact copy",
+            )?;
+        }
+        self.flight_live[slot] = true;
+        self.wait_fence(self.fence, "compact copy")?;
+        self.flight_live[slot] = false;
         Ok(())
     }
 
@@ -1632,11 +1805,20 @@ impl super::Renderer {
 
     /// Compacted positions from the last waited frame, metres.
     ///
+    /// The frame must have copied the picture. The copy is the host mirror of
+    /// the device compact, taken after the sim timestamps.
+    ///
     /// # Errors
     ///
-    /// Returns an error when the buffer cannot be mapped.
+    /// Returns an error when that copy is missing or cannot be mapped.
     pub fn particle_positions(&self) -> Result<Vec<[f32; 3]>, String> {
         self.gpu.particle_positions()
+    }
+
+    /// Slots, the dead ring, and the compact were allocated in device memory.
+    #[must_use]
+    pub fn particle_stores_are_device_local(&self) -> bool {
+        self.gpu.particle_stores_are_device_local()
     }
 }
 
@@ -1707,6 +1889,8 @@ fn flight_buffer_bytes(pass: &Pass) -> u64 {
         .saturating_add(pass.flights[1].depth.size)
         .saturating_add(pass.flights[0].stats.size)
         .saturating_add(pass.flights[1].stats.size)
+        .saturating_add(pass.flights[0].compact_host.size)
+        .saturating_add(pass.flights[1].compact_host.size)
         .saturating_add(pass.touch.size)
         .saturating_add(pass.sink.size)
         .saturating_add(4)
