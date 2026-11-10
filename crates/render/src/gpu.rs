@@ -1385,6 +1385,10 @@ impl genos_window::ShutdownDevice for Renderer {
         self.slow_fence = Some(stall);
     }
 
+    fn release_driver_at_exit(&mut self) {
+        self.gpu.release_driver_at_exit();
+    }
+
     fn frames_presented(&self) -> u64 {
         self.gpu.presented
     }
@@ -1739,10 +1743,13 @@ struct Gpu {
     presented: u64,
     /// The lifecycle is draining and destroying. Lighting waits must not block.
     lifecycle_release: bool,
-    /// The instance has been destroyed.
+    /// The instance has been destroyed, or quit left it for process exit.
     torn_down: bool,
+    /// Quit will `_exit` and must not wait in `vkDestroyDevice` or
+    /// `vkDestroyInstance`. Those two calls share one lavapipe teardown wait.
+    exit_release: bool,
     /// 0 yields, 1 destroys lighting, 2 destroys the swapchain, 3 releases
-    /// images and pipelines, 4 destroys the device, 5 the surface, then the instance.
+    /// images and pipelines, 4 destroys the surface, 5 the device, then the instance.
     teardown: u8,
     /// The drain submits have been queued.
     shutdown_armed: bool,
@@ -2618,6 +2625,7 @@ impl Gpu {
                 presented: 0,
                 lifecycle_release: false,
                 torn_down: false,
+                exit_release: false,
                 teardown: 0,
                 shutdown_armed: false,
                 shutdown_fence: std::ptr::null_mut(),
@@ -8793,8 +8801,16 @@ impl Gpu {
         !self.transfer_busy || self.fence_retired(self.transfer_fence)
     }
 
+    /// Leave `vkDestroyDevice` and `vkDestroyInstance` for process exit.
+    pub(crate) fn release_driver_at_exit(&mut self) {
+        self.exit_release = true;
+    }
+
     /// Name of the group the next [`Self::destroy_step`] call destroys.
     pub(crate) fn next_shutdown_phase(&self) -> &'static str {
+        if self.exit_release && self.teardown >= 5 {
+            return "driver_release";
+        }
         match self.teardown {
             0 => "destroy_yield",
             1 => "destroy_lighting",
@@ -8846,11 +8862,17 @@ impl Gpu {
                 false
             }
             5 => {
+                if self.release_instead_of_driver_destroy() {
+                    return true;
+                }
                 block(|| self.destroy_device_handle());
                 self.teardown = 6;
                 false
             }
             _ => {
+                if self.release_instead_of_driver_destroy() {
+                    return true;
+                }
                 block(|| self.destroy_instance_handle());
                 true
             }
@@ -8858,6 +8880,9 @@ impl Gpu {
     }
 
     fn finish_teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
         if self.teardown < 2 {
             self.destroy_lighting();
             self.teardown = 2;
@@ -8873,6 +8898,12 @@ impl Gpu {
         if self.teardown < 5 {
             self.destroy_surface_handle();
             self.teardown = 5;
+        }
+        // A quit drop can reach here with `exit_release` set and the device
+        // still alive. Destroying it now is the same wait the quit skipped.
+        if self.exit_release {
+            let _ = self.release_instead_of_driver_destroy();
+            return;
         }
         if self.teardown < 6 {
             self.destroy_device_handle();
@@ -9208,6 +9239,30 @@ impl Gpu {
         unsafe {
             (self.fns.destroy_surface)(self.instance, surface, std::ptr::null());
         }
+    }
+
+    /// Skip `vkDestroyDevice` and `vkDestroyInstance` on the player quit.
+    ///
+    /// On lavapipe those calls take one shared teardown lock: the threaded
+    /// submit join, the llvmpipe thread pool, or the shader-cache queue.
+    /// The wait is tens of milliseconds up to about 150 ms, and it shows up
+    /// on whichever of the two calls acquires the lock. While the instance
+    /// destroy holds the Wayland display lock, the seat thread cannot mark,
+    /// so the ping gap becomes that wait. This step runs before the unmap.
+    /// Skipping the calls keeps that wait off both the ping gap and the
+    /// window-gone-to-exit span. `_exit` reclaims the device.
+    fn release_instead_of_driver_destroy(&mut self) -> bool {
+        if !self.exit_release {
+            return false;
+        }
+        if !self.torn_down {
+            use std::io::Write;
+            println!("{}", genos_window::DRIVER_RELEASE_LINE);
+            let _ = std::io::stdout().flush();
+            self.torn_down = true;
+            self.lifecycle_release = true;
+        }
+        true
     }
 
     fn destroy_instance_handle(&mut self) {
