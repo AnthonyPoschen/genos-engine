@@ -7,13 +7,14 @@ use genos_audio::{mix_into, Barrier, Listener, Source, Vec3};
 use genos_load::Pcm;
 
 static ARMED: AtomicBool = AtomicBool::new(false);
-static ALLOCATED: AtomicBool = AtomicBool::new(false);
+static PANICKED: AtomicBool = AtomicBool::new(false);
 
 // SAFETY: methods forward to the system allocator and only record that a call happened.
 unsafe impl GlobalAlloc for Guard {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if ARMED.load(Ordering::Relaxed) {
-            ALLOCATED.store(true, Ordering::Relaxed);
+            let first = !PANICKED.swap(true, Ordering::Relaxed);
+            assert!(!first, "mix_into allocated");
         }
         // SAFETY: `layout` is the size and alignment the caller requested.
         unsafe { System.alloc(layout) }
@@ -58,7 +59,7 @@ fn mix_into_does_not_allocate() {
         absorption: 2.0,
     };
     let mut out = vec![0.0f32; 480 * 2];
-    ALLOCATED.store(false, Ordering::SeqCst);
+    PANICKED.store(false, Ordering::SeqCst);
     ARMED.store(true, Ordering::SeqCst);
     mix_into(
         &mut out,
@@ -68,6 +69,5 @@ fn mix_into_does_not_allocate() {
         48_000,
     );
     ARMED.store(false, Ordering::SeqCst);
-    assert!(!ALLOCATED.load(Ordering::SeqCst), "mix_into allocated");
     assert!(out.iter().any(|sample| *sample != 0.0));
 }

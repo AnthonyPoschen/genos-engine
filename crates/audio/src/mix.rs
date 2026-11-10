@@ -2,7 +2,6 @@
 #![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -48,7 +47,8 @@ pub struct Barrier {
 
 /// Mix `sources` into `frames` of interleaved stereo at `device_rate`.
 ///
-/// The returned buffer is the only allocation. The sum itself is [`mix_into`].
+/// The returned buffer is the only allocation. The sum uses a stack scratch
+/// and [`mix_into`] does not allocate.
 pub fn mix(
     sources: &[Source<'_>],
     listener: &Listener,
@@ -59,11 +59,43 @@ pub fn mix(
     if device_rate == 0 || frames == 0 {
         return Vec::new();
     }
-    let mut acc = vec![0.0f32; frames * 2];
-    mix_into(&mut acc, sources, listener, barriers, device_rate);
-    acc.into_iter()
-        .map(|sample| sample.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
-        .collect()
+    let mut out = vec![0i16; frames.saturating_mul(2)];
+    write_mix(&mut out, sources, listener, barriers, device_rate);
+    out
+}
+
+const SCRATCH_FRAMES: usize = 128;
+
+fn write_mix(
+    out: &mut [i16],
+    sources: &[Source<'_>],
+    listener: &Listener,
+    barriers: &[Barrier],
+    device_rate: u32,
+) {
+    let mut scratch = [0.0f32; SCRATCH_FRAMES * 2];
+    let total = out.len() / 2;
+    let mut base = 0usize;
+    while base < total {
+        let count = (total - base).min(SCRATCH_FRAMES);
+        let window = &mut scratch[..count.saturating_mul(2)];
+        window.fill(0.0);
+        if device_rate != 0 {
+            for source in sources {
+                render_source(window, source, listener, barriers, device_rate, base);
+            }
+        }
+        let start = base.saturating_mul(2);
+        quantize_into(window, &mut out[start..start + window.len()]);
+        base += count;
+    }
+}
+
+fn quantize_into(acc: &[f32], out: &mut [i16]) {
+    let count = acc.len().min(out.len());
+    for index in 0..count {
+        out[index] = acc[index].round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
 }
 
 /// Add every voice into `out`.
@@ -82,7 +114,7 @@ pub fn mix_into(
         return;
     }
     for source in sources {
-        render_source(out, source, listener, barriers, device_rate);
+        render_source(out, source, listener, barriers, device_rate, 0);
     }
 }
 
@@ -92,6 +124,7 @@ fn render_source(
     listener: &Listener,
     barriers: &[Barrier],
     device_rate: u32,
+    frame_base: usize,
 ) {
     let channels = source.pcm.channels as usize;
     if source.pcm.sample_rate == 0 || (channels != 1 && channels != 2) {
@@ -104,7 +137,7 @@ fn render_source(
     let frames = acc.len() / 2;
     let (level_l, level_r, step) = levels(source, listener, barriers, device_rate);
     for frame in 0..frames {
-        let cursor = frame as f64 * step;
+        let cursor = f64_from_usize(frame_base + frame) * step;
         if !source.looping && cursor >= source_frames as f64 {
             break;
         }
@@ -169,15 +202,20 @@ fn interp(source: &Source<'_>, cursor: f64, channel: usize, source_frames: usize
     if source_frames == 0 {
         return 0.0;
     }
+    let period = source_frames as f64;
     let position = if source.looping {
-        cursor.rem_euclid(source_frames as f64)
-    } else if cursor < 0.0 || cursor >= source_frames as f64 {
+        wrap_period(cursor, period)
+    } else if cursor < 0.0 || cursor >= period {
         return 0.0;
     } else {
         cursor
     };
-    let index = position.floor() as usize;
-    let frac = (position - index as f64) as f32;
+    let whole = floor_f64(position);
+    let index = usize_from_f64(whole);
+    if index >= source_frames {
+        return 0.0;
+    }
+    let frac = (position - whole) as f32;
     let next = if source.looping {
         (index + 1) % source_frames
     } else {
@@ -190,6 +228,79 @@ fn interp(source: &Source<'_>, cursor: f64, channel: usize, source_frames: usize
         pcm_sample(source, next, channel)
     };
     first + (second - first) * frac
+}
+
+fn f64_from_usize(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+}
+
+fn wrap_period(cursor: f64, period: f64) -> f64 {
+    if period <= 0.0 {
+        return 0.0;
+    }
+    let mut wrapped = cursor - floor_f64(cursor / period) * period;
+    if wrapped < 0.0 {
+        wrapped += period;
+    } else if wrapped >= period {
+        wrapped -= period;
+    }
+    wrapped
+}
+
+fn floor_f64(value: f64) -> f64 {
+    if !value.is_finite() {
+        return value;
+    }
+    let bits = value.to_bits();
+    let negative = bits & 0x8000_0000_0000_0000 != 0;
+    let biased = (bits >> 52) & 0x7ff;
+    if biased >= 0x7ff {
+        return value;
+    }
+    if biased < 1023 {
+        if value == 0.0 {
+            return value;
+        }
+        return if negative { -1.0 } else { 0.0 };
+    }
+    let exponent = biased - 1023;
+    if exponent >= 52 {
+        return value;
+    }
+    let frac_bits = u32::try_from(52 - exponent).unwrap_or(0);
+    let mask = (1u64 << frac_bits) - 1;
+    if bits & mask == 0 {
+        return value;
+    }
+    let truncated = f64::from_bits(bits & !mask);
+    if negative {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
+fn usize_from_f64(value: f64) -> usize {
+    if value <= 0.0 || !value.is_finite() {
+        return 0;
+    }
+    let bits = value.to_bits();
+    let biased = (bits >> 52) & 0x7ff;
+    if biased < 1023 {
+        return 0;
+    }
+    let exponent = biased - 1023;
+    if exponent >= 63 {
+        return usize::MAX;
+    }
+    let significand = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let shift = u32::try_from(exponent).unwrap_or(0);
+    let magnitude = if shift >= 52 {
+        significand << (shift - 52)
+    } else {
+        significand >> (52 - shift)
+    };
+    usize::try_from(magnitude).unwrap_or(usize::MAX)
 }
 
 fn pcm_sample(source: &Source<'_>, frame: usize, channel: usize) -> f32 {

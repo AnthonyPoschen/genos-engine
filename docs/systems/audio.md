@@ -23,7 +23,7 @@ The GPU pass is one compute dispatch on the renderer's Vulkan device. It reads t
 The crate is `crates/audio`, package `genos-audio`.
 
 - `mix` and `mix_into` are in `src/mix.rs`. `mix_into` sums into a caller-owned buffer and does not allocate. `mix` quantizes that sum into the returned buffer.
-- Sine, cosine, and the barrier exponential are in `src/poly.rs`. The mix does not call the platform math library for those.
+- Sine, cosine, and the barrier exponential are the Cephes `sinf`, `cosf`, and `expf` polynomials in `src/poly.rs`, with range reduction. The mix does not call the platform math library for those and does not use a fused multiply-add.
 - Doppler, balance, distance, and transmission are in `src/space.rs`.
 - `submit` is in `src/device.rs`. ALSA, WASAPI, and CoreAudio are compiled only on their own operating system.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
@@ -50,7 +50,7 @@ WASAPI and CoreAudio are not run from this Linux machine.
 
 Buses, a held device, disk-fed clips, reverb zones, and a console write are the plan in [the audio design](audio-design.md).
 
-`cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. That test does not open a device.
+`cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. A second digest, `tests/golden/paths.sha256`, covers loop wrap, a Doppler cursor that wraps, a non-trivial exp reduction, an `i16` clip, and two voices. Those tests do not open a device.
 
 ## Networking
 
