@@ -96,7 +96,12 @@ pub fn publish(scene: &Scene) -> Result<World, StoreError> {
     Ok(world)
 }
 
-/// Write a new position on one row and leave the draw list alone.
+/// Write a new position on the store row.
+///
+/// This is the store copy only. `scene.walls`, `scene.solids`, and
+/// `scene.lights` stay as they were at [`publish`]. An unchanged position
+/// does not write, so it emits no delta. A stale handle increments
+/// [`genos_ecs::Stats::stale_rejects`] and writes nothing.
 ///
 /// # Errors
 ///
@@ -109,19 +114,27 @@ pub fn move_placed(
     y: f32,
     z: f32,
 ) -> Result<(), StoreError> {
-    let Some(current) = world.get::<Placed>(handle) else {
-        return Err(if world.alive(handle) {
-            StoreError::Missing
-        } else {
-            StoreError::Stale
-        });
+    let current = match world.get::<Placed>(handle) {
+        Some(row) => row.clone(),
+        None => {
+            return match world.get_mut::<Placed>(handle) {
+                Err(err) => Err(err),
+                Ok(_row) => Err(StoreError::Missing),
+            };
+        }
     };
-    let mut next = current.clone();
+    if same_bits(current.x, x) && same_bits(current.y, y) && same_bits(current.z, z) {
+        return Ok(());
+    }
+    let mut next = current;
     next.x = x;
     next.y = y;
     next.z = z;
-    world.insert(handle, next)?;
-    Ok(())
+    world.insert(handle, next)
+}
+
+fn same_bits(left: f32, right: f32) -> bool {
+    left.to_bits() == right.to_bits()
 }
 
 fn wall_row(ordinal: usize, wall: &Wall) -> Result<Placed, StoreError> {
