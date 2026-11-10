@@ -152,6 +152,32 @@ pub enum PresentHost {
     Mac,
 }
 
+/// Steam Deck panel. Desktop and the LCD stay on SDR at Low. The OLED may take HDR10.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeckPanel {
+    Desktop,
+    Lcd,
+    Oled,
+}
+
+/// `product_name` from DMI. Galileo is the OLED Deck. Jupiter is the LCD Deck.
+#[must_use]
+pub fn deck_panel_from_product(name: &str) -> DeckPanel {
+    match name.trim() {
+        "Galileo" => DeckPanel::Oled,
+        "Jupiter" => DeckPanel::Lcd,
+        _ => DeckPanel::Desktop,
+    }
+}
+
+/// This machine's Deck panel. A missing DMI file is a desktop.
+#[must_use]
+pub fn deck_panel() -> DeckPanel {
+    let name =
+        std::fs::read_to_string("/sys/devices/virtual/dmi/id/product_name").unwrap_or_default();
+    deck_panel_from_product(&name)
+}
+
 /// Chosen swapchain.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HdrSwapchain {
@@ -1390,22 +1416,59 @@ pub fn mib_cents(mib: f64) -> f64 {
     (mib * 100.0).round()
 }
 
-/// Potato (bloom off, fixed exposure) and Low (four levels, at most 64 bins) stay SDR.
+/// Potato and Low stay on SDR. The Deck OLED Low chain may take HDR10 when that pair is listed.
+///
+/// Potato is checked first, so an edited Potato stays locked even when its bloom fields look like Low.
+/// A chain with four levels and at most 64 bins locks the same way. scRGB stays locked.
 #[must_use]
-pub fn post_locks_sdr(hdr: &genos_scene::HdrSettings) -> bool {
+pub fn post_locks_sdr(
+    hdr: &genos_scene::HdrSettings,
+    preset: genos_scene::LightingPreset,
+    panel: DeckPanel,
+    hdr10_listed: bool,
+) -> bool {
     if hdr.legacy_bytes {
         return true;
     }
-    let potato =
-        hdr.bloom_levels == 0 && matches!(hdr.exposure_mode, genos_scene::ExposureMode::Fixed);
-    let low = hdr.bloom_levels == 4 && hdr.histogram_bins <= 64;
-    potato || low
+    let potato = preset == genos_scene::LightingPreset::Potato
+        || (hdr.bloom_levels == 0 && matches!(hdr.exposure_mode, genos_scene::ExposureMode::Fixed));
+    if potato {
+        return true;
+    }
+    let low = preset == genos_scene::LightingPreset::Low
+        || (hdr.bloom_levels == 4 && hdr.histogram_bins <= 64);
+    if low && deck_oled_hdr10(hdr.output, panel, hdr10_listed) {
+        return false;
+    }
+    low
+}
+
+/// HDR10 when the Deck OLED lists it. scRGB stays on SDR. Desktop and the LCD stay on SDR.
+#[must_use]
+pub fn deck_oled_hdr10(
+    output: genos_scene::OutputMode,
+    panel: DeckPanel,
+    hdr10_listed: bool,
+) -> bool {
+    panel == DeckPanel::Oled
+        && hdr10_listed
+        && matches!(
+            output,
+            genos_scene::OutputMode::Hdr10 | genos_scene::OutputMode::Auto
+        )
 }
 
 /// HDR10 or scRGB keeps an encode image. Potato, Low, legacy, Auto, and SDR do not.
+///
+/// This is the desktop rule. A Deck OLED Low HDR10 chain is decided by [`post_locks_sdr`].
 #[must_use]
 pub fn post_encode_resident(hdr: &genos_scene::HdrSettings) -> bool {
-    if post_locks_sdr(hdr) {
+    if post_locks_sdr(
+        hdr,
+        genos_scene::LightingPreset::High,
+        DeckPanel::Desktop,
+        false,
+    ) {
         return false;
     }
     matches!(
@@ -1594,9 +1657,9 @@ fn meter_slots(bins: u32) -> u32 {
 ///
 /// Scene is RGBA16F. The finest bloom mip is RGBA16F. Later mips are RGB16F,
 /// two texels per 12 bytes. The encode image is 12 bytes a pixel (RGBA16F
-/// codes, then BGRA) only when `encode_full`. Unused bindings share one
-/// 16-byte stand-in, counted once in `lut_bytes`. The meter is empty unless
-/// exposure is auto. [`post_device_bytes`] accepts a buffer whose
+/// codes, then BGRA) only when `encode_full`. There is no lattice buffer.
+/// Empty bindings name the params buffer, already counted in `params_bytes`.
+/// The meter is empty unless exposure is auto. [`post_device_bytes`] accepts a buffer whose
 /// `VkMemoryRequirements.size` is this logical size, or that size rounded up
 /// to the alignment Vulkan reported for the same buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1727,8 +1790,8 @@ pub fn post_chain(
         (device, header)
     };
     let params_bytes = 32;
-    // One shared descriptor stand-in. Empty bloom, encode, and meter bindings use it too.
-    let lut_bytes = 16;
+    // AgX is evaluated in the shader. There is no lattice buffer and no stand-in.
+    let lut_bytes = 0;
     let (base_w, base_h) = mips
         .levels
         .first()
@@ -2065,11 +2128,11 @@ mod tests {
         let high = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::High);
         let ultra = genos_scene::HdrSettings::ultra();
         let cases = [
-            (&potato, 28.13, 29_491_248_u64, 0, 0, 0),
-            (&low, 37.46, 31_788_848, 7, 640, 80),
-            (&medium, 37.49, 38_701_616, 9, 1280, 80),
-            (&high, 37.50, 38_708_432, 11, 1280, 40),
-            (&ultra, 37.50, 38_709_752, 13, 1280, 20),
+            (&potato, 28.13, 29_491_232_u64, 0, 0, 0),
+            (&low, 37.46, 31_788_832, 7, 640, 80),
+            (&medium, 37.49, 38_701_600, 9, 1280, 80),
+            (&high, 37.50, 38_708_416, 11, 1280, 40),
+            (&ultra, 37.50, 38_709_736, 13, 1280, 20),
         ];
         for (hdr, mib, bytes, passes, base, coarse) in cases {
             let chain = post_chain(width, height, hdr, false);
@@ -2086,7 +2149,7 @@ mod tests {
         assert_eq!(post_chain(width, height, &potato, false).encode_bytes, 0);
         assert_eq!(post_chain(width, height, &potato, false).bloom_bytes, 0);
         assert_eq!(post_chain(width, height, &potato, false).meter_bytes, 0);
-        assert_eq!(post_chain(width, height, &high, false).lut_bytes, 16);
+        assert_eq!(post_chain(width, height, &high, false).lut_bytes, 0);
         let pixels = u64::from(width) * u64::from(height);
         let mut high_hdr = high.clone();
         high_hdr.output = genos_scene::OutputMode::Hdr10;
@@ -2100,9 +2163,9 @@ mod tests {
         let ultra_chain = post_chain(width, height, &ultra_hdr, true);
         let medium_chain = post_chain(width, height, &medium_hdr, true);
         assert_eq!(high_chain.encode_bytes, pixels * 12);
-        assert_eq!(high_chain.bytes, 82_945_232);
-        assert_eq!(ultra_chain.bytes, 82_946_552);
-        assert_eq!(medium_chain.bytes, 82_938_416);
+        assert_eq!(high_chain.bytes, 82_945_216);
+        assert_eq!(ultra_chain.bytes, 82_946_536);
+        assert_eq!(medium_chain.bytes, 82_938_400);
         assert!(u64_to_f64(medium_chain.bytes) <= mib_ceiling_bytes(79.68));
         assert!(u64_to_f64(high_chain.bytes) <= mib_ceiling_bytes(79.69));
         assert!(u64_to_f64(ultra_chain.bytes) <= mib_ceiling_bytes(79.69));
@@ -2222,6 +2285,64 @@ mod tests {
                 Some(1280)
             );
         }
+    }
+
+    #[test]
+    fn deck_oled_low_may_take_listed_hdr10() {
+        let mut low = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Low);
+        low.output = genos_scene::OutputMode::Hdr10;
+        let preset = genos_scene::LightingPreset::Low;
+        assert!(post_locks_sdr(&low, preset, DeckPanel::Desktop, true));
+        assert!(post_locks_sdr(&low, preset, DeckPanel::Lcd, true));
+        assert!(!post_locks_sdr(&low, preset, DeckPanel::Oled, true));
+        assert!(post_locks_sdr(&low, preset, DeckPanel::Oled, false));
+        low.output = genos_scene::OutputMode::Scrgb;
+        assert!(post_locks_sdr(&low, preset, DeckPanel::Oled, true));
+        low.output = genos_scene::OutputMode::Auto;
+        assert!(!post_locks_sdr(&low, preset, DeckPanel::Oled, true));
+        assert_eq!(deck_panel_from_product("Galileo"), DeckPanel::Oled);
+        assert_eq!(deck_panel_from_product("Jupiter"), DeckPanel::Lcd);
+        assert_eq!(deck_panel_from_product("  "), DeckPanel::Desktop);
+        let mut edited = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Potato);
+        edited.bloom_levels = 4;
+        edited.histogram_bins = 64;
+        edited.output = genos_scene::OutputMode::Hdr10;
+        assert!(post_locks_sdr(
+            &edited,
+            genos_scene::LightingPreset::Potato,
+            DeckPanel::Oled,
+            true,
+        ));
+        let deck = post_chain(1280, 800, &low, true);
+        assert_eq!(deck.encode_bytes, 1_024_000 * 12);
+        assert_eq!(deck.bytes, 21_118_832);
+        assert!(u64_to_f64(deck.bytes) <= mib_ceiling_bytes(37.46));
+    }
+
+    #[test]
+    fn software_timestamps_skip_the_hardware_ceiling() {
+        let software = crate::gpu::GpuKind::from_vk_device_type(4);
+        let integrated = crate::gpu::GpuKind::from_vk_device_type(1);
+        let discrete = crate::gpu::GpuKind::from_vk_device_type(2);
+        let virtual_gpu = crate::gpu::GpuKind::from_vk_device_type(3);
+        let other = crate::gpu::GpuKind::from_vk_device_type(0);
+        assert_eq!(software, crate::gpu::GpuKind::Software);
+        assert_eq!(integrated, crate::gpu::GpuKind::Hardware);
+        assert_eq!(discrete, crate::gpu::GpuKind::Hardware);
+        assert_eq!(virtual_gpu, crate::gpu::GpuKind::Hardware);
+        assert_eq!(other, crate::gpu::GpuKind::Hardware);
+        let ceiling = 1.50;
+        assert!(software.post_ms_passes(1.689, ceiling));
+        assert!(software.post_ms_passes(1.639, ceiling));
+        assert!(!discrete.post_ms_passes(1.689, ceiling));
+        assert!(!integrated.post_ms_passes(1.639, ceiling));
+        assert!(discrete.post_ms_passes(ceiling, ceiling));
+        assert!(!discrete.post_ms_passes(ceiling + f64::EPSILON, ceiling));
+        assert!(!software.post_ms_passes(0.0, ceiling));
+        assert!(!software.post_ms_passes(-1.0, ceiling));
+        assert!(!software.post_ms_passes(f64::NAN, ceiling));
+        assert!(!software.post_ms_passes(f64::INFINITY, ceiling));
+        assert!(!discrete.post_ms_passes(0.0, ceiling));
     }
 
     #[test]

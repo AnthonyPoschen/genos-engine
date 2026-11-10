@@ -397,12 +397,36 @@ impl Renderer {
     /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
     /// except Potato and Low settings, which stay SDR.
     pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.layout_post_for(
+            hdr,
+            genos_scene::LightingPreset::High,
+            crate::hdr_output::DeckPanel::Desktop,
+            false,
+        )
+    }
+
+    /// Rebuild the post chain the way `post_locks_sdr` classifies `preset` on `panel`.
+    ///
+    /// GI targets still follow Potato. `hdr10_listed` is the Deck OLED exception.
+    pub fn layout_post_for(
+        &mut self,
+        hdr: genos_scene::HdrSettings,
+        preset: genos_scene::LightingPreset,
+        panel: crate::hdr_output::DeckPanel,
+        hdr10_listed: bool,
+    ) -> Result<(), String> {
         self.gpu.lighting.settings =
             genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
         self.gpu.lighting.hdr = hdr;
         self.gpu.lighting.budget_hdr = true;
+        self.gpu.lighting.budget_preset = preset;
+        self.gpu.lighting.budget_panel = panel;
+        self.gpu.lighting.budget_hdr10_listed = hdr10_listed;
         let result = self.gpu.make_lighting_targets();
         self.gpu.lighting.budget_hdr = false;
+        self.gpu.lighting.budget_preset = genos_scene::LightingPreset::High;
+        self.gpu.lighting.budget_panel = crate::hdr_output::DeckPanel::Desktop;
+        self.gpu.lighting.budget_hdr10_listed = false;
         result
     }
 
@@ -516,12 +540,13 @@ impl Renderer {
         self.gpu.lighting.hdr_ms
     }
 
-    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p.
+    /// A lavapipe timestamp is not that score.
     pub fn post_ms_device(&self) -> f64 {
         self.hdr_ms()
     }
 
-    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, params, meter.
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting
@@ -530,7 +555,6 @@ impl Renderer {
             .saturating_add(lighting.scene_host.size)
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
-            .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
             .saturating_add(lighting.meter_dev.size)
             .saturating_add(lighting.meter_host.size);
@@ -555,7 +579,7 @@ impl Renderer {
                 scene_host: buffer(&lighting.scene_host),
                 bloom: buffer(&lighting.bloom),
                 encode: buffer(&lighting.hdr_encode),
-                lut: buffer(&lighting.agx_lut),
+                lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
                 params: buffer(&lighting.hdr_params),
                 meter: buffer(&lighting.meter_dev),
                 meter_host: buffer(&lighting.meter_host),
@@ -563,7 +587,7 @@ impl Renderer {
         )
     }
 
-    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    /// Post-chain bytes as MiB. The ceiling is the preset row in the HDR pipeline record.
     pub fn post_vram_device(&self) -> f64 {
         self.hdr_vram_bytes() / (1024.0 * 1024.0)
     }
@@ -3022,11 +3046,27 @@ impl Gpu {
                 color_space,
             });
         }
-        let force_sdr = self.lighting.hdr.legacy_bytes
-            || matches!(
-                self.lighting.settings.preset,
+        let hdr10_listed = listed.iter().any(|item| {
+            (item.format == crate::hdr_output::FORMAT_A2B10
+                || item.format == crate::hdr_output::FORMAT_A2R10)
+                && item.color_space == crate::hdr_output::COLOR_SPACE_HDR10
+        });
+        let force_sdr = if self.lighting.hdr.legacy_bytes {
+            true
+        } else {
+            let preset = self.lighting.settings.preset;
+            let named = matches!(
+                preset,
                 genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
             );
+            named
+                && crate::hdr_output::post_locks_sdr(
+                    &self.lighting.hdr,
+                    preset,
+                    crate::hdr_output::deck_panel(),
+                    hdr10_listed,
+                )
+        };
         crate::hdr_output::surface_choice(
             sdr_format,
             &listed,
@@ -10150,12 +10190,27 @@ pub enum GpuKind {
 }
 
 impl GpuKind {
-    fn from_vk_device_type(device_type: u32) -> Self {
+    /// `VK_PHYSICAL_DEVICE_TYPE_*`. `4` is `CPU` (lavapipe, llvmpipe).
+    #[must_use]
+    pub fn from_vk_device_type(device_type: u32) -> Self {
         // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
         if device_type == 4 {
             Self::Software
         } else {
             Self::Hardware
+        }
+    }
+
+    /// 1.50 ms is the 4070-at-1440p and Deck-at-800p ceiling. A software
+    /// rasterizer still needs a finite positive timestamp. It is not that score.
+    #[must_use]
+    pub fn post_ms_passes(self, value: f64, ceiling: f64) -> bool {
+        if !value.is_finite() || value <= 0.0 {
+            return false;
+        }
+        match self {
+            Self::Software => true,
+            Self::Hardware => value <= ceiling,
         }
     }
 }

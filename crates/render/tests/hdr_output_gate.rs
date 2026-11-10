@@ -20,12 +20,11 @@ use genos_render::{
     exposure_overshoot, exposure_still_change, exposure_with_compensation, graphics_white_linear,
     hdr10_pq, histogram_ev100, karis_downsample_rgb, karis_firefly_response, linear_from_display,
     pack_f32,
-    pick_hdr_output, pq_st2084, rec2020_from_rec709, resolve_swapchain,
-    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, post_chain,
-    HdrSwapchain,
-    HDR_PEAK_NITS,
-    Image, ListedFormat, PresentHost, Renderer, World, COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB,
-    COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
+    pick_hdr_output, post_chain, post_locks_sdr, pq_st2084, rec2020_from_rec709, resolve_swapchain,
+    scene_luma, scrgb_code, scrgb_from_display, step_exposure, swapchain_nits, tone, DeckPanel,
+    GpuKind, HdrSwapchain, HDR_PEAK_NITS, Image, ListedFormat, PresentHost, Renderer, World,
+    COLOR_SPACE_HDR10, COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10,
+    FORMAT_BGRA8, FORMAT_R16F, FORMAT_RGBA8,
 };
 
 use genos_scene::{Camera, HdrSettings, LightingPreset, LightingSettings, OutputMode};
@@ -56,7 +55,8 @@ const OVERSHOOT_MAX: f64 = 0.02;
 const FIREFLY_MAX: f64 = 1.0;
 const COMMUTE_MAX: f64 = 0.01;
 const DEVICE_MS_MAX: f64 = 1.5;
-const DEVICE_VRAM_MAX: f64 = 96.0;
+/// Published High and Ultra SDR ceiling. The 1440p rows check each preset.
+const PICTURE_VRAM_MAX: f64 = 37.50;
 /// Mean |picture − AgX(exposure × (scene + bloom × k))| on lit pixels.
 /// Sits above 8-bit dither and below a skipped `AgX`, a wrong lattice, a ×4 bloom add,
 /// and an exposure that stays at 1.
@@ -288,8 +288,8 @@ fn live_metrics() -> Vec<Metric> {
         aces_row(aces2_rec709([1.0, 1.0, 1.0])),
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
-        collected_ms("post_ms_device", gpu_post_ms(), DEVICE_MS_MAX),
-        at_most("post_vram_device", gpu_post_vram(), DEVICE_VRAM_MAX),
+        collected_ms("post_ms_device", gpu_grab().post_ms, DEVICE_MS_MAX),
+        at_most("post_vram_device", gpu_post_vram(), PICTURE_VRAM_MAX),
         equal("passes_fallback", chain_passes(LightingPreset::Potato), 0.0),
         equal("passes_low", chain_passes(LightingPreset::Low), 7.0),
         equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
@@ -324,6 +324,7 @@ fn live_metrics() -> Vec<Metric> {
         vram_1440("vram_1440_ultra_sdr", 4, 0, 37.50),
         vram_1440("vram_1440_ultra_hdr10", 4, 1, 79.69),
         vram_1440("vram_1440_ultra_scrgb", 4, 2, 79.69),
+        vram_deck_oled("vram_800_low_oled_hdr10", 37.46),
     ]
 }
 
@@ -373,7 +374,7 @@ fn proof_good() -> Vec<Metric> {
         at_most("pq_st2084", pq_error(pq_st2084), PQ_MAX),
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 0.40, DEVICE_MS_MAX),
-        at_most("post_vram_device", 37.5, DEVICE_VRAM_MAX),
+        at_most("post_vram_device", 37.5, PICTURE_VRAM_MAX),
     ]
 }
 
@@ -423,7 +424,7 @@ fn proof_broken() -> Vec<Metric> {
         at_most("pq_st2084", pq_error(|nits| nits / 10_000.0), PQ_MAX),
         equal("scrgb_code", eighty_nit_paper_white(203.0), SCRGB_WHITE),
         at_most("post_ms_device", 5.0, DEVICE_MS_MAX),
-        at_most("post_vram_device", 4_000.0, DEVICE_VRAM_MAX),
+        at_most("post_vram_device", 4_000.0, PICTURE_VRAM_MAX),
     ]
 }
 
@@ -459,7 +460,7 @@ fn eighty_nit_paper_white(_nits: f64) -> f64 {
 }
 
 fn collected_ms(name: &'static str, value: f64, device_ceiling: f64) -> Metric {
-    let status = if value.is_finite() && value > 0.0 {
+    let status = if gpu_grab().kind.post_ms_passes(value, device_ceiling) {
         Status::Pass
     } else {
         Status::Fail
@@ -1143,6 +1144,7 @@ struct Grab {
     exposure_want: f64,
     gap_x4: f64,
     post_ms: f64,
+    kind: GpuKind,
     post_vram: f64,
     lattice: f64,
     hot: f64,
@@ -1330,21 +1332,12 @@ fn hot_bloom(
     Ok(f64::from(bloom_peak) / 1.0e6)
 }
 
-fn gpu_post_ms() -> f64 {
-    let ms = gpu_grab().post_ms;
-    if ms.is_finite() && ms > 0.0 {
-        ms
-    } else {
-        DEVICE_MS_MAX + 1.0
-    }
-}
-
 fn gpu_post_vram() -> f64 {
     let mib = gpu_grab().post_vram;
     if mib.is_finite() && mib > 0.0 {
         mib
     } else {
-        DEVICE_VRAM_MAX + 1.0
+        PICTURE_VRAM_MAX + 1.0
     }
 }
 
@@ -1468,6 +1461,92 @@ fn measure_budget_device() -> Result<Budget, String> {
         }
     }
     Ok(Budget { ok: true, bytes })
+}
+
+#[derive(Clone, Copy)]
+struct DeckSample {
+    bytes: f64,
+    encode_bytes: u64,
+}
+
+fn deck_budget() -> Option<DeckSample> {
+    static SAMPLE: OnceLock<Option<DeckSample>> = OnceLock::new();
+    *SAMPLE.get_or_init(|| match measure_deck() {
+        Ok(sample) => Some(sample),
+        Err(err) => {
+            eprintln!("hdr gate 800: {err}");
+            None
+        }
+    })
+}
+
+fn measure_deck() -> Result<DeckSample, String> {
+    let mut window = Window::open_proof(1280, 800)?;
+    let frame = window.pump();
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let renderer = &mut *owner.device;
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Low);
+    hdr.output = OutputMode::Hdr10;
+    if post_locks_sdr(&hdr, LightingPreset::Low, DeckPanel::Oled, true) {
+        return Err("low oled hdr10 stayed locked".to_string());
+    }
+    renderer.layout_post_for(
+        hdr.clone(),
+        LightingPreset::Low,
+        DeckPanel::Oled,
+        true,
+    )?;
+    let (width, height) = renderer.picture_extent();
+    if width != 1280 || height != 800 {
+        return Err(format!("swapchain is {width}x{height}, wanted 1280x800"));
+    }
+    let chain = post_chain(width, height, &hdr, true);
+    let Some(device_bytes) = renderer.post_device_bytes(&chain) else {
+        return Err(format!(
+            "device {} does not match the oled chain",
+            renderer.hdr_vram_bytes()
+        ));
+    };
+    let got = renderer.hdr_vram_bytes();
+    let want = genos_render::bytes_to_mib(device_bytes) * 1024.0 * 1024.0;
+    if (got - want).abs() > 0.5 {
+        return Err(format!("oled device {got} formula {want}"));
+    }
+    Ok(DeckSample {
+        bytes: got,
+        encode_bytes: chain.encode_bytes,
+    })
+}
+
+fn vram_deck_oled(name: &'static str, ceiling_mib: f64) -> Metric {
+    let ceiling = genos_render::mib_ceiling_bytes(ceiling_mib);
+    let Some(sample) = deck_budget() else {
+        return Metric {
+            name,
+            value: Some(ceiling + 1.0),
+            threshold: ceiling,
+            compare: Compare::AtMost,
+            status: Status::Fail,
+        };
+    };
+    let status = if sample.bytes <= ceiling && sample.encode_bytes == 1_024_000 * 12 {
+        Status::Pass
+    } else {
+        Status::Fail
+    };
+    eprintln!(
+        "hdr gate 800: low oled hdr10 {} bytes, encode {}",
+        sample.bytes, sample.encode_bytes
+    );
+    Metric {
+        name,
+        value: Some(sample.bytes),
+        threshold: ceiling,
+        compare: Compare::AtMost,
+        status,
+    }
 }
 
 fn vram_1440(name: &'static str, preset: usize, mode: usize, ceiling_mib: f64) -> Metric {
@@ -1796,7 +1875,8 @@ fn empty_grab() -> Grab {
         exposure_want: wanted_exposure(),
         gap_x4: 0.0,
         post_ms: 0.0,
-        post_vram: DEVICE_VRAM_MAX + 1.0,
+        kind: GpuKind::Hardware,
+        post_vram: PICTURE_VRAM_MAX + 1.0,
         lattice: 1.0,
         hot: 1.0,
     }
@@ -1830,6 +1910,7 @@ fn finish_grab(
         exposure_want,
         gap_x4,
         post_ms: 0.0,
+        kind: renderer.gpu_kind(),
         post_vram: 0.0,
         lattice: 1.0,
         hot: 1.0,
