@@ -109,6 +109,7 @@ pub fn grade_world(preset: ReflectionPreset) -> World {
         reflections: ReflectionSettings::for_preset(preset),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: MenuSettings::default(),
     });
     world.reflection_swatch = true;

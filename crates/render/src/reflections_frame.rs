@@ -1929,23 +1929,27 @@ impl Gpu {
             preserve_count: 0,
             preserve: std::ptr::null(),
         };
+        // Same masks as `Gpu::make_render_pass`. The composite pass begins on
+        // that framebuffer, and this layer rejects a dependency mismatch
+        // (VUID-VkRenderPassBeginInfo-renderPass-00904). Depth write stays on
+        // a fragment-test stage, which is the stage that supports it.
         let deps = [
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: 0x80 | 0x1000,
-                dst_stage: 0x400,
-                src_access: 0x20 | 0x800,
-                dst_access: 0x100 | 0x400,
+                src_stage: 0x1000 | 0x400 | 0x200 | 0x100,
+                dst_stage: 0x400 | 0x100,
+                src_access: 0x800 | 0x100 | 0x400 | 0x200,
+                dst_access: 0x80 | 0x100 | 0x200 | 0x400,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: 0x400,
-                dst_stage: 0x80 | 0x1000,
+                src_stage: 0x400 | 0x200,
+                dst_stage: 0x1000 | 0x100 | 0x400,
                 src_access: 0x100 | 0x400,
-                dst_access: 0x20 | 0x800,
+                dst_access: 0x800 | 0x400 | 0x100,
                 flags: 0,
             },
         ];

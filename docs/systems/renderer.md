@@ -46,7 +46,7 @@ The crate is `crates/render`, package `genos-render`.
 - `World`, `Object`, `DrawKind`, and `in_view` are in `src/world.rs`.
 - Triangle positions are packed in `src/pack.rs`, and shape blocks are in `src/pool.rs`.
 - `FrameMemory` in `src/budget.rs` counts those blocks and the particle image against one byte budget.
-- The particle step and the card builder are in `src/particles.rs`.
+- The CPU particle step and the card builder are in `src/particles.rs`. Stage-1 GPU emit, simulate, and compact are `src/particle_sim.rs`, `shaders/particles.comp`, and `src/gpu/particle_pass.rs`. The keep pass draws them with `vkCmdDrawIndirect`. The CPU cards stay for the camera flame. The GPU path is off until `settings.particles` is enabled with a non-zero count.
 - GPU lighting is `src/lighting_gpu.rs` and `shaders/lighting_*.comp`. `shaders/gbuffer.vert` and `gbuffer.frag` write the G-buffer. `shaders/overlay.frag` draws particle cards and the fallback picture before the lighting targets exist.
 - `mesh::compose` and `mesh::tone` are the CPU direct-light checks the tests compare against.
 
@@ -86,9 +86,11 @@ There is no skinned clip player. A mesh animates only when the game writes a new
 
 A particle does not occlude. `affects_light` is not the lit flag and is not the emission flag. Emitting particles share one fire term. There is not one lamp per ember.
 
+The stage-1 GPU buffer is a vertex-pulled quad, so a card is not in the G-buffer. When `legacy_bytes` is off the cards are drawn into an RGBA16F image and blended into the scene-linear target before bloom and AgX. The legacy shoulder draws them in the keep pass after the picture. The Low budget is 65536 particles and the two-flight stage-1 buffers, including both host compact mirrors, stay within 16 MB. Params, compact, the indirect args, and the timestamp queries are one set per frame in flight. The persistent ring is one copy; the next compute waits the previous compute's writes with a pipeline barrier. `sort` and `lit` are stored and are not passes yet. `half_res` is a deprecated alias. Depth collision samples the previous frame's scene depth when that knob is on. The scene pass discards depth otherwise. `fx.sort_ms` and `fx.overdraw_px` stay 0.
+
 A screen-space shader does not run a custom program yet. Custom SPIR-V is not loaded.
 
-The raster draws the opaque shapes' depth first, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. The depth prepass runs `depth_mask.frag` with colour writes off, so an alpha-tested hole is discarded before the G-buffer. The G-buffer uses early fragment tests, and a discard there would not punch the depth that was already written. Material atlases are storage buffers (binding 4 colour, binding 7 normal). Sampling repeats in 0..1. Clamp and mirrored repeat are not in the shader. A normal map perturbs the vertex normal with a screen-space tangent; the mesh does not store tangents. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight.
+The raster draws the opaque shapes' depth first, then shades with an equal-or-nearer depth test, so each pixel shades one opaque surface however many faces cover it. The depth prepass runs `depth_mask.frag` with colour writes off, so an alpha-tested hole is discarded before the G-buffer. The G-buffer uses early fragment tests, and a discard there would not punch the depth that was already written. Material atlases are storage buffers (binding 4 colour, binding 7 normal). Sampling repeats in 0..1. Clamp and mirrored repeat are not in the shader. A normal map perturbs the vertex normal with a screen-space tangent; the mesh does not store tangents. Lighting and raster are two GPU stages in one submit. The CPU does not wait between them. A normal draw does not stall on the GPU fence. There are two frames in flight. An acquire that returns out of date resets that flight's fence and does not submit. `read_earlier_frame` and `frame_fog_columns` wait a flight fence only when that slot still has a submit in flight.
 
 The picture modes are `off` and FXAA. The draw does not run MSAA, SMAA, or TAA. The filter does not change the lighting. The filter does not change the overlay.
 
