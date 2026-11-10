@@ -215,7 +215,7 @@ fn serve(info: &'static SceneInfo, port: u16) -> Result<(), String> {
     eprintln!("mcp http://127.0.0.1:{port}/mcp scene={}", info.name);
     let mut session = Session::load(info);
     loop {
-        for pending in command::take_wait(Duration::from_secs(1)) {
+        for pending in command::take_wait(Duration::from_secs(1))? {
             let quit = pending.name == "physics_quit";
             let result = handle(&mut session, &pending.name, &pending.args);
             command::reply(pending.id, result);
