@@ -527,5 +527,57 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
             again.restir > 0,
             "{mode:?} did not read the reservoir after the failure ({again:?})"
         );
+        if mode == LampPickMode::Hits {
+            assert!(
+                failed.pixels > 0,
+                "a hits prepare failure held the previous colour ({failed:?})"
+            );
+        }
     }
+}
+
+/// Restir off, mode Reuse. The second quiet frame holds the exact record, so
+/// its pixel shadow rays drop. Bit 19 used to cancel that hold. A Hits prepare
+/// failure is not mode 4, so it still traces.
+#[test]
+fn a_quiet_restir_off_reuse_frame_drops_its_shadow_rays() {
+    let _diag = LampDiag;
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        ..DebugView::default()
+    });
+    let world = hall(8);
+    let camera = pose(0.0);
+    let mut off = quiet_restir(LampPickMode::Reuse);
+    off.restir_di = false;
+    renderer.set_lighting_settings(off);
+    draw(window, renderer, &world, &camera);
+    let traced = renderer.lighting_lamp_pick_counts();
+    draw(window, renderer, &world, &camera);
+    let held = renderer.lighting_lamp_pick_counts();
+    eprintln!(
+        "restir-off reuse rays {} then {}",
+        traced.pixels, held.pixels
+    );
+    assert!(
+        traced.pixels > 0,
+        "the first restir-off reuse frame traced no shadow rays ({traced:?})"
+    );
+    assert!(
+        held.pixels < traced.pixels / 2,
+        "the second quiet restir-off reuse frame retraced ({held:?} vs {traced:?})"
+    );
+    renderer.force_restir_prepare_failure(true);
+    renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));
+    draw(window, renderer, &world, &camera);
+    let failed = renderer.lighting_lamp_pick_counts();
+    eprintln!("hits prepare failure rays {}", failed.pixels);
+    assert!(
+        failed.pixels > 0,
+        "a hits prepare failure did not trace ({failed:?})"
+    );
 }

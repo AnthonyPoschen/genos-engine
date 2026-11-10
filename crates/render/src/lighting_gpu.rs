@@ -3009,6 +3009,19 @@ impl Gpu {
         self.lighting
             .restir_prev_lamps
             .extend(self.lighting.restir_lamps.iter().map(copy_gpu_lamp));
+        // One restir buffer, two frames in flight, and each frame waits only on
+        // its own slot fence. Frame N still has compute reads and writes in
+        // this buffer (the prefix, the history slot, the scratch) when frame
+        // N+1 records. On one queue a barrier's first scope is every earlier
+        // command in submission order, so this orders that work before the
+        // transfer overwrite. A second scratch and prefix would not remove the
+        // history dependency, and a barrier waits for the whole compute stage
+        // either way, so the extra buffers do not start the next frame sooner.
+        // The async light-cache submit uses the compute queue. Its direct pass
+        // is mode 2, which adds `pixels + kept` to the index before the
+        // reservoir test (`idx < pixels`), so that pass does not touch this
+        // buffer. When that queue is the graphics queue, this barrier covers it.
+        self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
         if self.lighting.restir_clear {
             self.lighting.restir_clear = false;
             unsafe {
@@ -3707,12 +3720,18 @@ impl Gpu {
             // The query reset and the prepare-open stamp are above prepare.
             if restir_on {
                 let pool = stamps.unwrap_or(std::ptr::null_mut());
+                // Frame N wrote the history slot this frame reads, and wrote the
+                // scratch this frame overwrites. The prefix barrier above makes
+                // those writes available. This one makes them visible to the
+                // passes' reads and writes.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 self.dispatch_restir_di(slot, &pc, pool, first);
                 // Shade reads the spatial store (header word 6). A 1440p pass is
                 // one dispatch; without this barrier the 4070 starts the direct
                 // shade while that store is still in flight, and the picture
                 // changes with the overlap. Lavapipe runs the dispatches in
-                // order, so the race does not show there.
+                // order, so the race does not show there. This is intra-frame:
+                // the two barriers above order the other frame.
                 self.memory_barrier(0x800, 0x800, 0x40, 0x20);
             }
             if let Some(pool) = stamps {

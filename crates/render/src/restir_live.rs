@@ -828,4 +828,64 @@ mod tests {
             }
         }
     }
+
+    fn function_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src.find(name).unwrap_or(src.len());
+        let rest = src.get(start..).unwrap_or("");
+        let tail_len = rest.len().saturating_sub(name.len());
+        let next = rest
+            .get(name.len()..)
+            .and_then(|tail| tail.find("\n    fn "))
+            .unwrap_or(tail_len);
+        rest.get(..name.len().saturating_add(next)).unwrap_or(rest)
+    }
+
+    /// Removing either cross-frame barrier, or the shade barrier, fails this.
+    /// Lavapipe and a fenced readback still pass without them.
+    #[test]
+    fn the_restir_barriers_order_the_other_frame_and_the_shade() {
+        let gpu = include_str!("lighting_gpu.rs");
+        let direct = include_str!("../shaders/lighting_direct.comp");
+        let prepare = function_body(gpu, "fn prepare_restir_di");
+        let update = prepare
+            .find("cmd_update_buffer")
+            .unwrap_or(prepare.len());
+        let prefix = prepare
+            .find("memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000)")
+            .unwrap_or(prepare.len());
+        assert!(
+            prefix < update,
+            "the prefix overwrite must wait for the other frame's compute read and write"
+        );
+        let call = "self.dispatch_restir_di(slot, &pc, pool, first);";
+        let at = gpu.find(call).unwrap_or(gpu.len());
+        assert!(at < gpu.len(), "dispatch_restir_di call");
+        let before = gpu.get(at.saturating_sub(700)..at).unwrap_or("");
+        let last = before.rfind("memory_barrier").unwrap_or(before.len());
+        assert!(
+            before[last..].starts_with("memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40)"),
+            "the passes must see the other frame's compute writes"
+        );
+        let after = gpu.get(at..at.saturating_add(800)).unwrap_or("");
+        let shade_at = after.find("memory_barrier").unwrap_or(after.len());
+        assert!(
+            after[shade_at..].starts_with("memory_barrier(0x800, 0x800, 0x40, 0x20);"),
+            "shade must wait for this frame's spatial store"
+        );
+        let world = function_body(gpu, "fn submit_lighting_world");
+        assert!(
+            world.contains("self.compute_queue"),
+            "the light-cache round submits on the compute queue"
+        );
+        assert!(
+            !world.contains("restir_buf"),
+            "the light-cache round must not name restir_buf"
+        );
+        let mode2 = direct.find("idx += pixels + kept;").unwrap_or(direct.len());
+        let reservoir = direct.find("&& idx < pixels;").unwrap_or(0);
+        assert!(
+            mode2 < reservoir,
+            "mode 2 must leave the screen before the reservoir test"
+        );
+    }
 }
