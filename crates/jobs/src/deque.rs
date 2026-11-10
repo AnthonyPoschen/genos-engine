@@ -4,9 +4,17 @@
 //! Chase and Lev, SPAA 2005. The array does not grow: a full push fails.
 //! That is the departure from their resizing circular array.
 
-use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(not(feature = "loom"))]
+use std::cell::UnsafeCell;
+#[cfg(not(feature = "loom"))]
+use std::sync::atomic::{fence, AtomicU64, Ordering};
+
+#[cfg(feature = "loom")]
+use loom::cell::UnsafeCell;
+#[cfg(feature = "loom")]
+use loom::sync::atomic::{fence, AtomicU64, Ordering};
 
 /// Outcome of a steal attempt.
 #[derive(Debug)]
@@ -58,7 +66,7 @@ impl<T> Deque<T> {
         // SAFETY: this slot is not in `[top, bottom)`. The owner is the only
         // pusher, so no thief reads it until `bottom` is stored below.
         unsafe {
-            (*cell.get()).write(task);
+            write_slot(cell, task);
         }
         self.bottom.store(bottom.wrapping_add(1), Ordering::Release);
         true
@@ -73,7 +81,7 @@ impl<T> Deque<T> {
         }
         let next = bottom - 1;
         self.bottom.store(next, Ordering::Relaxed);
-        std::sync::atomic::fence(Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         let top = self.top.load(Ordering::Relaxed);
         if top > next {
             self.bottom.store(top, Ordering::Relaxed);
@@ -87,7 +95,7 @@ impl<T> Deque<T> {
         // SAFETY: `next` was in `[top, bottom)` after the fence, so `push`
         // initialized this slot. On the last item the CAS below decides which
         // caller keeps the copy. A failed CAS forgets this copy.
-        let task = unsafe { cell.get().read().assume_init() };
+        let task = unsafe { read_slot(cell) };
         if top == next {
             if self
                 .top
@@ -111,7 +119,7 @@ impl<T> Deque<T> {
     /// Steal the oldest task. `Retry` means another thief or the owner won the race.
     pub(crate) fn steal(&self) -> Stolen<T> {
         let top = self.top.load(Ordering::Acquire);
-        std::sync::atomic::fence(Ordering::SeqCst);
+        fence(Ordering::SeqCst);
         let bottom = self.bottom.load(Ordering::Acquire);
         if top >= bottom {
             return Stolen::Empty;
@@ -123,7 +131,7 @@ impl<T> Deque<T> {
         // SAFETY: `top < bottom`, so the owner has published this slot. The
         // copy is kept only if the CAS wins. A loser forgets it so the winner
         // is the sole owner.
-        let task = unsafe { cell.get().read().assume_init() };
+        let task = unsafe { read_slot(cell) };
         if self
             .top
             .compare_exchange(
@@ -142,6 +150,38 @@ impl<T> Deque<T> {
     }
 }
 
+/// Read an initialized slot.
+///
+/// # Safety
+///
+/// `cell` is initialized, and this caller is the only one that keeps the copy.
+unsafe fn read_slot<T>(cell: &UnsafeCell<MaybeUninit<T>>) -> T {
+    #[cfg(not(feature = "loom"))]
+    {
+        cell.get().read().assume_init()
+    }
+    #[cfg(feature = "loom")]
+    {
+        cell.with(|ptr| ptr.read().assume_init())
+    }
+}
+
+/// Write a slot the caller owns.
+///
+/// # Safety
+///
+/// `cell` is not concurrently read or written.
+unsafe fn write_slot<T>(cell: &UnsafeCell<MaybeUninit<T>>, task: T) {
+    #[cfg(not(feature = "loom"))]
+    {
+        (*cell.get()).write(task);
+    }
+    #[cfg(feature = "loom")]
+    {
+        cell.with_mut(|ptr| (*ptr).write(task));
+    }
+}
+
 impl<T> Drop for Deque<T> {
     fn drop(&mut self) {
         while self.pop().is_some() {}
@@ -155,7 +195,7 @@ unsafe impl<T: Send> Send for Deque<T> {}
 // SAFETY: same as `Send`. Thieves share the deque through `&Deque`.
 unsafe impl<T: Send> Sync for Deque<T> {}
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "loom")))]
 mod tests {
     use super::{Deque, Stolen};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -219,5 +259,60 @@ mod tests {
         all.sort_unstable();
         assert_eq!(all, (0..100).collect::<Vec<_>>());
         assert_eq!(seen.load(Ordering::Relaxed), 100);
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    use super::{Deque, Stolen};
+    use loom::sync::Arc;
+    use loom::thread;
+
+    fn collect(popped: Option<u32>, stolen: Stolen<u32>) -> Vec<u32> {
+        let mut got = Vec::new();
+        if let Some(value) = popped {
+            got.push(value);
+        }
+        if let Stolen::Task(value) = stolen {
+            got.push(value);
+        }
+        got
+    }
+
+    #[test]
+    fn the_last_element_is_taken_once() {
+        loom::model(|| {
+            let deque = Arc::new(Deque::new(2));
+            assert!(deque.push(1));
+            let owner = Arc::clone(&deque);
+            let thief = Arc::clone(&deque);
+            let pop = thread::spawn(move || owner.pop());
+            let steal = thread::spawn(move || thief.steal());
+            let mut got = collect(pop.join().unwrap(), steal.join().unwrap());
+            if let Some(value) = deque.pop() {
+                got.push(value);
+            }
+            got.sort_unstable();
+            assert_eq!(got, vec![1]);
+        });
+    }
+
+    #[test]
+    fn push_pop_and_steal_cover_two_elements() {
+        loom::model(|| {
+            let deque = Arc::new(Deque::new(2));
+            assert!(deque.push(1));
+            assert!(deque.push(2));
+            let owner = Arc::clone(&deque);
+            let thief = Arc::clone(&deque);
+            let pop = thread::spawn(move || owner.pop());
+            let steal = thread::spawn(move || thief.steal());
+            let mut got = collect(pop.join().unwrap(), steal.join().unwrap());
+            if let Some(value) = deque.pop() {
+                got.push(value);
+            }
+            got.sort_unstable();
+            assert_eq!(got, vec![1, 2]);
+        });
     }
 }

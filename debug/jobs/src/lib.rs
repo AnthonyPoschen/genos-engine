@@ -178,8 +178,8 @@ pub fn output_dir(options: &Options) -> PathBuf {
 
 /// Run the fixed check.
 ///
-/// Each mutation expects the broken outcome. Correct code does not produce it,
-/// so the check fails while the mutation is on and passes when it is off.
+/// `--mutate` plants the bug in the scheduler. The assertions are the ones
+/// correct code must pass, so the check fails while the mutation is on.
 ///
 /// # Errors
 ///
@@ -187,49 +187,41 @@ pub fn output_dir(options: &Options) -> PathBuf {
 pub fn run_check(options: &Options) -> Result<CheckStats, String> {
     let workers = options.workers.unwrap_or(2);
     let budget_ms = options.budget_ms.unwrap_or(6.0);
-    let serial = run_grid(Order::Serial, 0, budget_ms)?;
-    let parallel = run_grid(Order::Parallel, workers, budget_ms)?;
-    let again = run_grid(Order::Serial, 0, budget_ms)?;
-    let matches = serial.hash == parallel.hash;
-    if options.mutate.as_deref() == Some("unordered_slots") {
-        if matches {
-            return Err(
-                "unordered_slots: the parallel hash still matches serial index order".into(),
-            );
-        }
-    } else if !matches {
+    let mutate = options.mutate.as_deref();
+    let serial = run_grid(
+        Order::Serial,
+        0,
+        budget_ms,
+        plant_named(mutate, "mislabeled"),
+    )?;
+    let parallel = run_grid(
+        Order::Parallel,
+        workers,
+        budget_ms,
+        plant_named(mutate, "unordered_slots"),
+    )?;
+    let again = run_grid(
+        Order::Serial,
+        0,
+        budget_ms,
+        plant_named(mutate, "server_runs_parallel"),
+    )?;
+    if serial.hash != parallel.hash {
         return Err("parallel hash diverged from serial".into());
     }
-    let stable = serial.hash == again.hash;
-    if options.mutate.as_deref() == Some("server_runs_parallel") {
-        if stable {
-            return Err("server_runs_parallel: two serial runs still match".into());
-        }
-    } else if !stable {
+    if serial.hash != again.hash {
         return Err("two serial runs diverged".into());
     }
-    let rejected = nested_is_rejected()?;
-    if options.mutate.as_deref() == Some("nested_wait") {
-        if rejected {
-            return Err("nested_wait: the nested run was still rejected".into());
-        }
-    } else if !rejected {
+    let rejected = nested_is_rejected(mutate == Some("nested_wait"))?;
+    if !rejected {
         return Err("a nested run was accepted".into());
     }
-    let slack = slack_during_seat()?;
-    if options.mutate.as_deref() == Some("slack_in_fence") {
-        if !slack.ran {
-            return Err("slack_in_fence: slack stayed suspended during the seat".into());
-        }
-    } else if slack.ran || slack.during_fence != 0 {
+    let slack = slack_during_seat(mutate == Some("slack_in_fence"))?;
+    if slack.ran || slack.during_fence != 0 {
         return Err("slack ran during the seat".into());
     }
     let physics_ms = serial.physics_ms;
-    if options.mutate.as_deref() == Some("mislabeled") {
-        if physics_ms > 0.0 {
-            return Err("mislabeled: physics still received the time".into());
-        }
-    } else if physics_ms <= 0.0 || serial.must_wall_ms <= 0.0 {
+    if physics_ms <= 0.0 || serial.must_wall_ms <= 0.0 {
         return Err("physics_ms or must_wall_ms was zero".into());
     }
     let hash = match options.order.unwrap_or(Order::Parallel) {
@@ -251,7 +243,16 @@ struct Grid {
     physics_ms: f64,
 }
 
-fn run_grid(order: Order, workers: u32, budget_ms: f32) -> Result<Grid, String> {
+fn plant_named<'a>(mutate: Option<&'a str>, name: &str) -> Option<&'a str> {
+    mutate.filter(|value| *value == name)
+}
+
+fn run_grid(
+    order: Order,
+    workers: u32,
+    budget_ms: f32,
+    plant: Option<&str>,
+) -> Result<Grid, String> {
     let clock = Arc::new(ManualClock::new(0.0));
     let scheduler = Scheduler::new(
         JobSettings {
@@ -262,6 +263,9 @@ fn run_grid(order: Order, workers: u32, budget_ms: f32) -> Result<Grid, String> 
         },
         ManualClock::handle(&clock),
     );
+    if let Some(name) = plant {
+        scheduler.plant(name)?;
+    }
     let moved = Arc::clone(&clock);
     let mut jobs = vec![Job {
         stage: 0,
@@ -298,8 +302,11 @@ fn run_grid(order: Order, workers: u32, budget_ms: f32) -> Result<Grid, String> 
     })
 }
 
-fn nested_is_rejected() -> Result<bool, String> {
+fn nested_is_rejected(plant: bool) -> Result<bool, String> {
     let scheduler = Arc::new(Scheduler::serial());
+    if plant {
+        scheduler.plant("nested_wait")?;
+    }
     let nested = Arc::clone(&scheduler);
     let report = scheduler
         .run(vec![Job {
@@ -329,8 +336,19 @@ struct SlackProbe {
     during_fence: u32,
 }
 
-fn slack_during_seat() -> Result<SlackProbe, String> {
-    let scheduler = Scheduler::serial();
+fn slack_during_seat(plant: bool) -> Result<SlackProbe, String> {
+    let scheduler = Scheduler::new(
+        JobSettings {
+            workers: 0,
+            order: Order::Serial,
+            frame_budget_ms: 6.0,
+            slack: true,
+        },
+        Arc::new(ManualClock::new(0.0)),
+    );
+    if plant {
+        scheduler.plant("slack_in_fence")?;
+    }
     scheduler.suspend_slack();
     let report = scheduler
         .run(vec![Job {

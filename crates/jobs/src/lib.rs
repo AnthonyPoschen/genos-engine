@@ -36,9 +36,9 @@ pub use settings::JobSettings;
 pub enum Class {
     /// Runs. Crossing the budget is counted, not a reason to stop.
     Must,
-    /// Runs only while the clock is under the budget.
+    /// Runs only while this frame's elapsed time is under the budget.
     Soon,
-    /// Runs only with no seat held, Slack enabled, and time left.
+    /// Runs only with no seat held, Slack enabled, and time left in the frame.
     Slack,
     /// Never runs. Counted as rejected.
     Pumped,

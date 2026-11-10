@@ -237,3 +237,42 @@ fn a_panic_is_counted_and_the_workers_return() {
     assert!(matches!(err, Err(ScheduleError::Panicked)));
     assert!(scheduler.counters().panics >= 1);
 }
+
+#[test]
+fn soon_and_slack_follow_frame_elapsed_and_the_last_frame_stats() {
+    let clock = Arc::new(ManualClock::new(100.0));
+    let scheduler = Scheduler::new(settings(Order::Serial, 0), ManualClock::handle(&clock));
+    let moved = Arc::clone(&clock);
+    let first = scheduler
+        .run(vec![
+            job(0, 0, Class::Must, move || {
+                moved.set(107.0);
+                1
+            }),
+            job(0, 1, Class::Soon, || 4),
+        ])
+        .unwrap();
+    assert!(first.stages[0].slots[1].is_none());
+    assert_eq!(first.stats.deferred, 1);
+
+    let second = scheduler
+        .run(vec![
+            job(0, 0, Class::Must, || 1),
+            job(0, 1, Class::Soon, || 4),
+            job(0, 2, Class::Slack, || 5),
+        ])
+        .unwrap();
+    assert_eq!(second.stages[0].slots[1], Some(4));
+    assert_eq!(second.stages[0].slots[2], Some(5));
+    assert_eq!(second.stats.deferred, 0);
+}
+
+#[test]
+fn slack_during_a_fence_is_counted_when_it_runs() {
+    let scheduler = Scheduler::new(settings(Order::Serial, 0), Arc::new(ManualClock::new(0.0)));
+    scheduler.plant("slack_in_fence").unwrap();
+    scheduler.suspend_slack();
+    let held = scheduler.run(vec![job(0, 0, Class::Slack, || 5)]).unwrap();
+    assert_eq!(held.stages[0].slots[0], Some(5));
+    assert_eq!(held.stats.slack_during_fence, 1);
+}
