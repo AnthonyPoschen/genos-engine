@@ -11,7 +11,7 @@ Play glTF skinned characters with blended clips, a data-driven state machine, ro
 | Text TRS clip, slerp sampling | done (one node) | `Animation::sample` in `crates/load/src/animation.rs` |
 | Scripted motion | done | `crates/scene/src/codimation.rs`, `.rhai`. This is not a clip. |
 | glTF skins, joints, clips | loaded | `crates/load/src/gltf.rs` reads skins, `JOINTS_0`/`WEIGHTS_0`, and linear/step clips. Morph targets stay unsupported. |
-| glTF skins in the cook | missing | ADR 0038 Addition A (`.gskin`). |
+| glTF skins in the cook | written | `.gskin` (`GSK1`) beside `.gcook`. A bad trailer stays the rigid mesh. |
 | Skinning, blending, state machine, GPU skin | missing | No compute skin pass yet. |
 
 ## 3. Prior art
@@ -71,7 +71,7 @@ Stage 1: glTF skins and clips through the cook (ADR 0038 Addition A), CPU sampli
 Mutations (must fail): ignore `inverseBindMatrices`, drop the 4th weight, swap slerp for nlerp without sign fix, wall-clock time, count clip bytes inside the 64 MB, wrong joint parent order.
 
 ## 10. Agent control and verification
-CLI `--anim-play <handle> <clip>`, `--anim-speed`, `--anim-freeze-tick N`. MCP `anim.set_param`, `anim.state` (returns state, clip times, weights for the selected scene handle), `anim.stats`, `view skin-weights|bones`. An agent changes a `.ganim` file, hot-reloads it, plays a scripted sequence and compares bone dumps plus screenshots. The 0.5 ms skin measurement is `genos-animation --measure-skin` on the owner's PC. Until the runtime exists, `genos-animation <file.gltf>` prints the import dump: joints, parents, clips, influence counts, and the skin notes (missing inverse bind, a reduced fifth weight, an omitted cubic-spline). That dump is the probe for the import.
+CLI `--anim-play <handle> <clip>`, `--anim-speed`, `--anim-freeze-tick N`. MCP `anim.set_param`, `anim.state` (returns state, clip times, weights for the selected scene handle), `anim.stats`, `view skin-weights|bones`. An agent changes a `.ganim` file, hot-reloads it, plays a scripted sequence and compares bone dumps plus screenshots. The 0.5 ms skin measurement is `genos-animation --measure-skin` on the owner's PC. Until the runtime exists, `genos-animation <file.gltf>` prints the import dump and `genos-animation <file.gskin>` prints the cooked record: joints, parents, clips, influence counts, notes, and `clip_bytes` (`anim.clip_mb` before the unit conversion). A missing inverse bind, a reduced fifth weight, and an omitted cubic-spline show up in the notes. That dump is the probe for the import and the cook.
 
 ## 11. Decisions for Anthony
 1. Graph format: RON/JSON data + Rhai conditions (recommended) vs pure Rhai?
