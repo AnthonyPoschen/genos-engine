@@ -1,3 +1,4 @@
+#![cfg(not(target_os = "windows"))]
 #![expect(
     clippy::expect_used,
     reason = "the quit-gap harness aborts when weston or a binary fixture fails"

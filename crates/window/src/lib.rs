@@ -1,28 +1,70 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::borrow_as_ptr, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::borrow_as_ptr,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_wrap,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
+)]
 
-//! Wayland window. Each pump pulls the seat, then tells subscribers what changed.
+//! Window. Each pump pulls the platform queue, then tells subscribers what changed.
+//!
+//! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
+//! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
 
 mod events;
 mod lifecycle;
 mod stall;
+#[cfg(test)]
+mod touch_log;
+mod win32_keys;
 
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
     block_ms_mirror, block_ms_needs_value, close_early_flag, close_early_mirror, exit,
-    gap_within_budget, parse_block_ms, parse_quit_gap,
-    parse_quit_phases, parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample,
-    ShutdownDevice, ShutdownPermit, ThreadStop, PHASE_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX, PRESENTED_PREFIX, parse_frames_presented,
+    gap_within_budget, parse_block_ms, parse_frames_presented, parse_quit_gap, parse_quit_phases,
+    parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample, ShutdownDevice,
+    ShutdownPermit, ThreadStop, PHASE_PREFIX, PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
@@ -33,6 +75,7 @@ use std::os::raw::{c_int, c_void};
 use std::sync::Arc;
 
 use events::EventHub;
+use genos_input::{InputSystem, TouchPhase, TouchPoint};
 
 #[repr(C)]
 struct RawPump {
@@ -59,6 +102,23 @@ struct RawPump {
     display: *mut c_void,
     surface: *mut c_void,
     wheel_y: f64,
+    minimized: i32,
+}
+
+#[repr(C)]
+struct RawTouch {
+    id: u64,
+    x: f32,
+    y: f32,
+    phase: i32,
+}
+
+#[repr(C)]
+struct RawExtra {
+    mouse_right: i32,
+    mouse_middle: i32,
+    touch_count: i32,
+    touch: [RawTouch; 8],
 }
 
 extern "C" {
@@ -76,6 +136,9 @@ extern "C" {
     fn genos_window_set_fullscreen(window: *mut c_void, fullscreen: c_int) -> c_int;
     fn genos_window_set_title(window: *mut c_void, title: *const i8) -> c_int;
     fn genos_window_destroy(window: *mut c_void);
+    fn genos_window_copy_extra(window: *mut c_void, out: *mut RawExtra) -> c_int;
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn genos_window_extra_size() -> c_int;
 }
 
 pub struct Frame {
@@ -103,6 +166,8 @@ pub struct Frame {
     pub pointer_y: f32,
     /// Vertical wheel this pump, in notches. Positive is wheel up. Cleared each pump.
     pub wheel_y: f32,
+    /// The Win32 window is minimized. The frame skips the draw until it returns.
+    pub minimized: bool,
 }
 
 pub struct Window {
@@ -111,6 +176,9 @@ pub struct Window {
     pub surface: *mut c_void,
     hub: EventHub,
     meter: Arc<StallMeter>,
+    mouse_right: bool,
+    mouse_middle: bool,
+    touch: Vec<TouchPoint>,
 }
 
 impl Window {
@@ -159,10 +227,13 @@ impl Window {
             None => None,
             Some("") => return Err("display name is empty".into()),
             Some(name) => Some(
-                std::ffi::CString::new(name).map_err(|_| "display name contains a null".to_string())?,
+                std::ffi::CString::new(name)
+                    .map_err(|_| "display name contains a null".to_string())?,
             ),
         };
-        let display_ptr = display.as_ref().map_or(std::ptr::null(), |name| name.as_ptr());
+        let display_ptr = display
+            .as_ref()
+            .map_or(std::ptr::null(), |name| name.as_ptr());
         let raw = unsafe {
             genos_window_open_on(
                 width as c_int,
@@ -173,7 +244,7 @@ impl Window {
             )
         };
         if raw.is_null() {
-            return Err("Wayland window failed to open".into());
+            return Err(open_failed());
         }
         let pump = unsafe {
             let mut out = std::mem::zeroed();
@@ -193,6 +264,9 @@ impl Window {
             surface: pump.surface,
             hub: EventHub::from_frame(&frame),
             meter,
+            mouse_right: false,
+            mouse_middle: false,
+            touch: Vec::new(),
         })
     }
 
@@ -279,13 +353,58 @@ impl Window {
         }
     }
 
+    /// Write this window's keyboard, pointer, and fingers into the input system.
+    ///
+    /// Call it after `InputSystem::begin_frame` and before the game reads actions.
+    /// The window does not own an action map and does not recognize a tap, a swipe,
+    /// or a pinch. `gated` is the focus gate's view of the last pump.
+    pub fn write_devices(&self, input: &mut InputSystem, gated: &GatedInput) {
+        input.write_window(
+            &gated.keys_down,
+            gated.mouse_dx,
+            gated.mouse_dy,
+            gated.mouse_left,
+            self.focused() && self.mouse_right,
+            self.focused() && self.mouse_middle,
+            &self.touch,
+        );
+    }
+
     fn read_frame(&mut self) -> Frame {
         let raw = unsafe {
             let mut out = std::mem::zeroed();
             genos_window_pump(self.raw, &mut out);
             out
         };
+        self.sample_extra();
         decode(&raw)
+    }
+
+    fn sample_extra(&mut self) {
+        let extra = unsafe {
+            let mut out = std::mem::zeroed();
+            genos_window_copy_extra(self.raw, &mut out);
+            out
+        };
+        self.mouse_right = extra.mouse_right != 0;
+        self.mouse_middle = extra.mouse_middle != 0;
+        let count = usize::try_from(extra.touch_count)
+            .unwrap_or(0)
+            .min(extra.touch.len());
+        self.touch.clear();
+        for sample in extra.touch.iter().take(count) {
+            self.touch.push(TouchPoint {
+                id: sample.id,
+                x: sample.x,
+                y: sample.y,
+                phase: match sample.phase {
+                    0 => TouchPhase::Began,
+                    1 => TouchPhase::Moved,
+                    2 => TouchPhase::Ended,
+                    _ => TouchPhase::Cancelled,
+                },
+            });
+        }
     }
 
     /// Lock and hide the Wayland pointer, or destroy that lock and show it again.
@@ -307,6 +426,17 @@ impl Drop for Window {
     fn drop(&mut self) {
         stall::forget_seat(self.raw);
         unsafe { genos_window_destroy(self.raw) };
+    }
+}
+
+fn open_failed() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        "Win32 window failed to open".to_string()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "Wayland window failed to open".to_string()
     }
 }
 
@@ -332,6 +462,7 @@ fn decode(raw: &RawPump) -> Frame {
         pointer_x: raw.pointer_x as f32,
         pointer_y: raw.pointer_y as f32,
         wheel_y: raw.wheel_y as f32,
+        minimized: raw.minimized != 0,
         mode: if raw.fullscreen != 0 {
             WindowMode::Fullscreen
         } else {
@@ -417,8 +548,12 @@ impl FocusGate {
 #[cfg(test)]
 mod tests {
     use super::{
-        extent_changed, genos_window_pump_size, FocusGate, Frame, GatedInput, RawPump, WindowMode,
+        extent_changed, genos_window_extra_size, genos_window_pump_size, FocusGate, Frame,
+        GatedInput, RawExtra, RawPump, WindowMode,
     };
+
+    #[cfg(target_os = "windows")]
+    use super::Window;
 
     #[test]
     fn resize_is_a_real_extent_change() {
@@ -472,6 +607,7 @@ mod tests {
             pointer_x: 0.0,
             pointer_y: 0.0,
             wheel_y: 0.0,
+            minimized: false,
         }
     }
 
@@ -481,6 +617,32 @@ mod tests {
             unsafe { genos_window_pump_size() } as usize,
             std::mem::size_of::<RawPump>()
         );
+        let extra = usize::try_from(unsafe { genos_window_extra_size() }).unwrap_or(0);
+        assert_eq!(extra, std::mem::size_of::<RawExtra>());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn win32_window_opens_pumps_and_accepts_mode_and_capture() {
+        let mut window = Window::open(320, 200).expect("win32 window");
+        let frame = window.pump();
+        assert!(frame.width >= 200, "client width {}", frame.width);
+        assert!(frame.height >= 100, "client height {}", frame.height);
+        assert!(!window.display.is_null(), "HINSTANCE");
+        assert!(!window.surface.is_null(), "HWND");
+        window.set_mode(WindowMode::Fullscreen).expect("fullscreen");
+        let fullscreen = window.pump();
+        assert_eq!(fullscreen.mode, WindowMode::Fullscreen);
+        window.set_mode(WindowMode::Windowed).expect("windowed");
+        let windowed = window.pump();
+        assert_eq!(windowed.mode, WindowMode::Windowed);
+        window.lock_cursor().expect("capture");
+        let locked = window.pump();
+        assert!(locked.pointer_locked);
+        window.unlock_cursor().expect("release");
+        let free = window.pump();
+        assert!(!free.pointer_locked);
+        window.set_title("Genos smoke");
     }
 
     #[test]

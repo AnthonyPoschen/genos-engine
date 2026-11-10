@@ -34,8 +34,23 @@ mod bindings;
 mod code;
 mod device;
 mod settings;
+#[cfg_attr(
+    all(target_os = "windows", not(test)),
+    allow(
+        dead_code,
+        reason = "the Linux joystick decoder still runs in the Windows tests"
+    )
+)]
+#[cfg_attr(
+    target_os = "windows",
+    allow(
+        unfulfilled_lint_expectations,
+        reason = "the Linux joystick code those expects cover is not compiled on Windows"
+    )
+)]
 mod system;
 mod touch;
+mod xinput;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
 pub use bindings::{debug_keys, Chord, KeyBindings};
