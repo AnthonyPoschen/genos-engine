@@ -25,6 +25,7 @@ cargo run --release -p genos-physics-debug -- --mcp                           # 
 | `resting_1025` | 1 024 spheres on a plane. | scale bench |
 | `layer_filter` | Two overlapping debris spheres. | `pair_tests` stays 0 |
 | `sleep_island` | Two separated stacks. | both islands sleep; a displaced sphere wakes one |
+| `chassis_rest` | 1 200 kg chassis, four wheel rays, static plane, awake for 180 steps. | `a_chassis_rests_on_four_springs` |
 
 Scenes are built in code (`src/scenes.rs`). The shared `debug/scenes/*.scene`
 files describe lighting geometry and have no bodies, masses or velocities.
@@ -35,8 +36,10 @@ files describe lighting geometry and have no bodies, masses or velocities.
 `pair_slices`, `dynamic_pair_impulses`, `linear_energy`, `rotational_energy`,
 `max_speed`, `min_y`, `hash`, `contact_points`, `sleeping_bodies`,
 `pair_tests`, `broadphase_builds`, `tree_nodes`, `islands`, `awake_bodies`,
-and `solver_bodies`. `hash` is FNV-1a over every body's pose and velocities,
-bit for bit. Equal hashes at a step mean equal state.
+`solver_bodies`, `wheel_rays`, and `vehicle_count`. `hash` is FNV-1a over
+every body's pose and velocities, then each stored wheel length, bit for bit.
+Equal hashes at a step mean equal state. A world with no vehicle hashes the
+bodies only.
 
 ## MCP and `POST /cmd/<name>`
 
@@ -49,3 +52,7 @@ bit for bit. Equal hashes at a step mean equal state.
 
 A picker hotkey, presets, a loop and screenshots all need a window. They come
 with a debug draw.
+
+`chassis_rest` is the G1 trial from [ADR 0040](../../docs/adr/0040-vehicle-domains.md).
+The ADR stays proposed. A1 would add `aero_trim` and S1 would add `thruster`
+on this same headless path. Those scenes are not here. Sea has no scene.
