@@ -9,10 +9,10 @@ layout(local_size_x = 1) in;
 #include "lighting_screen_probe.glsl"
 
 const uint PROD_HEAD_WORDS = 8u;
-const uint PROD_ROWS = 34u;
+const uint PROD_ROWS = 35u;
 const uint PROD_STRIDE = 17u;
 const uint PROD_MOTION_AT = 33u;
-const uint PROD_TRAILER_AT = 8u + 34u * 17u;
+const uint PROD_TRAILER_AT = 8u + 35u * 17u;
 const uint PROD_TRAILER = 36u;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -382,6 +382,21 @@ void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, 
     } else if (id == 32u) {
         cell = prod_owner(PROD_MV_PLANE_N, PROD_UP, PROD_RED, PROD_CELL_N);
         extra = prod_owner(PROD_MV_PLANE_F, PROD_UP, PROD_GREEN, PROD_CELL_N);
+    } else if (id == 34u) {
+        // Fine texel is lit. A coarser cell holds a different colour. Flag 512
+        // (set before the read) zeros trust and leaves the fine colour in rgb.
+        // Trust 0 must show the coarser cell, not black and not the fine colour.
+        uint texel = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+        if (texel != ~0u) {
+            cache.v[3u * texel + 2u] = vec4(PROD_RED, PROD_CELL_N);
+            cache.v[3u * texel + 1u].xyz = n;
+            cache.v[LIGHTING_SC_SUN_AT + texel] = vec4(0.0);
+        }
+        cell = prod_owner(q, n, PROD_PARENT, PROD_CELL_N);
+        if (cell != ~0u) {
+            cache.v[3u * cell + 1u].xyz = n;
+            cache.v[LIGHTING_SC_SUN_AT + cell] = vec4(0.0);
+        }
     }
     if (id == 3u || id == 9u) {
         uint texel = lighting_cache_find_sized(q, PROD_UP, true, LIGHTING_SC_TEXEL, q);
@@ -873,6 +888,11 @@ void main() {
         // returns black before it loads a cell, so neither row would show
         // whether the hit fill kept or dropped the cell.
         gstats.ctrl_bounce = (id == 20u || id == 22u) ? 2u : 0u;
+        if (id == 34u) {
+            // Flag 512 is bit 9 of lighting_sc_flags, which is bit 10 of head z.
+            uint at = lighting_change_at();
+            work.v[at].z = float(uint(work.v[at].z) | 1024u);
+        }
         lighting_compose_px = uvec2(0u);
         vec3 shown = lighting_screen_probe_indirect(uvec2(0u), pos, n);
         vec4 mean_after = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];

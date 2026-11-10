@@ -4,9 +4,7 @@
 // compose tens of milliseconds and the NVIDIA compiler sit for minutes. A
 // small sun step uses lighting_sun_compose.comp instead.
 // GI final pass: per pixel, emitted light, then direct irradiance plus the
-// screen probes' irradiance
-// (the 4 nearest probes, weighted by plane distance and normal; the light cache
-// where none matches), through the same
+// world-cache indirect, through the same
 // legacy shoulder and dither as the picture. The scene-referred radiance is
 // stored first (binding 13) and is not toned. Pixels with no surface keep the raster
 // colour already in the output. Clears the G-buffer record for the next frame.
@@ -66,9 +64,9 @@ uint pack_rgb(vec3 rgb) {
 }
 
 vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
-    // lighting_screen_probe_indirect. A pixel whose displayed indirect is the
-    // SH texel detail value does not read screen-probe irradiance. Every other
-    // pixel still does, including slants, movers, and a miss.
+    // lighting_screen_probe_indirect. Every pixel reads the world cache.
+    // A rejected, stale, empty, or detail-off corner mixes the coarser cell
+    // by trust. Probe irradiance is removed.
     return lighting_screen_probe_indirect(p, pos, n);
 }
 

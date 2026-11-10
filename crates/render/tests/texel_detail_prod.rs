@@ -20,7 +20,7 @@ use genos_render::{
 use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
-const ROWS: usize = 34;
+const ROWS: usize = 35;
 const TRAILER: usize = 36;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
@@ -217,7 +217,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(detail_off.head_hi, off.head_hi);
     assert!(
         near(detail_off.shown, [0.0, 0.0, 0.0]),
-        "detail off with an empty cache showed {:?}, wanted the probe",
+        "detail off with an empty cache showed {:?}, wanted black, the coarser cell is empty",
         detail_off.shown
     );
     assert!(detail_off.reads.abs() <= ABS);
@@ -226,7 +226,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let lamp_empty = &rows[3];
     assert!(
         near(lamp_empty.shown, [0.0, 0.0, 0.0]),
-        "a lamp change with an empty owner showed {:?}, wanted the probe, not the old green seed",
+        "a lamp change with an empty owner showed {:?}, wanted black, the coarser cell is empty, not the old green seed",
         lamp_empty.shown
     );
     assert!(
@@ -332,7 +332,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(mode0.head_hi, low.head_hi);
     assert!(
         near(mode0.shown, [0.0, 0.0, 0.0]),
-        "mode 0 showed {:?}, wanted the probe. The detail bit does not retire probes without the cache",
+        "mode 0 showed {:?}, wanted black, the coarser cell is empty. The detail bit does not retire probes without the cache",
         mode0.shown
     );
     assert!(mode0.reads.abs() <= ABS);
@@ -363,7 +363,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let quiet_empty = &rows[10];
     assert!(
         near(quiet_empty.shown, [0.0, 0.0, 0.0]),
-        "writes on, no lamp, empty owner showed {:?}, wanted the probe, not the old green seed",
+        "writes on, no lamp, empty owner showed {:?}, wanted black, the coarser cell is empty, not the old green seed",
         quiet_empty.shown
     );
     assert!(
@@ -418,7 +418,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let cleared = &rows[13];
     assert!(
         near(cleared.shown, [0.0, 0.0, 0.0]),
-        "after the writer, clearing sun word z and emptying the owner showed {:?}, wanted the probe, not the stored cell",
+        "after the writer, clearing sun word z and emptying the owner showed {:?}, wanted black, the coarser cell is empty, not the stored cell",
         cleared.shown
     );
     assert!(
@@ -516,7 +516,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let stale = &rows[20];
     assert!(
         near(stale.shown, [0.0, 0.0, 0.0]),
-        "a stale red cell showed {:?}, wanted the probe. seed {:?} reads {} skipped {} trust {} same {} conf {} mark {}",
+        "a stale red cell showed {:?}, wanted black, the coarser cell is empty. seed {:?} reads {} skipped {} trust {} same {} conf {} mark {}",
         stale.shown,
         stale.seed,
         stale.reads,
@@ -580,9 +580,14 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let detail_off_mover = &rows[23];
     assert_eq!(detail_off_mover.head_hi, off.head_hi);
     assert!(
-        near(detail_off_mover.shown, [0.0, 0.0, 0.0]),
-        "detail off mover showed {:?}, wanted the probe",
+        near(detail_off_mover.shown, red),
+        "detail off mover showed {:?}, wanted the red cell; trust 0 is that cell, not black",
         detail_off_mover.shown
+    );
+    assert!(
+        detail_off_mover.world_w.abs() <= ABS,
+        "detail off mover trust {}",
+        detail_off_mover.world_w
     );
     assert!(detail_off_mover.reads.abs() <= ABS);
     assert!((detail_off_mover.skipped - 1.0).abs() <= ABS);
@@ -594,7 +599,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert_eq!(low_mover.head_hi, low.head_hi);
     assert!(
         near(low_mover.shown, [0.0, 0.0, 0.0]),
-        "Low mover showed {:?}, wanted the probe",
+        "Low mover showed {:?}, wanted black, the coarser cell is empty",
         low_mover.shown
     );
     assert!(low_mover.reads.abs() <= ABS);
@@ -604,7 +609,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let empty_mover = &rows[25];
     assert!(
         near(empty_mover.shown, [0.0, 0.0, 0.0]),
-        "a mover with no cell showed {:?}, wanted the probe",
+        "a mover with no cell showed {:?}, wanted black, the coarser cell is empty",
         empty_mover.shown
     );
     assert!(empty_mover.reads.abs() <= ABS);
@@ -617,7 +622,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let stale_mover = &rows[26];
     assert!(
         near(stale_mover.shown, [0.0, 0.0, 0.0]),
-        "a stale cell under a mover showed {:?}, wanted the probe",
+        "a stale cell under a mover showed {:?}, wanted black, the coarser cell is empty",
         stale_mover.shown
     );
     assert!(near(stale_mover.cell, red), "stale mover cell {:?}", stale_mover.cell);
@@ -747,6 +752,21 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((trail[34] - 1.0).abs() <= ABS, "+X cell changed");
     assert!((trail[35] - 1.0).abs() <= ABS, "-Z cell changed");
 
+    let pop = &rows[34];
+    let parent = [5.0, 1.0, 4.0];
+    assert!(
+        pop.world_w.abs() <= ABS,
+        "trust stayed {}; a rejected read must not already be full",
+        pop.world_w
+    );
+    assert!(
+        near(pop.shown, parent),
+        "trust 0 popped to {:?}; the coarser cell is {parent:?}, not black and not the fine red",
+        pop.shown
+    );
+    assert!(!near(pop.shown, red), "full fine luminance while trust is 0");
+    assert!(!near(pop.shown, [0.0; 3]), "trust 0 went black before the pop");
+
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
@@ -756,7 +776,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "this dispatch presents nothing"
     );
     assert_eq!(
-        skip, 40,
+        skip, 41,
         "every indirect call skips the removed screen-probe read"
     );
     assert_eq!(eval, 0, "no call evaluates a screen-probe grid");
@@ -806,7 +826,7 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     let stale = &rows[0];
     assert!(
         near(stale.shown, [0.0, 0.0, 0.0]),
-        "read-only compose with an empty owner showed {:?}, wanted the probe, not the stale green seed",
+        "read-only compose with an empty owner showed {:?}, wanted black, the coarser cell is empty, not the stale green seed",
         stale.shown
     );
     assert!(
@@ -936,7 +956,7 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
     let ro_stale = &rows[9];
     assert!(
         near(ro_stale.shown, [0.0, 0.0, 0.0]),
-        "read-only stale mover showed {:?}, wanted the probe",
+        "read-only stale mover showed {:?}, wanted black, the coarser cell is empty",
         ro_stale.shown
     );
     assert!(near(ro_stale.cell, red));

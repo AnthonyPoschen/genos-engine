@@ -298,11 +298,31 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     );
     assert!(indirect.contains("lighting_world_irradiance(pos, n)"));
     assert!(indirect.contains("return max(world.rgb, vec3(0.0));"));
+    assert!(indirect.contains("lighting_coarse_world(pos, n)"));
+    assert!(indirect.contains("mix(coarse, max(world.rgb, vec3(0.0)), trust)"));
     assert!(
         !indirect.contains("lighting_sh_read"),
-        "compose does not add a second cell walk"
+        "compose does not add a second neighbour gather"
     );
     assert!(!indirect.contains("lighting_probe_irradiance"));
+    let coarse = function_body(&probe, "vec3 lighting_coarse_world(vec3 pos, vec3 n)");
+    assert_eq!(
+        coarse.matches("lighting_coarse_bilerp").count(),
+        2,
+        "two size steps, the parent and the coarser cell"
+    );
+    let slot = function_body(
+        &probe,
+        "void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, inout float wsum)",
+    );
+    assert!(slot.contains("lighting_cache_find_sized"));
+    assert!(slot.contains("lighting_sc_stale"));
+    assert!(slot.contains("lighting_sh_tilt"));
+    assert!(slot.contains("LIGHTING_COARSE_PLANE"));
+    assert!(!slot.contains("lighting_sh_read"));
+    assert!(!slot.contains("lighting_probe_irradiance"));
+    assert!(!coarse.contains("lighting_sh_read"));
+    assert!(!coarse.contains("lighting_probe_irradiance"));
 }
 
 #[test]
