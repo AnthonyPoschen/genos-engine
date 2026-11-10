@@ -3793,6 +3793,10 @@ impl Gpu {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             // Lamps, occluders and camera; the traced meshes; the drawn ones.
             self.frame_bytes.hash(&mut hasher);
+            // Fog is not in the scene bytes. A header that appears or disappears
+            // has to recompose the whole picture; a quiet reuse would keep the
+            // previous frame's fog on the pixels it does not redraw.
+            self.froxel_wrote.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
             self.lighting.draw_key.hash(&mut hasher);
             hasher.finish()
