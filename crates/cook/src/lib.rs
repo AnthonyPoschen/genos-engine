@@ -7,8 +7,9 @@
 //! The record is a `.gcook` file named by the source `AssetId`. Its header lists
 //! every input hash and the settings hash, so an unchanged input is skipped
 //! without decoding it. A SHA-256 trailer covers the whole file, so a load that
-//! returns a record has checked it. The runtime still loads source files; the
-//! cooked path is opt-in and does not change a draw.
+//! returns a record has checked it. The cook also writes a `.gmat` material
+//! record. The runtime path is opt-in. A manifest line with `mat=` loads
+//! without the source file. A line without it still loads source files.
 
 mod format;
 pub mod ktx2;
@@ -22,7 +23,7 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
-pub use package::{manifest, package, Manifest};
+pub use package::{manifest, package, package_with, Manifest, PackageEntry};
 pub use parallel::{map_by_cost, Threads};
 pub use texture::{
     cook_textures, cook_textures_file, cook_textures_with, decode_textures, encode_image,
@@ -197,6 +198,9 @@ pub struct AssetCook {
     pub record: (Outcome, PathBuf),
     /// The `.gtex`, when textures were asked for.
     pub textures: Option<(Outcome, PathBuf)>,
+    /// The `.gmat`. A fresh geometry cook rewrites it, because a changed input
+    /// can change a shade. Bake settings alone do not.
+    pub materials: (Outcome, PathBuf),
 }
 
 /// Cook a glTF file's `.gcook` and, with `textures`, its `.gtex`. Each record
@@ -221,9 +225,11 @@ pub fn cook_asset(
     let id = sha256(&bytes);
     let path = cooked_path(out, &id);
     let tex_path = textures_path(out, &id);
+    let mat_path = genos_load::materials_path(out, &id);
     let mesh_fresh =
         std::fs::read(&path).is_ok_and(|existing| up_to_date(&existing, &bytes, dir, settings));
     let tex_fresh = !textures || texture::textures_fresh(&tex_path, &bytes, dir);
+    let mat_fresh = materials_fresh(&mat_path, &id);
     let outcome = |fresh: bool| {
         if fresh {
             Outcome::UpToDate
@@ -234,8 +240,9 @@ pub fn cook_asset(
     let result = AssetCook {
         record: (outcome(mesh_fresh), path.clone()),
         textures: textures.then(|| (outcome(tex_fresh), tex_path.clone())),
+        materials: (outcome(mat_fresh && mesh_fresh), mat_path.clone()),
     };
-    if mesh_fresh && tex_fresh {
+    if mesh_fresh && tex_fresh && mat_fresh {
         return Ok(result);
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
@@ -268,7 +275,36 @@ pub fn cook_asset(
         write_mesh()?;
         write_tex()?;
     }
+    if !mat_fresh || !mesh_fresh {
+        write_materials(&doc, &mat_path)?;
+    }
     Ok(result)
+}
+
+fn materials_fresh(path: &Path, asset_id: &[u8; 32]) -> bool {
+    std::fs::read(path).is_ok_and(|bytes| {
+        genos_load::decode_materials(&bytes).is_ok_and(|decoded| decoded.asset_id == *asset_id)
+    })
+}
+
+fn write_materials(doc: &genos_load::ImportDoc, path: &Path) -> Result<(), CookError> {
+    let scene = doc.scene.as_ref().ok_or(CookError::NoScene)?;
+    let record = genos_load::CookedMaterials {
+        asset_id: doc.asset_id,
+        image_size: scene
+            .images
+            .iter()
+            .map(|image| [image.width, image.height])
+            .collect(),
+        materials: scene.materials.clone(),
+        primitive_shade: genos_load::primitive_shades(scene),
+    };
+    let bytes = genos_load::encode_materials(&record).map_err(|err| match err {
+        genos_load::CookedError::Corrupt(why) => CookError::Corrupt(why),
+        genos_load::CookedError::Io(_) => CookError::Corrupt("material record"),
+    })?;
+    genos_load::write_atomic(path, &bytes)?;
+    Ok(())
 }
 
 fn up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSettings) -> bool {

@@ -33,7 +33,7 @@ Each record uses these headings:
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
-- [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission.
+- [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission. The plan for one mix and device-output-only writes is [audio-design.md](audio-design.md) ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the probes, the commands, the scripts, the captures, and the ground-truth reference.
 
@@ -45,6 +45,7 @@ These are plans. They are not system records. A step edits the matching record w
 - [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Proposed.
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Accepted. Speculative contacts, swept time of impact, and the hot-swap are in the physics step. `slice_chunk` is not.
+- [Vehicle domains](../adr/0040-vehicle-domains.md): ground, aircraft, and space forces on one chassis body ([ADR 0040](../adr/0040-vehicle-domains.md)). Proposed. G1 wheel rays and S1 thruster forces are in the physics step. Aircraft and sea are not. Sea stays buoyancy and quadratic drag, and it is not a stage. The orbit is not in the step.
 - [PBR materials design](pbr-materials-design.md): glTF metallic-roughness, the shared shade, textures, and emissive lights ([ADR 0014](../adr/0014-pbr-materials.md)). Proposed. It does not copy the mesh-loading parsers.
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 - [HDR output design](hdr-output-design.md): scene-referred colour, exposure, AgX, bloom, HDR10 on Linux and scRGB on Windows ([ADR 0015](../adr/0015-hdr-output.md)). The metric gate is `crates/render/tests/hdr_output_gate.rs`.
@@ -52,5 +53,6 @@ These are plans. They are not system records. A step edits the matching record w
 - [Fog and volumetric lighting](fog-and-volumetric-lighting-design.md): a budgeted froxel volume, height fog, local volumes, shadowed shafts, and a world-cache read. [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md) is accepted. The froxel holds height fog and local volumes. Sun and point-lamp shafts use traced shadows. The world-cache read waits for lighting phase 3. `fog-check` grades the closed forms and each live renderer row. `debug/lighting` exposes the Fog page and `get_fog_settings`, `set_fog_settings`, and `get_fog_stats`.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 - [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
+- [Audio design](audio-design.md): one mix in `genos-audio`, device outputs that only write that mix, disk-fed clips, reverb zones, a later mix of propagation paths, and a bit-identical offline hash ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.

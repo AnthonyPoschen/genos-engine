@@ -26,6 +26,7 @@ mod pages;
 mod png;
 mod sha256;
 mod shade;
+mod shade_mean;
 mod source;
 mod stream;
 mod texture;
@@ -61,6 +62,7 @@ pub use pages::{mib_f32, miss_colour, HotReload, MaterialWatch};
 pub use png::Image;
 pub use sha256::{hex, sha256, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
+pub use shade_mean::primitive_shades;
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
     gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, PendingCopy, Sampled,

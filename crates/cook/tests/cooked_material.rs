@@ -3,18 +3,18 @@
     expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
 )]
 
-//! ADR 0035 amendment A (Proposed). A valid `.gmat` package matches the import
+//! ADR 0035 amendment A. A valid `.gmat` package matches the import
 //! without entering the glTF decoder. A bad record falls back to that decoder.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use genos_bake::{BakeMode, BakeSettings};
-use genos_cook::{cook_asset, load_cooked, package, Threads};
+use genos_cook::{cook_asset, load_cooked, package, package_with, Outcome, Threads};
 use genos_load::{
     decode_materials, encode_materials, hex, importer_entries, load_covered,
-    load_covered_or_source, load_gltf_file, materials_path, reset_importer_entries, sha256,
-    write_atomic, CookedMaterials, Package, PrimitiveShade,
+    load_covered_or_source, load_gltf_file, materials_path, primitive_shades,
+    reset_importer_entries, sha256, write_atomic, CookedMaterials, Package, PrimitiveShade,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -55,6 +55,68 @@ fn stomp_objects(dir: &Path) {
     for entry in std::fs::read_dir(&objects).unwrap() {
         std::fs::write(entry.unwrap().path(), b"not-a-gltf").unwrap();
     }
+}
+
+#[test]
+fn cook_emits_the_material_record_and_the_manifest_names_it() {
+    let dir = temp("emit");
+    let src = copy_fixture(&dir, &["tri.gltf", "tri.bin", "quad.png"]);
+    let source = src.join("tri.gltf");
+    let scene = load_gltf_file(&source).unwrap();
+    let id = sha256(&std::fs::read(&source).unwrap());
+    let first = cook_asset(&source, &dir, &settings(&dir), true, Threads::ONE).unwrap();
+    assert_eq!(first.materials.0, Outcome::Cooked);
+    let bytes = std::fs::read(&first.materials.1).unwrap();
+    let record = decode_materials(&bytes).unwrap();
+    assert_eq!(record.asset_id, id);
+    assert_eq!(record.materials, scene.materials);
+    assert_eq!(
+        record.image_size,
+        scene
+            .images
+            .iter()
+            .map(|image| [image.width, image.height])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(record.primitive_shade, primitive_shades(&scene));
+    let cooked = load_cooked(&first.record.1).unwrap();
+    let gtex = sha256(&std::fs::read(&first.textures.as_ref().unwrap().1).unwrap());
+    let mat = sha256(&bytes);
+    let manifest = package_with(&[(&cooked, Some(gtex), Some(mat))]);
+    let line = &manifest.lines[0];
+    let gtex_at = line.find(" gtex=").unwrap();
+    let mat_at = line.find(" mat=").unwrap();
+    assert!(gtex_at < mat_at, "{line}");
+    assert!(line.contains(&format!(" mat={}", hex(&mat))), "{line}");
+    write_atomic(&dir.join("package.manifest"), manifest.text().as_bytes()).unwrap();
+    assert_eq!(manifest.verify(&dir).unwrap(), 1);
+    assert_eq!(Package::open(&dir).unwrap().verify(&dir).unwrap(), 1);
+
+    let second = cook_asset(&source, &dir, &settings(&dir), true, Threads::ONE).unwrap();
+    assert_eq!(second.materials.0, Outcome::UpToDate);
+    assert_eq!(std::fs::read(&second.materials.1).unwrap(), bytes);
+
+    std::fs::remove_file(&first.materials.1).unwrap();
+    assert!(
+        manifest.verify(&dir).is_err(),
+        "a named material record has to be on disk"
+    );
+    assert!(Package::open(&dir).unwrap().verify(&dir).is_err());
+    let rewritten = cook_asset(&source, &dir, &settings(&dir), true, Threads::ONE).unwrap();
+    assert_eq!(rewritten.materials.0, Outcome::Cooked);
+    assert_eq!(std::fs::read(&rewritten.materials.1).unwrap(), bytes);
+
+    for name in ["tri.gltf", "tri.bin", "quad.png"] {
+        std::fs::remove_file(src.join(name)).unwrap();
+    }
+    stomp_objects(&dir);
+    reset_importer_entries();
+    let loaded = load_covered(&dir, &id).unwrap();
+    assert_eq!(importer_entries(), 0);
+    assert_eq!(loaded.materials, scene.materials);
+    assert_eq!(loaded.primitive_shade, record.primitive_shade);
+    assert_eq!(loaded.meshes.len(), scene.meshes.len());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Cook `source`, write `.gmat` from its import, and point the manifest at it.
@@ -192,9 +254,11 @@ fn corrupt_material_record_falls_back_to_the_source() {
     let at = bytes.len() / 2;
     bytes[at] ^= 0x01;
     std::fs::write(&mat, &bytes).unwrap();
+    let err = Package::open(&dir).unwrap().verify(&dir).unwrap_err();
     assert!(
-        Package::open(&dir).unwrap().verify(&dir).is_ok(),
-        "the accepted verifier does not read mat="
+        err.to_string()
+            .contains("material hash differs from the manifest"),
+        "{err}"
     );
     stomp_objects(&dir);
     reset_importer_entries();
