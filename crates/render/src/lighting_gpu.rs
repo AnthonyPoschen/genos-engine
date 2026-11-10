@@ -3033,7 +3033,11 @@ impl Gpu {
         changes: Option<&Vec<[f32; 4]>>,
     ) -> bool {
         self.lighting.restir_frame = false;
-        if !restir_product_shade(self.lighting.settings.restir_di, self.lighting.shade_gate)
+        if !restir_product_shade(
+            self.lighting.settings.restir_di,
+            self.lighting.settings.direct.enabled,
+            self.lighting.shade_gate,
+        )
             || width == 0
             || height == 0
         {
@@ -4294,6 +4298,7 @@ impl Gpu {
             self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
             let restir_wanted = restir_product_shade(
                 self.lighting.settings.restir_di,
+                self.lighting.settings.direct.enabled,
                 self.lighting.shade_gate,
             );
             let first = slot as u32 * LIGHTING_STAMPS;

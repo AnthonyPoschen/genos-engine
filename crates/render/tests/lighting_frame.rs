@@ -319,12 +319,8 @@ fn lighting_moving_object_shows_on_the_same_frame() {
     let camera = Camera::opening();
     let mut moved = base.clone();
     moved.solids[0].position.x += 0.5;
-    let before = settle_picture(
-        window,
-        renderer,
-        &World::from_scene(base),
-        &camera,
-    );
+    let still = World::from_scene(base);
+    let before = settle_picture(window, renderer, &still, &camera);
     let after = draw(
         window,
         renderer,
@@ -334,6 +330,15 @@ fn lighting_moving_object_shows_on_the_same_frame() {
     assert!(
         changed_pixels(&before, &after) > 0,
         "the first frame after the move shows it"
+    );
+    // A silhouette change is visible in the raster with compose off. The bounce
+    // view has to be a different picture from the full frame, or the store missed.
+    view_at(renderer, ViewMode::Bounce);
+    let bounce = draw(window, renderer, &still, &camera);
+    assert_bounce_is_shaded("moving object", &bounce);
+    assert!(
+        changed_pixels(&before, &bounce) > 0,
+        "bounce view matched the full picture: compose stored the unshaded albedo"
     );
 }
 
@@ -347,17 +352,21 @@ fn lighting_floor_change_shows_on_the_next_frame() {
     let camera = Camera::opening();
     let mut floor = base.clone();
     floor.floor.color = [0.2, 0.6, 0.3];
-    let before = settle_picture(
-        window,
-        renderer,
-        &World::from_scene(base),
-        &camera,
-    );
+    let still = World::from_scene(base);
+    let before = settle_picture(window, renderer, &still, &camera);
     let changed = World::from_scene(floor);
     let after = draw(window, renderer, &changed, &camera);
     assert!(
         changed_pixels(&before, &after) > 0,
         "the first frame after the floor change shows it"
+    );
+    // A floor-colour change is the raster albedo. Compose off still passes that.
+    view_at(renderer, ViewMode::Bounce);
+    let bounce = draw(window, renderer, &still, &camera);
+    assert_bounce_is_shaded("floor change", &bounce);
+    assert!(
+        changed_pixels(&before, &bounce) > 0,
+        "bounce view matched the full picture: compose stored the unshaded albedo"
     );
 }
 
@@ -412,6 +421,7 @@ fn lighting_moving_camera_keeps_its_brightness() {
             };
             last = draw(window, renderer, &world, &c);
         }
+        assert_bounce_is_shaded(clip, &settled);
         let ratio = mean_byte(&last) / mean_byte(&settled).max(1.0e-6);
         eprintln!("{clip}: moving / settled {ratio:.4}");
         assert!(
@@ -583,6 +593,17 @@ fn luma_bgra(px: &[u8]) -> f64 {
     0.2126 * f64::from(px[2]) + 0.7152 * f64::from(px[1]) + 0.0722 * f64::from(px[0])
 }
 
+/// Bounce view of this hall is dim (about 2.6). The unshaded albedo is the
+/// raster colour, near 200. Two albedo frames report error 0 and still clear
+/// a "not empty" floor, so a bounce comparison has to reject that picture.
+fn assert_bounce_is_shaded(name: &str, frame: &[u8]) {
+    let y = mean_luma(frame);
+    assert!(
+        y < 40.0,
+        "{name}: bounce view luma {y:.1} is the unshaded albedo, not the compose store"
+    );
+}
+
 fn mean_luma(frame: &[u8]) -> f64 {
     let n = frame.len() / 4;
     if n == 0 {
@@ -721,6 +742,7 @@ fn adaptive_atrous_matches_the_full_reference() {
         full_frames.push(draw(window, renderer, &world, &camera));
     }
     let reference = full_frames.last().expect("reference").clone();
+    assert_bounce_is_shaded("full reference", &reference);
     let full_flicker = flicker_variance(&full_frames[4..]);
     view_at(renderer, ViewMode::Depth);
     let depth = draw(window, renderer, &world, &camera);
@@ -812,6 +834,8 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     // not a comparison. Leaving A unpublished measured mean 0.133 p99 1.0
     // here; the 4070's unpublished A was mean 15.9 p99 41. Both fail below.
     assert!(y_one > 1.0, "one-iteration bounce is empty ({y_one:.2})");
+    assert_bounce_is_shaded("one-iteration bounce", &one);
+    assert_bounce_is_shaded("adaptive skip", &adaptive);
     assert!(
         mean < 0.05,
         "adaptive skip mean error {mean:.3} against one wavelet"
@@ -859,6 +883,8 @@ fn high_bounce(
 fn screen_denoise_matches_the_hash_wavelet() {
     let (hash_still, hash_stats) = high_bounce(false, 6, 0.0);
     let (screen_still, screen_stats) = high_bounce(true, 6, 0.0);
+    assert_bounce_is_shaded("hash still", &hash_still[5]);
+    assert_bounce_is_shaded("screen still", &screen_still[5]);
     assert_picture("still", &hash_still[5], &screen_still[5]);
     assert_picture_cost("still", &screen_stats, 320 * 180);
     assert_eq!(

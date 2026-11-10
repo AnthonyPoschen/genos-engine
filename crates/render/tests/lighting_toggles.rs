@@ -740,6 +740,10 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
         levels[i] = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
         dispatches[i] = saw.iter().sum();
     }
+    eprintln!(
+        "shadow luminance bounce 0/1/2 {:?} dispatches {:?}",
+        levels, dispatches
+    );
     assert!(
         levels[0] + 1.0 < levels[1] && levels[1] + 1.0 < levels[2],
         "shadow luminance bounce 0/1/2 {:?} dispatches {:?}",

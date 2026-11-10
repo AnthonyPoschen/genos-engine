@@ -156,8 +156,9 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
 
 /// The ReSTIR direct module is the product shade. Exact, random, and
 /// broken stay on the existing module, and so does `restir_di` off.
-pub(crate) fn restir_product_shade(restir_di: bool, gate: LampShadeGate) -> bool {
-    restir_di && gate == LampShadeGate::Product
+/// Direct off does not schedule it and does not bill it to the direct bucket.
+pub(crate) fn restir_product_shade(restir_di: bool, direct_on: bool, gate: LampShadeGate) -> bool {
+    restir_di && direct_on && gate == LampShadeGate::Product
 }
 
 /// `restir_di` off is the labelled exact sum for a pixel mode that used to sample.
@@ -817,11 +818,12 @@ mod probe_still_tests {
     #[test]
     fn restir_off_is_the_exact_reference_and_not_a_sample() {
         use genos_scene::LampPickMode;
-        assert!(restir_product_shade(true, LampShadeGate::Product));
-        assert!(!restir_product_shade(false, LampShadeGate::Product));
-        assert!(!restir_product_shade(true, LampShadeGate::Exact));
-        assert!(!restir_product_shade(true, LampShadeGate::Random));
-        assert!(!restir_product_shade(true, LampShadeGate::Broken));
+        assert!(restir_product_shade(true, true, LampShadeGate::Product));
+        assert!(!restir_product_shade(false, true, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, false, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Exact));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Random));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Broken));
         assert!(restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Product));
         assert!(restir_off_is_exact(false, LampPickMode::Pixels, LampShadeGate::Product));
         assert!(restir_off_is_exact(false, LampPickMode::Both, LampShadeGate::Product));

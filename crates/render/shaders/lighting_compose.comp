@@ -119,7 +119,12 @@ void main() {
             glow = vec3(0.0);
         }
     }
+    // Maintenance runs first (dispatch_sh_prep) and returns below, before the
+    // store. It must not wipe the record the picture compile is about to read.
+    // The picture compile clears after that read.
+#ifndef GENOS_COMPOSE_MAINT
     gbuf_clear_pixel(index);
+#endif
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }
@@ -160,12 +165,12 @@ void main() {
 #endif
     if (mode == 9u) {
         // Path codes, not light. R is lighting_px_shade / 8. G is 0 when the
-        // probe read was skipped, 0.5 when probes were read and trust stayed
-        // 1, 1 when the probes own the pixel. B is 1 when a corner took
-        // lighting_sc_parent. No dither: the bytes are the codes.
-        // PATH_SHADE_SCALE packs eight path codes into the red channel.
+        // world-cache read was skipped, 0.5 when that read stayed at full
+        // trust, 1 when the mix owns the pixel. B is 1 when a corner took
+        // lighting_sc_parent. Screen probes are gone. No dither: the bytes
+        // are the codes. PATH_SHADE_SCALE packs eight path codes into red.
         // PATH_MIXED_W is trust below a full world read. PATH_PROBES_READ is
-        // the green code when probes were read and trust stayed 1.
+        // the old green code for a full-trust read.
         const float PATH_MIXED_W = 0.99;
         const float PATH_PROBES_READ = 0.5;
         const float PATH_SHADE_SCALE = 1.0 / 8.0;
