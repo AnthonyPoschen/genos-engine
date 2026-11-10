@@ -45,8 +45,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    aero_trim_world, chassis_rest_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle,
-    Wheel, WheeledGround,
+    aero_trim_world, chassis_rest_world, thruster_world, Aircraft, GroundContact, SpaceCraft,
+    Thruster, Vehicle, Wheel, WheeledGround,
 };
 
 pub use destruction::{
@@ -620,6 +620,7 @@ pub fn step(world: &mut World, dt: f32) {
     world.islands.bind(world.broadphase.dynamic_ids());
     if !world.vehicles.is_empty() {
         vehicle::wake_sleeping_aircraft(world);
+        vehicle::wake_sleeping_thrusters(world);
     }
     let gravity = world.gravity;
     let dynamic_count = world.broadphase.dynamic_count();

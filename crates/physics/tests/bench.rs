@@ -92,6 +92,7 @@ fn timed_math_and_physics_batch_does_not_allocate() {
     );
     assert_eq!(allocs, 0, "timed math and physics allocated {allocs} times");
 
+    // The allocation counter is process-global, so the vehicle steps stay in this test.
     let mut aircraft = genos_physics::aero_trim_world();
     step(&mut aircraft, 1.0 / 60.0);
     let before_aircraft = ALLOCS.load(Ordering::Relaxed);
@@ -119,4 +120,21 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         wake_allocs, 0,
         "aircraft wake step allocated {wake_allocs} times"
     );
+
+    let mut thruster = genos_physics::thruster_world();
+    let mut ground = genos_physics::chassis_rest_world(10.0);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let before_vehicle = ALLOCS.load(Ordering::Relaxed);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let vehicle_allocs = ALLOCS.load(Ordering::Relaxed) - before_vehicle;
+    println!("vehicle_allocs={vehicle_allocs}");
+    assert_eq!(
+        vehicle_allocs, 0,
+        "vehicle step allocated {vehicle_allocs} times"
+    );
+    let velocity = thruster.bodies[0].velocity;
+    assert!(velocity.x.is_finite() && velocity.y.is_finite() && velocity.z.is_finite());
+    assert_eq!(ground.step_stats.wheel_rays, 4);
 }
