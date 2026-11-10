@@ -384,7 +384,9 @@ impl ActionMap {
                 ActionKind::Codes(codes) => {
                     out.push_str("\"kind\":\"codes\",\"codes\":[");
                     write_codes(&mut out, codes);
-                    out.push_str("]}");
+                    out.push(']');
+                    write_gesture_field(&mut out, action.gesture);
+                    out.push('}');
                 }
                 ActionKind::Axis2d(binding) => {
                     out.push_str("\"kind\":\"axis_2d\"");
@@ -399,6 +401,7 @@ impl ActionMap {
                         write_codes(&mut out, codes);
                         out.push(']');
                     }
+                    write_gesture_field(&mut out, action.gesture);
                     out.push('}');
                 }
             }
@@ -428,9 +431,13 @@ impl ActionMap {
                     },
                 );
             }
+            let body = chunk.split("{\"name\":\"").next().unwrap_or(chunk);
             if let Some(action) = map.actions.iter_mut().find(|action| action.name == name) {
                 if let Some(enabled) = enabled {
                     action.enabled = enabled;
+                }
+                if let Some(text) = json_string(body, "gesture") {
+                    action.gesture = parse_gesture(text)?;
                 }
             }
         }
@@ -551,6 +558,14 @@ fn code_axis_2d(input: &InputSystem, code: InputCode) -> Option<Axis2d> {
         }
     }
     found.then_some(sum)
+}
+
+fn write_gesture_field(out: &mut String, gesture: Option<GestureKind>) {
+    if let Some(gesture) = gesture {
+        out.push_str(",\"gesture\":\"");
+        out.push_str(gesture.name());
+        out.push('"');
+    }
 }
 
 fn add_gesture(out: &mut Axis2d, input: &InputSystem, gesture: Option<GestureKind>) {

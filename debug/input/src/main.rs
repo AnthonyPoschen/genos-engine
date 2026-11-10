@@ -27,7 +27,9 @@ const USAGE: &str = "genos-input: headless input debug binary
 
 Script lines: `key CODE down|up`, `button CODE down|up`, `mouse DX DY`,
 `pad SLOT connect NAME`, `pad SLOT disconnect`, `stick SLOT left|right X Y`,
+`padbutton SLOT CODE down|up`, `trigger SLOT left|right VALUE`,
 `touch ID X Y began|moved|ended|cancelled`, `rebind KEY=VALUE`, `frame`.
+Touch `X` and `Y` are points (pixels).
 
 The window backends (Wayland now; Windows, macOS, and X11 in the windowing
 work) call set_key, set_mouse_button, add_mouse_delta, connect_gamepad,
