@@ -347,13 +347,14 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     assert!(indirect.contains("lighting_world_irradiance(pos, n)"));
     assert!(indirect.contains("return max(world.rgb, vec3(0.0));"));
     assert!(indirect.contains("lighting_coarse_world(pos, n)"));
-    assert!(indirect.contains("mix(coarse, max(world.rgb, vec3(0.0)), trust)"));
+    assert!(indirect.contains("if (!(coarse.w > LIGHTING_CACHE_HAS_W))"));
+    assert!(indirect.contains("mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust)"));
     assert!(
         !indirect.contains("lighting_sh_read"),
         "compose does not add a second neighbour gather"
     );
     assert!(!indirect.contains("lighting_probe_irradiance"));
-    let coarse = function_body(&probe, "vec3 lighting_coarse_world(vec3 pos, vec3 n)");
+    let coarse = function_body(&probe, "vec4 lighting_coarse_world(vec3 pos, vec3 n)");
     assert_eq!(
         coarse.matches("lighting_coarse_bilerp").count(),
         2,

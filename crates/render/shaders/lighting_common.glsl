@@ -381,9 +381,6 @@ uint lighting_cell_of(vec3 pos, vec3 n, vec3 d) {
 // (miss/hit, 2 % of its distance, its normal) marks the probe for full traces
 // over the next LIGHTING_STRATA frames (probe normal w = until frame).
 const bool LIGHTING_HOLD_STRATA = true;
-bool lighting_stratum_held(uint probe) {
-    return LIGHTING_HOLD_STRATA && work.v[lighting_stratum_at(probe, lighting_stratum())].w > 1.5;
-}
 uint lighting_hold_check_k(uint probe) {
     return lighting_hash(probe ^ lighting_hash(pc.params.w)) % lighting_rays();
 }
@@ -418,37 +415,16 @@ bool lighting_held_crosses(vec3 origin, vec3 dir, float t) {
     }
     return false;
 }
-bool lighting_stratum_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
-    vec4 sp = work.v[lighting_stratum_at(probe, s)];
-    n = work.v[lighting_stratum_at(probe, s) + 1u].xyz;
-    origin = sp.xyz + n * 0.02;
-    dir = lighting_stratum_dir(sp.xyz, n, k, s);
-    return sp.w > 0.5;
-}
 
-// Ray k of probe's stratum s traced from its place now (a fill), when that stratum
-// is filled this frame.
-bool lighting_fill_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
-    vec4 pp = work.v[lighting_probe_at(probe)];
-    n = work.v[lighting_probe_at(probe) + 1u].xyz;
-    origin = pp.xyz + n * 0.02;
-    dir = vec3(0.0, 1.0, 0.0);
-    if (!lighting_fill_on() || pp.w < 0.5 || s == lighting_stratum() || lighting_pick(probe, s) != 0u) {
-        return false;
-    }
-    dir = lighting_stratum_dir(pp.xyz, n, k, s);
-    return true;
-}
-
-// Ray `ray`'s origin (just off its surface) and direction: probe rays first, then
-// this frame's light cache rays. False when the ray has no live source.
+// Ray `ray`'s origin (just off its surface) and direction: this frame's light
+// cache rays. Probe rays are gone, so that range has no source. False when the
+// ray has no live source.
 bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = vec3(0.0);
     dir = vec3(0.0, 1.0, 0.0);
     n = vec3(0.0, 1.0, 0.0);
     if (ray < lighting_probe_rays()) {
-        uint rays = lighting_rays();
-        return lighting_stratum_ray(ray / rays, lighting_stratum(), ray % rays, origin, dir, n);
+        return false;
     }
     uint r = ray - lighting_probe_rays();
     uint entry = r / LIGHTING_CACHE_RAYS;

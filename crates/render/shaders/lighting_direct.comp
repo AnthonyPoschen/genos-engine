@@ -63,7 +63,7 @@ void main() {
             idx += pixels + kept;
         }
     }
-    // Then (not on the async queue) one point per fill slot (lighting_fill_ray).
+    // Then (not on the async queue) one point per fill slot.
     uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
     if (gstats.ctrl_pixel_only == 0u) {
         uint points = fills + (mode == 2u ? 0u : kept);

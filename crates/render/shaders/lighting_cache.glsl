@@ -3866,7 +3866,8 @@ bool lighting_sh_texel_detail_covers(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     }
     if (obj) {
         // The mover arm shows lighting_sh_read and does not seed a world texel.
-        // Detail off and Low stay on the probes. Claim stays false.
+        // Detail off and Low are not this skip. They read the world cache.
+        // Claim stays false.
         float salt = lighting_obj_salt;
         lighting_obj_salt = 0.0;
         bool hit = lighting_sh_texel_detail_on() && lighting_sh_pose_accepts(pos, n);
@@ -4060,8 +4061,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         return vec4(lighting_sc_wrc_now(pos, n).rgb, 1.0);
     }
     if (lighting_sc_slanted(n)) {
-        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal
-        // instead of the probes (a mover's stay on the probes).
+        // ADR 0039 stage 2: a slanted surface reads the SH cells at its normal.
+        // A mover does not take this arm.
         if (lighting_sh_on() && !obj) {
             // Claim stays off. A slant that accepts cells must not allocate,
             // and an empty read must not stamp. Compose loads the stored
@@ -4120,12 +4121,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // They do not run for that texel, including when the read rejects
         // every corner: resample would copy a stale or far-side cell back in
         // as a seed. A texel that is not a detail candidate (detail off, a
-        // mover, its own samples, a coarse size) keeps those two. The compose
-        // parent walk is gone: it ran only while texel detail was off, and no
-        // preset is in that state. Ray hits still call lighting_sc_parent.
-        // A mover is not seeded. An empty read falls through to the probe seed.
-        bool detail_empty = cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
-        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && detail_empty;
+        // mover, its own samples, a coarse size) keeps those two. The parent
+        // walk is out of every compose compile. Flag 32 is the only
+        // sets/(sets+6) scale, so a mover with its own sets is the fine colour.
+        // A mover is not seeded. An empty read falls through to the world cache.
+        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
         if (detail_candidate) {
@@ -4192,6 +4192,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (mode == 3u && lighting_sc_stale(slot)) {
             continue;
         }
+        // The parent walk stays out of compose. A mover with its own sets is
+        // the fine colour once flag 32 is off.
         if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
@@ -4239,24 +4241,21 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         wsum += bil;
         float own_w = cache.v[3u * slot + 2u].w;
         // With the estimator (flag 1048576) a texel lit under changing light is
-        // still shown (its short mean lags a little, as Lumen's surface cache does);
-        // swapping the pixel to the probes swaps methods, and their difference was
-        // most of the mix error. Around a moving object the probes still take over.
+        // still shown (its short mean lags a little, as Lumen's surface cache does).
         bool est = (lighting_sc_flags() & 1048576u) != 0u;
         bool stale = mode == 3u && fract(own_w) > 0.1 && !est;
         float sc_trust = stale ? 0.0 : 1.0;
-        if ((lighting_sc_flags() & 32u) != 0u || obj) {
-            // A texel with few sets shares the pixel with the probes.
+        if ((lighting_sc_flags() & 32u) != 0u) {
+            // Flag 32 only. It used to apply to every mover as well, so a
+            // settled mover stayed at sets/(sets+6) and never reached trust 1.
             float c = floor(max(own_w, 0.0));
             sc_trust *= c / (c + LIGHTING_SC_TRUST_SETS);
         }
         trust += bil * (mode == 3u ? sc_trust : (mode != 2u ? 1.0 : min(v.w / 4.0, 1.0)));
     }
-    // Surface cache: while the light changes or around an object that moves, the
-    // probes (no history) show it.
-    // S72L: corners with no light are left out of the blend, not handed to the
-    // probes texel by texel (first fill tore as corners flipped between the two
-    // methods); the probes take the pixel only where most of it has nothing.
+    // While the light changes, or near a change with keep-near off, trust is 0.
+    // The pixel mixes a found coarser cell, or keeps the fine colour on a miss.
+    // Corners with no light stay out of the blend.
     if (mode == 3u && wsum > 0.0 && (lighting_sc_flags() & 33554432u) == 0u) {
         trust = trust / wsum * min(4.0 * wsum, 1.0);
     }
@@ -5523,11 +5522,4 @@ uint lighting_graw_at(uint probe, uint k) {
 }
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
-}
-// A write to a kept hit's slot (record or light) that changed it marks its probe.
-void lighting_gdirty_kept_at(uint at) {
-    uint base = lighting_kept_at(0u);
-    if (at >= base && at < base + lighting_kept_hits()) {
-        lighting_gdirty_mark((at - base) / lighting_rays() / LIGHTING_STRATA);
-    }
 }

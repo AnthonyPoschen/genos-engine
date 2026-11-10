@@ -20,7 +20,7 @@ use genos_render::{
 use genos_window::{ShutdownDevice, Window};
 
 const STRIDE: usize = 17;
-const ROWS: usize = 35;
+const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
 const READ_ROWS: usize = 12;
@@ -871,6 +871,30 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(!near(pop.shown, red), "full fine luminance while trust is 0");
     assert!(!near(pop.shown, [0.0; 3]), "trust 0 went black before the pop");
 
+    let fine = [7.0, 3.0, 1.0];
+    let cap = &rows[35];
+    assert!(
+        (cap.world_w - 1.0).abs() <= ABS,
+        "a mover at the set cap stayed at trust {}; it has to be 1",
+        cap.world_w
+    );
+    assert!(
+        near(cap.shown, fine),
+        "the settled mover showed {:?}; wanted its own {fine:?}",
+        cap.shown
+    );
+    let miss = &rows[36];
+    assert!(
+        miss.world_w.abs() <= ABS,
+        "the miss row's trust is {}; flag 512 has to keep it at 0",
+        miss.world_w
+    );
+    assert!(
+        near(miss.shown, fine),
+        "a coarse miss darkened the mover to {:?}; wanted its own {fine:?}",
+        miss.shown
+    );
+
     let skip = words[2].to_bits();
     let eval = words[3].to_bits();
     let reads = words[4].to_bits();
@@ -880,7 +904,7 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "this dispatch presents nothing"
     );
     assert_eq!(
-        skip, 41,
+        skip, 43,
         "every indirect call skips the removed screen-probe read"
     );
 
