@@ -40,7 +40,9 @@ Call `character_controller()` for the first player. The map has these actions:
 - `capture` reads the left mouse button.
 - `release` reads Escape.
 
-Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone before the poll that must use the new value.
+Read the axes with `axis_2d`. Read buttons with `down`. `GamepadDevice::pressed` is the edge for a button or a digital stick direction, matching the keyboard. Change the deadzone before the poll that must use the new value.
+
+`genos-ui` calls `ui_actions()` for focus. `ui_left`, `ui_right`, `ui_up`, and `ui_down` are the arrows, the d-pad, and the left stick. `ui_activate` is Enter, Space, and the south face button. `ui_back` is Escape and the east face button. `ui_next` is Tab. Shift-Tab moves to the previous control. `key_a` stays on `move`.
 
 ## Limits
 

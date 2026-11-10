@@ -16,7 +16,8 @@
 
 use genos_scene::{viewport_uv, Camera};
 
-use crate::text;
+use crate::kind::Kind;
+use crate::text::{self, TextFace};
 use crate::Action;
 use crate::Look;
 
@@ -166,6 +167,7 @@ impl Rect {
 #[derive(Clone, Debug)]
 pub struct Node {
     pub id: u32,
+    pub kind: Kind,
     pub direction: Direction,
     pub pad: Pad,
     pub gap: f32,
@@ -174,11 +176,19 @@ pub struct Node {
     pub height: Sizing,
     pub place: Option<Place>,
     pub text: Option<String>,
+    /// Bitmap unless a game sets [`TextFace::Outline`].
+    pub face: TextFace,
     pub idle: Look,
+    /// Border and fill while this node has UI focus and the pointer is up.
+    pub focus_look: Look,
     pub hover: Look,
     pub pressed: Look,
     pub draggable: bool,
     pub action: Option<Action>,
+    /// Children paint and hit only inside this node's padding box.
+    pub clip: bool,
+    /// Hover text. `frame` opens it after 0.4 s. `None` has no tip.
+    pub tooltip: Option<String>,
     pub children: Vec<Node>,
 }
 
@@ -186,6 +196,7 @@ impl Node {
     pub fn new(id: u32) -> Self {
         Self {
             id,
+            kind: Kind::Box,
             direction: Direction::TopToBottom,
             pad: Pad::default(),
             gap: 0.0,
@@ -194,11 +205,15 @@ impl Node {
             height: Sizing::fit(),
             place: None,
             text: None,
+            face: TextFace::Bitmap,
             idle: Look::default(),
+            focus_look: Look::default(),
             hover: Look::default(),
             pressed: Look::default(),
             draggable: false,
             action: None,
+            clip: false,
+            tooltip: None,
             children: Vec::new(),
         }
     }
@@ -219,11 +234,16 @@ pub struct Item {
     pub rect: Rect,
     pub content: Rect,
     pub text: Option<String>,
+    pub kind: Kind,
     pub idle: Look,
     pub hover: Look,
     pub pressed: Look,
+    pub focus_look: Look,
     pub draggable: bool,
     pub action: Option<Action>,
+    /// Ancestor clip. `None` means the item is not clipped.
+    pub clip_to: Option<Rect>,
+    pub tooltip: Option<String>,
 }
 
 struct Spec {
@@ -252,7 +272,7 @@ pub fn layout(root: &Node, space: Space, viewport: [f32; 2], camera: Option<&Cam
         Space::World(point) => world_rect(root, sized, point, viewport, camera),
     };
     let mut items = Vec::new();
-    layout_node(root, rect, None, &mut items);
+    layout_node(root, rect, None, None, &mut items);
     items
 }
 
@@ -351,7 +371,13 @@ fn axis_place(
     }
 }
 
-fn layout_node(node: &Node, rect: Rect, parent: Option<u32>, out: &mut Vec<Item>) {
+fn layout_node(
+    node: &Node,
+    rect: Rect,
+    parent: Option<u32>,
+    inherited: Option<Rect>,
+    out: &mut Vec<Item>,
+) {
     let content = inset(rect, node.pad);
     out.push(Item {
         id: node.id,
@@ -359,12 +385,29 @@ fn layout_node(node: &Node, rect: Rect, parent: Option<u32>, out: &mut Vec<Item>
         rect,
         content,
         text: node.text.clone(),
+        kind: node.kind.clone(),
         idle: node.idle,
+        focus_look: node.focus_look,
         hover: node.hover,
         pressed: node.pressed,
         draggable: node.draggable,
         action: node.action,
+        clip_to: inherited,
+        tooltip: node.tooltip.clone(),
     });
+    let child_clip = if node.clip {
+        Some(match inherited {
+            Some(outer) => intersect(outer, content).unwrap_or(Rect {
+                x: content.x,
+                y: content.y,
+                w: 0.0,
+                h: 0.0,
+            }),
+            None => content,
+        })
+    } else {
+        inherited
+    };
     let flow = flow_children(node);
     let bases: Vec<(f32, f32)> = flow
         .iter()
@@ -427,13 +470,31 @@ fn layout_node(node: &Node, rect: Rect, parent: Option<u32>, out: &mut Vec<Item>
                 h: main,
             }
         };
-        layout_node(child, child_rect, Some(node.id), out);
+        layout_node(child, child_rect, Some(node.id), child_clip, out);
         cursor += main + node.gap;
     }
     for child in node.children.iter().filter(|child| child.place.is_some()) {
         let basis = node_basis(child, Some(rect));
         let child_rect = position(child.place, basis, rect);
-        layout_node(child, child_rect, Some(node.id), out);
+        layout_node(child, child_rect, Some(node.id), child_clip, out);
+    }
+}
+
+/// Overlap of two rectangles. Empty overlap is `None`.
+pub(crate) fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    if x1 <= x0 || y1 <= y0 {
+        None
+    } else {
+        Some(Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
     }
 }
 

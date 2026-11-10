@@ -6,6 +6,15 @@
 
 pub(crate) const CELL_W: f32 = 12.0;
 pub(crate) const CELL_H: f32 = 16.0;
+
+/// Which face a label uses. Bitmap is the lighting panel. Outline reads a
+/// TrueType mask from [`crate::OutlineFont`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TextFace {
+    #[default]
+    Bitmap,
+    Outline,
+}
 const PIXEL: f32 = 2.0;
 /// One-pixel bitmap. Tick names use this so a row of steps stays quiet.
 pub(crate) const SMALL_PIXEL: f32 = 1.0;

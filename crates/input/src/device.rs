@@ -165,6 +165,10 @@ pub struct GamepadDevice {
     pub view: DeviceView,
     pub buttons: [ButtonState; MAX_GAMEPAD_BUTTONS],
     prev_buttons: [ButtonState; MAX_GAMEPAD_BUTTONS],
+    prev_left_stick: Axis2d,
+    prev_right_stick: Axis2d,
+    prev_left_trigger: f32,
+    prev_right_trigger: f32,
     pub left_stick: Axis2d,
     pub right_stick: Axis2d,
     pub left_trigger: f32,
@@ -185,6 +189,10 @@ impl GamepadDevice {
             },
             buttons: [ButtonState::Up; MAX_GAMEPAD_BUTTONS],
             prev_buttons: [ButtonState::Up; MAX_GAMEPAD_BUTTONS],
+            prev_left_stick: Axis2d::default(),
+            prev_right_stick: Axis2d::default(),
+            prev_left_trigger: 0.0,
+            prev_right_trigger: 0.0,
             left_stick: Axis2d::default(),
             right_stick: Axis2d::default(),
             left_trigger: 0.0,
@@ -197,25 +205,41 @@ impl GamepadDevice {
 
     pub fn begin_frame(&mut self) {
         self.prev_buttons = self.buttons;
+        self.prev_left_stick = self.left_stick;
+        self.prev_right_stick = self.right_stick;
+        self.prev_left_trigger = self.left_trigger;
+        self.prev_right_trigger = self.right_trigger;
+    }
+
+    /// True on the frame a button or a digital stick direction goes down.
+    pub fn pressed(&self, code: InputCode) -> bool {
+        if let Some(index) = gamepad_button_index(code) {
+            return self.prev_buttons[index] == ButtonState::Up
+                && self.buttons[index] == ButtonState::Down;
+        }
+        self.down(code)
+            && !axis_down(
+                self.prev_left_stick,
+                self.prev_right_stick,
+                self.prev_left_trigger,
+                self.prev_right_trigger,
+                self.activation_threshold,
+                code,
+            )
     }
 
     pub fn down(&self, code: InputCode) -> bool {
         if let Some(index) = gamepad_button_index(code) {
             return self.buttons[index] == ButtonState::Down;
         }
-        match code {
-            InputCode::gamepad_left_stick_up => self.left_stick.y >= self.activation_threshold,
-            InputCode::gamepad_left_stick_down => self.left_stick.y <= -self.activation_threshold,
-            InputCode::gamepad_left_stick_left => self.left_stick.x <= -self.activation_threshold,
-            InputCode::gamepad_left_stick_right => self.left_stick.x >= self.activation_threshold,
-            InputCode::gamepad_right_stick_up => self.right_stick.y >= self.activation_threshold,
-            InputCode::gamepad_right_stick_down => self.right_stick.y <= -self.activation_threshold,
-            InputCode::gamepad_right_stick_left => self.right_stick.x <= -self.activation_threshold,
-            InputCode::gamepad_right_stick_right => self.right_stick.x >= self.activation_threshold,
-            InputCode::gamepad_left_trigger => self.left_trigger >= self.activation_threshold,
-            InputCode::gamepad_right_trigger => self.right_trigger >= self.activation_threshold,
-            _ => false,
-        }
+        axis_down(
+            self.left_stick,
+            self.right_stick,
+            self.left_trigger,
+            self.right_trigger,
+            self.activation_threshold,
+            code,
+        )
     }
 
     /// Per-axis rest deadzone. Each axis inside it becomes zero. A larger tilt on that axis stays as it is.
@@ -243,6 +267,29 @@ impl GamepadDevice {
         } else {
             self.left_stick_deadzone
         }
+    }
+}
+
+fn axis_down(
+    left: Axis2d,
+    right: Axis2d,
+    left_trigger: f32,
+    right_trigger: f32,
+    threshold: f32,
+    code: InputCode,
+) -> bool {
+    match code {
+        InputCode::gamepad_left_stick_up => left.y >= threshold,
+        InputCode::gamepad_left_stick_down => left.y <= -threshold,
+        InputCode::gamepad_left_stick_left => left.x <= -threshold,
+        InputCode::gamepad_left_stick_right => left.x >= threshold,
+        InputCode::gamepad_right_stick_up => right.y >= threshold,
+        InputCode::gamepad_right_stick_down => right.y <= -threshold,
+        InputCode::gamepad_right_stick_left => right.x <= -threshold,
+        InputCode::gamepad_right_stick_right => right.x >= threshold,
+        InputCode::gamepad_left_trigger => left_trigger >= threshold,
+        InputCode::gamepad_right_trigger => right_trigger >= threshold,
+        _ => false,
     }
 }
 

@@ -53,6 +53,20 @@ impl ActionMap {
         self.insert(name, ActionKind::Axis2d(binding));
     }
 
+    /// True when a bound code went down this frame. A held code stays false.
+    pub fn pressed(&self, input: &InputSystem, name: &str) -> bool {
+        let Some(action) = self.find(name) else {
+            return false;
+        };
+        if !action.enabled {
+            return false;
+        }
+        let ActionKind::Codes(codes) = &action.kind else {
+            return false;
+        };
+        codes.iter().any(|bound| code_pressed(input, bound.code))
+    }
+
     pub fn down(&self, input: &InputSystem, name: &str) -> bool {
         let Some(action) = self.find(name) else {
             return false;
@@ -227,6 +241,16 @@ fn eval_2d(input: &InputSystem, binding: &Action2dBinding) -> Axis2d {
         }
     }
     clamp_axis(out)
+}
+
+fn code_pressed(input: &InputSystem, code: InputCode) -> bool {
+    if input.keyboard.pressed(code) || input.mouse.pressed(code) {
+        return true;
+    }
+    input
+        .gamepads
+        .iter()
+        .any(|pad| pad.view.connected && pad.pressed(code))
 }
 
 fn code_down(input: &InputSystem, code: InputCode) -> bool {
