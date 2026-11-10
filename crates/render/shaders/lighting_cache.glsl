@@ -4162,6 +4162,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         // The kept neighbour read is the pixel. lighting_sc_shown would gather
         // again to decide whether to show the seed, then throw that away.
+        // Path codes stay on the corner. The hit patch and the cell fallback
+        // overwrite them. A corner that never sets one keeps the unset shade.
+        uint corner_path = lighting_px_shade;
+        bool corner_parent = false;
         vec4 v;
         if (detail_kept) {
             v = vec4(detail_rgb, 1.0);
@@ -4194,7 +4198,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 // The screen-probe seed is removed. An empty fine texel that
                 // this setting does not already cover takes the SH-L1 cell
                 // when that read accepts a corner. A rejected read stays empty.
+                // Picture compose loads the lattice. The walk stays in maintenance.
+#ifdef GENOS_COMPOSE_NO_WALK
+                vec4 sh = lighting_sh_compose_lattice(q, n, false);
+#else
                 vec4 sh = lighting_sh_read(q, n, false);
+#endif
                 if (sh.w > LIGHTING_CACHE_HAS_W) {
                     if (LIGHTING_SC_WRITES) {
                         lighting_sc_set_seed(slot, sh.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
@@ -5085,7 +5094,11 @@ void lighting_svgf_push(uint slot) {
     if (lighting_sh_texel_detail_on()) {
         vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
         if (!any(greaterThan(prev, vec3(0.0)))) {
+#ifdef GENOS_COMPOSE_NO_WALK
+            vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
+#else
             vec4 cell = lighting_sh_read(cache.v[3u * slot].xyz, nb.xyz, false);
+#endif
             if (cell.w > LIGHTING_CACHE_HAS_W) {
                 // One prior sample, the same weight as the detail seed.
                 // Half the cell-to-target gap lands on this push. The next

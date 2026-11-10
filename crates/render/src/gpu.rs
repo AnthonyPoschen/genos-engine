@@ -2409,7 +2409,8 @@ impl Gpu {
             get_features(physical, have.as_mut_ptr());
             let mut features = [0u32; 55];
             features[26] = 1;
-            if have[22] != 0 {
+            let bc_textures = have[22] != 0;
+            if bc_textures {
                 features[22] = 1;
             }
             if have[40] != 0 {

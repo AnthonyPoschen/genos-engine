@@ -142,7 +142,3 @@ pub fn height_optical_depth_f32(
 pub fn f32_from_f64(value: f64) -> f32 {
     value as f32
 }
-
-fn narrow(value: f64) -> f32 {
-    f32_from_f64(value)
-}
