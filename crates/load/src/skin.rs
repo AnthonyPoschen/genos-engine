@@ -52,6 +52,11 @@ pub struct Joint {
     /// Quaternion x, y, z, w.
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
+    /// Column-major product of the non-joint nodes between the parent joint and this joint.
+    ///
+    /// Identity when the parent node is the parent joint. A channel replaces the
+    /// rest translation, rotation, and scale. It does not replace this matrix.
+    pub ancestor: [f32; 16],
     /// glTF node this joint came from.
     pub node: usize,
 }
@@ -84,6 +89,8 @@ pub struct Clip {
     pub duration: f32,
     /// Index into [`crate::GltfScene::skins`].
     pub skin: usize,
+    /// Index of the glTF `animations[]` entry. A cooked clip that has no glTF source uses 0.
+    pub animation: usize,
     pub channels: Vec<Channel>,
 }
 
@@ -140,9 +147,10 @@ pub fn joint_index(value: f32) -> Result<u16, LoadError> {
 
 /// Keep four influences per vertex.
 ///
-/// `extra` is `JOINTS_1` / `WEIGHTS_1` when the file has them. More than four
-/// non-zero weights keep the four largest, then those four are divided by
-/// their sum. A zero sum writes weight 1 on joint 0.
+/// `extra` is `JOINTS_1` / `WEIGHTS_1` when the file has them. Every non-zero
+/// weight is a candidate, from either set. More than four non-zero weights
+/// keep the four largest, then those four are divided by their sum. Four or
+/// fewer stay as written. A zero sum writes weight 1 on joint 0.
 ///
 /// # Errors
 ///
@@ -174,25 +182,26 @@ pub fn pack_influences(
         if let (Some(joints), Some(weights)) = (extra_joints, extra_weights) {
             push_set(&mut slots, &mut count, &joints[index], &weights[index])?;
         }
-        let nonzero = (0..count).filter(|&i| slots[i].1 > 0.0).count();
-        let mut order = [0usize; 8];
-        for (slot, item) in order.iter_mut().enumerate() {
-            *item = slot;
+        let mut ranked = [0usize; 8];
+        let mut nonzero = 0usize;
+        for (slot, pair) in slots.iter().enumerate().take(count) {
+            if pair.1 > 0.0 {
+                ranked[nonzero] = slot;
+                nonzero += 1;
+            }
         }
-        let keep = if nonzero > 4 {
+        if nonzero > 4 {
             flags.reduced = true;
-            order[..count]
+            ranked[..nonzero]
                 .sort_by(|&a, &b| slots[b].1.total_cmp(&slots[a].1).then_with(|| a.cmp(&b)));
-            4
-        } else {
-            count.min(4)
-        };
+        }
+        let keep = if nonzero > 4 { 4 } else { nonzero };
         let mut picked = [(0u16, 0.0f32); 4];
         let mut sum = 0.0f32;
         for slot in 0..keep {
-            let (joint, weight) = slots[order[slot]];
-            picked[slot] = (joint, weight.max(0.0));
-            sum += picked[slot].1;
+            let (joint, weight) = slots[ranked[slot]];
+            picked[slot] = (joint, weight);
+            sum += weight;
         }
         if sum <= 0.0 {
             flags.zero_sum = true;
@@ -356,6 +365,87 @@ pub fn sample_clip(
     }
 }
 
+/// Bind-pose model matrix of one joint.
+///
+/// `parent_model * ancestor * local`. The local rest is the joint node's own
+/// TRS. `ancestor` is the non-joint chain and is not part of that TRS.
+/// Returns nothing when a parent index walks off the list or cycles.
+#[must_use]
+pub fn rest_model(joints: &[Joint], index: usize) -> Option<[f32; 16]> {
+    let mut chain = Vec::new();
+    let mut cursor = Some(index);
+    let mut guard = 0usize;
+    while let Some(current) = cursor {
+        if current >= joints.len() || guard > joints.len() {
+            return None;
+        }
+        chain.push(current);
+        let parent = joints[current].parent;
+        cursor = if parent < 0 {
+            None
+        } else {
+            usize::try_from(parent).ok()
+        };
+        guard += 1;
+    }
+    let mut model = IDENTITY_BIND;
+    for joint_index in chain.iter().rev() {
+        let joint = &joints[*joint_index];
+        model = mat_mul(&model, &joint.ancestor);
+        model = mat_mul(
+            &model,
+            &trs_matrix(joint.translation, joint.rotation, joint.scale),
+        );
+    }
+    Some(model)
+}
+
+fn trs_matrix(translation: [f32; 3], rotation: [f32; 4], scale: [f32; 3]) -> [f32; 16] {
+    let length = (rotation[0] * rotation[0]
+        + rotation[1] * rotation[1]
+        + rotation[2] * rotation[2]
+        + rotation[3] * rotation[3])
+        .sqrt();
+    let (qx, qy, qz, qw) = if length > 0.0 {
+        (
+            rotation[0] / length,
+            rotation[1] / length,
+            rotation[2] / length,
+            rotation[3] / length,
+        )
+    } else {
+        (0.0, 0.0, 0.0, 1.0)
+    };
+    [
+        (1.0 - 2.0 * (qy * qy + qz * qz)) * scale[0],
+        (2.0 * (qx * qy + qz * qw)) * scale[0],
+        (2.0 * (qx * qz - qy * qw)) * scale[0],
+        0.0,
+        (2.0 * (qx * qy - qz * qw)) * scale[1],
+        (1.0 - 2.0 * (qx * qx + qz * qz)) * scale[1],
+        (2.0 * (qy * qz + qx * qw)) * scale[1],
+        0.0,
+        (2.0 * (qx * qz + qy * qw)) * scale[2],
+        (2.0 * (qy * qz - qx * qw)) * scale[2],
+        (1.0 - 2.0 * (qx * qx + qy * qy)) * scale[2],
+        0.0,
+        translation[0],
+        translation[1],
+        translation[2],
+        1.0,
+    ]
+}
+
+fn mat_mul(a: &[f32; 16], b: &[f32; 16]) -> [f32; 16] {
+    let mut out = [0.0; 16];
+    for column in 0..4 {
+        for row in 0..4 {
+            out[column * 4 + row] = (0..4).map(|k| a[k * 4 + row] * b[column * 4 + k]).sum();
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
 mod tests {
@@ -414,5 +504,74 @@ mod tests {
         assert!(packed.flags.zero_sum);
         assert_eq!(packed.joints, vec![[0, 0, 0, 0]]);
         assert_eq!(packed.weights, vec![[1.0, 0.0, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn five_equal_weights_renormalize_to_a_quarter() {
+        let primary_j = vec![[0.0, 1.0, 2.0, 3.0]];
+        let primary_w = vec![[0.5, 0.5, 0.5, 0.5]];
+        let extra_j = vec![[4.0, 0.0, 0.0, 0.0]];
+        let extra_w = vec![[0.5, 0.0, 0.0, 0.0]];
+        let packed =
+            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        assert!(packed.flags.reduced);
+        assert_eq!(packed.joints, vec![[0, 1, 2, 3]]);
+        assert_eq!(packed.weights, vec![[0.25, 0.25, 0.25, 0.25]]);
+    }
+
+    #[test]
+    fn a_later_set_is_kept_when_the_first_set_is_empty() {
+        let primary_j = vec![[0.0, 1.0, 2.0, 3.0]];
+        let primary_w = vec![[0.0, 0.0, 0.0, 0.0]];
+        let extra_j = vec![[1.0, 0.0, 0.0, 0.0]];
+        let extra_w = vec![[1.0, 0.0, 0.0, 0.0]];
+        let packed =
+            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        assert!(!packed.flags.zero_sum);
+        assert!(!packed.flags.reduced);
+        assert_eq!(packed.joints, vec![[1, 0, 0, 0]]);
+        assert_eq!(packed.weights, vec![[1.0, 0.0, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn a_split_pair_keeps_both_sets() {
+        let primary_j = vec![[0.0, 0.0, 0.0, 0.0]];
+        let primary_w = vec![[0.4, 0.0, 0.0, 0.0]];
+        let extra_j = vec![[4.0, 0.0, 0.0, 0.0]];
+        let extra_w = vec![[0.6, 0.0, 0.0, 0.0]];
+        let packed =
+            pack_influences(&primary_j, &primary_w, Some(&extra_j), Some(&extra_w)).expect("pack");
+        assert!(!packed.flags.reduced);
+        assert_eq!(packed.joints, vec![[0, 4, 0, 0]]);
+        assert_eq!(packed.weights, vec![[0.4, 0.6, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn the_ancestor_matrix_is_outside_the_local_rest() {
+        let joints = vec![
+            joint_at(-1, [0.0, 0.0, 0.0], IDENTITY_BIND),
+            joint_at(0, [0.0, 1.0, 0.0], translation_y(5.0)),
+        ];
+        let model = rest_model(&joints, 1).expect("model");
+        assert!((model[13] - 6.0).abs() < 1.0e-5);
+    }
+
+    fn joint_at(parent: i32, translation: [f32; 3], ancestor: [f32; 16]) -> Joint {
+        Joint {
+            name: String::new(),
+            parent,
+            inverse_bind: IDENTITY_BIND,
+            translation,
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            ancestor,
+            node: 0,
+        }
+    }
+
+    fn translation_y(y: f32) -> [f32; 16] {
+        let mut matrix = IDENTITY_BIND;
+        matrix[13] = y;
+        matrix
     }
 }
