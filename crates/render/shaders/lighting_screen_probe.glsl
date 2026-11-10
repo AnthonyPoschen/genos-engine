@@ -110,9 +110,15 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
         return max(world.rgb, vec3(0.0));
     }
     vec4 coarse = lighting_coarse_world(pos, n);
-    // A miss is not black light. Mix only a found cell.
+    // The doubled-size hash often misses. The 25 cm lattice is the filled
+    // coarser level maintenance already stored. Filled is a corner with
+    // sets, not a non-zero mean and not a higher count than this pixel.
+    // A miss is not black light.
     if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
-        return max(world.rgb, vec3(0.0));
+        coarse = lighting_sh_compose_lattice(pos, n, false);
+        if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
+            return max(world.rgb, vec3(0.0));
+        }
     }
     return max(mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust), vec3(0.0));
 }
