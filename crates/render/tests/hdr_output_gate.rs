@@ -295,15 +295,14 @@ fn live_metrics() -> Vec<Metric> {
         equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
         equal("passes_high", chain_passes(LightingPreset::High), 11.0),
         equal("passes_ultra", chain_passes_ultra(), 13.0),
-        equal("base_low", chain_base(LightingPreset::Low), 1280.0),
+        equal("base_low", chain_base(LightingPreset::Low), 640.0),
         equal("base_medium", chain_base(LightingPreset::Medium), 1280.0),
         equal("base_high", chain_base(LightingPreset::High), 1280.0),
         equal("base_ultra", chain_base_ultra(), 1280.0),
-        equal("coarse_low", chain_coarse(LightingPreset::Low), 160.0),
+        equal("coarse_low", chain_coarse(LightingPreset::Low), 80.0),
         equal("coarse_medium", chain_coarse(LightingPreset::Medium), 80.0),
         equal("coarse_high", chain_coarse(LightingPreset::High), 40.0),
         equal("coarse_ultra", chain_coarse_ultra(), 20.0),
-        at_most("gpu_bloom_low", gpu_bloom_at(4), GPU_BLOOM_MAX),
         at_most("gpu_bloom_high", gpu_bloom_at(6), GPU_BLOOM_MAX),
         at_most("gpu_bloom_ultra", gpu_bloom_at(7), GPU_BLOOM_MAX),
         at_most("gpu_agx_high", gpu_agx_at(6), GPU_AGX_MAX),
@@ -1151,7 +1150,6 @@ struct Grab {
 
 struct PictureSet {
     base: Grab,
-    low: Grab,
     high: Grab,
     ultra: Grab,
 }
@@ -1171,8 +1169,6 @@ fn grab_at(levels: u32) -> &'static Grab {
         &set.ultra
     } else if levels >= 6 {
         &set.high
-    } else if levels == 4 {
-        &set.low
     } else {
         &set.base
     }
@@ -1181,7 +1177,6 @@ fn grab_at(levels: u32) -> &'static Grab {
 fn capture_pictures() -> PictureSet {
     let fail = PictureSet {
         base: empty_grab(),
-        low: empty_grab(),
         high: empty_grab(),
         ultra: empty_grab(),
     };
@@ -1211,25 +1206,12 @@ fn capture_pictures() -> PictureSet {
             fail
         },
     };
-    let low = match capture_levels(window, renderer, &scene, &camera, 4, false) {
-        Ok(grab) => grab,
-        Err(err) => {
-            eprintln!("hdr gate gpu low: {err}");
-            return PictureSet {
-                base,
-                low: fail_grab(&err),
-                high: fail_grab(&err),
-                ultra: fail_grab(&err),
-            };
-        }
-    };
     let high = match capture_levels(window, renderer, &scene, &camera, 6, false) {
         Ok(grab) => grab,
         Err(err) => {
             eprintln!("hdr gate gpu high: {err}");
             return PictureSet {
                 base,
-                low,
                 high: fail_grab(&err),
                 ultra: fail_grab(&err),
             };
@@ -1241,18 +1223,12 @@ fn capture_pictures() -> PictureSet {
             eprintln!("hdr gate gpu ultra: {err}");
             return PictureSet {
                 base,
-                low,
                 high,
                 ultra: fail_grab(&err),
             };
         }
     };
-    PictureSet {
-        base,
-        low,
-        high,
-        ultra,
-    }
+    PictureSet { base, high, ultra }
 }
 
 fn capture_levels(

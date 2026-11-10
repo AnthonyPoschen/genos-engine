@@ -2505,6 +2505,10 @@ impl Gpu {
         let Some(first) = mips.levels.first() else {
             return Ok(());
         };
+        let modes = crate::hdr_output::bloom_modes(levels);
+        let Some(first_mode) = modes.first().copied() else {
+            return Ok(());
+        };
         self.bloom_dispatch(
             first.width,
             first.height,
@@ -2512,7 +2516,7 @@ impl Gpu {
             height,
             0,
             first.word,
-            0,
+            first_mode,
             0,
         );
         for index in 1..mips.levels.len() {
@@ -2522,11 +2526,22 @@ impl Gpu {
             let Some(dst) = mips.levels.get(index) else {
                 return Ok(());
             };
-            self.bloom_dispatch(dst.width, dst.height, src.width, src.height, src.word, dst.word, 1, 0);
+            let mode = modes.get(index).copied().unwrap_or(1);
+            self.bloom_dispatch(
+                dst.width,
+                dst.height,
+                src.width,
+                src.height,
+                src.word,
+                dst.word,
+                mode,
+                0,
+            );
         }
         let count = mips.levels.len();
         if count > 1 {
             let mut src_index = count - 1;
+            let mut mode_index = count;
             for finer in (0..count - 1).rev() {
                 let Some(src) = mips.levels.get(src_index) else {
                     return Ok(());
@@ -2534,6 +2549,7 @@ impl Gpu {
                 let Some(dst) = mips.levels.get(finer) else {
                     return Ok(());
                 };
+                let mode = modes.get(mode_index).copied().unwrap_or(2);
                 self.bloom_dispatch(
                     dst.width,
                     dst.height,
@@ -2541,10 +2557,11 @@ impl Gpu {
                     src.height,
                     src.word,
                     dst.word,
-                    2,
+                    mode,
                     dst.word,
                 );
                 src_index = finer;
+                mode_index = mode_index.saturating_add(1);
             }
         }
         let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);

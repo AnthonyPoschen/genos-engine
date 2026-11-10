@@ -1,8 +1,10 @@
 #version 450
-// Same-frame bloom pyramid. Karis on the first downsample, the 13-tap on the
-// rest, then the 3x3 tent back up. The chain matches bloom_pyramid: bloom only,
-// not scene + bloom. The finest mip is RGBA16F so the full-resolution tent is
-// two aligned loads. Later mips are RGB16F, two texels in 12 bytes.
+// Same-frame bloom pyramid. Karis on the first downsample. Four levels average
+// four of those samples into a quarter-resolution mip. Every other count is
+// one Karis sample at half resolution, which matches bloom_pyramid. The 13-tap
+// follows, then the 3x3 tent. Bloom only, not scene + bloom. The finest mip is
+// RGBA16F so the full-resolution tent is two aligned loads. Later mips are
+// RGB16F, two texels in 12 bytes.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(push_constant) uniform Push {
@@ -177,6 +179,15 @@ vec3 downsample13(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint d
     return acc;
 }
 
+// Quarter-resolution first step. Four half-resolution Karis samples, averaged.
+vec3 karis4(uint src_w, uint src_h, uvec2 p) {
+    vec3 acc = karis_at(src_w, src_h, p * 2u);
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 0u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(0u, 1u));
+    acc += karis_at(src_w, src_h, p * 2u + uvec2(1u, 1u));
+    return acc * BOX_SCALE;
+}
+
 float tent(int dx, int dy) {
     if (dx == 0 && dy == 0) {
         return TENT_CENTRE;
@@ -204,6 +215,9 @@ vec3 upsample3(uint base, uint src_w, uint src_h, uvec2 p, uint dst_w, uint dst_
 vec3 shade(uvec2 p, uint dst_w, uint dst_h, uint src_w, uint src_h, uint src, uint mode) {
     if (mode == 0u) {
         return karis_at(src_w, src_h, p);
+    }
+    if (mode == 4u) {
+        return karis4(src_w, src_h, p);
     }
     if (mode == 1u) {
         return downsample13(src, src_w, src_h, p, dst_w, dst_h);

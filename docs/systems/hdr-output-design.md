@@ -72,7 +72,7 @@ The lighting work caps are unchanged. Post has its own ceilings in §7. A slow b
 
 Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Potato and Low force SDR output. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Potato, so the grade is the same buffer on every preset. Potato does not run the pyramid or the histogram. Its exposure is fixed.
 
-Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom is half resolution and coarser down the pyramid on every preset. That is the Jimenez pyramid, not a camera-dependent kernel. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
+Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom on Medium and above is half resolution and coarser down the pyramid. Low's four levels start at quarter resolution so that chain stays inside 0.80 ms. That is the Jimenez pyramid, not a camera-dependent kernel. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
 
 ## 4. Alternatives
 
@@ -209,7 +209,7 @@ GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 | Image | Size at 1440p | Notes |
 |---|---|---|
 | Scene-referred | 2560×1440, one image | Not per frame in flight. Compose writes it. The grade reads it. |
-| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | Every count starts at half resolution. High is 1280×720 down to 40×22. Low's four levels stop at 160×90. No full-resolution bloom image. |
+| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | Medium and above start at half resolution. High is 1280×720 down to 40×22. Low's four levels start at quarter resolution, 640×360 down to 80×45. The first Low downsample averages four half-resolution Karis samples. Later taps are the 13-tap and the tent. No full-resolution bloom image. |
 | Exposed | same as the scene, or the swapchain's transient | The display pass can read the scene and the bloom sum and write the swapchain. A stored exposed image is not required for SDR. |
 | Histogram | preset bin count × `uint`, plus two short luma halves | High is 256 bins and 128 still samples. Fixed exposure does not allocate it. The CPU reads the header after the fence. |
 | Exposure state | two floats | Current scale and target scale. CPU owned. |

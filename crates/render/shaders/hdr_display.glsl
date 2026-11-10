@@ -1,6 +1,6 @@
 // Bloom add from the finest stored mip, before exposure. Intensity 0 does not
-// read the chain. `hdr.extra.w` is the base divisor. Every pyramid starts at
-// half resolution, so the divisor is 2. The finest mip starts at texel 0.
+// read the chain. `hdr.extra.w` is the base divisor: 2 is half resolution,
+// 4 is quarter resolution (Low). The finest mip starts at texel 0.
 layout(std430, set = 0, binding = 16) restrict readonly buffer BloomAdd {
     uint words[];
 } bloom_add;

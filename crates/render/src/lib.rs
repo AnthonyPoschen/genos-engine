@@ -70,6 +70,7 @@ pub use hdr_output::{
     scene_read_from_rgba, scene_referred, scrgb_code, scrgb_from_display, step_exposure,
     bytes_to_mib, mib_centi, mib_cents, mib_ceiling_bytes, align_device_bytes, device_size_matches,
     post_chain, post_device_bytes, post_encode_resident, post_locks_sdr, bloom_divisor,
+    bloom_first_mode, bloom_modes,
     bloom_level_count, bloom_passes, PostBuffer, PostChain, PostDevice,
     agx_lut_linear, agx_lut_texel, AGX_LOG_MAX, AGX_LOG_MIN, AGX_LUT_N,
     still_pop_share, surface_choice, swapchain_format_code, swapchain_nits, swapchain_pair,

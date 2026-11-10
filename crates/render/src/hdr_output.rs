@@ -1420,10 +1420,45 @@ pub fn mib_ceiling_bytes(mib: f64) -> f64 {
     mib * 1024.0 * 1024.0
 }
 
-/// Base divisor of the bloom pyramid. `0` stores nothing. Every other count starts at half resolution.
+/// Base divisor of the bloom pyramid. `0` stores nothing. `4` is the Low
+/// pyramid (quarter resolution). Every other level count starts at half resolution.
 #[must_use]
 pub fn bloom_divisor(levels: u32) -> u32 {
-    if levels == 0 { 0 } else { 2 }
+    match levels {
+        0 => 0,
+        4 => 4,
+        _ => 2,
+    }
+}
+
+/// First downsample. Four levels average four half-resolution Karis samples
+/// into a quarter-resolution mip (mode 4). Every other count is one Karis
+/// sample into a half-resolution mip (mode 0).
+#[must_use]
+pub fn bloom_first_mode(levels: u32) -> u32 {
+    if bloom_divisor(levels) == 4 {
+        4
+    } else {
+        0
+    }
+}
+
+/// Downsample and upsample modes, in dispatch order.
+///
+/// Length is [`bloom_passes`]. The first entry is [`bloom_first_mode`]. Each
+/// later downsample is the 13-tap (mode 1). Each upsample is the 3×3 tent (mode 2).
+#[must_use]
+pub fn bloom_modes(levels: u32) -> Vec<u32> {
+    let levels = levels.min(8);
+    if levels == 0 {
+        return Vec::new();
+    }
+    let later = usize::try_from(levels.saturating_sub(1)).unwrap_or(0);
+    let mut modes = Vec::with_capacity(later.saturating_mul(2).saturating_add(1));
+    modes.push(bloom_first_mode(levels));
+    modes.extend(std::iter::repeat_n(1, later));
+    modes.extend(std::iter::repeat_n(2, later));
+    modes
 }
 
 /// Levels the GPU actually builds. Legacy bytes, bloom off, or intensity 0 store nothing.
@@ -1475,7 +1510,11 @@ fn half_dim(value: u32) -> u32 {
     (value / 2).max(1)
 }
 
-/// Mip table. Every level count starts at half resolution.
+fn quarter_dim(value: u32) -> u32 {
+    (value / 4).max(1)
+}
+
+/// Mip table. Level 4 (Low) starts at quarter resolution. Every other count starts at half.
 #[must_use]
 pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
     let levels = levels.min(8);
@@ -1486,8 +1525,16 @@ pub fn bloom_mips(width: u32, height: u32, levels: u32) -> BloomMips {
             bytes: 0,
         };
     }
-    let mut level_w = half_dim(width);
-    let mut level_h = half_dim(height);
+    let mut level_w = if bloom_divisor(levels) == 4 {
+        quarter_dim(width)
+    } else {
+        half_dim(width)
+    };
+    let mut level_h = if bloom_divisor(levels) == 4 {
+        quarter_dim(height)
+    } else {
+        half_dim(height)
+    };
     let mut stored = Vec::new();
     let mut cursor = 0u32;
     let mut bytes = 0u64;
@@ -2019,7 +2066,7 @@ mod tests {
         let ultra = genos_scene::HdrSettings::ultra();
         let cases = [
             (&potato, 28.13, 29_491_248_u64, 0, 0, 0),
-            (&low, 37.46, 38_679_248, 7, 1280, 160),
+            (&low, 37.46, 31_788_848, 7, 640, 80),
             (&medium, 37.49, 38_701_616, 9, 1280, 80),
             (&high, 37.50, 38_708_432, 11, 1280, 40),
             (&ultra, 37.50, 38_709_752, 13, 1280, 20),
@@ -2137,6 +2184,44 @@ mod tests {
             post_device_bytes(&chain, reported(16, chain.bloom_bytes + 8, 8)),
             None
         );
+    }
+
+    /// Low's quarter-resolution chain. A half-resolution first mip, or a Karis
+    /// mode of 0, is the pyramid that missed 0.80 ms.
+    #[test]
+    fn low_bloom_stays_on_the_quarter_resolution_chain() {
+        let low = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Low);
+        let chain = post_chain(2560, 1440, &low, false);
+        assert_eq!(low.bloom_levels, 4);
+        assert_eq!(chain.divisor, 4);
+        assert_eq!(chain.passes, 7);
+        assert_eq!(chain.base_w, 640);
+        assert_eq!(chain.base_h, 360);
+        assert_eq!(chain.coarse_w, 80);
+        assert_eq!(chain.coarse_h, 45);
+        assert_eq!(bloom_modes(4), vec![4, 1, 1, 1, 2, 2, 2]);
+        assert_eq!(bloom_modes(4).len(), usize::try_from(chain.passes).unwrap_or(0));
+        let mips = bloom_mips(2560, 1440, 4);
+        assert_eq!(mips.levels.len(), 4);
+        assert_eq!(
+            mips.levels.iter().map(|mip| mip.width).collect::<Vec<_>>(),
+            vec![640, 320, 160, 80]
+        );
+        assert!(mips.levels.first().is_some_and(|mip| mip.rgba));
+        for levels in [5_u32, 6, 7] {
+            assert_eq!(bloom_divisor(levels), 2);
+            assert_eq!(bloom_first_mode(levels), 0);
+            let modes = bloom_modes(levels);
+            assert_eq!(modes.first().copied(), Some(0));
+            assert_eq!(modes.len(), usize::try_from(bloom_passes(levels)).unwrap_or(0));
+            assert_eq!(
+                bloom_mips(2560, 1440, levels)
+                    .levels
+                    .first()
+                    .map(|mip| mip.width),
+                Some(1280)
+            );
+        }
     }
 
     #[test]
