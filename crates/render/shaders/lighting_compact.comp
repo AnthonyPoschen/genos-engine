@@ -20,12 +20,20 @@ void main() {
     if (lighting_dense()) {
         // S70A: the args pass (one group, after the counts are in).
         if (slot == 0u) {
+            // diag[11] / diag[12] are this round's near on-screen fine texels
+            // and how many of those are at the set cap. Publish them, then
+            // clear, so the next compact starts at zero. The trace reads
+            // diag[56] and diag[57].
+            gstats.diag[56] = gstats.diag[11];
+            gstats.diag[57] = gstats.diag[12];
+            gstats.diag[11] = 0u;
+            gstats.diag[12] = 0u;
             if (lighting_coverage_first()) {
                 uint wsum = gstats.diag[8];
                 uint tw = gstats.diag[9];
                 uint under = gstats.diag[10];
                 float mean = wsum > 0u ? float(tw) / float(wsum) : 0.0;
-                ckeys.key[LIGHTING_COVERAGE_HOLD_AT] = (mean >= 2.0 * LIGHTING_DN_MIN_SETS && under > 0u) ? 1u : 0u;
+                ckeys.key[LIGHTING_COVERAGE_HOLD_AT] = (mean >= lighting_coverage_bar() && under > 0u) ? 1u : 0u;
                 gstats.diag[8] = 0u;
                 gstats.diag[9] = 0u;
                 gstats.diag[10] = 0u;
@@ -125,13 +133,21 @@ void main() {
         // coverage_first: near-weighted set mean of on-screen fine texels, and
         // how many of them are still under the 8-set minimum. The args pass
         // reads this and the next round's hold bit. Off, these words stay put.
-        if (lighting_coverage_first() && !wrc && on_screen) {
+        if (!wrc && on_screen) {
             float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
-            float wt = 1.0 / (1.0 + d);
-            atomicAdd(gstats.diag[8], uint(wt * 1000.0 + 0.5));
-            atomicAdd(gstats.diag[9], uint(t * wt * 1000.0 + 0.5));
-            if (t < LIGHTING_DN_MIN_SETS - 0.5) {
-                atomicAdd(gstats.diag[10], 1u);
+            if (d < LIGHTING_WRC_NEAR) {
+                atomicAdd(gstats.diag[11], 1u);
+                if (t >= lighting_sc_cap(slot) - 0.5) {
+                    atomicAdd(gstats.diag[12], 1u);
+                }
+            }
+            if (lighting_coverage_first()) {
+                float wt = 1.0 / (1.0 + d);
+                atomicAdd(gstats.diag[8], uint(wt * 1000.0 + 0.5));
+                atomicAdd(gstats.diag[9], uint(t * wt * 1000.0 + 0.5));
+                if (t < lighting_coverage_sets() - 0.5) {
+                    atomicAdd(gstats.diag[10], 1u);
+                }
             }
         }
         // S62B: the burst ends at what the cell can hold now (under changing
@@ -161,11 +177,11 @@ void main() {
             if (lighting_coverage_first() && !wrc) {
                 // Under the minimum: one quarter, not a whole 64-ray set.
                 // At the minimum while coverage is short: yield this round.
-                if (lighting_coverage_hold() && t >= LIGHTING_DN_MIN_SETS - 0.5 && !near) {
+                if (lighting_coverage_hold() && t >= lighting_coverage_sets() - 0.5 && !near) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
-                if (t < LIGHTING_DN_MIN_SETS - 0.5) {
+                if (t < lighting_coverage_sets() - 0.5) {
                     ms = 1u;
                 }
             }
@@ -301,6 +317,19 @@ void main() {
                 }
                 return;
             }
+            // At the set cap the texel is full. Residual noise does not
+            // re-admit it: the cap is the last set, and a full texel is not
+            // freed or restarted by reaching it. A nearby change, a moved
+            // lamp, or light that is still changing falls through and relights.
+            bool cap_mover;
+            if (!wrc && t >= lighting_sc_cap(slot) - 0.5 && !near
+                && lighting_sc_light_quiet()
+                && !lighting_sc_stale(slot)
+                && !lighting_sc_lamp_touched(slot)
+                && !lighting_sc_local_change(slot, cap_mover)) {
+                atomicAdd(gstats.waiting, 1u);
+                return;
+            }
             // S74A A-SVGF (lighting_cache.glsl): the gradient checks alone decide
             // the rays of a resolved texel; lambda sets the rate of a changing one.
             if (asvgf) {
@@ -387,7 +416,7 @@ void main() {
                 // S72K: a smooth bar across pages (lighting_sc_page_bar); edge
                 // (promoted) texels are held per texel only, not to the pages.
                 float pm = lighting_sc_promoted(slot) ? -1.0 : lighting_sc_page_bar(slot);
-                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < LIGHTING_SC_FULL_SETS) {
+                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < lighting_sc_cap(slot) - 0.5) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
@@ -396,7 +425,7 @@ void main() {
             // a texel sits out one round in four, on its own phase (hash), so
             // the texels of a page commit on different rounds and their counts
             // spread; a page never steps as one.
-            if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < LIGHTING_SC_FULL_SETS - 0.5
+            if (!wrc && lighting_sc_decorrelate() && !lighting_sc_svgf() && !near && t >= LIGHTING_DN_MIN_SETS - 0.5 && t < lighting_sc_cap(slot) - 0.5
                 && ((lighting_hash(lighting_sc_id(slot) ^ 0x5bd1e995u) + lighting_round()) & 3u) == 0u) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
@@ -469,25 +498,15 @@ void main() {
                 w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
             }
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
-            // cap_fill: at the ceiling, maintain. One trickle quarter, not a
-            // new whole set. Default off, so this return does not run.
-            if (lighting_cap_fill() && !wrc && t >= lighting_sc_cap(slot) - 0.5 && !near) {
-                uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
-                if (at < LIGHTING_SC_TRICKLE) {
-                    ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
-                    atomicAdd(gstats.pad2, 1u);
-                }
-                return;
-            }
-            // coverage_first: texels under 8 go on the young list, one quarter
+            // coverage_first: texels under the coverage minimum go on the young list, one quarter
             // each. Texels already at 8 wait while any on-screen texel is short.
-            if (lighting_coverage_first() && !wrc && t < LIGHTING_DN_MIN_SETS - 0.5) {
+            if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - 0.5) {
                 atomicAdd(gstats.due, 1u);
                 uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], 1u);
                 ckeys.key[2u * LIGHTING_CACHE_SLOTS - at] = slot;
                 return;
             }
-            if (lighting_coverage_hold() && !wrc && t >= LIGHTING_DN_MIN_SETS - 0.5 && !near) {
+            if (lighting_coverage_hold() && !wrc && t >= lighting_coverage_sets() - 0.5 && !near) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -523,20 +542,12 @@ void main() {
             }
             return;
         }
-        if (lighting_cap_fill() && !wrc && t >= lighting_sc_cap(slot) - 0.5 && !near) {
-            uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
-            if (at < LIGHTING_SC_TRICKLE) {
-                ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
-                atomicAdd(gstats.pad2, 1u);
-            }
-            return;
-        }
         bool young = young_now;
         uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
-        if (lighting_coverage_first() && !wrc && t < LIGHTING_DN_MIN_SETS - 0.5) {
+        if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - 0.5) {
             m = 1u;
         }
-        if (lighting_coverage_hold() && !wrc && !near && t >= LIGHTING_DN_MIN_SETS - 0.5) {
+        if (lighting_coverage_hold() && !wrc && !near && t >= lighting_coverage_sets() - 0.5) {
             atomicAdd(gstats.waiting, 1u);
             return;
         }

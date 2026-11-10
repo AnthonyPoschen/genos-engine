@@ -151,7 +151,7 @@ fn readonly_fixture_head_matches_the_folded_shader_constant() {
     // head 3.w bits 0-8. If this number moves, change that macro in the same edit.
     let head = lighting_change_head(&settings(true, false));
     let sc_flags = head.flags | ((head.head_hi & 511) << 23);
-    assert_eq!(head.mode_cap, 3 * 1000 + 64, "high, cap 64");
+    assert_eq!(head.mode_cap, 3 * 1000 + 8, "high, cap 8");
     assert_eq!((head.head_hi >> 12) & 31, 0, "no isolate toggles");
     assert_ne!(head.head_hi & DETAIL_BIT, 0, "detail on");
     assert_eq!(sc_flags, 14_395_658);

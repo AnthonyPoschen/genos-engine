@@ -241,11 +241,14 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
   --lighting-fill on|off    unlit probes read lit neighbours (GENOS_LIGHTING_FILL)
   --lighting-young-only on|off  quiet rounds relight young patches only (GENOS_LIGHTING_YOUNG_ONLY)
-  --lighting-world-cap N    world cell / texel average frames, 0 mode default (GENOS_LIGHTING_WORLD_CAP)
+  --lighting-world-cap N    world cell frames or texel ray sets, 0 mode default
+                            (32 for world cells, 8 for surface-cache texels; GENOS_LIGHTING_WORLD_CAP)
   --lighting-coverage-first on|off
-                            schedule under-minimum texels ahead of refinement (GENOS_LIGHTING_COVERAGE_FIRST, default off)
+                            schedule under-minimum texels ahead of refinement. The minimum
+                            is min(8, the set cap) (GENOS_LIGHTING_COVERAGE_FIRST, default off)
   --lighting-cap-fill on|off
-                            settle at world_cap and maintain, no 8-set perceptual stop (GENOS_LIGHTING_CAP_FILL, default off)
+                            skip the 8-set perceptual stop and fill to world_cap.
+                            A texel at the cap stops either way (GENOS_LIGHTING_CAP_FILL, default off)
   --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
   --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
   --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,

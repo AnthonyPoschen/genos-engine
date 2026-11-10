@@ -630,17 +630,20 @@ pub struct LightingExperimentSettings {
     pub young_only: bool,
     /// Key `world_cap`. Frames a world cell (mode 2) or ray sets a surface
     /// cache texel (mode 3) averages, 1 to 999. `0` keeps the mode's default
-    /// (32 for mode 2, 64 for mode 3).
+    /// (32 for mode 2, 8 for mode 3). A texel at that cap is full and is not
+    /// relit while the light is quiet.
     pub world_cap: u32,
     /// Key `coverage_first`. Default off. Once the near-camera-weighted mean
-    /// set count of on-screen fine texels reaches twice `LIGHTING_DN_MIN_SETS`,
+    /// set count of on-screen fine texels reaches twice the coverage minimum,
     /// texels under that minimum are scheduled ahead of texels already there,
     /// and a texel under the minimum takes one 16-ray quarter per round.
+    /// The minimum is `min(8, world cap)`, so it never asks for more sets
+    /// than the cap. At High's cap of 8 the hold mean is the cap.
     pub coverage_first: bool,
-    /// Key `cap_fill`. Default off. An explicit `world_cap` (and the mode
-    /// default when this is on with `world_cap` 0) is the settle point: the
-    /// 8-set perceptual stop does not fire, and a texel at the cap is
-    /// maintained instead of taking a new whole set every round.
+    /// Key `cap_fill`. Default off. Turns off the 8-set perceptual stop so
+    /// an explicit `world_cap` (or the mode default when this is on with
+    /// `world_cap` 0) is the only early settle. A texel at the cap is full
+    /// either way: it is not kept on the trickle list.
     pub cap_fill: bool,
     /// Key `sc_settle`. Surface cache: frames still before the debug tools
     /// call the picture settled. `0` uses the change counter.
