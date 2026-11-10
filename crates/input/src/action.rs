@@ -366,7 +366,7 @@ impl ActionMap {
                 clamp_axis(out)
             }
         };
-        add_gesture(&mut out, input, action.gesture);
+        add_gesture(&mut out, input, action.gesture, action.sensitivity);
         clamp_axis(out)
     }
 
@@ -568,7 +568,12 @@ fn write_gesture_field(out: &mut String, gesture: Option<GestureKind>) {
     }
 }
 
-fn add_gesture(out: &mut Axis2d, input: &InputSystem, gesture: Option<GestureKind>) {
+fn add_gesture(
+    out: &mut Axis2d,
+    input: &InputSystem,
+    gesture: Option<GestureKind>,
+    sensitivity: f32,
+) {
     match gesture {
         Some(GestureKind::Swipe) => {
             for item in input.gestures() {
@@ -581,7 +586,7 @@ fn add_gesture(out: &mut Axis2d, input: &InputSystem, gesture: Option<GestureKin
         Some(GestureKind::Pinch) => {
             for item in input.gestures() {
                 if let Gesture::Pinch { scale } = *item {
-                    out.y += (scale - 1.0).clamp(-1.0, 1.0);
+                    out.y += (scale - 1.0).clamp(-1.0, 1.0) * sensitivity;
                 }
             }
         }
