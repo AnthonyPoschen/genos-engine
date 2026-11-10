@@ -294,9 +294,15 @@ fn the_sim_dispatch_is_wider_than_one_invocation() {
     let (width, height, mut life) = open();
     let aspect = width as f32 / height.max(1) as f32;
     let camera = Camera::new(0.0, 2.0, 0.0);
-    let mut settings = emitter(1024, 32);
-    settings.rate = 32.0 / DT;
+    // 96 fills workgroup 0 and 32 slots of workgroup 1. A later group's
+    // block exclusive is the earlier group's count, and a slot after the
+    // first of that group has a non-zero local exclusive. Life is two steps,
+    // so the third frame retires both groups in one dead-list scan.
+    let mut settings = emitter(1024, 96);
+    settings.rate = 1.0e6;
+    settings.life = 2.0 * DT;
     let mut cpu = CpuParticles::new();
+    let mut saw_later_live = false;
     for _ in 0..3 {
         draw(&mut life, &world(settings.clone()), &camera);
         step_cpu(&mut cpu, &settings, aspect, &camera, 0, 0, Vec::new());
@@ -307,8 +313,18 @@ fn the_sim_dispatch_is_wider_than_one_invocation() {
             "gpu drifted {peak} m from the f64 mirror"
         );
         assert_eq!(life.device.particle_stats().alive, cpu.alive());
+        if cpu.alive() > 65 {
+            saw_later_live = true;
+        }
     }
-    assert!(cpu.alive() > 1, "the burst never spawned");
+    assert!(
+        saw_later_live,
+        "no live slot past the first workgroup"
+    );
+    assert!(
+        cpu.died() > 65,
+        "no death in a later workgroup for the block exclusive add"
+    );
     let (size, groups) = life.device.particle_sim_launch().expect("launch");
     assert!(size > 1, "sim workgroup was a single thread");
     assert!(groups > 1, "sim dispatch was a single group");

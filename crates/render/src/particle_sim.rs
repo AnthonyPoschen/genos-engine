@@ -2,11 +2,12 @@
 //!
 //! Positions accumulate in f64. The shader uses the same xorshift, the same
 //! spawn order, and f32 arithmetic. A GPU position may differ by at most 1e-3 m.
-//! One invocation walks every slot, so the alive list stays in slot order.
+//! The GPU runs the walk in parallel. This mirror keeps the serial slot order
+//! that the GPU matches.
 //!
 //! Haar and Aaltonen (SIGGRAPH 2015) update a persistent buffer from many
-//! threads. This stage keeps that buffer and the dead ring, and walks them
-//! serially so this mirror and the shader agree.
+//! threads. This stage keeps that buffer and the dead ring. The mirror stays
+//! serial so its slot order is the order the parallel scan has to reproduce.
 
 use genos_scene::{ParticleSettings, DEFAULT_SEED};
 
