@@ -1,0 +1,399 @@
+#version 450
+// Stage-1 integrate and compact. Emit is particles_emit.comp, so this shader
+// does not carry the xorshift jump.
+//
+// Integrate, the dead-list scan, and the compact each dispatch one thread per
+// slot (workgroup 64). Block sums are scanned in workgroups of 64, then those
+// totals are scanned the same way. The exclusive prefix keeps the dead-ring
+// order and the compact order identical to crates/render/src/particle_sim.rs.
+layout(local_size_x = 64) in;
+
+struct Slot {
+    vec4 position_age;
+    vec4 velocity_life;
+};
+
+struct Compact {
+    vec4 position_age;
+    vec4 velocity_life;
+    vec4 albedo_fade;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Params {
+    vec4 origin_rate;
+    vec4 motion;
+    vec4 albedo_dt;
+    uvec4 seed_budget_count_flags;
+    uvec4 generation_depth;
+    vec4 soft_pad;
+    mat4 view_proj;
+} params;
+
+layout(std430, set = 0, binding = 1) buffer State {
+    uint words[];
+} state;
+
+layout(std430, set = 0, binding = 2) buffer SlotBuf {
+    Slot slots[];
+} slots;
+
+layout(std430, set = 0, binding = 3) buffer DeadBuf {
+    uint indices[];
+} dead;
+
+layout(std430, set = 0, binding = 4) buffer CompactBuf {
+    Compact items[];
+} compact;
+
+layout(std430, set = 0, binding = 5) buffer Indirect {
+    uint vertex_count;
+    uint instance_count;
+    uint first_vertex;
+    uint first_instance;
+} indirect;
+
+layout(std430, set = 0, binding = 6) readonly buffer DepthBuf {
+    float samples[];
+} depth_buf;
+
+layout(set = 0, binding = 7) uniform sampler2D depth_image;
+
+// flags[budget] | prefix[budget] | block sum[groups] | block exclusive[groups]
+// | level-1 sum | level-1 exclusive | level-2 sum | level-2 exclusive
+layout(std430, set = 0, binding = 8) buffer Scan {
+    uint words[];
+} scan;
+
+layout(push_constant) uniform SimPush {
+    uint mode;
+    uint groups;
+    uint scan_count;
+    uint src_base;
+    uint dst_base;
+    uint sum_base;
+    uint parent_base;
+    uint scan_flags;
+} sim_push;
+
+const uint MODE_INIT = 0u;
+const uint MODE_INIT_HEADER = 9u;
+const uint MODE_INTEGRATE = 1u;
+const uint MODE_REDUCE_FLAGS = 2u;
+const uint MODE_SCAN_LEVEL = 3u;
+const uint MODE_SCAN_ADD = 12u;
+const uint SCAN_HEADER = 1u;
+const uint SCAN_RECORD = 2u;
+const uint SCAN_INDIRECT = 4u;
+const uint MODE_APPLY_DEAD = 4u;
+const uint MODE_REDUCE_ALIVE = 7u;
+const uint MODE_SCATTER = 8u;
+
+const uint FREEZE = 1u;
+const uint SKIP_DEAD = 2u;
+const uint SKIP_INDIRECT = 4u;
+const uint DEPTH = 8u;
+const uint DEPTH_IMAGE = 16u;
+const float HALF = 0.5;
+
+shared uint scratch[64];
+
+float depth_fade(vec3 position, bool image) {
+    uint depth_w = params.generation_depth.y;
+    uint depth_h = params.generation_depth.z;
+    if (!image && (depth_w == 0u || depth_h == 0u)) {
+        return 1.0;
+    }
+    vec4 clip = params.view_proj * vec4(position, 1.0);
+    if (abs(clip.w) < 1e-12) {
+        return 1.0;
+    }
+    vec3 ndc = clip.xyz / clip.w;
+    vec2 uv = ndc.xy * HALF + HALF;
+    if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) {
+        return 1.0;
+    }
+    float sample_z;
+    if (image) {
+        ivec2 size = textureSize(depth_image, 0);
+        ivec2 coord = ivec2(floor(uv * vec2(size)));
+        coord = clamp(coord, ivec2(0), size - ivec2(1));
+        sample_z = texelFetch(depth_image, coord, 0).r;
+    } else {
+        uint x = min(uint(floor(uv.x * float(depth_w))), depth_w - 1u);
+        uint y = min(uint(floor(uv.y * float(depth_h))), depth_h - 1u);
+        sample_z = depth_buf.samples[y * depth_w + x];
+    }
+    float delta = sample_z - ndc.z;
+    if (delta < 0.0) {
+        return -1.0;
+    }
+    float band = params.soft_pad.x > 0.0 ? params.soft_pad.x : 1e-4;
+    return clamp(delta / band, 0.0, 1.0);
+}
+
+uint budget_of() {
+    return params.seed_budget_count_flags.y;
+}
+
+uint flag_at(uint budget, uint index) {
+    return index;
+}
+
+uint prefix_at(uint budget, uint index) {
+    return budget + index;
+}
+
+uint sum_at(uint budget, uint index) {
+    return budget * 2u + index;
+}
+
+uint excl_at(uint budget, uint group_count, uint index) {
+    return budget * 2u + group_count + index;
+}
+
+void reduce(bool alive) {
+    uint budget = budget_of();
+    uint id = gl_GlobalInvocationID.x;
+    uint local = gl_LocalInvocationID.x;
+    uint pred = 0u;
+    if (id < budget) {
+        if (alive) {
+            pred = slots.slots[id].velocity_life.w > 0.0 ? 1u : 0u;
+        } else {
+            pred = scan.words[flag_at(budget, id)];
+        }
+    }
+    scratch[local] = pred;
+    memoryBarrierShared();
+    barrier();
+    for (uint offset = 1u; offset < 64u; offset <<= 1u) {
+        uint add = 0u;
+        if (local >= offset) {
+            add = scratch[local - offset];
+        }
+        memoryBarrierShared();
+        barrier();
+        if (local >= offset) {
+            scratch[local] += add;
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+    if (id < budget) {
+        scan.words[prefix_at(budget, id)] = scratch[local] - pred;
+    }
+    if (local == 63u) {
+        scan.words[sum_at(budget, gl_WorkGroupID.x)] = scratch[63];
+    }
+    if (id == 0u) {
+        state.words[14] = gl_WorkGroupSize.x;
+        state.words[15] = gl_NumWorkGroups.x;
+    }
+}
+
+// Exclusive prefix of `scan_count` values. Every thread in the workgroup
+// reaches both barriers. Lane 63 holds the group total, including padding
+// zeros past `scan_count`.
+void scan_level() {
+    uint count = sim_push.scan_count;
+    uint id = gl_GlobalInvocationID.x;
+    uint local = gl_LocalInvocationID.x;
+    uint pred = 0u;
+    if (id < count) {
+        pred = scan.words[sim_push.src_base + id];
+    }
+    scratch[local] = pred;
+    memoryBarrierShared();
+    barrier();
+    for (uint offset = 1u; offset < 64u; offset <<= 1u) {
+        uint add = 0u;
+        if (local >= offset) {
+            add = scratch[local - offset];
+        }
+        memoryBarrierShared();
+        barrier();
+        if (local >= offset) {
+            scratch[local] += add;
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+    if (id < count) {
+        scan.words[sim_push.dst_base + id] = scratch[local] - pred;
+    }
+    if (local == 63u && sim_push.sum_base != 0xffffffffu) {
+        scan.words[sim_push.sum_base + gl_WorkGroupID.x] = scratch[63];
+    }
+    if (local == 63u && (sim_push.scan_flags & SCAN_HEADER) != 0u) {
+        state.words[10] = scratch[63];
+        if ((sim_push.scan_flags & SCAN_INDIRECT) != 0u) {
+            uint drawn = scratch[63];
+            uint budget = budget_of();
+            if (drawn > budget) {
+                drawn = budget;
+            }
+            indirect.vertex_count = 6u;
+            indirect.instance_count = (params.seed_budget_count_flags.w & SKIP_INDIRECT) != 0u ? 0u : drawn;
+            indirect.first_vertex = 0u;
+            indirect.first_instance = 0u;
+        }
+    }
+    if (id == 0u && (sim_push.scan_flags & SCAN_HEADER) != 0u) {
+        state.words[11] = state.words[2];
+        state.words[12] = state.words[3];
+    }
+    if (id == 0u && (sim_push.scan_flags & SCAN_RECORD) != 0u) {
+        state.words[16] = gl_WorkGroupSize.x;
+        state.words[17] = gl_NumWorkGroups.x;
+    }
+}
+
+void scan_add() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= sim_push.scan_count) {
+        return;
+    }
+    scan.words[sim_push.dst_base + id] += scan.words[sim_push.parent_base + id / 64u];
+}
+
+void main() {
+    uint seed = params.seed_budget_count_flags.x;
+    uint budget = budget_of();
+    uint flags = params.seed_budget_count_flags.w;
+    uint generation = params.generation_depth.x;
+    uint id = gl_GlobalInvocationID.x;
+    uint mode = sim_push.mode;
+    uint group_count = sim_push.groups;
+    if (budget == 0u) {
+        if (id == 0u) {
+            indirect.vertex_count = 6u;
+            indirect.instance_count = 0u;
+            indirect.first_vertex = 0u;
+            indirect.first_instance = 0u;
+        }
+        return;
+    }
+    bool depth_on = (flags & DEPTH) != 0u;
+    bool depth_image_on = (flags & DEPTH_IMAGE) != 0u;
+    bool skip_dead = (flags & SKIP_DEAD) != 0u;
+    float dt = params.albedo_dt.w;
+    bool moving = !isnan(dt) && !isinf(dt) && dt > 0.0 && (flags & FREEZE) == 0u;
+
+    if (mode == MODE_INIT) {
+        bool need = state.words[9] == 0u || state.words[0] != generation;
+        if (need && id < budget) {
+            dead.indices[id] = id;
+            slots.slots[id].velocity_life.w = 0.0;
+        }
+        return;
+    }
+    if (mode == MODE_INIT_HEADER) {
+        if (id != 0u) {
+            return;
+        }
+        bool need = state.words[9] == 0u || state.words[0] != generation;
+        if (!need) {
+            return;
+        }
+        state.words[0] = generation;
+        state.words[1] = seed;
+        state.words[2] = 0u;
+        state.words[3] = budget;
+        state.words[4] = 0u;
+        state.words[5] = 0u;
+        state.words[6] = 0u;
+        state.words[7] = 0u;
+        state.words[8] = floatBitsToUint(0.0);
+        state.words[9] = 1u;
+        return;
+    }
+    if (mode == MODE_INTEGRATE) {
+        if (id == 0u) {
+            state.words[7] = 0u;
+        }
+        if (id >= budget) {
+            return;
+        }
+        scan.words[flag_at(budget, id)] = 0u;
+        if (!moving) {
+            return;
+        }
+        float life = slots.slots[id].velocity_life.w;
+        if (life <= 0.0) {
+            return;
+        }
+        float age = slots.slots[id].position_age.w + dt;
+        vec3 position = slots.slots[id].position_age.xyz + slots.slots[id].velocity_life.xyz * dt;
+        slots.slots[id].position_age = vec4(position, age);
+        float fade = depth_fade(position, depth_image_on);
+        if (age >= life || (depth_on && fade < 0.0)) {
+            slots.slots[id].velocity_life.w = 0.0;
+            scan.words[flag_at(budget, id)] = 1u;
+        }
+        return;
+    }
+    if (mode == MODE_REDUCE_FLAGS) {
+        reduce(false);
+        return;
+    }
+    if (mode == MODE_REDUCE_ALIVE) {
+        reduce(true);
+        return;
+    }
+    if (mode == MODE_SCAN_LEVEL) {
+        scan_level();
+        return;
+    }
+    if (mode == MODE_SCAN_ADD) {
+        scan_add();
+        return;
+    }
+    if (mode == MODE_APPLY_DEAD) {
+        if (id < budget && scan.words[flag_at(budget, id)] == 1u && !skip_dead) {
+            uint local = gl_LocalInvocationID.x;
+            uint group = gl_WorkGroupID.x;
+            uint place = scan.words[excl_at(budget, group_count, group)]
+                + scan.words[prefix_at(budget, id)];
+            uint tail = (state.words[11] + state.words[12] + place) % budget;
+            dead.indices[tail] = id;
+        }
+        if (id == 0u) {
+            uint total = state.words[10];
+            state.words[4] -= total;
+            state.words[6] += total;
+            if (!skip_dead) {
+                state.words[3] += total;
+            }
+        }
+        return;
+    }
+    if (mode == MODE_SCATTER) {
+        if (id < budget) {
+            float life = slots.slots[id].velocity_life.w;
+            if (life > 0.0) {
+                uint group = gl_WorkGroupID.x;
+                uint place = scan.words[excl_at(budget, group_count, group)]
+                    + scan.words[prefix_at(budget, id)];
+                vec3 position = slots.slots[id].position_age.xyz;
+                float fade = depth_fade(position, depth_image_on);
+                if (fade < 0.0) {
+                    fade = 0.0;
+                }
+                compact.items[place].position_age = slots.slots[id].position_age;
+                compact.items[place].velocity_life = slots.slots[id].velocity_life;
+                compact.items[place].albedo_fade = vec4(params.albedo_dt.xyz, fade);
+            }
+        }
+        if (id == 0u) {
+            uint drawn = state.words[10];
+            if (drawn > budget) {
+                drawn = budget;
+            }
+            state.words[4] = drawn;
+            indirect.vertex_count = 6u;
+            indirect.instance_count = (flags & SKIP_INDIRECT) != 0u ? 0u : drawn;
+            indirect.first_vertex = 0u;
+            indirect.first_instance = 0u;
+        }
+    }
+}

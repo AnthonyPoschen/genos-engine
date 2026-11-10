@@ -578,8 +578,8 @@ fn add_gesture(
         Some(GestureKind::Swipe) => {
             for item in input.gestures() {
                 if let Gesture::Swipe { x, y, .. } = *item {
-                    out.x += x * sensitivity;
-                    out.y += y * sensitivity;
+                    out.x += x;
+                    out.y += y;
                 }
             }
         }

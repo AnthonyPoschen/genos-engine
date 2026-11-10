@@ -15,6 +15,7 @@ use genos_debug::png;
 use genos_render::{Renderer, World};
 use genos_scene::{
     Camera, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light, MenuSettings,
+    ParticleSettings,
     ReflectionSettings, Scene, Vec3,
 };
 use genos_ui::FpsOverlay;
@@ -47,6 +48,7 @@ fn room() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }

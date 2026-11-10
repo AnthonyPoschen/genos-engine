@@ -22,7 +22,9 @@ The GPU pass is one compute dispatch on the renderer's Vulkan device. It reads t
 
 The crate is `crates/audio`, package `genos-audio`.
 
-- `mix` is in `src/mix.rs`. Doppler, balance, distance, and transmission are in `src/space.rs`.
+- `mix` and `mix_into` are in `src/mix.rs`. `mix_into` sums into a caller-owned buffer and does not allocate. `mix` quantizes that sum into the returned buffer.
+- Sine, cosine, and the barrier exponential are the Cephes `sinf`, `cosf`, and `expf` polynomials in `src/poly.rs`, with range reduction. The mix does not call the platform math library for those and does not use a fused multiply-add.
+- Doppler, balance, distance, and transmission are in `src/space.rs`.
 - `submit` is in `src/device.rs`. ALSA, WASAPI, and CoreAudio are compiled only on their own operating system.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
 
@@ -30,7 +32,7 @@ The crate is `crates/audio`, package `genos-audio`.
 
 ## Game use
 
-Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count.
+Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count. A realtime caller keeps the stereo buffer and calls `mix_into`.
 
 Set `positional` to false for music and UI. Set `looping` to keep a clip playing. Set `transmission` when `Renderer::transmission_gains` already computed that source.
 
@@ -46,6 +48,18 @@ The transmission pass reads the resident occluder bounds and absorption. The cam
 
 WASAPI and CoreAudio are not run from this Linux machine.
 
+Buses, a held device, disk-fed clips, reverb zones, and a console write are the plan in [the audio design](audio-design.md).
+
+`cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. A second digest, `tests/golden/paths.sha256`, covers loop wrap, a Doppler cursor that wraps, a non-trivial exp reduction, an `i16` clip, and two voices. Those tests do not open a device.
+
+## Networking
+
+- **Replicated state.** None. The mixed buffer stays in the process that called `mix`.
+- **Authority.** That process.
+- **Prediction / rollback.** None. `mix` does not rewind.
+- **Determinism.** `mix` is a pure function of its arguments. The stored-tape hash is the check.
+- **Headless server.** No sound device. The server does not call `submit`. The design's play-command lines replace this section in the commit that sends them.
+
 ## Decisions
 
-[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. Loading stays decode-only. See [Loading](loading.md).
+[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. [ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md) (accepted) keeps this mix and these device outputs. Loading stays decode-only. See [Loading](loading.md).

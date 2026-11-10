@@ -1,6 +1,6 @@
 # Particle effects (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. Extends the CPU particles in `crates/render/src/particles.rs` and the [rendering extras plan](rendering/extras-plan.md) "Particles"; binds to [fog design](fog-and-volumetric-lighting-design.md) (#76), [HDR design](hdr-output-design.md) (#75), [GI design](gi-design.md).
+Status: stage 1 implemented. Stages 2 and 3 stay design. Owner: Engine. Extends the CPU particles in `crates/render/src/particles.rs` and the [rendering extras plan](rendering/extras-plan.md) "Particles"; binds to [fog design](fog-and-volumetric-lighting-design.md) (#76), [HDR design](hdr-output-design.md) (#75), [GI design](gi-design.md).
 
 ## 1. Goal
 Thousands to a million GPU-simulated particles per scene (sparks, smoke, dust, rain, magic), emitters defined as data, lit by the same lights/GI, fogged, HDR-correct, sorted or order-independent, inside a per-preset budget.
@@ -11,7 +11,8 @@ Thousands to a million GPU-simulated particles per scene (sparks, smoke, dust, r
 | Seeded CPU emitter, smoke from fire, card builder | done | `crates/render/src/particles.rs`, tests `particles.rs`, `particle_frame.rs`, `particle_resident.rs` |
 | Particle atlas images | done | `pack.rs`, `ember.png`, `smoke.png` |
 | Density card → fog card, fire → one light | done | `particles.rs`, `crates/load/src/emitters.rs` |
-| GPU simulation, sorting, lit particles | missing | extras plan row "GPU particle simulation" |
+| GPU emit, simulate, compact, indirect draw | stage 1 | `shaders/particles.comp`, `src/gpu/particle_pass.rs`, `src/particle_sim.rs` |
+| Sorting, froxel lighting, half-resolution, `.gfx` | later | stages 2 and 3 below |
 
 ## 3. Prior art
 - Haar & Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015 (persistent buffer, compute update) — extras plan already cites.
@@ -34,8 +35,16 @@ Stage 1: move simulation to compute (extras plan order: sim first, expander seco
 
 **Deviation flags.** Lighting particles from the froxel grid instead of per-pixel follows Frostbite/Destiny practice, not Thomas 2014. Smoke with density keeps becoming fog cards (existing behaviour) rather than sorted sprites.
 
+**Stage 1 as built.** Compute dispatches one thread per slot (workgroup 64, `ceil(budget / 64)` groups). Integrate, emit, and the compact each run that wide. The block sums are scanned in workgroups of 64, and those totals are scanned the same way, so no thread walks the whole group list. The scan keeps dead-ring pushes and the compact in slot order, which is the order `particle_sim.rs` walks, so the f64 mirror still matches. Emit is its own compute pipeline. It jumps the xorshift by four steps per spawn so those writes are parallel and still consume the same stream, and that jump is not in the integrate shader. The compact buffer is drawn with one `vkCmdDrawIndirect` and a vertex-pulled quad (`particles.vert`, `particles.frag`). When `legacy_bytes` is off, that draw targets an RGBA16F image and a compute pass blends the premultiplied cards into `scene_lin` before bloom and AgX. The legacy shoulder still draws in the keep pass after the picture, and that draw depth-tests when the keep pass loaded scene depth and does not write depth. The HDR card pass does not depth-test; the sim already retired particles behind the depth image, and the centre fade is in the compact colour. A frame that composited cards forces a full lighting compose, so a reused `scene_lin` does not stack the cards a second time. The CPU card builder in `particles.rs` stays for emitters that are not this path, including the camera flame. A disabled emitter, a zero count, or a zero budget does not dispatch. Particles are not written into the G-buffer. The fire stays one lamp. `fx.sim_ms` stops before the 4-byte sync witness. That witness runs only when a test turns it on. A shipping recording does not fill it. `fx.sim_init_ms`, `fx.sim_death_ms`, `fx.sim_emit_ms`, and `fx.sim_compact_ms` are the pieces inside that span. Teardown waits any live flight fence, then the device, before it frees lighting or anything else. The 48 ms drain can give up first; that wait still runs. The swapchain is destroyed after lighting.
+
+Depth collision samples the previous frame's scene depth image on the GPU. The projection is that frame's view-projection, stored with the flight that wrote the image, so a camera move is tested against the view that produced the depth. That matrix already writes Vulkan depth in 0..1, which is the value stored in the attachment, so the particle's ndc z is compared directly. Moving geometry is one frame late: the image is the scene from the frame before. The compute step runs before this frame's scene pass, and it does not sample the attachment that pass is about to clear. `Renderer::set_particle_depth` remains the test override that fills a storage buffer. With no override, and once a frame has stored depth, the shader reads the image. The scene pass stores depth only when `depth_collision` is on. Other frames discard it. After the sample the image is returned to depth-attachment layout, which is the layout the reflection copy assumes.
+
+Params and the timestamp query pool are one per frame in flight. Compact and the indirect args ping-pong per flight, so this frame's draw can overlap the next frame's compute. The persistent ring is one copy, in device memory, as are the slot buffer and the compact. A host-cached copy of those stores made the death walk cross the bus once per particle, and the cached compact made that span swing. The dispatch stays one thread per slot: a dead slot is still in the buffer and has to be visited. The CPU reads positions from a host mirror copied after the sim timestamps, and only when the frame copied the picture. The next compute starts with a pipeline barrier. Its source scope is the previous submission's compute writes. A 4-byte fill, recorded only when a test asks for the sync witness, keeps its own transfer barrier, so it is not that dependency. This layer records a storage-buffer shader access as a read, and it treats a later queue submit as already ordered with the previous one, so a cross-submit race does not show up. The barrier's transfer source orders a one-word fill to a compute read in the same recording; that is the race the layer can see. The canary fill keeps its own transfer barrier. The compute source is still the ring. The ring shader's stores are not a write the layer can check. There is no CPU wait of the other flight. Alive and spawned are copied into the flight's own readback at the end of its compute; the host reads that copy only after the flight's fence. `instance_count` is clamped to the compact capacity. The fade is one centre sample stored in the compact colour, not a per-pixel Lorach 2007 sample. `fx.sim_ms` and `fx.draw_ms` are read from the flight whose fence has been waited. The draw timestamp brackets the indirect draw, inside the pass that drew the cards. `fx.vram_mb` counts the stage-1 buffers and, when depth is retained, both scene depth images.
+
+`sort` and `lit` are stored and written by the preset. Stage 1 does not dispatch a sort or a froxel light. `half_res` is a deprecated settings alias and is ignored: the draw is the framebuffer resolution. The 1.0 ms draw ceiling below is still specified at half resolution; the draw that runs is full resolution. `max_particles` is clamped to 65535×64, the Vulkan 1.3 minimum compute group count times the workgroup size. There is no `.gfx` parser. `--fx-spawn` and `fx.spawn` place this one emitter. `fx.sort_ms` and `fx.overdraw_px` stay 0. `fx.sim_ms` and `fx.draw_ms` are lavapipe timestamps when a frame has run. They are not a score against the GTX 1060 ceilings in section 7.
+
 ## 6. Data and settings
-`settings.particles`: `max_particles` (Low 64K / Med 256K / High 1M), `sort` (Low off → WBOIT, Med/High on), `lit` (Low vertex-only, High per-particle froxel + GI), `half_res` (Low on), `depth_collision` (Med+). Emitters `.gfx`: rate, burst, lifetime, shape, forces, curves, atlas frame, blend mode, `seed`.
+`settings.particles`: `max_particles` (Low 64K / Med 256K / High 1M, clamped to 4,194,240), `sort` (Low off → WBOIT, Med/High on), `lit` (Low vertex-only, High per-particle froxel + GI), `depth_collision` (Med+). `half_res` remains a deprecated key and does not change the draw. Emitters `.gfx`: rate, burst, lifetime, shape, forces, curves, atlas frame, blend mode, `seed`.
 
 ## 7. Per-frame stats and budget
 `fx.sim_ms`, `fx.sort_ms`, `fx.draw_ms`, `fx.alive`, `fx.spawned`, `fx.overdraw_px`, `fx.vram_mb`. Low, GTX 1060 6GB, 1080p: 64K particles, sim ≤ 0.3 ms, draw ≤ 1.0 ms at half-res, ≤ 16 MB buffers. Vulkan 1.3 compute + indirect.
@@ -53,7 +62,12 @@ Mutations: skip dead-list push (leak), reverse sort, drop dt, ignore fog transmi
 CLI `--fx-spawn <file.gfx> x y z`, `--fx-max`, `--fx-freeze`. MCP `fx.spawn`, `fx.set {emitter,param,value}`, `fx.stats`, `fx.list`, `view overdraw|particle-id`; emitter files hot-reload. Agent edits a `.gfx`, replays a seeded script, reads `fx.*` and grades screenshots.
 
 ## 10. Networking
-Cosmetic: never replicated. Clients spawn from replicated gameplay events (impacts, abilities) with an event-derived seed; headless server runs no particles.
+
+- Replicated state: none. Particles are cosmetic and are never replicated.
+- Authority: the client that sees the effect. The server does not own a particle buffer.
+- Prediction / rollback: none. A client spawns from a replicated gameplay event (an impact, an ability) and does not rewind the buffer.
+- Determinism: the spawn seed is derived from that event. The same seed and the same steps match the CPU mirror. The buffer itself is not a replicated snapshot.
+- Headless server: the server runs no particles. A zero count does not dispatch.
 
 ## 11. Decisions for Anthony
 1. Budget numbers per preset (64K/256K/1M) OK?

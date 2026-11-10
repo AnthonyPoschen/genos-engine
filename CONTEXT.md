@@ -141,8 +141,24 @@ An upper bound on how fast a gap can close: `gap / (|v_a − v_b| + |ω_a| r_a +
 _Avoid_: Closest-point velocity, time of impact scale
 
 **Physics step**:
-One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact. A broken bond swaps in chunk bodies from a fracture asset.
+One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact. A broken bond swaps in chunk bodies from a fracture asset. A vehicle, when present, adds domain forces on one chassis body before that body is integrated.
 _Avoid_: Lighting ray, cascade
+
+**Vehicle**:
+Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies. The aircraft payload applies steady lift, drag, and thrust at the centre of mass. Its lift coefficient is stored. Angle of attack is not read. The landing trial sets that payload and wheeled ground together. Space combined with either is outside the current trial.
+_Avoid_: Body id, pawn
+
+**Chassis payload**:
+The ground, aircraft, or space block on a vehicle. Wheels exist only in the ground payload.
+_Avoid_: Shared stick, component
+
+**Wheel ray**:
+A segment from a wheel's attach point along its chassis-frame direction, from the minimum length to the maximum length, excluding the chassis. G1 hits a plane or a box. A mesh is a miss. The suspension force is a spring-damper along that ray.
+_Avoid_: Speculative contact, time of impact
+
+**Thruster**:
+A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
+_Avoid_: Rocket body, orbit
 
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
@@ -247,3 +263,47 @@ _Avoid_: Sleep group, simulation island
 **Loading**:
 The system that turns byte sources into assets. Loading does not play audio and does not upload to a GPU.
 _Avoid_: Asset manager, content pipeline
+
+**Clip**:
+Cooked or decoded PCM a sound source plays.
+_Avoid_: Sample bank, cue
+
+**Sound source**:
+One playing clip. The mix type is `Source`.
+_Avoid_: Channel
+
+**Voice**:
+The pool slot that keeps one sound source playing across quanta. `VoiceId` names it.
+_Avoid_: Channel, track
+
+**Listener**:
+The pose the mix hears from. The camera supplies the position, the facing, and the velocity.
+_Avoid_: Ear, audio listener object
+
+**Audio bus**:
+A named sum of sound sources. World, music, and UI sum into the master output.
+_Avoid_: Mixer group, channel group
+
+**Transmission**:
+The gain along the straight path through occluders, `exp(-absorption * thickness)`.
+_Avoid_: Occlusion ray, obstruction
+
+**Sound device**:
+The operating-system playback endpoint. Linux writes ALSA, Windows writes WASAPI, and macOS writes CoreAudio. A console adds an endpoint that writes the same finished buffer.
+_Avoid_: Audio backend, audio engine
+
+**Resident clip**:
+A clip decoded before it plays.
+_Avoid_: In-memory bank
+
+**Disk-fed clip**:
+A clip whose samples are read from the cooked file ahead of the playhead.
+_Avoid_: Stream, streaming buffer
+
+**Reverb zone**:
+A world box that sets the listener's reverb send. Transmission is what changes the straight-path gain.
+_Avoid_: Reverb volume, audio volume
+
+**Command tape**:
+The timed mix commands an offline render plays. The cross-platform test hashes that render.
+_Avoid_: Event list, sound script
