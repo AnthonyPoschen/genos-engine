@@ -1,3 +1,6 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
+
 //! A zero mean is not evidence that a world-cache cell is populated.
 //!
 //! Eight all-zero sets used to pass `se < 0.05 * mean + 1e-4` and the
@@ -79,6 +82,14 @@ fn eight_zero_sets_are_not_resolved() {
     assert!(cache.contains("const uint LIGHTING_DIAG_UNDER_TRUSTED = 57u;"));
     assert!(cache.contains("atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);"));
     assert!(cache.contains("clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0)"));
+    assert!(
+        cache.contains("y_fine > 1.0e-3"),
+        "a short lit texel is trust 1; a short black texel is not sets/64"
+    );
+    assert!(
+        cache.contains("!(y_target > 1.0e-3)"),
+        "a bright filter target must not take the black-field prior"
+    );
 
     let hold = function_body(cache, "bool lighting_compact_hold_texel_rays(uint slot)");
     assert!(hold.contains(

@@ -4363,9 +4363,19 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         float sets = floor(max(own_w, 0.0));
         float sc_trust = 0.0;
         if (!stale) {
-            sc_trust = detail_kept
-                ? clamp(detail_trust, 0.0, 1.0)
-                : clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
+            if (detail_kept) {
+                sc_trust = clamp(detail_trust, 0.0, 1.0);
+            } else if (sets >= LIGHTING_SC_FULL_SETS - 0.5) {
+                // A full count, including a real zero, is the texel.
+                sc_trust = 1.0;
+            } else if (sets >= 0.5) {
+                // A short count of a lit texel is the emitter blotch. A short
+                // black count, including eight zeros, is not populated, so
+                // the coarse cell shows. sets/64 used to dilute that blotch
+                // for the whole warmup.
+                float y_fine = dot(max(v.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+                sc_trust = y_fine > 1.0e-3 ? 1.0 : 0.0;
+            }
         }
         if ((lighting_sc_flags() & 32u) != 0u) {
             // Flag 32 only. It used to apply to every mover as well, so a
@@ -5229,9 +5239,12 @@ void lighting_svgf_push(uint slot) {
         if (lighting_sh_texel_detail_on()) {
         vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
         float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        float y_target = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
         // A full count of a black field is dark. Below that, a black field
-        // is not evidence, so the coarser cell is still the prior.
-        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0)))) {
+        // with a dark target is not evidence, so the coarser cell is still
+        // the prior. A bright target is the filter's blotch: the prior would
+        // hold the black field and the edge snap below would never run.
+        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0))) && !(y_target > 1.0e-3)) {
 #ifdef GENOS_COMPOSE_NO_WALK
             vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
 #else
@@ -5250,7 +5263,6 @@ void lighting_svgf_push(uint slot) {
             // went out leaves none of the stored field: lighting_lamp_keep is
             // 0, and holding the 1/16 step is the multi-frame tail.
             float catch_up = LIGHTING_FIELD_CATCH;
-            float y_target = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
             float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
             // A lamp that left, or a field the filter has left by the edge
             // test, takes the target on this push. A quiet texel keeps the

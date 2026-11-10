@@ -75,10 +75,6 @@ pub fn specs() -> Vec<CommandSpec> {
             "The lighting settings in force (text form) and the last collected GPU pass: name, milliseconds, and dispatch count. One frame behind the draw that just finished.",
         ),
         spec(
-            "lighting_under_trusted",
-            "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
-        ),
-        spec(
             "set_lighting_settings",
             "Partial lighting update. Keys match the settings text (direct, shadows, gi, bounces, probes, …). A text field overlays key=value lines. The scene keeps the result; a renderer override is cleared. Applies on the next draw.",
         ),
@@ -116,12 +112,20 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(under_trusted_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+fn under_trusted_specs() -> Vec<CommandSpec> {
+    vec![spec(
+        "lighting_under_trusted",
+        "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
+    )]
 }
 
 fn reflection_specs() -> Vec<CommandSpec> {
