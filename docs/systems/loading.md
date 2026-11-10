@@ -35,6 +35,7 @@ The crate is `crates/load`, package `genos-load`.
 - `ByteSource`, `FileSource`, and `MemorySource` are in `src/source.rs`.
 - `load_image` and `decode_image` decode a PNG (`src/png.rs`, inflate in `src/inflate.rs`) or a JPEG (`src/jpeg.rs`), chosen by the first bytes.
 - `load_gltf` and `load_gltf_file` read glTF 2.0 in `src/gltf.rs`. JSON comes from the `genos-json` crate (`crates/json`), shared with the MCP server. `cargo run -p genos-load --example gltf_info -- file.glb` prints what a file holds.
+- `select_lod` in `src/lod.rs` picks a cooked mesh level from view-space depth and an upper bound on the instance transform's operator norm. It does not simplify. Simplification is `genos-cook`. The draw still uses level 0. `.gcook` version is `GCOOK_VERSION`.
 - `load_texture` and `load_texture_map` start in `src/lib.rs`. The map parser is in `src/texture.rs`.
 - `load_mesh` reads OBJ text in `src/mesh.rs`.
 - `load_material` reads the material text in `src/material.rs`.
