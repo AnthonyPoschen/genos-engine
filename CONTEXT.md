@@ -129,8 +129,24 @@ An upper bound on how fast a gap can close: `gap / (|v_a − v_b| + |ω_a| r_a +
 _Avoid_: Closest-point velocity, time of impact scale
 
 **Physics step**:
-One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact. A broken bond swaps in chunk bodies from a fracture asset.
+One update that moves bodies by gravity, contact, and springs. A speculative body can stop inside its margin. A swept pair advances to the time of impact. A broken bond swaps in chunk bodies from a fracture asset. A vehicle, when present, adds domain forces on one chassis body before that body is integrated.
 _Avoid_: Lighting ray, cascade
+
+**Vehicle**:
+Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies.
+_Avoid_: Body id, pawn
+
+**Chassis payload**:
+The ground, aircraft, or space block on a vehicle. Wheels exist only in the ground payload.
+_Avoid_: Shared stick, component
+
+**Wheel ray**:
+A segment from a wheel's attach point along its chassis-frame direction, from the minimum length to the maximum length, excluding the chassis. G1 hits a plane or a box. A mesh is a miss. The suspension force is a spring-damper along that ray.
+_Avoid_: Speculative contact, time of impact
+
+**Thruster**:
+A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
+_Avoid_: Rocket body, orbit
 
 **Bond**:
 One link in a breakable: two chunks, or a chunk and the world, plus the shared area and the health left.
