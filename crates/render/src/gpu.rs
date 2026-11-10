@@ -162,7 +162,7 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
-//! Vulkan loader and one forward pass. Entry points come from libvulkan.
+//! Vulkan loader and one forward pass. Entry points come from the platform loader.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -1977,14 +1977,7 @@ impl Gpu {
         height: u32,
     ) -> Result<Self, String> {
         unsafe {
-            let lib = dlopen(b"libvulkan.so.1\0".as_ptr() as *const c_char, 2);
-            if lib.is_null() {
-                return Err("libvulkan.so.1 did not open".into());
-            }
-            let get_instance: GetProc = transmute(dlsym(
-                lib,
-                b"vkGetInstanceProcAddr\0".as_ptr() as *const c_char,
-            ));
+            let get_instance = load_instance_proc()?;
             let enumerate_ext: unsafe extern "system" fn(
                 *const c_void,
                 *mut u32,
@@ -2015,7 +2008,7 @@ impl Gpu {
                 )?;
             }
             let surface_ext = b"VK_KHR_surface\0";
-            let wayland_ext = b"VK_KHR_wayland_surface\0";
+            let wayland_ext = surface_extension_name();
             let color_ext = b"VK_EXT_swapchain_colorspace\0";
             let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
             let has_props2 = extension_listed(
@@ -2032,6 +2025,9 @@ impl Gpu {
             }
             if extension_listed(&inst_listed, ext_count, b"VK_EXT_swapchain_colorspace") {
                 ext_ptrs.push(color_ext.as_ptr() as *const c_char);
+            }
+            if let Some(extra) = extra_instance_extension() {
+                ext_ptrs.push(extra.as_ptr() as *const c_char);
             }
             let app_name = b"genos-camera\0";
             #[repr(C)]
@@ -2067,7 +2063,7 @@ impl Gpu {
             let info = InstInfo {
                 s_type: 1,
                 next: std::ptr::null(),
-                flags: 0,
+                flags: instance_flags(),
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
@@ -2091,7 +2087,12 @@ impl Gpu {
             let mem_props: FnMemProps = transmute(load(b"vkGetPhysicalDeviceMemoryProperties\0"));
             let create_device: FnCreateDevice = transmute(load(b"vkCreateDevice\0"));
             let get_device: GetProc = transmute(load(b"vkGetDeviceProcAddr\0"));
-            let create_wayland_surface: FnWayland = transmute(load(b"vkCreateWaylandSurfaceKHR\0"));
+            let wayland_pfn = load(b"vkCreateWaylandSurfaceKHR\0");
+            let create_wayland_surface: FnWayland = if wayland_pfn.is_null() {
+                unused_wayland_surface
+            } else {
+                transmute(wayland_pfn)
+            };
             let destroy_surface: Fn2 = transmute(load(b"vkDestroySurfaceKHR\0"));
             let surface_support: FnSupport =
                 transmute(load(b"vkGetPhysicalDeviceSurfaceSupportKHR\0"));
@@ -2117,31 +2118,7 @@ impl Gpu {
                 "device list",
             )?;
 
-            #[repr(C)]
-            struct WaylandInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                display: *mut c_void,
-                surface: *mut c_void,
-            }
-            let wayland = WaylandInfo {
-                s_type: 1000006000,
-                next: std::ptr::null(),
-                flags: 0,
-                display,
-                surface: wl_surface,
-            };
-            let mut vk_surface = std::ptr::null_mut();
-            check(
-                create_wayland_surface(
-                    instance,
-                    &wayland as *const WaylandInfo as *const u8,
-                    std::ptr::null(),
-                    &mut vk_surface,
-                ),
-                "wayland surface",
-            )?;
+            let vk_surface = create_surface(get_instance, instance, display, wl_surface)?;
 
             let get_props: unsafe extern "system" fn(Handle, *mut u8) =
                 transmute(load(b"vkGetPhysicalDeviceProperties\0"));
@@ -2324,6 +2301,7 @@ impl Gpu {
             if hdr_meta {
                 dev_exts.push(hdr_meta_ext.as_ptr() as *const c_char);
             }
+            push_device_extensions(&mut dev_exts, &dev_listed, dev_ext_count);
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -9266,11 +9244,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
-
-extern "C" {
-    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
-}
+include!("vk_platform.rs");
 
 /// `Some(true)` when `arg` is `--gpu-times` and the count is the next argument.
 /// `Some(false)` when the flag already includes its value. `None` otherwise.

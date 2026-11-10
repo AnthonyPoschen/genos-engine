@@ -13,6 +13,7 @@
 #include "pointer-constraints-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+#include "genos_pump.h"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 1U
@@ -80,31 +81,24 @@ struct GenosWindow {
     int wheel_120;
 };
 
-struct GenosPump {
-    int width;
-    int height;
-    int closing;
-    int focused;
-    int mouse_dx;
-    int mouse_dy;
-    int capture_click;
-    int key_w;
-    int key_a;
-    int key_s;
-    int key_d;
-    int key_escape;
-    int resized;
-    int mouse_left;
-    uint8_t keys_down[256];
-    int pointer_locked;
-    int clicked_while_focused;
-    int fullscreen;
-    int pointer_x;
-    int pointer_y;
-    void *display;
-    void *surface;
-    double wheel_y;
-};
+int genos_window_backend_value = GENOS_BACKEND_WAYLAND;
+
+int genos_window_backend(void) {
+    return genos_window_backend_value;
+}
+
+int genos_window_copy_extra(void *window, struct GenosExtra *out) {
+    (void)window;
+    if (!out) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    return 0;
+}
+
+int genos_window_extra_size(void) {
+    return (int)sizeof(struct GenosExtra);
+}
 
 static void apply_cursor(struct GenosWindow *win);
 static void make_map_buffer(struct GenosWindow *win);

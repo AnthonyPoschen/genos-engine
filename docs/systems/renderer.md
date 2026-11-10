@@ -8,7 +8,7 @@ A game can submit fixed shapes today, and can submit meshes, particles, and shad
 
 ## Intent
 
-One Vulkan path serves Linux, Windows, and macOS. macOS uses MoltenVK. The renderer loads `libvulkan.so.1` directly. It does not use `ash`, `wgpu`, or `vulkano`.
+One Vulkan path serves Linux, Windows, and macOS. macOS uses MoltenVK. The renderer loads the platform Vulkan library directly (`libvulkan.so.1`, `vulkan-1.dll`, or `libvulkan.dylib` / `libMoltenVK.dylib`). It does not use `ash`, `wgpu`, or `vulkano`.
 
 `Renderer::draw` uploads new shape blocks and lamp parameters, then submits GPU lighting and raster. A normal submit does not wait for that GPU work. The caller does not build the field and does not pair lamps with objects. The engine keeps the field while the lights and the occluders stay the same. The engine keeps each shape block while a draw still uses it.
 
@@ -41,7 +41,7 @@ Lighting is described in [Lighting](lighting/README.md). The raster writes a G-b
 
 The crate is `crates/render`, package `genos-render`.
 
-- `Renderer` is in `src/gpu.rs`. `draw_profiled`, `poll_gpu_times`, and `finish_gpu_times` record the draw's GPU time.
+- `Renderer` is in `src/gpu.rs`. `draw_profiled`, `poll_gpu_times`, and `finish_gpu_times` record the draw's GPU time. The surface create is in `src/vk_platform.rs`. Wayland passes `wl_display` and `wl_surface` (`VK_KHR_wayland_surface`). X11 passes `Display` and the window id (`VK_KHR_xlib_surface`). Windows passes `HINSTANCE` and `HWND` (`VK_KHR_win32_surface`). macOS passes a `CAMetalLayer` (`VK_EXT_metal_surface`) and enables portability enumeration. The loader is `libvulkan.so.1`, `vulkan-1.dll`, or `libvulkan.dylib` / `libMoltenVK.dylib`.
 - `Antialias` is in `src/aa.rs`. The filter commands are in `src/aa_gpu.rs`. The pass is `shaders/fxaa.comp`.
 - `World`, `Object`, `DrawKind`, and `in_view` are in `src/world.rs`.
 - Triangle positions are packed in `src/pack.rs`, and shape blocks are in `src/pool.rs`.

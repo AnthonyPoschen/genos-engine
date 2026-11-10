@@ -1,0 +1,36 @@
+name: window-win32
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  gnu-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: mingw
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - name: cargo check Win32 window and XInput
+        run: cargo check -p genos-window -p genos-input --target x86_64-pc-windows-gnu
+
+  msvc-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: MSVC environment
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "vswhere found no VC tools" }
+          Write-Output "VS=$vs"
+          "VSWHERE=$vs" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
+      - name: build and window smoke
+        shell: cmd
+        run: |
+          call "%VSWHERE%\VC\Auxiliary\Build\vcvars64.bat"
+          cargo test -p genos-window -p genos-input --lib -- --test-threads=1

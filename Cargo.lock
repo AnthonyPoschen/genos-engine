@@ -343,6 +343,9 @@ dependencies = [
 [[package]]
 name = "genos-window"
 version = "0.1.0"
+dependencies = [
+ "genos-input",
+]
 
 [[package]]
 name = "getrandom"

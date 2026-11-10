@@ -11,7 +11,10 @@
 #![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
 
-//! Wayland window. Each pump pulls the seat, then tells subscribers what changed.
+//! Window. Each pump pulls the platform queue, then tells subscribers what changed.
+//!
+//! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
+//! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
 
 mod events;
 mod lifecycle;
@@ -33,6 +36,7 @@ use std::os::raw::{c_int, c_void};
 use std::sync::Arc;
 
 use events::EventHub;
+use genos_input::{InputSystem, TouchPhase, TouchPoint};
 
 #[repr(C)]
 struct RawPump {
@@ -61,6 +65,22 @@ struct RawPump {
     wheel_y: f64,
 }
 
+#[repr(C)]
+struct RawTouch {
+    id: u64,
+    x: f32,
+    y: f32,
+    phase: i32,
+}
+
+#[repr(C)]
+struct RawExtra {
+    mouse_right: i32,
+    mouse_middle: i32,
+    touch_count: i32,
+    touch: [RawTouch; 8],
+}
+
 extern "C" {
     fn genos_window_open_on(
         width: c_int,
@@ -76,6 +96,9 @@ extern "C" {
     fn genos_window_set_fullscreen(window: *mut c_void, fullscreen: c_int) -> c_int;
     fn genos_window_set_title(window: *mut c_void, title: *const i8) -> c_int;
     fn genos_window_destroy(window: *mut c_void);
+    fn genos_window_copy_extra(window: *mut c_void, out: *mut RawExtra) -> c_int;
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn genos_window_extra_size() -> c_int;
 }
 
 pub struct Frame {
@@ -111,6 +134,9 @@ pub struct Window {
     pub surface: *mut c_void,
     hub: EventHub,
     meter: Arc<StallMeter>,
+    mouse_right: bool,
+    mouse_middle: bool,
+    touch: Vec<TouchPoint>,
 }
 
 impl Window {
@@ -173,7 +199,7 @@ impl Window {
             )
         };
         if raw.is_null() {
-            return Err("Wayland window failed to open".into());
+            return Err(open_failed());
         }
         let pump = unsafe {
             let mut out = std::mem::zeroed();
@@ -193,6 +219,9 @@ impl Window {
             surface: pump.surface,
             hub: EventHub::from_frame(&frame),
             meter,
+            mouse_right: false,
+            mouse_middle: false,
+            touch: Vec::new(),
         })
     }
 
@@ -279,13 +308,58 @@ impl Window {
         }
     }
 
+    /// Write this window's keyboard, pointer, and fingers into the input system.
+    ///
+    /// Call it after `InputSystem::begin_frame` and before the game reads actions.
+    /// The window does not own an action map and does not recognize a tap, a swipe,
+    /// or a pinch. `gated` is the focus gate's view of the last pump.
+    pub fn write_devices(&self, input: &mut InputSystem, gated: &GatedInput) {
+        input.write_window(
+            &gated.keys_down,
+            gated.mouse_dx,
+            gated.mouse_dy,
+            gated.mouse_left,
+            self.focused() && self.mouse_right,
+            self.focused() && self.mouse_middle,
+            &self.touch,
+        );
+    }
+
     fn read_frame(&mut self) -> Frame {
         let raw = unsafe {
             let mut out = std::mem::zeroed();
             genos_window_pump(self.raw, &mut out);
             out
         };
+        self.sample_extra();
         decode(&raw)
+    }
+
+    fn sample_extra(&mut self) {
+        let extra = unsafe {
+            let mut out = std::mem::zeroed();
+            genos_window_copy_extra(self.raw, &mut out);
+            out
+        };
+        self.mouse_right = extra.mouse_right != 0;
+        self.mouse_middle = extra.mouse_middle != 0;
+        let count = usize::try_from(extra.touch_count)
+            .unwrap_or(0)
+            .min(extra.touch.len());
+        self.touch.clear();
+        for sample in extra.touch.iter().take(count) {
+            self.touch.push(TouchPoint {
+                id: sample.id,
+                x: sample.x,
+                y: sample.y,
+                phase: match sample.phase {
+                    0 => TouchPhase::Began,
+                    1 => TouchPhase::Moved,
+                    2 => TouchPhase::Ended,
+                    _ => TouchPhase::Cancelled,
+                },
+            });
+        }
     }
 
     /// Lock and hide the Wayland pointer, or destroy that lock and show it again.
@@ -307,6 +381,17 @@ impl Drop for Window {
     fn drop(&mut self) {
         stall::forget_seat(self.raw);
         unsafe { genos_window_destroy(self.raw) };
+    }
+}
+
+fn open_failed() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        return "Win32 window failed to open".to_string();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "Wayland window failed to open".to_string()
     }
 }
 
@@ -417,8 +502,12 @@ impl FocusGate {
 #[cfg(test)]
 mod tests {
     use super::{
-        extent_changed, genos_window_pump_size, FocusGate, Frame, GatedInput, RawPump, WindowMode,
+        extent_changed, genos_window_extra_size, genos_window_pump_size, FocusGate, Frame,
+        GatedInput, RawExtra, RawPump, WindowMode,
     };
+
+    #[cfg(target_os = "windows")]
+    use super::Window;
 
     #[test]
     fn resize_is_a_real_extent_change() {
@@ -481,6 +570,34 @@ mod tests {
             unsafe { genos_window_pump_size() } as usize,
             std::mem::size_of::<RawPump>()
         );
+        assert_eq!(
+            unsafe { genos_window_extra_size() } as usize,
+            std::mem::size_of::<RawExtra>()
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn win32_window_opens_pumps_and_accepts_mode_and_capture() {
+        let mut window = Window::open(320, 200).expect("win32 window");
+        let frame = window.pump();
+        assert!(frame.width >= 200, "client width {}", frame.width);
+        assert!(frame.height >= 100, "client height {}", frame.height);
+        assert!(!window.display.is_null(), "HINSTANCE");
+        assert!(!window.surface.is_null(), "HWND");
+        window.set_mode(WindowMode::Fullscreen).expect("fullscreen");
+        let fullscreen = window.pump();
+        assert_eq!(fullscreen.mode, WindowMode::Fullscreen);
+        window.set_mode(WindowMode::Windowed).expect("windowed");
+        let windowed = window.pump();
+        assert_eq!(windowed.mode, WindowMode::Windowed);
+        window.lock_cursor().expect("capture");
+        let locked = window.pump();
+        assert!(locked.pointer_locked);
+        window.unlock_cursor().expect("release");
+        let free = window.pump();
+        assert!(!free.pointer_locked);
+        window.set_title("Genos smoke");
     }
 
     #[test]

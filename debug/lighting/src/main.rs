@@ -564,9 +564,7 @@ fn run() -> Result<i32, String> {
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         pull_menu(
             &mut app,

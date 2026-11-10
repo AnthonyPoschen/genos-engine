@@ -26,7 +26,9 @@ A scene file is read on a worker once the window is mapped. The frame draws a sm
 
 `Window::open_proof_on` and `Window::open_named_on` take a Wayland display name. `None` connects to the session compositor. A verdict script sets the child `WAYLAND_DISPLAY` to the requested display. It passes `--display` only when that binary's help lists the flag. An older binary places the window from the environment. An empty name is refused.
 
-On Wayland, the keyboard and the mouse act while the window has focus. Gamepads do not use the window.
+On Wayland, the keyboard and the mouse act while the window has focus. On Win32 the same keys are written as evdev codes while the window has focus, and focus loss clears them. `Window::write_devices` sends that gated state, plus the right and middle buttons and the touch samples, through `InputSystem::write_window`. The window does not own an action map and does not recognize gestures. Gamepads do not use the window. XInput is read by the input system.
+
+A Win32 open prints `genos-window: backend=win32 dpi=<n> client=<w>x<h>`. `dpi=legacy` means `SetProcessDpiAwarenessContext` was missing and `SetProcessDPIAware` was used. `CreateWindow failed`, `RegisterClass failed`, `raw mouse failed`, and `monitor info failed` name those open and capture failures. The Rust error is `Win32 window failed to open`.
 
 ## Code
 
@@ -36,6 +38,7 @@ The crate is `crates/window`, package `genos-window`.
 - `WindowEvent` and `WindowMode` are in `src/events.rs`.
 - The app lifecycle is in `src/lifecycle.rs`.
 - The Wayland seat, the pointer lock, and fullscreen are in `src/wayland_shim.c`.
+- The Win32 window, DPI awareness, pointer clip, and fullscreen are in `src/win32_shim.c`. `display` is the `HINSTANCE`. `surface` is the `HWND`.
 
 ## App lifecycle
 
@@ -82,7 +85,7 @@ Give `window.display` and `window.surface` to the renderer. The window does not 
 
 ## Limits
 
-The X11 window waits. Windows and macOS windows wait. The editor window is not built. The horizontal wheel is ignored.
+The X11 window waits. The macOS window waits. The editor window is not built. The horizontal wheel is ignored. Win32 fullscreen is a borderless window the size of the nearest monitor, applied in `set_mode`, and reported on the next pump. A side thread does not pump the Win32 queue: messages stay on the thread that created the window. There is no compositor ping on Win32.
 
 A listener cannot pump the window. Fullscreen is a request. The compositor can refuse it.
 

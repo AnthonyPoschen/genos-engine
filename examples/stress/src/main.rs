@@ -1193,13 +1193,11 @@ fn run() -> Result<i32, String> {
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
+        window.write_devices(&mut input, &gated);
         if opts.step && input.keyboard.pressed(InputCode::key_space) {
             tools.request_steps(1);
             dt = tools.scene_dt(bench::STEP);
         }
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
         if keys.pressed(&input, "unfilled_tint") {
             stage.unfilled_tint = !stage.unfilled_tint;

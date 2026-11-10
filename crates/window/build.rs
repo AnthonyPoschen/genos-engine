@@ -1,15 +1,109 @@
-#![expect(clippy::manual_assert, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::panic, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(
+    clippy::manual_assert,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::panic,
+    reason = "the build stops when a host tool or OUT_DIR is missing"
+)]
 #![allow(
     clippy::disallowed_methods,
     reason = "the build reads OUT_DIR from Cargo"
 )]
-#![expect(clippy::unwrap_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
+#![expect(
+    clippy::unwrap_used,
+    reason = "the build stops when a host tool or OUT_DIR is missing"
+)]
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if os == "windows" {
+        build_windows();
+        return;
+    }
+    build_wayland();
+}
+
+fn build_windows() {
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if env == "msvc" {
+        compile_msvc(&out);
+    } else {
+        compile_gnu(&out);
+    }
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=genos_win32");
+    println!("cargo:rustc-link-lib=user32");
+    println!("cargo:rustc-link-lib=gdi32");
+    println!("cargo:rerun-if-changed=src/win32_shim.c");
+    println!("cargo:rerun-if-changed=src/genos_pump.h");
+}
+
+fn compile_msvc(out: &std::path::Path) {
+    let obj = out.join("win32_shim.obj");
+    let lib = out.join("genos_win32.lib");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cl".to_string());
+    let obj_arg = format!("/Fo{}", obj.display());
+    run(&cc, &["/nologo", "/c", "/W3", &obj_arg, "src/win32_shim.c"]);
+    let archiver = std::env::var("AR").unwrap_or_else(|_| "lib".to_string());
+    let lib_arg = format!("/OUT:{}", lib.display());
+    let obj_path = obj.display().to_string();
+    run(&archiver, &["/nologo", &lib_arg, &obj_path]);
+}
+
+fn compile_gnu(out: &std::path::Path) {
+    let obj = out.join("win32_shim.o");
+    let archive = out.join("libgenos_win32.a");
+    let cc = gnu_tool("gcc");
+    let archiver = gnu_tool("ar");
+    let obj_path = obj.display().to_string();
+    let archive_path = archive.display().to_string();
+    run(
+        &cc,
+        &[
+            "-c",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "src/win32_shim.c",
+            "-o",
+            &obj_path,
+        ],
+    );
+    run(&archiver, &["crs", &archive_path, &obj_path]);
+}
+
+fn gnu_tool(name: &str) -> String {
+    let from_env = if name == "ar" {
+        std::env::var("AR").ok()
+    } else {
+        std::env::var("CC").ok()
+    };
+    if let Some(tool) = from_env {
+        return tool;
+    }
+    let host = std::env::var("HOST").unwrap_or_default();
+    if host.contains("windows") {
+        return name.to_string();
+    }
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let prefix = if target.starts_with("i686") {
+        "i686-w64-mingw32"
+    } else {
+        "x86_64-w64-mingw32"
+    };
+    let candidate = format!("{prefix}-{name}");
+    if name == "ar" && Command::new(&candidate).arg("--version").output().is_err() {
+        return format!("{prefix}-gcc-ar");
+    }
+    candidate
+}
+
+fn build_wayland() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let protocols = [
         "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml",
@@ -65,6 +159,7 @@ fn main() {
     println!("cargo:rustc-link-lib=wayland-client");
     println!("cargo:rustc-link-lib=xkbcommon");
     println!("cargo:rerun-if-changed=src/wayland_shim.c");
+    println!("cargo:rerun-if-changed=src/genos_pump.h");
 }
 
 fn scan(xml: &str, out: &std::path::Path) -> PathBuf {
