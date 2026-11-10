@@ -22,7 +22,9 @@ The GPU pass is one compute dispatch on the renderer's Vulkan device. It reads t
 
 The crate is `crates/audio`, package `genos-audio`.
 
-- `mix` is in `src/mix.rs`. Doppler, balance, distance, and transmission are in `src/space.rs`.
+- `mix` and `mix_into` are in `src/mix.rs`. `mix_into` sums into a caller-owned buffer and does not allocate. `mix` quantizes that sum into the returned buffer.
+- Sine, cosine, and the barrier exponential are in `src/poly.rs`. The mix does not call the platform math library for those.
+- Doppler, balance, distance, and transmission are in `src/space.rs`.
 - `submit` is in `src/device.rs`. ALSA, WASAPI, and CoreAudio are compiled only on their own operating system.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
 
@@ -30,7 +32,7 @@ The crate is `crates/audio`, package `genos-audio`.
 
 ## Game use
 
-Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count.
+Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count. A realtime caller keeps the stereo buffer and calls `mix_into`.
 
 Set `positional` to false for music and UI. Set `looping` to keep a clip playing. Set `transmission` when `Renderer::transmission_gains` already computed that source.
 
@@ -46,14 +48,16 @@ The transmission pass reads the resident occluder bounds and absorption. The cam
 
 WASAPI and CoreAudio are not run from this Linux machine.
 
-Buses, a held device, disk-fed clips, reverb zones, a console write, and a cross-platform buffer hash are the plan in [the audio design](audio-design.md). This record stays the description of the code until a stage in that design lands.
+Buses, a held device, disk-fed clips, reverb zones, and a console write are the plan in [the audio design](audio-design.md).
+
+`cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. That test does not open a device.
 
 ## Networking
 
 - **Replicated state.** None. The mixed buffer stays in the process that called `mix`.
 - **Authority.** That process.
 - **Prediction / rollback.** None. `mix` does not rewind.
-- **Determinism.** `mix` is a pure function of its arguments. A stored hash of that buffer is stage 2 of the audio design. Today's tests check relationships.
+- **Determinism.** `mix` is a pure function of its arguments. The stored-tape hash is the check.
 - **Headless server.** No sound device. The server does not call `submit`. The design's play-command lines replace this section in the commit that sends them.
 
 ## Decisions

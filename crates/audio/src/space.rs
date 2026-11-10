@@ -59,7 +59,7 @@ pub(crate) fn pan_gains(source: Vec3, listener: Vec3, facing: Vec3) -> (f32, f32
     to_source = to_source.normalize();
     let side = to_source.dot(right).clamp(-1.0, 1.0);
     let angle = (side + 1.0) * 0.25 * std::f32::consts::PI;
-    (angle.cos(), angle.sin())
+    (crate::poly::cos_f(angle), crate::poly::sin_f(angle))
 }
 
 /// Inverse-distance pressure. Twice the distance is about half the amplitude.
@@ -75,7 +75,7 @@ pub(crate) fn transmission_gain(source: Vec3, listener: Vec3, barriers: &[Barrie
         let thickness = segment_thickness(source, listener, barrier.min, barrier.max);
         let absorption = barrier.absorption.max(0.0);
         if thickness > 0.0 && absorption > 0.0 {
-            gain *= (-absorption * thickness).exp();
+            gain *= crate::poly::exp_f(-absorption * thickness);
         }
     }
     gain

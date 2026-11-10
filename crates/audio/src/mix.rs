@@ -47,6 +47,8 @@ pub struct Barrier {
 }
 
 /// Mix `sources` into `frames` of interleaved stereo at `device_rate`.
+///
+/// The returned buffer is the only allocation. The sum itself is [`mix_into`].
 pub fn mix(
     sources: &[Source<'_>],
     listener: &Listener,
@@ -58,12 +60,30 @@ pub fn mix(
         return Vec::new();
     }
     let mut acc = vec![0.0f32; frames * 2];
-    for source in sources {
-        render_source(&mut acc, source, listener, barriers, device_rate);
-    }
+    mix_into(&mut acc, sources, listener, barriers, device_rate);
     acc.into_iter()
         .map(|sample| sample.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16)
         .collect()
+}
+
+/// Add every voice into `out`.
+///
+/// `out` is interleaved stereo and is cleared first. The caller owns the
+/// buffer. This function does not allocate.
+pub fn mix_into(
+    out: &mut [f32],
+    sources: &[Source<'_>],
+    listener: &Listener,
+    barriers: &[Barrier],
+    device_rate: u32,
+) {
+    out.fill(0.0);
+    if device_rate == 0 || out.len() < 2 {
+        return;
+    }
+    for source in sources {
+        render_source(out, source, listener, barriers, device_rate);
+    }
 }
 
 fn render_source(
