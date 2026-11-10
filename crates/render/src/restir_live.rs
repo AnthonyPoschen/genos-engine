@@ -851,11 +851,11 @@ mod tests {
             .find("cmd_update_buffer")
             .unwrap_or(prepare.len());
         let prefix = prepare
-            .find("memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000)")
+            .find("memory_barrier(0x800 | 0x1000, 0x1000, 0x20 | 0x40 | 0x800, 0x1000)")
             .unwrap_or(prepare.len());
         assert!(
             prefix < update,
-            "the prefix overwrite must wait for the other frame's compute read and write"
+            "the prefix overwrite must wait for the other frame's compute access and transfer read"
         );
         let call = "self.dispatch_restir_di(slot, &pc, pool, first);";
         let at = gpu.find(call).unwrap_or(gpu.len());
@@ -872,20 +872,64 @@ mod tests {
             after[shade_at..].starts_with("memory_barrier(0x800, 0x800, 0x40, 0x20);"),
             "shade must wait for this frame's spatial store"
         );
-        let world = function_body(gpu, "fn submit_lighting_world");
+        let passes = function_body(gpu, "fn lighting_passes");
+        let world_at = passes
+            .find("submit_lighting_world")
+            .unwrap_or(passes.len());
+        let bit_at = passes.find("pc[9] |= 1 << 21").unwrap_or(0);
         assert!(
-            world.contains("self.compute_queue"),
-            "the light-cache round submits on the compute queue"
+            world_at < bit_at,
+            "bit 21 is set only after the world submit"
         );
-        assert!(
-            !world.contains("restir_buf"),
-            "the light-cache round must not name restir_buf"
-        );
-        let mode2 = direct.find("idx += pixels + kept;").unwrap_or(direct.len());
-        let reservoir = direct.find("&& idx < pixels;").unwrap_or(0);
-        assert!(
-            mode2 < reservoir,
-            "mode 2 must leave the screen before the reservoir test"
-        );
+        assert_restir_words_under_restir_pix(direct);
+    }
+
+    /// Every `restir_words` use after the buffer declaration stays inside `restir_pix`.
+    fn assert_restir_words_under_restir_pix(src: &str) {
+        let body = src
+            .split_once("uint restir_words[];")
+            .map_or("", |(_, rest)| rest);
+        assert!(!body.is_empty(), "restir_words declaration");
+        let mut depth = 0i32;
+        let mut guards: Vec<Option<i32>> = Vec::new();
+        let mut uses = 0u32;
+        let mut i = 0usize;
+        while i < body.len() {
+            let rest = body.get(i..).unwrap_or("");
+            if rest.starts_with("if (restir_pix") {
+                guards.push(None);
+                i = i.saturating_add("if (restir_pix".len());
+                continue;
+            }
+            if rest.starts_with("restir_words") {
+                assert!(
+                    !guards.is_empty(),
+                    "restir_words load is not under restir_pix"
+                );
+                uses = uses.saturating_add(1);
+                i = i.saturating_add("restir_words".len());
+                continue;
+            }
+            match rest.chars().next() {
+                Some('{') => {
+                    depth += 1;
+                    if let Some(guard) = guards.last_mut() {
+                        if guard.is_none() {
+                            *guard = Some(depth);
+                        }
+                    }
+                }
+                Some('}') => {
+                    if guards.last().is_some_and(|guard| *guard == Some(depth)) {
+                        guards.pop();
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            i = i.saturating_add(1);
+        }
+        assert!(uses > 0, "no restir_words load");
+        assert!(guards.is_empty(), "unclosed restir_pix");
     }
 }

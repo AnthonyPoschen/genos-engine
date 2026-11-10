@@ -3011,17 +3011,18 @@ impl Gpu {
             .extend(self.lighting.restir_lamps.iter().map(copy_gpu_lamp));
         // One restir buffer, two frames in flight, and each frame waits only on
         // its own slot fence. Frame N still has compute reads and writes in
-        // this buffer (the prefix, the history slot, the scratch) when frame
-        // N+1 records. On one queue a barrier's first scope is every earlier
-        // command in submission order, so this orders that work before the
-        // transfer overwrite. A second scratch and prefix would not remove the
-        // history dependency, and a barrier waits for the whole compute stage
-        // either way, so the extra buffers do not start the next frame sooner.
-        // The async light-cache submit uses the compute queue. Its direct pass
-        // is mode 2, which adds `pixels + kept` to the index before the
-        // reservoir test (`idx < pixels`), so that pass does not touch this
-        // buffer. When that queue is the graphics queue, this barrier covers it.
-        self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
+        // this buffer when frame N+1 records, and a transfer read of header
+        // words 43-46 (the stats copy of history_accepts, history_rejects, and
+        // restir_point_adds). On one queue a barrier's first scope is every
+        // earlier command in submission order. Source is compute and transfer,
+        // so that copy finishes before vkCmdUpdateBuffer overwrites those
+        // words. A second scratch and prefix would not remove the history
+        // dependency, and a barrier waits for the whole source stage either
+        // way, so the extra buffers do not start the next frame sooner.
+        // The world submit copies pc before bit 21 is set. Every restir_words
+        // load sits under restir_pix, which requires that bit, so the async
+        // pass does not touch this buffer.
+        self.memory_barrier(0x800 | 0x1000, 0x1000, 0x20 | 0x40 | 0x800, 0x1000);
         if self.lighting.restir_clear {
             self.lighting.restir_clear = false;
             unsafe {
