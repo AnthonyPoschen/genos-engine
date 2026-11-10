@@ -1,7 +1,10 @@
 //! Import dump for `genos-animation`. Headless; no window and no device.
 
 use genos_json::{array, float, int, object, string, Value};
-use genos_load::{import_bytes, ChannelPath, Clip, ImportDoc, Interpolation, LoadError, Skin};
+use genos_load::{
+    decode_skin, import_bytes, ChannelPath, Clip, CookedError, DecodedSkin, ImportDoc,
+    Interpolation, LoadError, Skin,
+};
 
 /// One JSON object: skins, clips, influence counts, and the notes the import wrote.
 ///
@@ -11,6 +14,48 @@ use genos_load::{import_bytes, ChannelPath, Clip, ImportDoc, Interpolation, Load
 pub fn dump_bytes(bytes: &[u8]) -> Result<Value, LoadError> {
     let doc = import_bytes(bytes, &|_uri| Err(LoadError::Unrecognized))?;
     Ok(dump(&doc))
+}
+
+/// One JSON object for a `.gskin`: joints, clips, instance indices, and notes.
+///
+/// # Errors
+///
+/// A bad magic, version, or trailer is [`CookedError`].
+pub fn dump_gskin(bytes: &[u8]) -> Result<Value, CookedError> {
+    Ok(gskin_value(&decode_skin(bytes)?))
+}
+
+fn gskin_value(skin: &DecodedSkin) -> Value {
+    let influences: usize = skin
+        .primitives
+        .iter()
+        .map(|primitive| primitive.joints.len())
+        .sum();
+    object([
+        ("skins", array(skin.skins.iter().map(skin_value).collect())),
+        ("clips", array(skin.clips.iter().map(clip_value).collect())),
+        (
+            "instances",
+            array(
+                skin.instance_skins
+                    .iter()
+                    .map(|index| int(i64::from(*index)))
+                    .collect(),
+            ),
+        ),
+        (
+            "influences",
+            int(i64::try_from(influences).unwrap_or(i64::MAX)),
+        ),
+        (
+            "notes",
+            array(skin.notes.iter().cloned().map(string).collect()),
+        ),
+        (
+            "clip_bytes",
+            int(i64::try_from(skin.clip_bytes).unwrap_or(i64::MAX)),
+        ),
+    ])
 }
 
 /// The JSON object [`dump_bytes`] prints, from an import that already resolved URIs.
@@ -145,7 +190,7 @@ fn interp_name(interpolation: Interpolation) -> &'static str {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
 mod tests {
-    use super::dump_bytes;
+    use super::{dump_bytes, dump_gskin};
 
     const FIXTURE: &str = r#"{
         "asset": {"version": "2.0"},
@@ -164,5 +209,57 @@ mod tests {
         assert!(text.contains("\"parent\":-1"));
         assert!(text.contains("inverse bind missing"));
         assert!(text.contains("skins[0] skin: used"));
+    }
+
+    #[test]
+    fn a_gskin_dump_names_the_parent_and_the_clip_bytes() {
+        use genos_load::{
+            encode_skin, Channel, ChannelPath, Clip, Interpolation, Joint, Skin, SkinCook,
+            SkinPrimitive, IDENTITY_BIND,
+        };
+        let cook = SkinCook {
+            asset_id: [1; 32],
+            settings: [2; 32],
+            inputs: vec![(String::new(), [1; 32])],
+            skins: vec![Skin {
+                name: Some("body".into()),
+                joints: vec![Joint {
+                    name: "hips".into(),
+                    parent: -1,
+                    inverse_bind: IDENTITY_BIND,
+                    translation: [0.0, 1.0, 0.0],
+                    rotation: [0.0, 0.0, 0.0, 1.0],
+                    scale: [1.0, 1.0, 1.0],
+                    node: 4,
+                }],
+                notes: Vec::new(),
+            }],
+            clips: vec![Clip {
+                name: "move".into(),
+                duration: 1.0,
+                skin: 0,
+                channels: vec![Channel {
+                    joint: 0,
+                    path: ChannelPath::Translation,
+                    interpolation: Interpolation::Linear,
+                    times: vec![0.0],
+                    values: vec![0.0, 0.0, 0.0],
+                }],
+            }],
+            instance_skins: vec![Some(0)],
+            mesh_skin: vec![Some(0)],
+            primitives: vec![SkinPrimitive {
+                joints: vec![[0, 0, 0, 0]],
+                weights: vec![[1.0, 0.0, 0.0, 0.0]],
+            }],
+            primitive_mesh: vec![0],
+            notes: Vec::new(),
+        };
+        let encoded = encode_skin(&cook).expect("encode");
+        let text = genos_json::encode(&dump_gskin(&encoded.bytes).expect("dump"));
+        assert!(text.contains("\"name\":\"hips\""));
+        assert!(text.contains("\"parent\":-1"));
+        assert!(text.contains("\"clip_bytes\":"));
+        assert!(text.contains("linear"));
     }
 }
