@@ -438,7 +438,11 @@ void lighting_compose_note_field(uint slot, uint packed) {
     uint now = packed + 1u;
     uint prev = ckeys.key[LIGHTING_COMPOSE_PACK + slot];
     ckeys.key[LIGHTING_COMPOSE_PACK + slot] = now;
-    if (prev != 0u && prev != now) {
+    // The first stored field is a change. A held picture was composed before
+    // that write, and leaving it unmarked kept the pre-field shade until the
+    // next pack change. A full frame cleared the rects, so the mark does
+    // nothing until a pixel has recorded coverage.
+    if (prev != now) {
         lighting_compose_mark_slot(slot);
     }
 }
@@ -4837,9 +4841,16 @@ void lighting_svgf_variance(uint slot) {
     if (LIGHTING_DIRTY_ATROUS && !flip && !rebuild) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
+        // A one-frame step under LIGHTING_DIRTY_EPS still leaves the stored
+        // level behind the mean. The 16-set rebuild is that backstop. A mean
+        // that has already crossed the edge test is the same case earlier:
+        // the small emitter's cell stays in the held blur until then.
+        float y_now = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_old = dot(max(o.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        bool drifted = lighting_sh_lum_disagrees(max(y_now, y_old), min(y_now, y_old));
         // S78B: a spatial estimate is redone only when its value or one of its
         // 7 x 7 inputs moved (stamp 22.z), not every frame.
-        if (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo)) {
+        if (!drifted && (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo))) {
             return;
         }
         // S78X: noise-aware level 0 (Anthony: rewrite thresholds from the
@@ -5083,21 +5094,31 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     // A lamp ring updates the field every frame. The idle skip would leave the
     // stored colour behind the filter for up to LIGHTING_PUSH_IDLE frames.
+    // The filter has left the stored field by more than the edge test. The
+    // idle skip would keep the pre-blotch shade until the hash comes around.
+    // One push stores the filter target and the held picture redraws it.
+    bool field_behind = false;
     if (LIGHTING_DIRTY_ATROUS && !lighting_lamp_settling() && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
         && ((lighting_hash(lighting_sc_id(slot) ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
-        // S72V10 trusts the field for two frames from this stamp. The idle skip
-        // does not rewrite the field, so while the camera is held the stamp stays
-        // current and compose keeps showing that field instead of dropping it
-        // for the WRC on a timer. A later push that writes a different field
-        // marks the blocks (lighting_compose_note_field).
-        if (lighting_view_held()) {
-            uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
-            if (pf != 0u && lighting_frame() - pf >= 2u) {
-                cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+        vec3 stored = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float y_filter = dot(max(f.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_stored = dot(max(stored, vec3(0.0)), LIGHTING_SVGF_LW);
+        field_behind = lighting_sh_lum_disagrees(max(y_filter, y_stored), min(y_filter, y_stored));
+        if (!field_behind) {
+            // S72V10 trusts the field for two frames from this stamp. The idle skip
+            // does not rewrite the field, so while the camera is held the stamp stays
+            // current and compose keeps showing that field instead of dropping it
+            // for the WRC on a timer. A later push that writes a different field
+            // marks the blocks (lighting_compose_note_field).
+            if (lighting_view_held()) {
+                uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
+                if (pf != 0u && lighting_frame() - pf >= 2u) {
+                    cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+                }
             }
+            return;
         }
-        return;
     }
     vec4 target = lighting_svgf_target(slot);
     // The first stored field is the filter target, so a fill shows at once.
@@ -5127,7 +5148,15 @@ void lighting_svgf_push(uint slot) {
             // went out leaves none of the stored field: lighting_lamp_keep is
             // 0, and holding the 1/16 step is the multi-frame tail.
             float catch_up = LIGHTING_FIELD_CATCH;
-            if (lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
+            float y_target = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
+            float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
+            // A lamp that left, or a field the filter has left by the edge
+            // test, takes the target on this push. A quiet texel keeps the
+            // 1/16 step. The idle hash would otherwise show the old field
+            // for LIGHTING_PUSH_IDLE frames.
+            if (field_behind
+                || lighting_sh_lum_disagrees(max(y_target, y_prev), min(y_target, y_prev))
+                || lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
                 catch_up = 1.0;
             }
             outc = mix(prev, outc, catch_up);
