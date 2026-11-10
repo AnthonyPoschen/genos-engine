@@ -58,4 +58,4 @@ Buses, a held device, disk-fed clips, reverb zones, a console write, and a cross
 
 ## Decisions
 
-[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. [ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md) (proposed) keeps this mix and these device outputs. Loading stays decode-only. See [Loading](loading.md).
+[ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) keeps third-party crates off the audio device. [ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md) (accepted) keeps this mix and these device outputs. Loading stays decode-only. See [Loading](loading.md).

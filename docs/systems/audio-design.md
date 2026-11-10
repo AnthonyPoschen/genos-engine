@@ -1,8 +1,8 @@
 # Audio design
 
-Status: **proposed**. ADR: [0041](../adr/0041-one-audio-mix-device-outputs-only.md). The code that already runs is the [audio record](audio.md). Words added for this plan are in `CONTEXT.md`.
+Status: **accepted** (10 Nov 2026). ADR: [0041](../adr/0041-one-audio-mix-device-outputs-only.md). Anthony accepted the one mixer and the device-output split. The propagation stage and the `DevicePath` plug below are the additions he made after that. The code that already runs is the [audio record](audio.md). Words added for this plan are in `CONTEXT.md`.
 
-The mix in `genos-audio` is the one implementation of Doppler, pan, distance, transmission, buses, and reverb. ALSA, WASAPI, CoreAudio, and a later console write only receive the buffer that mix produced. A fixed tape rendered by `mix` hashes to the same bytes on every platform that runs `cargo test`.
+The mix in `genos-audio` is the one implementation of Doppler, pan, distance, transmission, buses, and reverb. ALSA, WASAPI, CoreAudio, and a `DevicePath` passed to `start_with` only receive the buffer that mix produced. A fixed tape rendered by `mix` hashes to the same bytes on every platform that runs `cargo test`.
 
 ## 1. What already exists
 
@@ -72,9 +72,21 @@ There is no reflection and no reverb. Transmission is a broadband gain. A wall d
 
 A reverb zone is an axis-aligned box with a send in `[0, 1]` and a tail index. The listener's position picks at most one zone, the smallest box that contains the listener. Equal box volume resolves to the lower tail index, then the lower send, then the earlier zone in the list, so the pick is a function of the zone list. Outside every zone the send is 0. The tail is one Schroeder reverberator: four combs in parallel, then two allpasses in series, delays chosen in samples at 48 kHz, gains constant in source. The voice is scaled by transmission first. The send is a fraction of that scaled voice into the tail. The dry path is the rest. One tail on Medium. A zone on High or Ultra may select a second or further fixed coefficient set. Low forces the send to 0 and does not step the delay lines, so the Low buffer matches the dry mix.
 
-The send moves through the same one-pole as the transmission smoother, so a zone crossing does not click. Zones do not replace transmission and do not read the surface light cache. A sound in another room is quieter because the straight path is absorbed. It does not get its own tail in this stage. Per-source tails are a later knob.
+The send moves through the same one-pole as the transmission smoother, so a zone crossing does not click. Zones do not replace transmission and do not read the surface light cache. A sound in another room is quieter because the straight path is absorbed. The zone step gives that sound the listener's one tail. A second tail per source waits. The propagation stage, after the five implementation steps, is where a doorway path and its reverberant energy join the direct path in the sum.
 
-A one-pole low-pass on a voice, driven by the transmission gain, is the muffle that a thick wall is missing. It is a later knob, off on Low, coefficients in this crate. It is not required to land zones.
+### Propagation, after the five implementation steps
+
+ADR 0041 calls this stage 6+. It follows deterministic mix, the held device, the camera listener, disk-fed clips, and reverb zones. It does not renumber the table in §11. Design stage 6 stays the camera copy.
+
+The listener hears every live path at once. Each path has its own gain, one-pole filter, delay, and direction. The callback sums them. When a path opens or closes, its gain slews with the transmission one-pole, so the sum does not pop.
+
+The direct path is the straight segment. Each wall it crosses applies `exp(-absorption * thickness)` and a one-pole cutoff from that wall's material. The frame thread keeps up to four crossings, in order. The callback runs those poles. Further crossings keep the gain product and the four lowest cutoffs.
+
+A portal path goes source, a point on the opening, listener. The direction is that opening point. The delay is the path length at 343 m/s, rounded to a sample at 48 kHz. Reflected energy and the Schroeder tail that leave through the same opening use that direction, with their own delay and gain. The doorway dominates the image when those paths carry more energy than the direct path. The direct path stays in the sum.
+
+Reflection taps are a few bounced rays on the physics broadphase: the static AABB tree and the dynamic AABB tree ([ADR 0033](../adr/0033-physics-scale-broadphase-and-sleep.md)). The tree today is not a triangle mesh BVH, and it has no public segment query. This stage adds a bounded query on the frame thread. The callback does not cast. A hit mapped to an occluder uses that absorption and cutoff. Diffuse energy from the hits feeds the one Schroeder tail the zone step owns.
+
+Low forces portals, reflection rays, and the wall low-pass off. A Low render matches the straight-path mix. The 1.0 ms mix ceiling stays. The budgets and the scripted-room hash are in ADR 0041. The hash is of `render_offline` at 48 kHz. Propagation off matches the straight-path hash. Propagation on has its own stable hash. The energy-weighted bearing lies closer to the doorway than to the source, and the direct path is still in the buffer.
 
 ### Handheld and console device outputs
 
@@ -82,7 +94,7 @@ The Steam Deck is Linux. SteamOS exposes the device through PipeWire and ALSA `d
 
 A Windows handheld uses the WASAPI write the same way.
 
-A console is the `cfg` branch that currently returns "this operating system has no audio device backend." The gap is one write function per vendor SDK: it copies the finished interleaved buffer into the vendor queue and returns the frame count. It contains no `mix` call. The public repository does not add SDK headers, samples, or vendor entry points. The stage lands on a machine that already has the SDK. Review of that stage is the write itself plus the offline hash, which does not need the SDK.
+A console does not add a `cfg` arm full of SDK calls. `DevicePath` is the write. `open` reports the rate, the period, and the channel count the device accepted. `start` runs `genos-audio`. `stop` joins it. `start_with` takes an implementor from outside this crate. This repository ships ALSA, WASAPI, CoreAudio, a null path for the headless server, and a fake path that records the callback. A console crate implements `DevicePath` and passes it to `start_with`. Cargo.toml of this repository does not name that crate. The callback writes the finished buffer and does not call `mix`.
 
 ### Cross-platform identical buffer
 
@@ -109,7 +121,7 @@ One library that both owns a production mix and ships a console device output in
 | oddio | Pulls into a caller buffer | None | No | MIT or Apache-2.0 | Reject. The pull split is what `mix_into` adds. The spatial scene would replace `space.rs`. |
 | Steam Audio | HRTF, occlusion, reflections, reverb on its own scene | None. It is a spatial library. | No official output. A partner ports it. | Apache-2.0 | Reject for v1. It is a second occluder world beside `transmit.comp`. |
 
-The minimal set of device outputs is the three that already link, plus the offline buffer the test writes, plus one console write per SDK when that SDK is present. Adding `cpal` or miniaudio would replace the three with one crate and would still leave consoles as a custom write.
+The in-tree device outputs are ALSA, WASAPI, CoreAudio, the null path, and the fake path. A console implementor of `DevicePath` stays out of tree and is passed to `start_with`. Adding `cpal` or miniaudio would replace the three desktop writes with one crate and would still leave the console plug to us.
 
 ## 6. Engine API
 
@@ -138,7 +150,7 @@ submit(interleaved, rate)                                      // one-shot, the 
 
 The command ring holds 256 `Copy` commands on Low. Overflow drops the newest command and increments `audio_command_drop`. The listener pose is a latest-wins slot with a sequence count, not a ring entry.
 
-`AudioSettings` lives in `genos-audio` with `to_text`, `parse`, and `set_key`, the three methods from the [settings principles](../engine/settings-principles.md). The trait stays in `genos-scene` until a second settings type needs it in a crate both can see. `genos-audio` does not depend on `genos-scene`, and `genos-scene` does not depend on `genos-audio`. The frame that already owns the camera holds the settings value. MCP commands are `get_audio_settings`, `set_audio_settings`, and `get_audio_stats`. A read of stats returns the probe counters from §9.
+`AudioSettings::default()` is the Low preset. The struct lives in `genos-audio` with `to_text`, `parse`, and `set_key`, the three methods from the [settings principles](../engine/settings-principles.md). The trait stays in `genos-scene` until a second settings type needs it in a crate both can see. `genos-audio` does not depend on `genos-scene`, and `genos-scene` does not depend on `genos-audio`. The frame that already owns the camera holds the settings value. MCP commands are `get_audio_settings`, `set_audio_settings`, and `get_audio_stats`. A read of stats returns the probe counters from §9.
 
 Rhai registers `audio.play`, `audio.stop`, and `audio.bus_gain` in the stage that adds the debug binary. A script does not call `submit`. That is ADR 0009.
 
@@ -152,7 +164,7 @@ Ross Bencina, "Real-time audio programming 101: time waits for nothing", is the 
 frame thread
   camera step
   copy Listener
-  enqueue Commands
+  enqueue Commands on the one preallocated ring
   every 2 frames on Low: transmission_gains or the CPU barrier walk
   publish gains
 
@@ -160,8 +172,8 @@ genos-audio-io          (disk-fed clips only)
   read cooked blocks
   decode IMA ADPCM into the voice ring
 
-genos-audio             (the device thread, not a job worker)
-  read commands and the latest Listener
+genos-audio             (the device callback, not a job worker)
+  read the ring and the latest Listener
   read voice rings and resident slabs
   mix_into the quantum
   one-pole on transmission and reverb send
@@ -170,7 +182,7 @@ genos-audio             (the device thread, not a job worker)
   write the device
 ```
 
-The job-system plan does not run this thread. A stolen worker would miss the device deadline. The same reason keeps `vkQueueSubmit` on one thread in that plan.
+The callback does not allocate and does not lock. The ring is one single-producer buffer allocated when the device starts. Head and tail are atomics. A full ring drops the newest command and increments `audio_command_drop`. The job-system plan does not run this thread. A stolen worker would miss the device deadline. The same reason keeps `vkQueueSubmit` on one thread in that plan.
 
 Voice slots, bus buffers, the command ring, and the reverb delay lines are allocated when the device opens, sized from `AudioSettings`. A preset change that resizes the pool happens between quanta: the frame thread publishes a new pool, the device thread swaps at the next quantum boundary. The quantum function itself does not allocate.
 
@@ -203,6 +215,7 @@ Every failure mode and every tunable has a probe. The stage that adds the featur
 | ALSA xrun or a WASAPI/CoreAudio underrun | `device_xrun` |
 | Disk-fed ring empty | `audio_underrun` |
 | Command ring full | `audio_command_drop` |
+| A predicted one-shot the server rejects | `audio_rejected_plays` |
 | Voice pool full | `audio_voice_drop` |
 | Resident bytes over the cap | `audio_resident_drop` |
 | Occlusion gain older than two frames | `occlusion_age_frames` |
@@ -252,7 +265,7 @@ Each stage is a later commit. This document is stage 0. A stage edits the [audio
 | 8 | IMA ADPCM cook. Resident clips and disk-fed clips. | Two cooks of one WAV share a subset hash. The audio thread's allocator test still passes while a disk-fed clip plays. Forcing an empty ring increments `audio_underrun`. The asset plan's WAV-PCM sentence is edited in this commit. |
 | 9 | Reverb zones. | Low's hash matches the dry hash from stage 5. A listener inside a zone changes the hash. A listener outside every zone matches the dry hash. `mix_us` with the tail forced off stays at the dry measurement. |
 | 10 | `AudioSettings`, MCP, `debug/audio`. | `debug/audio --render-offline --out <dir>` writes `metrics.json` and the wav under that directory, default `./genos-debug/audio/`. `--out` wins over `GENOS_AUDIO_OUT`. The variable is registered in `lint/env_mirrors.toml` as a mirror of `--out` in that commit. The binary uses the shared debug scaffolding. The probes in §9 have a command each. |
-| 11 | One console write, only on a machine with that SDK. | The module contains the vendor write and no `mix` call. The stage 2 hash passes on that toolchain. No SDK header is added to the public tree. |
+| 11 | `DevicePath` and `start_with`. Desktop paths, null, and fake ship here. A console implementor stays out of tree. | The callback writes the buffer it was given and does not call `mix`. The stage 2 hash passes without a console SDK. Cargo.toml does not name a console crate. |
 
 Stage 3's WASAPI and CoreAudio holds are verified on those machines. This Linux tree compiles them and does not run them, which the system record already says.
 
@@ -260,9 +273,9 @@ Stage 3's WASAPI and CoreAudio holds are verified on those machines. This Linux 
 
 The implementing commit that first sends a play command copies these lines into the audio record. Until then the record's lines are the ones for today's process-local mix.
 
-- **Replicated state.** World `Play` and `Stop` commands: asset id, sim tick, pose, gain, loop, bus. Music and UI stay on the client. The mixed buffer and the transmission gain stay on the client.
-- **Authority.** The server is the authority for world one-shots. The client is the authority for its UI and its own footsteps. A predicted footstep stops when the server does not confirm the step.
-- **Prediction / rollback.** The mix does not rewind. A rejected one-shot stops at the next quantum. Source poses follow the replicated transform.
+- **Replicated state.** World `Play` and `Stop` commands: asset id, sim tick, pose, gain, loop, bus. Music and UI stay on the client. PCM samples stay off the wire. The mixed buffer, the cursor, and the transmission gain stay on the client.
+- **Authority.** The server is the authority for world one-shots. The client is the authority for its UI and its own footsteps. A predicted one-shot stops when the server rejects it.
+- **Prediction / rollback.** The mix does not rewind. A rejected one-shot stops at the next quantum and increments `audio_rejected_plays`. Source poses follow the replicated transform.
 - **Determinism.** `render_offline` of one tape is bit-identical across platforms. The device clock is not a lockstep input. The server does not mix.
 - **Headless server.** No sound device, no `genos-audio` thread, no `transmission_gains`. The server still records the world play commands it replicates. `LoadProfile::Sim` leaves the audio bytes on disk.
 

@@ -1,6 +1,6 @@
 # 0041: One audio mix, and device outputs only write that mix
 
-Status: **Proposed**. Design: [audio design](../systems/audio-design.md). The living record of the code that already ships is [Audio](../systems/audio.md).
+Status: **Accepted** (10 Nov 2026). Anthony approved the one mixer and the device-output split as written. This revision records the propagation stage and the out-of-tree console plug he added after that approval. Design: [audio design](../systems/audio-design.md). The living record of the code that already ships is [Audio](../systems/audio.md).
 
 ## Context
 
@@ -13,11 +13,12 @@ The current `submit` opens the device, writes, and closes on every call. ALSA as
 ## Decision
 
 1. **One mix.** Mixing, resampling, buses, Doppler, pan, distance, transmission, and reverb stay in `genos-audio`. That code is the same on every platform. No SIMD path and no `mul_add` in the mix. `sin`, `cos`, and `exp` used by the mix move into this crate as published polynomials, so the platform math library cannot change a sample.
-2. **Device outputs only write.** ALSA, WASAPI, and CoreAudio stay the three writes ADR 0007 names. Each one receives the interleaved buffer `mix` already produced. A console adds one write of that same buffer when its SDK is on the machine that commits it. The public tree does not gain a console SDK. The Steam Deck and any other Linux handheld use the ALSA write. A Windows handheld uses the WASAPI write. There is no fourth mixer for a handheld.
+2. **Device outputs only write.** ALSA, WASAPI, and CoreAudio stay the three writes ADR 0007 names. Each one receives the interleaved buffer `mix` already produced. The trait is `DevicePath`. `start_with` takes an implementor and starts `genos-audio`. This repository ships the three desktop paths, a null path for the headless server, and a fake path that records the callback for tests. A console crate lives outside this repository, implements `DevicePath`, and passes it to `start_with`. The public tree does not gain a console SDK. The Steam Deck and any other Linux handheld use the ALSA write. A Windows handheld uses the WASAPI write. There is no fourth mixer for a handheld.
 3. **The identical-sound gate is an offline buffer.** A fixed command tape rendered by `mix` produces a SHA-256 of the 16-bit stereo buffer. `cargo test -p genos-audio` checks that hash on every platform that runs the suite. The hash is bit-identical. The sound device, the operating-system mixer, and the speakers sit outside the hash. A lossy cook has its own error bound against WAV. That bound is not the platform gate. The platform gate hashes the cooked decode, which is still bit-identical across machines.
 4. **Build on the current types.** `Listener`, `Source`, `Barrier`, `mix`, and `submit` stay the engine-facing API. New work adds a non-allocating write into a caller buffer, a held device, buses, a disk-fed clip, and reverb zones around those types. `crates/audio-check` keeps calling the public mix.
-5. **Occlusion stays the straight-path transmission that already ships.** The surface light cache stores light on surface patches. It has no thickness and no absorption. A physics ray is not a public query (`ray_hits_triangle` is private in `crates/physics/src/mesh.rs`) and it would see collision shapes, not the resident occluders. The frame thread keeps calling `transmission_gains` or the CPU `Barrier` walk. The audio thread only reads the latest gain.
-6. **Low is a row of knobs on that one mix.** Presets follow [ADR 0023](0023-graphics-settings-presets.md): one code path, a named table of caps. The Low ceilings (design targets, not yet measured) are 32 voices, 2 disk-fed clips, 8 MiB of decoded samples, a 480-frame quantum at 48 kHz, reverb off, and 1.0 ms of mix CPU per quantum.
+5. **Occlusion reuses the straight-path transmission that already ships.** `transmission_gain` and `transmit.comp` stay the walk: `exp(-absorption * thickness)` on resident occluders. The surface light cache stores light on surface patches. It has no thickness and no absorption. The frame thread publishes the gain. The callback only multiplies by it. The propagation stage below extends that walk with a low-pass and adds more paths. It does not replace the walk, and it does not read the surface light cache.
+6. **Low is the default preset and a row of knobs on that one mix.** `AudioSettings::default()` is Low. Presets follow [ADR 0023](0023-graphics-settings-presets.md): one code path, a named table of caps. The Low ceilings (design targets, not yet measured) are 32 voices, 2 disk-fed clips, 8 MiB of decoded samples, a 480-frame quantum at 48 kHz, reverb off, propagation off, and 1.0 ms of mix CPU per quantum.
+7. **One callback, one ring.** `genos-audio` is the device thread. The job pool does not run it. The callback does not allocate, lock, read a file, call Vulkan, or cast a ray. Commands arrive on one preallocated single-producer ring from the frame thread. Head and tail are atomics. PCM samples stay off the wire. A predicted one-shot stops when the server rejects it. The mixer does not rewind.
 
 ## Rejected
 
@@ -27,11 +28,32 @@ The current `submit` opens the device, writes, and closes on every call. ALSA as
 - **oddio as the mix.** It pulls frames into a caller buffer and does not open a device, which is the right split, and it has no console output, no cook, and no occluder walk. Adopting it would replace `mix` and `space.rs`.
 - **Steam Audio as the spatializer.** Apache-2.0. Supported platforms are Windows, Linux, macOS, Android, and iOS. Console support is a port the integrator does. It traces its own scene for occlusion and reverb. That is a second world beside `transmit.comp`. It does not open the sound device.
 - **Reading the surface light cache for occlusion.** The cache is light on surface patches ([glossary](../lighting/GLOSSARY.md)). A stale page would change a gain for a lighting reason. Audio keeps the occluder segment test.
-- **A physics ray per source.** No public segment query. The shapes are the collision set, not the resident occluders the picture uses.
+- **One chosen path, or an unbounded physics ray per source, as the occlusion of the first implementation steps.** `ray_hits_triangle` is private. The broadphase is two AABB trees of collision shapes ([ADR 0033](0033-physics-scale-broadphase-and-sleep.md)), not the resident occluder list. Those steps keep `transmission_gain`. The propagation stage later publishes a bounded path list. The callback still does not cast.
+
+## Stage 6+: propagation
+
+This stage follows the five implementation steps (deterministic mix, held device, camera listener, disk-fed clips, reverb zones). It does not renumber them, and it does not land inside them. The design's stage table stays 0–11. The listener hears a mix of paths. Every live path keeps its own gain, one-pole filter, delay, and direction. The callback sums them. A path that opens or closes slews its gain with the same one-pole the transmission smoother uses, so the sum does not pop.
+
+1. **Direct path.** The straight segment from source to listener. Each wall it crosses applies the transmission gain that already ships and a one-pole low-pass from that wall's material. The frame thread records up to four crossings. Each crossing keeps its gain and its cutoff. The callback runs those poles in order. Further crossings keep the gain product and the four lowest cutoffs. Absorption stays nepers per meter on the occluder. The cutoff is a second field on that same record, constant in the cook of the material, so two machines use the same coefficient.
+2. **Portal paths.** A door, window, or other opening is a segment. Sound that reaches the listener through that opening is a path: source, a point on the opening, listener. The direction is the opening point, the exit into the listener's room. The delay is the path length divided by 343 m/s, rounded to a whole sample at 48 kHz. Reflected and reverberant energy that leaves through the same opening uses that same direction, with its own longer delay and its own gain. The doorway becomes the loud part of the image when those paths carry more energy than the direct path. The mixer does not drop the direct path to make that happen. The sum does.
+3. **Reflection taps.** A few bounced rays against the physics broadphase, the static AABB tree and the dynamic AABB tree from ADR 0033. There is no triangle mesh BVH in the tree today. This stage adds a bounded segment query. It does not run on the callback. A hit that maps to an occluder uses that occluder's absorption and cutoff. Otherwise the tap uses a default pair stored on `AudioSettings`. Each tap is another path in the same sum: arrival direction, delay, gain, one filter. Diffuse energy from those hits feeds the Schroeder tail that the reverb-zone step already owns. The tail stays one reverberator. A portal's diffuse energy is panned with the portal path, not with a second tail.
+4. **Where the work runs.** The frame thread builds the path list and publishes it. The callback reads the list and sums. Low forces portal paths, reflection taps, and the wall low-pass off, so a Low render matches the straight-path mix. The 1.0 ms Low mix ceiling does not grow.
+
+The ceilings below are design targets. They are not measurements. Path build time is frame-thread time. The callback's extra taps sit inside the mix ceiling the preset already has.
+
+| | Low | Medium | High | Ultra |
+|---|---|---|---|---|
+| Direct path | broadband transmission | gain plus up to 4 wall poles | same | same |
+| Portal paths per source | 0 | 2 | 4 | 4 |
+| Reflection rays | 0 | 2 | 4 | 8 |
+| Frame-thread path build | 0 ms | 0.40 ms | 0.80 ms | 1.20 ms |
+| Mix CPU ceiling | 1.0 ms, unchanged | 1.5 ms, taps included | 1.5 ms, taps included | 2.0 ms, taps included |
+
+**Gate.** A scripted room: two boxes, one doorway, a source in the far room, the listener in the near room, a wall on the straight segment. `render_offline` at 48 kHz writes an `i16` buffer. The test checks its SHA-256. Low, and a run with propagation forced off, match the straight-path hash. A run with propagation on has a different hash, stable across platforms. The energy-weighted bearing sits closer to the doorway than to the source's true bearing, and the direct path's samples are still present in the sum. Closing the doorway slews the portal gain. The largest sample step between two quanta stays under the bound stored with the fixture. The test does not open a device and does not open Vulkan.
 
 ## Consequences
 
-- `device.rs` grows a held device and, later, one console write. It does not grow a mixer.
+- `device.rs` grows a held device. `DevicePath` and `start_with` are the console plug. A console implementor stays out of this repository. The file does not grow a mixer.
 - The asset plan's sentence "the audio bytes are the WAV PCM" changes when the cook stage writes IMA ADPCM. Short clips stay resident. Long clips are read from the cook during playback. The runtime still does not transcode a source file (ADR 0020).
 - The audio thread is `genos-audio`. It is not a job-system worker. It does not allocate, lock, or call `transmission_gains` (that call waits on a fence).
 - `debug/audio` is the stage that exposes the probes. Until it lands, the system record stays the description of today's code.
@@ -39,6 +61,6 @@ The current `submit` opens the device, writes, and closes on every call. ALSA as
 
 ## Departures
 
-- From Schroeder, "Natural Sounding Artificial Reverberation", JAES 1962: the comb and allpass tail is the reverb zone's tail. There is no geometric early reflection in that stage. A zone picks the send and, on High and Ultra, which fixed coefficient set.
+- From Schroeder, "Natural Sounding Artificial Reverberation", JAES 1962: the comb and allpass tail is the reverb zone's tail. That stage has no geometric early reflection. The propagation stage adds geometric paths as extra taps in the same sum. Those taps are not a second Schroeder. A zone still picks the send and, on High and Ultra, which fixed coefficient set.
 - From the Cephes `sinf` and `expf` polynomials (Moshier, public domain): the mix uses those approximations for pan and transmission. The published error bound is part of the stage that locks the hash. GLSL `exp` in `transmit.comp` stays. CPU and GPU gains match inside a tolerance. The golden hash uses the CPU value.
 - From Giacomoni, Moseley, and Vachharajani, "FastForward for Efficient Pipeline Parallelism", PPoPP 2008: one producer (the frame thread) and one consumer (`genos-audio`) share a fixed command ring. The listener pose is a separate latest-wins slot, so a full ring still moves the listener.
