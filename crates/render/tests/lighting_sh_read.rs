@@ -344,16 +344,13 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
         &probe,
         "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
     );
+    assert!(indirect.contains("lighting_world_irradiance(pos, n)"));
+    assert!(indirect.contains("return max(world.rgb, vec3(0.0));"));
     assert!(
-        indirect.contains("return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));"),
-        "an uncovered pixel, including a slant, still mixes the probes by world trust"
+        !indirect.contains("lighting_sh_read"),
+        "compose does not add a second cell walk"
     );
-    assert!(indirect.contains("return world.rgb;"));
-
-    let probes = [0.3_f32, 0.4, 0.5];
-    let empty = [9.0_f32, 9.0, 9.0];
-    let shown = mix(probes, empty, 0.0_f32.clamp(0.0, 1.0));
-    assert!(near(shown, probes), "w 0 shows the probes, got {shown:?}");
+    assert!(!indirect.contains("lighting_probe_irradiance"));
 }
 
 #[test]

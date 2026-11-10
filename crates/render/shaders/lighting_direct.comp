@@ -152,9 +152,12 @@ void main() {
             return;
         }
     }
-    // A kept probe hit (index h), a light cache ray (ray) or a fill (index h).
-    bool fill_hit = idx >= fills;
-    bool probe_hit = (idx >= pixels && idx < pixels + kept) || fill_hit;
+    // Screen-probe kept hits and fills are removed. The arm stays in this
+    // file so the cache-ray shade above it is unchanged, and the constant
+    // takes it out of the compiled shader.
+    const bool LIGHTING_SCREEN_PROBES = false;
+    bool fill_hit = LIGHTING_SCREEN_PROBES && idx >= fills;
+    bool probe_hit = LIGHTING_SCREEN_PROBES && ((idx >= pixels && idx < pixels + kept) || fill_hit);
     uint h = fill_hit ? idx - fills : idx - pixels;
     uint ray = idx < pixels + kept || fill_hit ? 0u : lighting_probe_rays() + (idx - pixels - kept);
     vec3 pos;

@@ -10,6 +10,11 @@ use genos_scene::{
 
 pub(crate) const BUCKETS: usize = 12;
 pub(crate) const B_COMPACT: u8 = 0;
+/// Retired screen-probe place slot. The index stays so compose remains pass 7.
+#[allow(
+    dead_code,
+    reason = "slot 1 stays so compose remains pass 7; the frame does not dispatch it"
+)]
 pub(crate) const B_PLACE: u8 = 1;
 pub(crate) const B_TRACE: u8 = 2;
 pub(crate) const B_DIRECT: u8 = 3;
@@ -283,7 +288,7 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.bounce.count == LIGHTING_BOUNCES_UNLIMITED && cache {
         bits |= CTRL_BOUNCE_UNLIMITED;
     }
-    if settings.probes.enabled {
+    if settings.allocates_probe_work() {
         bits |= CTRL_PROBES;
     }
     if settings.world_cache.enabled {
@@ -407,18 +412,19 @@ pub(crate) fn light_groups(
     let pixels = w.saturating_mul(h);
     let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
     // Preset high, this frame, not frozen and not a held frame: the list the
-    // pipeline recorded before the settings struct existed.
+    // pipeline recorded before the settings struct existed, without the
+    // removed screen-probe passes.
     let full = settings.direct_this_frame(frame)
         && settings.direct.resolution_scale == 1
-        && settings.probes_this_frame(frame)
-        && settings.probe_rays() == LIGHTING_RAYS
-        && settings.world_mode() == 3;
+        && settings.world_mode() == 3
+        && settings.world_cache.enabled
+        && settings.bounce.count >= 2;
     if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if frozen && probe_only(settings) {
-        // Still probe-only holds the probes and the cache rays. Pixel direct and
-        // compose remain, the same idle a settled surface-cache frame records.
+        // The stored probe-only flag no longer dispatches a grid. Pixel direct
+        // and compose remain, the same idle a settled surface-cache frame records.
         // High is `full` and took the branch above.
         if settings.direct.enabled {
             let k = settings.direct.resolution_scale.max(1);
@@ -433,14 +439,7 @@ pub(crate) fn light_groups(
             h.div_ceil(8).max(1),
         );
     } else if !round && full && !settings.cache_round_this_frame(frame) {
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), 1, B_TRACE);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), 1, B_DIRECT);
-        out.push(4, probes, 1, B_GATHER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
+        out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if round
         && full
@@ -449,27 +448,10 @@ pub(crate) fn light_groups(
         && settings.denoiser.iterations == 5
     {
         out.push(0, slots, 1, B_COMPACT);
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        out.push(
-            2,
-            (probe_ray_count + 2 * kept).div_ceil(64),
-            LIGHTING_MODE1,
-            B_TRACE,
-        );
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
-        out.push(
-            3,
-            (pixels + 2 * kept).div_ceil(64),
-            LIGHTING_MODE1,
-            B_DIRECT,
-        );
+        out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
-        out.push(4, probes, 1, B_GATHER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
         push_denoise(settings, w, h, slots, &mut out);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
@@ -546,9 +528,9 @@ fn gated(
     round: bool,
     w: u32,
     h: u32,
-    probes: u32,
-    probe_ray_count: u32,
-    kept: u32,
+    _probes: u32,
+    _probe_ray_count: u32,
+    _kept: u32,
     out: &mut LightGroups,
 ) {
     let buckets = settings.gpu_buckets(frame);
@@ -566,18 +548,8 @@ fn gated(
     if round && buckets.compact {
         out.push(0, slots, 1, B_COMPACT);
     }
-    if buckets.place && probes > 0 {
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-    }
-    if buckets.gather && probes > 0 {
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
-    }
     if round && (buckets.cache_rays || buckets.cache) {
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-    }
-    if buckets.probe_trace && probes > 0 {
-        let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), gy, B_TRACE);
     }
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
@@ -585,7 +557,7 @@ fn gated(
     let combined = buckets.direct && buckets.hit_light && k == 1 && settings.bounce.count > 0;
     if combined {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(3, (pixels + 2 * kept).div_ceil(64), gy, B_DIRECT);
+        out.push(3, pixels.div_ceil(64), gy, B_DIRECT);
     } else if buckets.direct {
         out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
         out.pixel_only = 1;
@@ -597,17 +569,6 @@ fn gated(
     // and does not record this one.
     if round && buckets.cache_rays {
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
-    }
-    if buckets.hit_light && !buckets.direct && kept > 0 {
-        out.push(3, (2 * kept).div_ceil(64).max(1), LIGHTING_MODE1, B_HIT);
-    }
-    if buckets.gather && probes > 0 {
-        out.push(4, probes, 1, B_GATHER);
-    }
-    if buckets.filter && probes > 0 {
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
     }
     if round && buckets.cache {
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
@@ -651,8 +612,11 @@ mod probe_still_tests {
         let mut off = LightingSettings::preset(LightingPreset::High);
         off.world_cache.enabled = false;
         let busy = groups(&off, false, true);
-        assert!(busy.counts[B_CACHE_RAYS as usize] > 0, "cache rays");
-        assert!(busy.counts[B_HIT as usize] > 0, "hit light");
+        assert_eq!(busy.counts[B_CACHE_RAYS as usize], 0, "no world cache, no cache rays");
+        assert_eq!(busy.counts[B_PLACE as usize], 0);
+        assert_eq!(busy.counts[B_HIT as usize], 0);
+        assert_eq!(busy.counts[B_DIRECT as usize], 1);
+        assert_eq!(busy.counts[B_COMPOSE as usize], 1);
         let quiet = groups(&off, true, true);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_HIT as usize], 0);
@@ -701,7 +665,7 @@ mod probe_still_tests {
             sum(one)
         );
         assert!(
-            sum(one) < sum(two),
+            sum(one) <= sum(two),
             "bounce 1 dispatched {} and bounce 2 dispatched {}",
             sum(one),
             sum(two)
@@ -713,13 +677,20 @@ mod probe_still_tests {
         assert_eq!(zero[B_HIT as usize], 0);
         assert!(zero[B_DIRECT as usize] > 0);
         assert!(zero[B_COMPOSE as usize] > 0);
-        assert_eq!(one[B_CACHE_RAYS as usize], 0);
-        assert_eq!(one[B_ATROUS as usize], 0);
-        assert_eq!(one[B_HIT as usize], 0);
-        assert!(one[B_TRACE as usize] > 0);
+        assert_eq!(one[B_PLACE as usize], 0);
+        assert_eq!(one[B_TRACE as usize], 0);
+        assert_eq!(one[B_GATHER as usize], 0);
+        assert_eq!(one[B_FILTER as usize], 0);
+        assert!(one[B_CACHE_RAYS as usize] > 0);
+        assert!(one[B_DIRECT as usize] > 0);
+        assert!(one[B_COMPOSE as usize] > 0);
         assert!(two[B_CACHE_RAYS as usize] > 0);
         assert!(two[B_ATROUS as usize] > 0);
         assert!(two[B_HIT as usize] > 0);
+        assert_eq!(two[B_PLACE as usize], 0);
+        assert_eq!(two[B_TRACE as usize], 0);
+        assert_eq!(two[B_GATHER as usize], 0);
+        assert_eq!(two[B_FILTER as usize], 0);
     }
 
     #[test]
@@ -862,43 +833,19 @@ mod probe_still_tests {
         assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Broken));
     }
 
-    /// Place searches, trace rays, gather bins, and filter bodies for `live`
-    /// probes. The CPU launch stays the full grid; this is the GPU-side count.
-    fn probe_retire_work(live: u32, rays: u32) -> (u32, u32, u32, u32, u32) {
-        (
-            live,
-            live,
-            live.saturating_mul(rays),
-            live,
-            live,
-        )
-    }
-
     #[test]
-    fn probe_retire_keeps_the_cpu_launch_and_counts_live_work() {
+    fn screen_probe_passes_are_not_dispatched() {
         let mut on = LightingSettings::preset(LightingPreset::High);
         on.surface_cache.sh_cells = true;
         on.surface_cache.sh_texel_detail = true;
         on.surface_cache.sh_probe_retire = true;
         on.sanitize();
-        let mut off = on.clone();
-        off.surface_cache.sh_probe_retire = false;
-        let retired = groups(&on, false, true);
-        let kept = groups(&off, false, true);
-        assert!(retired.counts[B_PLACE as usize] > 0);
-        assert!(retired.counts[B_TRACE as usize] > 0);
-        assert!(retired.counts[B_GATHER as usize] > 0);
-        assert!(retired.counts[B_FILTER as usize] > 0);
-        assert_eq!(retired.counts[B_PLACE as usize], kept.counts[B_PLACE as usize]);
-        assert_eq!(retired.counts[B_TRACE as usize], kept.counts[B_TRACE as usize]);
-        assert_eq!(retired.counts[B_GATHER as usize], kept.counts[B_GATHER as usize]);
-        assert_eq!(retired.counts[B_FILTER as usize], kept.counts[B_FILTER as usize]);
-        let (live, searches, rays, bins, threads) = probe_retire_work(1, 4);
-        assert_eq!(live, 1);
-        assert_eq!(searches, 1);
-        assert_eq!(rays, 4);
-        assert_eq!(bins, 1);
-        assert_eq!(threads, 1);
-        assert_eq!(probe_retire_work(0, 16).2, 0);
+        let groups = groups(&on, false, true);
+        assert_eq!(groups.counts[B_PLACE as usize], 0);
+        assert_eq!(groups.counts[B_GATHER as usize], 0);
+        assert_eq!(groups.counts[B_FILTER as usize], 0);
+        assert!(groups.counts[B_CACHE_RAYS as usize] > 0);
+        assert!(groups.counts[B_DIRECT as usize] > 0);
+        assert!(groups.counts[B_COMPOSE as usize] > 0);
     }
 }

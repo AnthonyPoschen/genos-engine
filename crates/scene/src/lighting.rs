@@ -82,9 +82,9 @@ pub enum LightingPreset {
     Potato,
     /// Direct light, shadows, and the time-of-day ambient curve. No GI.
     DayCycle,
-    /// One bounce of screen-probe GI. No surface cache, denoiser, or prefill.
+    /// One bounce of the world cache. No denoiser and no prefill.
     Gi1Bounce,
-    /// Probe GI, one bounce, coarse tile, refresh every other frame.
+    /// World-cache GI, one bounce, refresh every other frame.
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
@@ -571,16 +571,9 @@ pub struct SurfaceCacheSettings {
     /// The read does not write the cell. Requires `sh_texel_detail`; on without
     /// it does nothing. Head 3.w bit 18.
     pub sh_texel_ray_cut: bool,
-    /// Key `surface_cache.sh_probe_retire` (ADR 0039 stage 5 slice). On for High
-    /// and Medium. Off for Low (ADR open question 2) and for presets with no
-    /// world cache. The knob stays. The probe passes stay.
-    /// A screen probe whose bilinear footprint has no uncovered surface does not
-    /// run place's surface search, does not trace, does not finish a gather bin,
-    /// and does not run the filter body. The footprint is recomputed every place
-    /// from the current G-buffer and the same `lighting_sh_texel_detail_covers`
-    /// test compose uses. A missing, stale, empty, own-sample, or rejected corner
-    /// keeps the probes that pixel samples. Low and detail off ignore the bit.
-    /// The CPU group list stays the full grid. Head 3.w bit 19.
+    /// Key `surface_cache.sh_probe_retire`. Deprecated alias. The passes are
+    /// removed, so the key parses, warns once, and does not schedule. Head 3.w
+    /// bit 19 stays in the change block and is not a dispatch.
     pub sh_probe_retire: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
@@ -795,10 +788,11 @@ impl LightingSettings {
             }
             LightingPreset::Gi1Bounce => {
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 64;
-                s.world_cache.enabled = false;
-                // No world cache, so the directional product bits stay off.
-                // Turning the knobs on without the cache still does nothing.
+                s.world_cache.enabled = true;
+                // One bounce reads the world cache. The directional product
+                // stays a High and Medium default.
                 clear_sh_product(&mut s.surface_cache);
                 s.denoiser.enabled = false;
                 s.prefill = false;
@@ -821,19 +815,22 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
-                // ADR 0039 open question 2: Low keeps screen probes until a
-                // 1060 measurement exists. The knobs can still turn the bits on.
+                // ADR 0039 open question 2: Low does not turn the directional
+                // product on until a 1060 measurement exists. Screen-probe
+                // passes are gone on every preset. The knobs can still turn
+                // the bits on.
                 clear_sh_product(&mut s.surface_cache);
                 s.direct.max_lights = 4;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 16;
                 s.probes.tile = 32;
                 s.probes.refresh_frames = 2;
-                s.world_cache.enabled = false;
+                s.world_cache.enabled = true;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). Adaptive failed
-                // the 4070 picture bar (S79), so it stays off.
+                // Adaptive failed the 4070 picture bar (S79), so it stays off.
+                // Bounce 1 still runs the world-cache filter.
                 s.denoiser.adaptive = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
@@ -902,7 +899,7 @@ impl LightingSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
             },
             probes: ProbeSettings {
-                enabled: true,
+                enabled: false,
                 rays: 64,
                 tile: 0,
                 refresh_frames: 1,
@@ -975,7 +972,10 @@ impl LightingSettings {
             4.0
         };
         if let Some(mode) = self.gi.world_mode {
-            self.gi.world_mode = Some(mode.min(3));
+            // Mode 2 pushed screen-probe irradiance into world patches.
+            // That pass is removed, so the stored mode becomes the surface cache.
+            let mode = if mode == 2 { 3 } else { mode.min(3) };
+            self.gi.world_mode = Some(mode);
         }
         if self.probes.rays != 0 {
             self.probes.rays = self.probes.rays.clamp(4, 64);
@@ -1028,15 +1028,14 @@ impl LightingSettings {
         self.restir_split_passes = u32::from(self.restir_split_passes != 0);
     }
 
-    /// World mode the shaders see. A forced mode wins once cache-to-cache is
-    /// allowed. Bounce 0 and 1 stay on the probe path (mode 0): the surface
-    /// cache is the extra bounce, so it is not live until bounce 2.
+    /// World mode the shaders see. Bounce 0 has no GI buffers. A world cache
+    /// from bounce 1 up is mode 3. Mode 2 (screen-probe push) is removed.
     pub fn world_mode(&self) -> u32 {
-        if !self.gi.enabled || self.bounce.count < 2 {
+        if !self.gi.enabled || self.bounce.count == 0 {
             return 0;
         }
         if let Some(mode) = self.gi.world_mode {
-            return mode;
+            return if mode == 2 { 3 } else { mode };
         }
         if self.world_cache.enabled {
             3
@@ -1047,44 +1046,40 @@ impl LightingSettings {
 
     /// GI dispatches. Bounce 0 is direct light and flat ambient, so this is false.
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
     /// The million-slot cache and its key table. Freed when GI is off or the
     /// bounce count does not use it.
     pub fn allocates_cache(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
-    /// Probe and cache-ray work buffer. Freed when bounce 0 skips GI.
+    /// Screen-probe work buffers are removed. The name stays so callers compile.
     pub fn allocates_probe_work(&self) -> bool {
-        self.gi.enabled && self.bounce.count > 0 && self.probes.enabled
+        false
     }
 
     pub fn direct_this_frame(&self, frame: u32) -> bool {
         self.direct.enabled && frame_due(frame, self.direct.refresh_frames)
     }
 
-    pub fn probes_this_frame(&self, frame: u32) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && self.probes.enabled
-            && frame_due(frame, self.probes.refresh_frames)
+    /// Screen-probe passes are removed. The key still parses and does not schedule.
+    pub fn probes_this_frame(&self, _frame: u32) -> bool {
+        false
     }
 
-    /// Surface-cache round. Recorded from bounce 2 up, where cache-to-cache runs.
+    /// Surface-cache round. Bounce 1 relights cells. Bounce 2 and above also
+    /// read the cache from a ray hit (`lighting_bounce_ok`).
     pub fn cache_round_this_frame(&self, frame: u32) -> bool {
         self.gi.enabled
-            && self.bounce.count >= 2
-            && (self.world_cache.enabled || self.probes.enabled)
+            && self.bounce.count >= 1
+            && self.world_cache.enabled
             && frame_due(frame, self.gi.refresh_frames)
     }
 
-    /// Cache-ray dispatches (cache-to-cache). Not recorded at bounce 0 or 1.
+    /// Cache-ray dispatches. Recorded from bounce 1 when the world cache is on.
+    /// Bounce 2 and above also let a hit read the cache (`lighting_bounce_ok`).
     pub fn cache_rays_this_frame(&self, frame: u32) -> bool {
         self.cache_round_this_frame(frame)
     }
@@ -1114,7 +1109,7 @@ impl LightingSettings {
         self.gi.refresh_frames = 1;
         self.gi.budget_shift = 0;
         self.bounce.count = LIGHTING_BOUNCES_UNLIMITED;
-        self.probes.enabled = true;
+        self.probes.enabled = false;
         self.probes.rays = 64;
         self.probes.tile = 0;
         self.probes.refresh_frames = 1;
@@ -1536,7 +1531,10 @@ impl LightingSettings {
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
             "surface_cache.sh_texel_ray_cut" => self.surface_cache.sh_texel_ray_cut = on(value)?,
-            "surface_cache.sh_probe_retire" => self.surface_cache.sh_probe_retire = on(value)?,
+            "surface_cache.sh_probe_retire" => {
+                warn_screen_probe_retired("surface_cache.sh_probe_retire");
+                self.surface_cache.sh_probe_retire = on(value)?;
+            }
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1561,11 +1559,26 @@ impl LightingSettings {
             "toggles" => self.experiments.toggles = parse_lighting_toggles(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
-            "probes" => self.probes.enabled = on(value)?,
-            "probe_rays" => self.probes.rays = num_u32(value)?,
-            "probe_tile" => self.probes.tile = num_u32(value)?,
-            "probe_refresh" => self.probes.refresh_frames = num_u32(value)?.max(1),
-            "probe_stale" => self.probes.staleness_frames = num_u32(value)?.max(1),
+            "probes" => {
+                warn_screen_probe_retired("probes");
+                self.probes.enabled = on(value)?;
+            }
+            "probe_rays" => {
+                warn_screen_probe_retired("probe_rays");
+                self.probes.rays = num_u32(value)?;
+            }
+            "probe_tile" => {
+                warn_screen_probe_retired("probe_tile");
+                self.probes.tile = num_u32(value)?;
+            }
+            "probe_refresh" => {
+                warn_screen_probe_retired("probe_refresh");
+                self.probes.refresh_frames = num_u32(value)?.max(1);
+            }
+            "probe_stale" => {
+                warn_screen_probe_retired("probe_stale");
+                self.probes.staleness_frames = num_u32(value)?.max(1);
+            }
             "world_cache" => self.world_cache.enabled = on(value)?,
             "world_cell" => self.world_cache.cell_metres = num_f32(value)?,
             "world_refresh" => self.world_cache.refresh_frames = num_u32(value)?.max(1),
@@ -1861,20 +1874,19 @@ impl LightingSettings {
         GpuBuckets {
             direct: self.direct_this_frame(frame),
             shadows: self.shadows.enabled && (self.direct.enabled || self.gi_passes()),
-            place: self.probes_this_frame(frame),
-            probe_trace: self.probes_this_frame(frame),
-            gather: self.probes_this_frame(frame),
-            filter: self.probes_this_frame(frame),
+            place: false,
+            probe_trace: false,
+            gather: false,
+            filter: false,
             compact: self.cache_round_this_frame(frame),
             cache: self.cache_round_this_frame(frame),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            // True when hits are shaded. The separate hit-light dispatch is only
-            // recorded for cache rays (bounce 2 and up). One bounce shades kept
-            // hits inside the direct dispatch.
+            // True when cache rays are shaded. Bounce 1 records that dispatch.
+            // A hit reads the cache only from bounce 2 (`lighting_bounce_ok`).
             hit_light: self.gi.enabled
                 && self.bounce.count > 0
-                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+                && self.cache_rays_this_frame(frame),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -2323,6 +2335,21 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_YOUNG_ONLY", "GENOS_LIGHTING_YOUNG_ONLY"),
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
+
+fn warn_screen_probe_retired(key: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key) {
+        eprintln!(
+            "warning: {key} is deprecated; screen-probe passes are removed and the world cache is the indirect light (alias kept for one release)"
+        );
+    }
+}
 
 fn warn_lamp_pick_reuse_alias() {
     use std::sync::Once;

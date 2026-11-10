@@ -17,7 +17,6 @@ Scene | - | - | open | sky
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi
-Pipeline | - | - | open | lighting_probes
 Pipeline | - | - | open | lighting_world_cache
 Pipeline | - | - | open | lighting_sky
 Pipeline | - | - | open | lighting_emissive
@@ -42,11 +41,9 @@ Lamps | direct | Lamps | open | lighting_lamp_pick_samples
 Lamps | direct | Lamps | open | lighting_lamp_pick_candidates
 Lamps | direct | Lamps | open | lighting_lamp_pick_radius
 Lamps | direct | Lamps | open | lighting_lamp_pick_history
-GI | gi | Probes | open | lighting_bounces
-GI | gi | Probes | open | lighting_gi_refresh
-GI | gi | Probes | open | lighting_budget_shift
-GI | gi | Probes | open | lighting_probe_rays
-GI | gi | Probes | open | lighting_probe_stale
+GI | gi | Indirect | open | lighting_bounces
+GI | gi | Indirect | open | lighting_gi_refresh
+GI | gi | Indirect | open | lighting_budget_shift
 GI | world | World cache | closed | lighting_world_stale
 GI | world | World cache | closed | lighting_surface_cache_attach_movers
 GI | world | World cache | closed | lighting_surface_cache_sh_cells

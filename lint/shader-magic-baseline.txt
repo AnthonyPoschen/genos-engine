@@ -17,11 +17,9 @@ crates/render/shaders/lighting_filter.comp 10
 crates/render/shaders/lighting_gather.comp 27
 crates/render/shaders/lighting_lamp_pick.glsl 5
 crates/render/shaders/lighting_pack.glsl 6
-crates/render/shaders/lighting_place.comp 8
 crates/render/shaders/lighting_screen.comp 10
-crates/render/shaders/lighting_screen_probe.glsl 10
 crates/render/shaders/lighting_sun_compose.comp 34
-crates/render/shaders/lighting_trace.comp 12
+crates/render/shaders/lighting_trace.comp 4
 crates/render/shaders/material_atlas.glsl 9
 crates/render/shaders/mesh_field.glsl 18
 crates/render/shaders/overlay.frag 10

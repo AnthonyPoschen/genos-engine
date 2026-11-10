@@ -19,7 +19,7 @@ use super::{Buffer, Gpu, Handle, Memory, check, read_f32s};
 
 const SLOTS: u64 = 1_048_576;
 const CACHE_BYTES: u64 = SLOTS * 392;
-// One screen probe shifts the change block past the cache-ray region. The
+// One retired grid slot shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
 const OUT_FLOATS: usize = 8 + 34 * 17 + 36 + 32;

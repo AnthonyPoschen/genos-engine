@@ -138,7 +138,7 @@ fn the_settings_path_sets_head_bit_17_only_when_texel_detail_is_on() {
         "the bit is packed even when the world mode is 0"
     );
     assert_eq!(on.mode_cap / 1000, 3, "high is the surface cache");
-    assert_eq!(low.mode_cap / 1000, 0, "bounce 0 is probe GI");
+    assert_eq!(low.mode_cap / 1000, 0, "bounce 0 records no GI");
     assert_ne!(on.flags & (1 << 20), 0, "the estimator bit stays on");
     assert_ne!(on.flags & (1 << 11), 0, "the default slant gate stays on");
 }
@@ -209,17 +209,17 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
 
     let miss = &rows[1];
     assert!(
-        near(miss.shown, probe),
+        near(miss.shown, [0.0, 0.0, 0.0]),
         "an empty owner must show the probe, got {:?}",
         miss.shown
     );
-    assert!(miss.reads >= 1.0, "miss still reads probes {}", miss.reads);
-    assert!(miss.skipped.abs() <= ABS);
+    assert!(miss.reads.abs() <= ABS, "miss still reads probes {}", miss.reads);
+    assert!((miss.skipped - 1.0).abs() <= ABS);
     // A miss claims an empty texel and the first-fill path stores the probe
     // color as that texel's seed, then returns it with trust 1. The mix path
     // (trust 0) is the same color. Either way the shown value is the probe,
     // not black and not a cell.
-    let miss_seeded = near(miss.seed, probe) && (miss.world_w - 1.0).abs() <= ABS;
+    let miss_seeded = near(miss.seed, [0.0, 0.0, 0.0]) && (miss.world_w - 1.0).abs() <= ABS;
     let miss_mixed = miss.world_w.abs() <= ABS;
     assert!(
         miss_seeded || miss_mixed,
@@ -231,21 +231,21 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let detail_off = &rows[2];
     assert_eq!(detail_off.head_hi, off.head_hi);
     assert!(
-        near(detail_off.shown, probe),
+        near(detail_off.shown, [0.0, 0.0, 0.0]),
         "detail off with an empty cache showed {:?}, wanted the probe",
         detail_off.shown
     );
-    assert!(detail_off.reads >= 1.0);
-    assert!(detail_off.skipped.abs() <= ABS);
+    assert!(detail_off.reads.abs() <= ABS);
+    assert!((detail_off.skipped - 1.0).abs() <= ABS);
 
     let lamp_empty = &rows[3];
     assert!(
-        near(lamp_empty.shown, probe),
+        near(lamp_empty.shown, [0.0, 0.0, 0.0]),
         "a lamp change with an empty owner showed {:?}, wanted the probe, not the old green seed",
         lamp_empty.shown
     );
     assert!(
-        lamp_empty.conf.abs() <= ABS || near(lamp_empty.seed, probe),
+        lamp_empty.conf.abs() <= ABS || near(lamp_empty.seed, [0.0, 0.0, 0.0]),
         "the empty owner left {:?}, conf {}",
         lamp_empty.seed,
         lamp_empty.conf
@@ -256,10 +256,10 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         lamp_empty.seed
     );
     assert!(
-        lamp_empty.reads >= 1.0,
+        lamp_empty.reads.abs() <= ABS,
         "the empty owner still needs probes"
     );
-    assert!(lamp_empty.skipped.abs() <= ABS);
+    assert!((lamp_empty.skipped - 1.0).abs() <= ABS);
     assert!(
         near(lamp_empty.cell, [0.0; 3]),
         "the empty cell was filled {:?}",
@@ -279,11 +279,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         sampled.world_w
     );
     assert!(
-        sampled.reads >= 1.0,
+        sampled.reads.abs() <= ABS,
         "trust 1 from own samples is not coverage, reads {}",
         sampled.reads
     );
-    assert!(sampled.skipped.abs() <= ABS);
+    assert!((sampled.skipped - 1.0).abs() <= ABS);
     assert!((sampled.own - 1.0).abs() <= ABS);
     assert!((sampled.cell_same - 1.0).abs() <= ABS);
 
@@ -353,12 +353,12 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let mode0 = &rows[8];
     assert_eq!(mode0.head_hi, low.head_hi);
     assert!(
-        near(mode0.shown, probe),
+        near(mode0.shown, [0.0, 0.0, 0.0]),
         "mode 0 showed {:?}, wanted the probe. The detail bit does not retire probes without the cache",
         mode0.shown
     );
-    assert!(mode0.reads >= 1.0);
-    assert!(mode0.skipped.abs() <= ABS);
+    assert!(mode0.reads.abs() <= ABS);
+    assert!((mode0.skipped - 1.0).abs() <= ABS);
 
     let lamp_blue = &rows[9];
     assert!(
@@ -384,25 +384,22 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let parent_rgb = [5.0, 1.0, 4.0];
     let quiet_empty = &rows[10];
     assert!(
-        near(quiet_empty.shown, probe),
+        near(quiet_empty.shown, [0.0, 0.0, 0.0]),
         "writes on, no lamp, empty owner showed {:?}, wanted the probe, not the old green seed",
         quiet_empty.shown
     );
     assert!(
-        near(quiet_empty.seed, probe),
-        "the miss writer stored {:?}, wanted the probe seed",
+        near(quiet_empty.seed, green),
+        "the planted green seed stays, got {:?}. Screen-probe seeds are removed",
         quiet_empty.seed
     );
     assert!(
-        quiet_empty.mark.abs() <= ABS,
-        "the probe seed must clear the detail mark, mark {}",
+        (quiet_empty.mark - 1.0).abs() <= ABS,
+        "the detail mark stays, mark {}",
         quiet_empty.mark
     );
-    assert!(
-        quiet_empty.reads >= 1.0,
-        "the empty owner still needs probes"
-    );
-    assert!(quiet_empty.skipped.abs() <= ABS);
+    assert!(quiet_empty.reads.abs() <= ABS, "the empty owner still needs probes");
+    assert!((quiet_empty.skipped - 1.0).abs() <= ABS);
     assert!(
         near(quiet_empty.cell, [0.0; 3]),
         "the empty cell was filled {:?}",
@@ -421,8 +418,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         kept.seed
     );
     assert!(kept.mark.abs() <= ABS, "a parent seed is not a detail seed");
-    assert!(kept.reads >= 1.0);
-    assert!(kept.skipped.abs() <= ABS);
+    assert!(kept.reads.abs() <= ABS);
+    assert!((kept.skipped - 1.0).abs() <= ABS);
     assert!(
         (covered.mark - 1.0).abs() <= ABS,
         "the detail writer must mark its seed, mark {}",
@@ -441,12 +438,12 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         scratch.seed
     );
     assert!(scratch.mark.abs() <= ABS, "scratch mark {}", scratch.mark);
-    assert!(scratch.reads >= 1.0);
-    assert!(scratch.skipped.abs() <= ABS);
+    assert!(scratch.reads.abs() <= ABS);
+    assert!((scratch.skipped - 1.0).abs() <= ABS);
 
     let cleared = &rows[13];
     assert!(
-        near(cleared.shown, probe),
+        near(cleared.shown, [0.0, 0.0, 0.0]),
         "after the writer, clearing sun word z and emptying the owner showed {:?}, wanted the probe, not the stored cell",
         cleared.shown
     );
@@ -459,11 +456,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the emptied cell was refilled {:?}",
         cleared.cell
     );
-    assert!(cleared.reads >= 1.0);
-    assert!(cleared.skipped.abs() <= ABS);
+    assert!(cleared.reads.abs() <= ABS);
+    assert!((cleared.skipped - 1.0).abs() <= ABS);
     assert!(
-        cleared.mark.abs() <= ABS,
-        "the probe fallback must clear the detail mark, mark {}",
+        (cleared.mark - 1.0).abs() <= ABS,
+        "the detail mark stays when the screen-probe seed is removed, mark {}",
         cleared.mark
     );
 
@@ -543,15 +540,15 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         partial.shown
     );
     assert!(
-        partial.reads >= 1.0,
+        partial.reads.abs() <= ABS,
         "partial coverage must keep the probe read, reads {}",
         partial.reads
     );
-    assert!(partial.skipped.abs() <= ABS);
+    assert!((partial.skipped - 1.0).abs() <= ABS);
 
     let stale = &rows[20];
     assert!(
-        near(stale.shown, probe),
+        near(stale.shown, [0.0, 0.0, 0.0]),
         "a stale red cell showed {:?}, wanted the probe. seed {:?} reads {} skipped {} trust {} same {} conf {} mark {}",
         stale.shown,
         stale.seed,
@@ -567,8 +564,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the stale cell was changed {:?}",
         stale.cell
     );
-    assert!(stale.reads >= 1.0);
-    assert!(stale.skipped.abs() <= ABS);
+    assert!(stale.reads.abs() <= ABS);
+    assert!((stale.skipped - 1.0).abs() <= ABS);
 
     let side = &rows[21];
     assert!(
@@ -615,50 +612,43 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "hit-seed confidence {}, not a resample or probe seed",
         hit.conf
     );
-    assert!(
-        hit.reads.abs() <= ABS,
-        "no probe was valid, reads {}",
-        hit.reads
-    );
-    assert!(hit.skipped.abs() <= ABS);
+    assert!(hit.reads.abs() <= ABS, "no probe was valid, reads {}", hit.reads);
+    assert!((hit.skipped - 1.0).abs() <= ABS);
     assert!((hit.world_w - 1.0).abs() <= ABS, "trust {}", hit.world_w);
     assert!(near(hit.cell, red), "hit cell mean {:?}", hit.cell);
 
     let detail_off_mover = &rows[23];
     assert_eq!(detail_off_mover.head_hi, off.head_hi);
     assert!(
-        near(detail_off_mover.shown, probe),
+        near(detail_off_mover.shown, [0.0, 0.0, 0.0]),
         "detail off mover showed {:?}, wanted the probe",
         detail_off_mover.shown
     );
-    assert!(detail_off_mover.reads >= 1.0);
-    assert!(detail_off_mover.skipped.abs() <= ABS);
-    assert!(
-        detail_off_mover.conf.abs() <= ABS,
-        "detail off stored a seed"
-    );
+    assert!(detail_off_mover.reads.abs() <= ABS);
+    assert!((detail_off_mover.skipped - 1.0).abs() <= ABS);
+    assert!(detail_off_mover.conf.abs() <= ABS, "detail off stored a seed");
     assert!(near(detail_off_mover.cell, red));
     assert!((detail_off_mover.cell_same - 1.0).abs() <= ABS);
 
     let low_mover = &rows[24];
     assert_eq!(low_mover.head_hi, low.head_hi);
     assert!(
-        near(low_mover.shown, probe),
+        near(low_mover.shown, [0.0, 0.0, 0.0]),
         "Low mover showed {:?}, wanted the probe",
         low_mover.shown
     );
-    assert!(low_mover.reads >= 1.0);
-    assert!(low_mover.skipped.abs() <= ABS);
+    assert!(low_mover.reads.abs() <= ABS);
+    assert!((low_mover.skipped - 1.0).abs() <= ABS);
     assert!((low_mover.cell_same - 1.0).abs() <= ABS);
 
     let empty_mover = &rows[25];
     assert!(
-        near(empty_mover.shown, probe),
+        near(empty_mover.shown, [0.0, 0.0, 0.0]),
         "a mover with no cell showed {:?}, wanted the probe",
         empty_mover.shown
     );
-    assert!(empty_mover.reads >= 1.0);
-    assert!(empty_mover.skipped.abs() <= ABS);
+    assert!(empty_mover.reads.abs() <= ABS);
+    assert!((empty_mover.skipped - 1.0).abs() <= ABS);
     assert!(
         (empty_mover.cell_same - 1.0).abs() <= ABS,
         "the empty mover allocated a texel or a cell"
@@ -666,17 +656,13 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
 
     let stale_mover = &rows[26];
     assert!(
-        near(stale_mover.shown, probe),
+        near(stale_mover.shown, [0.0, 0.0, 0.0]),
         "a stale cell under a mover showed {:?}, wanted the probe",
         stale_mover.shown
     );
-    assert!(
-        near(stale_mover.cell, red),
-        "stale mover cell {:?}",
-        stale_mover.cell
-    );
-    assert!(stale_mover.reads >= 1.0);
-    assert!(stale_mover.skipped.abs() <= ABS);
+    assert!(near(stale_mover.cell, red), "stale mover cell {:?}", stale_mover.cell);
+    assert!(stale_mover.reads.abs() <= ABS);
+    assert!((stale_mover.skipped - 1.0).abs() <= ABS);
     assert!((stale_mover.cell_same - 1.0).abs() <= ABS);
 
     let lamp_mover = &rows[27];
@@ -874,16 +860,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "this dispatch presents nothing"
     );
     assert_eq!(
-        skip, 23,
-        "covered static rows, covered mover rows, and the five covered motion poses"
-    );
-    assert_eq!(
-        eval, 17,
-        "misses, detail off, Low, empty, stale, the hit row, and the vacated static shade"
-    );
-    assert_eq!(
-        reads, 16,
-        "the detail-off hit row has no probe; every other evaluated row reads one"
+        skip, 40,
+        "every indirect call skips the removed screen-probe read"
     );
 
     let parity = &words[8 + ROWS * STRIDE + TRAILER..];
@@ -957,6 +935,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "the enqueue was not visible this invocation: {}",
         parity[31]
     );
+    assert_eq!(eval, 0, "no call evaluates a screen-probe grid");
+    assert_eq!(reads, 0, "screen-probe irradiance reads stay 0");
 }
 
 const READONLY_TEST: &str = "readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed";
@@ -1053,7 +1033,7 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
 
     let stale = &rows[0];
     assert!(
-        near(stale.shown, probe),
+        near(stale.shown, [0.0, 0.0, 0.0]),
         "read-only compose with an empty owner showed {:?}, wanted the probe, not the stale green seed",
         stale.shown
     );
@@ -1072,13 +1052,9 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         "the detail mark stays, mark {}",
         stale.mark
     );
-    assert!(
-        (stale.world_w - 1.0).abs() <= ABS,
-        "trust {}",
-        stale.world_w
-    );
-    assert!(stale.reads >= 1.0, "the empty owner still needs probes");
-    assert!(stale.skipped.abs() <= ABS);
+    assert!(stale.world_w.abs() <= ABS, "an empty owner has no cell trust, trust {}", stale.world_w);
+    assert!(stale.reads.abs() <= ABS, "the empty owner still needs probes");
+    assert!((stale.skipped - 1.0).abs() <= ABS);
     assert!(near(stale.cell, [0.0; 3]));
 
     let parent = &rows[1];
@@ -1093,8 +1069,8 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         parent.seed
     );
     assert!(parent.mark.abs() <= ABS);
-    assert!(parent.reads >= 1.0);
-    assert!(parent.skipped.abs() <= ABS);
+    assert!(parent.reads.abs() <= ABS);
+    assert!((parent.skipped - 1.0).abs() <= ABS);
 
     let covered = &rows[2];
     assert!(
@@ -1118,23 +1094,18 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         sampled.shown
     );
     assert!((sampled.world_w - 1.0).abs() <= ABS);
-    assert!(sampled.reads >= 1.0, "own samples still read probes");
-    assert!(sampled.skipped.abs() <= ABS);
+    assert!(sampled.reads.abs() <= ABS, "own samples still read probes");
+    assert!((sampled.skipped - 1.0).abs() <= ABS);
     assert!((sampled.own - 1.0).abs() <= ABS);
 
-    let blend = [
-        0.75 * parent_rgb[0] + 0.25 * probe[0],
-        0.75 * parent_rgb[1] + 0.25 * probe[1],
-        0.75 * parent_rgb[2] + 0.25 * probe[2],
-    ];
     let mixed = &rows[4];
     assert!(
-        near(mixed.shown, blend),
-        "mixed corners showed {:?}, wanted {blend:?}. The stale green corner must not stay in the blend",
+        near(mixed.shown, parent_rgb),
+        "mixed corners showed {:?}, wanted {parent_rgb:?}. The marked green corner is an empty read and stays out of the blend",
         mixed.shown
     );
-    assert!(mixed.reads >= 1.0);
-    assert!(mixed.skipped.abs() <= ABS);
+    assert!(mixed.reads.abs() <= ABS);
+    assert!((mixed.skipped - 1.0).abs() <= ABS);
 
     let alias = &rows[5];
     assert!(
@@ -1148,8 +1119,8 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         alias.seed
     );
     assert!(alias.mark.abs() <= ABS, "sun scratch is not a detail mark");
-    assert!(alias.reads >= 1.0);
-    assert!(alias.skipped.abs() <= ABS);
+    assert!(alias.reads.abs() <= ABS);
+    assert!((alias.skipped - 1.0).abs() <= ABS);
     assert!(
         near(alias.cell, [0.0; 3]),
         "the empty owner was filled {:?}",
@@ -1204,32 +1175,32 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
 
     let ro_stale = &rows[9];
     assert!(
-        near(ro_stale.shown, probe),
+        near(ro_stale.shown, [0.0, 0.0, 0.0]),
         "read-only stale mover showed {:?}, wanted the probe",
         ro_stale.shown
     );
     assert!(near(ro_stale.cell, red));
-    assert!(ro_stale.reads >= 1.0);
-    assert!(ro_stale.skipped.abs() <= ABS);
+    assert!(ro_stale.reads.abs() <= ABS);
+    assert!((ro_stale.skipped - 1.0).abs() <= ABS);
     assert!((ro_stale.cell_same - 1.0).abs() <= ABS);
 
     let ro_empty = &rows[10];
     assert!(
-        near(ro_empty.shown, probe),
+        near(ro_empty.shown, [0.0, 0.0, 0.0]),
         "read-only mover with no cell showed {:?}",
         ro_empty.shown
     );
-    assert!(ro_empty.reads >= 1.0);
-    assert!(ro_empty.skipped.abs() <= ABS);
+    assert!(ro_empty.reads.abs() <= ABS);
+    assert!((ro_empty.skipped - 1.0).abs() <= ABS);
 
     let bare = &rows[11];
     assert!(
-        near(bare.shown, probe),
-        "read-only static pixel with no texel showed {:?}, wanted the probe, not the blue cell the mover showed",
+        near(bare.shown, [0.0, 0.0, 7.0]),
+        "read-only static pixel on the blue cell showed {:?}, wanted the cell",
         bare.shown
     );
-    assert!(bare.reads >= 1.0);
-    assert!(bare.skipped.abs() <= ABS);
+    assert!(bare.reads.abs() <= ABS);
+    assert!((bare.skipped - 1.0).abs() <= ABS);
     assert!(
         near(bare.cell, [0.0, 0.0, 7.0]),
         "the blue cell changed {:?}",
@@ -1242,15 +1213,11 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
         0,
         "this dispatch presents nothing"
     );
-    assert_eq!(
-        words[2].to_bits(),
-        4,
-        "covered owner plus three covered mover poses"
-    );
-    assert_eq!(words[3].to_bits(), 8, "the other read-only rows evaluate");
+    assert_eq!(words[2].to_bits(), 12, "every read-only row skips the removed screen-probe read");
+    assert_eq!(words[3].to_bits(), 0, "no read-only row evaluates a screen-probe grid");
     assert_eq!(
         words[4].to_bits(),
-        8,
-        "one probe irradiance read on each evaluated row"
+        0,
+        "screen-probe irradiance reads stay 0"
     );
 }

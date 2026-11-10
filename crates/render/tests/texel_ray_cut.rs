@@ -146,7 +146,7 @@ fn ray_cut_bit_is_packed_only_from_the_setting() {
     );
     assert_eq!(detail_off.head_hi & DETAIL_BIT, 0);
     assert_eq!(low.head_hi & RAY_CUT_BIT, RAY_CUT_BIT);
-    assert_eq!(low.mode_cap / 1000, 0, "Low stays probe GI");
+    assert_eq!(low.mode_cap / 1000, 3, "Low is one bounce of the world cache");
     assert_eq!(on.mode_cap / 1000, 3);
     assert_eq!(plain.head_hi & RAY_CUT_BIT, RAY_CUT_BIT, "High defaults the ray cut on");
     assert_eq!(plain.head_hi & DETAIL_BIT, DETAIL_BIT, "High defaults texel detail on");
@@ -282,8 +282,8 @@ fn agreed_texel_rays_are_cut_and_disagreement_keeps_them() {
     let rays: u32 = rows.iter().map(|row| row.rays).sum();
     assert_eq!(word(&words, 0), held);
     assert_eq!(word(&words, 1), rays);
-    assert_eq!(held, 5);
-    assert_eq!(rays, 5 * FULL_SET);
+    assert_eq!(held, 6);
+    assert_eq!(rays, 6 * FULL_SET);
     assert_eq!(word(&words, 2), 0, "the gate does not list a young cell");
     assert_eq!(word(&words, 3), 0, "the gate does not list a world-cell refresh");
 }

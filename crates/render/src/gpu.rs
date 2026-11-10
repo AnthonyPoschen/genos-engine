@@ -184,7 +184,6 @@ mod media_check;
 mod stage;
 mod texel_detail;
 mod texel_ray_cut;
-mod probe_retire;
 
 /// Return lavapipe's compiler scratch to the OS. The software fixture calls
 /// this after it drops the device that planted the read-only scene, and before
@@ -1154,18 +1153,6 @@ impl Renderer {
         self.gpu.texel_ray_cut()
     }
 
-    /// One lavapipe run of place, trace, gather, and filter on a planted screen.
-    ///
-    /// The rows are the stage 5 retirement cases. Counts are what those passes
-    /// wrote, not a potential-ray product.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the device rejects a dispatch.
-    pub fn probe_retire(&mut self) -> Result<Vec<f32>, String> {
-        self.gpu.probe_retire()
-    }
-
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
     /// The fog budget scales this span. Lavapipe is the cloud device.
     pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
@@ -1713,8 +1700,6 @@ struct Gpu {
     texel_detail: Option<texel_detail::Pipe>,
     /// Lazy ADR 0039 stage 4 ray-cut dispatch. Absent until that test asks.
     texel_ray_cut: Option<texel_ray_cut::Pipe>,
-    /// Lazy ADR 0039 probe-retire dispatch. Absent until that test asks.
-    probe_retire: Option<probe_retire::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -2600,7 +2585,6 @@ impl Gpu {
                 media_check: None,
                 texel_detail: None,
                 texel_ray_cut: None,
-                probe_retire: None,
                 media_ms: None,
                 media_groups: 1,
                 froxel: None,
@@ -9038,7 +9022,6 @@ impl Gpu {
             self.destroy_media_check();
             self.destroy_texel_detail();
             self.destroy_texel_ray_cut();
-            self.destroy_probe_retire();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
