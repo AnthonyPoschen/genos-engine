@@ -249,9 +249,10 @@ struct Removal {
 /// are contiguous. A write stores the current clock on that cell, then
 /// advances it. [`Self::clock`] is the next tick a write will store.
 /// [`Self::changes_since`] returns cells and removals whose tick is that
-/// cursor or newer, in handle-index order, then wrapping distance from the
-/// cursor, then component name. A removal older than half the tick space is
-/// dropped, so a wrapped clock does not re-emit it.
+/// cursor or newer, in handle-index order, then distance behind the newest
+/// issued tick, then component name. Cursor `0` uses that same key. A removal
+/// older than half the tick space is dropped, so a wrapped clock does not
+/// re-emit it.
 pub struct World {
     slots: Vec<Slot>,
     free: BTreeSet<u32>,
@@ -563,15 +564,16 @@ impl World {
     }
 
     /// Components and removals at or after `tick`, sorted by handle index, then
-    /// wrapping distance from `tick`, then name.
+    /// distance behind the newest issued tick, then name.
     ///
     /// Pass the value [`Self::clock`] returned before the writes. A cursor of
     /// `0` returns every stored tick that has not been retired, because stored
     /// ticks start at 1 and `0` means "from the start". Any other cursor uses
     /// a wrapping compare, so a tick just after `u32::MAX` is still ahead of a
-    /// cursor of `u32::MAX`. Removals older than half the tick space are
-    /// omitted. The same distance orders the batch, so a removal at `u32::MAX`
-    /// stays ahead of the re-insert at tick `1`.
+    /// cursor of `u32::MAX`. Both cursors share one order key, the inverted
+    /// distance behind the newest issued tick, so a removal at `u32::MAX`
+    /// stays ahead of the re-insert at tick `1`. Removals at least half the
+    /// tick space behind that newest tick are omitted.
     #[must_use]
     pub fn changes_since(&self, tick: u32) -> Vec<ComponentDelta> {
         let newest = newest_issued(self.clock);
@@ -607,12 +609,12 @@ impl World {
         out.sort_by(|left, right| {
             (
                 left.handle.index(),
-                left.tick.wrapping_sub(tick),
+                order_key(left.tick, newest),
                 left.component,
             )
                 .cmp(&(
                     right.handle.index(),
-                    right.tick.wrapping_sub(tick),
+                    order_key(right.tick, newest),
                     right.component,
                 ))
         });
@@ -1159,6 +1161,16 @@ fn removal_expired(tick: u32, newest: u32) -> bool {
     newest.wrapping_sub(tick) >= TICK_HALF
 }
 
+/// Older ticks sort first for every cursor, including `0`.
+///
+/// `tick.wrapping_sub(0)` is the raw tick, which puts a post-wrap payload
+/// ahead of a tombstone at `u32::MAX`. Distance behind `newest` grows as the
+/// tick gets older, and the bitwise not reverses that so the larger distance
+/// is the smaller key.
+fn order_key(tick: u32, newest: u32) -> u32 {
+    !newest.wrapping_sub(tick)
+}
+
 fn take_tick(clock: &mut u32) -> u32 {
     if *clock == 0 {
         *clock = 1;
@@ -1306,6 +1318,25 @@ mod tests {
             follower.get::<Health>(copied).expect("health").0,
             source.get::<Health>(handle).expect("health").0
         );
+
+        let from_start = source.changes_since(0);
+        let start_tags: Vec<_> = from_start
+            .iter()
+            .filter(|delta| delta.component == "tag")
+            .collect();
+        assert_eq!(start_tags.len(), 2);
+        assert_eq!(start_tags[0].tick, u32::MAX);
+        assert_eq!(start_tags[0].bytes.len(), 0);
+        assert_eq!(start_tags[1].tick, 1);
+        let mut second = World::new();
+        second.register::<Health>().expect("health");
+        second.register::<Tag>().expect("tag");
+        let again = second.spawn_with(Health(1)).expect("spawn");
+        second.insert(again, Tag(3)).expect("tag");
+        for delta in &from_start {
+            second.apply_delta(delta).expect("apply from the start");
+        }
+        assert_eq!(second.get::<Tag>(again).expect("tag").0, 9);
     }
 
     #[test]
@@ -1336,6 +1367,24 @@ mod tests {
         assert_eq!(follower.stats().stale_rejects, rejects);
         assert!(!follower.alive(old));
         assert_eq!(follower.get::<Health>(renewed).expect("health").0, 7);
+
+        let from_start = source.changes_since(0);
+        assert_eq!(from_start.len(), 2);
+        assert_eq!(from_start[0].handle, old);
+        assert_eq!(from_start[0].tick, u32::MAX);
+        assert_eq!(from_start[0].bytes.len(), 0);
+        assert_eq!(from_start[1].handle, renewed);
+        assert_eq!(from_start[1].tick, 1);
+        let mut second = World::new();
+        second.register::<Health>().expect("health");
+        let seeded_again = second.spawn_with(Health(1)).expect("seed");
+        assert_eq!(seeded_again, old);
+        for delta in &from_start {
+            second.apply_delta(delta).expect("apply from the start");
+        }
+        assert!(!second.alive(old));
+        assert_eq!(second.get::<Health>(renewed).expect("health").0, 7);
+        assert_eq!(second.stats().stale_rejects, 0);
     }
 
     #[test]
@@ -1344,6 +1393,13 @@ mod tests {
         let handle = world.spawn_with(Health(1)).expect("spawn");
         world.despawn(handle).expect("despawn");
         let tick = world.changes_since(0)[0].tick;
+        world.clock = tick.wrapping_add(TICK_HALF);
+        let newest = newest_issued(world.clock);
+        assert_eq!(newest.wrapping_sub(tick), TICK_HALF - 1);
+        assert!(world
+            .changes_since(0)
+            .iter()
+            .any(|delta| delta.tick == tick && delta.bytes.is_empty()));
         world.clock = tick.wrapping_add(TICK_HALF).wrapping_add(1);
         assert_eq!(world.changes_since(0).len(), 0);
         let fresh = world.spawn_with(Health(3)).expect("later");

@@ -18,7 +18,8 @@
 //! - Determinism: the same spawns and writes produce the same handles, the same
 //!   ticks, and the same [`World::changes_since`] bytes. Query order follows
 //!   table creation, then row. Deltas are sorted by handle index, then the
-//!   wrapping distance from the cursor, then name.
+//!   distance behind the newest issued tick, then name. Cursor `0` uses that
+//!   same key.
 //! - Headless server: no window, no Vulkan, no threads. The store is data.
 
 mod bytes;
