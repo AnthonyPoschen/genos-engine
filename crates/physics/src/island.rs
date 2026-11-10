@@ -124,6 +124,7 @@ impl Islands {
     pub fn assign_and_sleep(
         &mut self,
         bodies: &mut [Body],
+        vehicles: &[crate::vehicle::Vehicle],
         dt: f32,
         linear: f32,
         angular: f32,
@@ -169,10 +170,13 @@ impl Islands {
             if !dynamic_live(body) || body.sleeping {
                 continue;
             }
+            let held = !vehicles.is_empty()
+                && crate::vehicle::actuator_holds_awake(vehicles, index_of(id));
             let calm = body.velocity.length() < linear
                 && body.angular_velocity.length() < angular
                 && !body.motor
-                && body.spring.is_none();
+                && body.spring.is_none()
+                && !held;
             if calm {
                 body.sleep_time += dt;
             } else {
