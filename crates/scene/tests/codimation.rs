@@ -36,54 +36,57 @@ fn room(blocker: bool) -> Scene {
             color_mix: -1.0,
         });
     }
-    Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 30.0,
-            half_z: 30.0,
-            color: [1.0, 1.0, 1.0],
-        },
-        walls,
-        solids: vec![
-            Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
+    {
+        let mut __scene = Scene::from_lists(
+            Floor {
                 position: Vec3::ZERO,
-                size: 1.0,
-                height: 1.2,
-                color: [1.0, 0.0, 0.0],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
+                half_x: 30.0,
+                half_z: 30.0,
+                color: [1.0, 1.0, 1.0],
             },
-            Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
-                position: Vec3::new(-6.0, 0.0, 3.0),
-                size: 1.0,
-                height: 1.2,
-                color: [0.0, 1.0, 0.0],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            },
-        ],
-        lights: vec![Light {
-            position: Vec3::new(0.0, 7.0, 0.0),
-            color: [1.0, 1.0, 1.0],
+            walls,
+            vec![
+                Solid {
+                    yaw: 0.0,
+                    shape: Shape::Square,
+                    position: Vec3::ZERO,
+                    size: 1.0,
+                    height: 1.2,
+                    color: [1.0, 0.0, 0.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                },
+                Solid {
+                    yaw: 0.0,
+                    shape: Shape::Square,
+                    position: Vec3::new(-6.0, 0.0, 3.0),
+                    size: 1.0,
+                    height: 1.2,
+                    color: [0.0, 1.0, 0.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                },
+            ],
+            vec![Light {
+                position: Vec3::new(0.0, 7.0, 0.0),
+                color: [1.0, 1.0, 1.0],
 
-            direction: Vec3::ZERO,
-        }],
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+                direction: Vec3::ZERO,
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }
 
@@ -105,7 +108,7 @@ fn bind(camera: &mut Camera, scene: &Scene, easing: Easing, points: Vec<Vec3>) {
 }
 
 fn solid_body<'a>(camera: &'a Camera, scene: &Scene, solid: usize) -> &'a Body {
-    let index = camera.view - scene.solids.len() + solid;
+    let index = camera.view - scene.solid_len() + solid;
     &camera.physics.bodies[index]
 }
 
@@ -129,29 +132,29 @@ fn a_clear_segment_ends_on_the_point_and_the_loop_leaves_that_point() {
     let end = points[1];
     let start = points[0];
     let mut scene = room(false);
-    scene.solids[0].position = start;
-    let parked = scene.solids[1].position;
+    scene.solid_mut(0).position = start;
+    let parked = scene.solid(1).position;
     let mut camera = rig(&scene);
     let parked_body = solid_body(&camera, &scene, 1).position;
     bind(&mut camera, &scene, Easing::Linear, points);
     frames(&mut camera, &mut scene, 60);
-    let arrived = (scene.solids[0].position - end).length();
+    let arrived = (scene.solid(0).position - end).length();
     assert!(
         arrived < 0.05,
         "segment end {:?} error {arrived}",
-        scene.solids[0].position
+        scene.solid(0).position
     );
-    same_volume(&scene.solids[0], solid_body(&camera, &scene, 0));
+    same_volume(scene.solid(0), solid_body(&camera, &scene, 0));
 
     frames(&mut camera, &mut scene, 60);
-    let back = (scene.solids[0].position - start).length();
-    let stuck = (scene.solids[0].position - end).length();
+    let back = (scene.solid(0).position - start).length();
+    let stuck = (scene.solid(0).position - end).length();
     assert!(back < 0.05, "cycle did not return, error {back}");
     assert!(stuck > 0.5, "stuck at the last position");
-    same_volume(&scene.solids[0], solid_body(&camera, &scene, 0));
+    same_volume(scene.solid(0), solid_body(&camera, &scene, 0));
 
     frames(&mut camera, &mut scene, 15);
-    let after = scene.solids[0].position;
+    let after = scene.solid(0).position;
     assert!(
         (after - start).length() > 0.1,
         "time past the cycle did not move the solid"
@@ -160,7 +163,7 @@ fn a_clear_segment_ends_on_the_point_and_the_loop_leaves_that_point() {
         (after - end).length() > (after - start).length(),
         "past the cycle the solid stayed on the last position"
     );
-    assert_eq!(scene.solids[1].position, parked);
+    assert_eq!(scene.solid(1).position, parked);
     assert_eq!(solid_body(&camera, &scene, 1).position, parked_body);
 }
 
@@ -171,16 +174,16 @@ fn two_easings_differ_mid_segment_and_both_finish_on_the_end() {
     let start = points[0];
     let mut linear_scene = room(false);
     let mut eased_scene = room(false);
-    linear_scene.solids[0].position = start;
-    eased_scene.solids[0].position = start;
+    linear_scene.solid_mut(0).position = start;
+    eased_scene.solid_mut(0).position = start;
     let mut linear = rig(&linear_scene);
     let mut eased = rig(&eased_scene);
     bind(&mut linear, &linear_scene, Easing::Linear, points.clone());
     bind(&mut eased, &eased_scene, Easing::EaseIn, points);
     frames(&mut linear, &mut linear_scene, 15);
     frames(&mut eased, &mut eased_scene, 15);
-    let linear_pos = linear_scene.solids[0].position;
-    let eased_pos = eased_scene.solids[0].position;
+    let linear_pos = linear_scene.solid(0).position;
+    let eased_pos = eased_scene.solid(0).position;
     assert!(
         (linear_pos - start).length() > 0.05,
         "linear did not leave the start"
@@ -202,13 +205,10 @@ fn two_easings_differ_mid_segment_and_both_finish_on_the_end() {
 
     frames(&mut linear, &mut linear_scene, 45);
     frames(&mut eased, &mut eased_scene, 45);
-    assert!((linear_scene.solids[0].position - end).length() < 0.05);
-    assert!((eased_scene.solids[0].position - end).length() < 0.05);
-    same_volume(
-        &linear_scene.solids[0],
-        solid_body(&linear, &linear_scene, 0),
-    );
-    same_volume(&eased_scene.solids[0], solid_body(&eased, &eased_scene, 0));
+    assert!((linear_scene.solid(0).position - end).length() < 0.05);
+    assert!((eased_scene.solid(0).position - end).length() < 0.05);
+    same_volume(linear_scene.solid(0), solid_body(&linear, &linear_scene, 0));
+    same_volume(eased_scene.solid(0), solid_body(&eased, &eased_scene, 0));
 }
 
 #[test]
@@ -217,16 +217,16 @@ fn ease_in_out_starts_slower_than_linear() {
     let start = points[0];
     let mut linear_scene = room(false);
     let mut eased_scene = room(false);
-    linear_scene.solids[0].position = start;
-    eased_scene.solids[0].position = start;
+    linear_scene.solid_mut(0).position = start;
+    eased_scene.solid_mut(0).position = start;
     let mut linear = rig(&linear_scene);
     let mut eased = rig(&eased_scene);
     bind(&mut linear, &linear_scene, Easing::Linear, points.clone());
     bind(&mut eased, &eased_scene, Easing::EaseInOut, points);
     frames(&mut linear, &mut linear_scene, 15);
     frames(&mut eased, &mut eased_scene, 15);
-    let linear_travel = (linear_scene.solids[0].position - start).length();
-    let eased_travel = (eased_scene.solids[0].position - start).length();
+    let linear_travel = (linear_scene.solid(0).position - start).length();
+    let eased_travel = (eased_scene.solid(0).position - start).length();
     assert!(eased_travel > 0.02, "ease-in-out did not leave the start");
     assert!(
         eased_travel < linear_travel,
@@ -239,22 +239,22 @@ fn a_held_path_stays_put_and_a_resume_continues() {
     let points = path();
     let start = points[0];
     let mut scene = room(false);
-    scene.solids[0].position = start;
+    scene.solid_mut(0).position = start;
     let mut camera = rig(&scene);
     bind(&mut camera, &scene, Easing::EaseInOut, points);
     assert!(camera.set_codimation_running(0, false));
     frames(&mut camera, &mut scene, 30);
     assert!(
-        (scene.solids[0].position - start).length() < 0.02,
+        (scene.solid(0).position - start).length() < 0.02,
         "a held path moved to {:?}",
-        scene.solids[0].position
+        scene.solid(0).position
     );
     assert!(camera.set_codimation_running(0, true));
     frames(&mut camera, &mut scene, 20);
     assert!(
-        (scene.solids[0].position - start).length() > 0.05,
+        (scene.solid(0).position - start).length() > 0.05,
         "resume left the solid at {:?}",
-        scene.solids[0].position
+        scene.solid(0).position
     );
 }
 
@@ -265,9 +265,9 @@ fn a_wall_blocks_the_segment_and_a_clear_path_reaches_the_end() {
     let start = points[0];
     let mut blocked_scene = room(true);
     let mut clear_scene = room(false);
-    blocked_scene.solids[0].position = start;
-    clear_scene.solids[0].position = start;
-    let parked = blocked_scene.solids[1].position;
+    blocked_scene.solid_mut(0).position = start;
+    clear_scene.solid_mut(0).position = start;
+    let parked = blocked_scene.solid(1).position;
     let mut blocked = rig(&blocked_scene);
     let mut clear = rig(&clear_scene);
     bind(&mut blocked, &blocked_scene, Easing::Linear, points.clone());
@@ -275,14 +275,14 @@ fn a_wall_blocks_the_segment_and_a_clear_path_reaches_the_end() {
     frames(&mut blocked, &mut blocked_scene, 60);
     frames(&mut clear, &mut clear_scene, 60);
 
-    let stopped = blocked_scene.solids[0].position;
+    let stopped = blocked_scene.solid(0).position;
     assert!(
         stopped.x > start.x + 0.2,
         "blocked solid did not move toward the wall, x {}",
         stopped.x
     );
     let wall_face = 1.2 - 0.15;
-    let solid_face = stopped.x + blocked_scene.solids[0].size * 0.5;
+    let solid_face = stopped.x + blocked_scene.solid(0).size * 0.5;
     assert!(
         solid_face < wall_face + 0.02,
         "solid entered the wall, face {solid_face} wall {wall_face}"
@@ -292,13 +292,13 @@ fn a_wall_blocks_the_segment_and_a_clear_path_reaches_the_end() {
         "blocked solid reached the end"
     );
     same_volume(
-        &blocked_scene.solids[0],
+        blocked_scene.solid(0),
         solid_body(&blocked, &blocked_scene, 0),
     );
-    assert_eq!(blocked_scene.solids[1].position, parked);
+    assert_eq!(blocked_scene.solid(1).position, parked);
 
-    let arrived = (clear_scene.solids[0].position - end).length();
+    let arrived = (clear_scene.solid(0).position - end).length();
     assert!(arrived < 0.05, "clear path error {arrived}");
-    same_volume(&clear_scene.solids[0], solid_body(&clear, &clear_scene, 0));
-    assert_eq!(clear_scene.solids[1].position, parked);
+    same_volume(clear_scene.solid(0), solid_body(&clear, &clear_scene, 0));
+    assert_eq!(clear_scene.solid(1).position, parked);
 }

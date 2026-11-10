@@ -616,7 +616,7 @@ fn pack_draw(
             })
         }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
-            let wall = world.scene.walls.get(*index)?;
+            let wall = world.scene.wall_at(*index)?;
             let half = [wall.half_x, wall.height * 0.5, wall.half_z];
             // A wall lower than the eye shows its top; a raised one (lintel, sill, roof
             // slab) shows its underside too. The fourth key value names the faces.
@@ -648,7 +648,7 @@ fn pack_draw(
             })
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            let solid = world.scene.solids.get(*index)?;
+            let solid = world.scene.solid_at(*index)?;
             match solid.shape {
                 Shape::Square => {
                     let half = solid.size * 0.5;
@@ -665,9 +665,9 @@ fn pack_draw(
                         color_rect: [0.0; 4],
                         normal_rect: [0.0; 4],
                         cutoff: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
-                material_flags: 0,
+                        roughness: 1.0,
+                        metallic: 0.0,
+                        material_flags: 0,
                         source: ShapeSource::Box {
                             half: extent,
                             top: true,
@@ -686,9 +686,9 @@ fn pack_draw(
                         color_rect: [0.0; 4],
                         normal_rect: [0.0; 4],
                         cutoff: 0.0,
-                roughness: 1.0,
-                metallic: 0.0,
-                material_flags: 0,
+                        roughness: 1.0,
+                        metallic: 0.0,
+                        material_flags: 0,
                         source: ShapeSource::Cylinder {
                             radius,
                             height: solid.height,
@@ -1060,8 +1060,7 @@ pub fn overlay_vertex(pos: [f32; 3], color: [f32; 3]) -> GpuVertex {
 fn lamps_of(world: &World) -> Vec<GpuLamp> {
     world
         .scene
-        .lights
-        .iter()
+        .lights()
         .take(MAX_LAMPS)
         .map(|light| {
             let span = light.direction.x * light.direction.x
@@ -1094,27 +1093,25 @@ fn lamps_of(world: &World) -> Vec<GpuLamp> {
 fn occluder(world: &World, object: &crate::world::Object) -> Option<GpuOcc> {
     match &object.kind {
         DrawKind::Fixed(FixedPart::Floor) | DrawKind::Fixed(FixedPart::Ceiling) => None,
-        DrawKind::Fixed(FixedPart::Wall(index)) => {
-            world.scene.walls.get(*index).map(|wall| GpuOcc {
-                center: [
-                    wall.position.x,
-                    wall.base + wall.height * 0.5,
-                    wall.position.z,
-                ],
-                shape: 0.0,
-                half_x: wall.half_x,
-                height: wall.height,
-                half_z: wall.half_z,
-                radius: 0.0,
-                albedo: wall.color,
-                absorption: wall.absorption,
-                reflectance: wall.reflectance,
-                color_mix: wall.color_mix,
-                yaw: 0.0,
-            })
-        }
+        DrawKind::Fixed(FixedPart::Wall(index)) => world.scene.wall_at(*index).map(|wall| GpuOcc {
+            center: [
+                wall.position.x,
+                wall.base + wall.height * 0.5,
+                wall.position.z,
+            ],
+            shape: 0.0,
+            half_x: wall.half_x,
+            height: wall.height,
+            half_z: wall.half_z,
+            radius: 0.0,
+            albedo: wall.color,
+            absorption: wall.absorption,
+            reflectance: wall.reflectance,
+            color_mix: wall.color_mix,
+            yaw: 0.0,
+        }),
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            world.scene.solids.get(*index).map(|solid| solid_occ(solid))
+            world.scene.solid_at(*index).map(|solid| solid_occ(solid))
         }
         _ => Some(GpuOcc {
             center: object.bounds.center,
@@ -1166,14 +1163,12 @@ fn object_color(world: &World, object: &crate::world::Object) -> [f32; 3] {
             .map_or([1.0, 1.0, 1.0], |ceiling| ceiling.color),
         DrawKind::Fixed(FixedPart::Wall(index)) => world
             .scene
-            .walls
-            .get(*index)
+            .wall_at(*index)
             .map(|wall| wall.color)
             .unwrap_or([1.0; 3]),
         DrawKind::Fixed(FixedPart::Solid(index)) => world
             .scene
-            .solids
-            .get(*index)
+            .solid_at(*index)
             .map(|solid| solid.color)
             .unwrap_or([1.0; 3]),
         DrawKind::Mesh { color, .. }
@@ -1205,7 +1200,7 @@ fn push_object(
             }
         }
         DrawKind::Fixed(FixedPart::Wall(index)) => {
-            if let Some(wall) = world.scene.walls.get(*index) {
+            if let Some(wall) = world.scene.wall_at(*index) {
                 push_box(
                     out,
                     wall.color,
@@ -1221,7 +1216,7 @@ fn push_object(
             }
         }
         DrawKind::Fixed(FixedPart::Solid(index)) => {
-            if let Some(solid) = world.scene.solids.get(*index) {
+            if let Some(solid) = world.scene.solid_at(*index) {
                 match solid.shape {
                     Shape::Square => {
                         let half = solid.size * 0.5;
@@ -1947,51 +1942,54 @@ mod tests {
 
     #[test]
     fn packed_objects_name_their_vertex_ranges() {
-        let scene = Scene {
-            floor: Floor {
-                position: Vec3::new(0.0, 0.0, 0.0),
-                half_x: 4.0,
-                half_z: 4.0,
-                color: [1.0, 1.0, 1.0],
-            },
-            walls: vec![Wall {
-                base: 0.0,
-                position: Vec3::new(1.0, 0.0, 0.0),
-                half_x: 0.2,
-                half_z: 1.0,
-                height: 2.0,
-                color: [0.8, 0.8, 0.8],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            }],
-            solids: vec![Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
-                position: Vec3::new(-1.0, 0.0, 0.5),
-                size: 1.0,
-                height: 1.0,
-                color: [1.0, 0.0, 0.0],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            }],
-            lights: vec![Light {
-                position: Vec3::new(0.0, 4.0, 0.0),
-                color: [1.0, 1.0, 1.0],
+        let scene = {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::new(0.0, 0.0, 0.0),
+                    half_x: 4.0,
+                    half_z: 4.0,
+                    color: [1.0, 1.0, 1.0],
+                },
+                vec![Wall {
+                    base: 0.0,
+                    position: Vec3::new(1.0, 0.0, 0.0),
+                    half_x: 0.2,
+                    half_z: 1.0,
+                    height: 2.0,
+                    color: [0.8, 0.8, 0.8],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                }],
+                vec![Solid {
+                    yaw: 0.0,
+                    shape: Shape::Square,
+                    position: Vec3::new(-1.0, 0.0, 0.5),
+                    size: 1.0,
+                    height: 1.0,
+                    color: [1.0, 0.0, 0.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                }],
+                vec![Light {
+                    position: Vec3::new(0.0, 4.0, 0.0),
+                    color: [1.0, 1.0, 1.0],
 
-                direction: Vec3::ZERO,
-            }],
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+                    direction: Vec3::ZERO,
+                }],
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
@@ -2019,7 +2017,7 @@ mod tests {
         });
         let (key, model) = solid.expect("the solid keeps a shape block");
         let mut moved = world.clone();
-        moved.scene.solids[0].position.x += 1.5;
+        moved.scene.solid_mut(0).position.x += 1.5;
         let again = pack_frame(&moved, &view, eye, &mut memory);
         let again_key = again.draws.iter().find_map(|draw| match draw {
             PackedDraw::Shape {

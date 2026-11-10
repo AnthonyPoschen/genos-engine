@@ -1,7 +1,25 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::implicit_clone, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::implicit_clone,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::manual_midpoint,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Direct-path gains from the renderer's resident occluders. The query does not present.
 
@@ -26,33 +44,37 @@ fn wall(z0: f32, z1: f32, absorption: f32) -> Wall {
 }
 
 fn world(walls: Vec<Wall>) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [1.0, 1.0, 1.0],
-        },
-        walls,
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            walls,
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 
 fn open() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(64, 64).map_err(|err| err.to_string())?;
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
     Ok(genos_window::Lifecycle::new(window, renderer, permit))
 }
 
@@ -93,7 +115,7 @@ fn resident_occluders_change_direct_path_gain() {
     assert!(first[1] > 0.9, "clear gain {}", first[1]);
     assert!((first[0] - first[2]).abs() < 0.08);
 
-    scene.scene.walls[0] = wall(-3.2, -2.0, 3.0);
+    *scene.scene.wall_mut(0) = wall(-3.2, -2.0, 3.0);
     renderer.retain_scene(&scene).expect("thickness update");
     let next = renderer
         .transmission_gains(listener, &[blocked])
@@ -106,13 +128,13 @@ fn resident_occluders_change_direct_path_gain() {
         first[0]
     );
 
-    scene.scene.walls[0] = wall(-3.4, -3.0, 0.05);
+    *scene.scene.wall_mut(0) = wall(-3.4, -3.0, 0.05);
     renderer.retain_scene(&scene).unwrap();
     let soft = renderer.transmission_gains(listener, &[blocked]).unwrap()[0];
     println!("gains transmit={soft}");
     assert!(soft > 0.8, "transmitting material {soft}");
 
-    scene.scene.walls[0] = wall(-3.5, -3.0, 20.0);
+    *scene.scene.wall_mut(0) = wall(-3.5, -3.0, 20.0);
     renderer.retain_scene(&scene).unwrap();
     let hard = renderer.transmission_gains(listener, &[blocked]).unwrap()[0];
     println!("gains block={hard}");

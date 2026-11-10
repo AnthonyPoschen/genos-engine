@@ -1,16 +1,88 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::uninlined_format_args, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_wrap,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::chunks_exact_to_as_chunks,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::uninlined_format_args,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! Each lighting preset, and each feature turned off from high, draws a few frames.
 //!
@@ -26,42 +98,52 @@ use genos_scene::{
 };
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     std::env::set_var("GENOS_GPU_TIMES", "30");
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn room(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [0.6, 0.6, 0.6],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: vec![Light {
-            position: Vec3::new(0.0, 3.0, 0.0),
-            color: [1.0, 0.95, 0.85],
-            direction: Vec3::new(0.2, -1.0, 0.1),
-        }],
-        ceiling: None,
-        sky: None,
-        lighting: settings,
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [0.6, 0.6, 0.6],
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![Light {
+                position: Vec3::new(0.0, 3.0, 0.0),
+                color: [1.0, 0.95, 0.85],
+                direction: Vec3::new(0.2, -1.0, 0.1),
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = settings;
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 
@@ -222,15 +304,7 @@ fn presets_and_feature_off_skip_their_passes() {
     ];
     for (name, settings, run, zero) in cases {
         let world = room(settings);
-        timed |= run_case(
-            window,
-            renderer,
-            &world,
-            &mut camera,
-            name,
-            run,
-            zero,
-        );
+        timed |= run_case(window, renderer, &world, &mut camera, name, run, zero);
     }
 
     let mut off = LightingSettings::preset(LightingPreset::High);
@@ -294,7 +368,9 @@ fn presets_and_feature_off_skip_their_passes() {
         &world,
         &mut camera,
         "bounces 1",
-        &["direct", "shadows", "compose", "place", "trace", "gather", "filter"],
+        &[
+            "direct", "shadows", "compose", "place", "trace", "gather", "filter",
+        ],
         &["compact", "cache", "cache_rays", "atrous", "hit_light"],
     );
 
@@ -445,43 +521,46 @@ fn box_at(x: f32, z: f32, color: [f32; 3]) -> Solid {
 /// Closed hangar so the mean is the interior, not the sky. Red and green boxes
 /// sit in front of the camera.
 fn interior(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.55, 0.55, 0.55],
-        },
-        walls: vec![
-            wall(0.0, -4.0, 4.0, 0.15),
-            wall(0.0, 4.0, 4.0, 0.15),
-            wall(-4.0, 0.0, 0.15, 4.0),
-            wall(4.0, 0.0, 0.15, 4.0),
-        ],
-        solids: vec![
-            box_at(-1.2, -0.4, [0.8, 0.05, 0.05]),
-            box_at(1.2, -0.4, [0.05, 0.7, 0.1]),
-        ],
-        lights: vec![Light {
-            position: Vec3::new(0.0, 2.6, 0.4),
-            color: [8.0, 7.6, 6.8],
-            direction: Vec3::ZERO,
-        }],
-        ceiling: Some(Ceiling {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 4.0,
+                half_z: 4.0,
+                color: [0.55, 0.55, 0.55],
+            },
+            vec![
+                wall(0.0, -4.0, 4.0, 0.15),
+                wall(0.0, 4.0, 4.0, 0.15),
+                wall(-4.0, 0.0, 0.15, 4.0),
+                wall(4.0, 0.0, 0.15, 4.0),
+            ],
+            vec![
+                box_at(-1.2, -0.4, [0.8, 0.05, 0.05]),
+                box_at(1.2, -0.4, [0.05, 0.7, 0.1]),
+            ],
+            vec![Light {
+                position: Vec3::new(0.0, 2.6, 0.4),
+                color: [8.0, 7.6, 6.8],
+                direction: Vec3::ZERO,
+            }],
+        );
+        __scene.ceiling = Some(Ceiling {
             height: 3.0,
             color: [0.7, 0.7, 0.72],
-        }),
-        sky: Some(Sky {
+        });
+        __scene.sky = Some(Sky {
             color: [0.11, 0.14, 0.19],
-        }),
-        lighting: settings,
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+        });
+        __scene.lighting = settings;
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 
@@ -685,14 +764,7 @@ fn presets_and_toggles_match_their_look() {
         // so a stale probe field cannot hide a tile bug.
         let moving = name != "world cache off";
         let world = interior(settings);
-        let pixels = shoot(
-            window,
-            renderer,
-            &world,
-            &mut camera,
-            frames,
-            moving,
-        );
+        let pixels = shoot(window, renderer, &world, &mut camera, frames, moving);
         let look = look_at(&pixels);
         assert_eq!(pixels.len(), (width * height * 4) as usize, "{name}");
         assert_sane(name, &look);
@@ -767,38 +839,41 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
 }
 
 fn shadow_corner(settings: LightingSettings) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.8, 0.8, 0.8],
-        },
-        walls: vec![
-            wall(0.0, -4.0, 4.0, 0.12),
-            wall(0.0, 4.0, 4.0, 0.12),
-            wall(-4.0, 0.0, 0.12, 4.0),
-            wall(4.0, 0.0, 0.12, 4.0),
-        ],
-        solids: vec![box_at(0.0, 0.0, [0.75, 0.75, 0.75])],
-        lights: vec![Light {
-            position: Vec3::new(-2.2, 1.5, 0.0),
-            color: [10.0, 9.0, 8.0],
-            direction: Vec3::ZERO,
-        }],
-        ceiling: Some(Ceiling {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 4.0,
+                half_z: 4.0,
+                color: [0.8, 0.8, 0.8],
+            },
+            vec![
+                wall(0.0, -4.0, 4.0, 0.12),
+                wall(0.0, 4.0, 4.0, 0.12),
+                wall(-4.0, 0.0, 0.12, 4.0),
+                wall(4.0, 0.0, 0.12, 4.0),
+            ],
+            vec![box_at(0.0, 0.0, [0.75, 0.75, 0.75])],
+            vec![Light {
+                position: Vec3::new(-2.2, 1.5, 0.0),
+                color: [10.0, 9.0, 8.0],
+                direction: Vec3::ZERO,
+            }],
+        );
+        __scene.ceiling = Some(Ceiling {
             height: 3.0,
             color: [0.85, 0.85, 0.85],
-        }),
-        sky: None,
-        lighting: settings,
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+        });
+        __scene.sky = None;
+        __scene.lighting = settings;
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     })
 }
 

@@ -1,13 +1,67 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_wrap,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! The small stress picture against an independent ray trace.
 //!
@@ -15,9 +69,7 @@
 
 use std::sync::Mutex;
 
-use genos_render::{
-    agreement, linear_from_display, luminance, radiance, sees, Renderer,
-};
+use genos_render::{agreement, linear_from_display, luminance, radiance, sees, Renderer};
 use genos_scene::{viewport_uv, Camera, Scene, Shape, Solid, Vec3};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
@@ -28,9 +80,13 @@ fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -51,11 +107,7 @@ fn stage() -> Stage {
 }
 
 fn aim(eye: [f32; 3], target: [f32; 3]) -> Camera {
-    let d = [
-        target[0] - eye[0],
-        target[1] - eye[1],
-        target[2] - eye[2],
-    ];
+    let d = [target[0] - eye[0], target[1] - eye[1], target[2] - eye[2]];
     let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1.0e-6);
     let pitch = (d[1] / len).clamp(-1.0, 1.0).asin();
     let yaw = d[0].atan2(-d[2]);
@@ -73,7 +125,10 @@ fn draw(
 ) -> Vec<u8> {
     let _ = window.pump();
     if settle {
-        renderer.draw(world, camera, true).expect("draw").expect("pixels")
+        renderer
+            .draw(world, camera, true)
+            .expect("draw")
+            .expect("pixels")
     } else {
         renderer.draw(world, camera, false).expect("draw");
         renderer.read_picture().expect("pixels")
@@ -122,13 +177,12 @@ fn on_foot(solid: &Solid, x: f32, z: f32) -> bool {
 }
 
 fn clear_floor(scene: &Scene, x: f32, z: f32) -> bool {
-    scene.solids.iter().all(|solid| !on_foot(solid, x, z))
+    scene.solids().all(|solid| !on_foot(solid, x, z))
 }
 
 fn red_box(scene: &Scene) -> &Solid {
     scene
-        .solids
-        .iter()
+        .solids()
         .find(|solid| {
             (solid.color[0] - 0.9).abs() < 0.05
                 && (solid.color[1] - 0.15).abs() < 0.05
@@ -166,11 +220,7 @@ fn box_face(solid: &Solid, eye: [f32; 3]) -> ([f32; 3], [f32; 3]) {
 }
 
 fn floor_near(scene: &Scene, camera: &Camera, around: [f32; 2], aspect: f32) -> [f32; 3] {
-    let eye = [
-        camera.position.x,
-        camera.position.y,
-        camera.position.z,
-    ];
+    let eye = [camera.position.x, camera.position.y, camera.position.z];
     for ring in [1.3_f32, 1.8, 2.4, 3.2] {
         for step in 0..12 {
             let a = step as f32 * std::f32::consts::TAU / 12.0;
@@ -200,7 +250,15 @@ struct Point {
     albedo: [f32; 3],
 }
 
-fn score(name: &str, pixels: &[u8], width: u32, height: u32, camera: &Camera, scene: &Scene, point: &Point) -> f32 {
+fn score(
+    name: &str,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    camera: &Camera,
+    scene: &Scene,
+    point: &Point,
+) -> f32 {
     let engine = sample_y(pixels, width, height, camera, point.at);
     let reference = luminance(radiance(scene, point.at, point.normal, point.albedo));
     let score = agreement(engine, reference);
@@ -312,15 +370,39 @@ fn the_small_stress_picture_matches_the_ray_trace() {
     let settled_hall = draw(window, renderer, &stage.world, &hall, true);
     let mut scores = Vec::new();
     for point in &hall_points {
-        scores.push(score(point.name, &settled_hall, width, height, &hall, scene, point));
+        scores.push(score(
+            point.name,
+            &settled_hall,
+            width,
+            height,
+            &hall,
+            scene,
+            point,
+        ));
     }
     let settled_room = draw(window, renderer, &stage.world, &room, true);
     for point in &room_points {
-        scores.push(score(point.name, &settled_room, width, height, &room, scene, point));
+        scores.push(score(
+            point.name,
+            &settled_room,
+            width,
+            height,
+            &room,
+            scene,
+            point,
+        ));
     }
     let settled_out = draw(window, renderer, &stage.world, &outside, true);
     for point in &yard_points {
-        scores.push(score(point.name, &settled_out, width, height, &outside, scene, point));
+        scores.push(score(
+            point.name,
+            &settled_out,
+            width,
+            height,
+            &outside,
+            scene,
+            point,
+        ));
     }
     let mean = scores.iter().sum::<f32>() / scores.len() as f32;
     println!("mean={mean:.4} n={}", scores.len());
@@ -331,7 +413,12 @@ fn the_small_stress_picture_matches_the_ray_trace() {
     assert!(mean >= 0.90, "mean {mean} is under 0.90");
 }
 
-fn warmup(window: &mut Window, renderer: &mut Renderer, world: &genos_render::World, camera: &Camera) {
+fn warmup(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &genos_render::World,
+    camera: &Camera,
+) {
     // The live frames stay inside the tier budget, so the first ones do not
     // finish the field. Settle once, then the timed cases start from that picture.
     let _ = draw(window, renderer, world, camera, true);
@@ -411,7 +498,10 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     let hall_floor = floor_near(
         &stage.world.scene,
         &hall,
-        [red_box(&stage.world.scene).position.x, red_box(&stage.world.scene).position.z],
+        [
+            red_box(&stage.world.scene).position.x,
+            red_box(&stage.world.scene).position.z,
+        ],
         aspect,
     );
     let hall_points = [
@@ -433,26 +523,41 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     let lamp = stage
         .world
         .scene
-        .lights
-        .iter()
+        .lights()
         .position(|light| {
             light.direction.length_squared() < 1.0e-6
                 && (light.position.x - 12.5).abs() < 1.0
                 && (light.position.z - 21.5).abs() < 1.0
         })
         .expect("hall lamp");
-    let kept = stage.world.scene.lights[lamp].color;
-    stage.world.scene.lights[lamp].color = [0.0, 0.0, 0.0];
+    let kept = stage.world.scene.light(lamp).color;
+    stage.world.scene.light_mut(lamp).color = [0.0, 0.0, 0.0];
     let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &hall, 100);
     println!("lamp_off frames={frames} ms={ms:.1}");
     assert!(ms < 250.0, "lamp off took {ms:.1} ms");
-    check_points("lamp_off", &pixels, width, height, &hall, &stage.world.scene, &hall_points);
+    check_points(
+        "lamp_off",
+        &pixels,
+        width,
+        height,
+        &hall,
+        &stage.world.scene,
+        &hall_points,
+    );
 
-    stage.world.scene.lights[lamp].color = kept;
+    stage.world.scene.light_mut(lamp).color = kept;
     let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &hall, 100);
     println!("lamp_on frames={frames} ms={ms:.1}");
     assert!(ms < 250.0, "lamp on took {ms:.1} ms");
-    check_points("lamp_on", &pixels, width, height, &hall, &stage.world.scene, &hall_points);
+    check_points(
+        "lamp_on",
+        &pixels,
+        width,
+        height,
+        &hall,
+        &stage.world.scene,
+        &hall_points,
+    );
 
     for step in 1..=3 {
         stage.advance(0.4);
@@ -508,7 +613,15 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     stage.advance(1.5);
     let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("outside_still frames={frames} ms={ms:.1}");
-    check_points("outside_still", &pixels, width, height, &outside, &frozen, &yards);
+    check_points(
+        "outside_still",
+        &pixels,
+        width,
+        height,
+        &outside,
+        &frozen,
+        &yards,
+    );
 
     let before = luminance(radiance(
         &stage.world.scene,
@@ -526,18 +639,61 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
         sun_yard.normal,
         sun_yard.albedo,
     ));
-    assert!((before - after).abs() > 0.02, "sun did not move the yard: {before} {after}");
+    assert!(
+        (before - after).abs() > 0.02,
+        "sun did not move the yard: {before} {after}"
+    );
     let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("sun_move frames={frames} ms={ms:.1}");
-    check_points("sun_move", &pixels, width, height, &outside, &stage.world.scene, &yards);
+    check_points(
+        "sun_move",
+        &pixels,
+        width,
+        height,
+        &outside,
+        &stage.world.scene,
+        &yards,
+    );
 
     stage.day = 0.75;
     stage.apply();
     let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("sun_gone frames={frames} ms={ms:.1}");
     let settled = draw(window, renderer, &stage.world, &outside, true);
-    let _ = score("sun_gone_live_sun", &pixels, width, height, &outside, &stage.world.scene, &yards[0]);
-    let _ = score("sun_gone_settled_sun", &settled, width, height, &outside, &stage.world.scene, &yards[0]);
-    let _ = score("sun_gone_settled_shadow", &settled, width, height, &outside, &stage.world.scene, &yards[1]);
-    check_points("sun_gone", &pixels, width, height, &outside, &stage.world.scene, &yards);
+    let _ = score(
+        "sun_gone_live_sun",
+        &pixels,
+        width,
+        height,
+        &outside,
+        &stage.world.scene,
+        &yards[0],
+    );
+    let _ = score(
+        "sun_gone_settled_sun",
+        &settled,
+        width,
+        height,
+        &outside,
+        &stage.world.scene,
+        &yards[0],
+    );
+    let _ = score(
+        "sun_gone_settled_shadow",
+        &settled,
+        width,
+        height,
+        &outside,
+        &stage.world.scene,
+        &yards[1],
+    );
+    check_points(
+        "sun_gone",
+        &pixels,
+        width,
+        height,
+        &outside,
+        &stage.world.scene,
+        &yards,
+    );
 }

@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Equal elapsed time keeps the same motion. A bad interval does not advance.
 
@@ -76,21 +79,20 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
 
     let mut mouse_slow = Camera::new(0.0, 0.0, 0.0);
     let mut mouse_fast = Camera::new(0.0, 0.0, 0.0);
-    let mut empty = genos_scene::Scene {
-        floor: scene.floor.clone(),
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    let mut empty = {
+        let mut __scene =
+            genos_scene::Scene::from_lists(scene.floor.clone(), Vec::new(), Vec::new(), Vec::new());
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     };
     let mouse = Actions {
         capture_click: true,

@@ -118,7 +118,7 @@ impl Camera {
     /// Bind a looping path to one solid. The solid should already sit on the first position.
     /// Returns false when `solid` is not in `scene`.
     pub fn codimate(&mut self, scene: &Scene, solid: usize, motion: Codimation) -> bool {
-        if solid >= scene.solids.len() {
+        if solid >= scene.solid_len() {
             return false;
         }
         if let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) {
@@ -156,7 +156,7 @@ impl Camera {
             0.0,
             Vec3::new(floor.half_x, FLOOR_HALF_Y, floor.half_z),
         ));
-        for wall in &scene.walls {
+        for wall in scene.walls() {
             physics.insert(Body::cuboid(
                 Vec3::new(
                     wall.position.x,
@@ -167,11 +167,11 @@ impl Camera {
                 Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
             ));
         }
-        for solid in &scene.solids {
+        for solid in scene.solids() {
             physics.insert(solid_collider(solid));
         }
         self.view = physics.insert(view_capsule(self.position));
-        self.solid_origin = Some(1 + scene.walls.len());
+        self.solid_origin = Some(1 + scene.wall_len());
         self.physics = physics;
         let count = self.codimations.len();
         for index in 0..count {
@@ -299,7 +299,7 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
     for index in 0..count {
         let solid_index = camera.codimations[index].solid;
         let lift = {
-            let Some(solid) = scene.solids.get(solid_index) else {
+            let Some(solid) = scene.solid_at(solid_index) else {
                 continue;
             };
             center_lift(solid)
@@ -366,7 +366,7 @@ fn write_codimations(camera: &Camera, scene: &mut Scene) {
             continue;
         };
         let position = body.position;
-        let Some(solid) = scene.solids.get_mut(slot.solid) else {
+        let Some(solid) = scene.solid_at_mut(slot.solid) else {
             continue;
         };
         solid.position = position - Vec3::Y * center_lift(solid);

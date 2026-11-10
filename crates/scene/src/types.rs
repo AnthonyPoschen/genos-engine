@@ -3,6 +3,7 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
+use genos_ecs::{SceneHandle, World};
 use genos_math::Vec3;
 
 use crate::{
@@ -164,12 +165,17 @@ pub struct Sky {
     pub color: [f32; 3],
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Scene {
     pub floor: Floor,
-    pub walls: Vec<Wall>,
-    pub solids: Vec<Solid>,
-    pub lights: Vec<Light>,
+    /// Rows for the floor, walls, solids, and lights. The draw order is the
+    /// handle lists below, not these columns: a removal swaps a column row and
+    /// the list keeps the surviving handles in place.
+    pub(crate) objects: World,
+    pub(crate) floor_handle: SceneHandle,
+    pub(crate) wall_order: Vec<SceneHandle>,
+    pub(crate) solid_order: Vec<SceneHandle>,
+    pub(crate) light_order: Vec<SceneHandle>,
     /// None leaves the scene open to the sky.
     pub ceiling: Option<Ceiling>,
     /// None: a ray that leaves the scene brings nothing back, and the background is black.
@@ -202,17 +208,31 @@ pub struct Scene {
 
 impl Scene {
     pub fn solid_by_color(&self, color: [f32; 3]) -> Option<&Solid> {
-        self.solids.iter().find(|solid| {
-            (solid.color[0] - color[0]).abs() < 0.01
+        for index in 0..self.solid_order.len() {
+            let Some(solid) = self.solid_at(index) else {
+                continue;
+            };
+            let close = (solid.color[0] - color[0]).abs() < 0.01
                 && (solid.color[1] - color[1]).abs() < 0.01
-                && (solid.color[2] - color[2]).abs() < 0.01
-        })
+                && (solid.color[2] - color[2]).abs() < 0.01;
+            if close {
+                return Some(solid);
+            }
+        }
+        None
     }
 
     /// True when two wall rectangles on the ground plane overlap or touch.
     pub fn walls_share_a_corner(&self) -> bool {
-        for (i, a) in self.walls.iter().enumerate() {
-            for b in self.walls.iter().skip(i + 1) {
+        let count = self.wall_order.len();
+        for left in 0..count {
+            let Some(a) = self.wall_at(left) else {
+                continue;
+            };
+            for right in (left + 1)..count {
+                let Some(b) = self.wall_at(right) else {
+                    continue;
+                };
                 let overlap_x = (a.position.x - b.position.x).abs() <= a.half_x + b.half_x + 0.05;
                 let overlap_z = (a.position.z - b.position.z).abs() <= a.half_z + b.half_z + 0.05;
                 if overlap_x && overlap_z {

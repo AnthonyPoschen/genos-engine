@@ -233,7 +233,7 @@ pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
             ],
             half: [scene.floor.half_x, 0.05, scene.floor.half_z],
         }),
-        FixedPart::Wall(index) => scene.walls.get(*index).map(|wall| Bounds {
+        FixedPart::Wall(index) => scene.wall_at(*index).map(|wall| Bounds {
             center: [
                 wall.position.x,
                 wall.base + wall.height * 0.5,
@@ -241,7 +241,7 @@ pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
             ],
             half: [wall.half_x, wall.height * 0.5, wall.half_z],
         }),
-        FixedPart::Solid(index) => scene.solids.get(*index).map(|solid| {
+        FixedPart::Solid(index) => scene.solid_at(*index).map(|solid| {
             let reach = solid_reach(solid);
             Bounds {
                 center: [solid.position.x, solid.height * 0.5, solid.position.z],
@@ -350,8 +350,8 @@ fn scene_identity(scene: &Scene) -> u64 {
         &mut h,
     );
     f(&fl.color, &mut h);
-    scene.walls.len().hash(&mut h);
-    for w in &scene.walls {
+    scene.wall_len().hash(&mut h);
+    for w in scene.walls() {
         f(
             &[
                 w.position.x,
@@ -366,8 +366,8 @@ fn scene_identity(scene: &Scene) -> u64 {
         );
         f(&w.color, &mut h);
     }
-    scene.solids.len().hash(&mut h);
-    for s in &scene.solids {
+    scene.solid_len().hash(&mut h);
+    for s in scene.solids() {
         format!("{:?}", s.shape).hash(&mut h);
         f(&[s.size, s.height], &mut h);
     }
@@ -420,14 +420,15 @@ pub struct StreamedTexture {
 }
 
 impl World {
-    pub fn from_scene(scene: Scene) -> Self {
+    pub fn from_scene(mut scene: Scene) -> Self {
+        scene.sync_floor();
         let identity = scene_identity(&scene);
         let mut parts = vec![FixedPart::Floor];
         if scene.ceiling.is_some() {
             parts.push(FixedPart::Ceiling);
         }
-        parts.extend((0..scene.walls.len()).map(FixedPart::Wall));
-        parts.extend((0..scene.solids.len()).map(FixedPart::Solid));
+        parts.extend((0..scene.wall_len()).map(FixedPart::Wall));
+        parts.extend((0..scene.solid_len()).map(FixedPart::Solid));
         let objects = parts
             .into_iter()
             .map(|part| Object {
@@ -464,8 +465,8 @@ impl World {
     /// Scene the lighting traces. Hidden and off-screen objects stay in it.
     pub fn light_scene(&self) -> Scene {
         let mut scene = self.scene.clone();
-        let mut drop_solids = vec![false; scene.solids.len()];
-        let mut drop_walls = vec![false; scene.walls.len()];
+        let mut drop_solids = vec![false; scene.solid_len()];
+        let mut drop_walls = vec![false; scene.wall_len()];
         let mut extras = Vec::new();
         for object in &self.objects {
             match &object.kind {
@@ -484,21 +485,23 @@ impl World {
                 _ => {}
             }
         }
-        let solids = std::mem::take(&mut scene.solids);
-        scene.solids = solids
-            .into_iter()
-            .enumerate()
-            .filter(|(index, _)| !drop_solids[*index])
-            .map(|(_, solid)| solid)
-            .collect();
-        let walls = std::mem::take(&mut scene.walls);
-        scene.walls = walls
-            .into_iter()
+        let walls: Vec<_> = scene
+            .walls()
+            .cloned()
             .enumerate()
             .filter(|(index, _)| !drop_walls[*index])
             .map(|(_, wall)| wall)
             .collect();
-        scene.solids.extend(extras);
+        let mut solids: Vec<_> = scene
+            .solids()
+            .cloned()
+            .enumerate()
+            .filter(|(index, _)| !drop_solids[*index])
+            .map(|(_, solid)| solid)
+            .collect();
+        solids.extend(extras);
+        let lights = scene.lights_cloned();
+        scene = scene.replace_parts(walls, solids, lights);
         scene
     }
 }
@@ -571,41 +574,44 @@ mod tests {
     use genos_scene::{view_proj, Camera, Floor, Light, Scene, Shape, Solid, Vec3};
 
     pub(super) fn red_scene() -> Scene {
-        Scene {
-            floor: Floor {
-                position: Vec3::new(0.0, 0.0, 0.0),
-                half_x: 8.0,
-                half_z: 8.0,
-                color: [1.0, 1.0, 1.0],
-            },
-            walls: Vec::new(),
-            solids: vec![Solid {
-                yaw: 0.0,
-                shape: Shape::Square,
-                position: Vec3::new(0.0, 0.0, 0.0),
-                size: 1.5,
-                height: 1.2,
-                color: [1.0, 0.0, 0.0],
-                absorption: 0.0,
-                reflectance: -1.0,
-                color_mix: -1.0,
-            }],
-            lights: vec![Light {
-                position: Vec3::new(0.0, 7.0, 0.0),
-                color: [1.0, 1.0, 1.0],
+        {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::new(0.0, 0.0, 0.0),
+                    half_x: 8.0,
+                    half_z: 8.0,
+                    color: [1.0, 1.0, 1.0],
+                },
+                Vec::new(),
+                vec![Solid {
+                    yaw: 0.0,
+                    shape: Shape::Square,
+                    position: Vec3::new(0.0, 0.0, 0.0),
+                    size: 1.5,
+                    height: 1.2,
+                    color: [1.0, 0.0, 0.0],
+                    absorption: 0.0,
+                    reflectance: -1.0,
+                    color_mix: -1.0,
+                }],
+                vec![Light {
+                    position: Vec3::new(0.0, 7.0, 0.0),
+                    color: [1.0, 1.0, 1.0],
 
-                direction: Vec3::ZERO,
-            }],
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+                    direction: Vec3::ZERO,
+                }],
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         }
     }
 
@@ -655,7 +661,7 @@ mod tests {
             }
         ));
 
-        assert_eq!(world.light_scene().solids.len(), 2);
+        assert_eq!(world.light_scene().solid_len(), 2);
     }
 }
 
@@ -683,12 +689,12 @@ mod identity_tests {
     fn a_moved_lamp_or_solid_keeps_the_world_but_a_new_floor_does_not() {
         let base = super::tests::red_scene();
         let mut lamp = base.clone();
-        if let Some(l) = lamp.lights.first_mut() {
+        if let Some(l) = lamp.light_at_mut(0) {
             l.position.x += 1.5;
         }
-        lamp.lights.clear();
+        lamp.clear_lights();
         let mut solid = base.clone();
-        if let Some(s) = solid.solids.first_mut() {
+        if let Some(s) = solid.solid_at_mut(0) {
             s.position.x += 0.5;
         }
         let mut floor = base.clone();

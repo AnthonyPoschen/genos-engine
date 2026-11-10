@@ -1,6 +1,6 @@
 # Scene ECS (design)
 
-Status: accepted, 10 Nov 2026. Owner: Engine. The tables are `genos-ecs` (`crates/ecs`). `publish` in `genos-scene` copies the floor, walls, solids, and lights into a store. The draw vecs remain, because `World::from_scene` still keys `FixedPart` by vec index (ADR 0032). The headless store check is `debug/ecs`.
+Status: accepted, 10 Nov 2026. Owner: Engine. The tables are `genos-ecs` (`crates/ecs`). `Scene` stores the floor, walls, solids, and lights in that world. Draw order is a handle list per kind (`crates/scene/src/scene_store.rs`). `World::from_scene` rebuilds `FixedPart::Wall(usize)` and `FixedPart::Solid(usize)` from that order, so the ordinal is still the list index (ADR 0032). The typed `Vec`s are gone. `Parent`, prefabs, `NetId`, undo, and Rhai get/set are not built. The headless store check is `debug/ecs`.
 
 The live scene is four arrays and a side table of names. That is enough for one scripted room. It is not enough for the four systems that have to name an object and find it again later. [Animation](animation.md) needs a parent link for joints. The [physics plan](physics/plan.md) scales to thousands of bodies and says snapshot order is `NetId` order once bodies live on stable ids. Save, load, and MCP undo need a name that survives a removal and a reload. Lighting invalidation needs a change record per object that moved, which [ADR 0013](../adr/0013-lighting-invalidation-is-local.md) already specifies and the scene does not yet emit. The [job system](job-system.md) runs the wide passes; this design is the storage those passes iterate.
 
@@ -16,13 +16,13 @@ One table of placed objects, each with a scene handle that a save file, an undo 
 
 | Piece | State | Code |
 |---|---|---|
-| Scene storage | One `Floor`, `Vec<Wall>`, `Vec<Solid>`, `Vec<Light>`, plus settings structs | `Scene` in `crates/scene/src/types.rs` |
-| Object store | `publish` copies the floor, walls, solids, and lights into a `genos-ecs` world. Handles are stable for the same lists. The draw vecs are still the lists the renderer indexes | `publish` / `move_placed` in `crates/scene/src/objects.rs` |
+| Scene storage | One `Floor` field plus the same rows in a `genos-ecs` world. Walls, solids, and lights are handle-order lists. Settings structs stay on `Scene` | `Scene` in `crates/scene/src/types.rs`, lists in `crates/scene/src/scene_store.rs` |
+| Object store | `publish` copies the floor, walls, solids, and lights into a fresh world. Two publishes of the same lists share handles. `walls()`, `solids()`, and `lights()` are views of the handle order | `publish` / `move_placed` in `crates/scene/src/objects.rs` |
 | Ids on the objects | None. `Wall`, `Solid`, and `Light` have no handle field | `types.rs` |
 | Live names | A side table. `Handles::index` assigns from 1 every time a `Host` is built. The strings are `floor`, `wall:<id>`, `solid:<id>`, `light:<id>` | `crates/mcp/src/live.rs` |
 | Edit path | `set_object` / `spawn_object` / `remove_object`. A geometry edit calls `Camera::attach_scene`, which rebuilds colliders. The `.rhai` file is not written | `live.rs`; [scene record](scene.md) limits |
 | Change detection | `Host::with_frame` clones the whole `Scene` and compares it | `live.rs` `with_frame` |
-| Draw keys | `FixedPart::Wall(usize)` and `FixedPart::Solid(usize)` are indices into those vecs. A removal shifts every later index | `World::from_scene` in `crates/render/src/world.rs` |
+| Draw keys | `FixedPart::Wall(usize)` and `FixedPart::Solid(usize)` are ordinals in the handle-order lists. A removal of an earlier object still shifts every later ordinal. The lighting key is rebuilt from that ordinal in the same frame | `World::from_scene` in `crates/render/src/world.rs` |
 | Physics handles | `World::insert` returns a `usize`. `Body` has no id. The plan's `BodyId` is `{ index: u32, generation: u32 }` and is not built yet | `crates/physics/src/lib.rs`; [physics plan](physics/plan.md) P2 |
 | Codimation | Keyed by the solid's vec index | `Camera::codimate` in `crates/scene/src/camera.rs` |
 | Hierarchy | None. `Solid.yaw` is one angle about +Y. The picture places a wall or a square solid from `position.x`, `position.z`, and `height`, and ignores `position.y` | [scene record](scene.md) limits |

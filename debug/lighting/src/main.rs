@@ -1197,28 +1197,32 @@ impl Host for App {
 }
 
 fn loading_world() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 2.0,
-            half_z: 2.0,
-            color: [0.15, 0.15, 0.16],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: Some(Sky {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 2.0,
+                half_z: 2.0,
+                color: [0.15, 0.15, 0.16],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(Sky {
             color: [0.02, 0.02, 0.025],
-        }),
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
-        debug: DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        menu: MenuSettings::default(),
+        });
+        __scene.lighting =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        __scene.debug = DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     })
 }
 
@@ -1286,32 +1290,35 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 | genos_load::LoadError::NotFound { .. } => err.to_string(),
                 _ => format!("{}: {err}", full.display()),
             })?;
-            let mut scene = Scene {
-                floor: Floor {
-                    position: Vec3::new(1000.0, 0.0, 0.0),
-                    half_x: 0.01,
-                    half_z: 0.01,
-                    color: [0.2, 0.2, 0.2],
-                },
-                walls: Vec::new(),
-                solids: Vec::new(),
-                lights: Vec::new(),
-                ceiling: None,
-                sky: sky.map(|color| Sky { color }),
-                lighting: genos_scene::LightingSettings::default(),
-                debug: DebugSettings::default(),
-                fps_counter: FpsCounterSettings::default(),
-                event_loop: EventLoopSettings::default(),
-                reflections: ReflectionSettings::default(),
-                hdr: genos_scene::HdrSettings::legacy_bytes(),
-                fog: FogSettings::default(),
-                menu: MenuSettings::default(),
+            let mut scene = {
+                let mut __scene = Scene::from_lists(
+                    Floor {
+                        position: Vec3::new(1000.0, 0.0, 0.0),
+                        half_x: 0.01,
+                        half_z: 0.01,
+                        color: [0.2, 0.2, 0.2],
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                );
+                __scene.ceiling = None;
+                __scene.sky = sky.map(|color| Sky { color });
+                __scene.lighting = genos_scene::LightingSettings::default();
+                __scene.debug = DebugSettings::default();
+                __scene.fps_counter = FpsCounterSettings::default();
+                __scene.event_loop = EventLoopSettings::default();
+                __scene.reflections = ReflectionSettings::default();
+                __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+                __scene.fog = FogSettings::default();
+                __scene.menu = MenuSettings::default();
+                __scene
             };
             if let Some(sun) = sun {
-                scene.lights.push(sun_light(sun));
+                scene.push_light(sun_light(sun));
             }
             for lamp in lamps {
-                scene.lights.push(point_light(lamp));
+                scene.push_light(point_light(lamp));
             }
             let mut world = World::from_scene(scene);
             for object in &mut world.objects {

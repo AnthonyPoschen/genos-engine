@@ -1,11 +1,35 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unreadable_literal, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::excessive_precision,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Geometric light at a surface. No probe field and no gather shader.
 //!
@@ -126,7 +150,7 @@ pub fn direct_light_in(
         return [0.0; 3];
     }
     let mut sum = [0.0; 3];
-    for light in &scene.lights {
+    for light in scene.lights() {
         let (toward, dist2, target) = lamp_toward(light, origin);
         let nd = dot(toward, normal);
         if nd <= 0.0 {
@@ -155,7 +179,7 @@ pub fn lamps_in(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for light in &scene.lights {
+    for light in scene.lights() {
         let (toward, dist2, target) = lamp_toward(light, origin);
         let nd = dot(toward, normal);
         if nd <= 0.0 || surfaces.blocked(origin, target) {
@@ -336,12 +360,12 @@ pub fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Opti
             }
         }
     }
-    for wall in &scene.walls {
+    for wall in scene.walls() {
         if let Some((t, n)) = hit_wall(origin, dir, wall, best_t) {
             consider(t, n, wall.color, &mut best_t, &mut best);
         }
     }
-    for solid in &scene.solids {
+    for solid in scene.solids() {
         if let Some((t, n)) = hit_solid(origin, dir, solid, best_t) {
             consider(t, n, solid.color, &mut best_t, &mut best);
         }
@@ -398,12 +422,12 @@ fn point_inside(scene: &Scene, p: [f32; 3]) -> bool {
     if p[1] < -0.02 {
         return false;
     }
-    for wall in &scene.walls {
+    for wall in scene.walls() {
         if inside_wall(p, wall) {
             return true;
         }
     }
-    for solid in &scene.solids {
+    for solid in scene.solids() {
         if inside_solid(p, solid) {
             return true;
         }
@@ -640,26 +664,29 @@ mod tests {
     use genos_scene::{Floor, Light, Scene, Solid, Vec3, Wall};
 
     fn room(lights: Vec<Light>, walls: Vec<Wall>, solids: Vec<Solid>) -> Scene {
-        Scene {
-            floor: Floor {
-                position: Vec3::ZERO,
-                half_x: 8.0,
-                half_z: 8.0,
-                color: [1.0, 1.0, 1.0],
-            },
-            walls,
-            solids,
-            lights,
-            ceiling: None,
-            sky: None,
-            lighting: genos_scene::LightingSettings::default(),
-            debug: genos_scene::DebugSettings::default(),
-            fps_counter: genos_scene::FpsCounterSettings::default(),
-            event_loop: genos_scene::EventLoopSettings::default(),
-            reflections: genos_scene::ReflectionSettings::default(),
-            hdr: genos_scene::HdrSettings::legacy_bytes(),
-            fog: genos_scene::FogSettings::default(),
-            menu: genos_scene::MenuSettings::default(),
+        {
+            let mut __scene = Scene::from_lists(
+                Floor {
+                    position: Vec3::ZERO,
+                    half_x: 8.0,
+                    half_z: 8.0,
+                    color: [1.0, 1.0, 1.0],
+                },
+                walls,
+                solids,
+                lights,
+            );
+            __scene.ceiling = None;
+            __scene.sky = None;
+            __scene.lighting = genos_scene::LightingSettings::default();
+            __scene.debug = genos_scene::DebugSettings::default();
+            __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+            __scene.event_loop = genos_scene::EventLoopSettings::default();
+            __scene.reflections = genos_scene::ReflectionSettings::default();
+            __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+            __scene.fog = genos_scene::FogSettings::default();
+            __scene.menu = genos_scene::MenuSettings::default();
+            __scene
         }
     }
 
@@ -729,7 +756,7 @@ mod tests {
         assert!(luminance(direct) < 1.0e-4, "direct leaks {direct:?}");
         assert!(luminance(floor) > 0.01, "no bounce {floor:?}");
         // Behind the wall nothing lit is in sight within one bounce.
-        let lone = room(scene.lights.clone(), vec![wall], Vec::new());
+        let lone = room(scene.lights_cloned(), vec![wall], Vec::new());
         let behind = radiance(&lone, [0.0, 0.0, 1.5], [0.0, 1.0, 0.0], [1.0, 1.0, 1.0]);
         assert!(
             luminance(behind) < 1.0e-3,

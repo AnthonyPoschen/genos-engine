@@ -1,6 +1,15 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::expect_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
 
 //! Lavapipe check that the frame-rate plate is in the picture.
 //!
@@ -21,33 +30,37 @@ use genos_ui::FpsOverlay;
 use genos_window::Window;
 
 fn room() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 4.0,
-            half_z: 4.0,
-            color: [0.45, 0.47, 0.5],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: vec![Light {
-            position: Vec3::new(0.0, 2.2, 0.0),
-            color: [1.0, 0.95, 0.85],
-            direction: Vec3::new(0.0, -1.0, 0.0),
-        }],
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: FpsCounterSettings {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 4.0,
+                half_z: 4.0,
+                color: [0.45, 0.47, 0.5],
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![Light {
+                position: Vec3::new(0.0, 2.2, 0.0),
+                color: [1.0, 0.95, 0.85],
+                direction: Vec3::new(0.0, -1.0, 0.0),
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings {
             enabled: true,
             rate_hz: 4.0,
-        },
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        menu: MenuSettings::default(),
+        };
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene
     })
 }
 
@@ -103,8 +116,9 @@ fn fps_overlay_renders_on_lavapipe() {
 
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;

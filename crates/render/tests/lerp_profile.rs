@@ -1,18 +1,102 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::no_effect_underscore_binding, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::uninlined_format_args, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_wrap,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::format_push_string,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::needless_range_loop,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::no_effect_underscore_binding,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_arguments,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::uninlined_format_args,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! Camera orbit, moving lamp, and overlay churn, timed with the shipped profiler.
 //!
@@ -34,14 +118,21 @@ const STILL_FRAMES: u32 = 36;
 const OVERLAY_FRAMES: u32 = 36;
 const LERP_STEPS: u32 = 96;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn scene() -> genos_scene::Scene {
@@ -54,8 +145,7 @@ fn scene() -> genos_scene::Scene {
 
 fn red_box(scene: &genos_scene::Scene) -> Vec3 {
     scene
-        .solids
-        .iter()
+        .solids()
         .find(|solid| {
             solid.shape == Shape::Square
                 && solid.color[0] > 0.8
@@ -76,7 +166,7 @@ fn orbit(center: Vec3, angle: f32) -> Camera {
 }
 
 fn place_lamp(world: &mut World, angle: f32) {
-    let Some(light) = world.scene.lights.first_mut() else {
+    let Some(light) = world.scene.light_at_mut(0) else {
         return;
     };
     light.position.x = 3.5 * angle.cos();
@@ -389,15 +479,7 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, START);
         let scene_cpu = scene_at.elapsed();
         one_frame(
-            window,
-            renderer,
-            &mut world,
-            &mut sim,
-            boot,
-            &camera,
-            &overlay,
-            timestamps,
-            scene_cpu,
+            window, renderer, &mut world, &mut sim, boot, &camera, &overlay, timestamps, scene_cpu,
             ui_cpu,
         )
         .expect("warmup");
@@ -418,17 +500,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, START);
         let scene_cpu = scene_at.elapsed();
         record(
-            window,
-            renderer,
-            &mut world,
-            &mut sim,
-            boot,
-            &camera,
-            &overlay,
-            timestamps,
-            scene_cpu,
-            ui_cpu,
-            &mut still,
+            window, renderer, &mut world, &mut sim, boot, &camera, &overlay, timestamps, scene_cpu,
+            ui_cpu, &mut still,
         )
         .expect("still frame");
     }
@@ -508,17 +581,8 @@ fn the_orbit_stays_in_the_still_frame_band() {
         let camera = orbit(center, angle);
         let scene_cpu = scene_at.elapsed();
         record(
-            window,
-            renderer,
-            &mut world,
-            &mut sim,
-            boot,
-            &camera,
-            &overlay,
-            timestamps,
-            scene_cpu,
-            ui_cpu,
-            &mut lerp,
+            window, renderer, &mut world, &mut sim, boot, &camera, &overlay, timestamps, scene_cpu,
+            ui_cpu, &mut lerp,
         )
         .expect("lerp frame");
     }

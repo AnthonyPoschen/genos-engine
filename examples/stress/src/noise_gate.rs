@@ -23,8 +23,8 @@ use genos_debug::png;
 use genos_debug::{Image, RefSetup};
 use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
 use genos_scene::{
-    AmbientMode, Camera, Floor, FogSettings, FpsCounterSettings, HdrSettings, Light, LightingPreset,
-    LightingSettings, MenuSettings, Scene, Shape, Solid, Vec3,
+    AmbientMode, Camera, Floor, FogSettings, FpsCounterSettings, HdrSettings, Light,
+    LightingPreset, LightingSettings, MenuSettings, Scene, Shape, Solid, Vec3,
 };
 use genos_window::Window;
 
@@ -373,7 +373,12 @@ fn write_gate_files(
     std::fs::write(out.join("metrics.json"), report_json(report)).map_err(|err| err.to_string())?;
     png::write_png(&out.join("live-still.png"), width, height, &live.last_still)?;
     png::write_png(&out.join("live-pan.png"), width, height, &live.last_pan)?;
-    png::write_png(&out.join("exact-still.png"), width, height, &exact.last_still)?;
+    png::write_png(
+        &out.join("exact-still.png"),
+        width,
+        height,
+        &exact.last_still,
+    )?;
     png::write_png(&out.join("exact-pan.png"), width, height, &exact.last_pan)?;
     Ok(())
 }
@@ -490,7 +495,7 @@ fn solo_frames(
     pose: &Camera,
 ) -> Result<Vec<Vec<f32>>, String> {
     let mut solos = Vec::new();
-    for lamp in 0..world.scene.lights.len() {
+    for lamp in 0..world.scene.light_len() {
         renderer.set_debug_view(DebugView {
             mode: ViewMode::Light,
             lamp: u32::try_from(lamp).unwrap_or(0),
@@ -559,36 +564,39 @@ fn overlap_world(n: u32) -> World {
             direction: Vec3::ZERO,
         });
     }
-    let scene = Scene {
-        floor: Floor {
-            position: Vec3::ZERO,
-            half_x: 20.0,
-            half_z: 20.0,
-            color: [0.8, 0.8, 0.8],
-        },
-        walls: Vec::new(),
-        solids: vec![Solid {
-            shape: Shape::Square,
-            position: Vec3::new(0.0, 0.0, -1.0),
-            size: 0.8,
-            height: 3.0,
-            yaw: 0.0,
-            color: [0.35, 0.35, 0.35],
-            absorption: 0.0,
-            reflectance: -1.0,
-            color_mix: -1.0,
-        }],
-        lights,
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Potato),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        menu: MenuSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
+    let scene = {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::ZERO,
+                half_x: 20.0,
+                half_z: 20.0,
+                color: [0.8, 0.8, 0.8],
+            },
+            Vec::new(),
+            vec![Solid {
+                shape: Shape::Square,
+                position: Vec3::new(0.0, 0.0, -1.0),
+                size: 0.8,
+                height: 3.0,
+                yaw: 0.0,
+                color: [0.35, 0.35, 0.35],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
+            }],
+            lights,
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene
     };
     World::from_scene(scene)
 }
@@ -670,8 +678,8 @@ mod tests {
         assert!(!config.specular);
         assert_eq!(config.lamps, 16);
         let world = overlap_world(16);
-        assert_eq!(world.scene.lights.len(), 16);
-        let sum: f32 = world.scene.lights.iter().map(|lamp| lamp.color[0]).sum();
+        assert_eq!(world.scene.light_len(), 16);
+        let sum: f32 = world.scene.lights().map(|lamp| lamp.color[0]).sum();
         assert!((sum - 3.0).abs() < 1.0e-4, "{sum}");
     }
 }

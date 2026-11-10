@@ -1,23 +1,55 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
-
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::redundant_closure_for_method_calls,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 //! Small sun step on lavapipe. The shader bit is the proof. Times are not.
 
 use genos_render::{Renderer, World};
 use genos_scene::{Camera, Light, Scene, Vec3};
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
+fn open() -> (
+    std::sync::MutexGuard<'static, ()>,
+    genos_window::Lifecycle<Renderer>,
+) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = genos_window::Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
-        .expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn hall() -> World {
@@ -37,7 +69,17 @@ fn sun_at(yaw: f32) -> Light {
     }
 }
 
-fn draw(window: &mut genos_window::Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
+fn aim_last(scene: &mut Scene, direction: Vec3) {
+    let last = scene.light_len() - 1;
+    scene.light_mut(last).direction = direction;
+}
+
+fn draw(
+    window: &mut genos_window::Window,
+    renderer: &mut Renderer,
+    world: &World,
+    camera: &Camera,
+) {
     let _ = window.pump();
     renderer.draw(world, camera, false).expect("draw");
 }
@@ -52,12 +94,13 @@ fn lighting_names(renderer: &Renderer) -> Vec<String> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_small_sun_step_sets_the_shader_bit() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let mut world = hall();
-    world.scene.lights.push(sun_at(0.0));
+    world.scene.push_light(sun_at(0.0));
     let camera = Camera::opening();
     let names = lighting_names(renderer);
     assert!(
@@ -74,7 +117,10 @@ fn a_small_sun_step_sets_the_shader_bit() {
         draw(window, renderer, &world, &camera);
     }
     let frozen = renderer.lighting_sun_stats();
-    assert!(!frozen.gpu_sun, "a frozen sun stays off the sun path: {frozen:?}");
+    assert!(
+        !frozen.gpu_sun,
+        "a frozen sun stays off the sun path: {frozen:?}"
+    );
     assert_eq!(frozen.host_frames, 0);
     assert_eq!(lighting_names(renderer).len(), 10);
 
@@ -82,13 +128,19 @@ fn a_small_sun_step_sets_the_shader_bit() {
     // and moving benches never enter the path, so this is the proof the flag
     // changed the compose.
     std::env::set_var("GENOS_LIGHTING_FULL_EFFORT", "1");
-    world.scene.lights.last_mut().unwrap().direction = sun_at(0.2_f32.to_radians()).direction;
+    aim_last(&mut world.scene, sun_at(0.2_f32.to_radians()).direction);
     draw(window, renderer, &world, &camera);
     let early = renderer.lighting_sun_stats();
-    assert!(!early.gpu_sun, "full effort stays off before any sun frame: {early:?}");
+    assert!(
+        !early.gpu_sun,
+        "full effort stays off before any sun frame: {early:?}"
+    );
     assert_eq!(early.host_frames, 0);
     assert!(early.full_effort);
-    assert_eq!(early.compose, 1, "picture compose, not the sun band: {early:?}");
+    assert_eq!(
+        early.compose, 1,
+        "picture compose, not the sun band: {early:?}"
+    );
     assert_eq!(early.dispatches, 1);
     let early_text = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
     assert!(early_text.contains("full_effort 1\n"), "{early_text}");
@@ -97,7 +149,7 @@ fn a_small_sun_step_sets_the_shader_bit() {
     std::env::remove_var("GENOS_LIGHTING_FULL_EFFORT");
 
     let yaw = 0.4_f32.to_radians();
-    world.scene.lights.last_mut().unwrap().direction = sun_at(yaw).direction;
+    aim_last(&mut world.scene, sun_at(yaw).direction);
     let mut slices = Vec::new();
     for _ in 0..4 {
         draw(window, renderer, &world, &camera);
@@ -106,13 +158,22 @@ fn a_small_sun_step_sets_the_shader_bit() {
         slices.push(stats.slice);
     }
     let held = renderer.lighting_sun_stats();
-    assert!(held.host_frames >= 4, "host counted the dispatches: {held:?}");
     assert!(
-        slices.iter().collect::<std::collections::BTreeSet<_>>().len() > 1,
+        held.host_frames >= 4,
+        "host counted the dispatches: {held:?}"
+    );
+    assert!(
+        slices
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1,
         "bands move: {slices:?}"
     );
     assert!(
-        lighting_names(renderer).iter().any(|name| name == "lighting sun compose"),
+        lighting_names(renderer)
+            .iter()
+            .any(|name| name == "lighting sun compose"),
         "the sun compose pipeline is built on the first small step"
     );
     let counter = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
@@ -123,12 +184,18 @@ fn a_small_sun_step_sets_the_shader_bit() {
 
     let host_before = renderer.lighting_sun_stats().host_frames;
     std::env::set_var("GENOS_LIGHTING_FULL_EFFORT", "1");
-    world.scene.lights.last_mut().unwrap().direction = sun_at(yaw + 0.2_f32.to_radians()).direction;
+    aim_last(
+        &mut world.scene,
+        sun_at(yaw + 0.2_f32.to_radians()).direction,
+    );
     draw(window, renderer, &world, &camera);
     let full = renderer.lighting_sun_stats();
     assert!(!full.gpu_sun, "full effort leaves the sun path: {full:?}");
     assert!(full.full_effort, "the flag is on: {full:?}");
-    assert_eq!(full.compose, 1, "full effort takes the picture compose: {full:?}");
+    assert_eq!(
+        full.compose, 1,
+        "full effort takes the picture compose: {full:?}"
+    );
     assert_eq!(full.dispatches, 1, "one compose dispatch: {full:?}");
     assert_eq!(full.host_frames, host_before);
     let forced = std::fs::read_to_string("genos-debug/sun/counter.txt").expect("sun counter");
@@ -137,10 +204,10 @@ fn a_small_sun_step_sets_the_shader_bit() {
     assert!(forced.contains("sun 0\n"), "{forced}");
     std::env::remove_var("GENOS_LIGHTING_FULL_EFFORT");
 
-    let point = world.scene.lights[0].position;
-    world.scene.lights[0].position = Vec3::new(point.x + 0.4, point.y, point.z);
+    let point = world.scene.light(0).position;
+    world.scene.light_mut(0).position = Vec3::new(point.x + 0.4, point.y, point.z);
     draw(window, renderer, &world, &camera);
-    world.scene.lights[0].position = point;
+    world.scene.light_mut(0).position = point;
     draw(window, renderer, &world, &camera);
     let mut catch = Vec::new();
     for _ in 0..6 {
@@ -154,9 +221,9 @@ fn a_small_sun_step_sets_the_shader_bit() {
     );
 
     std::env::set_var("GENOS_LIGHTING_CATCH_UP", "0");
-    world.scene.lights[0].position = Vec3::new(point.x + 0.4, point.y, point.z);
+    world.scene.light_mut(0).position = Vec3::new(point.x + 0.4, point.y, point.z);
     draw(window, renderer, &world, &camera);
-    world.scene.lights[0].position = point;
+    world.scene.light_mut(0).position = point;
     draw(window, renderer, &world, &camera);
     draw(window, renderer, &world, &camera);
     let off = renderer.lighting_sun_stats();
@@ -176,19 +243,16 @@ fn a_corner_lamp_that_stops_catches_up_for_four_frames() {
         )))
         .expect("bounce corner"),
     );
-    let lamp = world
-        .scene
-        .lights
-        .iter()
-        .position(|light| light.direction == genos_scene::Vec3::ZERO)
+    let lamp = (0..world.scene.light_len())
+        .find(|&index| world.scene.light(index).direction == Vec3::ZERO)
         .expect("point lamp");
-    let home = world.scene.lights[lamp].position;
+    let home = world.scene.light(lamp).position;
     let camera = Camera::new(0.8, 0.8, -0.785);
     for _ in 0..3 {
         draw(window, renderer, &world, &camera);
     }
     for step in 1..=8 {
-        world.scene.lights[lamp].position.x = home.x + 0.08 * step as f32;
+        world.scene.light_mut(lamp).position.x = home.x + 0.08 * step as f32;
         draw(window, renderer, &world, &camera);
     }
     let mut catch = Vec::new();

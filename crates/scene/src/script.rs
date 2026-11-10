@@ -34,8 +34,8 @@ use genos_math::Vec3;
 use crate::debug_settings::DebugSettings;
 use crate::event_loop::EventLoopSettings;
 use crate::fog::FogSettings;
-use crate::hdr::HdrSettings;
 use crate::fps_counter::FpsCounterSettings;
+use crate::hdr::HdrSettings;
 use crate::lighting::LightingSettings;
 use crate::menu::MenuSettings;
 use crate::reflections::ReflectionSettings;
@@ -410,21 +410,24 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
             return Err("roof sits below a wall top".into());
         }
     }
-    Ok(Scene {
-        floor,
-        walls: built.walls.clone(),
-        solids: built.solids.clone(),
-        lights: built.lights.clone(),
-        ceiling: built.ceiling.clone(),
-        sky: None,
-        lighting: built.lighting.clone(),
-        debug: built.debug.clone(),
-        fps_counter: built.fps_counter,
-        menu: built.menu.clone(),
-        event_loop: built.event_loop,
-        reflections: built.reflections,
-        hdr: built.hdr.clone(),
-        fog: built.fog.clone(),
+    Ok({
+        let mut __scene = Scene::from_lists(
+            floor,
+            built.walls.clone(),
+            built.solids.clone(),
+            built.lights.clone(),
+        );
+        __scene.ceiling.clone_from(&built.ceiling);
+        __scene.sky = None;
+        __scene.lighting = built.lighting.clone();
+        __scene.debug = built.debug.clone();
+        __scene.fps_counter = built.fps_counter;
+        __scene.menu = built.menu.clone();
+        __scene.event_loop = built.event_loop;
+        __scene.reflections = built.reflections;
+        __scene.hdr = built.hdr.clone();
+        __scene.fog = built.fog.clone();
+        __scene
     })
 }
 

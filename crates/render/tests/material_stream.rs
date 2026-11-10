@@ -69,32 +69,36 @@ fn open() -> (
     let mut window = Window::open_proof(640, 360).expect("proof window");
     let frame = window.pump();
     let (renderer, permit) =
-        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
     let owner = genos_window::Lifecycle::new(window, renderer, permit);
     (guard, owner)
 }
 
 fn scene() -> Scene {
-    Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [0.0, 0.0, 0.0],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        hdr: genos_scene::HdrSettings::default(),
-        fog: genos_scene::FogSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+    {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [0.0, 0.0, 0.0],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::default();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }
 
@@ -193,9 +197,7 @@ fn stream_card(span: f32, place_z: f32, bounds_z: f32) -> Object {
 
 fn push_stream(world: &mut World, size: u32, red: u8, span: f32, place_z: f32, bounds_z: f32) {
     let object = world.objects.len();
-    world
-        .objects
-        .push(stream_card(span, place_z, bounds_z));
+    world.objects.push(stream_card(span, place_z, bounds_z));
     world.stream_textures.push(StreamedTexture {
         atlas: solid_atlas(size, red),
         object,

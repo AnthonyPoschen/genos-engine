@@ -608,7 +608,7 @@ fn gated(
 /// the sun is up when that direction points down.
 pub(crate) fn sun_height(scene: &genos_scene::Scene) -> f32 {
     let mut best = 0.0f32;
-    for light in &scene.lights {
+    for light in scene.lights() {
         let d = light.direction;
         let len = (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
         if len > 1.0e-4 {

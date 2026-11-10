@@ -1,8 +1,32 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::manual_midpoint,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! The lighting panel through the public UI entry, against a real lamp.
 
@@ -95,7 +119,8 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
     let idle = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
     apply_actions(&mut scene, &idle);
     assert_eq!(
-        scene.lights[0].position, start,
+        scene.light(0).position,
+        start,
         "showing the panel moved the lamp"
     );
     assert!(
@@ -152,8 +177,8 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
         *x_values.last().unwrap() >= 8.0,
         "X does not reach the floor: {x_values:?}"
     );
-    assert_eq!(scene.lights[0].position.y, start.y);
-    assert_eq!(scene.lights[0].position.z, start.z);
+    assert_eq!(scene.light(0).position.y, start.y);
+    assert_eq!(scene.light(0).position.z, start.z);
 
     let mut scene = lamp_scene(start);
     let z_values = sweep(id::Z, 2, &mut scene, &camera, start);
@@ -166,8 +191,8 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
         *z_values.last().unwrap() >= 8.0,
         "Z does not reach the floor: {z_values:?}"
     );
-    assert_eq!(scene.lights[0].position.x, start.x);
-    assert_eq!(scene.lights[0].position.y, start.y);
+    assert_eq!(scene.light(0).position.x, start.x);
+    assert_eq!(scene.light(0).position.y, start.y);
 
     let mut scene = lamp_scene(start);
     let y_samples = sweep_samples(id::Y, 1, &mut scene, &camera, start);
@@ -181,8 +206,8 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
         y_values.iter().any(|value| (*value - 7.0).abs() < 1.0e-4),
         "Y is missing the scripted height 7: {y_values:?}"
     );
-    assert_eq!(scene.lights[0].position.x, start.x);
-    assert_eq!(scene.lights[0].position.z, start.z);
+    assert_eq!(scene.light(0).position.x, start.x);
+    assert_eq!(scene.light(0).position.z, start.z);
 
     let buried = y_samples
         .iter()
@@ -191,13 +216,13 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
     let mut buried_scene = lamp_scene(start);
     choose_notch(buried.x, buried.y, &mut buried_scene, &camera);
     assert!(
-        buried_scene.lights[0].position.y < 0.0,
+        buried_scene.light(0).position.y < 0.0,
         "the underground notch left the lamp at {}",
-        buried_scene.lights[0].position.y
+        buried_scene.light(0).position.y
     );
-    assert!(buried_scene.lights[0].position.y <= 0.05);
-    assert_eq!(buried_scene.lights[0].position.x, start.x);
-    assert_eq!(buried_scene.lights[0].position.z, start.z);
+    assert!(buried_scene.light(0).position.y <= 0.05);
+    assert_eq!(buried_scene.light(0).position.x, start.x);
+    assert_eq!(buried_scene.light(0).position.z, start.z);
 
     let height = y_samples
         .iter()
@@ -205,15 +230,15 @@ fn notched_sliders_set_one_axis_and_wait_for_a_drag() {
         .expect("height 7 sample");
     let mut high = lamp_scene(start);
     choose_notch(height.x, height.y, &mut high, &camera);
-    assert!((high.lights[0].position.y - 7.0).abs() < 1.0e-4);
-    assert_eq!(high.lights[0].position.x, start.x);
-    assert_eq!(high.lights[0].position.z, start.z);
+    assert!((high.light(0).position.y - 7.0).abs() < 1.0e-4);
+    assert_eq!(high.light(0).position.x, start.x);
+    assert_eq!(high.light(0).position.z, start.z);
 }
 
 #[test]
 fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
     let mut scene = lamp_scene(Vec3::new(0.0, 7.0, 0.0));
-    scene.solids.push(Solid {
+    scene.push_solid(Solid {
         yaw: 0.0,
         shape: Shape::Square,
         position: Vec3::new(3.0, 0.0, 3.0),
@@ -224,7 +249,7 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
         reflectance: -1.0,
         color_mix: -1.0,
     });
-    let solid = scene.solids[0].position;
+    let solid = scene.solid(0).position;
     let camera = aim_at(lamp_of(&scene));
     let mut state = State::default();
     let frame = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
@@ -263,7 +288,7 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
         "the camera move left the sun in place"
     );
 
-    scene.lights[0].position.y = 5.0;
+    scene.light_mut(0).position.y = 5.0;
     let lowered = ui(&mut state, &scene, &camera, pointer(0.0, 0.0, false));
     let lowered_point = project(&camera, lamp_of(&scene));
     assert_on_screen(lowered_point);
@@ -274,7 +299,7 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
         "sun did not follow the lamp: {lowered_center:?} vs {lowered_point:?}"
     );
 
-    scene.lights[0].position = Vec3::new(0.0, -2.0, 0.0);
+    scene.light_mut(0).position = Vec3::new(0.0, -2.0, 0.0);
     let underground_camera = aim_at(lamp_of(&scene));
     let underground = ui(
         &mut state,
@@ -306,7 +331,7 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
     );
 
     let mut state = State::default();
-    let before = scene.lights[0].position;
+    let before = scene.light(0).position;
     let press = ui(
         &mut state,
         &scene,
@@ -327,8 +352,8 @@ fn the_sun_tracks_the_lamp_and_a_press_does_not_move_it() {
     assert!(drag.look_capture, "the drag on the sun blocked look");
     apply_actions(&mut scene, &press);
     apply_actions(&mut scene, &drag);
-    assert_eq!(scene.lights[0].position, before);
-    assert_eq!(scene.solids[0].position, solid);
+    assert_eq!(scene.light(0).position, before);
+    assert_eq!(scene.solid(0).position, solid);
 }
 
 #[test]
@@ -437,7 +462,7 @@ fn sweep_samples(
             frame.actions
         );
         apply_actions(scene, &frame);
-        let position = scene.lights[0].position;
+        let position = scene.light(0).position;
         assert_eq!(other_axes(position, axis), other_axes(start, axis));
         samples.push(Sample {
             x,
@@ -626,7 +651,7 @@ fn assert_on_screen(point: [f32; 2]) {
 }
 
 fn lamp_of(scene: &Scene) -> [f32; 3] {
-    let light = &scene.lights[0];
+    let light = &scene.light(0);
     [light.position.x, light.position.y, light.position.z]
 }
 
@@ -665,30 +690,33 @@ fn apply_actions(scene: &mut Scene, frame: &Frame) {
 }
 
 fn lamp_scene(position: Vec3) -> Scene {
-    Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 8.0,
-            half_z: 8.0,
-            color: [1.0, 1.0, 1.0],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: vec![Light {
-            position,
-            color: [0.5, 0.5, 0.5],
+    {
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 8.0,
+                half_z: 8.0,
+                color: [1.0, 1.0, 1.0],
+            },
+            Vec::new(),
+            Vec::new(),
+            vec![Light {
+                position,
+                color: [0.5, 0.5, 0.5],
 
-            direction: Vec3::ZERO,
-        }],
-        ceiling: None,
-        sky: None,
-        lighting: genos_scene::LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
+                direction: Vec3::ZERO,
+            }],
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = genos_scene::LightingSettings::default();
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene
     }
 }

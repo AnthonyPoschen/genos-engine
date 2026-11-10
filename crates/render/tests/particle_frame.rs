@@ -1,11 +1,56 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_wrap, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::too_many_arguments, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_lossless,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_wrap,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_sign_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_arguments,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
 
 //! Presented fire. Pixel checks use `Renderer::draw` readback.
 //!
@@ -131,7 +176,7 @@ fn cpu_fallback(open_error: &str) {
     let direct = luminance(direct_light(&world.scene, [0.0, 2.4, 0.0], normal));
     let lit = shade_lit(albedo, direct, [0.0; 3], normal);
     let mut dark_scene = world.scene.clone();
-    dark_scene.lights.clear();
+    dark_scene.clear_lights();
     let dark_direct = luminance(direct_light(&dark_scene, [0.0, 2.4, 0.0], normal));
     let dark = shade_lit(albedo, dark_direct, [0.0; 3], normal);
     assert!(
@@ -222,7 +267,8 @@ fn the_presented_frame_shows_embers_a_trail_and_emitted_floor_light() {
     let opened = (|| {
         let mut window = Window::open_proof(1280, 720)?;
         let frame = window.pump();
-        let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+        let (renderer, permit) =
+            Renderer::open(window.display, window.surface, frame.width, frame.height)?;
         Ok::<_, String>(genos_window::Lifecycle::new(window, renderer, permit))
     })();
     let mut owner = match opened {
@@ -256,7 +302,7 @@ fn the_presented_frame_shows_embers_a_trail_and_emitted_floor_light() {
     sim.apply(&mut first, false, true);
     let no_emit = draw(window, renderer, &first);
     sim.apply(&mut first, true, true);
-    first.scene.lights.clear();
+    first.scene.clear_lights();
     let dark = draw(window, renderer, &first);
 
     assert_picture(
