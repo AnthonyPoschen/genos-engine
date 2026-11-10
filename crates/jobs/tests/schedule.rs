@@ -193,6 +193,13 @@ fn job_settings_round_trip() {
 
 #[test]
 fn slack_does_not_run_inside_seat_enter() {
+    genos_jobs::note_seat_enter();
+    let fenced = Scheduler::new(settings(Order::Serial, 0), Arc::new(ManualClock::new(0.0)));
+    let held_by_window = fenced.run(vec![job(0, 0, Class::Slack, || 5)]).unwrap();
+    assert!(held_by_window.stages[0].slots[0].is_none());
+    assert_eq!(held_by_window.stats.slack_during_fence, 0);
+    genos_jobs::note_seat_leave();
+
     let scheduler = Scheduler::new(settings(Order::Serial, 0), Arc::new(ManualClock::new(0.0)));
     scheduler.suspend_slack();
     let held = scheduler.run(vec![job(0, 0, Class::Slack, || 5)]).unwrap();

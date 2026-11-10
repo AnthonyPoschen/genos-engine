@@ -550,7 +550,7 @@ impl Tools {
     /// Run queued commands, put back the edits the example's update undid, and set
     /// the view. True when the example must read the picture back this frame.
     pub fn before_draw(&mut self, ctx: &mut Ctx) -> bool {
-        for cmd in genos_mcp::command::take() {
+        for cmd in genos_mcp::command::take().unwrap_or_default() {
             let args = Args(&cmd.args);
             match self.run(&cmd.name, &args, ctx) {
                 Ok(Step::Reply(value)) => genos_mcp::command::reply(cmd.id, Ok(value)),
