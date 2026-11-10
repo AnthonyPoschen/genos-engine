@@ -35,9 +35,9 @@
     reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
 )]
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use std::fs::File;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use std::io::{ErrorKind, Read};
 
 use crate::code::InputCode;
@@ -51,7 +51,7 @@ use crate::touch::{Gesture, TouchPoint, TouchSurface};
 const TOUCH_ID: u32 = 2;
 
 /// One open `/dev/input/jsN` file and the latest control positions.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 #[derive(Debug)]
 struct OpenJoystick {
     file: File,
@@ -123,7 +123,7 @@ pub struct InputSystem {
     pub keyboard: KeyboardDevice,
     pub mouse: MouseDevice,
     pub gamepads: [GamepadDevice; MAX_GAMEPADS],
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     joysticks: [Option<OpenJoystick>; MAX_GAMEPADS],
     mouse_sensitivity: f32,
     active_glyphs: GlyphSet,
@@ -140,7 +140,7 @@ impl Clone for InputSystem {
             keyboard: self.keyboard.clone(),
             mouse: self.mouse.clone(),
             gamepads: self.gamepads.clone(),
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             joysticks: std::array::from_fn(|_| None),
             mouse_sensitivity: self.mouse_sensitivity,
             active_glyphs: self.active_glyphs,
@@ -166,7 +166,7 @@ impl InputSystem {
             keyboard: KeyboardDevice::new(),
             mouse: MouseDevice::new(),
             gamepads: std::array::from_fn(GamepadDevice::new),
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             joysticks: std::array::from_fn(|_| None),
             mouse_sensitivity: 1.0,
             active_glyphs: GlyphSet::KeyboardMouse,
@@ -506,18 +506,20 @@ impl InputSystem {
 
     /// Read the platform pads into the stable slots. A missing device leaves the slot disconnected.
     ///
-    /// Windows calls `XInput`. Other targets read `/dev/input/jsN`. The first Linux
+    /// Windows calls `XInput`. macOS calls `GameController`. Other targets read `/dev/input/jsN`. The first Linux
     /// poll opens a present device and keeps the file. A later poll reads new
     /// events from that file. An empty read keeps the last sticks.
     pub fn poll_gamepads(&mut self) {
         #[cfg(target_os = "windows")]
         crate::xinput::poll(self);
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        crate::gamecontroller::poll(self);
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         self.poll_linux_joysticks();
     }
 
     /// Read `/dev/input/jsN` into the stable slots.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fn poll_linux_joysticks(&mut self) {
         for slot in 0..MAX_GAMEPADS {
             if self.joysticks[slot].is_none() {
@@ -550,7 +552,7 @@ impl InputSystem {
 
     /// Copy one polled pad. A stick that was already outside the deadzone, and a
     /// button that was already down, do not select the family again.
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fn absorb_joystick(&mut self, slot: usize) {
         let Some(state) = self.joysticks[slot].as_ref().map(|stick| stick.state) else {
             return;
@@ -638,7 +640,7 @@ impl Default for InputSystem {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn open_joystick(slot: usize) -> Option<OpenJoystick> {
     let mut file = File::open(format!("/dev/input/js{slot}")).ok()?;
     set_nonblock(&mut file).ok()?;
@@ -656,7 +658,7 @@ fn open_joystick(slot: usize) -> Option<OpenJoystick> {
 }
 
 /// `JSIOCGNAME(128)` from `linux/joystick.h`.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn joystick_name(file: &File, slot: usize) -> String {
     let mut buf = [0u8; 128];
     // SAFETY: `fd` is the open joystick. The request reads the device name
@@ -675,7 +677,7 @@ fn joystick_name(file: &File, slot: usize) -> String {
 }
 
 /// Read queued events. [`ErrorKind::WouldBlock`] keeps the last stick positions.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn drain_joystick(stick: &mut OpenJoystick) -> Result<(), ()> {
     let mut buf = [0u8; 8];
     loop {
@@ -692,7 +694,7 @@ fn drain_joystick(stick: &mut OpenJoystick) -> Result<(), ()> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn set_nonblock(file: &mut std::fs::File) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
     let fd = file.as_raw_fd();
@@ -1437,7 +1439,7 @@ mod tests {
         assert!(pad.down(InputCode::gamepad_right_trigger));
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn a_steady_poll_of_an_active_pad_does_not_allocate() {
         use std::os::fd::OwnedFd;

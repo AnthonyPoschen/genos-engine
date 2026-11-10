@@ -415,7 +415,7 @@ impl Window {
         let rc =
             unsafe { genos_window_set_pointer_capture(self.raw, if captured { 1 } else { 0 }) };
         if rc != 0 {
-            Err("Wayland pointer lock failed".into())
+            Err(pointer_lock_failed().into())
         } else {
             Ok(())
         }
@@ -434,9 +434,28 @@ fn open_failed() -> String {
     {
         "Win32 window failed to open".to_string()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        return "Cocoa window failed to open".to_string();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         "Wayland window failed to open".to_string()
+    }
+}
+
+fn pointer_lock_failed() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        return "Win32 pointer lock failed";
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return "Cocoa pointer lock failed";
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "Wayland pointer lock failed"
     }
 }
 
@@ -552,7 +571,7 @@ mod tests {
         GatedInput, RawExtra, RawPump, WindowMode,
     };
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     use super::Window;
 
     #[test]
@@ -630,6 +649,30 @@ mod tests {
         assert!(frame.height >= 100, "client height {}", frame.height);
         assert!(!window.display.is_null(), "HINSTANCE");
         assert!(!window.surface.is_null(), "HWND");
+        window.set_mode(WindowMode::Fullscreen).expect("fullscreen");
+        let fullscreen = window.pump();
+        assert_eq!(fullscreen.mode, WindowMode::Fullscreen);
+        window.set_mode(WindowMode::Windowed).expect("windowed");
+        let windowed = window.pump();
+        assert_eq!(windowed.mode, WindowMode::Windowed);
+        window.lock_cursor().expect("capture");
+        let locked = window.pump();
+        assert!(locked.pointer_locked);
+        window.unlock_cursor().expect("release");
+        let free = window.pump();
+        assert!(!free.pointer_locked);
+        window.set_title("Genos smoke");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_window_opens_pumps_and_accepts_mode_and_capture() {
+        let mut window = Window::open(320, 200).expect("cocoa window");
+        let frame = window.pump();
+        assert!(frame.width >= 200, "client width {}", frame.width);
+        assert!(frame.height >= 100, "client height {}", frame.height);
+        assert!(!window.display.is_null(), "CAMetalLayer");
+        assert_eq!(window.display, window.surface);
         window.set_mode(WindowMode::Fullscreen).expect("fullscreen");
         let fullscreen = window.pump();
         assert_eq!(fullscreen.mode, WindowMode::Fullscreen);

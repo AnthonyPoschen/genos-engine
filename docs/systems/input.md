@@ -44,7 +44,7 @@ A touch point is one finger sample: an id, a position, and a phase (`began`, `mo
 
 The crate is `crates/input`, package `genos-input`.
 
-- `InputSystem` in `src/system.rs` owns the devices, the gamepad poll, and the glyph-set changes. `src/xinput.rs` owns the Windows pad read.
+- `InputSystem` in `src/system.rs` owns the devices, the gamepad poll, and the glyph-set changes. `src/xinput.rs` owns the Windows pad read. `src/gamecontroller.rs` owns the macOS pad read.
 - `InputCode` in `src/code.rs` owns the names and the values.
 - `character_controller` in `src/action.rs` owns the first action map. `InputSettings` in `src/settings.rs` owns the settings file.
 - `GamepadDevice` in `src/device.rs` owns the stick deadzone. `glyph_set_from_name` owns the picture family.
@@ -64,17 +64,17 @@ Read the axes with `axis_2d`. Read buttons with `down`. Change the deadzone befo
 
 ## Limits
 
-macOS and X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
+X11 device reads are not in this crate yet. Windows reads XInput inside `poll_gamepads` and writes each slot with `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger`. The pad name is `XInput`, so the pictures are Xbox. Slots `0..3` are the XInput user indices. macOS reads GameController the same way. The pad's vendor name selects the pictures. A controller without an extended gamepad does not take a slot. IOKit is not read, so a pad GameController does not publish stays disconnected. A missing slot is disconnected. Stick Y stays positive upward. The engine deadzone still applies on read. A later poll of a pad that is already connected does not allocate: `connect_gamepad` returns before it copies the name.
 
-The Win32 window writes the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
+The Win32 and Cocoa windows write the keyboard, the pointer, and touch through `Window::write_devices`, which calls `write_window`. That call uses `set_key`, `set_mouse_button`, `add_mouse_delta`, and `set_touch_points`. The window does not own a second action map and does not recognize a tap, a swipe, or a pinch.
 
 Every backend uses the same writes:
 
 - `begin_frame`, then the writes, then the game reads the action map.
 - `set_key` or `apply_evdev_keys` for the keyboard.
 - `set_mouse_button` and `add_mouse_delta` for the pointer.
-- `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux reads `/dev/input/jsN` inside `poll_gamepads`. Windows reads XInput the same way.
-- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch. Win32 pointer messages for touch and pen are the samples. A finger that is still down and did not move this frame is reported as `moved`.
+- `connect_gamepad`, `set_gamepad_stick`, `set_gamepad_button`, and `set_gamepad_trigger` for a pad. Linux reads `/dev/input/jsN` inside `poll_gamepads`. Windows reads XInput. macOS reads GameController.
+- `set_touch_points` for fingers. The action map turns points into a tap, a swipe, or a pinch. Win32 pointer messages and Cocoa touches are the samples. A finger that is still down and did not move this frame is reported as `moved`.
 
 The behavior source for the key and pointer reads is `input-zig`, listed in [Architecture](../architecture.md). The UI reads `take_device_changes` and `active_glyphs` after those writes.
 
