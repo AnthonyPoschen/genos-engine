@@ -3794,7 +3794,9 @@ impl Gpu {
                     self.dispatch_sh_prep(sun_compose, compose_full, gx, gy);
                     self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
                     if let Some(pool) = stamps {
-                        let at = first + 1 + k as u32;
+                        let at = first
+                            .saturating_add(1)
+                            .saturating_add(u32::try_from(k).unwrap_or(u32::MAX));
                         if at < first + RESTIR_STAMP_AT {
                             (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
                         }
