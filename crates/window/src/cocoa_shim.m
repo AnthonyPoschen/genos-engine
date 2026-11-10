@@ -128,6 +128,8 @@ static int evdev_from_mac(unsigned short code) {
     }
 }
 
+extern int genos_modifier_down(unsigned key_code, unsigned long long flags);
+
 static void set_evdev(struct GenosCocoa *win, int evdev, int down) {
     if (!win || evdev < 0 || evdev > 255) {
         return;
@@ -327,15 +329,10 @@ static void handle_event(struct GenosCocoa *win, NSEvent *event) {
         break;
     case NSEventTypeFlagsChanged:
         evdev = evdev_from_mac(event.keyCode);
-        down = 0;
-        if (event.keyCode == 56 || event.keyCode == 60) {
-            down = (event.modifierFlags & NSEventModifierFlagShift) != 0;
-        } else if (event.keyCode == 59 || event.keyCode == 62) {
-            down = (event.modifierFlags & NSEventModifierFlagControl) != 0;
-        } else if (event.keyCode == 58 || event.keyCode == 61) {
-            down = (event.modifierFlags & NSEventModifierFlagOption) != 0;
+        down = genos_modifier_down((unsigned)event.keyCode, (unsigned long long)event.modifierFlags);
+        if (down >= 0) {
+            set_evdev(win, evdev, down);
         }
-        set_evdev(win, evdev, down);
         break;
     case NSEventTypeLeftMouseDown:
         win->mouse_left = 1;
@@ -409,10 +406,11 @@ static void handle_event(struct GenosCocoa *win, NSEvent *event) {
 }
 - (BOOL)windowShouldClose:(id)sender {
     (void)sender;
+    /* Keep the window. The pump reports `closing` and the frame decides. */
     if (win) {
         win->closing = 1;
     }
-    return YES;
+    return NO;
 }
 - (void)windowDidResize:(NSNotification *)note {
     (void)note;
@@ -461,6 +459,7 @@ static void drain(struct GenosCocoa *win) {
         handle_event(win, event);
         [NSApp sendEvent:event];
     }
+    [NSApp updateWindows];
 }
 
 static void copy_out(struct GenosCocoa *win, struct GenosPump *out) {
@@ -530,6 +529,7 @@ struct GenosCocoa *genos_window_open_on(
         }
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp finishLaunching];
         scale = NSScreen.mainScreen.backingScaleFactor;
         if (scale < 1.0) {
             scale = 1.0;
@@ -575,7 +575,9 @@ struct GenosCocoa *genos_window_open_on(
         win->window.delegate = win->delegate;
         note_pixels(win);
         [win->window makeKeyAndOrderFront:nil];
-        [NSApp activateIgnoringOtherApps:YES];
+        if ([NSApp respondsToSelector:@selector(activate)]) {
+            [NSApp performSelector:@selector(activate)];
+        }
         win->focused = win->window.keyWindow ? 1 : 0;
         fprintf(
             stderr,

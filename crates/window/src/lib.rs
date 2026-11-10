@@ -52,6 +52,7 @@
 //! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
 //! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
 
+mod cocoa_keys;
 mod events;
 mod lifecycle;
 mod stall;
@@ -436,7 +437,7 @@ fn open_failed() -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        return "Cocoa window failed to open".to_string();
+        "Cocoa window failed to open".to_string()
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -447,11 +448,11 @@ fn open_failed() -> String {
 fn pointer_lock_failed() -> &'static str {
     #[cfg(target_os = "windows")]
     {
-        return "Win32 pointer lock failed";
+        "Win32 pointer lock failed"
     }
     #[cfg(target_os = "macos")]
     {
-        return "Cocoa pointer lock failed";
+        "Cocoa pointer lock failed"
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {

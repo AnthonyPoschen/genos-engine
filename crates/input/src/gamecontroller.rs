@@ -6,7 +6,7 @@
     )
 )]
 
-//! `GameController` pads. Connected extended gamepads fill the low slots.
+//! `GameController` pads. A controller keeps its slot until it disconnects.
 //!
 //! Stick Y is already positive upward. Trigger values are already `0..=1`.
 //! The reported name selects the picture family. This file does not read `IOKit`,
@@ -37,7 +37,7 @@ const BUTTONS: [(usize, InputCode); 15] = [
     (14, InputCode::gamepad_right_stick_press),
 ];
 
-#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct RawPad {
     connected: i32,
@@ -109,41 +109,61 @@ pub(crate) fn poll(system: &mut InputSystem) {
         buttons: [0; 15],
     }; crate::device::MAX_GAMEPADS];
     let cap = i32::try_from(raw.len()).unwrap_or(0);
+    // SAFETY: `raw` is a writable buffer of `cap` slots. The poll fills that many.
     let count = unsafe { genos_gamecontroller_poll(raw.as_mut_ptr(), cap) };
     let count = usize::try_from(count).unwrap_or(0).min(raw.len());
-    for (slot, sample) in raw.iter().enumerate() {
-        if slot < count && sample.connected != 0 {
-            apply(system, slot, &from_raw(sample));
-        } else {
-            apply(system, slot, &Sample::disconnected());
-        }
+    for (slot, sample) in raw.iter().enumerate().take(count) {
+        apply_raw(system, slot, sample);
     }
 }
 
 #[cfg(target_os = "macos")]
-fn from_raw(sample: &RawPad) -> Sample {
-    let name = CStr::from_bytes_until_nul(&sample.name)
-        .ok()
-        .map(|text| text.to_string_lossy().trim().to_string())
-        .unwrap_or_default();
-    let mut buttons = [false; 15];
-    for (index, down) in sample.buttons.iter().enumerate() {
-        buttons[index] = *down != 0;
+fn apply_raw(system: &mut InputSystem, slot: usize, raw: &RawPad) {
+    if raw.connected == 0 {
+        let was = system
+            .gamepads
+            .get(slot)
+            .is_some_and(|pad| pad.view.connected);
+        if was {
+            eprintln!("genos-input: gamepad slot={slot} source=gamecontroller connected=0");
+            system.connect_gamepad(slot, false, "");
+        }
+        return;
     }
-    Sample {
-        connected: true,
-        name,
-        left: Axis2d {
-            x: sample.lx,
-            y: sample.ly,
+    let name = CStr::from_bytes_until_nul(&raw.name)
+        .ok()
+        .and_then(|text| text.to_str().ok())
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("Gamepad");
+    let was = system
+        .gamepads
+        .get(slot)
+        .is_some_and(|pad| pad.view.connected);
+    if !was {
+        eprintln!("genos-input: gamepad slot={slot} source=gamecontroller connected=1");
+    }
+    system.connect_gamepad(slot, true, name);
+    system.set_gamepad_stick(
+        slot,
+        InputCode::gamepad_left_stick,
+        Axis2d {
+            x: raw.lx,
+            y: raw.ly,
         },
-        right: Axis2d {
-            x: sample.rx,
-            y: sample.ry,
+    );
+    system.set_gamepad_stick(
+        slot,
+        InputCode::gamepad_right_stick,
+        Axis2d {
+            x: raw.rx,
+            y: raw.ry,
         },
-        left_trigger: sample.lt,
-        right_trigger: sample.rt,
-        buttons,
+    );
+    system.set_gamepad_trigger(slot, InputCode::gamepad_left_trigger, raw.lt);
+    system.set_gamepad_trigger(slot, InputCode::gamepad_right_trigger, raw.rt);
+    for (index, code) in BUTTONS {
+        system.set_gamepad_button(slot, code, raw.buttons[index] != 0);
     }
 }
 
@@ -201,5 +221,46 @@ mod tests {
         apply(&mut input, 0, &Sample::disconnected());
         assert!(!input.gamepads[0].view.connected);
         assert_eq!(input.gamepads[0].left_stick.y, 0.0);
+    }
+
+    #[test]
+    fn a_steady_gamecontroller_sample_does_not_allocate() {
+        let mut input = InputSystem::new();
+        let mut buttons = [false; 15];
+        buttons[0] = true;
+        let sample = Sample {
+            connected: true,
+            name: "DualSense Wireless Controller".to_string(),
+            left: Axis2d { x: 0.0, y: 1.0 },
+            right: Axis2d::default(),
+            left_trigger: 1.0,
+            right_trigger: 0.0,
+            buttons,
+        };
+        apply(&mut input, 0, &sample);
+        let _ = input.take_device_changes();
+        let ((), bytes) = crate::alloc_guard(|| {
+            for _ in 0..8 {
+                apply(&mut input, 0, &sample);
+            }
+        });
+        assert_eq!(bytes, 0, "steady GameController sample allocated {bytes} bytes");
+    }
+
+    #[test]
+    fn the_poll_buffer_initializes_without_a_clone() {
+        let pads = [super::RawPad {
+            connected: 0,
+            name: [0; 128],
+            lx: 0.0,
+            ly: 0.0,
+            rx: 0.0,
+            ry: 0.0,
+            lt: 0.0,
+            rt: 0.0,
+            buttons: [0; 15],
+        }; 4];
+        assert_eq!(pads[3].connected, 0);
+        assert_eq!(pads.len(), 4);
     }
 }
