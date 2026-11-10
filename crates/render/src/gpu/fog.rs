@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use genos_scene::{Camera, FogSettings, FogShape, Light, LightingPreset, Scene};
+use genos_scene::{Camera, FogSettings, FogShape, LightingPreset, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
 use crate::fog::{
@@ -68,8 +68,7 @@ impl Gpu {
         }
         let origin = [camera.position.x, camera.position.y, camera.position.z];
         let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
-        let lights = scene.lights_cloned();
-        let (sun, lamps) = sun_and_lamps(&lights);
+        let (sun, lamps) = sun_and_lamps(scene);
         self.froxel_frame = Some(FrameJob {
             params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),
             width: size.width,
@@ -1611,11 +1610,11 @@ fn columns_from(floats: &[f32]) -> Vec<FogColumn> {
     columns
 }
 
-fn sun_and_lamps(lights: &[Light]) -> (DirectSun, Vec<FogPointLamp>) {
+fn sun_and_lamps(scene: &Scene) -> (DirectSun, Vec<FogPointLamp>) {
     let mut sun = default_frame_sun();
     let mut lamps = Vec::new();
     let mut sun_set = false;
-    for light in lights {
+    for light in scene.lights() {
         let span = light.direction.x * light.direction.x
             + light.direction.y * light.direction.y
             + light.direction.z * light.direction.z;
