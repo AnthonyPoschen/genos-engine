@@ -40,41 +40,52 @@ fn build_windows() {
     println!("cargo:rustc-link-lib=user32");
     println!("cargo:rustc-link-lib=gdi32");
     println!("cargo:rerun-if-changed=src/win32_shim.c");
+    println!("cargo:rerun-if-changed=src/touch_log.c");
+    println!("cargo:rerun-if-changed=src/touch_log.h");
     println!("cargo:rerun-if-changed=src/genos_pump.h");
 }
 
 fn compile_msvc(out: &std::path::Path) {
-    let obj = out.join("win32_shim.obj");
+    let shim = out.join("win32_shim.obj");
+    let touch = out.join("touch_log.obj");
     let lib = out.join("genos_win32.lib");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cl".to_string());
-    let obj_arg = format!("/Fo{}", obj.display());
-    run(&cc, &["/nologo", "/c", "/W3", &obj_arg, "src/win32_shim.c"]);
+    let shim_arg = format!("/Fo{}", shim.display());
+    let touch_arg = format!("/Fo{}", touch.display());
+    run(
+        &cc,
+        &["/nologo", "/c", "/W3", &shim_arg, "src/win32_shim.c"],
+    );
+    run(
+        &cc,
+        &["/nologo", "/c", "/W3", &touch_arg, "src/touch_log.c"],
+    );
     let archiver = std::env::var("AR").unwrap_or_else(|_| "lib".to_string());
     let lib_arg = format!("/OUT:{}", lib.display());
-    let obj_path = obj.display().to_string();
-    run(&archiver, &["/nologo", &lib_arg, &obj_path]);
+    let shim_path = shim.display().to_string();
+    let touch_path = touch.display().to_string();
+    run(&archiver, &["/nologo", &lib_arg, &shim_path, &touch_path]);
 }
 
 fn compile_gnu(out: &std::path::Path) {
-    let obj = out.join("win32_shim.o");
+    let shim = out.join("win32_shim.o");
+    let touch = out.join("touch_log.o");
     let archive = out.join("libgenos_win32.a");
     let cc = gnu_tool("gcc");
     let archiver = gnu_tool("ar");
-    let obj_path = obj.display().to_string();
+    let shim_path = shim.display().to_string();
+    let touch_path = touch.display().to_string();
     let archive_path = archive.display().to_string();
-    run(
-        &cc,
-        &[
-            "-c",
-            "-Wall",
-            "-Wextra",
-            "-Werror",
-            "src/win32_shim.c",
-            "-o",
-            &obj_path,
-        ],
-    );
-    run(&archiver, &["crs", &archive_path, &obj_path]);
+    for (source, obj) in [
+        ("src/win32_shim.c", shim_path.as_str()),
+        ("src/touch_log.c", touch_path.as_str()),
+    ] {
+        run(
+            &cc,
+            &["-c", "-Wall", "-Wextra", "-Werror", source, "-o", obj],
+        );
+    }
+    run(&archiver, &["crs", &archive_path, &shim_path, &touch_path]);
 }
 
 fn gnu_tool(name: &str) -> String {
@@ -132,6 +143,23 @@ fn build_wayland() {
     );
 
     let mut compiled = vec![shim_obj];
+    let touch_obj = out.join("touch_log.o");
+    run(
+        "cc",
+        &[
+            "-c",
+            "-fPIC",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "src/touch_log.c",
+            "-o",
+            touch_obj.to_str().unwrap(),
+        ],
+    );
+    compiled.push(touch_obj);
+    println!("cargo:rerun-if-changed=src/touch_log.c");
+    println!("cargo:rerun-if-changed=src/touch_log.h");
     for source in &sources {
         let obj = source.with_extension("o");
         run(

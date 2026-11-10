@@ -19,6 +19,8 @@
 mod events;
 mod lifecycle;
 mod stall;
+#[cfg(test)]
+mod touch_log;
 mod win32_keys;
 
 pub use events::{WindowEvent, WindowMode};
