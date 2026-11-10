@@ -762,6 +762,8 @@ fn options() -> Result<Options, String> {
 }
 
 fn main() {
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
