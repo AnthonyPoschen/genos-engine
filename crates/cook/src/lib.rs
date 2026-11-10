@@ -19,10 +19,13 @@ mod texture;
 use std::path::{Path, PathBuf};
 
 use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
-use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
+use genos_load::{
+    decode_skin, encode_skin, hex, sha256, skin_path, ByteSource, GltfMesh, ImportDoc, LoadError,
+    MeshInstance, Sha256, SkinCook, SkinPrimitive,
+};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
-pub use package::{manifest, package, Manifest};
+pub use package::{manifest, package, package_files, Manifest, PackageFile};
 pub use parallel::{map_by_cost, Threads};
 pub use texture::{
     cook_textures, cook_textures_file, cook_textures_with, decode_textures, encode_image,
@@ -197,6 +200,8 @@ pub struct AssetCook {
     pub record: (Outcome, PathBuf),
     /// The `.gtex`, when textures were asked for.
     pub textures: Option<(Outcome, PathBuf)>,
+    /// The `.gskin`, when the source has a skin.
+    pub skin: Option<(Outcome, PathBuf)>,
 }
 
 /// Cook a glTF file's `.gcook` and, with `textures`, its `.gtex`. Each record
@@ -221,9 +226,14 @@ pub fn cook_asset(
     let id = sha256(&bytes);
     let path = cooked_path(out, &id);
     let tex_path = textures_path(out, &id);
+    let skin_file = skin_path(out, &id);
     let mesh_fresh =
         std::fs::read(&path).is_ok_and(|existing| up_to_date(&existing, &bytes, dir, settings));
     let tex_fresh = !textures || texture::textures_fresh(&tex_path, &bytes, dir);
+    let skin_bytes = std::fs::read(&skin_file).ok();
+    let skin_fresh = skin_bytes
+        .as_deref()
+        .is_some_and(|existing| skin_up_to_date(existing, &bytes, dir, settings));
     let outcome = |fresh: bool| {
         if fresh {
             Outcome::UpToDate
@@ -231,11 +241,16 @@ pub fn cook_asset(
             Outcome::Cooked
         }
     };
-    let result = AssetCook {
+    let mut result = AssetCook {
         record: (outcome(mesh_fresh), path.clone()),
         textures: textures.then(|| (outcome(tex_fresh), tex_path.clone())),
+        skin: skin_bytes
+            .is_some()
+            .then(|| (outcome(skin_fresh), skin_file.clone())),
     };
-    if mesh_fresh && tex_fresh {
+    // A missing `.gskin` beside a fresh `.gcook` is a rigid asset. Removing the
+    // skin file does not rebuild it until the geometry record is stale.
+    if mesh_fresh && tex_fresh && (skin_fresh || skin_bytes.is_none()) {
         return Ok(result);
     }
     let doc = genos_load::import_bytes(&bytes, &|uri| {
@@ -256,6 +271,17 @@ pub fn cook_asset(
         }
         Ok(())
     };
+    let write_skin = || -> Result<Option<(Outcome, PathBuf)>, CookError> {
+        let Some(scene) = doc.scene.as_ref() else {
+            return Ok(None);
+        };
+        if scene.skins.is_empty() {
+            return Ok(None);
+        }
+        let encoded = encode_skin(&skin_of(&doc, settings)?).map_err(skin_error)?;
+        genos_load::write_atomic(&skin_file, &encoded.bytes)?;
+        Ok(Some((Outcome::Cooked, skin_file.clone())))
+    };
     if threads.get() > 1 && !mesh_fresh && !tex_fresh {
         std::thread::scope(|scope| {
             let tex = scope.spawn(write_tex);
@@ -268,7 +294,75 @@ pub fn cook_asset(
         write_mesh()?;
         write_tex()?;
     }
+    if !skin_fresh {
+        result.skin = write_skin()?;
+        if result.skin.is_none() {
+            let _ = std::fs::remove_file(&skin_file);
+        }
+    }
     Ok(result)
+}
+
+fn skin_error(err: genos_load::CookedError) -> CookError {
+    match err {
+        genos_load::CookedError::Corrupt(why) => CookError::Corrupt(why),
+        genos_load::CookedError::Io(err) => CookError::Io(err),
+    }
+}
+
+fn skin_of(doc: &ImportDoc, settings: &BakeSettings) -> Result<SkinCook, CookError> {
+    let scene = doc.scene.as_ref().ok_or(CookError::NoScene)?;
+    let mut primitives = Vec::new();
+    let mut primitive_mesh = Vec::new();
+    for (mesh_index, mesh) in scene.meshes.iter().enumerate() {
+        for primitive in &mesh.primitives {
+            primitives.push(SkinPrimitive {
+                joints: primitive.joints.clone(),
+                weights: primitive.weights.clone(),
+            });
+            primitive_mesh.push(mesh_index);
+        }
+    }
+    let mut mesh_skin = vec![None; scene.meshes.len()];
+    for instance in &scene.instances {
+        if instance.skin.is_some() && mesh_skin.get(instance.mesh) == Some(&None) {
+            mesh_skin[instance.mesh] = instance.skin;
+        }
+    }
+    Ok(SkinCook {
+        asset_id: doc.asset_id,
+        settings: settings_hash(settings),
+        inputs: inputs_of(doc)
+            .into_iter()
+            .map(|input| (input.uri, input.hash))
+            .collect(),
+        skins: scene.skins.clone(),
+        clips: scene.clips.clone(),
+        instance_skins: scene
+            .instances
+            .iter()
+            .map(|instance| instance.skin)
+            .collect(),
+        mesh_skin,
+        primitives,
+        primitive_mesh,
+        notes: scene.skin_notes.clone(),
+    })
+}
+
+fn skin_up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSettings) -> bool {
+    let Ok(decoded) = decode_skin(existing) else {
+        return false;
+    };
+    if decoded.asset_id != sha256(source) || decoded.settings != settings_hash(settings) {
+        return false;
+    }
+    let inputs = decoded
+        .inputs
+        .into_iter()
+        .map(|(uri, hash)| Input { uri, hash })
+        .collect::<Vec<_>>();
+    inputs_match(&inputs, source, dir)
 }
 
 fn up_to_date(existing: &[u8], source: &[u8], dir: &Path, settings: &BakeSettings) -> bool {
