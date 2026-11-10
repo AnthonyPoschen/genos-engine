@@ -129,23 +129,32 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint round_entries;
     uint mask[];
 } gstats;
+// The read-only fixture sets this word to 64 before every production call and
+// never writes another value. A macro, not a function: glslc does not inline
+// the one-line helper, and lavapipe then keeps every control-bit arm. The
+// writing compile still reads the buffer.
+#ifdef PROD_READONLY
+#define lighting_ctrl_bits() 64u
+#else
+#define lighting_ctrl_bits() gstats.ctrl_bits
+#endif
 // 0 pixel or probe read, 1 cache-ray hit, 2 probe hit. The direct pass sets it
 // before a cache read. A pixel compose leaves it at 0.
 uint lighting_hit_kind = 0u;
 bool lighting_gi_on() {
-    return (gstats.ctrl_bits & 4u) != 0u;
+    return (lighting_ctrl_bits() & 4u) != 0u;
 }
 bool lighting_sky_enabled() {
-    return (gstats.ctrl_bits & 256u) != 0u;
+    return (lighting_ctrl_bits() & 256u) != 0u;
 }
 // Bits 16..18. High writes 5, which is also the fallback when the field is 0.
 uint lighting_denoise_iters() {
-    uint n = (gstats.ctrl_bits >> 16u) & 7u;
+    uint n = (lighting_ctrl_bits() >> 16u) & 7u;
     return n == 0u ? 5u : n;
 }
 // Bits 22..31, steps of 0.0001. Relative luminance deviation sqrt(var) / mean.
 float lighting_denoise_variance() {
-    return float((gstats.ctrl_bits >> 22u) & 1023u) * 0.0001;
+    return float((lighting_ctrl_bits() >> 22u) & 1023u) * 0.0001;
 }
 // LIGHTING_DENOISE_PLAIN is the high pipeline. Adaptive passes are compiled
 // out of it. That branch lives in the other a-trous pipeline. On the 4070 the
@@ -158,14 +167,14 @@ bool lighting_denoise_adaptive() { return false; }
 // Bit 20. Fewer wavelet iterations where history is stable. Off unless the
 // experimental knob is on. See S79.
 bool lighting_denoise_adaptive() {
-    return (gstats.ctrl_bits & 1048576u) != 0u;
+    return (lighting_ctrl_bits() & 1048576u) != 0u;
 }
 #endif
 // Unlimited (bit 16384) is today's cache. Bounce 0 and 1 do not read it: one
 // bounce is the direct light on a probe hit, and the cache lookup is not run.
 // Bounce 2 and above read it (cache-to-cache).
 bool lighting_bounce_ok() {
-    if ((gstats.ctrl_bits & 16384u) != 0u) {
+    if ((lighting_ctrl_bits() & 16384u) != 0u) {
         return true;
     }
     return gstats.ctrl_bounce >= 2u;
@@ -210,9 +219,14 @@ const uint CHG_V_RELIT = 28u;    // kept hits relit by verification / wakes
 const uint CHG_W_HOPS = 29u;     // sum of hop depth of woken probes (chain size)
 uint lighting_bounce_path = 2u;
 // S78S debug isolate toggles (lighting_gpu.rs lighting_toggles): head 3.w bits 12-15.
+// PROD_READONLY is a macro for the same reason as lighting_ctrl_bits.
+#ifdef PROD_READONLY
+#define lighting_toggles() 0u
+#else
 uint lighting_toggles() {
     return (uint(work.v[lighting_change_at() + 3u].w) >> 12u) & 31u;
 }
+#endif
 const uint LIGHTING_TOGGLE_FREEZE_CACHE = 1u;
 // Cache-only view (ADR 0039): pixels show the 25 cm world cells, no texels or probes.
 const uint LIGHTING_TOGGLE_CELLS_ONLY = 16u;
@@ -552,12 +566,18 @@ const uint LIGHTING_WRC_SNAP_COL_AT = LIGHTING_WRC_BG_AT + 2048u;
 // sit in (a running mean of up to cap frames, binding 10 after the patches) and
 // pixels read that, interpolated, so what a pixel shows depends on where it is in
 // the world, not on where the probe grid fell this frame.
+#ifdef PROD_READONLY
+// High, bounce 2 or more, cap 64. The read-only rows all copy that head.
+#define lighting_world_mode() 3u
+#define lighting_world_cap() 64.0
+#else
 uint lighting_world_mode() {
     return (uint(work.v[lighting_change_at()].w) / 1000u) % 100u;
 }
 float lighting_world_cap() {
     return float(uint(work.v[lighting_change_at()].w) % 1000u);
 }
+#endif
 // Sets texel slot grows to.
 float lighting_sc_cap(uint slot);
 float lighting_sc_light_window();
@@ -570,10 +590,17 @@ float lighting_hit_size(vec3 pos);
 // cm; none since S57) grow to twice the cap; bit 5 a texel with few sets shares its
 // pixels with the probes; bit 6 a texel's lit-from point moving does not restart
 // its sets.
+#ifdef PROD_READONLY
+// High's sc_flags (6007050), the estimator bit, and sh_cells. Same word
+// lighting_change_head packs for the read-only fixture. texel_detail_prod
+// locks this number.
+#define lighting_sc_flags() 14395658u
+#else
 uint lighting_sc_flags() {
     // S72K: bits 23 and up ride in head 3.w (head z is a float, exact to 2^24).
     return (uint(work.v[lighting_change_at()].z) >> 1u) | ((uint(work.v[lighting_change_at() + 3u].w) & 511u) << 23u);
 }
+#endif
 // S72S budget scale (Anthony 14:03: scale down to a weak GPU, nothing may need a
 // minimum ray count): every per-round ray budget (texels, trickle, WRC refresh,
 // scouts, bursts) is divided by 2^shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, head 3.w
@@ -584,7 +611,9 @@ uint lighting_sc_budget_shift() {
 // S72O (Anthony: squares still build up; a page must never shift as a unit):
 // per-texel commit timing and ray strata, and the stored means rectified
 // against their edge-aware neighbourhood. Flag 268435456 off.
+#ifndef PROD_READONLY
 uint lighting_world_mode();
+#endif
 // S72R: the GIBS MSME accumulator verbatim (lighting_cache.comp); flag
 // 1073741824 the S59-S68 estimator (plain mean warm-up, young floor, anti-lag).
 bool lighting_sc_msme() {
@@ -2105,9 +2134,14 @@ const uint LIGHTING_SH_RAY_CUT_BIT = 262144u;
 const uint LIGHTING_SH_PROBE_RETIRE_BIT = 524288u;
 // Same low confidence as the parent seed. A const, so it is not a new magic number.
 const float LIGHTING_SH_DETAIL_CONF = 0.25;
+#ifdef PROD_READONLY
+// The read-only fixture copies only the detail-on head.
+#define lighting_sh_texel_detail_on() true
+#else
 bool lighting_sh_texel_detail_on() {
     return lighting_sh_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_DETAIL_BIT) != 0u;
 }
+#endif
 // Stage 4 is off unless the detail seed is on. The bit alone does not cut rays.
 bool lighting_sh_texel_ray_cut_on() {
     return lighting_sh_texel_detail_on() && (uint(work.v[lighting_change_at() + 3u].w) & LIGHTING_SH_RAY_CUT_BIT) != 0u;
@@ -2697,7 +2731,7 @@ vec4 lighting_sc_shown(uint slot) {
     // fell through to parent and world-cache walks on every pixel and got
     // slower than with the filter on. The texel's own mean is one load.
     // High sets the denoise bit, so this branch is not taken.
-    if ((gstats.ctrl_bits & 64u) == 0u && lighting_world_mode() == 3u) {
+    if ((lighting_ctrl_bits() & 64u) == 0u && lighting_world_mode() == 3u) {
         if (own.w > 0.5) {
             return vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0);
         }
@@ -3454,7 +3488,7 @@ uint lighting_sc_interval(uint slot, float t) {
 // round in LIGHTING_WRC_SCOUT_STILL.
 const uint LIGHTING_WRC_SCOUT_STILL = 8u;
 bool lighting_wrc_scout_due() {
-    if ((gstats.ctrl_bits & 1024u) == 0u) {
+    if ((lighting_ctrl_bits() & 1024u) == 0u) {
         return false;
     }
     vec4 last_eye = work.v[lighting_change_at() + 1u];
@@ -4854,7 +4888,7 @@ uint lighting_svgf_pass_limit(uint slot, float var, float lum) {
     // old test never entered the skip the settled cache takes (16 sets).
     // ReLAX keys the drop off history length; this stop is the short-run
     // equivalent, flagged as a deviation in S79.
-    uint thr_q = (gstats.ctrl_bits >> 22u) & 1023u;
+    uint thr_q = (lighting_ctrl_bits() >> 22u) & 1023u;
     if (thr_q >= 1000u) {
         by_var = 1u;
     } else if (thr > 0.0 && rel <= thr) {
@@ -5474,7 +5508,7 @@ uint lighting_shadow_cell(vec3 o, vec3 n, uint li, out uint tag) {
 }
 float lighting_shadow_get(vec3 o, vec3 n, uint li) {
     // Shadows off, or the hard filter: trace, do not read the cell.
-    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+    if ((lighting_ctrl_bits() & 2u) == 0u || (lighting_ctrl_bits() & 2048u) != 0u) {
         return -1.0;
     }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
@@ -5492,7 +5526,7 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
 const bool LIGHTING_COMPACT_LIST = true;
 const uint LIGHTING_COMPACT_IDLE = 8u;
 void lighting_shadow_put(vec3 o, vec3 n, uint li, bool lit) {
-    if ((gstats.ctrl_bits & 2u) == 0u || (gstats.ctrl_bits & 2048u) != 0u) {
+    if ((lighting_ctrl_bits() & 2u) == 0u || (lighting_ctrl_bits() & 2048u) != 0u) {
         return;
     }
     if (!LIGHTING_SHADOW_CACHE || li >= LIGHTING_WRC_SNAP_LAMPS || li >= scene.lamp_count) {
@@ -5588,12 +5622,12 @@ uint lighting_pix_at() {
 // this and relight every pixel every still frame, which costs more than the
 // cache being on. High keeps the mode-3 check: the cache bit is set there.
 bool lighting_pix_cache_ok() {
-    return lighting_world_mode() == 3u || (gstats.ctrl_bits & 32u) == 0u;
+    return lighting_world_mode() == 3u || (lighting_ctrl_bits() & 32u) == 0u;
 }
 bool lighting_pix_reuse_on() {
     // No probes and no world cache is a 4096-byte stand-in. Pixel reuse indexes
     // the work buffer past that (the same rule as the shadow cells).
-    bool stored = (gstats.ctrl_bits & 16u) != 0u || (gstats.ctrl_bits & 32u) != 0u;
+    bool stored = (lighting_ctrl_bits() & 16u) != 0u || (lighting_ctrl_bits() & 32u) != 0u;
     return LIGHTING_PIX_REUSE && lighting_gi_on() && stored && lighting_pix_cache_ok();
 }
 bool lighting_pix_quiet() {

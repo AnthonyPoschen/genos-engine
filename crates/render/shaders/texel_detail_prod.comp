@@ -732,8 +732,7 @@ void prod_plant_scene() {
 
 void prod_readonly() {
     // lamp.y is the first row and lamp.z the count. The fixture runs a few
-    // rows at a time and the counts accumulate in gstats. The reader process
-    // alone was still killed on a 16 GiB lavapipe cgroup (anon-rss 14711896 kB).
+    // rows at a time and the counts accumulate in gstats.
     uint begin = pc.lamp.y;
     uint count = pc.lamp.z == 0u ? 12u : pc.lamp.z;
     uint end = begin + count;
