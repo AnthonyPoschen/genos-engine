@@ -434,7 +434,7 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         if (ci >= lighting_grad_count()) {
             return false;
         }
-        uint gs = ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
+        uint gs = lighting_grad_list_slot(ckeys.key[LIGHTING_GRAD_LIST_AT + ci]);
         vec3 gp;
         if (ckeys.key[gs] == 0u || !lighting_sc_texel_world(gs, gp, n)) {
             return false;

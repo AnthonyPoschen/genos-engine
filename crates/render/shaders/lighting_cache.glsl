@@ -3625,6 +3625,17 @@ bool lighting_lamp_noted() {
     }
     return false;
 }
+// Newest lamp note still inside the settle window. 0 when nothing is noted.
+uint lighting_lamp_note_frame() {
+    uint best = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
+        if (f != 0u && int(lighting_frame() - f) <= int(LIGHTING_WRC_CHANGE_FRAMES) && f >= best) {
+            best = f;
+        }
+    }
+    return best;
+}
 bool lighting_lamp_settling_raw() {
     if (ckeys.key[LIGHTING_DRAIN_FLAG_AT] != 0u) {
         return true;
@@ -5213,6 +5224,15 @@ const uint LIGHTING_GRAD_COUNT_AT = LIGHTING_SC_HIST_AT + 72u;
 const uint LIGHTING_EXT_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u;
 const uint LIGHTING_SHADOW_EPOCH_AT = LIGHTING_EXT_AT;
 const uint LIGHTING_GRAD_LIST_AT = LIGHTING_EXT_AT + 1024u;
+// List word: low 28 bits are the texel. The top nibble is 0 for one check,
+// 2..4 for the first of a settle group of that many rays, or 0xF for a
+// follower ray in that group. A slot index fits in 21 bits.
+uint lighting_grad_list_slot(uint raw) {
+    return raw & 0x0FFFFFFFu;
+}
+uint lighting_grad_list_tag(uint raw) {
+    return raw >> 28u;
+}
 const float LIGHTING_ASVGF_EPS = 0.05;
 const float LIGHTING_ASVGF_SE = 0.05;
 const float LIGHTING_ASVGF_FULL = 0.25;
@@ -5342,72 +5362,142 @@ void lighting_sc_check_soon(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + 1u);
     cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(LIGHTING_CHECK_MIN);
 }
-// One check per block. The pick when it has a stored ray, otherwise the
-// lowest stored texel. A never-checked texel is "due", and enqueueing every
-// one would skip the relights that replace the mean.
-bool lighting_sc_settle_pick(uint slot) {
-    if (!lighting_sc_grad_stored(slot)) {
-        return false;
-    }
+// Four same-seed checks per block on a lamp change. The hash picks come first
+// (stable for the note, so the same texels keep their pre-change seeds). The
+// lowest stored texels fill a short set. The list stops at the check-ray cap.
+const uint LIGHTING_SETTLE_K = 4u;
+// Frames after the note that may still list, when the change frame did not
+// publish a sample. The change frame itself is the pending read.
+const uint LIGHTING_SETTLE_EARLY = 4u;
+// Hash picks, then the lowest stored texels, up to LIGHTING_SETTLE_K.
+uvec4 lighting_sc_settle_picks(uint slot, out uint n) {
+    uvec4 picks = uvec4(~0u);
+    n = 0u;
     vec2 c = lighting_sc_true_cell(slot);
     ivec2 b = ivec2(floor(c / 3.0));
     ivec2 m = ivec2(c) - 3 * b;
-    uint h = hash_cell3(ivec3(b, 0), lighting_round());
-    uint rep = h % 9u;
-    ivec2 rm = ivec2(int(rep % 3u), int(rep / 3u));
-    uint rs = lighting_sc_cell_slot(slot, rm - m);
-    if (rs != ~0u && lighting_sc_grad_stored(rs)) {
-        return uint(m.y * 3 + m.x) == rep;
+    uint h = hash_cell3(ivec3(b, 0), 0u);
+    uint stored_s[9];
+    uint stored_r[9];
+    uint ns = 0u;
+    [[dont_unroll]] for (uint rep = 0u; rep < 9u; rep++) {
+        ivec2 rm = ivec2(int(rep % 3u), int(rep / 3u));
+        uint rs = rm == m ? slot : lighting_sc_cell_slot(slot, rm - m);
+        if (rs != ~0u && lighting_sc_grad_stored(rs)) {
+            stored_s[ns] = rs;
+            stored_r[ns] = rep;
+            ns++;
+        }
     }
-    uint mine = uint(m.y * 3 + m.x);
-    for (uint k = 0u; k < mine; k++) {
-        ivec2 km = ivec2(int(k % 3u), int(k / 3u));
-        uint ns = lighting_sc_cell_slot(slot, km - m);
-        if (ns != ~0u && lighting_sc_grad_stored(ns)) {
+    [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
+        if (n >= LIGHTING_SETTLE_K) {
+            break;
+        }
+        uint rep = (h + i) % 9u;
+        [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+            if (j < ns && stored_r[j] == rep) {
+                picks[n] = stored_s[j];
+                n++;
+                break;
+            }
+        }
+    }
+    [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+        if (j >= ns || n >= LIGHTING_SETTLE_K) {
+            break;
+        }
+        bool seen = false;
+        [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+            if (k < n && picks[k] == stored_s[j]) {
+                seen = true;
+            }
+        }
+        if (!seen) {
+            picks[n] = stored_s[j];
+            n++;
+        }
+    }
+    return picks;
+}
+// The leader's stamp is at or after this lamp note, including a sample that
+// stayed under ε. The pending frame still lists: its note is the previous lamp.
+bool lighting_sc_settle_done(uint leader) {
+    uint note = lighting_lamp_note_frame();
+    uint f = floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + leader].x);
+    return note != 0u && f != 0u && int(f) >= int(note);
+}
+// True means skip this texel's relight. The leader lists the whole group.
+// A group past the cap is still skipped for this frame, so the stored rays
+// survive until a later early frame can list them.
+bool lighting_sc_settle_lambda(uint slot, bool pending) {
+    if (!LIGHTING_GRAD_CHECKS_ON) {
+        return false;
+    }
+    if (!pending) {
+        uint note = lighting_lamp_note_frame();
+        int age = int(lighting_frame()) - int(note);
+        if (note == 0u || age < 1 || age > int(LIGHTING_SETTLE_EARLY)) {
             return false;
+        }
+    }
+    uint n = 0u;
+    uvec4 picks = lighting_sc_settle_picks(slot, n);
+    if (n == 0u) {
+        return false;
+    }
+    bool mine = false;
+    [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+        if (i < n && picks[i] == slot) {
+            mine = true;
+        }
+    }
+    if (!mine) {
+        return false;
+    }
+    if (!pending && lighting_sc_settle_done(picks[0])) {
+        return false;
+    }
+    if (slot == picks[0]) {
+        uint cap = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
+        uint base = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], n);
+        // A group that starts under the cap and runs past it still owns those
+        // words. Write the prefix, so the count does not read a stale slot.
+        uint m = base >= cap ? 0u : min(n, cap - base);
+        if (m == 1u) {
+            ckeys.key[LIGHTING_GRAD_LIST_AT + base] = picks[0];
+        } else if (m >= 2u) {
+            ckeys.key[LIGHTING_GRAD_LIST_AT + base] = picks[0] | (m << 28u);
+            [[dont_unroll]] for (uint i = 1u; i < LIGHTING_SETTLE_K; i++) {
+                if (i < m) {
+                    ckeys.key[LIGHTING_GRAD_LIST_AT + base + i] = picks[i] | 0xF0000000u;
+                }
+            }
         }
     }
     return true;
 }
-// A lamp settle used to return before the same-seed check, so λ stayed 0
-// for the whole change. True means skip this texel's relight: the check
-// reads its stored ray.
-bool lighting_sc_settle_lambda(uint slot, bool pending) {
-    if (!LIGHTING_GRAD_CHECKS_ON || !lighting_sc_settle_pick(slot)) {
-        return false;
-    }
-    // A fresh λ is this block's last check. A change the snapshot has not
-    // noted yet is not that check: the stored ray is still the old light.
-    if (!pending && lighting_sc_lambda(slot) >= LIGHTING_ASVGF_EPS && lighting_sc_lambda_fresh(slot)) {
-        return false;
-    }
-    if (!lighting_sc_check_turn(slot)) {
-        return false;
-    }
-    uint cap = (LIGHTING_GRAD_ENTRIES * LIGHTING_CACHE_RAYS) >> lighting_sc_budget_shift();
-    uint at = atomicAdd(ckeys.key[LIGHTING_GRAD_COUNT_AT], 1u);
-    if (at < cap) {
-        ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
-    }
-    return at < cap;
-}
-void lighting_sc_grad_take(uint slot, float l_now) {
+float lighting_sc_grad_d(uint slot, float l_now) {
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
-    vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
     float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
-    float d = min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
-    float n2 = clamp(g2.w, 0.0, LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+    return min(1.0, abs(l_now - g.y) / max(max(l_now, g.y), 0.1 * mean + 1.0e-4));
+}
+float lighting_sc_grad_n2(uint slot) {
+    return clamp(cache.v[LIGHTING_SC_GRAD2_AT + slot].w, 0.0, LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
+}
+// One gate on one residual. `mark` records a settle sample that did not clear
+// ε, so the block is not listed again for this lamp note. A passing λ is
+// already stamped by lighting_sc_grad_put.
+void lighting_sc_grad_finish(uint slot, float d, float n2, bool mark) {
     float lam = max(0.0, d - 2.0 * sqrt(n2));
     cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_CHECK_SIGMA_MAX * LIGHTING_CHECK_SIGMA_MAX);
-    // checks and changed are pad4 and pad5 (lightingsc words 22 and 23).
-    // chg[30] is the SH lookup count (CHG_SH_LOOKUPS).
-    atomicAdd(gstats.pad4, 1u);
-    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
     if (lam < LIGHTING_ASVGF_EPS) {
-        // Confirmed: defer the next check (doubling).
-        uint iv = clamp(floatBitsToUint(g2.z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
+        uint iv = clamp(floatBitsToUint(cache.v[LIGHTING_SC_GRAD2_AT + slot].z), LIGHTING_CHECK_MIN / 2u, LIGHTING_CHECK_MAX / 2u) * 2u;
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = uintBitsToFloat(iv);
         cache.v[LIGHTING_SC_GRAD2_AT + slot].y = uintBitsToFloat(lighting_frame() + iv);
+        if (mark) {
+            cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
+            cache.v[LIGHTING_SC_GRAD2_AT + slot].x = uintBitsToFloat(lighting_frame());
+        }
         lighting_dg(42u, 1u);
         return;
     }
@@ -5421,7 +5511,7 @@ void lighting_sc_grad_take(uint slot, float l_now) {
         lighting_sc_grad_put(off == ivec2(0) ? slot : lighting_sc_cell_slot(slot, off), lam);
     }
     // S76D: a confirmed change nominates the ring around its block (5 x 5 less
-    // the 3 x 3, same surface) for checks.
+    // the 3 x 3, same surface) for checks. λ itself stays on the 3 x 3.
     [[dont_unroll]] for (int k = 0; k < 25; k++) {
         ivec2 off = b + ivec2(k % 5, k / 5) - ivec2(1);
         if (off.x >= b.x && off.x < b.x + 3 && off.y >= b.y && off.y < b.y + 3) {
@@ -5430,6 +5520,44 @@ void lighting_sc_grad_take(uint slot, float l_now) {
         lighting_sc_nominate(lighting_sc_cell_slot(slot, off));
         lighting_dg(56u, 1u);
     }
+}
+void lighting_sc_grad_take(uint slot, float l_now) {
+    // checks and changed are pad4 and pad5 (lightingsc words 22 and 23).
+    // chg[30] is the SH lookup count (CHG_SH_LOOKUPS). One check is one ray.
+    atomicAdd(gstats.pad4, 1u);
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], 1u);
+    lighting_sc_grad_finish(slot, lighting_sc_grad_d(slot, l_now), lighting_sc_grad_n2(slot), false);
+}
+// The settle group is consecutive list words. Average the raw residuals, then
+// one 2σ gate. A miss is left out of the mean. It is not a zero.
+void lighting_sc_grad_take_mean(uint ci, uint tag) {
+    atomicAdd(gstats.pad4, tag);
+    atomicAdd(ckeys.key[LIGHTING_CHECK_P_AT + 1u], tag);
+    float sum = 0.0;
+    float n2s = 0.0;
+    uint got = 0u;
+    uint leader = ~0u;
+    [[dont_unroll]] for (uint k = 0u; k < LIGHTING_SETTLE_K; k++) {
+        if (k >= tag) {
+            break;
+        }
+        uint gsk = lighting_grad_list_slot(ckeys.key[LIGHTING_GRAD_LIST_AT + ci + k]);
+        if (k == 0u) {
+            leader = gsk;
+        }
+        vec4 v = work.v[lighting_rad_at(lighting_probe_rays() + ci + k + lighting_grad_first() * LIGHTING_CACHE_RAYS)];
+        if (ckeys.key[gsk] == 0u || lighting_ray_none(v)) {
+            continue;
+        }
+        float l_now = dot(lighting_ray_light(v), LIGHTING_SVGF_LW);
+        sum += lighting_sc_grad_d(gsk, l_now);
+        n2s += lighting_sc_grad_n2(gsk);
+        got++;
+    }
+    if (got == 0u || leader == ~0u) {
+        return;
+    }
+    lighting_sc_grad_finish(leader, sum / float(got), n2s / float(got), true);
 }
 // Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
 // hit's shadow ray to a lamp is kept per 12.5 cm cell, facing axis and lamp, with
