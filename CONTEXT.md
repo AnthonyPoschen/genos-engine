@@ -49,11 +49,11 @@ The state in which a window receives the keyboard and the pointer from the displ
 _Avoid_: Active, selected
 
 **Input system**:
-The owner of the keyboard, the mouse, and the gamepad slots.
+The owner of the keyboard, the mouse, the gamepad slots, and the touch points.
 _Avoid_: Input manager, event bus
 
 **Device**:
-The keyboard, the mouse, or one gamepad slot.
+The keyboard, the mouse, one gamepad slot, or the touch surface.
 _Avoid_: Controller, peripheral
 
 **Gamepad slot**:
@@ -61,8 +61,16 @@ A stable player slot for one gamepad. Slot 0 stays player one while that gamepad
 _Avoid_: Joystick index, controller id
 
 **Glyph set**:
-The picture family for the device the player is using: keyboard and mouse, Xbox, PlayStation, Steam Deck, or a generic gamepad. The input system reports the active family.
+The picture family for the device the player is using: keyboard and mouse, Xbox, PlayStation, Steam Deck, a generic gamepad, or touch. The input system reports the active family.
 _Avoid_: Icon theme, prompt set
+
+**Touch point**:
+One finger sample: an id, a position, and a phase. The window writes the points. The input system does not read the touch hardware.
+_Avoid_: Touch event, pointer event
+
+**Gesture**:
+A tap, a swipe, or a pinch recognized from touch points. An action binds one gesture.
+_Avoid_: Touch event, flick
 
 **Input code**:
 The shared token for a key, a mouse button, or a gamepad control.

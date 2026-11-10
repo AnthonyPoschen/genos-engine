@@ -35,6 +35,7 @@ mod code;
 mod device;
 mod settings;
 mod system;
+mod touch;
 
 pub use action::{character_controller, Action2dBinding, ActionMap, BoundInput};
 pub use bindings::{debug_keys, Chord, KeyBindings};
@@ -45,6 +46,7 @@ pub use device::{
 };
 pub use settings::InputSettings;
 pub use system::{DeviceChange, InputSystem};
+pub use touch::{Gesture, GestureKind, TouchPhase, TouchPoint, TouchSurface, SWIPE_MIN, TAP_SLOP};
 
 #[cfg(test)]
 mod alloc_count {
