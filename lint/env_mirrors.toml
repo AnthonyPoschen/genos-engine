@@ -1622,9 +1622,9 @@ kind = "test"
 detail = "material_stream watchdog seconds"
 
 [[var]]
-name = "GENOS_RESTIR_OUT"
-kind = "mirror"
-detail = "--out"
+name = "GENOS_COMPOSE_MAINT"
+kind = "build"
+detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"
 
 [[var]]
 name = "GENOS_TEXEL_RO_DIR"
