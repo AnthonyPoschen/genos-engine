@@ -249,6 +249,10 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lighting-cap-fill on|off
                             skip the 8-set perceptual stop and fill to world_cap.
                             A texel at the cap stops either way (GENOS_LIGHTING_CAP_FILL, default off)
+  --lighting-bounded-quarters on|off
+                            under change and for a new claim, one 16-ray quarter
+                            per due texel, stopped at the ray budget, near cells
+                            under 8 sets before refinement (GENOS_LIGHTING_BOUNDED_QUARTERS, default off)
   --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
   --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
   --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
@@ -853,7 +857,7 @@ fn settings_text(stage: &Stage) -> String {
 }
 
 /// Flag, `LightingSettings` key, and the environment variable it mirrors.
-const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 13] = [
+const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 14] = [
     (
         "--lighting-cache-async",
         "cache_async",
@@ -882,6 +886,11 @@ const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 13] = [
         "GENOS_LIGHTING_COVERAGE_FIRST",
     ),
     ("--lighting-cap-fill", "cap_fill", "GENOS_LIGHTING_CAP_FILL"),
+    (
+        "--lighting-bounded-quarters",
+        "bounded_quarters",
+        "GENOS_LIGHTING_BOUNDED_QUARTERS",
+    ),
     (
         "--lighting-sc-settle",
         "sc_settle",

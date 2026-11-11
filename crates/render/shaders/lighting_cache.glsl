@@ -497,6 +497,10 @@ const float LIGHTING_WRC_NEAR = 6.0;
 const uint LIGHTING_SC_BUCKETS = 64u;
 const uint LIGHTING_SC_HIST_AT = 2u * LIGHTING_CACHE_SLOTS + 2u;
 const uint LIGHTING_SC_THR_AT = LIGHTING_SC_HIST_AT + LIGHTING_SC_BUCKETS;
+// How many entries of the threshold bucket a bounded round may list. ~0 lists
+// the whole bucket. The used counter is reset by the cache pass each round.
+const uint LIGHTING_SC_ALLOW_AT = LIGHTING_SC_HIST_AT + 86u;
+const uint LIGHTING_SC_ALLOW_USED_AT = LIGHTING_SC_HIST_AT + 87u;
 // WRC refresh (S61B, Anthony: a hard, fixed budget): at most LIGHTING_WRC_REFRESH
 // batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
 // burst, from two lists: change-driven first (a mover nearby, or a lamp that
@@ -1353,6 +1357,9 @@ bool lighting_sc_light_quiet() {
 bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
 bool lighting_lamp_settling_raw();
+bool lighting_lamp_noted();
+bool lighting_lamp_ring_hot();
+bool lighting_lamp_ring_moved();
 bool lighting_wrc_lone(uint slot);
 uint lighting_settle_turns(bool first);
 const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
@@ -3049,6 +3056,12 @@ bool lighting_coverage_hold() {
 bool lighting_cap_fill() {
     return (uint(work.v[lighting_change_at() + 3u].w) & 2097152u) != 0u;
 }
+// bounded_quarters (head 3.w bit 22). Default off. Under change and for a new
+// claim, a due fine texel takes one 16-ray quarter and the round stops at the
+// ray budget instead of filling the boosted texel room.
+bool lighting_bounded_quarters() {
+    return (uint(work.v[lighting_change_at() + 3u].w) & 4194304u) != 0u;
+}
 // Coverage asks for the 8-set minimum, but never for more sets than the cap.
 // At High's cap of 8 the minimum is the cap, and the hold mean is the cap.
 float lighting_coverage_sets() {
@@ -3073,6 +3086,93 @@ float lighting_sc_drain_sigma() {
 // the budget is unchanged (lighting_sc_cap_lists).
 uint lighting_sc_ray_budget() {
     return ckeys.key[LIGHTING_ARGS_AT + 11u];
+}
+// Entry ceiling for one round when bounded_quarters is on. 0 when the flag is
+// off, so the caller keeps the boosted room. A set ray budget is that many
+// rays, in 16-ray entries. Budget 0 keeps the base room and does not take the
+// boost (the 87,808-entry ceiling).
+uint lighting_bounded_entry_cap() {
+    if (!lighting_bounded_quarters()) {
+        return 0u;
+    }
+    uint rays = lighting_sc_ray_budget();
+    uint shift = lighting_sc_budget_shift();
+    uint room = lighting_sc_room() >> shift;
+    if (rays == 0u) {
+        return min(lighting_sc_base_room() >> shift, room);
+    }
+    // The budget is a ray count, not the base-room share. 1M rays is above
+    // that share and below the boosted room, so the cap stops at the room
+    // only when the budget would walk past the texel entries.
+    return min(max(rays / LIGHTING_CACHE_RAYS, 1u), room);
+}
+// The eye or the view moved since the change head was stored. A still camera
+// stays false, so a quiet frame does not keep a cell share of the budget.
+bool lighting_view_moving() {
+    vec4 last_eye = work.v[lighting_change_at() + 1u];
+    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
+    if (last_eye.w < 0.5) {
+        return true;
+    }
+    if (length(scene.eye.xyz - last_eye.xyz) > 0.01) {
+        return true;
+    }
+    return dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
+}
+// World cells carry the bounce a fine texel samples. The first rounds give
+// them the whole budget, so the texels' 8 sets are not stored against an
+// empty bounce. A lamp that moved puts the settle list (cells and the
+// texels' quarters) on that same budget. Otherwise cells keep an eighth
+// while the camera moves or a lamp note is hot, and a quiet frame spends
+// nothing on that share.
+uint lighting_bounded_cell_cap() {
+    uint cap = lighting_bounded_entry_cap();
+    if (cap == 0u) {
+        return 0u;
+    }
+    if (lighting_frame() < 24u) {
+        return cap;
+    }
+    if (lighting_lamp_ring_moved()) {
+        // The settle list (cells and the texels' quarters) shares the budget.
+        return cap;
+    }
+    if (lighting_view_moving() || lighting_lamp_ring_hot()) {
+        return max(cap / 8u, 1u);
+    }
+    return 0u;
+}
+// A lamp in the change ring, ignoring the settle streak. The streak stops the
+// whole-room settle path so a lamp that never rests cannot hold that path.
+// Bounded quarters is already inside the ray budget, so the relight runs for
+// the whole note (LIGHTING_WRC_CHANGE_FRAMES).
+bool lighting_lamp_ring_hot() {
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint f = ckeys.key[LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i + 8u];
+        if (f != 0u && int(lighting_frame() - f) <= int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            return true;
+        }
+    }
+    return false;
+}
+// A ring entry whose two ends differ is a lamp that moved, not the spawn
+// note (a new lamp stores the same point twice). The still hall does not
+// keep relighting for that note. A move keeps the texels due until the
+// note expires, so the bounce can arrive.
+bool lighting_lamp_ring_moved() {
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        if (length(a - b) > LIGHTING_LAMP_STILL) {
+            return true;
+        }
+    }
+    return false;
 }
 // surface_cache.dormant_rays: whole rays per frame, 0 through 16.
 // 0 keeps one sweep in LIGHTING_SC_DORMANT.
@@ -3204,6 +3304,12 @@ uint lighting_dense_entry(uint d) {
 // per non-empty list, none of those lists drops to zero. A tighter ceiling keeps
 // the largest lists: it cannot hold one entry for every list.
 void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint g, inout uint s) {
+    // Bounded quarters trims the ray-counted lists in lighting_write_args, and
+    // keeps that order. The proportional split below would cut the texel list
+    // from the front and undo the near-cell rank.
+    if (lighting_bounded_quarters()) {
+        return;
+    }
     uint budget = lighting_sc_ray_budget();
     uint rays = (a + b + c + g + s) * LIGHTING_CACHE_RAYS;
     if (budget == 0u || rays <= budget) {
@@ -3350,7 +3456,18 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
         uint first = min(lighting_young_count(), young_room);
-        a = min(room, first + lighting_mature_count());
+        uint bcap = lighting_bounded_entry_cap();
+        if (bcap > 0u) {
+            // Cells take lighting_bounded_cell_cap: the whole budget for the
+            // first rounds and while a moved lamp's settle list is young,
+            // an eighth while the camera or a lamp note is hot, and nothing
+            // once quiet. The mature list gets what that young share leaves.
+            first = min(first, lighting_bounded_cell_cap());
+            uint mature_keep = min(lighting_mature_count(), bcap - first);
+            a = first + mature_keep;
+        } else {
+            a = min(room, first + lighting_mature_count());
+        }
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
@@ -3358,6 +3475,14 @@ void lighting_write_args() {
             + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
         s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
         g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
+        if (bcap > 0u) {
+            // a is the texel list. Trickle and the world-cell refresh take
+            // what that list leaves, so a full budget is texels first.
+            uint left = bcap - a;
+            b = min(b, left);
+            left -= b;
+            c = min(c, left);
+        }
         lighting_shadow_epochs();
         // S76D: last round's demand for fair service, and the global boost when
         // a large share of the checks since the last write escalated.
@@ -3430,6 +3555,9 @@ uint lighting_cache_batch_slot(uint j) {
         }
     }
     uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? (ckeys.key[LIGHTING_SETTLE_ROOM_AT] != 0u ? ckeys.key[LIGHTING_SETTLE_ROOM_AT] : lighting_sc_base_room() >> lighting_sc_budget_shift()) : room);
+    if (lighting_world_mode() == 3u && lighting_bounded_quarters()) {
+        first = min(first, lighting_bounded_cell_cap());
+    }
     if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
@@ -3441,6 +3569,12 @@ uint lighting_cache_batch_slot(uint j) {
     // The scheduler lists only what this round should take (from the front);
     // otherwise the sweep turns with the rounds.
     uint start = (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) ? 0u : (lighting_round() * LIGHTING_CACHE_BATCH) % count;
+    // The admitted list is one priority band. Slide the window each round so
+    // the same slots do not take every quarter while the rest of the band waits.
+    if (lighting_world_mode() == 3u && lighting_bounded_quarters() && count > 0u) {
+        uint stride = max(lighting_bounded_entry_cap(), 1u);
+        start = (lighting_round() * stride) % count;
+    }
     return ckeys.key[LIGHTING_CACHE_SLOTS + 1u + (start + k) % count];
 }
 
@@ -3577,6 +3711,30 @@ uint lighting_sc_entries(uint slot, bool full) {
     // not a per-entry scale. Under budget this count is the fixed quarter count.
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
 }
+// Admission rank when bounded_quarters is on. A higher bucket is listed first.
+// Near (under 6 m) and under the 8-set minimum: 48..63, emptier and closer
+// first. Far and under that minimum: 32..47. Refinement, already at the
+// minimum and under the cap: 16..23. A texel already at the cap while a lamp
+// is moving: 0..7, below every unfilled near texel.
+uint lighting_bounded_bucket(uint slot, float t, bool lamp_move) {
+    float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
+    float near_w = 1.0 / max(d, 0.5);
+    uint near_i = uint(clamp(floor(near_w * 4.0), 0.0, 7.0));
+    float deficit = max(lighting_coverage_sets() - floor(t), 0.0);
+    bool under = deficit > 0.5;
+    bool at_cap = floor(t) >= lighting_sc_cap(slot) - 0.5;
+    bool near = d < LIGHTING_WRC_NEAR;
+    if (under) {
+        uint def_i = uint(clamp(floor(deficit), 1.0, 8.0));
+        uint sub = near_i >> 1u;
+        uint base = near ? 48u : 32u;
+        return base + (def_i - 1u) * 2u + (sub >= 2u ? 1u : 0u);
+    }
+    if (at_cap && lamp_move) {
+        return near_i;
+    }
+    return 16u + near_i;
+}
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
 // (a quarter from up to 2 m beside it), half over the sphere and half within
 // ~50 degrees of where the camera is heading (forward, plus its motion and turn
@@ -3635,7 +3793,11 @@ const float LIGHTING_WRC_CELL_SIZE = 0.2;
 // Texels on screen in the last frames (near the camera first) join the first settle tier.
 const int LIGHTING_SETTLE_SCREEN_FRAMES = 2;
 bool lighting_wrc_lone(uint slot) {
-    return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE && lighting_lamp_settling();
+    // A moved lamp keeps the cell sample a whole hemisphere for the note, not
+    // one band of the 64-ray set. The settle streak ends before the note does.
+    bool moved = lighting_bounded_quarters() && lighting_lamp_ring_moved();
+    return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE
+        && (lighting_lamp_settling() || moved);
 }
 uint lighting_settle_turns(bool first) {
     // The first tier (WRC cells) shares the room; the rest
@@ -3711,6 +3873,11 @@ bool lighting_compact_hold_texel_rays(uint slot) {
 #ifdef GENOS_COMPOSE_NO_WALK
     return false;
 #else
+    // A moved lamp's bounce reaches past its range. Holding the far texels
+    // would freeze the old bounce. The spawn note is not a move.
+    if (lighting_bounded_quarters() && lighting_lamp_ring_moved()) {
+        return false;
+    }
     if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
     }

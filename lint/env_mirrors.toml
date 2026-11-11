@@ -313,6 +313,11 @@ kind = "todo"
 detail = "no CLI argument yet"
 
 [[var]]
+name = "GENOS_LIGHTING_BOUNDED_QUARTERS"
+kind = "mirror"
+detail = "--lighting-bounded-quarters (stress), LightingSettings key; MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_CACHE_HZ"
 kind = "mirror"
 detail = "--lighting-cache-hz (stress), LightingSettings key; MCP set_lighting_settings"
