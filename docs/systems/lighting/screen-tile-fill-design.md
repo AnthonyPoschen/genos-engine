@@ -2,7 +2,7 @@
 
 Status: **Proposed** (11 Nov 2026). Design only: no engine code, no setting, no shader changes in this PR. Nothing here is accepted until Anthony Poschen reviews it. On acceptance this becomes ADR 0044 (0042 and 0043 are taken on open branches, and 0019, 0040 and 0043 are already duplicated; check for a clash before the number is claimed).
 
-**Addendum (11 Nov, 17:03):** [screen-tile-fill-world-cache-addendum.md](screen-tile-fill-world-cache-addendum.md) makes the world cache the only store, sets the budget as a constant per-frame ray spend per preset (a pick traces a 16-ray quarter, so picks = budget / 16), and says how slanted surfaces are filled. Where it disagrees with sections 5.1, 8, 11 and 15 below, the addendum wins.
+**Addendum (11 Nov, 17:28):** [screen-tile-fill-world-cache-addendum.md](screen-tile-fill-world-cache-addendum.md) makes the world cache the only store (texels are its 12.5 cm detail, not a second store). The tile fill is an always-on single-ray scheduler with a fixed budget; priority is closeness × (remaining error + measured change). Every ray contributes the frame it lands (the 64-ray-set commit is removed). Where it disagrees with sections 5.1, 5.5, 8, 9, 11, 14 and 15 below, the addendum wins.
 
 Origin: Anthony, 11 Nov 2026: "if we did a sample per 8x8 then we could also handle neighbour sharing and every cell improves together". The weekly research note (`research/2026-11-11-weekly.md`, PR #264, not yet on this branch) found the Lumen World Cache fill as proposal (A).
 
@@ -402,8 +402,8 @@ Each stage is a separate PR under about 400 lines, one concern, a gate command, 
 |---|---|---|---|
 | F0 | Reference-first fill-curve test; presented-frame knockout test; first-hit histogram, ray-efficiency counter; #265 lag cause. No behaviour change | Tests green on the current build and red under knockout; baseline JSON committed | One baseline session |
 | F1 | CPU reference crate: pick, water-fill, deposit, resolve, share weight, gates | Unbiased plane test, leak tests, fault injections fail | No |
-| F2 | `tile_fill` off by default: pick, path, deposit, resolve; a pick traces a 16-ray quarter, `fill_budget` per preset; deposits go into the existing cells and texels (cell-targeted picks for slanted pixels); origin-only, no sharing, no virtual tiles; texel due lists untouched when off. Region 26 (F1 stamp) allocated only under the trace | Still hall near error within gate; rays <= budget; compile time; knockout red | Yes |
-| F3 | Need weights (under, stale, disagree, prox), water-filling threshold, spread-out floor, constant spend: leftover budget builds off-screen cells within `fill_radius` (virtual tiles replace scouts) | Fill curve at or better than #265 at 1M; turn, spin, walk-back and unfilled gates | Yes |
+| F2 | `tile_fill` off by default: wire the always-on single-ray scheduler into the world cache with the tunables; leftover budget goes to nearby already-claimed cells within `fill_radius`; each frame's n deposited rays fold into MSME with an n-ray weight (no 64-ray-set wait); due lists and settle unused when the flag is on; origin-only, no sharing, no virtual tiles. Region 26 (F1 stamp) allocated only under the trace | Still hall remaining near error within gate; rays = budget; compile time; knockout red | Yes |
+| F3 | Priority from closeness × (remaining error + measured change), water-filling, check rays at `fill_check_rate`; virtual tiles replace scouts and can claim new cells within `fill_radius` | Remaining near error; turn, spin, walk-back and unfilled gates | Yes |
 | F4a | In-tile sharing with all gates, entering as a low-confidence seed (no `shared_count` field) | Leak test within 2%, blotch/correlation within noise, fill curve faster than F3 | Yes |
 | F4b | Ring sharing (only if F4a gains) | Same | Yes |
 | F5 | Path vertices (up to 3 bounces, backward deposit) only if lamp-move lag needs it | Lamp-move lag gate; no energy gain beyond reference | Yes |
