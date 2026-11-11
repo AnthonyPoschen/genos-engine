@@ -12,6 +12,7 @@
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
 const float FILL_TINY = 1.0e-4;
+const float FILL_REAL_CAP = 1.0e20;
 const float FILL_TWO = 2.0;
 const float FILL_GOLDEN = 2.3999631;
 const float FILL_VIEW_EPS = 0.05;
@@ -189,7 +190,7 @@ float lighting_fill_unit(float v) {
 
 // Infinity compares equal to itself, so `x == x` does not reject it.
 bool lighting_fill_real(float v) {
-    return v == v && v <= 1.0e20 && v >= -1.0e20;
+    return v == v && abs(v) <= FILL_REAL_CAP;
 }
 
 uint lighting_fill_seed(uint slot) {
