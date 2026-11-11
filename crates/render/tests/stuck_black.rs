@@ -1,3 +1,6 @@
+#![expect(clippy::expect_used, reason = "a test aborts when a shader function is missing")]
+#![expect(clippy::panic, reason = "a test aborts when a shader function is missing")]
+
 //! A zero mean is not evidence that a world-cache cell is populated.
 //!
 //! Eight all-zero sets used to pass `se < 0.05 * mean + 1e-4` and the
@@ -64,7 +67,7 @@ fn eight_zero_sets_are_not_resolved() {
     assert!(!noise.contains("max(lum, 1.0e-3)"));
 
     let settled = function_body(cache, "bool lighting_sc_settled(uint slot, float t)");
-    assert!(settled.contains("floor(t) < reach - 0.5"));
+    assert!(settled.contains("floor(t) < reach - LIGHTING_SC_HALF"));
 
     let compact = include_str!("../shaders/lighting_compact.comp");
     assert!(compact.contains(
@@ -82,7 +85,7 @@ fn eight_zero_sets_are_not_resolved() {
 
     let hold = function_body(cache, "bool lighting_compact_hold_texel_rays(uint slot)");
     assert!(hold.contains(
-        "floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - 0.5"
+        "floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - LIGHTING_SC_HALF"
     ));
     assert!(hold.contains("lighting_sh_blend_trust < 1.0"));
 
@@ -121,7 +124,7 @@ fn eight_zero_sets_are_not_resolved() {
     let pop = function_body(cache, "vec4 lighting_sc_debug_population(vec3 pos, vec3 n)");
     assert!(pop.contains("lighting_sc_seed(s)"), "the record keeps the seed apart from the mean");
     assert!(pop.contains("3u * s + 2u"), "the record reads the own-sample count");
-    assert!(pop.contains("scene_inside(tp + tn * 0.02)"), "the record flags a ray origin inside geometry");
+    assert!(pop.contains("scene_inside(tp + tn * origin_m)"), "the record flags a ray origin inside geometry");
     let compose = include_str!("../shaders/lighting_compose.comp");
     let sun = include_str!("../shaders/lighting_sun_compose.comp");
     for src in [compose, sun] {
