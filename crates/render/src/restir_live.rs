@@ -547,6 +547,18 @@ mod tests {
             Some(0b010),
             "only lamp 1 moved"
         );
+        assert_eq!(
+            at(&packed.words, 39),
+            1,
+            "a position-only move sets word 39"
+        );
+        let still = prefix(&before, &before, &RestirCam::default(), 1, 0, cost)
+            .unwrap_or_else(|| panic!("prefix"));
+        assert_eq!(
+            at(&still.words, 39),
+            0,
+            "a still lamp leaves word 39 clear"
+        );
         let fewer = [lamp(0.0), lamp(2.0)];
         let cost = super::RestirCost {
             width: 8,

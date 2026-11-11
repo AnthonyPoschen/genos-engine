@@ -73,7 +73,7 @@ Findings:
 
 5. **Overflow behaviour (table full, `missed > 0`):**
    - Eviction is by priority, not first-come. A claim that finds no free slot in its 16-slot window may take the window's lowest-priority slot. Priority is a mix of how recently the slot was shown (`shown` frame), its distance to the camera, and how converged it is (sets). Near-camera, on-screen and young slots are never evicted for far ones. That way, errors near the camera are weighted the most.
-   - No pops or flicker. An evicted slot is not shown cold. The new patch starts from the screen probe or irradiance fallback that unclaimed lookups already use today, and blends in over its normal set count. The old patch simply stops being read. Far, off-screen patches go first, so the change is not visible.
+   - No pops or flicker. An evicted slot is not shown cold. The new patch starts from the parent cell or the SH irradiance an unclaimed lookup already uses, and blends in over its normal set count. The old patch simply stops being read. Far, off-screen patches go first, so the change is not visible.
    - Lifetime pressure. When `missed` stays above 0.1% of lookups for 60 frames, the effective `LIGHTING_CACHE_LIFE` halves, with 300 frames as the lowest it goes. It recovers once misses stay at 0 for 600 frames. This trims stale patches before eviction is needed.
    - A sustained miss rate (> 1% for 5 s) is reported to auto-tune as "cache undersized". Auto-tune may raise the count within the VRAM budget. That counts as a resize (point 6).
 

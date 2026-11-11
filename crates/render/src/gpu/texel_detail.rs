@@ -100,9 +100,12 @@ fn plant_file(kind: &str) -> std::path::PathBuf {
 }
 
 fn ckeys_bytes() -> u64 {
-    // The parity block writes a lattice record. The table sits past the
-    // screen list, so the fixture buffer is the production key allocation.
-    super::lighting_sh_keys_words() * 4
+    // Through the lattice and the two election words, then the seed payload.
+    // Production is the same formula with the frame's pixel count
+    // (`lighting_gpu`). This dispatch is 1x1 (`dims` in the push constant),
+    // and a published corner writes eight words at pixel 0.
+    const PIXELS: u64 = 1;
+    (super::lighting_sh_keys_words() + PIXELS * 8) * 4
 }
 
 impl Gpu {

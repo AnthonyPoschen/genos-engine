@@ -113,7 +113,7 @@ make lighting SCENE=sponza
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
-(the existing texels view: slots with fewer than four sets stay dim),
+(the existing texels view: own-mean luma, seed luma, and set count),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
 `--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).

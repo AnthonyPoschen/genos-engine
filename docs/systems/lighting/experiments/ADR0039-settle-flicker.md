@@ -53,7 +53,7 @@ The held picture is exact zero on both paths. The step's mean luminance change s
 
 Through the flickering windows (about frames 3–120) the on path still evaluates 13747 probes and skips 361. Ray-cut holds stay 0. Relight stays about 41k texels and about 1.0M rays, matching the legacy path (evaluate 14108, skip 0). Wavelet dirty stays 0.0000 and the mode stays `screen`.
 
-Holds start at frame 123 (`diag[38]` 530, `diag[39]` 33920), which is the same frame the full-screen probe evaluate collapses. By frame 200 evaluate is 0 and the picture delta is already 0, with about 1170 texels held. The camera step (frame 272) brings evaluate back to 12621 for one frame (skip 1611) while about 1070 texels stay held, then holds rise to about 1600 and about 90k rays. The wavelet stays `screen`.
+Holds start at frame 123 (`diag[38]` 530, `diag[39]` 33920), which is the same frame the evaluate across the whole picture collapses. By frame 200 evaluate is 0 and the picture delta is already 0, with about 1170 texels held. The camera step (frame 272) brings evaluate back to 12621 for one frame (skip 1611) while about 1070 texels stay held, then holds rise to about 1600 and about 90k rays. The wavelet stays `screen`.
 
 ## Which term moves
 

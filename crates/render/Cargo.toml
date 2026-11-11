@@ -7,6 +7,11 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+# Test-only. Named production guards stay on unless GENOS_KNOCKOUT lists them.
+knockout = []
+
 [dependencies]
 genos-load = { path = "../load" }
 genos-bake = { path = "../bake" }

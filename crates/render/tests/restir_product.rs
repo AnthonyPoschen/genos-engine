@@ -124,13 +124,16 @@ fn names(renderer: &Renderer) -> Vec<String> {
 }
 
 #[test]
-fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
+fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     // Wiring lock for the constants and the counter words. Source text is
     // not SPIR-V, and it does not grade a pixel. `turn_reprojection` grades
     // the CPU mirror of the live policy. The product draw below shows the
     // counters move. Neither is a per-pixel depth or normal threshold.
+    // The picture is the cumulative mean of the unbiased sample. It is not
+    // the raw sample, and it is not the exact-sum mean the review rejected.
     let live = include_str!("../shaders/restir_live.comp");
     let direct = include_str!("../shaders/lighting_direct.comp");
+    let pick = include_str!("../shaders/lighting_lamp_pick.glsl");
     assert!(live.contains("const float RESTIR_DEPTH_REL = 0.02;"));
     assert!(live.contains("const float RESTIR_DEPTH_ABS = 0.05;"));
     assert!(live.contains("const float RESTIR_NORMAL_MIN = 0.9;"));
@@ -144,7 +147,10 @@ fn restir_live_keeps_the_product_history_test_and_the_raw_sample() {
     assert!(!direct.contains("atomicAdd(gstats.diag[13u], 1u);"));
     assert!(!direct.contains("e = e_exact + e_mean"));
     assert!(!direct.contains("e = e_mean"));
-    assert!(direct.contains("sample is the graded colour"));
+    assert!(direct.contains("The graded colour is the mean of the unbiased sample"));
+    assert!(direct.contains("mean_prev >= RESTIR_MEAN_CAP"));
+    assert!(direct.contains("restir_words[39u] == 0u"));
+    assert!(pick.contains("const uint RESTIR_MEAN_CAP = 4096u;"));
 }
 
 fn assert_quiet(counts: &LampPickCounts, what: &str) {

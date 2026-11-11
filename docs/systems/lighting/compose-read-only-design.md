@@ -1,6 +1,6 @@
 # Read-only compose: removing the High quit stall (#142)
 
-Status: the separate maintenance pipeline was removed. Compose writes the surface cache again (specialization constant 0 on) so startup builds one compose pipeline. The NVIDIA compile cost this split was measured to avoid is open again.
+Status: the separate maintenance pipeline was removed. Compose writes the surface cache again (specialization constant 0 on) so startup builds one compose pipeline. The 4070 withdrew the compile cost this split was measured to avoid: a cold compile of about 12.9 s against about 30.9 s on lighting-v3, and exit of about 1.5 s against about 20 s.
 
 ## Problem
 

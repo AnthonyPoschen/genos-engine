@@ -40,6 +40,17 @@ use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// The process is about to `_exit`. A [`Lifecycle`] drop then skips
+/// `vkDestroyDevice` and `vkDestroyInstance`, same as [`Lifecycle::quit`].
+static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// Arm every later lifecycle drop in this process to leave the driver
+/// teardown for process exit. Call this from a binary whose `main` ends in
+/// [`exit`]. In-process tests do not, so a drop there still destroys the device.
+pub fn release_driver_on_process_exit() {
+    RELEASE_DRIVER_ON_EXIT.store(true, Ordering::Relaxed);
+}
+
 use crate::{Window, PUMP_BUDGET};
 
 /// The process is about to `_exit`. A [`Lifecycle`] drop then skips

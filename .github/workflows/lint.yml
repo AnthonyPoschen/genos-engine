@@ -104,9 +104,13 @@ jobs:
           export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
           # GPU picture/reference integration tests in render, stress and debug
           # take far too long on lavapipe; run only their unit tests here.
-          gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug"
+          # restir-ref's live estimator is the same loops in release below:
+          # debug does not finish them before this job's timeout, and the
+          # frame counts and the 2% tolerance stay as written.
+          gpu="--exclude genos-render --exclude genos-stress --exclude genos-debug --exclude genos-restir-ref"
           # lifecycle_quit needs the built windowed binaries; the quit-gap job runs it.
           cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1 --skip every_binary_answers_pings_while_it_quits
+          cargo test --locked --release -p genos-restir-ref --no-fail-fast -- --test-threads=1
           cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
           # Integration tests in those crates that never open a device: CPU
           # references, shader-source lints and CPU-side packing checks.
@@ -115,3 +119,15 @@ jobs:
             -p genos-render --test gpu_budget --test shader_loops --test particle_resident \
             -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
             -- --test-threads=1
+
+  fill-knockout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+      - name: presented-frame fill gate, passes and goes red with cache_fill knocked out
+        run: ./scripts/ci-fill-knockout.sh
