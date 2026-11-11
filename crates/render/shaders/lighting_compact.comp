@@ -137,15 +137,15 @@ void main() {
             float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
             if (d < LIGHTING_WRC_NEAR) {
                 atomicAdd(gstats.diag[11], 1u);
-                if (t >= lighting_sc_cap(slot) - 0.5) {
+                if (t >= lighting_sc_cap(slot) - LIGHTING_SC_SET_EDGE) {
                     atomicAdd(gstats.diag[12], 1u);
                 }
             }
             if (lighting_coverage_first()) {
                 float wt = 1.0 / (1.0 + d);
-                atomicAdd(gstats.diag[8], uint(wt * 1000.0 + 0.5));
-                atomicAdd(gstats.diag[9], uint(t * wt * 1000.0 + 0.5));
-                if (t < lighting_coverage_sets() - 0.5) {
+                atomicAdd(gstats.diag[8], uint(wt * LIGHTING_SC_DIAG_SCALE + LIGHTING_SC_SET_EDGE));
+                atomicAdd(gstats.diag[9], uint(t * wt * LIGHTING_SC_DIAG_SCALE + LIGHTING_SC_SET_EDGE));
+                if (t < lighting_coverage_sets() - LIGHTING_SC_SET_EDGE) {
                     atomicAdd(gstats.diag[10], 1u);
                 }
             }
@@ -182,11 +182,11 @@ void main() {
             if (lighting_coverage_first() && !wrc) {
                 // Under the minimum: one quarter, not a whole 64-ray set.
                 // At the minimum while coverage is short: yield this round.
-                if (lighting_coverage_hold() && t >= lighting_coverage_sets() - 0.5 && !near) {
+                if (lighting_coverage_hold() && t >= lighting_coverage_sets() - LIGHTING_SC_SET_EDGE && !near) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
-                if (t < lighting_coverage_sets() - 0.5) {
+                if (t < lighting_coverage_sets() - LIGHTING_SC_SET_EDGE) {
                     ms = 1u;
                 }
             }
@@ -338,7 +338,7 @@ void main() {
             // since the last stamp is not "touched", and the light reads as
             // quiet, so this return would freeze the mean before the bounce
             // arrives. Bounded quarters keeps it due for the whole note.
-            if (!wrc && t >= lighting_sc_cap(slot) - 0.5 && !near
+            if (!wrc && t >= lighting_sc_cap(slot) - LIGHTING_SC_SET_EDGE && !near
                 && lighting_sc_light_quiet()
                 && !lighting_sc_stale(slot)
                 && !lighting_sc_lamp_touched(slot)
@@ -418,7 +418,7 @@ void main() {
             // changes) would leave the old lamp in the picture. The bucket
             // order is the queue.
             bool open_quarter = lighting_bounded_quarters() && !wrc
-                && (lighting_sc_quarter0(slot) > 0u || t < lighting_coverage_sets() - 0.5 || lamp_due);
+                && (lighting_sc_quarter0(slot) > 0u || t < lighting_coverage_sets() - LIGHTING_SC_SET_EDGE || lamp_due);
             // S72V11: per record, while the global light since its relight has
             // changed by less than LIGHTING_IC_GLOBAL_STALE (S72V9 required the
             // whole frame quiet, which a running sun never is: the still smoke
@@ -446,7 +446,7 @@ void main() {
                 // S72K: a smooth bar across pages (lighting_sc_page_bar); edge
                 // (promoted) texels are held per texel only, not to the pages.
                 float pm = lighting_sc_promoted(slot) ? -1.0 : lighting_sc_page_bar(slot);
-                if (!open_quarter && pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < lighting_sc_cap(slot) - 0.5) {
+                if (!open_quarter && pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < lighting_sc_cap(slot) - LIGHTING_SC_SET_EDGE) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
@@ -534,13 +534,13 @@ void main() {
             }
             // coverage_first: texels under the coverage minimum go on the young list, one quarter
             // each. Texels already at 8 wait while any on-screen texel is short.
-            if (lighting_coverage_first() && !lighting_bounded_quarters() && !wrc && t < lighting_coverage_sets() - 0.5) {
+            if (lighting_coverage_first() && !lighting_bounded_quarters() && !wrc && t < lighting_coverage_sets() - LIGHTING_SC_SET_EDGE) {
                 atomicAdd(gstats.due, 1u);
                 uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], 1u);
                 ckeys.key[2u * LIGHTING_CACHE_SLOTS - at] = slot;
                 return;
             }
-            if (lighting_coverage_hold() && !lighting_bounded_quarters() && !wrc && t >= lighting_coverage_sets() - 0.5 && !near) {
+            if (lighting_coverage_hold() && !lighting_bounded_quarters() && !wrc && t >= lighting_coverage_sets() - LIGHTING_SC_SET_EDGE && !near) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -599,10 +599,10 @@ void main() {
         if (lighting_bounded_quarters() && !wrc) {
             m = 1u;
         }
-        if (lighting_coverage_first() && !lighting_bounded_quarters() && !wrc && t < lighting_coverage_sets() - 0.5) {
+        if (lighting_coverage_first() && !lighting_bounded_quarters() && !wrc && t < lighting_coverage_sets() - LIGHTING_SC_SET_EDGE) {
             m = 1u;
         }
-        if (lighting_coverage_hold() && !lighting_bounded_quarters() && !wrc && !near && t >= lighting_coverage_sets() - 0.5) {
+        if (lighting_coverage_hold() && !lighting_bounded_quarters() && !wrc && !near && t >= lighting_coverage_sets() - LIGHTING_SC_SET_EDGE) {
             atomicAdd(gstats.waiting, 1u);
             return;
         }

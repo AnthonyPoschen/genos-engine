@@ -3054,9 +3054,16 @@ bool lighting_bounded_quarters() {
 float lighting_coverage_sets() {
     return min(LIGHTING_DN_MIN_SETS, max(lighting_world_cap(), 1.0));
 }
+// Twice the coverage minimum, and never more sets than the cap. The 2 stays
+// on the const line: the shader-constant lint counts a bare fraction.
+const float LIGHTING_COVERAGE_BAR_SETS = 2.0;
 float lighting_coverage_bar() {
-    return min(2.0 * lighting_coverage_sets(), max(lighting_world_cap(), 1.0));
+    return min(LIGHTING_COVERAGE_BAR_SETS * lighting_coverage_sets(), max(lighting_world_cap(), 1.0));
 }
+// Half a stored set. A count that has landed on an integer compares through
+// this edge. The diag scale is the fixed point of the coverage mean.
+const float LIGHTING_SC_SET_EDGE = 0.5;
+const float LIGHTING_SC_DIAG_SCALE = 1000.0;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
 // the listing's 0.1 floor and still clamps. The hold path does not read this.
@@ -3095,16 +3102,21 @@ uint lighting_bounded_entry_cap() {
 }
 // The eye or the view moved since the change head was stored. A still camera
 // stays false, so a quiet frame does not keep a cell share of the budget.
+// The thresholds match the scout test. They live on const lines.
+const float LIGHTING_VIEW_EYE_READY = 0.5;
+const float LIGHTING_VIEW_EYE_STEP = 0.01;
+const float LIGHTING_VIEW_FWD_EPS = 1.0e-6;
+const float LIGHTING_VIEW_FWD_DOT = 0.9999;
 bool lighting_view_moving() {
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    if (last_eye.w < 0.5) {
+    if (last_eye.w < LIGHTING_VIEW_EYE_READY) {
         return true;
     }
-    if (length(scene.eye.xyz - last_eye.xyz) > 0.01) {
+    if (length(scene.eye.xyz - last_eye.xyz) > LIGHTING_VIEW_EYE_STEP) {
         return true;
     }
-    return dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
+    return dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, LIGHTING_VIEW_FWD_EPS, 0.0))) < LIGHTING_VIEW_FWD_DOT;
 }
 // World cells carry the bounce a fine texel samples. The first rounds give
 // them the whole budget, so the texels' 8 sets are not stored against an
@@ -3600,7 +3612,7 @@ bool lighting_sc_settled(uint slot, float t) {
     // full even when the estimator is still noisy: another set is not allowed,
     // so the noise is not a reason to stay due.
     float cap = lighting_sc_cap(slot);
-    if (floor(t) >= cap - 0.5) {
+    if (floor(t) >= cap - LIGHTING_SC_SET_EDGE) {
         return true;
     }
     // cap_fill (default off) turns the perceptual stop off, so a higher
@@ -3662,7 +3674,7 @@ uint lighting_sc_interval(uint slot, float t) {
     // At the cap, leftover inconsistency is the noise the cap chose to keep.
     // It does not shorten the interval. The compact pass does not list a
     // quiet texel at the cap at all.
-    if (floor(t) >= lighting_sc_cap(slot) - 0.5 && lighting_sc_light_quiet() && !lighting_sc_stale(slot)) {
+    if (floor(t) >= lighting_sc_cap(slot) - LIGHTING_SC_SET_EDGE && lighting_sc_light_quiet() && !lighting_sc_stale(slot)) {
         return uint(LIGHTING_SC_RATE_DORMANT);
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
@@ -3703,16 +3715,20 @@ uint lighting_sc_entries(uint slot, bool full) {
 // first. Far and under that minimum: 32..47. Refinement, already at the
 // minimum and under the cap: 16..23. A texel already at the cap while a lamp
 // is moving: 0..7, below every unfilled near texel.
+const float LIGHTING_BQ_NEAR_FLOOR = 0.5;
+const float LIGHTING_BQ_NEAR_SCALE = 4.0;
+const float LIGHTING_BQ_NEAR_TOP = 7.0;
+const float LIGHTING_BQ_DEFICIT_MAX = 8.0;
 uint lighting_bounded_bucket(uint slot, float t, bool lamp_move) {
     float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
-    float near_w = 1.0 / max(d, 0.5);
-    uint near_i = uint(clamp(floor(near_w * 4.0), 0.0, 7.0));
+    float near_w = 1.0 / max(d, LIGHTING_BQ_NEAR_FLOOR);
+    uint near_i = uint(clamp(floor(near_w * LIGHTING_BQ_NEAR_SCALE), 0.0, LIGHTING_BQ_NEAR_TOP));
     float deficit = max(lighting_coverage_sets() - floor(t), 0.0);
-    bool under = deficit > 0.5;
-    bool at_cap = floor(t) >= lighting_sc_cap(slot) - 0.5;
+    bool under = deficit > LIGHTING_SC_SET_EDGE;
+    bool at_cap = floor(t) >= lighting_sc_cap(slot) - LIGHTING_SC_SET_EDGE;
     bool near = d < LIGHTING_WRC_NEAR;
     if (under) {
-        uint def_i = uint(clamp(floor(deficit), 1.0, 8.0));
+        uint def_i = uint(clamp(floor(deficit), 1.0, LIGHTING_BQ_DEFICIT_MAX));
         uint sub = near_i >> 1u;
         uint base = near ? 48u : 32u;
         return base + (def_i - 1u) * 2u + (sub >= 2u ? 1u : 0u);
