@@ -120,6 +120,10 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("lighting_round() & (guard - 1u)"),
         "off-screen checks must rotate through the slot table"
     );
+    assert!(
+        fill.contains("lighting_fill_real"),
+        "an infinite check luma must not be stored or raise lambda"
+    );
     let pick = source("lighting_lamp_pick.glsl");
     assert!(
         pick.contains("lighting_fill_check_u"),
