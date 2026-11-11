@@ -246,7 +246,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
   --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
                             freeze_probes, cells_only, none (GENOS_LIGHTING_TOGGLES)
-  --lighting-probe-tile N   screen probe tile pixels, 4..64, 0 auto (GENOS_LIGHTING_TILE)
+  --lighting-probe-tile N   deprecated alias, pixels 4..64, 0 auto (GENOS_LIGHTING_TILE)
   --lighting-denoise-dirty F  a-trous work-list fraction, 0..1 (GENOS_LIGHTING_ATROUS_DIRTY)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)

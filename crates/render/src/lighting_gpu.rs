@@ -40,8 +40,15 @@ const LIGHTING_CACHE_RAYS: u32 = 16;
 /// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
 /// or fp32 (48 B). lighting_cache_slots.glsl `LIGHTING_SH_HALF` has the same value.
 const LIGHTING_SH_HALF: bool = true;
-/// Cache bytes a slot: 23 vec4 regions plus the SH-L1 (1.5 vec4 at fp16, 3 at fp32).
-const LIGHTING_CACHE_SLOT_BYTES: u64 = 368 + if LIGHTING_SH_HALF { 24 } else { 48 };
+/// Cache bytes a slot: 23 vec4 regions, the SH-L1 (1.5 vec4 at fp16, 3 at
+/// fp32), padding so the shown-age word is region 26 in both layouts, then
+/// that word. Compose does not read the age. It must not share region 23
+/// with the SH.
+const LIGHTING_CACHE_SLOT_BYTES: u64 = {
+    let sh = if LIGHTING_SH_HALF { 24 } else { 48 };
+    let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+    23 * 16 + sh + pad + 16
+};
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
@@ -1126,6 +1133,20 @@ impl Gpu {
             check(result, what)?;
         }
         Ok(pipeline)
+    }
+
+    /// Size the first buffers from the process launch, not from the High default.
+    ///
+    /// Device creation runs before a scene exists. The High default would
+    /// allocate the million-slot cache and free it once the launch preset is
+    /// potato. lavapipe keeps those pages until `vkDestroyDevice`, and that
+    /// release misses the quit budget. `--preset` wins over
+    /// `GENOS_LIGHTING_PRESET`.
+    pub(crate) fn apply_launch_preset(&mut self) -> Result<(), String> {
+        let mut launch = genos_scene::LightingSettings::default();
+        launch.apply_env()?;
+        self.lighting.settings = launch;
+        Ok(())
     }
 
     /// Size the G-buffer, work and output buffers for the picture and point every
@@ -2315,6 +2336,8 @@ impl Gpu {
                     "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
+                let hist = crate::shown_age::AgeHist::from_diag(&w[24..88]);
+                eprintln!("{}", crate::shown_age::line(queue, self.lighting.frame, &hist));
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
@@ -3830,9 +3853,9 @@ impl Gpu {
         }
         self.lighting.stats_still[slot] = self.lighting.still;
         self.lighting.last_slot = slot;
-        // What moved in the traced world since the last frame: the probes drop the
-        // kept rays that cross it (lighting_gather.comp). Light needs nothing here: every
-        // kept hit is shaded again each frame.
+        // Bounds of what moved in the traced world since the last frame.
+        // A cache ray drops a stratum that crosses a mover. Direct light shades
+        // its samples again each frame, so it does not read this list.
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -5003,7 +5026,14 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
         cap => cap,
     }
     .clamp(1, 999);
-    let toggles = settings.experiments.toggles;
+    let mut toggles = settings.experiments.toggles;
+    // Test-only. A shipping build's guard is always on, so this bit stays
+    // whatever the settings asked for. The knockout feature with
+    // GENOS_KNOCKOUT=cache_fill freezes cache value writes. The dispatches
+    // stay: dropping them faults lavapipe.
+    if !crate::gate::guard(crate::gate::CACHE_FILL) {
+        toggles |= genos_scene::LIGHTING_TOGGLE_FREEZE_CACHE;
+    }
     const GI_ESTIMATOR: u32 = 1 << 20;
     const SURFACE_CACHE_HOLD: u32 = 1 << 30;
     const SH_CELLS: u32 = 1 << 23;
@@ -5923,8 +5953,10 @@ mod sh_knob_tests {
             .find(|l| l.starts_with("const bool LIGHTING_SH_HALF"))
             .expect("LIGHTING_SH_HALF in lighting_cache_slots.glsl");
         assert_eq!(line.contains("true"), LIGHTING_SH_HALF, "{line}");
-        let sh_bytes = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
-        assert_eq!(sh_bytes, if LIGHTING_SH_HALF { 24 } else { 48 });
+        let tail = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
+        let sh_bytes = if LIGHTING_SH_HALF { 24 } else { 48 };
+        let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+        assert_eq!(tail, sh_bytes + pad + 16);
         let rays = glsl
             .lines()
             .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))

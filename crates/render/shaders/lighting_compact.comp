@@ -222,6 +222,9 @@ void main() {
             if (lighting_sc_expired(last, shown)) {
                 atomicAdd(gstats.freed, 1u);
                 ckeys.key[slot] = 0u;
+                // The offer word is not cleared by apply. A later claim of this
+                // slot would atomicMin against the previous surface.
+                lighting_sc_forget(slot);
                 cache.v[3u * slot + 1u] = vec4(0.0);
                 cache.v[3u * slot + 2u] = vec4(0.0);
             }

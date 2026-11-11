@@ -141,7 +141,7 @@ Role: STORE · Literature: Lumen WRC (SH per probe); DDGI irradiance (octahedral
 **SH texel detail**: (ADR 0039 stage 3, `surface_cache.sh_texel_detail`, on for High and Medium) an empty fine world texel takes its first light from the trilinear neighbour read of the 25 cm SH cells at the texel's true normal. The value is a low-confidence seed, not an own sample. The detail mark is a negative confidence. Parent, resample, hit, and probe seeds stay positive. Sun word z is the quarter sun scratch and is not this mark. Compose drops a marked seed whose neighbour read is empty on every `lighting_sc_seed` return, including the default High denoise path. That drop does not depend on the write-path lamp clear. The stored magnitude stays, so a read-only compose still refuses to resample over it, and a coarse miss keeps the fine world colour. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. The read does not write the cell. An empty fine texel this setting covers does not take resample or the hit patch, even when the neighbour read accepts nothing. The probe seed still runs for that miss, so a rejected cell is not copied back in as a seed. Those two stay when the texel is not a detail candidate, including when SH cells are on and this setting is off. The compose parent walk is gone. Ray hits still call `lighting_sc_parent`. A mover is not seeded. With this setting on, a mover pixel shows the same world-cell read at its current world position and true normal. That read does not allocate, does not stamp (`claim` false), and does not write a world texel or an object texel. Coverage is the read accepting a corner, so a covered mover does not read screen-probe irradiance. A rejected read, an empty slant, and a detail-off mover mix a found coarser world-cache cell by trust. A coarse miss keeps the fine world colour. A slanted pixel returns the cell read and does not run those writers. Screen-probe place, trace, gather, and filter are removed. Requires `surface_cache.sh_cells`.
 Role: STORE · Literature: Lumen card seeded from the world radiance cache · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
 
-**SH texel ray cut**: (ADR 0039 stage 4, `surface_cache.sh_texel_ray_cut`, on for High and Medium) a fine world texel skips its own rays when the live 25 cm neighbour read is complete and the accepted corners agree within the sparse luminance ratio. The texel's own samples, when it has any, are compared with that live read. The stored seed is not. A world cell is not skipped, and the read does not write the cell. A lamp change that reaches the texel since it was sampled is a miss: the sparse ratio stays true across a small dim, so the texel keeps its rays until that ring entry expires. A noted lamp takes the new set whole. The drain flag is not a note, so a still texel keeps its blend. Compose skips the probe evaluate for a covered pixel during that settle. The picture stays one estimate: the filtered field when it is stored, and the neighbour read when it is not. A quiet stored field moves toward a later filter target by a sixteenth on each push and reaches it. A lamp that left (`lighting_lamp_keep` is 0) takes that target on the push. There is no hold. An empty texel still shows the neighbour read. Requires `surface_cache.sh_texel_detail`. The comparison is Rec.709 luminance within that existing ratio. It is not an RGB match and it is not a match of the whole SH field.
+**SH texel ray cut**: (ADR 0039 stage 4, `surface_cache.sh_texel_ray_cut`, on for High and Medium) a fine world texel skips its own rays when the live 25 cm neighbour read is complete and the accepted corners agree within the sparse luminance ratio. The texel's own samples, when it has any, are compared with that live read. The stored seed is not. A world cell is not skipped, and the read does not write the cell. A lamp change that reaches the texel since it was sampled is a miss: the sparse ratio stays true across a small dim, so the texel keeps its rays until that ring entry expires. A noted lamp takes the new set whole. The drain flag is not a note, so a still texel keeps its blend. Compose skips the probe evaluate for a covered pixel during that settle. The picture stays one estimate: the filtered field when it is stored, and the neighbour read when it is not. A quiet stored field moves toward a later filter target by a sixteenth on each push and reaches it. A lamp that left (`lighting_lamp_keep` is 0) takes that target on the push. A stored field the filter has left by the sparse luminance ratio takes that target on the push as well, and the first stored field marks the blocks that read the texel. There is no hold. An empty texel still shows the neighbour read. Requires `surface_cache.sh_texel_detail`. The comparison is Rec.709 luminance within that existing ratio. It is not an RGB match and it is not a match of the whole SH field.
 Role: SCHED · Literature: Lumen final gather where the world cache already agrees · More detail: ADR 0039 stage 4, `docs/systems/lighting/adr-0039-remaining.md`
 
 **SH probe retire**: (`surface_cache.sh_probe_retire`) a deprecated alias. Screen-probe passes are removed, so the key parses, warns once, and does not schedule a pass. Indirect light is the SH-L1 world cache, with texel detail as a one-way seed.
@@ -427,6 +427,32 @@ Role: SCHED · Literature: `VK_EXT_memory_budget` heapBudget · More detail: [..
 
 **Dwell**: frames a mip that just became resident cannot be evicted, unless usage is over `heapBudget`.
 Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
+
+### Tile fill
+
+**Tile fill**: choosing screen tiles and tracing paths into the surface cache from the pixels that need samples. Off unless `fill-ref --tile-fill on`. The live cache does not run it yet.
+Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Pick**: one path from one pixel in a tile. The pixel is drawn by need, not uniformly.
+Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill budget**: the ray ceiling for a frame. It is a ceiling, not a target. The default in the checker is 1,000,000.
+Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+
+**Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
+Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
+
+**Shared sample**: a hit reconnected to a neighbour cell with the Jacobian weight. It never increments `own_count`.
+Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
+Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
+
+**Virtual tile**: an off-screen direction that stands in for a pixel so the same need applies behind the camera. The checker does not trace them; stage F3 does.
+Role: SCHED · Literature: the engine's scout rays · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
+
+**Need**: `prox * max(under, stale, disagree)`. It is how a pixel asks for picks.
+Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
 
 ### Historical (do not reuse)
 

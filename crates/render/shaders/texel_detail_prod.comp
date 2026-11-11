@@ -1041,6 +1041,12 @@ void main() {
         prod_head(variant);
         prod_lamp_clear();
         gstats.ctrl_bits = id == 7u ? 0u : PROD_DENOISE;
+        // Bit 2 is lighting_gi_on. The seed election publishes only when it is
+        // set, which production compose does. PROD_DENOISE alone leaves it off,
+        // so a hit fill would elect nothing. This row is the detail-off hit.
+        if (id == 22u) {
+            gstats.ctrl_bits |= 4u;
+        }
         if (id == PROD_MOTION_AT) {
             prod_motion();
             continue;
@@ -1103,6 +1109,11 @@ void main() {
         float own = 0.0;
         vec3 seed_rgb = vec3(0.0);
         if (texel != ~0u) {
+            // Compose elects a hit or resample seed. Compact
+            // (`lighting_sc_seed_apply`) is the writer, and this dispatch does
+            // not run that pass. Apply the slot, then read the store. With GI
+            // off the election stays empty and apply does nothing.
+            lighting_sc_seed_apply(texel);
             vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + texel];
             conf = abs(sp.z);
             own = cache.v[3u * texel + 2u].w;
