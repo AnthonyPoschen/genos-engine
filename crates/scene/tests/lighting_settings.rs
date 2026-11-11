@@ -700,9 +700,13 @@ fn fill_budgets_follow_the_preset_and_round_trip() {
     assert_eq!(high.surface_cache.fill.warmup_rays, 16);
     assert_eq!(high.surface_cache.fill.check_rate, 9);
     assert_eq!(high.surface_cache.fill.max_picks, 4);
-    assert_eq!(high.surface_cache.fill.share, 1);
+    assert_eq!(high.surface_cache.fill.share, 0);
     assert_eq!(high.surface_cache.fill.share_cap, 32);
     assert_eq!(high.surface_cache.fill.share_receivers, 3);
+    assert_eq!(
+        high.surface_cache.fill.share_handover,
+        high.surface_cache.fill.warmup_rays
+    );
     assert!((high.surface_cache.fill.share_min_hit - 2.0).abs() < 1.0e-4);
     assert!((high.surface_cache.fill.share_conf - 0.25).abs() < 1.0e-4);
     let medium = LightingSettings::preset(LightingPreset::Medium);

@@ -70,6 +70,7 @@ GI | world | World cache | closed | lighting_fill_share_w_cap
 GI | world | World cache | closed | lighting_fill_share_cos
 GI | world | World cache | closed | lighting_fill_share_conf
 GI | world | World cache | closed | lighting_fill_share_receivers
+GI | world | World cache | closed | lighting_fill_share_handover
 GI | world | World cache | closed | lighting_screen_verify
 GI | world | World cache | closed | lighting_world_verify
 Denoise | - | - | open | lighting_denoise_iters

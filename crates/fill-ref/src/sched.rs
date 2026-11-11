@@ -102,6 +102,8 @@ pub struct Tunables {
     pub share_conf: f32,
     /// Distinct cells in the tile one sample may seed.
     pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High matches warmup.
+    pub share_handover: u32,
 }
 
 impl Tunables {
@@ -130,7 +132,7 @@ impl Tunables {
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
-            share: 1,
+            share: 0,
             share_min_hit: 2.0,
             share_cap: 32,
             share_plane: 0.02,
@@ -139,6 +141,7 @@ impl Tunables {
             share_cos: 0.05,
             share_conf: 0.25,
             share_receivers: 3,
+            share_handover: 16,
         }
     }
 
@@ -726,7 +729,7 @@ mod tests {
     fn the_share_knobs_match_the_high_limits() {
         let tun = high();
         let limits = crate::ShareLimits::high();
-        assert_eq!(tun.share, 1);
+        assert_eq!(tun.share, 0);
         assert!((tun.share_min_hit - limits.t_min).abs() < 1.0e-6);
         assert_eq!(tun.share_cap, limits.share_cap);
         assert!((tun.share_plane - limits.plane).abs() < 1.0e-6);
@@ -735,6 +738,8 @@ mod tests {
         assert!((tun.share_cos - limits.cos_floor).abs() < 1.0e-6);
         assert!((tun.share_conf - limits.confidence).abs() < 1.0e-6);
         assert_eq!(tun.share_receivers, limits.receivers);
+        assert_eq!(tun.share_handover, tun.warmup_rays);
+        assert_eq!(tun.share_handover, limits.handover);
         assert!(limits.enabled);
     }
 

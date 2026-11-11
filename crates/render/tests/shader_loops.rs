@@ -178,9 +178,14 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         fill.contains("lighting_fill_share("),
         "an in-tile sample must reach the share pass"
     );
+    let cache = source("lighting_cache.glsl");
     assert!(
-        fill.contains("lighting_sc_set_seed"),
-        "a shared sample must enter as a seed"
+        fill.contains("lighting_sc_set_fill_seed"),
+        "a shared sample must enter as a fill seed"
+    );
+    assert!(
+        cache.contains("lighting_sc_set_seed(slot, rgb, conf, sunfrac)"),
+        "the fill mark is written on the seed channel"
     );
     assert!(
         !fill.contains("shared_count"),
@@ -215,6 +220,18 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
     assert!(
         fill.contains("lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r)"),
         "a fresher cell's scale stays in the claim"
+    );
+    assert!(
+        fill.contains("lighting_fill_seed_spent"),
+        "the fill seed's weight reaches 0"
+    );
+    assert!(
+        fill.contains("lighting_fill_u(31)"),
+        "fill_share_handover is the drop, and 0 uses the warmup count"
+    );
+    assert!(
+        cache.contains("const float LIGHTING_SC_HANDOVER = 16.0;"),
+        "the 16-set handover stays for seeds this pass did not write"
     );
 }
 

@@ -30,6 +30,8 @@ pub struct ShareLimits {
     pub confidence: f32,
     /// Distinct receivers one sample may seed. The tile holds the rest.
     pub receivers: u32,
+    /// Own rays after which the fill seed's display weight is 0.
+    pub handover: u32,
 }
 
 impl ShareLimits {
@@ -45,6 +47,7 @@ impl ShareLimits {
             share_cap: SHARE_CAP,
             confidence: SEED_CONF,
             receivers: SHARE_RECEIVERS,
+            handover: 16,
         }
     }
 }
@@ -704,7 +707,34 @@ pub fn tile_share_holds() -> bool {
 mod tests {
     use super::*;
 
-    /// Shown blend once the seed is the only prior. Fade is zero at 16 sets.
+    /// Fill-seed display. At and after `drop` own rays the weight is 0.
+    /// Below that the 16-set fade still mixes. The ray cap is not the drop.
+    fn fill_shown(seed: Vec3, confidence: f32, own: Vec3, rays: u32, drop: u32) -> Vec3 {
+        const HANDOVER_SETS: f32 = 16.0;
+        const HANDOVER_K: f32 = 2.0;
+        if rays >= drop.max(1) || confidence <= 0.0 {
+            return own;
+        }
+        if rays == 0 {
+            return seed;
+        }
+        let capped = rays.min(u32::from(u16::MAX));
+        let sets = (f32::from(u16::try_from(capped).unwrap_or(u16::MAX)) / 64.0).max(1.0);
+        let n = sets.floor().max(0.0);
+        let fade = (1.0 - n / HANDOVER_SETS).clamp(0.0, 1.0);
+        if fade <= 0.0 {
+            return own;
+        }
+        let k = HANDOVER_K * confidence.min(1.0) * fade;
+        let a = if n > 0.5 {
+            n / (n + k).max(1.0e-4)
+        } else {
+            0.0
+        };
+        seed * (1.0 - a) + own * a
+    }
+
+    /// Non-fill shown blend. Fade is zero at 16 sets. Fill seeds do not use this.
     fn handover_shown(seed: Vec3, confidence: f32, own: Vec3, sets: f32) -> Vec3 {
         const HANDOVER_SETS: f32 = 16.0;
         const HANDOVER_K: f32 = 2.0;
@@ -1111,5 +1141,22 @@ mod tests {
         let held = run(&origin, &hit, bright, &[cold], &limits, Faults::default(), (1, 1));
         assert!(luma_of(open.seeds[0].rgb) > cap + 1.0);
         assert!(luma_of(held.seeds[0].rgb) <= cap + 1.0e-3);
+    }
+
+    #[test]
+    fn a_cell_past_the_handover_matches_the_cell_without_a_seed() {
+        let drop = ShareLimits::high().handover;
+        let seed = Vec3::new(4.0, 0.2, 0.1);
+        let own = Vec3::new(1.0, 0.4, 0.2);
+        let with_seed = fill_shown(seed, SEED_CONF, own, drop, drop);
+        let bare = fill_shown(Vec3::ZERO, 0.0, own, drop, drop);
+        assert_eq!(with_seed, bare);
+        assert_eq!(with_seed, own);
+        // Eight stored sets, the ray cap, used to leave the seed in the mean.
+        assert_eq!(fill_shown(seed, SEED_CONF, own, 512, drop), own);
+        let early = fill_shown(seed, SEED_CONF, own, drop - 1, drop);
+        assert!((luma_of(early) - luma_of(own)).abs() > 1.0e-3);
+        let held = fill_shown(seed, SEED_CONF, own, drop, drop + 16);
+        assert!((luma_of(held) - luma_of(own)).abs() > 1.0e-3);
     }
 }

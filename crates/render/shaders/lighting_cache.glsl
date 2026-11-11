@@ -2107,6 +2107,29 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
         uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))),
         clamp(conf, 0.05, 1.0));
 }
+// A fill seed stores its confidence above this. The 16-set handover does not
+// read the mark. Detail seeds stay negative and below it.
+const float FILL_SEED_MARK = 2.0;
+void lighting_sc_set_fill_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
+    lighting_sc_set_seed(slot, rgb, conf, sunfrac);
+    if (!LIGHTING_SC_WRITES) {
+        return;
+    }
+    float z = cache.v[LIGHTING_SC_SPARSE_AT + slot].z;
+    if (z > 0.0 && z < FILL_SEED_MARK) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = z + FILL_SEED_MARK;
+    }
+}
+bool lighting_sc_fill_marked(float stored) {
+    return abs(stored) >= FILL_SEED_MARK;
+}
+float lighting_sc_seed_weight(float stored) {
+    float mag = abs(stored);
+    if (lighting_sc_fill_marked(stored)) {
+        mag -= FILL_SEED_MARK;
+    }
+    return mag;
+}
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
@@ -2122,7 +2145,7 @@ vec4 lighting_sc_seed(uint slot) {
     if (lighting_sh_detail_seed_rejected(slot)) {
         return vec4(0.0);
     }
-    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), abs(stored));
+    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), lighting_sc_seed_weight(stored));
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).

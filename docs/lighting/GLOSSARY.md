@@ -451,8 +451,11 @@ Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/l
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
-**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed`. The colour is the clamped reconnection. The confidence is `fill_share_conf` times `max(0, 1 - own_count / fill_share_cap)`, so a cell that already has samples fades the prior instead of storing a darker one. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample.
+**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed`. The colour is the clamped reconnection. The confidence is `fill_share_conf` times `max(0, 1 - own_count / fill_share_cap)`, so a cell that already has samples fades the prior instead of storing a darker one. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample. Its display weight is 0 once the cell's own rays reach `fill_share_handover`.
 Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share handover**: own rays after which a fill seed's display weight is exactly 0. `fill_share_handover` defaults to `fill_warmup`. The 16-set handover stays for seeds this pass did not write. The ray cap is not this count.
+Role: TEMPORAL · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
 
 **Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
 Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2

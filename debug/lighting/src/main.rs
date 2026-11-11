@@ -177,7 +177,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT,
                          FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
                          FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
-                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS.
+                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
+                         FILL_SHARE_HANDOVER.
                          Check rays are one same-seed ray per fill_check_rate block.
                          fill_share 1 seeds other cells in the same tile.
                          0 turns that off. Ring is not a value here.
@@ -366,6 +367,7 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_fill_share_cos",
     "lighting_fill_share_conf",
     "lighting_fill_share_receivers",
+    "lighting_fill_share_handover",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",

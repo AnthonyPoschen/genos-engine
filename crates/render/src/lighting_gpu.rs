@@ -123,7 +123,7 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
 
 /// Fill param words sit after the per-pixel seed payload. One lock word per
 /// slot follows them (`lighting_fill.glsl`).
-const FILL_PARAM_WORDS: u64 = 31;
+const FILL_PARAM_WORDS: u64 = 32;
 const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
 /// Header, then two hit words and two link words per cache-ray slot.
 const FILL_TAIL_PER_RAY: u64 = 4;
@@ -4297,6 +4297,7 @@ impl Gpu {
                     fill.share_cos.to_bits(),
                     fill.share_conf.to_bits(),
                     fill.share_receivers,
+                    fill.share_handover,
                 ];
                 let frame_pixels =
                     u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));

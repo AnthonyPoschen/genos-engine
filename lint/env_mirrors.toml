@@ -558,6 +558,11 @@ kind = "mirror"
 detail = "surface_cache.fill_share_cos (stress knob lighting_fill_share_cos); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_HANDOVER"
+kind = "mirror"
+detail = "surface_cache.fill_share_handover (stress knob lighting_fill_share_handover); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_SHARE_MIN_HIT"
 kind = "mirror"
 detail = "surface_cache.fill_share_min_hit (stress knob lighting_fill_share_min_hit); MCP set_lighting_settings"

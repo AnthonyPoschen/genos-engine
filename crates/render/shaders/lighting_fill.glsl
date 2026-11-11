@@ -11,7 +11,8 @@
 // 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell, 16 check_rate,
 // 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma,
 // 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
-// 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers.
+// 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers,
+// 31 share handover, in own rays. 0 means the warmup count (word 12).
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -46,7 +47,7 @@ const float FILL_Q10 = 1023.0;
 const float FILL_SHARE_COS0 = 0.05;
 const vec3 FILL_MSME = vec3(0.299, 0.587, 0.114);
 
-const uint LIGHTING_FILL_PARAMS = 31u;
+const uint LIGHTING_FILL_PARAMS = 32u;
 const uint LIGHTING_FILL_TILE_CAP = 262144u;
 const uint LIGHTING_FILL_TILE_AT = 2u * LIGHTING_CACHE_SLOTS - LIGHTING_FILL_TILE_CAP;
 const uint LIGHTING_FILL_PICK_AT = LIGHTING_CACHE_SLOTS + 1u;
@@ -690,6 +691,36 @@ float lighting_fill_shown(uint rays, uint slot) {
     return min(sets, lighting_sc_cap(slot));
 }
 
+// Own rays at which a fill seed's display weight is 0. A zero word is the
+// warmup count. This is not the 16-set handover.
+uint lighting_fill_seed_drop() {
+    uint drop = lighting_fill_u(31);
+    if (drop == 0u) {
+        drop = max(lighting_fill_u(12), 1u);
+    }
+    return max(drop, 1u);
+}
+
+bool lighting_fill_seed_due(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 0.0);
+    return rays >= float(lighting_fill_seed_drop());
+}
+
+// Clear a fill seed once the cell has enough of its own rays. Other seeds
+// are not marked, so their 16-set fade stays. Runs in this commit, which
+// already owns the param words.
+void lighting_fill_seed_spent(uint slot) {
+    if (!lighting_sc_fill_marked(cache.v[LIGHTING_SC_SPARSE_AT + slot].z)) {
+        return;
+    }
+    if (lighting_fill_seed_due(slot)) {
+        lighting_sc_clear_seed(slot);
+    }
+}
+
 // `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
 // calls this, after every ray into the slot has been summed.
 void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
@@ -789,6 +820,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         atomicMax(gstats.max_change, uint(clamp(change, 0.0, 1.0) * FILL_CHANGE_SCALE));
     }
     atomicAdd(gstats.relit, 1u);
+    lighting_fill_seed_spent(slot);
 }
 
 // Newest lamp-change frame that still reaches p, or 0. Same reach test as
@@ -876,6 +908,9 @@ float lighting_fill_share_accept(uint origin_slot, uint recv, vec3 origin_p, vec
         return 0.0;
     }
     if (!(lighting_fill_share_scale(recv) > 0.0)) {
+        return 0.0;
+    }
+    if (lighting_fill_seed_due(recv)) {
         return 0.0;
     }
     uint updated = lighting_sc_updated(recv);
@@ -1024,7 +1059,7 @@ void lighting_fill_share_pass(uint gid, uint phase) {
                 float scale = lighting_fill_share_scale(found[s]);
                 vec3 rgb = lighting_fill_share_rgb(found[s], irr * found_w[s]);
                 if (scale > 0.0 && dot(rgb, FILL_MSME) > 0.0) {
-                    lighting_sc_set_seed(found[s], rgb, lighting_fill_f(29) * scale, clamp(rad.w, 0.0, 1.0));
+                    lighting_sc_set_fill_seed(found[s], rgb, lighting_fill_f(29) * scale, clamp(rad.w, 0.0, 1.0));
                 }
             }
         }
