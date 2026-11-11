@@ -182,7 +182,19 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 mod fog;
 mod media_check;
 mod particle_pass;
+mod pass_sync;
 mod stage;
+mod texel_detail;
+mod texel_ray_cut;
+
+/// Return lavapipe's compiler scratch to the OS. The software fixture calls
+/// this after it drops the device that planted the read-only scene, and before
+/// it opens the device that compiles the reader. A product frame does not call it.
+pub fn release_software_compiler_heap() {
+    texel_detail::release_compiler_heap();
+}
+
+pub use texel_detail::TexelDetailPlant;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -556,8 +568,10 @@ impl Renderer {
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
             .saturating_add(lighting.hdr_params.size)
-            .saturating_add(lighting.meter_dev.size)
-            .saturating_add(lighting.meter_host.size);
+            .saturating_add(lighting.meter_dev[0].size)
+            .saturating_add(lighting.meter_dev[1].size)
+            .saturating_add(lighting.meter_host[0].size)
+            .saturating_add(lighting.meter_host[1].size);
         bytes as f64
     }
 
@@ -572,7 +586,7 @@ impl Renderer {
             size: source.size,
             align: source.align,
         };
-        crate::hdr_output::post_device_bytes(
+        let matched = crate::hdr_output::post_device_bytes(
             chain,
             crate::hdr_output::PostDevice {
                 scene: buffer(&lighting.scene_lin),
@@ -581,9 +595,21 @@ impl Renderer {
                 encode: buffer(&lighting.hdr_encode),
                 lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
                 params: buffer(&lighting.hdr_params),
-                meter: buffer(&lighting.meter_dev),
-                meter_host: buffer(&lighting.meter_host),
+                meter: buffer(&lighting.meter_dev[0]),
+                meter_host: buffer(&lighting.meter_host[0]),
             },
+        )?;
+        // The other flight has the same meter. One buffer was a WRITE_AFTER_WRITE
+        // when both frames filled it. The chain sizes one; the total counts both.
+        if lighting.meter_dev[1].size != lighting.meter_dev[0].size
+            || lighting.meter_host[1].size != lighting.meter_host[0].size
+        {
+            return None;
+        }
+        Some(
+            matched
+                .saturating_add(lighting.meter_dev[1].size)
+                .saturating_add(lighting.meter_host[1].size),
         )
     }
 
@@ -1214,6 +1240,52 @@ impl Renderer {
         self.gpu.media_closed_forms()
     }
 
+    /// One lavapipe dispatch of `lighting_screen_probe_indirect` with the
+    /// production cache. The rows are the stage 3 covered and uncovered cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod()
+    }
+
+    /// Writing specialization with `lamp.x = 1`. The returned bytes are the
+    /// planted cache and key table. Drop this renderer before compiling the
+    /// reader: lavapipe keeps the compiler heap until the device is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.gpu.texel_detail_prod_plant()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// `plant` was captured by [`Self::texel_detail_prod_plant`] on a device
+    /// that has since been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly(plant)
+    }
+
+    /// One lavapipe dispatch of `lighting_compact_hold_texel_rays`.
+    ///
+    /// The rows are the stage 4 agreement cases. The shader does not trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_ray_cut(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_ray_cut()
+    }
+
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
     /// The fog budget scales this span. Lavapipe is the cloud device.
     pub fn media_dispatch_ms(&mut self, groups: u32) -> Result<f64, String> {
@@ -1364,6 +1436,43 @@ impl Renderer {
     /// The counters are zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set.
     pub fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.gpu.lighting_lamp_pick_counts()
+    }
+
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. A real zero at that count is dark and is not
+    /// included. Waits for that frame.
+    pub fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.gpu.lighting_under_trusted_pixels()
+    }
+
+    /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
+    /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
+    pub fn restir_spatial_bound(&self) -> u8 {
+        self.gpu.lighting.restir_spatial_bound
+    }
+
+    /// One spatial dispatch on fixed reservoirs. `neighbors` is the count the
+    /// product frame would bind: 0–4 is `restir-spatial`, above 4 is
+    /// `restir-spatial-wide`. The shader still reads header word 13, so a
+    /// scalar bind with a larger word leaves the input sample.
+    pub fn restir_merge_oracle(
+        &mut self,
+        neighbors: u32,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        self.gpu.restir_merge_oracle(neighbors, scene, gbuf, restir)
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.gpu.lighting_restir_prepare_failures()
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.gpu.force_restir_prepare_failure(on);
     }
 
     /// Sun-step mark from the last submitted frame. Waits for that frame.
@@ -1634,7 +1743,12 @@ struct Gpu {
     cmds: [Handle; 2],
     fences: [Handle; 2],
     image_readies: [Handle; 2],
-    render_dones: [Handle; 2],
+    /// Present-wait semaphores, one per swapchain image, indexed by the image
+    /// `vkAcquireNextImageKHR` returns. The submit fence does not prove the
+    /// presentation engine has finished waiting, so a frames-in-flight semaphore
+    /// is still in use when the next submit signals it. `vkDestroySwapchainKHR`
+    /// then waits for a present that cannot complete.
+    present_sems: Vec<Handle>,
     colors: [Image; 2],
     depths: [Image; 2],
     framebuffers: [Handle; 2],
@@ -1733,6 +1847,10 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Lazy ADR 0039 stage 3 production dispatch. Absent until that test asks.
+    texel_detail: Option<texel_detail::Pipe>,
+    /// Lazy ADR 0039 stage 4 ray-cut dispatch. Absent until that test asks.
+    texel_ray_cut: Option<texel_ray_cut::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -2460,16 +2578,21 @@ impl Gpu {
                 None
             };
             // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
-            // G-buffer, and textureCompressionBC (22) when the device has it.
+            // G-buffer, textureCompressionBC (22) when the device has it, and
+            // shaderInt64 (40) only when the device reports it. A SPIR-V module
+            // that declares OpCapability Int64 is illegal without the feature.
             type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
             let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
             let mut have = [0u32; 55];
             get_features(physical, have.as_mut_ptr());
-            let bc_textures = have[22] != 0;
             let mut features = [0u32; 55];
             features[26] = 1;
+            let bc_textures = have[22] != 0;
             if bc_textures {
                 features[22] = 1;
+            }
+            if have[40] != 0 {
+                features[40] = 1;
             }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
@@ -2591,7 +2714,7 @@ impl Gpu {
                 cmds: [std::ptr::null_mut(); 2],
                 fences: [std::ptr::null_mut(); 2],
                 image_readies: [std::ptr::null_mut(); 2],
-                render_dones: [std::ptr::null_mut(); 2],
+                present_sems: Vec::new(),
                 colors: [Image::empty(), Image::empty()],
                 depths: [Image::empty(), Image::empty()],
                 framebuffers: [std::ptr::null_mut(); 2],
@@ -2652,6 +2775,8 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                texel_detail: None,
+                texel_ray_cut: None,
                 media_ms: None,
                 media_groups: 1,
                 particle_pass: None,
@@ -2779,6 +2904,9 @@ impl Gpu {
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
             block(|| gpu.make_lighting())?;
+            // Before the scene exists. Otherwise a potato launch still builds
+            // the High cache once, and lavapipe holds it through quit.
+            gpu.apply_launch_preset()?;
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
@@ -2860,7 +2988,6 @@ impl Gpu {
             };
             for slot in 0..2 {
                 self.image_readies[slot] = self.make_sem()?;
-                self.render_dones[slot] = self.make_sem()?;
                 check(
                     (self.fns.create_fence)(
                         self.device,
@@ -2872,7 +2999,6 @@ impl Gpu {
                 )?;
             }
             self.image_ready = self.image_readies[0];
-            self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
             let transfer_pool = PoolInfo {
                 s_type: 39,
@@ -3340,6 +3466,7 @@ impl Gpu {
                 ),
                 "image list",
             )?;
+            self.make_present_sems()?;
 
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
@@ -3493,6 +3620,8 @@ impl Gpu {
         };
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
+            // Both raster sets are rewritten. The other flight may still be executing.
+            self.wait_all_inflight()?;
             let share = self.light_families();
             let next = self.make_buffer_queues(
                 (bytes.len() as u64).max(5120),
@@ -3513,7 +3642,6 @@ impl Gpu {
         self.cmd = self.cmds[slot];
         self.fence = self.fences[slot];
         self.image_ready = self.image_readies[slot];
-        self.render_done = self.render_dones[slot];
         self.color = copy_image(&self.colors[slot]);
         self.depth = copy_image(&self.depths[slot]);
         self.framebuffer = self.framebuffers[slot];
@@ -3580,6 +3708,8 @@ impl Gpu {
         {
             return Some(5);
         }
+        // The seed check records its own buffer and does not stage uploads.
+        // The stage table has six slots (0-5). A seventh index would panic.
         None
     }
 
@@ -3825,6 +3955,15 @@ impl Gpu {
             if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
                 check(acquire, "acquire")?;
             }
+            let image = usize::try_from(index).unwrap_or(usize::MAX);
+            let Some(present_sem) = self.present_sems.get(image).copied() else {
+                return Err(format!(
+                    "swapchain image {index} has no present semaphore"
+                ));
+            };
+            // This image was reacquired, so the presentation engine has released
+            // the semaphore it waited on for the previous present of this image.
+            self.render_done = present_sem;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             if profiled {
@@ -3838,8 +3977,9 @@ impl Gpu {
             self.update_resident_scene()?;
             self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
-            // Wait stage for the acquire semaphore is color output. A top-of-pipe
-            // source races that acquire under synchronization validation.
+            // The acquire semaphore is waited in color output. The layout
+            // transition has to happen in that stage, or it races the
+            // presentation engine's read of this image.
             self.image_barrier(swap, 0, 7, 0x400, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
@@ -4067,14 +4207,14 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} \
                  hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
-                 hit_near_tests={} px_lamps={} hit_lamps={}",
+                 hit_near_tests={} px_lamps={} hit_lamps={} \
+                 restir_hist_accept={} restir_hist_reject={} restir_point_adds={}",
                 c.pixels,
                 c.kept,
                 c.fills,
                 c.cache,
-                c.spatial,
                 c.kept_live,
                 c.kept_due,
                 c.kept_shade,
@@ -4082,7 +4222,10 @@ impl Gpu {
                 c.fill_shade,
                 c.near_tests,
                 c.px_lamps,
-                c.hit_lamps
+                c.hit_lamps,
+                c.history_accepts,
+                c.history_rejects,
+                c.restir_point_adds
             )
         } else {
             String::new()
@@ -4135,12 +4278,17 @@ impl Gpu {
         let counts = self.lighting.frame_counts[slot];
         let mut bucket_ms = [0.0f64; BUCKETS];
         if !ids.is_empty() && !times.lighting_pool.is_null() {
-            let mut g = vec![0u64; ids.len() + 1];
+            // Pass stamps stop before the ReSTIR queries. A longer list is not timed.
+            let stamp_n = (ids.len() + 1).min(RESTIR_STAMP_AT as usize);
+            let mut g = vec![0u64; stamp_n];
+            // One cast for both query ranges. A second `slot as u32` is a new
+            // lossy-cast line, and the baseline does not allow it.
+            let stamp_base = slot as u32 * LIGHTING_STAMPS;
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     times.lighting_pool,
-                    slot as u32 * LIGHTING_STAMPS,
+                    stamp_base,
                     g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
@@ -4152,6 +4300,7 @@ impl Gpu {
                 if times.print && times.lighting_disp.len() != ids.len() {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
                 }
+                let mut shade_ms = 0.0;
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
                     if times.print && pass < times.lighting.len() {
@@ -4167,10 +4316,61 @@ impl Gpu {
                             times.lighting_bucket[tag] += ms;
                         }
                     }
+                    if tag == B_DIRECT as usize {
+                        shade_ms += ms;
+                    }
                     if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
                         bucket_ms[B_SHADOWS as usize] += ms;
+                    }
+                }
+                let restir_at = self.lighting.restir_query[slot];
+                if restir_at != u32::MAX {
+                    let mut raw = [0u64; 4];
+                    let restir_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            restir_at,
+                            4,
+                            32,
+                            raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    let mut prepare_raw = [0u64; 2];
+                    let prepare_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            stamp_base + RESTIR_PREPARE_AT,
+                            2,
+                            16,
+                            prepare_raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    if restir_got == 0 {
+                        let part = |a, b| tick_delta(a, b, bits) as f64 * period / 1.0e6;
+                        let parts = [
+                            part(raw[0], raw[1]),
+                            part(raw[1], raw[2]),
+                            part(raw[2], raw[3]),
+                        ];
+                        let sum = parts[0] + parts[1] + parts[2];
+                        bucket_ms[B_DIRECT as usize] += sum;
                         if times.print {
-                            times.lighting_bucket[B_SHADOWS as usize] += ms;
+                            times.lighting[3] += sum;
+                            times.lighting_bucket[B_DIRECT as usize] += sum;
+                            times.restir[0] += parts[0];
+                            times.restir[1] += parts[1];
+                            times.restir[2] += parts[2];
+                            if prepare_got == 0 {
+                                times.restir[3] += part(prepare_raw[0], prepare_raw[1]);
+                            }
+                            times.restir[4] += shade_ms;
+                            times.restir_frames += 1;
                         }
                     }
                 }
@@ -4244,7 +4444,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} light_px={:.3} light_hit={:.3} prefill={:.3}{}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -4263,12 +4463,29 @@ impl Gpu {
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
                 times.world_pass[3] / f64::from(times.world_runs.max(1)),
                 times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
-                times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                // `light=` splits into pixels + kept hits and cache-ray hits. The
+                // shadows bucket only mirrors those two dispatches (it is not a
+                // pass), so it is left out of this line to avoid a double count.
+                times.lighting_bucket[B_DIRECT as usize] / f64::from(times.lighting_frames),
+                times.lighting_bucket[B_HIT as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
                     .map(|stats| format!(" | {}", stats.line()))
                     .unwrap_or_default(),
-                lamp_pick_line
+                lamp_pick_line,
+                if times.restir_frames > 0 {
+                    let n = f64::from(times.restir_frames);
+                    format!(
+                        " restir_prepare={:.3} restir_initial={:.3} restir_temporal={:.3} restir_spatial={:.3} restir_shade={:.3}",
+                        times.restir[3] / n,
+                        times.restir[0] / n,
+                        times.restir[1] / n,
+                        times.restir[2] / n,
+                        times.restir[4] / n
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
         if !times.light_spans.is_empty() {
@@ -4782,6 +4999,36 @@ impl Gpu {
         let mut host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         self.destroy_buffer(&mut host);
         Ok(read)
+    }
+
+    /// One binary semaphore per current swapchain image. Replaces any previous set.
+    fn make_present_sems(&mut self) -> Result<(), String> {
+        self.destroy_present_sems();
+        let count = self.swap_images.len();
+        self.present_sems.reserve(count);
+        for _ in 0..count {
+            let sem = self.make_sem()?;
+            self.present_sems.push(sem);
+        }
+        if let Some(sem) = self.present_sems.first().copied() {
+            self.render_done = sem;
+        }
+        Ok(())
+    }
+
+    fn destroy_present_sems(&mut self) {
+        if self.device.is_null() {
+            self.present_sems.clear();
+            return;
+        }
+        let sems = std::mem::take(&mut self.present_sems);
+        for sem in sems {
+            if !sem.is_null() {
+                unsafe {
+                    (self.fns.destroy_sem)(self.device, sem, std::ptr::null());
+                }
+            }
+        }
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -5820,6 +6067,7 @@ impl Gpu {
                     break;
                 };
                 self.write_device(cmd, dst, offset, &chunk)?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
                 sent += end - at;
                 at = end;
             }
@@ -5896,6 +6144,7 @@ impl Gpu {
                     continue;
                 };
                 self.write_device(cmd, dst, offset, &bytes[start..stop])?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -6253,18 +6502,11 @@ impl Gpu {
         // Both variants share one external dependency so the keep and clear
         // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
         // VUID-vkCmdDraw-renderPass-02684): framebuffers and pipelines are made
-        // against one variant and used with the other. The reflection composite
-        // pass uses this framebuffer, so its masks are these same values.
-        // Late-fragment depth writes are in the source scope: the keep pass's
-        // depth load otherwise races the scene pass when depth is discarded.
-        let in_stage = 0x1000 | 0x400 | 0x200 | 0x100;
-        let in_access = 0x800 | 0x100 | 0x400 | 0x200;
-        let in_dst_stage = 0x400 | 0x100;
-        let in_dst = 0x80 | 0x100 | 0x200 | 0x400;
-        let out_src_stage = 0x400 | 0x200;
-        let out_src_access = 0x100 | 0x400;
-        let out_dst_stage = 0x1000 | 0x100 | 0x400;
-        let out_dst_access = 0x800 | 0x400 | 0x100;
+        // against one variant and used with the other. The filter leaves the
+        // color image visible to a transfer read; the clear pass waits on the
+        // previous frame's color output.
+        let into = pass_sync::scene_pass_in();
+        let out = pass_sync::scene_pass_out();
         let atts = [
             Att {
                 flags: 0,
@@ -6313,19 +6555,19 @@ impl Gpu {
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: in_stage,
-                dst_stage: in_dst_stage,
-                src_access: in_access,
-                dst_access: in_dst,
+                src_stage: into.src_stage,
+                dst_stage: into.dst_stage,
+                src_access: into.src_access,
+                dst_access: into.dst_access,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: out_src_stage,
-                dst_stage: out_dst_stage,
-                src_access: out_src_access,
-                dst_access: out_dst_access,
+                src_stage: out.src_stage,
+                dst_stage: out.dst_stage,
+                src_access: out.src_access,
+                dst_access: out.dst_access,
                 flags: 0,
             },
         ];
@@ -7489,8 +7731,17 @@ impl Gpu {
         self.prepare_atlas_draw(true);
         self.prepare_atlas_draw(false);
         let show = self.ready_to_show();
+        let mut last_page = None;
         for (index, level) in &show {
-            self.record_mip_blit(*index, *level);
+            if let Some(image) = self.record_mip_blit(*index, *level) {
+                last_page = Some(image);
+            }
+        }
+        // One readback for the submit. Copying every page into the same
+        // 4-byte buffer was a WRITE_AFTER_WRITE (the allocation is often 16
+        // bytes). The host reads the last page.
+        if let Some(image) = last_page {
+            self.copy_page_texel(image);
         }
         for (index, level) in show {
             if let Some(source) = self
@@ -7738,24 +7989,18 @@ impl Gpu {
         self.copy_image_texel(image, 6, &self.page_readback);
     }
 
-    fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self
-            .stream_sources
-            .iter()
-            .find(|source| source.index == index)
-        else {
-            return;
-        };
-        let Some(slot) = usize::try_from(level).ok() else {
-            return;
-        };
-        let Some(mip) = source.chain.levels.get(slot) else {
-            return;
-        };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
-            return;
-        };
-        self.publish_resident(&page, source.color, level);
+    /// Blit one resident page. Returns the page image when it is a colour page
+    /// the host can read, so the submit copies that texel once.
+    fn record_mip_blit(&self, index: usize, level: u32) -> Option<Handle> {
+        let source = self.stream_sources.iter().find(|source| source.index == index)?;
+        let slot = usize::try_from(level).ok()?;
+        let mip = source.chain.levels.get(slot)?;
+        let page = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))?;
+        let color = source.color;
+        self.publish_resident(&page, color, level);
+        let atlas_slot = usize::from(!color);
+        let readable = color && !block_texel(self.sampled_format[atlas_slot]);
+        readable.then_some(page.image)
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
@@ -7796,9 +8041,6 @@ impl Gpu {
                 atlas_w.max(1),
                 atlas_h.max(1),
             );
-        }
-        if color && !block_texel(self.sampled_format[slot]) {
-            self.copy_page_texel(page.image);
         }
     }
 
@@ -8768,11 +9010,6 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
-            if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-                self.destroy_aa_targets();
-                self.destroy_reflection_targets();
-                return;
-            }
             self.destroy_aa_targets();
             self.destroy_reflection_targets();
             for slot in 0..2 {
@@ -8835,6 +9072,9 @@ impl Gpu {
             }
             self.flight_live[slot] = false;
         }
+        // After the swapchain: a present may still be finishing, and
+        // vkDestroySwapchainKHR is what waits for it. The semaphore goes after.
+        self.destroy_present_sems();
     }
 
     /// Presentation images. The seat is dispatched around this call: the
@@ -9345,6 +9585,8 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_texel_detail();
+            self.destroy_texel_ray_cut();
             self.destroy_particle_pass();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
@@ -9373,10 +9615,8 @@ impl Gpu {
                 if !self.image_readies[slot].is_null() {
                     (self.fns.destroy_sem)(self.device, self.image_readies[slot], std::ptr::null());
                 }
-                if !self.render_dones[slot].is_null() {
-                    (self.fns.destroy_sem)(self.device, self.render_dones[slot], std::ptr::null());
-                }
             }
+            self.destroy_present_sems();
             if !self.desc_pool.is_null() {
                 (self.fns.destroy_desc_pool)(self.device, self.desc_pool, std::ptr::null());
             }
@@ -10033,8 +10273,12 @@ struct GpuTimes {
     lighting_disp: Vec<(usize, f64)>,
     lighting_frames: u32,
     lighting: [f64; 9],
-    /// Per-bucket sums, including cache rays, hit light, and shadows.
+    /// Per-bucket sums, including cache rays and hit light. The shadows slot stays
+    /// zero: it would only mirror the direct and hit-light dispatches.
     lighting_bucket: [f64; 12],
+    /// ReSTIR sums over `restir_frames`: initial, temporal, spatial, prepare, shade.
+    restir: [f64; 5],
+    restir_frames: u32,
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
     prefill_frames: u32,
@@ -10051,7 +10295,13 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
 /// One before the passes, one after each dispatch, then the HDR pair when it fits.
-const LIGHTING_STAMPS: u32 = 28;
+/// ReSTIR uses four pass queries at [`RESTIR_STAMP_AT`] and two prepare
+/// queries at [`RESTIR_PREPARE_AT`], past the pass list.
+const LIGHTING_STAMPS: u32 = 38;
+/// Before initial, after initial, after temporal, after spatial.
+const RESTIR_STAMP_AT: u32 = 32;
+/// Before the prefix upload, and after it. Shade is the direct-pass sum, not a query.
+const RESTIR_PREPARE_AT: u32 = 36;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
@@ -10101,6 +10351,8 @@ impl Default for GpuTimes {
             lighting_frames: 0,
             lighting: [0.0; 9],
             lighting_bucket: [0.0; 12],
+            restir: [0.0; 5],
+            restir_frames: 0,
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),

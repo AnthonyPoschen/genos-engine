@@ -411,13 +411,12 @@ fn capture_pass(
         if i + 1 == config.settle || (i + 1) % 50 == 0 {
             let c = renderer.lighting_lamp_pick_counts();
             eprintln!(
-                "noise-gate {label} settle {}/{} rays {} exact {} restir {} copied {}",
+                "noise-gate {label} settle {}/{} rays {} exact {} restir {}",
                 i + 1,
                 config.settle,
                 c.pixels,
                 c.exact,
-                c.restir,
-                c.copied
+                c.restir
             );
         }
     }
@@ -431,8 +430,8 @@ fn capture_pass(
         still.push(y);
     }
     eprintln!(
-        "noise-gate {label} still rays {} exact {} restir {} copied {}",
-        still_counts.pixels, still_counts.exact, still_counts.restir, still_counts.copied
+        "noise-gate {label} still rays {} exact {} restir {}",
+        still_counts.pixels, still_counts.exact, still_counts.restir
     );
     let mut pan = Vec::with_capacity(usize::try_from(config.frames).unwrap_or(0));
     let mut last_pan = Vec::new();
@@ -451,8 +450,8 @@ fn capture_pass(
         pan.push(y);
     }
     eprintln!(
-        "noise-gate {label} pan rays {} exact {} restir {} copied {}",
-        pan_counts.pixels, pan_counts.exact, pan_counts.restir, pan_counts.copied
+        "noise-gate {label} pan rays {} exact {} restir {}",
+        pan_counts.pixels, pan_counts.exact, pan_counts.restir
     );
     Ok(Pass {
         still,
@@ -601,10 +600,13 @@ fn gate_lighting(preset: Option<LightingPreset>, specular: bool) -> LightingSett
     } else {
         let mut settings = LightingSettings::preset(LightingPreset::High);
         settings.bounce.count = 1;
-        settings.probes.enabled = true;
+        // Pixel reuse of the direct shade needs the work buffer the world cache
+        // allocates. The graded view is direct, so that cache is not the bounce
+        // on screen.
+        settings.probes.enabled = false;
         settings.probes.rays = 4;
         settings.probes.tile = 64;
-        settings.world_cache.enabled = false;
+        settings.world_cache.enabled = true;
         settings.denoiser.enabled = false;
         settings.prefill = false;
         settings.gi.enabled = true;

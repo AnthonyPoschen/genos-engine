@@ -26,18 +26,24 @@ pub enum ViewMode {
     Depth,
     /// Direct light only, as `Direct`; kept for the tools' lamp view.
     Light,
-    /// Surface cache: the texel size each pixel reads (red 6.25 cm, green
-    /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
-    /// than 4 sets; shaded by the normal so surfaces read.
+    /// Surface cache population. Red's low 7 bits are the texel's own-mean
+    /// luma (0–127) and its high bit is set when the cache ray origin is
+    /// inside geometry. Green is the seed luma. Blue's low 7 bits are the
+    /// set count and its high bit is set when the cell is coarser than
+    /// 12.5 cm. The bytes are exact (no dither). A hash miss is (0, 0, 0)
+    /// plus the size bits.
     Texels,
     /// Short-term relative standard deviation of the cache entry under each
     /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
+    /// Which path produced the bounce: cell step, fine texel, probe, or a ray
+    /// hit. The picture is flat codes, not light. See lighting_compose.comp.
+    Path,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 9] = [
+    pub const ALL: [ViewMode; 10] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -47,6 +53,7 @@ impl ViewMode {
         Self::Light,
         Self::Texels,
         Self::Variance,
+        Self::Path,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +67,7 @@ impl ViewMode {
             Self::Light => "light",
             Self::Texels => "texels",
             Self::Variance => "variance",
+            Self::Path => "path",
         }
     }
 

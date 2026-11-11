@@ -94,6 +94,10 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA` | `crates/scene/src/lighting.rs:1247` | `--surface-cache-firefly-sigma` |
 | `GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET` | `crates/scene/src/lighting.rs:1248` | `--surface-cache-ray-budget` |
 | `GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS` | `crates/scene/src/lighting.rs:1249` | `--surface-cache-dormant-rays` |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` | `crates/scene/src/lighting.rs` | `surface_cache.sh_cells` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_detail` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_ray_cut` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE` | `crates/scene/src/lighting.rs` | `surface_cache.sh_probe_retire` (stress knob) |
 | `GENOS_LIGHTING_DIRECT_SPECULAR` | `crates/scene/src/lighting.rs` | `--lighting-direct-specular` |
 
 | Variable | Where | CLI today |
@@ -294,7 +298,7 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 | `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
-| `build` | 3 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, and `GENOS_HDR_COMPOSE` (the HDR compose shader compile). |
+| `build` | 5 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, `GENOS_HDR_COMPOSE`, `GENOS_COMPOSE_MAINT`, and `GENOS_COMPOSE_NO_WALK` (shader compile defines, not process environment variables). |
 
 Do not add a new `kind = "todo"`. Add a `mirror` whose `detail` is the flag, or do not read the variable.
 

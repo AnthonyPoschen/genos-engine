@@ -11,14 +11,22 @@ tests=(
   "the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
 )
 
-# The knockout feature must stay test-only: no manifest but genos-render's
-# own may name it, and it is never a default feature.
-if git grep -n knockout -- '*.toml' ':!crates/render/Cargo.toml' | grep .; then
-  echo "FAIL: a manifest outside crates/render enables the knockout feature" >&2
+# The knockout feature must stay test-only, and it is never a default.
+# genos-render owns it. genos-stress forwards it so the fill gate
+# (examples/stress/tests/fill_knockout.rs) can compile the guard out.
+# That forward is not a default. No other manifest may name it.
+if git grep -n knockout -- '*.toml' \
+  ':!crates/render/Cargo.toml' \
+  ':!examples/stress/Cargo.toml' | grep .; then
+  echo "FAIL: a manifest other than genos-render or the stress fill forward names knockout" >&2
   exit 1
 fi
-if grep -nE '^default *=.*knockout' crates/render/Cargo.toml; then
-  echo "FAIL: knockout is a default feature of genos-render" >&2
+if grep -nE '^default *=.*knockout' crates/render/Cargo.toml examples/stress/Cargo.toml; then
+  echo "FAIL: knockout is a default feature" >&2
+  exit 1
+fi
+if ! grep -q '^knockout = \["genos-render/knockout"\]$' examples/stress/Cargo.toml; then
+  echo "FAIL: genos-stress knockout forward is not genos-render/knockout" >&2
   exit 1
 fi
 

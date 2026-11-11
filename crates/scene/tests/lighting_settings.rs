@@ -21,7 +21,7 @@ use genos_scene::{
     LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
     LAMP_PICK_SPATIAL_RADIUS,
     SurfaceCacheBlend, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_DEFAULT_SC_FLAGS,
-    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
+    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
 };
 
 fn room() -> &'static str {
@@ -52,6 +52,103 @@ fn surface_cache_attach_movers_round_trips() {
     assert!(settings
         .set_key("surface_cache.attach_movers", "maybe")
         .is_err());
+}
+
+#[test]
+fn surface_cache_sh_probe_retire_round_trips() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.surface_cache.sh_probe_retire);
+    let mut settings = high;
+    settings.set_key("surface_cache.sh_texel_detail", "off").unwrap();
+    settings
+        .set_key("surface_cache.sh_probe_retire", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_probe_retire);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_probe_retire);
+    assert!(
+        !parsed.surface_cache.sh_texel_detail,
+        "probe retire does not turn the detail seed on"
+    );
+    settings
+        .set_key("surface_cache.sh_probe_retire", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_probe_retire);
+    assert!(settings
+        .set_key("surface_cache.sh_probe_retire", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_sh_texel_ray_cut_round_trips() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.surface_cache.sh_texel_ray_cut);
+    let mut settings = high;
+    settings.set_key("surface_cache.sh_texel_detail", "off").unwrap();
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_texel_ray_cut);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_ray_cut);
+    assert!(
+        !parsed.surface_cache.sh_texel_detail,
+        "the ray cut does not turn the detail seed on"
+    );
+    settings
+        .set_key("surface_cache.sh_texel_ray_cut", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_texel_ray_cut);
+    assert!(settings
+        .set_key("surface_cache.sh_texel_ray_cut", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_sh_texel_detail_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.surface_cache.sh_texel_detail);
+    settings.set_key("surface_cache.sh_cells", "off").unwrap();
+    settings
+        .set_key("surface_cache.sh_texel_detail", "on")
+        .unwrap();
+    assert!(settings.surface_cache.sh_texel_detail);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(parsed.surface_cache.sh_texel_detail);
+    assert!(
+        !parsed.surface_cache.sh_cells,
+        "texel detail does not turn the cell store on"
+    );
+    settings
+        .set_key("surface_cache.sh_texel_detail", "off")
+        .unwrap();
+    assert!(!settings.surface_cache.sh_texel_detail);
+    assert!(settings
+        .set_key("surface_cache.sh_texel_detail", "maybe")
+        .is_err());
+}
+
+#[test]
+fn surface_cache_sh_cells_round_trips() {
+    let mut settings = LightingSettings::default();
+    assert!(settings.surface_cache.sh_cells);
+    settings.set_key("surface_cache.sh_cells", "off").unwrap();
+    assert!(!settings.surface_cache.sh_cells);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!(!parsed.surface_cache.sh_cells);
+    assert_eq!(parsed.preset_label(), "custom");
+    settings.set_key("surface_cache.sh_cells", "on").unwrap();
+    assert!(settings.surface_cache.sh_cells);
+    assert!(settings.set_key("surface_cache.sh_cells", "maybe").is_err());
+}
+
+#[test]
+fn cells_only_toggle_parses() {
+    let mut settings = LightingSettings::default();
+    settings.set_key("toggles", "cells_only").unwrap();
+    assert_eq!(settings.experiments.toggles, LIGHTING_TOGGLE_CELLS_ONLY);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.experiments.toggles, LIGHTING_TOGGLE_CELLS_ONLY);
 }
 
 #[test]
@@ -162,17 +259,20 @@ fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
 }
 
 #[test]
-fn gi_presets_sample_pixels_from_a_reservoir() {
+fn gi_presets_shade_pixels_with_restir() {
     let low = LightingSettings::preset(LightingPreset::Low);
+    assert!(low.restir_di);
     assert_eq!(low.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(low.lamp_pick.candidates, LAMP_PICK_CANDIDATES_LOW);
     assert_eq!(low.lamp_pick.radius, 0, "low is temporal only");
     assert!(low.lamp_pick.unbiased);
     let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert!(medium.restir_di);
     assert_eq!(medium.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(medium.lamp_pick.candidates, LAMP_PICK_CANDIDATES_MEDIUM);
     assert_eq!(medium.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
     let high = LightingSettings::preset(LightingPreset::High);
+    assert!(high.restir_di);
     assert_eq!(high.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(high.lamp_pick.candidates, LAMP_PICK_CANDIDATES_HIGH);
     assert_eq!(high.lamp_pick.radius, LAMP_PICK_SPATIAL_RADIUS);
@@ -192,8 +292,40 @@ fn gi_presets_sample_pixels_from_a_reservoir() {
         );
     }
     let potato = LightingSettings::preset(LightingPreset::Potato);
-    assert_eq!(potato.direct.max_lights, 8);
+    // The reservoir samples every lamp. The old 8 was a production cap.
+    assert_eq!(potato.direct.max_lights, 0);
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Low).direct.max_lights,
+        0
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Medium)
+            .direct
+            .max_lights,
+        0
+    );
     assert!(!potato.gi.enabled);
+}
+
+#[test]
+fn restir_pass_cost_round_trips_and_clamps() {
+    let mut settings = LightingSettings::default();
+    assert_eq!(settings.restir_spatial_neighbors, 4);
+    assert_eq!(settings.restir_spatial_radius, 2);
+    assert_eq!(settings.restir_resolution_scale, 1);
+    assert_eq!(settings.restir_candidates, 4);
+    assert_eq!(settings.restir_spatial_checkerboard, 0);
+    assert_eq!(settings.restir_split_passes, 0);
+    settings.set_key("restir_spatial_neighbors", "8").expect("neighbors");
+    settings.set_key("restir_resolution_scale", "9").expect("scale");
+    settings.set_key("restir_candidates", "0").expect("candidates");
+    assert_eq!(settings.restir_spatial_neighbors, 8);
+    assert_eq!(settings.restir_resolution_scale, 4);
+    assert_eq!(settings.restir_candidates, 1);
+    let parsed = LightingSettings::parse(&settings.to_text()).expect("parse");
+    assert_eq!(parsed.restir_spatial_neighbors, 8);
+    assert_eq!(parsed.restir_resolution_scale, 4);
+    assert_eq!(parsed.restir_candidates, 1);
 }
 
 #[test]
@@ -308,12 +440,16 @@ fn day_cycle_and_one_bounce_sit_between_potato_and_low() {
     let one = LightingSettings::preset(LightingPreset::Gi1Bounce);
     assert!(one.gi.enabled);
     assert_eq!(one.bounce.count, 1);
-    assert!(!one.world_cache.enabled);
+    assert!(one.world_cache.enabled);
     assert!(!one.denoiser.enabled);
     assert!(!one.prefill);
     assert_eq!(one.probe_rays(), 64);
-    assert!(one.probes_this_frame(1));
-    assert!(!one.cache_rays_this_frame(1));
+    assert!(!one.probes_this_frame(1));
+    assert!(one.cache_rays_this_frame(1));
+    assert!(!one.surface_cache.sh_texel_detail && !one.surface_cache.sh_probe_retire);
+    let potato = LightingSettings::preset(LightingPreset::Potato);
+    assert!(!potato.surface_cache.sh_cells && !day.surface_cache.sh_cells);
+    assert!(!day.surface_cache.sh_texel_detail && !potato.surface_cache.sh_probe_retire);
     let high = LightingSettings::preset(LightingPreset::High);
     assert_eq!(high.bounce.count, LIGHTING_BOUNCES_UNLIMITED);
     assert_eq!(high.probe_rays(), 64);
@@ -342,11 +478,18 @@ fn high_is_the_tuned_path() {
     assert_eq!(low.denoiser.iterations, 1);
     assert!(!low.denoiser.adaptive);
     assert!(low.denoiser.plain());
+    assert!(high.surface_cache.sh_cells && high.surface_cache.sh_texel_detail);
+    assert!(high.surface_cache.sh_texel_ray_cut && high.surface_cache.sh_probe_retire);
+    assert!(medium.surface_cache.sh_cells && medium.surface_cache.sh_texel_detail);
+    assert!(medium.surface_cache.sh_texel_ray_cut && medium.surface_cache.sh_probe_retire);
+    assert!(!low.surface_cache.sh_cells && !low.surface_cache.sh_texel_detail);
+    assert!(!low.surface_cache.sh_texel_ray_cut && !low.surface_cache.sh_probe_retire);
     assert!((high.denoiser.variance_threshold - 0.02).abs() < 1.0e-6);
     assert_eq!(high.world_mode(), 3);
     assert!(high.allocates_cache());
     let buckets = high.gpu_buckets(1);
-    assert!(buckets.direct && buckets.shadows && buckets.place && buckets.probe_trace);
+    assert!(buckets.direct && buckets.shadows && !buckets.place && !buckets.probe_trace);
+    assert!(!buckets.gather && !buckets.filter);
     assert!(buckets.cache && buckets.cache_rays && buckets.atrous && buckets.prefill);
 }
 
@@ -363,9 +506,9 @@ fn a_partial_line_overlays_a_preset() {
     assert!(text.contains("denoise_adaptive=1"));
     let parsed = LightingSettings::parse(&text).unwrap();
     assert!(parsed.denoiser.adaptive);
-    assert!(settings.probes_this_frame(1));
-    assert!(!settings.cache_rays_this_frame(1));
-    assert!(!settings.atrous_this_frame(1));
+    assert!(!settings.probes_this_frame(1));
+    assert!(settings.cache_rays_this_frame(1));
+    assert!(settings.atrous_this_frame(1));
     let mut two = settings.clone();
     two.set_key("bounces", "2").unwrap();
     assert!(two.cache_rays_this_frame(1));

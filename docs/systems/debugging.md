@@ -113,7 +113,7 @@ make lighting SCENE=sponza
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
-(the existing texels view: slots with fewer than four sets stay dim),
+(the existing texels view: own-mean luma, seed luma, and set count),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
 `--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
@@ -274,6 +274,18 @@ the picture still blended toward it; frame counts from before that commit
 (light_settle, room_switch, reference_views settle frames) read lower and are not
 comparable with later ones. `temporal_flicker` measured that blend tail as flicker.
 
+`status` and `wait` do not share a present. The frame thread takes the queue
+once, at the start of a present. A command that replies then returns to the
+script while that present is still open, and the next command is taken on a
+later present. `wait`'s `accepted` is the count when it was taken. `frame` is
+`accepted` plus the requested count. A `status` from the previous command reads
+one present lower than `accepted`. `wait_settled` with `then_frames` keeps the
+tail inside that job, so the saved present is the settle present plus
+`then_frames`, and the pixels written on that present carry that same id. A
+`capture` with `frame` saves that present or rejects it. A present already
+drawn is rejected. The targeted present with no pixels is rejected and is not
+replaced by a later one.
+
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
@@ -348,7 +360,9 @@ under their own key. The CPU proof runs at nice and half the cores
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
 are targets GI is working towards (the room's 48 px swim and light structure):
-a miss prints MISS and fails nothing.
+a miss prints MISS and fails nothing. The room row's blotch PASS stays 0.023.
+The ADR 0039 cache-only mean of 0.014 is a separate command, `genos-stress room-blotch`
+([room blotch](lighting/room-blotch.md)). A PASS from gi-check is not that gate.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
   640x360, clock paused, each compared with a 320x180 reference

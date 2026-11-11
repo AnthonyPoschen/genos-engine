@@ -2,13 +2,6 @@
     clippy::as_conversions,
     reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
 )]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::assert_is_empty,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
 #![expect(
     clippy::cast_lossless,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
@@ -189,7 +182,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --cooked DIR           load a glTF scene from a genos-cook directory (ADR 0035).
                          GENOS_COOKED applies only when this is omitted.
                          Unset keeps the glTF and PNG path
-  --unfilled             show the texels view (slots with fewer than 4 sets are dim)
+  --unfilled             show the texels view (red own mean, green seed, blue set count)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --denoise-launch hash|screen
@@ -318,13 +311,15 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_lamp_pick_candidates",
     "lighting_lamp_pick_radius",
     "lighting_lamp_pick_history",
+    "lighting_restir_spatial_neighbors",
+    "lighting_restir_spatial_radius",
+    "lighting_restir_resolution_scale",
+    "lighting_restir_candidates",
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
-    "lighting_probe_rays",
-    "lighting_probe_stale",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
@@ -344,8 +339,8 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_surface_cache_blend",
     "fog_view",
 ];
-const VIEWS: [&str; 8] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
+const VIEWS: [&str; 9] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -1599,6 +1594,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
         ViewMode::Variance => "variance",
+        ViewMode::Path => "path",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -2645,6 +2641,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
         "variance" => ViewMode::Variance,
+        "path" => ViewMode::Path,
         _ => ViewMode::Full,
     }
 }
@@ -3231,8 +3228,6 @@ mod tests {
             "Firefly sigma",
             "Ray budget",
             "Dormant rays",
-            "Screen probe rays",
-            "Probe stale frames",
             "Cache stale frames",
             "Denoiser iterations",
             "Denoiser variance",
@@ -3250,7 +3245,6 @@ mod tests {
             "Shadows",
             "GI",
             "Denoiser",
-            "Screen probes",
             "Surface light cache",
             "Attach movers",
             "Sky light",
@@ -3264,7 +3258,6 @@ mod tests {
         for name in [
             "lighting_bounces",
             "lighting_direct",
-            "lighting_probes",
             "lighting_world_cache",
             "lighting_denoise",
             "lighting_sky",
@@ -3295,15 +3288,7 @@ mod tests {
         assert!(names.contains(&"day-cycle"));
         assert!(names.contains(&"gi-1bounce"));
         assert!(names.contains(&"high"));
-        let rays = rows
-            .iter()
-            .find(|row| row.label == "Screen probe rays")
-            .unwrap()
-            .slider
-            .as_ref()
-            .unwrap();
-        assert!(rays.steps.is_empty());
-        assert_eq!(rays.step, 4.0);
+        assert!(rows.iter().all(|row| row.label != "Screen probe rays"), "removed from the menu");
         let denoise = rows
             .iter()
             .find(|row| row.label == "Denoiser iterations")
@@ -3454,7 +3439,7 @@ mod tests {
         let gi = tabs.tabs.iter().find(|tab| tab.title == "GI").unwrap();
         assert!(gi.blocks.iter().any(|block| matches!(
             block,
-            genos_ui::PanelBlock::Section(section) if section.title == "Probes" && !section.collapsed
+            genos_ui::PanelBlock::Section(section) if section.title == "Indirect" && !section.collapsed
         )));
         assert!(gi.blocks.iter().any(|block| matches!(
             block,

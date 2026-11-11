@@ -1,0 +1,6 @@
+#version 450
+// Retired pipeline slot. The screen-probe place, gather, and filter passes
+// are removed and the frame does not dispatch this module.
+layout(local_size_x = 64) in;
+void main() {
+}

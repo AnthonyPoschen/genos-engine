@@ -10,6 +10,7 @@ mod gpu;
 mod hdr_output;
 #[cfg(test)]
 mod lamp_pick;
+pub mod lighting_sh;
 mod material_stream;
 mod mesh;
 mod mesh_field;
@@ -20,7 +21,9 @@ mod particles;
 mod pool;
 mod reflections;
 mod reflections_grade;
+mod restir_live;
 mod scene_mesh;
+mod shown_age;
 mod trace;
 mod unfilled;
 mod wire;
@@ -55,10 +58,11 @@ pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
-    gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
-    GpuKind, LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
-    MaterialStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats,
-    ViewMode, VkTraffic,
+    gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, DebugView,
+    DrawProfile, GiSample, GpuKind, LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats,
+    LightingChangeHead, LightingSunStats, MaterialStats, Renderer, ScreenLine, ScreenRect,
+    SettleStats, TexelDetailPlant, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
+    release_software_compiler_heap,
 };
 pub use hdr_output::{
     aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,

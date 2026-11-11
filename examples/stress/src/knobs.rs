@@ -119,7 +119,8 @@ impl Host for Stage {
                 "Lamp power",
                 self.power as f64,
                 (0.0, 4.0),
-                0.05,
+                // A 1.5% dim (0.985) has to land on a step. 0.05 snapped it back to 1.
+                0.005,
                 "",
             ),
             Knob::choice(
@@ -402,6 +403,49 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "Lamp unbiased",
             lighting.lamp_pick.unbiased,
         ),
+        Knob::switch("lighting_restir_di", "ReSTIR DI", lighting.restir_di),
+        Knob::number(
+            "lighting_restir_spatial_neighbors",
+            "ReSTIR neighbours",
+            lighting.restir_spatial_neighbors as f64,
+            (0.0, 16.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_spatial_radius",
+            "ReSTIR radius",
+            lighting.restir_spatial_radius as f64,
+            (0.0, 8.0),
+            1.0,
+            " px",
+        ),
+        Knob::number(
+            "lighting_restir_resolution_scale",
+            "ReSTIR scale",
+            lighting.restir_resolution_scale as f64,
+            (1.0, 4.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_candidates",
+            "ReSTIR candidates",
+            lighting.restir_candidates as f64,
+            (1.0, 32.0),
+            1.0,
+            "",
+        ),
+        Knob::switch(
+            "lighting_restir_spatial_checkerboard",
+            "ReSTIR checkerboard",
+            lighting.restir_spatial_checkerboard != 0,
+        ),
+        Knob::switch(
+            "lighting_restir_split_passes",
+            "ReSTIR split passes",
+            lighting.restir_split_passes != 0,
+        ),
         Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
         Knob::choice(
             "lighting_shadow_filter",
@@ -430,6 +474,21 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_surface_cache_attach_movers",
             "Attach movers",
             lighting.surface_cache.attach_movers,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_cells",
+            "SH cells (ADR 0039)",
+            lighting.surface_cache.sh_cells,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_texel_detail",
+            "SH texel detail (ADR 0039)",
+            lighting.surface_cache.sh_texel_detail,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_texel_ray_cut",
+            "SH texel ray cut (ADR 0039)",
+            lighting.surface_cache.sh_texel_ray_cut,
         ),
         Knob::choice(
             "lighting_surface_cache_blend",
@@ -460,23 +519,6 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             (0.0, 16.0),
             1.0,
             "",
-        ),
-        Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
-        Knob::number(
-            "lighting_probe_rays",
-            "Probe rays",
-            lighting.probes.rays as f64,
-            (4.0, 64.0),
-            4.0,
-            "",
-        ),
-        Knob::number(
-            "lighting_probe_stale",
-            "Probe stale",
-            lighting.probes.staleness_frames as f64,
-            (1.0, 900.0),
-            1.0,
-            " frames",
         ),
         Knob::switch(
             "lighting_world_cache",
@@ -635,6 +677,17 @@ pub fn apply_lighting_knob(
         "lighting_lamp_pick_radius" => ("lamp_pick_radius", whole.to_string()),
         "lighting_lamp_pick_history" => ("lamp_pick_history", whole.max(1).to_string()),
         "lighting_lamp_pick_unbiased" => ("lamp_pick_unbiased", on_off(v)),
+        "lighting_restir_di" => ("restir_di", on_off(v)),
+        "lighting_restir_spatial_neighbors" => ("restir_spatial_neighbors", whole.to_string()),
+        "lighting_restir_spatial_radius" => ("restir_spatial_radius", whole.to_string()),
+        "lighting_restir_resolution_scale" => {
+            ("restir_resolution_scale", whole.clamp(1, 4).to_string())
+        }
+        "lighting_restir_candidates" => ("restir_candidates", whole.max(1).to_string()),
+        "lighting_restir_spatial_checkerboard" => {
+            ("restir_spatial_checkerboard", u32::from(v >= 0.5).to_string())
+        }
+        "lighting_restir_split_passes" => ("restir_split_passes", u32::from(v >= 0.5).to_string()),
         "lighting_shadows" => ("shadows", on_off(v)),
         "lighting_shadow_filter" => (
             "shadow_filter",
@@ -644,6 +697,9 @@ pub fn apply_lighting_knob(
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
         "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
+        "lighting_surface_cache_sh_cells" => ("surface_cache.sh_cells", on_off(v)),
+        "lighting_surface_cache_sh_texel_detail" => ("surface_cache.sh_texel_detail", on_off(v)),
+        "lighting_surface_cache_sh_texel_ray_cut" => ("surface_cache.sh_texel_ray_cut", on_off(v)),
         "lighting_surface_cache_blend" => (
             "surface_cache.blend",
             if v >= 0.5 { "hold" } else { "msme" }.to_string(),
@@ -651,9 +707,6 @@ pub fn apply_lighting_knob(
         "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
         "lighting_surface_cache_ray_budget" => ("surface_cache.ray_budget", whole.to_string()),
         "lighting_surface_cache_dormant_rays" => ("surface_cache.dormant_rays", whole.to_string()),
-        "lighting_probes" => ("probes", on_off(v)),
-        "lighting_probe_rays" => ("probe_rays", whole.to_string()),
-        "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
         "lighting_world_cache" => ("world_cache", on_off(v)),
         "lighting_world_stale" => ("world_stale", whole.max(1).to_string()),
         "lighting_denoise" => ("denoise", on_off(v)),
@@ -916,13 +969,13 @@ mod tests {
         "lighting_gi_refresh",
         "lighting_budget_shift",
         "lighting_surface_cache_attach_movers",
+        "lighting_surface_cache_sh_cells",
+        "lighting_surface_cache_sh_texel_detail",
+        "lighting_surface_cache_sh_texel_ray_cut",
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",
         "lighting_surface_cache_dormant_rays",
-        "lighting_probes",
-        "lighting_probe_rays",
-        "lighting_probe_stale",
         "lighting_world_cache",
         "lighting_world_stale",
         "lighting_denoise",

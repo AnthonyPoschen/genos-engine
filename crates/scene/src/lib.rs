@@ -40,12 +40,14 @@ pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
     lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
     DirectSettings, GiSettings, GpuBuckets, LightingExperimentSettings, parse_lighting_toggles,
-    LIGHTING_DEFAULT_SC_FLAGS, LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
+    LIGHTING_DEFAULT_SC_FLAGS, LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
     LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES, LampPickMode, LampPickSettings, LightingPreset,
     LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
     SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
     LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_HOLD_FRAMES, LAMP_PICK_SPATIAL_RADIUS,
-    LIGHTING_BOUNCES_UNLIMITED,
+    LIGHTING_BOUNCES_UNLIMITED, RESTIR_CANDIDATES, RESTIR_RESOLUTION_SCALE,
+    RESTIR_SPATIAL_CHECKERBOARD, RESTIR_SPATIAL_NEIGHBORS, RESTIR_SPATIAL_RADIUS,
+    RESTIR_SPLIT_PASSES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use particles::{

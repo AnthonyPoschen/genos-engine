@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle lint-docs lint
+.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle restir-ref lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -40,6 +40,11 @@ lighting-ref-check:
 lighting-oracle:
 	cargo build --release -p genos-stress
 	scripts/lighting/oracle_run.sh $(if $(PROFILE),$(PROFILE),quick) $(if $(OUT),$(OUT),genos-debug/oracle)
+
+# CPU ReSTIR DI reference (docs/systems/lighting/restir-di-plan.md).
+# Writes ./genos-debug/restir/metrics.json and reference.json.
+restir-ref:
+	cargo run -p genos-restir-ref --bin restir-ref -- run --out genos-debug/restir
 
 # docs/systems/*/plan.md: a References section, and local links that resolve.
 # docs/systems/core-networking/plan.md is allowlisted until that plan lands.

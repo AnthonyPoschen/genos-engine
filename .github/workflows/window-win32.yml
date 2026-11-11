@@ -13,7 +13,7 @@ jobs:
         with:
           targets: x86_64-pc-windows-gnu
       - name: mingw
-        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+        run: bash scripts/ci-apt.sh gcc-mingw-w64-x86-64
       - name: cargo check Win32 window and XInput
         run: cargo check -p genos-window -p genos-input --target x86_64-pc-windows-gnu
 
