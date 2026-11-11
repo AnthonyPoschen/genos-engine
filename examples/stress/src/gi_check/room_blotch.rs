@@ -1587,7 +1587,7 @@ fn bytes_are_lighting_experiment(bytes: &[u8]) -> bool {
         || rest.starts_with(b"GI2_")
         || rest == b"GI_DEBUG"
         || rest == b"COMPOSE_SC_WRITES"
-        || rest == b"RESTIR_DI"
+        || rest.starts_with(b"RESTIR_")
 }
 
 fn capture_drops_env(name: &[u8]) -> bool {
@@ -1600,7 +1600,8 @@ fn lighting_experiment_env(name: &str) -> bool {
 }
 
 /// Parent bindings the capture child keeps. Lighting catalogue names are
-/// dropped, including deprecated `GENOS_GI2_*` aliases and `GENOS_GI_DEBUG`.
+/// dropped, including deprecated `GENOS_GI2_*` aliases, `GENOS_GI_DEBUG`, and
+/// every `GENOS_RESTIR_*` name.
 /// `GENOS_COMPOSE_SC_WRITES` is dropped because the renderer reads it outside
 /// that catalogue and it changes surface-cache compose writes.
 /// `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` is then set to `1`.
@@ -2973,6 +2974,12 @@ mod tests {
             ("GENOS_GI_DEBUG", "1"),
             ("GENOS_COMPOSE_SC_WRITES", "1"),
             ("GENOS_RESTIR_DI", "1"),
+            ("GENOS_RESTIR_CANDIDATES", "8"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "8"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "4"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "2"),
+            ("GENOS_RESTIR_SPATIAL_CHECKERBOARD", "1"),
+            ("GENOS_RESTIR_SPLIT_PASSES", "1"),
             ("GENOS_REFERENCE_GPU", "1"),
             ("PATH", "/usr/bin"),
             ("GENOS_REFERENCE_THREADS", "8"),
