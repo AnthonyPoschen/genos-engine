@@ -1516,6 +1516,17 @@ impl Renderer {
         self.gpu.lighting_under_trusted_pixels()
     }
 
+    /// Fill scheduler work from the last frame: serial plan iterations, then
+    /// the histogram dispatch's group count. Waits for that frame.
+    pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
+        self.gpu.lighting_fill_compact_work()
+    }
+
+    /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
+    pub fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
+        self.gpu.lighting_fill_ray_split()
+    }
+
     /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
     /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
     pub fn restir_spatial_bound(&self) -> u8 {

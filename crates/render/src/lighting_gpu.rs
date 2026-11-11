@@ -125,16 +125,28 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
 /// slot follows them (`lighting_fill.glsl`).
 const FILL_PARAM_WORDS: u64 = 32;
 const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
-/// Header, then two hit words and two link words per cache-ray slot.
+/// Header, off-screen bins, histograms, water-fill plan, extra cursors, then
+/// two hit words and two link words per cache-ray slot. Matches
+/// `lighting_fill.glsl`.
+const FILL_OFF_CAP: u64 = 16384;
+const FILL_HIST_WORDS: u64 = 192;
+const FILL_PLAN_WORDS: u64 = 384;
+const FILL_EXTRA_WORDS: u64 = 192;
+const FILL_HEADER_WORDS: u64 = 8 + FILL_OFF_CAP + FILL_HIST_WORDS + FILL_PLAN_WORDS + FILL_EXTRA_WORDS;
 const FILL_TAIL_PER_RAY: u64 = 4;
+const FILL_TILE_CAP: u64 = 262144;
 
 fn lighting_fill_param_words(pixels: u64) -> u64 {
     lighting_sh_keys_words() + pixels * 8
 }
 
+fn lighting_fill_tile_at() -> u64 {
+    2 * LIGHTING_CACHE_SLOTS - FILL_TILE_CAP
+}
+
 pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
     let rays = (LIGHTING_CACHE_BATCH as u64) * (LIGHTING_CACHE_RAYS as u64);
-    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS + 4 + rays * FILL_TAIL_PER_RAY
+    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS + FILL_HEADER_WORDS + rays * FILL_TAIL_PER_RAY
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -734,6 +746,10 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Parallel fill schedule. Bit 4 stays clear. The shader reads bits 1 and 2.
+const LIGHTING_FILL_HIST: u32 = LIGHTING_ARGS + 4;
+const LIGHTING_FILL_EMIT_ON: u32 = LIGHTING_ARGS + 5;
+const LIGHTING_FILL_EMIT_OFF: u32 = LIGHTING_ARGS + 6;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -1652,6 +1668,25 @@ impl Gpu {
         const WORD: usize = 24 + 57;
         self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
             .map_or(0, |w| w[WORD])
+    }
+
+    /// Serial plan iterations (`gstats.pad2`, stats word 20) and the histogram
+    /// dispatch's group count (`gstats.pad3`, word 21) from the last frame.
+    /// A slot-table scan is hundreds of thousands of iterations and a dispatch
+    /// over every cache slot. Waits for that frame.
+    pub(crate) fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
+        self.idle_device();
+        const SERIAL: usize = 20;
+        const GROUPS: usize = 21;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or([0, 0], |w| [w[SERIAL], w[GROUPS]])
+    }
+
+    /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
+    pub(crate) fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
+        self.idle_device();
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or([0; 6], |w| [w[16], w[17], w[19], w[22], w[1], w[2]])
     }
 
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
@@ -4687,6 +4722,29 @@ impl Gpu {
                 // the two barriers above order the other frame.
                 self.memory_barrier(0x800, 0x800, 0x40, 0x20);
             }
+            if round
+                && self.lighting.cache_full
+                && self.lighting.settings.surface_cache.fill.budget > 0
+            {
+                let pixels = u64::from(w) * u64::from(h);
+                let scratch =
+                    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS;
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    scratch * 4,
+                    FILL_HEADER_WORDS * 4,
+                    0,
+                );
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_fill_tile_at() * 4,
+                    FILL_TILE_CAP * 4,
+                    0,
+                );
+                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            }
             if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
@@ -4750,11 +4808,23 @@ impl Gpu {
                 let kind = if gy >= LIGHTING_ARGS { gy } else { 0 };
                 if kind != 0 {
                     let mut k_pc = cur_pc;
-                    k_pc[6] |= 1 << 4;
-                    if kind == LIGHTING_MODE1 {
-                        k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
-                    } else if kind == LIGHTING_DENSE_RAYS {
-                        k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    // Bits 1 and 2 select the parallel fill passes. Bit 4 is the
+                    // one-thread plan. The three fill passes leave bit 4 clear.
+                    let fill_bits = match kind {
+                        LIGHTING_FILL_HIST => Some(4),
+                        LIGHTING_FILL_EMIT_ON => Some(2),
+                        LIGHTING_FILL_EMIT_OFF => Some(6),
+                        _ => None,
+                    };
+                    if let Some(bits) = fill_bits {
+                        k_pc[6] = (cur_pc[6] & !0x16) | bits;
+                    } else {
+                        k_pc[6] |= 1 << 4;
+                        if kind == LIGHTING_MODE1 {
+                            k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                        } else if kind == LIGHTING_DENSE_RAYS {
+                            k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                        }
                     }
                     (self.fns.cmd_push)(
                         self.cmd,

@@ -17,6 +17,20 @@ void main() {
     }
     barrier();
     uint slot = gl_GlobalInvocationID.x;
+    // Bits 1 and 2, with bit 4 clear: the parallel fill schedule. Bit 2 alone
+    // is the histogram, bit 1 alone emits screen rays, both emit off-screen
+    // rays. None of them walks the slot table.
+    uint fill_sched = pc.params.z & 6u;
+    if ((pc.params.z & 16u) == 0u && fill_sched != 0u) {
+        if (fill_sched == 6u) {
+            lighting_fill_emit_off(slot);
+        } else if (fill_sched == 4u) {
+            lighting_fill_hist(slot);
+        } else {
+            lighting_fill_emit_on(slot);
+        }
+        return;
+    }
     // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
     // before that pass. The hash wavelet does not use these words.
     if (slot == 0u && (gstats.ctrl_bits & 524288u) != 0u) {
@@ -60,7 +74,7 @@ void main() {
     // here (freeing after LIGHTING_CACHE_LIFE, the global-light refresh list), so
     // it is visited one round in LIGHTING_COMPACT_IDLE, by hash. Read texels, due
     // checks and WRC cells are visited every round as before.
-    if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !lighting_ray_fill_on() && !(cache.v[3u * slot + 1u].w > 0.2)) {
+    if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
         uint last0 = floatBitsToUint(cache.v[3u * slot].w);
         bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
         if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(lighting_sc_id(slot) ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {

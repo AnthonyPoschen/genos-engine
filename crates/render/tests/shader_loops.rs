@@ -138,11 +138,24 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     );
     assert!(
         fill.contains("lighting_round() % tiles"),
-        "check rays must rotate through the screen, not rescan the same prefix"
+        "screen check rays must rotate with the round, not rescan the same prefix"
     );
     assert!(
-        fill.contains("lighting_round() & (guard - 1u)"),
-        "off-screen checks must rotate through the slot table"
+        fill.contains("lighting_hash(block ^ lighting_hash(lighting_round()))"),
+        "off-screen checks are one hash per block, not a scan of the slot table"
+    );
+    let plan = function_body(&fill, "void lighting_fill_dispatch()");
+    assert!(
+        !plan.contains("LIGHTING_CACHE_SLOTS"),
+        "the one scheduler thread must not walk the slot table"
+    );
+    assert!(
+        !plan.contains("LIGHTING_FILL_TILE_CAP"),
+        "the one scheduler thread must not walk the tile table"
+    );
+    assert!(
+        plan.contains("gstats.pad2"),
+        "the plan records how many serial iterations it ran"
     );
     assert!(
         fill.contains("lighting_fill_real"),
