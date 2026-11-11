@@ -15,7 +15,7 @@ MARK = re.compile(r"MARK (\w+) frame=(\d+)")
 AGE = re.compile(
     r"lightingage \S+ frame (\d+) red (\d+) never (\d+) age0 (\d+) "
     r"age1_3 (\d+) age4_7 (\d+) age8_15 (\d+) age16 (\d+) "
-    r"predates (\d+) postdates (\d+) sum_age (\d+) nostamp (\d+)"
+    r"predates (\d+) postdates (\d+) sum_age (\d+) nostamp (\d+)(?: noslot (\d+) slanted (\d+))?"
 )
 
 
@@ -33,7 +33,7 @@ def ages(path):
         m = AGE.search(line)
         if not m:
             continue
-        n = [int(x) for x in m.groups()]
+        n = [int(x or 0) for x in m.groups()]
         committed = n[1] - n[2]
         rows.append(
             {
@@ -49,6 +49,8 @@ def ages(path):
                 "postdates": n[9],
                 "sum_age": n[10],
                 "nostamp": n[11],
+                "noslot": n[12],
+                "slanted": n[13],
                 "mean_age": (n[10] / committed) if committed else None,
             }
         )
@@ -96,7 +98,8 @@ def print_ages(log_path):
             f"age16 {share(row['age16'], committed)} "
             f"predates {share(row['predates'], committed)} "
             f"postdates {share(row['postdates'], committed)} "
-            f"nostamp {share(row['nostamp'], committed)} never {row['never']}"
+            f"nostamp {share(row['nostamp'], committed)} never {row['never']} "
+            f"noslot {row['noslot']} slanted {row['slanted']}"
         )
 
 

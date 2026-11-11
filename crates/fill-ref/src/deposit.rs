@@ -10,7 +10,6 @@ pub struct Faults {
     pub t_min_off: bool,
     pub count_shared_as_own: bool,
     pub unclamped: bool,
-    pub uniform_pick: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

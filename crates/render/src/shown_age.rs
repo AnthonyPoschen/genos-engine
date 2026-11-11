@@ -1,17 +1,18 @@
 //! Age of the shown surface-cache mean.
 //!
-//! The screen pass tallies near red-box pixels into `gstats.diag[0..11]` when
-//! `GENOS_LIGHTING_AGE` is set. The stamp is cache word 23, written when a
+//! The screen pass tallies near red-box pixels into `gstats.diag[14..26]` when
+//! `GENOS_LIGHTING_SC_TRACE` is set. The stamp is cache word 23, written when a
 //! fine texel's mean is committed. Compose does not read that word.
 //!
 //! A commit postdates the lamp-move stamp when its frame is at or after the
 //! newest ring entry that still reaches the texel. A commit before that stamp
 //! predates it: the shown mean was stored before the lamp moved.
 
-// diag[14..25]. 0..13 and the screen-list words are already counters.
+// diag[14..26]. 0..13 and the screen-list words are already counters.
 /// `diag[14]`. Near red-box pixels tallied this frame.
 pub const DIAG_RED: usize = 14;
-/// `diag[15]`. No commit stamp yet.
+/// `diag[15]`. No shown commit: no slot (`DIAG_NOSLOT`), or a slot whose
+/// mean the committing pass never wrote (seeded, or not yet relit).
 pub const DIAG_NEVER: usize = 15;
 /// `diag[16]`. Age 0 frames.
 pub const DIAG_AGE0: usize = 16;
@@ -31,6 +32,12 @@ pub const DIAG_POSTDATES: usize = 22;
 pub const DIAG_SUM_AGE: usize = 23;
 /// `diag[24]`. A commit, and no lamp stamp reaches the texel.
 pub const DIAG_NOSTAMP: usize = 24;
+/// `diag[25]`. The pixel's texel key is not in the cache at all. A subset of `DIAG_NEVER`.
+pub const DIAG_NOSLOT: usize = 25;
+/// `diag[26]`. The pixel is on a turned surface (flag 2048). It has no fine
+/// texels, so compose shows probes there and none of the age counters above
+/// describe what it shows. Every such pixel is also in `DIAG_NOSLOT`.
+pub const DIAG_SLANTED: usize = 26;
 
 /// How the shown commit sits against the lamp-move stamp.
 ///
@@ -42,7 +49,7 @@ pub enum Stamp {
     /// The texel has never committed a mean.
     Never,
     /// Committed, and no ring entry reaches the texel.
-    NoStamp,
+    Unstamped,
     /// Commit frame is before the lamp-move stamp.
     Predates,
     /// Commit frame is at or after the lamp-move stamp.
@@ -60,7 +67,7 @@ pub fn classify(frame: u32, commit: u32, stamp: u32) -> (Option<u32>, Stamp) {
     }
     let age = frame.saturating_sub(commit);
     let stamp = if stamp == 0 {
-        Stamp::NoStamp
+        Stamp::Unstamped
     } else if commit >= stamp {
         Stamp::Postdates
     } else {
@@ -99,6 +106,8 @@ pub struct AgeHist {
     pub postdates: u32,
     pub sum_age: u32,
     pub nostamp: u32,
+    pub noslot: u32,
+    pub slanted: u32,
 }
 
 impl AgeHist {
@@ -116,6 +125,8 @@ impl AgeHist {
             postdates: at(DIAG_POSTDATES),
             sum_age: at(DIAG_SUM_AGE),
             nostamp: at(DIAG_NOSTAMP),
+            noslot: at(DIAG_NOSLOT),
+            slanted: at(DIAG_SLANTED),
         }
     }
 
@@ -134,7 +145,7 @@ impl AgeHist {
 /// The `lightingage` line. `queue` is `frame` or `round`, as `lightingsc` uses.
 pub fn line(queue: &str, frame: u32, hist: &AgeHist) -> String {
     format!(
-        "lightingage {queue} frame {frame} red {} never {} age0 {} age1_3 {} age4_7 {} age8_15 {} age16 {} predates {} postdates {} sum_age {} nostamp {}",
+        "lightingage {queue} frame {frame} red {} never {} age0 {} age1_3 {} age4_7 {} age8_15 {} age16 {} predates {} postdates {} sum_age {} nostamp {} noslot {} slanted {}",
         hist.red,
         hist.never,
         hist.age0,
@@ -146,6 +157,8 @@ pub fn line(queue: &str, frame: u32, hist: &AgeHist) -> String {
         hist.postdates,
         hist.sum_age,
         hist.nostamp,
+        hist.noslot,
+        hist.slanted,
     )
 }
 
@@ -172,7 +185,7 @@ mod tests {
     #[test]
     fn never_committed_and_no_stamp_are_their_own_classes() {
         assert_eq!(classify(10, 0, 168), (None, Stamp::Never));
-        assert_eq!(classify(10, 8, 0).1, Stamp::NoStamp);
+        assert_eq!(classify(10, 8, 0).1, Stamp::Unstamped);
         assert_eq!(age_slot(0), DIAG_AGE0);
         assert_eq!(age_slot(3), DIAG_AGE1_3);
         assert_eq!(age_slot(7), DIAG_AGE4_7);
@@ -188,11 +201,14 @@ mod tests {
         diag[DIAG_PREDATES] = 40;
         diag[DIAG_POSTDATES] = 50;
         diag[DIAG_SUM_AGE] = 270;
+        diag[DIAG_NOSLOT] = 4;
+        diag[DIAG_SLANTED] = 3;
         let hist = AgeHist::from_diag(&diag);
         let mean = hist.mean_age().unwrap_or(-1.0);
         assert!((mean - 3.0).abs() < 1.0e-9);
         let text = line("frame", 192, &hist);
         assert!(text.starts_with("lightingage frame frame 192 red 100 "));
         assert!(text.contains("predates 40 postdates 50 sum_age 270"));
+        assert!(text.ends_with("noslot 4 slanted 3"));
     }
 }

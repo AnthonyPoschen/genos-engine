@@ -2729,19 +2729,29 @@ uint lighting_lamp_move_stamp(vec3 p) {
     }
     return stamp;
 }
-// Near red-box pixels (albedo and 6 m, the fill-curve red box). diag[14..24]
-// match crates/render/src/shown_age.rs.
-void lighting_shown_age_tally(vec3 pos, vec3 albedo, uint slot) {
-    if (length(pos - scene.eye.xyz) >= 6.0) {
+// The fill-curve red box: albedo above RED_MIN in r, below RED_MAX in g and b,
+// within RED_NEAR metres of the eye.
+const float LIGHTING_AGE_RED_NEAR = 6.0;
+const float LIGHTING_AGE_RED_MIN = 0.45;
+const float LIGHTING_AGE_RED_MAX = 0.35;
+// Near red-box pixels. diag[14..26] match crates/render/src/shown_age.rs.
+void lighting_shown_age_tally(vec3 pos, vec3 n, vec3 albedo, uint slot) {
+    if (length(pos - scene.eye.xyz) >= LIGHTING_AGE_RED_NEAR) {
         return;
     }
-    if (!(albedo.r > 0.45 && albedo.g < 0.35 && albedo.b < 0.35)) {
+    if (!(albedo.r > LIGHTING_AGE_RED_MIN && albedo.g < LIGHTING_AGE_RED_MAX && albedo.b < LIGHTING_AGE_RED_MAX)) {
         return;
     }
     atomicAdd(gstats.diag[14], 1u);
+    // A turned surface (flag 2048) has no fine texels. Compose reads probes
+    // there, so no stamp below can describe what it shows.
+    if (lighting_sc_slanted(n)) {
+        atomicAdd(gstats.diag[26], 1u);
+    }
     // A miss is ~0u. Nested so the cache index stays in range.
     if (slot >= LIGHTING_CACHE_SLOTS) {
         atomicAdd(gstats.diag[15], 1u);
+        atomicAdd(gstats.diag[25], 1u);
         return;
     }
     uint commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + slot].x);
