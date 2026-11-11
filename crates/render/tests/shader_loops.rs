@@ -83,6 +83,22 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("n / (rays0 + n)"),
         "the resolve must fold with an n-ray weight"
     );
+    assert!(
+        fill.contains("lighting_fill_hit_at"),
+        "off-screen resolve must read the stashed hit, not the radiance slot"
+    );
+    assert!(
+        fill.contains("barrier()"),
+        "the claimer must finish the slot before another ray folds it"
+    );
+    assert!(
+        fill.contains("lighting_fill_f(7)"),
+        "fill_far_share must be read"
+    );
+    assert!(
+        !fill.contains("if (prev == mark)"),
+        "a second ray into a slot must be summed, not dropped"
+    );
     assert!(fill.contains("lighting_ray_fill_on"), "fill must be wired");
     let compact = source("lighting_compact.comp");
     assert!(
