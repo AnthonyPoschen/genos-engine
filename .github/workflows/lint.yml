@@ -15,14 +15,19 @@ jobs:
       - name: shader and Wayland tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config
+          sudo apt-get install -y glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config python3-venv
       - name: cargo-deny 0.20.2
         run: |
           curl -fsSL -o /tmp/cargo-deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
           tar -xzf /tmp/cargo-deny.tgz -C /tmp
           sudo install -m 755 /tmp/cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny /usr/local/bin/cargo-deny
-      - name: semgrep
-        run: pip install semgrep
+      - name: semgrep 1.184.0
+        run: |
+          # A venv, not the system pip: Ubuntu 24.04 rejects pip install (PEP 668).
+          # 1.184.0 is the semgrep the last green ubuntu-latest lint installed.
+          python3 -m venv "${RUNNER_TEMP}/semgrep"
+          "${RUNNER_TEMP}/semgrep/bin/pip" install --disable-pip-version-check 'semgrep==1.184.0'
+          echo "${RUNNER_TEMP}/semgrep/bin" >> "$GITHUB_PATH"
       - name: lint
         run: ./scripts/lint.sh
 
@@ -53,3 +58,15 @@ jobs:
           export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
           export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
           cargo test --locked -p genos-stress --test noise_gate -- --test-threads=1
+
+  fill-knockout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+      - name: presented-frame fill gate, passes and goes red with cache_fill knocked out
+        run: ./scripts/ci-fill-knockout.sh

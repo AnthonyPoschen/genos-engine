@@ -1,5 +1,6 @@
 mod aa;
 mod budget;
+mod gate;
 mod fog;
 mod fog_budget;
 mod fog_pass;
