@@ -124,6 +124,32 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("lighting_fill_real"),
         "an infinite check luma must not be stored or raise lambda"
     );
+    let pick = source("lighting_lamp_pick.glsl");
+    assert!(
+        pick.contains("lighting_fill_check_u"),
+        "a check ray's lamp pick must use the stored seed"
+    );
+    let direct = source("lighting_direct.comp");
+    assert!(
+        direct.contains("lighting_fill_check_u"),
+        "a texel-direct check must not mix the frame into a fill check ray"
+    );
+    let compact = source("lighting_compact.comp");
+    assert!(
+        compact.contains("lighting_fill_visit"),
+        "world mode 3 must admit through the fill visit"
+    );
+    assert!(
+        !compact.contains("LIGHTING_WRC_SCOUT"),
+        "the old refresh walk must not be listed"
+    );
+}
+
+/// The share pass writes a seed. These strings are the gates that a behavioural
+/// CPU test cannot see: the stamp source, the confidence scale, and the clamp.
+#[test]
+fn the_fill_share_writes_a_seed_under_the_five_gates() {
+    let fill = source("lighting_fill.glsl");
     assert!(
         fill.contains("lighting_fill_share("),
         "an in-tile sample must reach the share pass"
@@ -144,24 +170,21 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("lighting_fill_f(23)"),
         "a near hit must read fill_share_min_hit"
     );
-    let pick = source("lighting_lamp_pick.glsl");
     assert!(
-        pick.contains("lighting_fill_check_u"),
-        "a check ray's lamp pick must use the stored seed"
-    );
-    let direct = source("lighting_direct.comp");
-    assert!(
-        direct.contains("lighting_fill_check_u"),
-        "a texel-direct check must not mix the frame into a fill check ray"
-    );
-    let compact = source("lighting_compact.comp");
-    assert!(
-        compact.contains("lighting_fill_visit"),
-        "world mode 3 must admit through the fill visit"
+        fill.contains("lighting_sc_updated(recv)"),
+        "the lamp stamp compares the mean commit, not the visit word"
     );
     assert!(
-        !compact.contains("LIGHTING_WRC_SCOUT"),
-        "the old refresh walk must not be listed"
+        !fill.contains("floatBitsToUint(cache.v[3u * recv].w)"),
+        "a bounce read must not refresh the share stamp"
+    );
+    assert!(
+        fill.contains("lighting_fill_f(29) * scale"),
+        "own-count expiry scales the seed confidence"
+    );
+    assert!(
+        fill.contains("lighting_fill_share_have_mean"),
+        "a cold cell has no short mean to clamp against"
     );
 }
 

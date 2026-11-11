@@ -792,7 +792,9 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
 }
 
 // Newest lamp-change frame that still reaches p, or 0. Same reach test as
-// lighting_lamp_delta. A share whose frame is not after this stamp stays home.
+// lighting_lamp_delta. `updated` is the mean commit (`lighting_sc_updated`),
+// not the visit word: a bounce read refreshes that word without a new mean.
+// A share whose frame is not after this stamp stays home.
 uint lighting_fill_stamp(vec3 p, uint updated) {
     uint stamp = 0u;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
@@ -845,7 +847,16 @@ float lighting_fill_share_jacobian(vec3 origin, vec3 n_o, vec3 hit, vec3 n_h, fl
     return (cos_theta_j / cos_theta_o) * ((cos_phi_j / d2) / (cos_phi_o / t2));
 }
 
-// All five gates. A miss returns 0. The weight is already clamped.
+// Own-count expiry. 0 means the cell takes no more seeds. The scale is trust,
+// not a darkening of the stored light.
+float lighting_fill_share_scale(uint recv) {
+    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
+    float own_cap = float(max(lighting_fill_u(24), 1u));
+    return max(0.0, 1.0 - rays / own_cap);
+}
+
+// All five gates. A miss returns 0. The value is the clamped reconnection,
+// before the own-count scale. That scale multiplies the seed confidence.
 float lighting_fill_share_accept(uint origin_slot, uint recv, vec3 origin_p, vec3 n_o, vec3 hit, vec3 n_h, float t, vec3 recv_p, vec3 n_j) {
     if (recv == ~0u || recv == origin_slot || recv >= LIGHTING_CACHE_SLOTS || ckeys.key[recv] == 0u) {
         return 0.0;
@@ -864,18 +875,15 @@ float lighting_fill_share_accept(uint origin_slot, uint recv, vec3 origin_p, vec
     if (t < lighting_fill_f(23)) {
         return 0.0;
     }
-    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
-    float own_cap = float(max(lighting_fill_u(24), 1u));
-    float scale = max(0.0, 1.0 - rays / own_cap);
-    if (!(scale > 0.0)) {
+    if (!(lighting_fill_share_scale(recv) > 0.0)) {
         return 0.0;
     }
-    uint updated = floatBitsToUint(cache.v[3u * recv].w);
+    uint updated = lighting_sc_updated(recv);
     uint stamp = lighting_fill_stamp(recv_p, updated);
     if (stamp != 0u && lighting_frame() <= stamp) {
         return 0.0;
     }
-    float w = lighting_fill_share_jacobian(origin_p, n_o, hit, n_h, t, recv_p, n_j) * scale;
+    float w = lighting_fill_share_jacobian(origin_p, n_o, hit, n_h, t, recv_p, n_j);
     w = min(w, lighting_fill_f(27));
     if (!(w > 0.0) || w > FILL_REAL_CAP) {
         return 0.0;
@@ -894,16 +902,30 @@ uint lighting_fill_share_claim(float w, uint ray) {
     return pack == 0u ? 1u : pack;
 }
 
+// True once MSME has a short mean. A zeroed estimator is not an upper bound:
+// the 0.1 floor would crush the cold cells this pass exists to seed. The own
+// sample waits for the same warmup before it clamps.
+bool lighting_fill_share_have_mean(uint recv) {
+    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
+    float shown = cache.v[3u * recv + 2u].w;
+    float started = cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].x;
+    return rays >= float(max(lighting_fill_u(12), 1u)) && shown > FILL_HALF && started > 0.0;
+}
+
 vec3 lighting_fill_share_rgb(uint recv, vec3 contrib) {
+    contrib = max(contrib, vec3(0.0));
+    if (!lighting_fill_share_have_mean(recv)) {
+        return contrib;
+    }
     vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * recv];
     float mean_l = dot(max(a.rgb, vec3(0.0)), FILL_MSME);
     float dev = sqrt(max(a.w, 0.0));
     float cap = FILL_FIRE_FLOOR + mean_l + lighting_sc_firefly_sigma() * dev;
-    float luma = dot(max(contrib, vec3(0.0)), FILL_MSME);
+    float luma = dot(contrib, FILL_MSME);
     if (luma > cap && luma > 0.0) {
         contrib *= cap / luma;
     }
-    return max(contrib, vec3(0.0));
+    return contrib;
 }
 
 // phase 0 clears the receiver lock, phase 1 elects, phase 2 writes the seed.
@@ -1005,9 +1027,10 @@ void lighting_fill_share_pass(uint gid, uint phase) {
             } else if (phase == 1u) {
                 atomicMax(ckeys.key[lock], word);
             } else if (ckeys.key[lock] == word) {
+                float scale = lighting_fill_share_scale(found[s]);
                 vec3 rgb = lighting_fill_share_rgb(found[s], irr * found_w[s]);
-                if (dot(rgb, FILL_MSME) > 0.0) {
-                    lighting_sc_set_seed(found[s], rgb, lighting_fill_f(29), clamp(rad.w, 0.0, 1.0));
+                if (scale > 0.0 && dot(rgb, FILL_MSME) > 0.0) {
+                    lighting_sc_set_seed(found[s], rgb, lighting_fill_f(29) * scale, clamp(rad.w, 0.0, 1.0));
                 }
             }
         }
