@@ -912,7 +912,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float blend = clamp(k, 0.0, 1.0);
     if (cell && n > 0.0) {
         blend = sample_add / max(sample_t + sample_add, FILL_EPS);
-        if (lighting_sc_dark_fill() && sample_t < 0.5 * LIGHTING_WRC_CAP) {
+        if (lighting_sc_dark_fill() && sample_t < FILL_HALF * LIGHTING_WRC_CAP) {
             float ratio = sample_t / max(sample_t + sample_add, FILL_EPS);
             blend = 1.0 - ratio * ratio * ratio;
         }
