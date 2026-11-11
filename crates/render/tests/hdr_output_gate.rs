@@ -1669,8 +1669,12 @@ fn capture_legacy() -> LegacyGrab {
     // Potato's ambient sits under 0.64, so the shoulder never runs. Raised
     // ambient puts the plain compose onto the curve this row grades.
     world.scene.lighting.ambient.intensity = 8.0;
-    // The shoulder row grades the plain compose, not a live reservoir. Potato
-    // with ReSTIR on resamples every frame, so two presented frames never match.
+    // The stored shoulder is the labelled exact compose. Potato leaves
+    // `restir_di` on, and that shade is one new reservoir sample each frame:
+    // the converging mean lives in the lamp-pick reservoir, potato's lamp
+    // mode is off, so `lamp_pix` stays false and the mean does not run.
+    // Two presented frames then differ. This row grades the shoulder, on the
+    // exact path. `LEGACY_CODE_MAX` stays 0.
     world.scene.lighting.restir_di = false;
     world.scene.hdr = HdrSettings::legacy_bytes();
     let opened = open_grade_renderer();
