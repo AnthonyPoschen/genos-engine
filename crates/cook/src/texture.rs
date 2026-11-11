@@ -5,10 +5,8 @@
 //! ([`genos_load::image_spaces`]). Colour (base colour, emissive) is BC7 sRGB,
 //! other data is BC7 unorm and normals are BC5 (X and Y; Z is rebuilt). Each
 //! image is one KTX2. The encoder is `intel_tex_2` (Intel ISPC Texture
-//! Compressor). AVX2 and AVX-512 use the basic profile. The SSE2, SSE4 and
-//! AVX kernels of that profile miss a four-colour block, so a host without
-//! AVX2 uses the slow profile. Edges are padded to whole 4×4 blocks by
-//! repeating the last row and column.
+//! Compressor, basic profile, BC7 mode 2 left on). Edges are padded to whole
+//! 4×4 blocks by repeating the last row and column.
 //!
 //! The record: `GTX1`, version, asset id, settings hash, inputs, then each
 //! texture (image index, KTX2 bytes), then a SHA-256 of every byte before it.
@@ -29,8 +27,7 @@ use crate::{inputs_match, inputs_of, map_by_cost, CookError, Input, Outcome, Thr
 
 pub const TEXTURE_MAGIC: &[u8; 4] = b"GTX1";
 pub const TEXTURE_VERSION: u32 = 1;
-const ENCODER: &str =
-    "intel_tex_2 0.5 ispc bc7-basic (slow below avx2) bc5; genos_load mip_chain v1";
+const ENCODER: &str = "intel_tex_2 0.5 ispc bc7-basic mode2 bc5; genos_load mip_chain v1";
 
 /// One cooked image.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,33 +82,6 @@ fn padded(mip: &Mip, channels: usize) -> (Vec<u8>, u32, u32) {
     (out, pw, ph)
 }
 
-/// Hosts without AVX2 dispatch the SSE2, SSE4 or AVX kernel. Those three
-/// miss a four-colour block under the basic profile.
-fn bc7_basic_is_weak() -> bool {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        !std::arch::is_x86_feature_detected!("avx2")
-    }
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    {
-        false
-    }
-}
-
-fn bc7_settings(alpha: bool) -> bc7::EncodeSettings {
-    if bc7_basic_is_weak() {
-        if alpha {
-            bc7::alpha_slow_settings()
-        } else {
-            bc7::opaque_slow_settings()
-        }
-    } else if alpha {
-        bc7::alpha_basic_settings()
-    } else {
-        bc7::opaque_basic_settings()
-    }
-}
-
 fn encode_level(mip: &Mip, format: BlockFormat, alpha: bool) -> Vec<u8> {
     if format == BlockFormat::Bc5Unorm {
         let (data, width, height) = padded(mip, 2);
@@ -123,7 +93,7 @@ fn encode_level(mip: &Mip, format: BlockFormat, alpha: bool) -> Vec<u8> {
         });
     }
     let (data, width, height) = padded(mip, 4);
-    let settings = bc7_settings(alpha);
+    let settings = bc7_level_settings(alpha);
     bc7::compress_blocks(
         &settings,
         &RgbaSurface {
@@ -133,6 +103,23 @@ fn encode_level(mip: &Mip, format: BlockFormat, alpha: bool) -> Vec<u8> {
             stride: width * 4,
         },
     )
+}
+
+/// Basic profile, with BC7 mode 2 left on.
+///
+/// `intel_tex_2` 0.5 skips mode 2 in `opaque_basic_settings` and
+/// `alpha_basic_settings`. The SSE2, SSE4 and AVX kernels then encode the
+/// 2×2 quad at 12 dB. AVX2 and AVX-512 still clear 40 dB with the skip, which
+/// is why a GitHub-hosted runner passes and a machine without AVX2 does not.
+/// Mode 2 is the 3-subset partition those older kernels need for that block.
+fn bc7_level_settings(alpha: bool) -> bc7::EncodeSettings {
+    let mut settings = if alpha {
+        bc7::alpha_basic_settings()
+    } else {
+        bc7::opaque_basic_settings()
+    };
+    settings.skip_mode2 = false;
+    settings
 }
 
 /// Mips and blocks for one image in the given space.
@@ -317,4 +304,129 @@ pub(crate) fn textures_fresh(path: &Path, source: &[u8], dir: &Path) -> bool {
 /// A read failure or a record that does not check.
 pub fn load_textures(path: &Path) -> Result<CookedTextures, CookError> {
     decode_textures(&std::fs::read(path)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bc7_level_settings;
+
+    #[test]
+    fn bc7_mode2_stays_on() {
+        assert!(!bc7_level_settings(false).skip_mode2);
+        assert!(!bc7_level_settings(true).skip_mode2);
+    }
+}
+
+/// The SSE2 kernel is what a CPU without AVX2 runs. `quad.png` is a 2×2 of
+/// red, green, blue and white. With mode 2 skipped that kernel scores it at
+/// 12 dB; with mode 2 on it is exact. GitHub-hosted runners have AVX2, so the
+/// dispatch path there does not catch a regression.
+#[cfg(all(test, target_arch = "x86_64"))]
+mod sse2_quad {
+    use super::bc7_level_settings;
+
+    #[repr(C)]
+    struct RgbaSurface {
+        ptr: *mut u8,
+        width: i32,
+        height: i32,
+        stride: i32,
+    }
+
+    #[repr(C)]
+    struct Bc7Settings {
+        mode_selection: [bool; 4],
+        refine_iterations: [i32; 8],
+        skip_mode2: bool,
+        fast_skip_mode1: i32,
+        fast_skip_mode3: i32,
+        fast_skip_mode7: i32,
+        mode45_channel0: i32,
+        refine_iterations_channel: i32,
+        channels: i32,
+    }
+
+    extern "C" {
+        fn CompressBlocksBC7_ispc_sse2(
+            src: *mut RgbaSurface,
+            dst: *mut u8,
+            settings: *mut Bc7Settings,
+        );
+    }
+
+    fn to_i32(value: u32) -> i32 {
+        i32::try_from(value).unwrap_or(0)
+    }
+
+    #[test]
+    fn sse2_encodes_the_quad_above_the_floor() {
+        // 2×2 red, green, blue, white, padded by repeating the last row and column.
+        let corner = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let mut pixels = [0_u8; 64];
+        for row in 0..4 {
+            for column in 0..4 {
+                let from = (row.min(1) * 2 + column.min(1)) * 4;
+                let to = (row * 4 + column) * 4;
+                pixels[to..to + 4].copy_from_slice(&corner[from..from + 4]);
+            }
+        }
+        let want = bc7_level_settings(false);
+        let mut settings = Bc7Settings {
+            mode_selection: want.mode_selection,
+            refine_iterations: [
+                to_i32(want.refine_iterations[0]),
+                to_i32(want.refine_iterations[1]),
+                to_i32(want.refine_iterations[2]),
+                to_i32(want.refine_iterations[3]),
+                to_i32(want.refine_iterations[4]),
+                to_i32(want.refine_iterations[5]),
+                to_i32(want.refine_iterations[6]),
+                to_i32(want.refine_iterations[7]),
+            ],
+            skip_mode2: want.skip_mode2,
+            fast_skip_mode1: to_i32(want.fast_skip_threshold_mode1),
+            fast_skip_mode3: to_i32(want.fast_skip_threshold_mode3),
+            fast_skip_mode7: to_i32(want.fast_skip_threshold_mode7),
+            mode45_channel0: to_i32(want.mode45_channel0),
+            refine_iterations_channel: to_i32(want.refine_iterations_channel),
+            channels: want.channels,
+        };
+        let mut surface = RgbaSurface {
+            ptr: pixels.as_mut_ptr(),
+            width: 4,
+            height: 4,
+            stride: 16,
+        };
+        let mut block = [0_u8; 16];
+        // SAFETY: `pixels` is one tightly packed 4×4 RGBA block, `block` holds
+        // the 16-byte BC7 output, and `settings` matches `bc7_enc_settings`.
+        // `CompressBlocksBC7_ispc_sse2` is the SSE2 kernel in `intel_tex_2`.
+        unsafe {
+            CompressBlocksBC7_ispc_sse2(&raw mut surface, block.as_mut_ptr(), &raw mut settings);
+        }
+        let mut texels = [0_u8; 64];
+        bcdec_rs::bc7(&block, &mut texels, 16);
+        let mut sum = 0.0_f64;
+        let mut count = 0.0_f64;
+        for row in 0..2 {
+            for column in 0..2 {
+                for channel in 0..4 {
+                    let got = f64::from(texels[(row * 4 + column) * 4 + channel]);
+                    let src_byte = f64::from(corner[(row * 2 + column) * 4 + channel]);
+                    let delta = got - src_byte;
+                    sum += delta * delta;
+                    count += 1.0;
+                }
+            }
+        }
+        let mse = sum / count;
+        let psnr = if mse == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0_f64 * 255.0 / mse).log10()
+        };
+        assert!(psnr >= 40.0, "sse2 quad {psnr:.1} dB");
+    }
 }
