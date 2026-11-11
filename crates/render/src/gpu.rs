@@ -1306,6 +1306,13 @@ impl Renderer {
         self.gpu.lighting_lamp_pick_counts()
     }
 
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. A real zero at that count is dark and is not
+    /// included. Waits for that frame.
+    pub fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.gpu.lighting_under_trusted_pixels()
+    }
+
     /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
     /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
     pub fn restir_spatial_bound(&self) -> u8 {
@@ -8876,6 +8883,9 @@ impl Gpu {
     }
 
     fn finish_teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
         if self.teardown < 2 {
             self.destroy_lighting();
             self.teardown = 2;
@@ -8891,6 +8901,12 @@ impl Gpu {
         if self.teardown < 5 {
             self.destroy_surface_handle();
             self.teardown = 5;
+        }
+        // A quit drop can reach here with `exit_release` set and the device
+        // still alive. Destroying it now is the same wait the quit skipped.
+        if self.exit_release {
+            let _ = self.release_instead_of_driver_destroy();
+            return;
         }
         if self.teardown < 6 {
             self.destroy_device_handle();

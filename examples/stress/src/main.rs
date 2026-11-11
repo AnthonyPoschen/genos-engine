@@ -216,7 +216,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
   --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). On by default. Off is the exact sum.
-                            The argument wins. The picture stays the raw sample.
+                            The argument wins. The picture is the mean of the unbiased sample.
   --restir-spatial-neighbors N
                             spatial reservoirs merged per pixel, 0..16 (GENOS_RESTIR_SPATIAL_NEIGHBORS).
                             0 skips the spatial pass. Default 4

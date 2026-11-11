@@ -25,7 +25,10 @@ const vec3 RAY_NEAR = vec3(9.6, 0.0, 0.0);
 const vec3 RAY_SPLIT = vec3(12.0, 0.0, 0.0);
 const vec3 RAY_NEW = vec3(40.0, 0.0, 0.0);
 const vec3 RAY_GREEN = vec3(0.0, 6.0, 0.0);
-const float RAY_N = 4.0;
+// A full set count. The ray cut holds only at LIGHTING_SC_FULL_SETS, so the
+// agreeing rows plant that many samples. Four used to be enough, and a black
+// cell then cut a texel that had never been traced.
+const float RAY_N = 64.0;
 const float RAY_OFF = 0.2;
 // Above the world-cell mark, and not 25 cm, so this slot does not reuse a corner's key.
 const float RAY_COARSE_SIZE = 0.5;
@@ -217,6 +220,17 @@ void main() {
                 cache.v[3u * texel + 2u] = vec4(RAY_NEW, RAY_N);
             }
             if (mode == RAY_OWN_AGREE || mode == RAY_FUTURE) {
+                cache.v[3u * texel + 2u] = vec4(RAY_RED, RAY_N);
+            }
+            // A full count that agrees with the live cell may hold. The stable
+            // row stays at zero sets: an empty texel keeps its rays.
+            if (mode == RAY_SEED_DIFF) {
+                cache.v[3u * texel + 2u] = vec4(RAY_GREEN, RAY_N);
+            }
+            if (mode == RAY_BLACK) {
+                cache.v[3u * texel + 2u] = vec4(vec3(0.0), RAY_N);
+            }
+            if (mode == RAY_MIX_OK) {
                 cache.v[3u * texel + 2u] = vec4(RAY_RED, RAY_N);
             }
             vec3 seed = RAY_RED;

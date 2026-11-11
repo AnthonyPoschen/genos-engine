@@ -1545,6 +1545,10 @@ impl Tools {
                 &ctx.renderer.lighting_settings().to_text(),
                 ctx.renderer,
             )),
+            "lighting_under_trusted" => reply(obj(vec![(
+                "pixels",
+                num(f64::from(ctx.renderer.lighting_under_trusted_pixels())),
+            )])),
             "set_lighting_settings" => {
                 let scene = ctx.host.scene();
                 apply_lighting_update(&mut scene.lighting, args.0)?;
