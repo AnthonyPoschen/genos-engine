@@ -128,6 +128,9 @@ void lighting_fill_free(uint slot) {
     lighting_sc_forget(slot);
     cache.v[3u * slot + 1u] = vec4(0.0);
     cache.v[3u * slot + 2u] = vec4(0.0);
+    // The next occupant must not compare against this surface.
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = vec4(0.0);
+    cache.v[LIGHTING_SC_GRAD2_AT + slot] = vec4(0.0);
 }
 
 // The fine cell is past its leash and a coarser cell still covers the point.
@@ -180,25 +183,45 @@ uint lighting_fill_bucket(float pri) {
     return min(uint(floor(t * FILL_BUCKET_STEPS)) + 1u, 63u);
 }
 
+float lighting_fill_unit(float v) {
+    return (v >= 0.0 && v <= 1.0) ? v : 0.0;
+}
+
+uint lighting_fill_seed(uint slot) {
+    return max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
+}
+
+// The lamp sample of a check ray. The budget index and the frame are not in it.
+float lighting_fill_check_u(uint slot) {
+    uint key = slot < LIGHTING_CACHE_SLOTS ? ckeys.key[slot] : 0u;
+    uint seed = lighting_fill_seed(slot);
+    return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
+}
+
 uint lighting_fill_q(uint slot, float d) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
     float mean = max(dot(shown_v.rgb, FILL_LUMA), FILL_TINY);
     float dev = sqrt(max(est.w, 0.0));
-    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
+    float lam = lighting_fill_unit(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
     float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
     float close = 1.0 / max(d, lighting_fill_f(10));
     return lighting_fill_bucket(close * (err + lighting_fill_f(11) * lam));
 }
 
 void lighting_fill_decay(uint slot) {
-    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
-    cache.v[LIGHTING_SC_GRAD_AT + slot].x = lam * clamp(lighting_fill_f(18), 0.0, 1.0);
-    if (floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z) == 0u) {
-        uint seed = max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
-        cache.v[LIGHTING_SC_GRAD_AT + slot].z = uintBitsToFloat(seed);
+    uint want = lighting_fill_seed(slot);
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    // A reused slot still holds the previous occupant's seed. Drop it before
+    // priority, so the new surface starts with no lambda and no stored luma.
+    if (floatBitsToUint(g.z) != want) {
+        g = vec4(0.0);
+        g.z = uintBitsToFloat(want);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 0.0;
     }
+    g.x = lighting_fill_unit(g.x) * clamp(lighting_fill_f(18), 0.0, 1.0);
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
 }
 
 // Drop a clipmap cell past its leash. 12.5 cm detail stays; the screen stage
@@ -303,23 +326,38 @@ uint lighting_fill_give(uint slot, uint q, uint base_m[64], inout uint extra_lef
     if (q == 0u || slot >= LIGHTING_CACHE_SLOTS || at >= end) {
         return at;
     }
-    uint m = base_m[q];
-    if (extra_left[q] > 0u && m < max_picks) {
+    // cell_grant: max_picks is per cell. A screen cell can win several tiles.
+    // Off-screen locks keep bit 31, and each slot is visited once.
+    uint lock = lighting_fill_lock_at() + slot;
+    uint lock_w = ckeys.key[lock];
+    bool ranked = (lock_w & 0x80000000u) != 0u;
+    uint prior = ranked ? 0u : lock_w;
+    if (prior >= max_picks) {
+        return at;
+    }
+    uint room = max_picks - prior;
+    uint m = min(base_m[q], room);
+    if (extra_left[q] > 0u && m < room) {
         m += 1u;
         extra_left[q] -= 1u;
     }
+    uint emitted = 0u;
     for (uint k = 0u; k < 8u; k++) {
         if (k >= m || at >= end) {
             break;
         }
         ckeys.key[LIGHTING_FILL_PICK_AT + at] = slot;
         at++;
+        emitted++;
+    }
+    if (!ranked) {
+        ckeys.key[lock] = prior + emitted;
     }
     return at;
 }
 
 float lighting_fill_pace(uint slot, float calm, float k, float rays0, float n) {
-    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
+    float lam = lighting_fill_unit(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
     // Lambda 0 keeps the caller's weight: the calm n/(rays+n), or the MSME k.
     if (!(lam > 0.0)) {
         return k;
@@ -338,18 +376,34 @@ float lighting_fill_pace(uint slot, float calm, float k, float rays0, float n) {
 
 void lighting_fill_note_check(uint slot, float l_now) {
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
-    bool have = cache.v[LIGHTING_SC_GRAD2_AT + slot].z > FILL_HALF;
-    float lam = clamp(g.x, 0.0, 1.0);
+    uint want = lighting_fill_seed(slot);
+    if (floatBitsToUint(g.z) != want) {
+        g = vec4(0.0);
+        g.z = uintBitsToFloat(want);
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 0.0;
+    }
+    bool have = cache.v[LIGHTING_SC_GRAD2_AT + slot].z > FILL_HALF && (g.y == g.y);
+    float lam = lighting_fill_unit(g.x);
+    // A non-finite sample must not stick. The decayed lambda stays, and the
+    // stored luma stays only when it is a real number.
+    if (!(l_now == l_now)) {
+        if (!(g.y == g.y)) {
+            g.y = 0.0;
+            have = false;
+        }
+        g.x = lam;
+        cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
+        cache.v[LIGHTING_SC_GRAD2_AT + slot].z = have ? 1.0 : 0.0;
+        return;
+    }
     if (have) {
         float denom = max(max(abs(l_now), abs(g.y)), FILL_TINY);
         float d = min(1.0, abs(l_now - g.y) / denom);
-        lam = clamp(d - FILL_TWO * max(lighting_fill_f(21), 0.0), 0.0, 1.0);
+        lam = lighting_fill_unit(d - FILL_TWO * max(lighting_fill_f(21), 0.0));
     }
     g.x = lam;
     g.y = l_now;
-    if (floatBitsToUint(g.z) == 0u) {
-        g.z = uintBitsToFloat(max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u));
-    }
+    g.z = uintBitsToFloat(want);
     cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
     cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 1.0;
 }
@@ -379,9 +433,16 @@ void lighting_fill_dispatch() {
     }
     uint check_n = 0u;
     uint limit = LIGHTING_FILL_TILE_CAP;
-    for (uint t = 0u; t < limit; t++) {
-        if (t >= tiles) {
+    // checks_from_phase: the cap walks from this frame's phase and wraps, so
+    // the tail of the table is not skipped every frame.
+    uint tile_phase = tiles == 0u ? 0u : lighting_round() % tiles;
+    for (uint i = 0u; i < limit; i++) {
+        if (i >= tiles) {
             continue;
+        }
+        uint t = i + tile_phase;
+        if (t >= tiles) {
+            t -= tiles;
         }
         uint w = ckeys.key[LIGHTING_FILL_TILE_AT + t];
         if (w == 0u) {
@@ -414,7 +475,9 @@ void lighting_fill_dispatch() {
     }
     uint lod_max = lighting_fill_lod_max();
     uint guard = LIGHTING_CACHE_SLOTS;
-    for (uint s = 0u; s < guard; s++) {
+    uint slot_phase = lighting_round() & (guard - 1u);
+    for (uint i = 0u; i < guard; i++) {
+        uint s = (i + slot_phase) & (guard - 1u);
         uint w = ckeys.key[lighting_fill_lock_at() + s];
         if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
             continue;
@@ -460,6 +523,13 @@ void lighting_fill_dispatch() {
         }
         uint q = min(w >> 21u, 63u);
         at = lighting_fill_give((w & 2097151u) - 1u, q, base_m, extra_left, max_picks, at, end);
+    }
+    // The lock word is the resolve chain. The per-cell count must not stay in it.
+    for (uint i = check_n; i < at; i++) {
+        uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + i];
+        if (slot < LIGHTING_CACHE_SLOTS) {
+            ckeys.key[lighting_fill_lock_at() + slot] = 0u;
+        }
     }
     uint on = at - check_n;
     uint off = spend - on;

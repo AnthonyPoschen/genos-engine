@@ -252,7 +252,12 @@ void main() {
     uint lit = 0u;
     float u = 0.0;
     if (pick) {
-        if (cache_pick) {
+        uint fill_r = ray >= lighting_probe_rays() ? ray - lighting_probe_rays() : ~0u;
+        uint fill_checks = lighting_ray_fill_on() ? ckeys.key[lighting_fill_header_at() + 2u] : 0u;
+        if (fill_r < fill_checks) {
+            // Same lamp sample every frame. A texel-direct check must not mix the frame in.
+            u = lighting_fill_check_u(ckeys.key[LIGHTING_FILL_PICK_AT + fill_r]);
+        } else if (cache_pick) {
             uint r = ray - lighting_probe_rays();
             uint ent = r / LIGHTING_CACHE_RAYS;
             if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
