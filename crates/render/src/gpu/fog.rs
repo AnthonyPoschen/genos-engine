@@ -48,9 +48,16 @@ pub(super) struct Targets {
     inject: Handle,
     integrate: Handle,
     query: Handle,
-    cmd: Handle,
+    pub(super) cmd: Handle,
     fence: Handle,
     image_ready: bool,
+    /// Last buffers written into `set`. A repeat update while the other flight
+    /// still executes this set is VUID-vkUpdateDescriptorSets-None-03047.
+    bound: bool,
+    bound_scene: Handle,
+    bound_params: Handle,
+    bound_columns: Handle,
+    bound_view: Handle,
 }
 
 impl Gpu {
@@ -70,7 +77,7 @@ impl Gpu {
         let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
         let (sun, lamps) = sun_and_lamps(&scene.lights);
         self.froxel_frame = Some(FrameJob {
-            params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0),
+            params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),
             width: size.width,
             height: size.height,
             slices: size.slices,
@@ -127,23 +134,19 @@ impl Gpu {
     }
 
     /// Compose reads `pad0`. A frame that did not dispatch leaves it at 0.
-    pub(super) fn release_froxel_header(&self) {
+    pub(super) fn release_froxel_header(&mut self) -> Result<(), String> {
         if self.froxel_wrote || self.frame_scene[0].buffer.is_null() {
-            return;
+            return Ok(());
         }
         let cmd = self.cmd;
-        self.barrier_on(cmd, 0x8000 | 0x800, 0x1000, 0x20, 0x1000);
+        let dst = self.frame_scene[0].buffer;
+        // The scene upload is a transfer write of this buffer, including the
+        // word at byte 12. Wait for that write, not only the earlier reads.
+        self.barrier_on(cmd, 0x8000 | 0x800 | 0x1000, 0x1000, 0x20 | 0x1000, 0x1000);
         let zero = 0u32.to_ne_bytes();
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                12,
-                4,
-                zero.as_ptr().cast(),
-            );
-        }
+        self.write_device(cmd, dst, 12, &zero)?;
         self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
+        Ok(())
     }
 
     /// Record inject and integrate on the frame command buffer, then copy the
@@ -185,7 +188,7 @@ impl Gpu {
         );
         self.stamp_froxel(cmd, query, 1, 0x800);
         if columns_fit(job.width, job.height) {
-            self.publish_frame_columns(cmd, columns, job.width, job.height, job.slices);
+            self.publish_frame_columns(cmd, columns, job.width, job.height, job.slices)?;
             self.froxel_wrote = true;
         }
         self.froxel_pending = !query.is_null() && self.timestamp_period > 0.0;
@@ -206,31 +209,26 @@ impl Gpu {
 
     /// Device-side `pad0` plus the column tail. Compose sees fog only after this.
     fn publish_frame_columns(
-        &self,
+        &mut self,
         cmd: Handle,
         columns: Handle,
         width: u32,
         height: u32,
         slices: u32,
-    ) {
+    ) -> Result<(), String> {
         self.barrier_on(cmd, 0x800, 0x1000 | 0x4000, 0x40 | 0x20, 0x800 | 0x1000 | 0x2000);
         let word = tail_word().to_ne_bytes();
         let head = column_header(width, height, slices);
+        let dst = self.frame_scene[0].buffer;
+        self.write_device(cmd, dst, 12, &word)?;
+        // Two transfer writes of frame_scene. Sync validation without range
+        // tracking treats them as one buffer even though the ranges differ.
+        self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
+        self.write_device(cmd, dst, scene_offset(), &head)?;
+        // The 16-byte header and the column copy are both transfer writes of
+        // frame_scene. Order them before the copy.
+        self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                12,
-                4,
-                word.as_ptr().cast(),
-            );
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.frame_scene[0].buffer,
-                scene_offset(),
-                16,
-                head.as_ptr().cast(),
-            );
             let region = CopyRegion {
                 src: 0,
                 dst: scene_offset().saturating_add(16),
@@ -245,6 +243,7 @@ impl Gpu {
             );
         }
         self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
+        Ok(())
     }
 
     pub(super) fn collect_froxel_time(&mut self) {
@@ -291,6 +290,7 @@ impl Gpu {
             &job.lamps,
             flags,
             job.stop_slices,
+            job.reference_far,
         );
         let scene = scene_bytes_for(job);
         let (
@@ -335,23 +335,7 @@ impl Gpu {
                 "froxel reset fence",
             )?;
             check((self.fns.reset_cmd)(cmd, 0), "froxel reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(cmd, std::ptr::from_ref(&begin).cast()),
-                "froxel begin",
-            )?;
+            self.begin_reused(cmd)?;
         }
         self.barrier_on(cmd, 0x4000, 0x800, 0x4000, 0x20);
         self.transition_froxel_image(cmd, image)?;
@@ -460,6 +444,7 @@ impl Gpu {
             flags: 0,
             stop_slices: 0,
             read_extinction: false,
+            reference_far: 0.0,
         };
         let gpu = self.run_fog(&job)?;
         if self.timestamp_period <= 0.0 {
@@ -490,6 +475,7 @@ impl Gpu {
             flags: 0,
             stop_slices: 0,
             read_extinction: false,
+            reference_far: 0.0,
         };
         let gpu = self.run_fog(&job)?;
         if self.timestamp_period <= 0.0 {
@@ -568,6 +554,21 @@ impl Gpu {
         {
             return Ok(());
         }
+        let replacing = self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| !targets.image.image.is_null());
+        if replacing {
+            // The current flight was waited by the caller. Its fence may already
+            // have been reset, so only the other flight is waited here.
+            let other = 1 - self.flight;
+            self.wait_flight(other)?;
+            let fence = self
+                .froxel
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |targets| targets.fence);
+            self.wait_fence(fence, "froxel replace")?;
+        }
         let (image_bytes, image) = self.make_image_3d(size)?;
         let columns = self.make_buffer(
             column_bytes(size.width, size.height).max(16),
@@ -589,6 +590,7 @@ impl Gpu {
             targets.size = size;
             targets.bytes = bytes;
             targets.image_ready = false;
+            targets.bound = false;
             retired
         };
         self.destroy_image(&mut retired.0);
@@ -700,6 +702,11 @@ impl Gpu {
             cmd,
             fence,
             image_ready: false,
+            bound: false,
+            bound_scene: std::ptr::null_mut(),
+            bound_params: std::ptr::null_mut(),
+            bound_columns: std::ptr::null_mut(),
+            bound_view: std::ptr::null_mut(),
         })
     }
 
@@ -970,7 +977,30 @@ impl Gpu {
         Ok((cmd, fence))
     }
 
-    fn write_froxel_set(&self, scene: Handle) -> Result<(), String> {
+    fn write_froxel_set(&mut self, scene: Handle) -> Result<(), String> {
+        let unchanged = self.froxel.as_ref().is_some_and(|targets| {
+            targets.bound
+                && targets.bound_scene == scene
+                && targets.bound_params == targets.params.buffer
+                && targets.bound_columns == targets.columns.buffer
+                && targets.bound_view == targets.image.view
+        });
+        if unchanged {
+            return Ok(());
+        }
+        // The set is shared by both frames and by the standalone dispatch.
+        // record_and_submit has already reset the current flight's fence, so
+        // waiting it here would hang. The other flight, and the froxel fence,
+        // are the command buffers that can still be executing this set.
+        let other = 1 - self.flight;
+        self.wait_flight(other)?;
+        let fence = self
+            .froxel
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |targets| targets.fence);
+        if !fence.is_null() {
+            self.wait_fence(fence, "froxel descriptor")?;
+        }
         let targets = self.froxel.as_ref().ok_or("froxel targets missing")?;
         #[repr(C)]
         struct BufInfo {
@@ -1069,6 +1099,16 @@ impl Gpu {
         ];
         unsafe {
             (self.fns.update_desc)(self.device, 4, writes.as_ptr().cast(), 0, std::ptr::null());
+        }
+        if let Some(targets) = self.froxel.as_mut() {
+            let params = targets.params.buffer;
+            let columns = targets.columns.buffer;
+            let view = targets.image.view;
+            targets.bound = true;
+            targets.bound_scene = scene;
+            targets.bound_params = params;
+            targets.bound_columns = columns;
+            targets.bound_view = view;
         }
         Ok(())
     }
@@ -1669,6 +1709,7 @@ fn encode_params(
     lamps: &[FogPointLamp],
     flags: u32,
     stop_slices: u32,
+    reference_far: f32,
 ) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(PARAM_BYTES);
     push_u32(&mut bytes, size.width);
@@ -1678,7 +1719,7 @@ fn encode_params(
     push_f32(&mut bytes, view.origin[0]);
     push_f32(&mut bytes, view.origin[1]);
     push_f32(&mut bytes, view.origin[2]);
-    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, reference_far);
     push_f32(&mut bytes, view.forward[0]);
     push_f32(&mut bytes, view.forward[1]);
     push_f32(&mut bytes, view.forward[2]);
@@ -1708,7 +1749,13 @@ fn encode_params(
     push_u32(&mut bytes, u32::try_from(volumes).unwrap_or(0));
     push_u32(&mut bytes, u32::try_from(lamp_count).unwrap_or(0));
     push_u32(&mut bytes, stop_slices);
-    push_u32(&mut bytes, 0);
+    // F2 shadow rays per froxel. Low, High, and Ultra use 2 (ADR 0026).
+    let f2_rays = if flags & crate::fog_pass::FOG_F2_REFERENCE != 0 {
+        2
+    } else {
+        0
+    };
+    push_u32(&mut bytes, f2_rays);
     for volume in settings.volumes.iter().take(MAX_VOLUMES) {
         push_f32(&mut bytes, volume.position[0]);
         push_f32(&mut bytes, volume.position[1]);

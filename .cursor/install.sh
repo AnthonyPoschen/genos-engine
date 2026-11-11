@@ -7,6 +7,8 @@ set -euo pipefail
 packages=(
     build-essential pkg-config git
     glslc                                         # shaders (crates/render, crates/gpuref)
+    glslang-tools                                 # glslangValidator (crates/render/build.rs)
+    spirv-tools                                   # spirv-opt folds the read-only texel module
     libwayland-dev wayland-protocols libxkbcommon-dev  # crates/window
     libvulkan1 mesa-vulkan-drivers vulkan-tools   # lavapipe (software Vulkan)
     weston                                        # headless Wayland compositor
@@ -29,5 +31,8 @@ fi
 export PATH="$HOME/.cargo/bin:$PATH"
 rustup toolchain install stable --profile minimal
 rustup default stable
+
+# Local pre-push runs scripts/lint.sh. CI remains the authority.
+bash scripts/install-git-hooks.sh
 
 cargo build --workspace --release --tests

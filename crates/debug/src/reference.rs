@@ -7,7 +7,6 @@
 #![expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::ignore_without_reason, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::ignored_unit_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -29,12 +28,20 @@
 //! particle cards.
 //! A hit's albedo is the shared shade's diffuse albedo (`genos_load::ShadeSample`).
 //! Analytic paint is that shade with metallic 0. A glTF hit passes the textured shade.
+//!
+//! Specular: a solid with a [`SolidMaterial`] override (the `object` command's
+//! roughness and metallic) adds a GGX lobe at the primary hit only: each lamp
+//! weighted by the lobe, plus one GGX-sampled ray whose hit returns its Lambert
+//! path (or the sky). Its diffuse albedo is scaled by `1 - metallic`. Later
+//! vertices stay Lambert paint, so a gloss solid seen in another gloss solid
+//! shows diffuse there. When [`RefSetup::specular`] is set that lobe is also
+//! kept on its own ([`Reference::specular`], the `aov: "specular"` image).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use genos_load::ShadeSample;
 use genos_render::{
-    direct_light_in, linear_from_display, pack_f32, rec709_y, scene_luma, SceneMesh, SceneRead,
+    direct_light_in, lamps_in, linear_from_display, solid_contains, pack_f32, rec709_y, scene_luma, SceneMesh, SceneRead,
     Surfaces, TraceHit,
 };
 use genos_scene::{look_direction, Camera, Scene};
@@ -46,6 +53,13 @@ const PI: f32 = std::f32::consts::PI;
 const REACH: f32 = 200.0;
 /// Vertical field of view of the picture (genos-scene `view_proj`).
 const FOV_Y: f32 = 60.0;
+
+/// Roughness and metallic for one solid, 0 to 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SolidMaterial {
+    pub roughness: f32,
+    pub metallic: f32,
+}
 
 /// What to trace.
 #[derive(Clone, Debug)]
@@ -69,6 +83,10 @@ pub struct RefSetup {
     /// Trace the scene's triangles ([`SceneMesh`], through the CPU BVH) instead of
     /// its analytic shapes. Both must agree within the trace's noise.
     pub triangles: bool,
+    /// Per solid index; None (or past the end) is plain paint.
+    pub materials: Vec<Option<SolidMaterial>>,
+    /// Keep the primary specular lobe on its own as well ([`Reference::specular`]).
+    pub specular: bool,
 }
 
 impl RefSetup {
@@ -86,6 +104,8 @@ impl RefSetup {
             seconds: f32::INFINITY,
             max_bounces: 64,
             triangles: false,
+            materials: Vec::new(),
+            specular: false,
         }
     }
 }
@@ -104,6 +124,28 @@ pub struct Reference {
     /// Mean standard error of a pixel's luminance over its mean (hit pixels): the
     /// reference's own noise. Comparisons below it mean nothing; raise spp.
     pub noise: f32,
+    /// Linear radiance of the primary specular lobe alone (no fog), when
+    /// [`RefSetup::specular`] asked for it. Zero on paint.
+    pub specular: Option<Vec<[f32; 3]>>,
+}
+
+impl Reference {
+    /// [`Reference::specular`] toned like the picture.
+    pub fn specular_image(&self) -> Option<Image> {
+        self.specular.as_ref().map(|spec| Image {
+            width: self.image.width,
+            height: self.image.height,
+            rgb: spec
+                .iter()
+                .flat_map(|c| c.map(tone8))
+                .collect(),
+        })
+    }
+}
+
+/// [`tone`] as an 8-bit channel.
+fn tone8(v: f32) -> u8 {
+    (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
 fn tone(x: f32) -> f32 {
@@ -183,7 +225,7 @@ fn lift(hit: &TraceHit) -> [f32; 3] {
 #[cfg(test)]
 fn path(scene: &Scene, first: &TraceHit, max_bounces: u32, rng: &mut Rng) -> [f32; 3] {
     let u = (rng.next(), rng.next());
-    path_from(scene, scene, first, max_bounces, u, rng)
+    path_from(scene, scene, first, 0.0, max_bounces, u, rng)
 }
 
 /// One path whose first bounce direction comes from `stratum`, a cell of the pixel's
@@ -192,6 +234,7 @@ fn path_from(
     scene: &Scene,
     surfaces: &dyn Surfaces,
     first: &TraceHit,
+    metallic: f32,
     max_bounces: u32,
     stratum: (f32, f32),
     rng: &mut Rng,
@@ -200,7 +243,10 @@ fn path_from(
     let mut at = *first;
     // Analytic hits are paint. A caller that already shaded a glTF material stores
     // the diffuse albedo here, which is the same product with metallic applied.
-    let primary = ShadeSample::paint(first.albedo);
+    let primary = ShadeSample {
+        metallic,
+        ..ShadeSample::paint(first.albedo)
+    };
     let mut weight = scale(primary.diffuse_albedo(), LAMBERT);
     let mut sum = primary.outgoing(
         LAMBERT,
@@ -241,6 +287,146 @@ fn path_from(
     sum
 }
 
+/// Bounce irradiance arriving at `point` on a surface facing `normal`: the light
+/// every other surface sends there (their direct light and all later bounces, up
+/// to `max_bounces` hops), not the lamps' own direct light at `point`. This is
+/// what a surface-cache cell stores. `samples` cosine directions on a jittered
+/// grid; the sky counts where a ray leaves the scene. Deterministic for `seed`.
+pub fn bounce_irradiance(
+    scene: &Scene,
+    point: [f32; 3],
+    normal: [f32; 3],
+    samples: u32,
+    max_bounces: u32,
+    seed: u64,
+) -> [f32; 3] {
+    let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
+    let n = normalize(normal);
+    let from = add(point, scale(n, 0.02));
+    // ceil(sqrt(samples)) by integer search — no f64→u32 cast.
+    let side = {
+        let n = u64::from(samples.max(1));
+        let mut s = 1u64;
+        while s.saturating_mul(s) < n {
+            s += 1;
+        }
+        u32::try_from(s).unwrap_or(u32::MAX)
+    };
+    let mut rng = Rng::new(seed ^ 0xB0_0CE);
+    let mut sum = [0.0f32; 3];
+    for k in 0..samples.max(1) {
+        let cell = k % (side * side);
+        let u = ((cell % side) as f32 + rng.next()) / side as f32;
+        let v = ((cell / side) as f32 + rng.next()) / side as f32;
+        let dir = cosine(n, u, v);
+        let l = match scene.first_hit(from, dir, REACH) {
+            None => sky,
+            Some(hit) => {
+                let rest = (rng.next(), rng.next());
+                let emitted = ShadeSample::paint(hit.albedo).emissive;
+                add(
+                    emitted,
+                    path_from(scene, scene, &hit, 0.0, max_bounces.saturating_sub(1), rest, &mut rng),
+                )
+            }
+        };
+        sum = add(sum, l);
+    }
+    // A cosine sample estimates the cosine-weighted mean radiance; irradiance is π times it.
+    scale(sum, PI / samples.max(1) as f32)
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// The material override of the solid `first` lies on, if any.
+fn material_at(setup: &RefSetup, first: &TraceHit) -> Option<SolidMaterial> {
+    let inward = add(first.point, scale(first.normal, -0.01));
+    setup
+        .materials
+        .iter()
+        .zip(&setup.scene.solids)
+        .find_map(|(m, solid)| m.filter(|_| solid_contains(solid, inward)))
+}
+
+/// Smith-GGX masking for one direction (height-correlated form left out).
+fn smith_g1(n_dot_x: f32, a2: f32) -> f32 {
+    2.0 * n_dot_x / (n_dot_x + (a2 + (1.0 - a2) * n_dot_x * n_dot_x).sqrt())
+}
+
+/// Schlick Fresnel with F0 = mix(0.04, base, metallic).
+fn fresnel(base: [f32; 3], metallic: f32, v_dot_h: f32) -> [f32; 3] {
+    let k = (1.0 - v_dot_h.clamp(0.0, 1.0)).powi(5);
+    base.map(|b| {
+        let f0 = 0.04 + (b - 0.04) * metallic;
+        f0 + (1.0 - f0) * k
+    })
+}
+
+/// One sample of the GGX lobe at the primary hit toward `eye`: every lamp
+/// through the lobe, plus one GGX-sampled ray whose hit returns its Lambert path.
+#[allow(clippy::too_many_arguments, reason = "one call site, all trace state")]
+fn specular_from(
+    scene: &Scene,
+    surfaces: &dyn Surfaces,
+    first: &TraceHit,
+    eye: [f32; 3],
+    mat: SolidMaterial,
+    max_bounces: u32,
+    rng: &mut Rng,
+) -> [f32; 3] {
+    let n = first.normal;
+    let v = normalize(add(eye, scale(first.point, -1.0)));
+    let nv = dot(n, v).max(1.0e-4);
+    let alpha = (mat.roughness * mat.roughness).max(1.0e-3);
+    let a2 = alpha * alpha;
+    let mut sum = [0.0; 3];
+    for (l, irradiance) in lamps_in(scene, surfaces, lift(first), n) {
+        let h = normalize(add(v, l));
+        let (nl, nh, vh) = (dot(n, l).max(1.0e-4), dot(n, h).max(0.0), dot(v, h).max(0.0));
+        let den = nh * nh * (a2 - 1.0) + 1.0;
+        let d = a2 / (PI * den * den);
+        let g = smith_g1(nl, a2) * smith_g1(nv, a2);
+        let f = fresnel(first.albedo, mat.metallic, vh);
+        // BRDF × irradiance; the irradiance already carries n·l.
+        sum = add(sum, mul(scale(f, d * g / (4.0 * nl * nv)), irradiance));
+    }
+    // Indirect: h drawn from D·(n·h), so weight = F·G·(v·h) / ((n·h)(n·v)).
+    let (u1, u2) = (rng.next(), rng.next());
+    let cos_t = ((1.0 - u1) / (1.0 + (a2 - 1.0) * u1)).max(0.0).sqrt();
+    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+    let phi = 2.0 * PI * u2;
+    let up = if n[1].abs() < 0.9 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [1.0, 0.0, 0.0]
+    };
+    let t = normalize(cross(up, n));
+    let b = cross(n, t);
+    let h = normalize(add(
+        add(scale(t, sin_t * phi.cos()), scale(b, sin_t * phi.sin())),
+        scale(n, cos_t),
+    ));
+    let vh = dot(v, h);
+    let l = add(scale(h, 2.0 * vh), scale(v, -1.0));
+    let nl = dot(n, l);
+    if nl <= 0.0 || vh <= 0.0 {
+        return sum;
+    }
+    let nh = dot(n, h).max(1.0e-4);
+    let g = smith_g1(nl, a2) * smith_g1(nv, a2);
+    let weight = scale(fresnel(first.albedo, mat.metallic, vh), g * vh / (nh * nv));
+    let incoming = match surfaces.first_hit(lift(first), l, REACH) {
+        None => scene.sky.as_ref().map_or([0.0; 3], |s| s.color),
+        Some(next) => {
+            let u = (rng.next(), rng.next());
+            path_from(scene, surfaces, &next, 0.0, max_bounces.saturating_sub(1), u, rng)
+        }
+    };
+    add(sum, mul(weight, incoming))
+}
+
 /// Trace the whole picture on every core in passes of `spp` paths per pixel until
 /// the noise is at most `noise_target`, `max_spp` is reached or `seconds` run out
 /// (after at least one pass). Blocks until done.
@@ -249,6 +435,7 @@ fn path_from(
     reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
 )]
 pub fn render(setup: &RefSetup) -> Reference {
+    type Row = (usize, Vec<[f64; 3]>, Vec<f64>, Vec<[f64; 3]>);
     let started = std::time::Instant::now();
     let (w, h) = (setup.width.max(1) as usize, setup.height.max(1) as usize);
     let forward = {
@@ -281,6 +468,11 @@ pub fn render(setup: &RefSetup) -> Reference {
     // Per pixel: sum of radiance and of squared luminance.
     let mut sum = vec![[0.0f64; 3]; w * h];
     let mut sq = vec![0.0f64; w * h];
+    let mats: Vec<Option<SolidMaterial>> = firsts
+        .iter()
+        .map(|f| f.as_ref().and_then(|f| material_at(setup, f)))
+        .collect();
+    let mut spec_sum = vec![[0.0f64; 3]; if setup.specular { w * h } else { 0 }];
     let batch = setup.spp.max(1);
     let side = (batch as f32).sqrt().floor().max(1.0) as u32;
     // Half the cores unless GENOS_REFERENCE_THREADS says otherwise: a proof render
@@ -295,7 +487,7 @@ pub fn render(setup: &RefSetup) -> Reference {
     loop {
         let next_row = AtomicUsize::new(0);
         let pass = done / batch;
-        let rows: Vec<(usize, Vec<[f64; 3]>, Vec<f64>)> = std::thread::scope(|s| {
+        let rows: Vec<Row> = std::thread::scope(|s| {
             let workers: Vec<_> = (0..threads)
                 .map(|_| {
                     s.spawn(|| {
@@ -307,6 +499,7 @@ pub fn render(setup: &RefSetup) -> Reference {
                             }
                             let mut row = vec![[0.0f64; 3]; w];
                             let mut row_sq = vec![0.0f64; w];
+                            let mut row_spec = vec![[0.0f64; 3]; w];
                             for x in 0..w {
                                 let Some(first) = &firsts[y * w + x] else {
                                     continue;
@@ -324,14 +517,31 @@ pub fn render(setup: &RefSetup) -> Reference {
                                     let u = ((cell % side) as f32 + rng.next()) / side as f32;
                                     let v = ((cell / side) as f32 + rng.next()) / side as f32;
                                     let stratum = ((u + sx).fract(), (v + sy).fract());
-                                    let l = path_from(
+                                    let mat = mats[y * w + x];
+                                    let mut l = path_from(
                                         &setup.scene,
                                         surfaces,
                                         first,
+                                        mat.map_or(0.0, |m| m.metallic),
                                         setup.max_bounces,
                                         stratum,
                                         &mut rng,
                                     );
+                                    if let Some(mat) = mat {
+                                        let spec = specular_from(
+                                            &setup.scene,
+                                            surfaces,
+                                            first,
+                                            setup.eye,
+                                            mat,
+                                            setup.max_bounces,
+                                            &mut rng,
+                                        );
+                                        l = add(l, spec);
+                                        for c in 0..3 {
+                                            row_spec[x][c] += spec[c] as f64;
+                                        }
+                                    }
                                     let l = genos_render::compose_pixel_medium(
                                         &setup.scene.fog,
                                         &genos_render::PixelRay {
@@ -356,7 +566,7 @@ pub fn render(setup: &RefSetup) -> Reference {
                                     }
                                 }
                             }
-                            out.push((y, row, row_sq));
+                            out.push((y, row, row_sq, row_spec));
                         }
                         out
                     })
@@ -367,8 +577,13 @@ pub fn render(setup: &RefSetup) -> Reference {
                 .flat_map(|w| w.join().unwrap_or_default())
                 .collect()
         });
-        for (y, row, row_sq) in rows {
+        for (y, row, row_sq, row_spec) in rows {
             for x in 0..w {
+                if setup.specular {
+                    for c in 0..3 {
+                        spec_sum[y * w + x][c] += row_spec[x][c];
+                    }
+                }
                 for c in 0..3 {
                     sum[y * w + x][c] += row[x][c];
                 }
@@ -402,7 +617,7 @@ pub fn render(setup: &RefSetup) -> Reference {
         .collect();
     let rgb = linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Reference {
         image: Image {
@@ -415,6 +630,12 @@ pub fn render(setup: &RefSetup) -> Reference {
         spp: done,
         seconds: started.elapsed().as_secs_f32(),
         noise,
+        specular: setup.specular.then(|| {
+            spec_sum
+                .iter()
+                .map(|v| v.map(|c| (c / done as f64) as f32))
+                .collect()
+        }),
     }
 }
 
@@ -485,7 +706,7 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
     let rgb = out
         .linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Ok(Reference {
         image: Image {
@@ -498,13 +719,19 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
         spp: out.spp.min(u32::MAX as u64) as u32,
         seconds: out.seconds,
         noise: out.noise,
+        specular: None,
     })
 }
 
-/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
-/// bounce limit when it is at least as converged as asked; a new trace is saved there.
-/// The key hashes the scene's Debug text, so it holds within one build of the engine.
-pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
+/// File stem for [`render_cached`].
+///
+/// The hash is the scene's `Debug` text, the eye, yaw, pitch, width, height and
+/// bounce count. Seconds are not included. Analytic traces keep that stem.
+/// Triangle traces add `triangles`, and a GPU trace adds `gpuref-v2`. A specular
+/// lobe or a material override is not cached. An integrator revision is not in
+/// the hash: another commit can collide with a file that already meets the noise
+/// target. Callers that promote a file record the commit beside it.
+pub fn cache_key(setup: &RefSetup) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!(
@@ -518,17 +745,41 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
         setup.max_bounces
     )
     .hash(&mut hasher);
-    // Analytic traces keep their old keys, so existing caches stay valid.
     if setup.triangles {
         "triangles".hash(&mut hasher);
     }
-    // GPU traces (triangles, their own tracer) keep their own keys.
-    let gpu = gpu_wanted();
-    if gpu {
+    if gpu_wanted() {
         "gpuref-v2".hash(&mut hasher);
     }
-    let path = dir.join(format!("{:016x}.ref", hasher.finish()));
-    if let Some(r) = load(&path, setup.width, setup.height) {
+    hasher.finish()
+}
+
+/// Read one cached reference. `None` when the file is missing, short, or the wrong size.
+pub fn read_cached(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
+    load(path, width, height)
+}
+
+/// Write one cached reference in the format [`render_cached`] reads back.
+pub fn write_cached(path: &std::path::Path, reference: &Reference) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, save(reference))
+}
+
+/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
+/// bounce limit when it is at least as converged as asked; a new trace is saved there.
+/// The key hashes the scene's Debug text, so it holds within one build of the engine.
+pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
+    // The specular layer is not stored and gpuref has no materials: trace here.
+    if setup.specular || !setup.materials.is_empty() {
+        return render(setup);
+    }
+    let gpu = gpu_wanted();
+    let path = dir.join(format!("{:016x}.ref", cache_key(setup)));
+    if let Some(r) = read_cached(&path, setup.width, setup.height) {
         if r.noise <= setup.noise_target || r.spp >= setup.max_spp {
             return r;
         }
@@ -544,7 +795,7 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     } else {
         render(setup)
     };
-    let _ = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, save(&r)));
+    let _ = write_cached(&path, &r);
     r
 }
 
@@ -597,7 +848,7 @@ fn load(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
     }
     let rgb = linear
         .iter()
-        .flat_map(|c| c.map(|v| (tone(v) * 255.0).round().clamp(0.0, 255.0) as u8))
+        .flat_map(|c| c.map(tone8))
         .collect();
     Some(Reference {
         image: Image {
@@ -609,6 +860,7 @@ fn load(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
         hit,
         spp,
         seconds: 0.0,
+        specular: None,
         noise,
     })
 }
@@ -1104,6 +1356,8 @@ mod tests {
                     seconds: f32::INFINITY,
                     max_bounces: bounces,
                     triangles: false,
+                    materials: Vec::new(),
+                    specular: false,
                 });
                 r.image
                     .save(&dir.join(format!("{name}-b{bounces}.png")))
@@ -1146,6 +1400,8 @@ mod tests {
             seconds: f32::INFINITY,
             max_bounces: 64,
             triangles,
+            materials: Vec::new(),
+            specular: false,
         };
         let a = render(&setup(false));
         let b = render(&setup(true));
@@ -1170,6 +1426,53 @@ mod tests {
         assert!(bias < 0.01, "picture mean differs by {bias}");
     }
 
+    /// `aov: specular` keeps a specular layer: a polished metal solid has one,
+    /// paint (no override) has none, and the layer is part of the full picture.
+    #[test]
+    fn specular_layer_is_lit_for_metal_and_dark_for_paint() {
+        let mut scene = closed_room();
+        scene.solids = vec![genos_scene::Solid {
+            shape: genos_scene::Shape::Square,
+            position: Vec3::new(0.0, 0.0, 0.0),
+            size: 1.5,
+            height: 1.2,
+            yaw: 0.3,
+            color: [0.9, 0.8, 0.6],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        }];
+        let setup = |materials| RefSetup {
+            scene: scene.clone(),
+            eye: [0.0, 1.6, 2.7],
+            yaw: 0.0,
+            pitch: -0.25,
+            width: 48,
+            height: 36,
+            spp: 32,
+            noise_target: 0.0,
+            max_spp: 32,
+            seconds: f32::INFINITY,
+            max_bounces: 8,
+            triangles: false,
+            materials,
+            specular: true,
+        };
+        let total = |r: &Reference| -> f32 {
+            r.specular.iter().flatten().map(|c| luma(*c)).sum()
+        };
+        let metal = render(&setup(vec![Some(SolidMaterial {
+            roughness: 0.05,
+            metallic: 1.0,
+        })]));
+        let paint = render(&setup(Vec::new()));
+        assert!(metal.specular_image().is_some());
+        assert!(total(&metal) > 0.0, "metal has no specular light");
+        assert_eq!(total(&paint), 0.0);
+        let full: f32 = metal.linear.iter().map(|c| luma(*c)).sum();
+        assert!(total(&metal) <= full * 1.001);
+    }
+
     #[test]
     fn a_picture_equal_to_its_reference_has_no_error() {
         let reference = Reference {
@@ -1182,6 +1485,7 @@ mod tests {
             hit: vec![true, true],
             spp: 1,
             seconds: 0.0,
+            specular: None,
             noise: 0.0,
         };
         let (c, _) = compare(
@@ -1214,6 +1518,7 @@ mod tests {
             hit: vec![true],
             spp: 1,
             seconds: 0.0,
+            specular: None,
             noise: 0.0,
         };
         let scene = SceneRead {

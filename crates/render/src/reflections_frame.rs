@@ -67,7 +67,9 @@ struct ReflectionGpu {
     portal_layout: Handle,
     portal_set_layout: Handle,
     portal_pool: Handle,
-    portal_set: Handle,
+    /// One set per frame in flight. `upload_portal_link` rewrites binding 1 to
+    /// that flight's instance buffer; the other flight may still be drawing.
+    portal_sets: [Handle; 2],
     composite_pipe: Handle,
     composite_layout: Handle,
     composite_set_layout: Handle,
@@ -134,7 +136,7 @@ impl ReflectionGpu {
             portal_layout: std::ptr::null_mut(),
             portal_set_layout: std::ptr::null_mut(),
             portal_pool: std::ptr::null_mut(),
-            portal_set: std::ptr::null_mut(),
+            portal_sets: [std::ptr::null_mut(); 2],
             composite_pipe: std::ptr::null_mut(),
             composite_layout: std::ptr::null_mut(),
             composite_set_layout: std::ptr::null_mut(),
@@ -286,7 +288,7 @@ impl Gpu {
         self.reflection.query_slot = u32::try_from(self.flight).unwrap_or(0) * 2;
         self.stamp_reflection(0, 1);
         self.copy_scene_depth();
-        self.upload_water_buffer();
+        self.upload_water_buffer()?;
         let mut drawn = 0u32;
         let count = self.reflection.plane_count;
         for index in 0..count {
@@ -310,7 +312,7 @@ impl Gpu {
             self.draw_water_surfaces(matrix);
         }
         if self.reflection.swatch {
-            self.draw_ggx_swatch();
+            self.draw_ggx_swatch()?;
         }
         self.dispatch_reflection_rays()?;
         self.stamp_reflection(1, 0x2000);
@@ -334,7 +336,7 @@ impl Gpu {
         let normal = Vec3::new(plane.normal[0], plane.normal[1], plane.normal[2]);
         let portal = plane.kind == ReflectorKind::Portal;
         if portal {
-            self.upload_portal_link(&plane);
+            self.upload_portal_link(&plane)?;
         }
         let view = if portal {
             [0.0; 16]
@@ -357,7 +359,7 @@ impl Gpu {
                     self.reflection.portal_layout,
                     0,
                     1,
-                    &self.reflection.portal_set,
+                    &self.reflection.portal_sets[self.flight],
                     0,
                     std::ptr::null(),
                 );
@@ -489,8 +491,8 @@ impl Gpu {
         }
     }
 
-    fn draw_ggx_swatch(&self) {
-        self.upload_ggx_quad();
+    fn draw_ggx_swatch(&mut self) -> Result<(), String> {
+        self.upload_ggx_quad()?;
         self.begin_target_pass(self.reflection.composite_pass, self.framebuffer, false);
         let identity = crate::world::identity_pose();
         unsafe {
@@ -511,6 +513,7 @@ impl Gpu {
             (self.fns.cmd_draw)(self.cmd, 6, 1, 0, 0);
             (self.fns.cmd_end_rp)(self.cmd);
         }
+        Ok(())
     }
 
     fn dispatch_reflection_rays(&mut self) -> Result<(), String> {
@@ -554,7 +557,7 @@ impl Gpu {
         Ok(())
     }
 
-    fn upload_water_buffer(&self) {
+    fn upload_water_buffer(&mut self) -> Result<(), String> {
         let mut bytes = vec![0u8; usize::try_from(WATER_BYTES).unwrap_or(0)];
         let mut at = 0usize;
         let push = |bytes: &mut [u8], at: &mut usize, value: f32| {
@@ -668,11 +671,13 @@ impl Gpu {
                 ],
             );
         }
-        self.update_buffer(&self.reflection.water_buf, &bytes);
+        let dst = self.reflection.water_buf.buffer;
+        self.update_buffer(dst, &bytes)?;
         self.buffer_barrier(self.reflection.water_buf.buffer, 0x1000, 0x80, 0x1000, 0x20);
+        Ok(())
     }
 
-    fn upload_portal_link(&self, plane: &Reflector) {
+    fn upload_portal_link(&mut self, plane: &Reflector) -> Result<(), String> {
         let mut bytes = vec![0u8; usize::try_from(LINK_BYTES).unwrap_or(0)];
         let mut at = 0usize;
         let push4 = |bytes: &mut [u8], at: &mut usize, value: [f32; 4]| {
@@ -759,16 +764,18 @@ impl Gpu {
                 0.0,
             ],
         );
-        self.update_buffer(&self.reflection.link_buf, &bytes);
+        let dst = self.reflection.link_buf.buffer;
+        self.update_buffer(dst, &bytes)?;
         self.buffer_barrier(self.reflection.link_buf.buffer, 0x1000, 0x8, 0x1000, 0x20);
         self.write_storage(
-            self.reflection.portal_set,
+            self.reflection.portal_sets[self.flight],
             1,
             &self.instance_bufs[self.flight],
         );
+        Ok(())
     }
 
-    fn upload_ggx_quad(&self) {
+    fn upload_ggx_quad(&mut self) -> Result<(), String> {
         let width = self.extent_w.max(1) as f32;
         let height = self.extent_h.max(1) as f32;
         let x1 = -1.0 + 16.0 / width;
@@ -791,27 +798,15 @@ impl Gpu {
         let bytes = unsafe {
             std::slice::from_raw_parts(verts.as_ptr() as *const u8, std::mem::size_of_val(&verts))
         };
-        self.update_buffer(&self.reflection.ggx_buf, bytes);
+        let dst = self.reflection.ggx_buf.buffer;
+        self.update_buffer(dst, bytes)?;
         self.buffer_barrier(self.reflection.ggx_buf.buffer, 0x1000, 0x4, 0x1000, 0x4);
+        Ok(())
     }
 
-    fn update_buffer(&self, buffer: &Buffer, bytes: &[u8]) {
-        if buffer.buffer.is_null() || bytes.is_empty() {
-            return;
-        }
-        let size = u64::try_from(bytes.len()).unwrap_or(0) & !3;
-        if size == 0 {
-            return;
-        }
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                buffer.buffer,
-                0,
-                size,
-                bytes.as_ptr() as *const c_void,
-            );
-        }
+    fn update_buffer(&mut self, buffer: Handle, bytes: &[u8]) -> Result<(), String> {
+        let cmd = self.cmd;
+        self.write_device(cmd, buffer, 0, bytes)
     }
 
     fn copy_scene_depth(&mut self) {
@@ -1293,12 +1288,19 @@ impl Gpu {
     fn make_portal_pipeline(&mut self) -> Result<(), String> {
         self.reflection.portal_set_layout = self.two_storage_layout(0x1)?;
         self.reflection.portal_layout = self.set_only_layout(self.reflection.portal_set_layout)?;
-        self.reflection.portal_pool = self.desc_pool_kind(7, 2)?;
-        self.reflection.portal_set = self.alloc_one(
-            self.reflection.portal_pool,
-            self.reflection.portal_set_layout,
-        )?;
-        self.write_storage(self.reflection.portal_set, 0, &self.reflection.link_buf);
+        // Two sets, two storage buffers each.
+        self.reflection.portal_pool = self.desc_pool_sets(7, 4, 2)?;
+        for slot in 0..2 {
+            self.reflection.portal_sets[slot] = self.alloc_one(
+                self.reflection.portal_pool,
+                self.reflection.portal_set_layout,
+            )?;
+            self.write_storage(
+                self.reflection.portal_sets[slot],
+                0,
+                &self.reflection.link_buf,
+            );
+        }
         self.reflection.portal_pipe = self.make_reflect_raster(
             self.reflection.portal_layout,
             self.reflection.clear_pass,
@@ -1669,6 +1671,49 @@ impl Gpu {
         Ok(handle)
     }
 
+    /// `descriptors` is the number of descriptors of `kind`. `sets` is `maxSets`.
+    fn desc_pool_sets(&self, kind: u32, descriptors: u32, sets: u32) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Size {
+            kind: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            max_sets: u32,
+            size_count: u32,
+            sizes: *const Size,
+        }
+        let size = Size {
+            kind,
+            count: descriptors,
+        };
+        let pool = PoolInfo {
+            s_type: 33,
+            next: std::ptr::null(),
+            flags: 0,
+            max_sets: sets,
+            size_count: 1,
+            sizes: &size,
+        };
+        let mut handle = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_desc_pool)(
+                    self.device,
+                    &pool as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut handle,
+                ),
+                "reflection descriptor pool",
+            )?;
+        }
+        Ok(handle)
+    }
+
     fn desc_pool_mixed(&self) -> Result<Handle, String> {
         #[repr(C)]
         struct Size {
@@ -1936,23 +1981,25 @@ impl Gpu {
             preserve_count: 0,
             preserve: std::ptr::null(),
         };
+        let into = pass_sync::reflect_pass_in();
+        let out = pass_sync::reflect_pass_out();
         let deps = [
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: 0x80 | 0x1000,
-                dst_stage: 0x400,
-                src_access: 0x20 | 0x800,
-                dst_access: 0x100 | 0x400,
+                src_stage: into.src_stage,
+                dst_stage: into.dst_stage,
+                src_access: into.src_access,
+                dst_access: into.dst_access,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: 0x400,
-                dst_stage: 0x80 | 0x1000,
-                src_access: 0x100 | 0x400,
-                dst_access: 0x20 | 0x800,
+                src_stage: out.src_stage,
+                dst_stage: out.dst_stage,
+                src_access: out.src_access,
+                dst_access: out.dst_access,
                 flags: 0,
             },
         ];

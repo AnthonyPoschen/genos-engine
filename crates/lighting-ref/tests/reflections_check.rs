@@ -16,9 +16,18 @@ fn run(flag: &str, fixture: &str, out: &std::path::Path) -> (u8, String) {
         .output()
         .unwrap_or_else(|err| panic!("{err}"));
     let code = output.status.code().unwrap_or_else(|| panic!("no status"));
-    let text = String::from_utf8(output.stdout).unwrap_or_else(|err| panic!("{err}"));
+    let raw = String::from_utf8(output.stdout).unwrap_or_else(|err| panic!("{err}"));
+    // The window lifecycle report (`lifecycle_*`) shares stdout with the checks.
+    let mut text = String::new();
+    for line in raw.lines().filter(|line| !line.starts_with("lifecycle_")) {
+        text.push_str(line);
+        text.push('\n');
+    }
     let err = String::from_utf8(output.stderr).unwrap_or_else(|err| panic!("{err}"));
-    assert!(err.is_empty(), "{err}");
+    // The device teardown report (`vk_teardown`, `vk_traffic`, `vk_memory`) is
+    // expected on stderr; anything else is an error.
+    let unexpected: Vec<&str> = err.lines().filter(|line| !line.starts_with("vk_")).collect();
+    assert!(unexpected.is_empty(), "{err}");
     (u8::try_from(code).unwrap_or(255), text)
 }
 

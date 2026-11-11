@@ -202,11 +202,12 @@ struct Metric {
     status: Status,
 }
 
-fn main() {
+fn main() -> std::process::ExitCode {
     if let Err(err) = run() {
         eprintln!("{err}");
-        std::process::exit(1);
+        return std::process::ExitCode::from(1);
     }
+    std::process::ExitCode::SUCCESS
 }
 
 fn run() -> Result<(), String> {
@@ -1124,12 +1125,14 @@ fn capture_gpu() -> Grab {
     world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
     world.scene.hdr = gpu_settings();
     let opened = open_grade_renderer();
-    let (mut window, mut renderer) = match opened {
-        Ok(pair) => pair,
+    let mut owner = match opened {
+        Ok(owner) => owner,
         Err(err) => return fail_grab(&err),
     };
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = Camera::opening();
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         return fail_grab(&err);
     }
     // The second frame is a different lamp, so a pyramid of the previous
@@ -1137,7 +1140,7 @@ fn capture_gpu() -> Grab {
     if let Some(light) = world.scene.lights.first_mut() {
         light.color = [6.0, 0.3, 0.1];
     }
-    let pixels = match draw_once(&mut window, &mut renderer, &world, &camera) {
+    let pixels = match draw_once(window, renderer, &world, &camera) {
         Ok(pixels) => pixels,
         Err(err) => return fail_grab(&err),
     };
@@ -1153,10 +1156,10 @@ fn capture_gpu() -> Grab {
         Ok(encoded) => encoded,
         Err(err) => return fail_grab(&err),
     };
-    let mut grab = finish_grab(&renderer, pixels, &scene2, bloom_buf, bloom_add);
+    let mut grab = finish_grab(renderer, pixels, &scene2, bloom_buf, bloom_add);
     let mut post_ms = renderer.post_ms_device();
     if post_ms <= 0.0 {
-        if draw_once(&mut window, &mut renderer, &world, &camera).is_err() {
+        if draw_once(window, renderer, &world, &camera).is_err() {
             return fail_grab("the timestamp frame returned no readback");
         }
         post_ms = renderer.post_ms_device();
@@ -1191,11 +1194,12 @@ fn load_hall() -> Result<genos_scene::Scene, String> {
     )))
 }
 
-fn open_grade_renderer() -> Result<(Window, Renderer), String> {
+fn open_grade_renderer() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(160, 90)?;
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    Ok((window, renderer))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    Ok(genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn draw_once(
@@ -1288,8 +1292,8 @@ fn capture_legacy() -> LegacyGrab {
     world.scene.lighting.ambient.intensity = 8.0;
     world.scene.hdr = HdrSettings::legacy_bytes();
     let opened = open_grade_renderer();
-    let (mut window, mut renderer) = match opened {
-        Ok(pair) => pair,
+    let mut owner = match opened {
+        Ok(owner) => owner,
         Err(err) => {
             eprintln!("hdr gate legacy: {err}");
             return LegacyGrab {
@@ -1298,15 +1302,17 @@ fn capture_legacy() -> LegacyGrab {
             };
         }
     };
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = Camera::opening();
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         eprintln!("hdr gate legacy: {err}");
         return LegacyGrab {
             ok: false,
             pixels: Vec::new(),
         };
     }
-    let first = match draw_once(&mut window, &mut renderer, &world, &camera) {
+    let first = match draw_once(window, renderer, &world, &camera) {
         Ok(pixels) => pixels,
         Err(err) => {
             eprintln!("hdr gate legacy: {err}");
@@ -1316,7 +1322,7 @@ fn capture_legacy() -> LegacyGrab {
             };
         }
     };
-    let second = match draw_once(&mut window, &mut renderer, &world, &camera) {
+    let second = match draw_once(window, renderer, &world, &camera) {
         Ok(pixels) => pixels,
         Err(err) => {
             eprintln!("hdr gate legacy: {err}");
@@ -1419,19 +1425,21 @@ fn capture_legacy_mode() -> LegacyModeGrab {
     hdr.legacy_bytes = false;
     world.scene.hdr = hdr;
     let opened = open_grade_renderer();
-    let (mut window, mut renderer) = match opened {
-        Ok(pair) => pair,
+    let mut owner = match opened {
+        Ok(owner) => owner,
         Err(err) => {
             eprintln!("hdr gate gpu_legacy: {err}");
             return empty;
         }
     };
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = Camera::opening();
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         eprintln!("hdr gate gpu_legacy: {err}");
         return empty;
     }
-    let pixels = match draw_once(&mut window, &mut renderer, &world, &camera) {
+    let pixels = match draw_once(window, renderer, &world, &camera) {
         Ok(pixels) => pixels,
         Err(err) => {
             eprintln!("hdr gate gpu_legacy: {err}");
@@ -1622,15 +1630,17 @@ fn capture_encode() -> EncodeGrab {
     world.scene.lighting = encode_lighting();
     world.scene.hdr = encode_settings(OutputMode::Hdr10);
     let opened = open_grade_renderer();
-    let (mut window, mut renderer) = match opened {
-        Ok(pair) => pair,
+    let mut owner = match opened {
+        Ok(owner) => owner,
         Err(err) => return fail_encode(&err),
     };
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let camera = Camera::opening();
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         return fail_encode(&err);
     }
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         return fail_encode(&err);
     }
     let scene_hdr10 = match renderer.read_scene() {
@@ -1641,12 +1651,12 @@ fn capture_encode() -> EncodeGrab {
         Ok(encoded) => encoded,
         Err(err) => return fail_encode(&err),
     };
-    let hdr10_surface = surface_is(&renderer, true);
+    let hdr10_surface = surface_is(renderer, true);
     world.scene.hdr.output = OutputMode::Scrgb;
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         return fail_encode(&err);
     }
-    if let Err(err) = draw_once(&mut window, &mut renderer, &world, &camera) {
+    if let Err(err) = draw_once(window, renderer, &world, &camera) {
         return fail_encode(&err);
     }
     let scene_scrgb = match renderer.read_scene() {
@@ -1660,7 +1670,7 @@ fn capture_encode() -> EncodeGrab {
     EncodeGrab {
         ok: true,
         hdr10_surface,
-        scrgb_surface: surface_is(&renderer, false),
+        scrgb_surface: surface_is(renderer, false),
         scene_hdr10,
         encode_hdr10,
         scene_scrgb,

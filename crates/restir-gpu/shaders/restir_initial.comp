@@ -114,69 +114,7 @@ float target_at(uint recv, uint lamp) {
 
 #include "restir_tree.glsl"
 
-uint uniform_index(uint n) {
-    if (n <= 1u) {
-        return 0u;
-    }
-    uint limit = 0xffffffffu - (0xffffffffu % n);
-    while (true) {
-        uint draw = next_u32();
-        if (draw < limit) {
-            return draw % n;
-        }
-    }
-}
-
-void sample_cdf(const float weights[64], uint n, out uint index, out float pdf, out bool hit) {
-    float sum = 0.0;
-    for (uint i = 0u; i < n; i++) {
-        sum += weights[i];
-    }
-    if (sum <= 0.0) {
-        next_f32();
-        hit = false;
-        index = 0u;
-        pdf = 0.0;
-        return;
-    }
-    float mark = next_f32() * sum;
-    float acc = 0.0;
-    for (uint i = 0u; i < n; i++) {
-        if (weights[i] <= 0.0) {
-            continue;
-        }
-        acc += weights[i];
-        if (mark < acc) {
-            index = i;
-            pdf = weights[i] / sum;
-            hit = true;
-            return;
-        }
-    }
-    for (uint k = n; k > 0u; k--) {
-        uint i = k - 1u;
-        if (weights[i] > 0.0) {
-            index = i;
-            pdf = weights[i] / sum;
-            hit = true;
-            return;
-        }
-    }
-    hit = false;
-    index = 0u;
-    pdf = 0.0;
-}
-
-void stream_update(inout uint lamp, inout float w_sum, inout uint m, uint next_lamp, float stream) {
-    float unit = next_f32();
-    m += 1u;
-    if (stream > 0.0) {
-        w_sum += stream;
-        if (unit * w_sum < stream) {
-            lamp = next_lamp;
-        }
-    }
-}
+#include "restir_sample.glsl"
 
 void main() {
     rng_init();
@@ -187,41 +125,11 @@ void main() {
     }
     for (uint recv = 0u; recv < pc.receiver_count; recv++) {
         float weights[64];
-        if (!tree) {
-            for (uint lamp = 0u; lamp < n; lamp++) {
-                weights[lamp] = target_at(recv, lamp);
-            }
-        }
-        uint chosen = LAMP_EMPTY;
-        float w_sum = 0.0;
-        uint m = 0u;
-        for (uint c = 0u; c < pc.candidates; c++) {
-            bool hit = false;
-            uint lamp = 0u;
-            float pdf = 0.0;
-            if (tree) {
-                sample_tree(recv, lamp, pdf, hit);
-            } else if (pc.proposal == PROPOSAL_TARGET) {
-                sample_cdf(weights, n, lamp, pdf, hit);
-            } else if (n == 0u) {
-                hit = false;
-            } else {
-                lamp = uniform_index(n);
-                pdf = 1.0 / float(n);
-                hit = true;
-            }
-            if (!hit) {
-                stream_update(chosen, w_sum, m, LAMP_EMPTY, 0.0);
-            } else {
-                float phat = tree ? target_at(recv, lamp) : weights[lamp];
-                float stream = pdf > 0.0 ? phat / pdf : 0.0;
-                stream_update(chosen, w_sum, m, lamp, stream);
-            }
-        }
-        float target = 0.0;
-        if (chosen != LAMP_EMPTY && (tree ? chosen < pc.lamp_count : chosen < n)) {
-            target = tree ? target_at(recv, chosen) : weights[chosen];
-        }
+        uint chosen;
+        float w_sum;
+        uint m;
+        float target;
+        initial_at(recv, n, chosen, w_sum, m, target, weights);
         uint slot = pc.out_base + recv * 4u;
         if (m == 0u || chosen == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
             words[slot] = LAMP_EMPTY;

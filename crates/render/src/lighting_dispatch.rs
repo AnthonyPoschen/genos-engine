@@ -10,6 +10,11 @@ use genos_scene::{
 
 pub(crate) const BUCKETS: usize = 12;
 pub(crate) const B_COMPACT: u8 = 0;
+/// Retired screen-probe place slot. The index stays so compose remains pass 7.
+#[allow(
+    dead_code,
+    reason = "slot 1 stays so compose remains pass 7; the frame does not dispatch it"
+)]
 pub(crate) const B_PLACE: u8 = 1;
 pub(crate) const B_TRACE: u8 = 2;
 pub(crate) const B_DIRECT: u8 = 3;
@@ -21,6 +26,8 @@ pub(crate) const B_ATROUS: u8 = 8;
 pub(crate) const B_CACHE_RAYS: u8 = 9;
 pub(crate) const B_HIT: u8 = 10;
 pub(crate) const B_SHADOWS: u8 = 11;
+/// Gather of the texels and lattices maintenance enqueued. Not a pipe index.
+pub(crate) const SH_PREP_PASS: usize = 9;
 
 pub(crate) const LIGHTING_BUCKET_NAMES: [&str; BUCKETS] = [
     "compact",
@@ -118,8 +125,10 @@ const CTRL_DIRECT_FRESH: u32 = 32768;
 /// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
 /// Screen wavelet over visible fine texels. Bit 19. Bits 19 and 21 were
-/// half-res and tiles (S79); 19 is this filter now. Bit 21 stays free.
+/// half-res and tiles (S79); 19 is this filter now.
 const CTRL_DENOISE_SCREEN: u32 = 1 << 19;
+/// Direct pixels use the GGX lobe. Bit 21. Off keeps Lambert on irradiance.
+const CTRL_DIRECT_SPECULAR: u32 = 1 << 21;
 /// Skip later wavelet iterations on stable texels. Bit 20. Off unless the
 /// experimental knob is on.
 const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
@@ -138,7 +147,31 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         u32::from(settings.denoiser.enabled && settings.denoiser.screen),
         // Bit 0: reservoirs are allocated. Bit 1: a second slot for spatial reuse.
         // Radius 0 is one slot (temporal only).
-        u32::from(settings.lamp_pick.reuse()) | (u32::from(settings.lamp_pick.radius > 0) << 1),
+        // Bit 2: ReSTIR DI reservoirs. Sized while nothing is in flight.
+        u32::from(settings.lamp_pick.reuse())
+            | (u32::from(settings.lamp_pick.radius > 0) << 1)
+            | (u32::from(settings.restir_di) << 2),
+    )
+}
+
+/// The ReSTIR direct module is the product shade. Exact, random, and
+/// broken stay on the existing module, and so does `restir_di` off.
+/// Direct off does not schedule it and does not bill it to the direct bucket.
+pub(crate) fn restir_product_shade(restir_di: bool, direct_on: bool, gate: LampShadeGate) -> bool {
+    restir_di && direct_on && gate == LampShadeGate::Product
+}
+
+/// `restir_di` off is the labelled exact sum for a pixel mode that used to sample.
+///
+/// Mode off already walks every lamp. Hits leave pixels on that walk.
+/// The noise gate's random, exact, and broken bits are not this switch.
+pub(crate) fn restir_off_is_exact(restir_di: bool, mode: LampPickMode, gate: LampShadeGate) -> bool {
+    if restir_di || gate != LampShadeGate::Product {
+        return false;
+    }
+    matches!(
+        mode,
+        LampPickMode::Reuse | LampPickMode::Pixels | LampPickMode::Both
     )
 }
 
@@ -148,7 +181,7 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
 /// persist a fault injection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LampShadeGate {
-    /// The preset's shade. A quiet held view can take the exact sum and hold.
+    /// The preset's shade. ReSTIR DI when `restir_di` is on. Off is the exact sum.
     #[default]
     Product,
     /// Every point lamp, inside the reuse shade. The gate's baseline.
@@ -167,29 +200,6 @@ pub(crate) fn lamp_shade_bits(gate: LampShadeGate) -> u32 {
         LampShadeGate::Random => 1 << 18,
         // Hold off as well, or a still view would shade the exact sum and pass.
         LampShadeGate::Broken => (1 << 18) | (1 << 20),
-    }
-}
-
-/// Point lamps at or under this count shade the exact sum.
-///
-/// Matches `LAMP_PICK_EXACT_LIT` in `lighting_lamp_pick.glsl`.
-const DIRECT_PLAIN_LAMPS: u32 = 8;
-
-/// Bind the pre-reservoir direct shade.
-///
-/// Off traces every lamp. Reuse of at most [`DIRECT_PLAIN_LAMPS`] point lamps
-/// does too, then holds on a matching signature. The reservoir module's
-/// register file was the direct-pass cost on that path. The noise gate stays
-/// on the reservoir module so a still view can grade the random path. Hits,
-/// pixels, and both stay there: those modes are the lamp-pick tests.
-pub(crate) fn direct_shade_plain(mode: LampPickMode, point_lamps: u32, gate: LampShadeGate) -> bool {
-    if gate != LampShadeGate::Product {
-        return false;
-    }
-    match mode {
-        LampPickMode::Off => true,
-        LampPickMode::Reuse => point_lamps <= DIRECT_PLAIN_LAMPS,
-        LampPickMode::Hits | LampPickMode::Pixels | LampPickMode::Both => false,
     }
 }
 
@@ -253,6 +263,9 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.direct.enabled {
         bits |= CTRL_DIRECT;
     }
+    if settings.direct.specular {
+        bits |= CTRL_DIRECT_SPECULAR;
+    }
     if settings.direct_this_frame(frame) {
         bits |= CTRL_DIRECT_FRESH;
     }
@@ -276,7 +289,7 @@ pub(crate) fn pack_lighting_ctrl(
     if settings.bounce.count == LIGHTING_BOUNCES_UNLIMITED && cache {
         bits |= CTRL_BOUNCE_UNLIMITED;
     }
-    if settings.probes.enabled {
+    if settings.allocates_probe_work() {
         bits |= CTRL_PROBES;
     }
     if settings.world_cache.enabled {
@@ -370,6 +383,13 @@ impl LightGroups {
     }
 }
 
+fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
+    if settings.world_mode() == 3 {
+        out.push(SH_PREP_PASS, gx, gy, B_CACHE);
+    }
+    out.push(7, gx, gy, B_COMPOSE);
+}
+
 /// The group list for this frame. `probe_ray_count` is probes × rays.
 pub(crate) fn light_groups(
     settings: &LightingSettings,
@@ -393,18 +413,19 @@ pub(crate) fn light_groups(
     let pixels = w.saturating_mul(h);
     let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
     // Preset high, this frame, not frozen and not a held frame: the list the
-    // pipeline recorded before the settings struct existed.
+    // pipeline recorded before the settings struct existed, without the
+    // removed screen-probe passes.
     let full = settings.direct_this_frame(frame)
         && settings.direct.resolution_scale == 1
-        && settings.probes_this_frame(frame)
-        && settings.probe_rays() == LIGHTING_RAYS
-        && settings.world_mode() == 3;
+        && settings.world_mode() == 3
+        && settings.world_cache.enabled
+        && settings.bounce.count >= 2;
     if frozen && full {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if frozen && probe_only(settings) {
-        // Still probe-only holds the probes and the cache rays. Pixel direct and
-        // compose remain, the same idle a settled surface-cache frame records.
+        // The stored probe-only flag no longer dispatches a grid. Pixel direct
+        // and compose remain, the same idle a settled surface-cache frame records.
         // High is `full` and took the branch above.
         if settings.direct.enabled {
             let k = settings.direct.resolution_scale.max(1);
@@ -412,17 +433,15 @@ pub(crate) fn light_groups(
             out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
             out.pixel_only = 1;
         }
-        out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+        push_picture(
+            &mut out,
+            settings,
+            w.div_ceil(8).max(1),
+            h.div_ceil(8).max(1),
+        );
     } else if !round && full && !settings.cache_round_this_frame(frame) {
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), 1, B_TRACE);
-        out.push(3, (pixels + 2 * kept).div_ceil(64), 1, B_DIRECT);
-        out.push(4, probes, 1, B_GATHER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if round
         && full
         && settings.cache_rays_this_frame(frame)
@@ -430,30 +449,13 @@ pub(crate) fn light_groups(
         && settings.denoiser.iterations == 5
     {
         out.push(0, slots, 1, B_COMPACT);
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        out.push(
-            2,
-            (probe_ray_count + 2 * kept).div_ceil(64),
-            LIGHTING_MODE1,
-            B_TRACE,
-        );
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
-        out.push(
-            3,
-            (pixels + 2 * kept).div_ceil(64),
-            LIGHTING_MODE1,
-            B_DIRECT,
-        );
+        out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
-        out.push(4, probes, 1, B_GATHER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
         push_denoise(settings, w, h, slots, &mut out);
-        out.push(7, w.div_ceil(8), h.div_ceil(8), B_COMPOSE);
+        push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else {
         gated(
             settings,
@@ -527,9 +529,9 @@ fn gated(
     round: bool,
     w: u32,
     h: u32,
-    probes: u32,
-    probe_ray_count: u32,
-    kept: u32,
+    _probes: u32,
+    _probe_ray_count: u32,
+    _kept: u32,
     out: &mut LightGroups,
 ) {
     let buckets = settings.gpu_buckets(frame);
@@ -547,18 +549,8 @@ fn gated(
     if round && buckets.compact {
         out.push(0, slots, 1, B_COMPACT);
     }
-    if buckets.place && probes > 0 {
-        out.push(1, probes.div_ceil(64), 1, B_PLACE);
-    }
-    if buckets.gather && probes > 0 {
-        out.push(4, probes.div_ceil(64), 1, B_GATHER);
-    }
     if round && (buckets.cache_rays || buckets.cache) {
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-    }
-    if buckets.probe_trace && probes > 0 {
-        let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(2, (probe_ray_count + 2 * kept).div_ceil(64), gy, B_TRACE);
     }
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
@@ -566,7 +558,7 @@ fn gated(
     let combined = buckets.direct && buckets.hit_light && k == 1 && settings.bounce.count > 0;
     if combined {
         let gy = if round { LIGHTING_MODE1 } else { 1 };
-        out.push(3, (pixels + 2 * kept).div_ceil(64), gy, B_DIRECT);
+        out.push(3, pixels.div_ceil(64), gy, B_DIRECT);
     } else if buckets.direct {
         out.push(3, lit.div_ceil(64).max(1), 1, B_DIRECT);
         out.pixel_only = 1;
@@ -579,24 +571,18 @@ fn gated(
     if round && buckets.cache_rays {
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
     }
-    if buckets.hit_light && !buckets.direct && kept > 0 {
-        out.push(3, (2 * kept).div_ceil(64).max(1), LIGHTING_MODE1, B_HIT);
-    }
-    if buckets.gather && probes > 0 {
-        out.push(4, probes, 1, B_GATHER);
-    }
-    if buckets.filter && probes > 0 {
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-        out.push(5, probes.div_ceil(64), 1, B_FILTER);
-    }
     if round && buckets.cache {
         out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
     }
     if buckets.atrous {
         push_denoise(settings, w, h, slots, out);
     }
-    out.push(7, w.div_ceil(8).max(1), h.div_ceil(8).max(1), B_COMPOSE);
+    push_picture(
+        out,
+        settings,
+        w.div_ceil(8).max(1),
+        h.div_ceil(8).max(1),
+    );
 }
 
 /// Sun height 0..1 from a directional lamp. Rays travel along `direction`;
@@ -627,8 +613,11 @@ mod probe_still_tests {
         let mut off = LightingSettings::preset(LightingPreset::High);
         off.world_cache.enabled = false;
         let busy = groups(&off, false, true);
-        assert!(busy.counts[B_CACHE_RAYS as usize] > 0, "cache rays");
-        assert!(busy.counts[B_HIT as usize] > 0, "hit light");
+        assert_eq!(busy.counts[B_CACHE_RAYS as usize], 0, "no world cache, no cache rays");
+        assert_eq!(busy.counts[B_PLACE as usize], 0);
+        assert_eq!(busy.counts[B_HIT as usize], 0);
+        assert_eq!(busy.counts[B_DIRECT as usize], 1);
+        assert_eq!(busy.counts[B_COMPOSE as usize], 1);
         let quiet = groups(&off, true, true);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_HIT as usize], 0);
@@ -677,7 +666,7 @@ mod probe_still_tests {
             sum(one)
         );
         assert!(
-            sum(one) < sum(two),
+            sum(one) <= sum(two),
             "bounce 1 dispatched {} and bounce 2 dispatched {}",
             sum(one),
             sum(two)
@@ -689,13 +678,20 @@ mod probe_still_tests {
         assert_eq!(zero[B_HIT as usize], 0);
         assert!(zero[B_DIRECT as usize] > 0);
         assert!(zero[B_COMPOSE as usize] > 0);
-        assert_eq!(one[B_CACHE_RAYS as usize], 0);
-        assert_eq!(one[B_ATROUS as usize], 0);
-        assert_eq!(one[B_HIT as usize], 0);
-        assert!(one[B_TRACE as usize] > 0);
+        assert_eq!(one[B_PLACE as usize], 0);
+        assert_eq!(one[B_TRACE as usize], 0);
+        assert_eq!(one[B_GATHER as usize], 0);
+        assert_eq!(one[B_FILTER as usize], 0);
+        assert!(one[B_CACHE_RAYS as usize] > 0);
+        assert!(one[B_DIRECT as usize] > 0);
+        assert!(one[B_COMPOSE as usize] > 0);
         assert!(two[B_CACHE_RAYS as usize] > 0);
         assert!(two[B_ATROUS as usize] > 0);
         assert!(two[B_HIT as usize] > 0);
+        assert_eq!(two[B_PLACE as usize], 0);
+        assert_eq!(two[B_TRACE as usize], 0);
+        assert_eq!(two[B_GATHER as usize], 0);
+        assert_eq!(two[B_FILTER as usize], 0);
     }
 
     #[test]
@@ -708,9 +704,13 @@ mod probe_still_tests {
         assert_eq!(quiet.pixel_only, 0);
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
+        assert_eq!(quiet.counts[B_CACHE as usize], 1);
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
-        assert_eq!(quiet.groups.len(), 2);
+        assert_eq!(quiet.groups.len(), 3);
+        assert_eq!(quiet.groups[1].0, SH_PREP_PASS);
+        assert_eq!(quiet.tags[1], B_CACHE);
+        assert_eq!(quiet.groups[2].0, 7);
     }
 
     #[test]
@@ -816,18 +816,38 @@ mod probe_still_tests {
     }
 
     #[test]
-    fn few_lamp_reuse_binds_the_pre_reservoir_shade() {
+    fn restir_off_is_the_exact_reference_and_not_a_sample() {
         use genos_scene::LampPickMode;
-        assert!(direct_shade_plain(LampPickMode::Off, 5, LampShadeGate::Product));
-        assert!(direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Product));
-        assert!(direct_shade_plain(LampPickMode::Reuse, 8, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 9, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 16, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Random));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Exact));
-        assert!(!direct_shade_plain(LampPickMode::Reuse, 5, LampShadeGate::Broken));
-        assert!(!direct_shade_plain(LampPickMode::Pixels, 3, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Both, 3, LampShadeGate::Product));
-        assert!(!direct_shade_plain(LampPickMode::Hits, 3, LampShadeGate::Product));
+        assert!(restir_product_shade(true, true, LampShadeGate::Product));
+        assert!(!restir_product_shade(false, true, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, false, LampShadeGate::Product));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Exact));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Random));
+        assert!(!restir_product_shade(true, true, LampShadeGate::Broken));
+        assert!(restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Product));
+        assert!(restir_off_is_exact(false, LampPickMode::Pixels, LampShadeGate::Product));
+        assert!(restir_off_is_exact(false, LampPickMode::Both, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Off, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Hits, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(true, LampPickMode::Reuse, LampShadeGate::Product));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Exact));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Random));
+        assert!(!restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Broken));
+    }
+
+    #[test]
+    fn screen_probe_passes_are_not_dispatched() {
+        let mut on = LightingSettings::preset(LightingPreset::High);
+        on.surface_cache.sh_cells = true;
+        on.surface_cache.sh_texel_detail = true;
+        on.surface_cache.sh_probe_retire = true;
+        on.sanitize();
+        let groups = groups(&on, false, true);
+        assert_eq!(groups.counts[B_PLACE as usize], 0);
+        assert_eq!(groups.counts[B_GATHER as usize], 0);
+        assert_eq!(groups.counts[B_FILTER as usize], 0);
+        assert!(groups.counts[B_CACHE_RAYS as usize] > 0);
+        assert!(groups.counts[B_DIRECT as usize] > 0);
+        assert!(groups.counts[B_COMPOSE as usize] > 0);
     }
 }

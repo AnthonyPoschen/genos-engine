@@ -1,8 +1,9 @@
 //! Age of the shown surface-cache mean.
 //!
 //! The screen pass tallies near red-box pixels into `gstats.diag[14..26]` when
-//! `GENOS_LIGHTING_SC_TRACE` is set. The stamp is cache word 23, written when a
-//! fine texel's mean is committed. Compose does not read that word.
+//! `GENOS_LIGHTING_SC_TRACE` is set. The stamp is cache region 26, past the
+//! SH-L1, written when a fine texel's mean is committed. Compose does not read
+//! that word.
 //!
 //! A commit postdates the lamp-move stamp when its frame is at or after the
 //! newest ring entry that still reaches the texel. A commit before that stamp
@@ -35,13 +36,11 @@ pub const DIAG_NOSTAMP: usize = 24;
 /// `diag[25]`. The pixel's texel key is not in the cache at all. A subset of `DIAG_NEVER`.
 pub const DIAG_NOSLOT: usize = 25;
 /// `diag[26]`. The pixel is on a turned surface (flag 2048). It has no fine
-/// texels, so compose shows probes there and none of the age counters above
-/// describe what it shows. Every such pixel is also in `DIAG_NOSLOT`.
+/// texel, so the fine-texel counters above do not describe what it shows.
+/// Compose reads the world-cache patch. Every such pixel is also in `DIAG_NOSLOT`.
 pub const DIAG_SLANTED: usize = 26;
 /// `diag[27]`. Slanted pixels whose compose source has a commit.
-/// On this branch that source is the screen probes when their weight clears
-/// the compose fallback, and the 25 cm patch otherwise. On #265 it is the
-/// SH-cell blend.
+/// That source is the world-cache patch (25 cm, or the 50 cm parent).
 pub const DIAG_FEED_N: usize = 27;
 /// `diag[28]`. Sum of those ages.
 pub const DIAG_FEED_SUM: usize = 28;
@@ -61,7 +60,7 @@ pub const DIAG_PATCH_PRE: usize = 34;
 pub const DIAG_PATCH_POST: usize = 35;
 /// `diag[36]`. No 25 cm or 50 cm commit.
 pub const DIAG_PATCH_NONE: usize = 36;
-/// `diag[37]`. Slanted pixels compose showed from screen probes.
+/// `diag[37]`. Unused on this branch: compose does not show a separate feeder.
 pub const DIAG_FEED_PROBES: usize = 37;
 
 /// How the shown commit sits against the lamp-move stamp.

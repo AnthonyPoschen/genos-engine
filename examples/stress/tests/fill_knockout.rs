@@ -50,14 +50,14 @@ const REFERENCE: &str = concat!(
 /// Sky in the reference, sRGB. Pixels within 2 codes are left out.
 const SKY: [u8; 3] = [28, 36, 48];
 
-fn open() -> (MutexGuard, Window, Renderer) {
+fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     static GPU: Mutex<()> = Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
-    let renderer =
+    let (renderer, permit) =
         Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -160,7 +160,9 @@ fn error_vs_reference(bgra: &[u8], reference: &(Vec<f32>, Vec<bool>)) -> f64 {
 /// assertion.
 #[test]
 fn the_presented_frame_moves_when_the_cache_fills() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     renderer
         .apply_lighting_preset("high")
         .expect("high preset");
@@ -169,7 +171,7 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     let mut early = Vec::new();
     let mut late = Vec::new();
     for frame in 0..LATE {
-        let pixels = draw(&mut window, &mut renderer, &stage.world, &camera);
+        let pixels = draw(window, renderer, &stage.world, &camera);
         assert_eq!(
             pixels.len(),
             (renderer.width() * renderer.height() * 4) as usize,

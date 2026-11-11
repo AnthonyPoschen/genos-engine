@@ -1,0 +1,13 @@
+#!/bin/sh
+# Local pre-push lint. This hook is not an enforcement boundary:
+# `git push --no-verify` skips it, and a clone does not run it until
+# `scripts/install-git-hooks.sh` has installed it. CI remains the authority.
+set -u
+root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+lint=$root/scripts/lint.sh
+if [ ! -f "$lint" ]; then
+  echo "pre-push: missing $lint" >&2
+  exit 1
+fi
+"$lint"
+exit $?
