@@ -1,12 +1,13 @@
-// Stage F2. The world cache is the only store. A cache round spends fill_budget
-// single rays: one need-weighted pick per screen tile, and the rest on a
-// 360-degree clipmap around the player. Each ray deposits the frame it lands.
-// The radii match crates/fill-ref/src/sched.rs.
+// Stages F2 and F3. The world cache is the only store. A cache round spends
+// fill_budget single rays. F3 water-fills them by priority and spends part of
+// the budget on one same-seed check ray per fill_check_rate block. The radii,
+// the weight, and the fold match crates/fill-ref/src/sched.rs.
 //
 // Param words, after the per-pixel seed payload:
 // 0 budget, 1 tile, 2 lod_near, 3 leash, 4 look_ahead, 5 cell_max, 6 far,
 // 7 far_share, 8 offscreen_floor, 9 error_target, 10 prox_min, 11 change_weight,
-// 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell.
+// 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell, 16 check_rate,
+// 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma.
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -17,7 +18,6 @@ const float FILL_VIEW_EPS = 0.05;
 const float FILL_CELL_KEEP = 0.75;
 const vec3 FILL_LUMA = vec3(0.2126, 0.7152, 0.0722);
 const float FILL_PRI_SCALE = 32.0;
-const float FILL_PRI_MAX = 63.0;
 const float FILL_RAY_BIAS = 0.02;
 const float FILL_SET_RAYS = 64.0;
 const float FILL_VAR_SEED = 0.15;
@@ -32,8 +32,12 @@ const float FILL_K_DEN = 256.0;
 const float FILL_VB_DEN = 32.0;
 const float FILL_SUN_DEN = 16.0;
 const float FILL_CHANGE_SCALE = 1.0e6;
+// water::bucket: (log2(priority) + 16) / 18, then 62 steps above the zero bucket.
+const float FILL_BUCKET_BIAS = 16.0;
+const float FILL_BUCKET_SPAN = 18.0;
+const float FILL_BUCKET_STEPS = 62.0;
 
-const uint LIGHTING_FILL_PARAMS = 16u;
+const uint LIGHTING_FILL_PARAMS = 22u;
 const uint LIGHTING_FILL_TILE_CAP = 262144u;
 const uint LIGHTING_FILL_TILE_AT = 2u * LIGHTING_CACHE_SLOTS - LIGHTING_FILL_TILE_CAP;
 const uint LIGHTING_FILL_PICK_AT = LIGHTING_CACHE_SLOTS + 1u;
@@ -168,16 +172,33 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
+uint lighting_fill_bucket(float pri) {
+    if (!(pri > 0.0)) {
+        return 0u;
+    }
+    float t = clamp((log2(max(pri, FILL_EPS)) + FILL_BUCKET_BIAS) / FILL_BUCKET_SPAN, 0.0, 1.0);
+    return min(uint(floor(t * FILL_BUCKET_STEPS)) + 1u, 63u);
+}
+
 uint lighting_fill_q(uint slot, float d) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
     float mean = max(dot(shown_v.rgb, FILL_LUMA), FILL_TINY);
     float dev = sqrt(max(est.w, 0.0));
-    float err = max(0.0, dev / mean - lighting_fill_f(9));
+    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
+    float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
     float close = 1.0 / max(d, lighting_fill_f(10));
-    // lambda is 0 until F3. change_weight is uploaded and not read here.
-    float pri = close * err;
-    return uint(clamp(pri * FILL_PRI_SCALE, 1.0, FILL_PRI_MAX));
+    return lighting_fill_bucket(close * (err + lighting_fill_f(11) * lam));
+}
+
+void lighting_fill_decay(uint slot) {
+    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
+    cache.v[LIGHTING_SC_GRAD_AT + slot].x = lam * clamp(lighting_fill_f(18), 0.0, 1.0);
+    if (floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z) == 0u) {
+        uint seed = max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
+        cache.v[LIGHTING_SC_GRAD_AT + slot].z = uintBitsToFloat(seed);
+    }
 }
 
 // Drop a clipmap cell past its leash. 12.5 cm detail stays; the screen stage
@@ -193,6 +214,7 @@ void lighting_fill_visit(uint slot) {
     float base = lighting_fill_f(15);
     uint last = floatBitsToUint(cache.v[3u * slot].w);
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+    lighting_fill_decay(slot);
     float d = length(p - scene.eye.xyz);
     float extra = length(lighting_fill_look());
     if (size >= base * FILL_CELL_KEEP) {
@@ -239,20 +261,123 @@ void lighting_fill_visit(uint slot) {
     atomicMax(ckeys.key[LIGHTING_FILL_TILE_AT + ti], packed);
 }
 
+void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
+    take = 0u;
+    uint remaining = share;
+    for (uint i = 0u; i < 64u; i++) {
+        base_m[i] = 0u;
+        extra_m[i] = 0u;
+    }
+    for (int level = 63; level >= 1; level--) {
+        if (remaining == 0u) {
+            break;
+        }
+        uint count = hist[uint(level)];
+        if (count == 0u) {
+            continue;
+        }
+        uint room = remaining / count;
+        uint base = min(room, max_picks);
+        uint used = base * count;
+        if (used > remaining) {
+            used = remaining;
+        }
+        uint leftover = remaining - used;
+        uint extra_room = (max_picks - base) * count;
+        uint extra = leftover;
+        if (extra > extra_room) {
+            extra = extra_room;
+        }
+        base_m[uint(level)] = base;
+        extra_m[uint(level)] = extra;
+        uint got = used + extra;
+        if (got > remaining) {
+            got = remaining;
+        }
+        remaining -= got;
+        take += got;
+    }
+}
+
+uint lighting_fill_give(uint slot, uint q, uint base_m[64], inout uint extra_left[64], uint max_picks, uint at, uint end) {
+    if (q == 0u || slot >= LIGHTING_CACHE_SLOTS || at >= end) {
+        return at;
+    }
+    uint m = base_m[q];
+    if (extra_left[q] > 0u && m < max_picks) {
+        m += 1u;
+        extra_left[q] -= 1u;
+    }
+    for (uint k = 0u; k < 8u; k++) {
+        if (k >= m || at >= end) {
+            break;
+        }
+        ckeys.key[LIGHTING_FILL_PICK_AT + at] = slot;
+        at++;
+    }
+    return at;
+}
+
+float lighting_fill_pace(uint slot, float calm, float k, float rays0, float n) {
+    float lam = clamp(cache.v[LIGHTING_SC_GRAD_AT + slot].x, 0.0, 1.0);
+    // Lambda 0 keeps the caller's weight: the calm n/(rays+n), or the MSME k.
+    if (!(lam > 0.0)) {
+        return k;
+    }
+    float wfloor = clamp(lighting_fill_f(19), 0.0, 1.0);
+    float scale = 1.0 - lam * (1.0 - wfloor);
+    float fast = n / max(rays0 * max(scale, 0.0) + n, FILL_EPS);
+    float cap = lighting_fill_f(20);
+    if (cap > 0.0) {
+        fast = min(fast, cap);
+    }
+    float bound = max(max(cap, 0.0), calm);
+    float target = min(max(calm, fast), bound);
+    return max(k, mix(calm, target, lam));
+}
+
+void lighting_fill_note_check(uint slot, float l_now) {
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    bool have = cache.v[LIGHTING_SC_GRAD2_AT + slot].z > FILL_HALF;
+    float lam = clamp(g.x, 0.0, 1.0);
+    if (have) {
+        float denom = max(max(abs(l_now), abs(g.y)), FILL_TINY);
+        float d = min(1.0, abs(l_now - g.y) / denom);
+        lam = clamp(d - FILL_TWO * max(lighting_fill_f(21), 0.0), 0.0, 1.0);
+    }
+    g.x = lam;
+    g.y = l_now;
+    if (floatBitsToUint(g.z) == 0u) {
+        g.z = uintBitsToFloat(max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u));
+    }
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
+    cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 1.0;
+}
+
 void lighting_fill_dispatch() {
     uint budget = lighting_fill_u(0);
     uint tile = max(lighting_fill_u(1), 1u);
     uint tiles_x = (pc.dims.x + tile - 1u) / tile;
     uint tiles_y = (pc.dims.y + tile - 1u) / tile;
     uint tiles = min(tiles_x * tiles_y, LIGHTING_FILL_TILE_CAP);
-    uint floor_n = uint(ceil(float(budget) * lighting_fill_f(8)));
-    floor_n = min(floor_n, budget);
-    uint on_cap = budget - floor_n;
+    uint rate = max(lighting_fill_u(16), 1u);
+    uint side = 1u;
+    while (side < 8u && side * side < rate) {
+        side++;
+    }
+    uint area = side * side;
+    uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
+    uint pick_cap = LIGHTING_FILL_TILE_AT - LIGHTING_FILL_PICK_AT;
+    uint check_cap = budget / rate;
+    if (check_cap == 0u && budget > 0u) {
+        check_cap = 1u;
+    }
+    check_cap = min(check_cap, min(budget, pick_cap));
     uint hist[64];
     for (uint i = 0u; i < 64u; i++) {
         hist[i] = 0u;
     }
-    uint nonempty = 0u;
+    uint check_n = 0u;
     uint limit = LIGHTING_FILL_TILE_CAP;
     for (uint t = 0u; t < limit; t++) {
         if (t >= tiles) {
@@ -262,58 +387,31 @@ void lighting_fill_dispatch() {
         if (w == 0u) {
             continue;
         }
-        nonempty++;
-        hist[min(w >> 21u, 63u)]++;
-    }
-    uint on = min(nonempty, on_cap);
-    uint cutoff = 0u;
-    uint of_cut = on;
-    if (nonempty > on_cap) {
-        uint left = on;
-        for (int q = 63; q >= 0; q--) {
-            uint hq = hist[uint(q)];
-            if (hq >= left) {
-                cutoff = uint(q);
-                of_cut = left;
-                break;
-            }
-            left -= hq;
+        uint q = min(w >> 21u, 63u);
+        if (q > 0u) {
+            hist[q]++;
         }
-    }
-    uint n = 0u;
-    uint at_cut = 0u;
-    for (uint t = 0u; t < limit; t++) {
-        uint w = t < tiles ? ckeys.key[LIGHTING_FILL_TILE_AT + t] : 0u;
-        ckeys.key[LIGHTING_FILL_TILE_AT + t] = 0u;
-        if (w == 0u || n >= on) {
+        if (check_n >= check_cap) {
             continue;
         }
-        uint q = min(w >> 21u, 63u);
-        if (nonempty > on_cap) {
-            if (q < cutoff) {
-                continue;
-            }
-            if (q == cutoff) {
-                if (at_cut >= of_cut) {
-                    continue;
-                }
-                at_cut++;
-            }
+        uint tx = t % max(tiles_x, 1u);
+        uint ty = t / max(tiles_x, 1u);
+        uint bx = tx / side;
+        uint by = ty / side;
+        uint ox = tx - bx * side;
+        uint oy = ty - by * side;
+        uint h = lighting_hash(bx ^ lighting_hash(by ^ lighting_hash(lighting_round())));
+        if (oy * side + ox == h % area) {
+            ckeys.key[LIGHTING_FILL_PICK_AT + check_n] = (w & 2097151u) - 1u;
+            check_n++;
         }
-        ckeys.key[LIGHTING_FILL_PICK_AT + n] = (w & 2097151u) - 1u;
-        n++;
     }
-    uint off = budget - n;
-    uint far_n = min(uint(ceil(float(budget) * lighting_fill_f(7))), off);
-    uint near_n = off - far_n;
     uint hist_far[64];
     uint hist_near[64];
     for (uint i = 0u; i < 64u; i++) {
         hist_far[i] = 0u;
         hist_near[i] = 0u;
     }
-    uint n_far = 0u;
-    uint n_near = 0u;
     uint lod_max = lighting_fill_lod_max();
     uint guard = LIGHTING_CACHE_SLOTS;
     for (uint s = 0u; s < guard; s++) {
@@ -323,115 +421,103 @@ void lighting_fill_dispatch() {
         }
         uint q = min((w >> 16u) & 63u, 63u);
         uint level = (w >> 8u) & 255u;
-        if (level == lod_max) {
-            hist_far[q]++;
-            n_far++;
-        } else {
-            hist_near[q]++;
-            n_near++;
-        }
-    }
-    uint far_take = min(n_far, far_n);
-    uint near_take = min(n_near, near_n);
-    uint pick_cap = LIGHTING_FILL_TILE_AT - LIGHTING_FILL_PICK_AT;
-    uint room = pick_cap - min(n, pick_cap);
-    if (far_take + near_take > room) {
-        if (far_take > room) {
-            far_take = room;
-            near_take = 0u;
-        } else {
-            near_take = room - far_take;
-        }
-    }
-    uint far_cut = 0u;
-    uint far_of = far_take;
-    if (n_far > far_take) {
-        uint left = far_take;
-        for (int q = 63; q >= 0; q--) {
-            uint hq = hist_far[uint(q)];
-            if (hq >= left) {
-                far_cut = uint(q);
-                far_of = left;
-                break;
+        if (q > 0u) {
+            if (level == lod_max) {
+                hist_far[q]++;
+            } else {
+                hist_near[q]++;
             }
-            left -= hq;
+        }
+        if (check_n >= check_cap) {
+            continue;
+        }
+        uint block = s / rate;
+        uint local = s - block * rate;
+        uint pick = lighting_hash(block ^ lighting_hash(lighting_round())) % rate;
+        if (local == pick) {
+            ckeys.key[LIGHTING_FILL_PICK_AT + check_n] = s;
+            check_n++;
         }
     }
-    uint near_cut = 0u;
-    uint near_of = near_take;
-    if (n_near > near_take) {
-        uint left = near_take;
-        for (int q = 63; q >= 0; q--) {
-            uint hq = hist_near[uint(q)];
-            if (hq >= left) {
-                near_cut = uint(q);
-                near_of = left;
-                break;
-            }
-            left -= hq;
-        }
+    uint spend = budget - check_n;
+    uint floor_n = min(uint(ceil(float(spend) * lighting_fill_f(8))), spend);
+    uint on_cap = spend - floor_n;
+    uint base_m[64];
+    uint extra_m[64];
+    uint on_take = 0u;
+    lighting_fill_plan(hist, on_cap, max_picks, base_m, extra_m, on_take);
+    uint extra_left[64];
+    for (uint i = 0u; i < 64u; i++) {
+        extra_left[i] = extra_m[i];
     }
-    uint ranked = 0u;
+    uint at = check_n;
+    uint end = min(check_n + on_take, pick_cap);
+    for (uint t = 0u; t < limit; t++) {
+        uint w = t < tiles ? ckeys.key[LIGHTING_FILL_TILE_AT + t] : 0u;
+        ckeys.key[LIGHTING_FILL_TILE_AT + t] = 0u;
+        if (w == 0u) {
+            continue;
+        }
+        uint q = min(w >> 21u, 63u);
+        at = lighting_fill_give((w & 2097151u) - 1u, q, base_m, extra_left, max_picks, at, end);
+    }
+    uint on = at - check_n;
+    uint off = spend - on;
+    uint far_n = min(uint(ceil(float(spend) * lighting_fill_f(7))), off);
+    uint near_n = off - far_n;
+    uint far_take = 0u;
+    uint near_take = 0u;
+    lighting_fill_plan(hist_far, far_n, max_picks, base_m, extra_m, far_take);
+    for (uint i = 0u; i < 64u; i++) {
+        extra_left[i] = extra_m[i];
+    }
+    end = min(at + far_take, pick_cap);
     uint far_got = 0u;
-    uint near_got = 0u;
-    uint far_at = 0u;
-    uint near_at = 0u;
     for (uint s = 0u; s < guard; s++) {
         uint w = ckeys.key[lighting_fill_lock_at() + s];
         if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
             continue;
         }
-        uint q = min((w >> 16u) & 63u, 63u);
         uint level = (w >> 8u) & 255u;
-        bool take = false;
-        if (level == lod_max) {
-            if (far_got < far_take) {
-                if (n_far > far_take) {
-                    if (q < far_cut) {
-                        take = false;
-                    } else if (q == far_cut) {
-                        if (far_at < far_of) {
-                            far_at++;
-                            take = true;
-                        }
-                    } else {
-                        take = true;
-                    }
-                } else {
-                    take = true;
-                }
-                if (take) {
-                    far_got++;
-                }
-            }
-        } else if (near_got < near_take) {
-            if (n_near > near_take) {
-                if (q < near_cut) {
-                    take = false;
-                } else if (q == near_cut) {
-                    if (near_at < near_of) {
-                        near_at++;
-                        take = true;
-                    }
-                } else {
-                    take = true;
-                }
-            } else {
-                take = true;
-            }
-            if (take) {
-                near_got++;
-            }
-        }
-        if (!take || n + ranked >= pick_cap) {
+        if (level != lod_max) {
             continue;
         }
-        ckeys.key[LIGHTING_FILL_PICK_AT + n + ranked] = s;
-        ranked++;
+        uint before = at;
+        uint q = min((w >> 16u) & 63u, 63u);
+        at = lighting_fill_give(s, q, base_m, extra_left, max_picks, at, end);
+        far_got += at - before;
     }
+    uint near_budget = min(near_n, spend - on - far_got);
+    lighting_fill_plan(hist_near, near_budget, max_picks, base_m, extra_m, near_take);
+    for (uint i = 0u; i < 64u; i++) {
+        extra_left[i] = extra_m[i];
+    }
+    end = min(at + near_take, pick_cap);
+    uint near_got = 0u;
+    for (uint s = 0u; s < guard; s++) {
+        uint w = ckeys.key[lighting_fill_lock_at() + s];
+        if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
+            continue;
+        }
+        uint level = (w >> 8u) & 255u;
+        if (level == lod_max) {
+            continue;
+        }
+        uint before = at;
+        uint q = min((w >> 16u) & 63u, 63u);
+        at = lighting_fill_give(s, q, base_m, extra_left, max_picks, at, end);
+        near_got += at - before;
+    }
+    uint ranked = far_got + near_got;
+    uint placed = check_n + on + ranked;
+    if (placed > budget) {
+        placed = budget;
+    }
+    uint far_disc = far_n - min(far_got, far_n);
     ckeys.key[lighting_fill_header_at()] = ranked;
-    ckeys.key[lighting_fill_header_at() + 1u] = far_n - far_got;
-    ckeys.key[LIGHTING_ARGS_AT + 15u] = n;
+    ckeys.key[lighting_fill_header_at() + 1u] = far_disc;
+    ckeys.key[lighting_fill_header_at() + 2u] = check_n;
+    ckeys.key[LIGHTING_ARGS_AT + 15u] = on;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 2u] = 1u;
@@ -439,13 +525,14 @@ void lighting_fill_dispatch() {
     ckeys.key[LIGHTING_ARGS_AT + 4u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 5u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 6u] = budget;
-    ckeys.key[LIGHTING_ARGS_AT + 7u] = n;
-    ckeys.key[LIGHTING_ARGS_AT + 8u] = n;
-    ckeys.key[LIGHTING_ARGS_AT + 9u] = n;
-    ckeys.key[LIGHTING_ARGS_AT + 10u] = n;
+    ckeys.key[LIGHTING_ARGS_AT + 7u] = on;
+    ckeys.key[LIGHTING_ARGS_AT + 8u] = on;
+    ckeys.key[LIGHTING_ARGS_AT + 9u] = on;
+    ckeys.key[LIGHTING_ARGS_AT + 10u] = on;
     gstats.rays = budget;
-    gstats.due = n;
-    gstats.scouts = budget - n;
+    gstats.due = on;
+    gstats.scouts = budget - on - check_n;
+    gstats.pad4 = check_n;
     gstats.round_entries = (budget + 15u) / 16u;
 }
 
@@ -461,9 +548,11 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     if (r >= budget) {
         return false;
     }
+    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
     uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
     uint ranked = ckeys.key[lighting_fill_header_at()];
-    if (r < on + ranked) {
+    uint placed = min(checks + on + ranked, budget);
+    if (r < placed) {
         uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             return false;
@@ -473,13 +562,22 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
             return false;
         }
         origin = p + n * FILL_RAY_BIAS;
-        uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
-        uint stratum = (lighting_hash(rk) + lighting_round()) % 64u;
-        dir = lighting_dir(rk, n, stratum, 64u);
+        if (r < checks) {
+            // Same seed every frame. The round is not part of the direction.
+            uint seed = floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z);
+            if (seed == 0u) {
+                seed = max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
+            }
+            dir = lighting_dir(seed, n, seed % 64u, 64u);
+        } else {
+            uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
+            uint stratum = (lighting_hash(rk) + lighting_round() + r) % 64u;
+            dir = lighting_dir(rk, n, stratum, 64u);
+        }
         return true;
     }
-    uint disc = max(budget - min(on + ranked, budget), 1u);
-    uint i = (r - on - ranked + lighting_round()) % disc;
+    uint disc = max(budget - placed, 1u);
+    uint i = (r - placed + lighting_round()) % disc;
     dir = lighting_fill_fibonacci(i, disc);
     origin = scene.eye.xyz;
     n = dir;
@@ -517,7 +615,8 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float rays0 = max(b.w, 0.0);
     uint warmup = max(lighting_fill_u(12), 1u);
-    float k = n / (rays0 + n);
+    float calm = n / (rays0 + n);
+    float k = lighting_fill_pace(slot, calm, calm, rays0, n);
     bool cell = cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE;
     vec3 mean = old.rgb;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {
@@ -543,6 +642,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         k = clamp(smoothstep(0.0, 1.0, rho * max(FILL_RAY_BIAS, inc - FILL_CATCH)), 1.0 / FILL_K_DEN, 1.0) * b.x;
         float vb = mix(b.x, clamp(dot(msmel, FILL_HALF * sm / vec3(max(FILL_DEV_EPS, dev))), 1.0 / FILL_PRI_SCALE, 1.0), FILL_FIRE_FLOOR);
         k = max(k, 1.0 / FILL_K_DEN);
+        k = lighting_fill_pace(slot, calm, k, rays0, n);
         mean = mix(old.rgb, e, clamp(k, 0.0, 1.0));
         cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
         b = vec4(vb, inc, k, b.w);
@@ -614,9 +714,10 @@ void lighting_fill_resolve(uint gid) {
         return;
     }
     uint budget = lighting_fill_u(0);
+    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
     uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
     uint ranked = ckeys.key[lighting_fill_header_at()];
-    uint placed = min(on + ranked, budget);
+    uint placed = min(checks + on + ranked, budget);
     uint far_disc = ckeys.key[lighting_fill_header_at() + 1u];
     uint lod_max = lighting_fill_lod_max();
     for (uint r = gid; r < budget; r += 64u) {
@@ -682,6 +783,8 @@ void lighting_fill_resolve(uint gid) {
         float sum_sun = 0.0;
         float count = 0.0;
         bool saw_on = false;
+        bool saw_check = false;
+        float check_luma = 0.0;
         uint cur = r;
         uint steps = 0u;
         while (steps < budget) {
@@ -708,7 +811,10 @@ void lighting_fill_resolve(uint gid) {
                 sum_z += lk * dir.z;
                 sum_sun += rad.w;
                 count += 1.0;
-                if (cur < on) {
+                if (cur < checks) {
+                    saw_check = true;
+                    check_luma = dot(lk, FILL_LUMA);
+                } else if (cur < checks + on) {
                     saw_on = true;
                 }
             }
@@ -720,6 +826,9 @@ void lighting_fill_resolve(uint gid) {
             cur = nxt - 1u;
         }
         float inv = 1.0 / max(count, 1.0);
+        if (saw_check) {
+            lighting_fill_note_check(slot, check_luma);
+        }
         lighting_fill_commit(slot, sum_e * inv, count, sum_lk * inv, sum_x * inv, sum_y * inv, sum_z * inv, saw_on, sum_sun * inv);
     }
 }

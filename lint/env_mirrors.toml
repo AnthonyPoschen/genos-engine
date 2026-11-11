@@ -453,6 +453,11 @@ kind = "mirror"
 detail = "surface_cache.fill_budget (stress knob lighting_fill_budget); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_CATCHUP_MAX"
+kind = "mirror"
+detail = "surface_cache.fill_catchup_max (stress knob lighting_fill_catchup_max); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_CELL_MAX"
 kind = "mirror"
 detail = "surface_cache.fill_cell_max (stress knob lighting_fill_cell_max); MCP set_lighting_settings"
@@ -466,6 +471,11 @@ detail = "surface_cache.fill_change_weight (stress knob lighting_fill_change_wei
 name = "GENOS_LIGHTING_FILL_CHECK_RATE"
 kind = "mirror"
 detail = "surface_cache.fill_check_rate (stress knob lighting_fill_check_rate); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHECK_SIGMA"
+kind = "mirror"
+detail = "surface_cache.fill_check_sigma (stress knob lighting_fill_check_sigma); MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL_ERROR_TARGET"
@@ -488,6 +498,11 @@ kind = "mirror"
 detail = "surface_cache.fill_frame_dt (stress knob lighting_fill_frame_dt); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_LAMBDA_DECAY"
+kind = "mirror"
+detail = "surface_cache.fill_lambda_decay (stress knob lighting_fill_lambda_decay); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_LEASH"
 kind = "mirror"
 detail = "surface_cache.fill_leash (stress knob lighting_fill_leash); MCP set_lighting_settings"
@@ -501,6 +516,11 @@ detail = "surface_cache.fill_lod_near (stress knob lighting_fill_lod_near); MCP 
 name = "GENOS_LIGHTING_FILL_LOOK_AHEAD"
 kind = "mirror"
 detail = "surface_cache.fill_look_ahead (stress knob lighting_fill_look_ahead); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_MAX_PICKS"
+kind = "mirror"
+detail = "surface_cache.fill_max_picks (stress knob lighting_fill_max_picks); MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR"
@@ -526,6 +546,11 @@ detail = "surface_cache.fill_tile (stress knob lighting_fill_tile); MCP set_ligh
 name = "GENOS_LIGHTING_FILL_WARMUP"
 kind = "mirror"
 detail = "surface_cache.fill_warmup (stress knob lighting_fill_warmup); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_WINDOW_FLOOR"
+kind = "mirror"
+detail = "surface_cache.fill_window_floor (stress knob lighting_fill_window_floor); MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_GI"
