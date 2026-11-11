@@ -902,19 +902,13 @@ uint lighting_fill_share_claim(float w, uint ray) {
     return pack == 0u ? 1u : pack;
 }
 
-// True once MSME has a short mean. A zeroed estimator is not an upper bound:
-// the 0.1 floor would crush the cold cells this pass exists to seed. The own
-// sample waits for the same warmup before it clamps.
-bool lighting_fill_share_have_mean(uint recv) {
-    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
-    float shown = cache.v[3u * recv + 2u].w;
-    float started = cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].x;
-    return rays >= float(max(lighting_fill_u(12), 1u)) && shown > FILL_HALF && started > 0.0;
-}
-
 vec3 lighting_fill_share_rgb(uint recv, vec3 contrib) {
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u];
+    float shown = cache.v[3u * recv + 2u].w;
     contrib = max(contrib, vec3(0.0));
-    if (!lighting_fill_share_have_mean(recv)) {
+    // A claim-zero estimator (b.x == 0) is not a bound of 0.1. The own fold
+    // clamps only after warmup rays, a started short mean, and a shown value.
+    if (!(b.x > 0.0 && b.w >= float(max(lighting_fill_u(12), 1u)) && shown > FILL_HALF)) {
         return contrib;
     }
     vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * recv];
@@ -1021,7 +1015,7 @@ void lighting_fill_share_pass(uint gid, uint phase) {
                 break;
             }
             uint lock = lighting_fill_lock_at() + found[s];
-            uint word = lighting_fill_share_claim(found_w[s], r);
+            uint word = lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r);
             if (phase == 0u) {
                 atomicExchange(ckeys.key[lock], 0u);
             } else if (phase == 1u) {

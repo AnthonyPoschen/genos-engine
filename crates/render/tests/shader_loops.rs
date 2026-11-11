@@ -37,6 +37,30 @@ const SHADERS: [&str; 24] = [
 /// Largest constant trip count a loop may have.
 const MAX_CONSTANT_TRIPS: u64 = 64;
 
+fn function_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let at = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let rest = &src[at + signature.len()..];
+    let open = rest
+        .find('{')
+        .unwrap_or_else(|| panic!("{signature} has no body"));
+    let mut depth = 0i32;
+    for (i, ch) in rest[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{signature} body does not close")
+}
+
 fn source(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("shaders")
@@ -170,21 +194,27 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         fill.contains("lighting_fill_f(23)"),
         "a near hit must read fill_share_min_hit"
     );
+    let accept = function_body(&fill, "float lighting_fill_share_accept");
     assert!(
-        fill.contains("lighting_sc_updated(recv)"),
-        "the lamp stamp compares the mean commit, not the visit word"
+        accept.contains("lighting_sc_updated(recv)"),
+        "the stamp reads the commit frame, not the visit word"
     );
     assert!(
-        !fill.contains("floatBitsToUint(cache.v[3u * recv].w)"),
-        "a bounce read must not refresh the share stamp"
+        !accept.contains("cache.v[3u * recv].w"),
+        "a bounce read updates the visit word and is not the mean"
+    );
+    let rgb = function_body(&fill, "vec3 lighting_fill_share_rgb");
+    assert!(
+        rgb.contains("b.x > 0.0"),
+        "a zeroed estimator is not a firefly bound"
     );
     assert!(
         fill.contains("lighting_fill_f(29) * scale"),
         "own-count expiry scales the seed confidence"
     );
     assert!(
-        fill.contains("lighting_fill_share_have_mean"),
-        "a cold cell has no short mean to clamp against"
+        fill.contains("lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r)"),
+        "a fresher cell's scale stays in the claim"
     );
 }
 

@@ -66,8 +66,11 @@ pub struct ShareCell {
     pub depth: f32,
     pub own_count: u32,
     pub stamp: u32,
+    /// Frame the cell's mean was committed. The stamp gate reads this.
     pub mean_frame: u32,
-    /// Running upper bound once MSME has a short mean. Ignored until `short_mean`.
+    /// Frame a bounce read touched the cell. The stamp gate does not read it.
+    pub visit_frame: u32,
+    /// Upper bound once a short mean exists. A claim zero is not a bound.
     pub firefly: f32,
     /// The cell has an MSME short mean. A cold cell does not clamp the seed.
     pub short_mean: bool,
@@ -211,6 +214,7 @@ fn cell(pos: Vec3, normal: Vec3) -> ShareCell {
         own_count: 0,
         stamp: 0,
         mean_frame: 0,
+        visit_frame: 0,
         firefly: 1.0e6,
         short_mean: false,
     }
@@ -279,8 +283,13 @@ fn luma_of(rgb: Vec3) -> f32 {
     0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
 }
 
+/// Same weights as `FILL_MSME` in `lighting_fill.glsl`.
+fn msme_luma(rgb: Vec3) -> f32 {
+    0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z
+}
+
 fn firefly(rgb: Vec3, cap: f32) -> Vec3 {
-    let luma = luma_of(rgb);
+    let luma = msme_luma(rgb);
     if luma > cap && luma > 0.0 {
         rgb * (cap / luma)
     } else {
@@ -775,11 +784,19 @@ mod tests {
         recv.own_count = 0;
         recv.stamp = 20;
         recv.mean_frame = 10;
+        // A bounce read this frame is not the mean. Comparing it would accept.
+        recv.visit_frame = 21;
+        assert_eq!(recv.visit_frame, 21);
         assert_eq!(
             share_weight(&origin, &hit, &recv, &Faults::default(), 20),
             Err(Reject::Stamp)
         );
         assert!(share_weight(&origin, &hit, &recv, &Faults::default(), 21).is_ok());
+        recv.mean_frame = 21;
+        assert!(
+            share_weight(&origin, &hit, &recv, &Faults::default(), 20).is_ok(),
+            "a mean committed after the stamp accepts"
+        );
     }
 
     #[test]
@@ -959,6 +976,12 @@ mod tests {
         let early = share_claim(1.0, 2.0, 1);
         let later = share_claim(1.0, 2.0, 5);
         assert!(early > later);
+        let fresh = share_claim(1.0, 2.0, 4);
+        let stale = share_claim(0.5, 2.0, 4);
+        assert!(
+            fresh > stale,
+            "a higher own-count scale must win the same reconnection"
+        );
         assert_ne!(share_claim(1.0, 2.0, 0), 0);
         assert_ne!(share_claim(0.0, 2.0, 3), 0);
     }
@@ -1001,6 +1024,25 @@ mod tests {
         close.cell.pos = Vec3::new(0.2, 0.0, 0.0);
         let held = run(&origin, &hit, irr, &[close], &limits, Faults::default(), (1, 1));
         assert_eq!(held.count, 1);
+        // Threshold is plane * depth = 0.06. 0.1 m is out, 0.01 m is in.
+        let mut edge = stepped;
+        edge.cell.pos = Vec3::new(0.0, 0.1, 0.0);
+        assert_eq!(
+            share_weight(&origin, &hit, &edge.cell, &Faults::default(), 1),
+            Err(Reject::Plane)
+        );
+        edge.cell.pos.y = 0.01;
+        assert!(share_weight(&origin, &hit, &edge.cell, &Faults::default(), 1).is_ok());
+    }
+
+    #[test]
+    fn the_firefly_clamp_uses_the_msme_luma() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        assert!(luma_of(red) < 0.25, "Rec.709 of red is under the cap");
+        let capped = firefly(red, 0.25);
+        assert!((msme_luma(red) - 0.299).abs() < 1.0e-4);
+        assert!(capped.x < red.x, "MSME luma of red is over the cap");
+        assert!((msme_luma(capped) - 0.25).abs() < 1.0e-4);
     }
 
     #[test]
