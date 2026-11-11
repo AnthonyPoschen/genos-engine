@@ -28,6 +28,15 @@ void lighting_tex_put(uint slot, vec4 v) {
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
+    if (lighting_ray_fill_on()) {
+        if (gid == 0u) {
+            gstats.live = lighting_live_count();
+            lighting_wrc_note_lamps();
+            lighting_ls_note();
+        }
+        lighting_fill_resolve(gid);
+        return;
+    }
     // The neighbour walk is the gather dispatch before compose, not this
     // relight. This pass does not touch the bin lists or the lattice table.
     if (gid >= LIGHTING_CACHE_BATCH) {
@@ -44,9 +53,6 @@ void main() {
         // they fill what the young leave of the batch; the histogram restarts.
         if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
             lighting_wrc_note_lamps();
-            if (lighting_wrc_scout_due()) {
-                atomicAdd(gstats.scouts, LIGHTING_WRC_SCOUT_ENTRIES * LIGHTING_CACHE_RAYS);
-            }
             lighting_ls_note();
             uint room = lighting_sc_room() >> lighting_sc_budget_shift();
             uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();

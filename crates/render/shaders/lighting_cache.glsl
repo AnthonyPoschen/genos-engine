@@ -3085,7 +3085,8 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dispatch sizes past the WRC lists (LIGHTING_ARGS_AT: rays x,y,z; entries x,y,z;
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
-bool lighting_wrc_scout_due();
+bool lighting_ray_fill_on();
+void lighting_fill_dispatch();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
@@ -3323,7 +3324,7 @@ void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint 
     s = outv[4];
 }
 void lighting_write_args() {
-    uint a;
+    uint a = 0u;
     uint b = 0u;
     uint c = 0u;
     uint s = 0u;
@@ -3349,17 +3350,6 @@ void lighting_write_args() {
         }
         ckeys.key[LIGHTING_SETTLE_SEEN_AT] = newest;
         ckeys.key[LIGHTING_SETTLE_STREAK_AT] = streak;
-        uint sh = lighting_sc_budget_shift();
-        uint room = lighting_sc_room() >> sh;
-        // While a lamp change settles the young list (every cell and texel, in
-        // turns, lighting_settle_turns) takes the whole room, not only the base
-        // share, so the cache gets as many full bounce rounds as it can.
-        uint young_room = (lighting_lamp_settling() ? lighting_sc_room() : lighting_sc_base_room()) >> sh;
-        ckeys.key[LIGHTING_SETTLE_ROOM_AT] = young_room;
-        ckeys.key[LIGHTING_SETTLE_LAST_AT] = ckeys.key[LIGHTING_SETTLE_COUNT_AT];
-        ckeys.key[LIGHTING_SETTLE_COUNT_AT] = 0u;
-        ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT] = ckeys.key[LIGHTING_SETTLE_FIRST_AT];
-        ckeys.key[LIGHTING_SETTLE_FIRST_AT] = 0u;
         uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
         if (dh > 0u) {
             float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
@@ -3379,28 +3369,17 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
-        uint first = min(lighting_young_count(), young_room);
-        a = min(room, first + lighting_mature_count());
-        b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
-        // S77A: change-list cells are checks, one 16-ray entry each; the
-        // background list (and escalated cells) take whole sets.
-        c = min(min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
-            + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
-        s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
-        g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
-        // S76D: last round's demand for fair service, and the global boost when
-        // a large share of the checks since the last write escalated.
-        ckeys.key[LIGHTING_CHECK_P_AT + 3u] = ckeys.key[LIGHTING_SC_HIST_AT + 72u]; // LIGHTING_GRAD_COUNT_AT
-        uint esc = ckeys.key[LIGHTING_CHECK_P_AT];
-        uint chk = ckeys.key[LIGHTING_CHECK_P_AT + 1u];
-        if (chk >= 64u) {
-            if (float(esc) > 0.2 * float(chk)) { // LIGHTING_BOOST_FRAC
-                ckeys.key[LIGHTING_CHECK_P_AT + 2u] = lighting_frame() + 120u; // LIGHTING_BOOST_FRAMES
-            }
-            ckeys.key[LIGHTING_CHECK_P_AT] = 0u;
-            ckeys.key[LIGHTING_CHECK_P_AT + 1u] = 0u;
+        if (lighting_ray_fill_on()) {
+            lighting_fill_dispatch();
+            return;
         }
+        // World mode 3 due lists are gone. A budget of 0 traces no cache rays.
+        a = 0u;
+        b = 0u;
+        c = 0u;
+        s = 0u;
+        g = 0u;
     } else {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
@@ -3562,19 +3541,6 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     return uint(clamp(iv, LIGHTING_SC_RATE_FAST, LIGHTING_SC_RATE_DORMANT));
 }
-// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
-// round in LIGHTING_WRC_SCOUT_STILL.
-const uint LIGHTING_WRC_SCOUT_STILL = 8u;
-bool lighting_wrc_scout_due() {
-    if ((lighting_ctrl_bits() & 1024u) == 0u) {
-        return false;
-    }
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
-        || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
-    return moving || lighting_round() % LIGHTING_WRC_SCOUT_STILL == 0u;
-}
 uint lighting_sc_quarter0(uint slot) {
     if (lighting_world_mode() != 3u) {
         return 0u;
@@ -3585,42 +3551,6 @@ uint lighting_sc_entries(uint slot, bool full) {
     // The ray budget is a ceiling on the dispatch lists (lighting_sc_cap_lists),
     // not a per-entry scale. Under budget this count is the fixed quarter count.
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
-}
-// WRC scout ray s of this round (entries past the batch's texels): from the eye
-// (a quarter from up to 2 m beside it), half over the sphere and half within
-// ~50 degrees of where the camera is heading (forward, plus its motion and turn
-// since the last frame the probes ran).
-void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
-    uint h = lighting_hash(s ^ lighting_hash(lighting_round()));
-    float u1 = lighting_unit(h);
-    float u2 = lighting_unit(h ^ 0x68e31da4u);
-    vec4 head_at = vec4(0.0);
-    vec3 eye = scene.eye.xyz;
-    vec3 fwd = normalize(scene.view_forward.xyz);
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    vec3 ahead = fwd;
-    if (last_eye.w > 0.5 && dot(last_fwd, last_fwd) > 0.5) {
-        ahead = fwd + 8.0 * (eye - last_eye.xyz) + 4.0 * (fwd - normalize(last_fwd));
-    }
-    ahead = normalize(ahead + vec3(0.0, 1.0e-4, 0.0));
-    float z = (s & 1u) == 0u ? 1.0 - 2.0 * u1 : 1.0 - u1 * 0.36;
-    float r = sqrt(max(1.0 - z * z, 0.0));
-    float a = LIGHTING_TAU * u2;
-    vec3 local = vec3(r * cos(a), r * sin(a), z);
-    if ((s & 1u) == 0u) {
-        dir = local;
-    } else {
-        vec3 t = normalize(abs(ahead.y) < 0.9 ? cross(ahead, vec3(0.0, 1.0, 0.0)) : cross(ahead, vec3(1.0, 0.0, 0.0)));
-        vec3 b = cross(ahead, t);
-        dir = normalize(t * local.x + b * local.y + ahead * local.z);
-    }
-    origin = eye;
-    if ((s & 3u) == 3u) {
-        float u3 = lighting_unit(h ^ 0x27d4eb2fu);
-        float b3 = LIGHTING_TAU * lighting_unit(h ^ 0x165667b1u);
-        origin += vec3(cos(b3), 0.0, sin(b3)) * (2.0 * u3);
-    }
 }
 // WRC: did a lamp that reaches p move since frame `updated` (within the last
 // LIGHTING_WRC_CHANGE_FRAMES)? The ring holds moved lamps' spheres (both places,
@@ -6175,3 +6105,4 @@ void lighting_sc_seed_apply(uint slot) {
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
 }
+#include "lighting_fill.glsl"

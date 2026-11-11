@@ -423,6 +423,9 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = vec3(0.0);
     dir = vec3(0.0, 1.0, 0.0);
     n = vec3(0.0, 1.0, 0.0);
+    if (lighting_ray_fill_on()) {
+        return lighting_fill_ray(ray, origin, dir, n);
+    }
     if (ray < lighting_probe_rays()) {
         return false;
     }
@@ -443,15 +446,6 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         uint grk = floatBitsToUint(gg.z);
         origin = gp + n * 0.02;
         dir = lighting_dir(grk, n, lighting_sc_stratum(grk, floatBitsToUint(gg.w), LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
-        return true;
-    }
-    if (lighting_world_mode() == 3u && entry >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
-        // A WRC scout ray: its hit claims and reads the WRC cell there.
-        if (!lighting_wrc_scout_due()) {
-            return false;
-        }
-        lighting_wrc_scout(r - (LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) * LIGHTING_CACHE_RAYS, origin, dir);
-        n = dir;
         return true;
     }
     uint slot = lighting_cache_batch_slot(entry);

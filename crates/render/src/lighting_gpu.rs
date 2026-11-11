@@ -121,6 +121,15 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
     lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
 }
 
+/// Fill param words sit after the per-pixel seed payload. One lock word per
+/// slot follows them (`lighting_fill.glsl`).
+const FILL_PARAM_WORDS: u64 = 16;
+const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
+
+fn lighting_fill_param_words(pixels: u64) -> u64 {
+    lighting_sh_keys_words() + pixels * 8
+}
+
 fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
@@ -1304,7 +1313,7 @@ impl Gpu {
                 // election (lighting_sh_keys_words). Eight words per pixel
                 // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_sh_keys_words() + pixels * 8) * 4,
+                    (lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -4225,6 +4234,33 @@ impl Gpu {
                     keys,
                     (LIGHTING_ARGS_AT + 14) * 4,
                     &drain_sigma.to_ne_bytes(),
+                )?;
+                let fill = self.lighting.settings.surface_cache.fill;
+                let fill_words = [
+                    fill.budget,
+                    fill.tile.max(1),
+                    fill.lod_near.to_bits(),
+                    fill.leash_scale.to_bits(),
+                    fill.look_ahead.to_bits(),
+                    fill.cell_max.to_bits(),
+                    fill.far.to_bits(),
+                    fill.far_share.to_bits(),
+                    fill.offscreen_floor.to_bits(),
+                    fill.error_target.to_bits(),
+                    fill.prox_min.to_bits(),
+                    fill.change_weight.to_bits(),
+                    fill.warmup_rays,
+                    fill.ray_cap,
+                    fill.frame_dt.to_bits(),
+                    self.lighting.settings.world_cache.cell_metres.to_bits(),
+                ];
+                let frame_pixels =
+                    u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));
+                self.write_device(
+                    cmd,
+                    keys,
+                    lighting_fill_param_words(frame_pixels) * 4,
+                    pod_slice(&fill_words),
                 )?;
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
