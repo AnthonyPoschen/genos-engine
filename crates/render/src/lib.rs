@@ -19,6 +19,7 @@ mod pool;
 mod reflections;
 mod reflections_grade;
 mod scene_mesh;
+mod shown_age;
 mod trace;
 mod unfilled;
 mod wire;

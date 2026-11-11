@@ -41,6 +41,10 @@ fn lighting_tile(height: u32) -> u32 {
 pub(crate) const LIGHTING_RAYS: u32 = 64;
 /// Light cache sizes; lighting_cache_slots.glsl has the same numbers.
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
+/// 24 vec4s a slot. Words 0..22 are the cache the picture reads. Word 23 is
+/// the frame a fine texel's shown mean was last committed (`shown_age`).
+/// Compose does not read it. 24 * 16 = 384 bytes, was 23 * 16 = 368.
+const LIGHTING_CACHE_STRIDE: u64 = 384;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
@@ -1070,7 +1074,7 @@ impl Gpu {
                     &share,
                 )?;
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * 368,
+                    LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_STRIDE,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -2006,6 +2010,8 @@ impl Gpu {
                     "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
+                let hist = crate::shown_age::AgeHist::from_diag(&w[24..88]);
+                eprintln!("{}", crate::shown_age::line(queue, self.lighting.frame, &hist));
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
