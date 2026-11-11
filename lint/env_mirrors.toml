@@ -1485,3 +1485,13 @@ detail = "--temporal"
 name = "GENOS_RESTIR_SPATIAL"
 kind = "mirror"
 detail = "--spatial"
+
+[[var]]
+name = "GENOS_FILL_REF_OUT"
+kind = "mirror"
+detail = "--out on fill-ref"
+
+[[var]]
+name = "GENOS_FILL_TILE"
+kind = "mirror"
+detail = "--tile-fill"
