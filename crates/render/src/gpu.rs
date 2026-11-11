@@ -2700,6 +2700,9 @@ impl Gpu {
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
             block(|| gpu.make_lighting())?;
+            // Before the scene exists. Otherwise a potato launch still builds
+            // the High cache once, and lavapipe holds it through quit.
+            gpu.apply_launch_preset()?;
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();

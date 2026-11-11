@@ -1125,6 +1125,20 @@ impl Gpu {
         Ok(pipeline)
     }
 
+    /// Size the first buffers from the process launch, not from the High default.
+    ///
+    /// Device creation runs before a scene exists. The High default would
+    /// allocate the million-slot cache and free it once the launch preset is
+    /// potato. lavapipe keeps those pages until `vkDestroyDevice`, and that
+    /// release misses the quit budget. `--preset` wins over
+    /// `GENOS_LIGHTING_PRESET`.
+    pub(crate) fn apply_launch_preset(&mut self) -> Result<(), String> {
+        let mut launch = genos_scene::LightingSettings::default();
+        launch.apply_env()?;
+        self.lighting.settings = launch;
+        Ok(())
+    }
+
     /// Size the G-buffer, work and output buffers for the picture and point every
     /// descriptor at them.
     fn make_lighting_targets(&mut self) -> Result<(), String> {
@@ -3818,9 +3832,9 @@ impl Gpu {
         }
         self.lighting.stats_still[slot] = self.lighting.still;
         self.lighting.last_slot = slot;
-        // What moved in the traced world since the last frame: the probes drop the
-        // kept rays that cross it (lighting_gather.comp). Light needs nothing here: every
-        // kept hit is shaded again each frame.
+        // Bounds of what moved in the traced world since the last frame.
+        // A cache ray drops a stratum that crosses a mover. Direct light shades
+        // its samples again each frame, so it does not read this list.
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
