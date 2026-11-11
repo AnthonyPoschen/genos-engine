@@ -32,8 +32,24 @@ LUM = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 DEPTH_RANGE = 50.0  # lighting_compose.comp: depth view = 1 - distance / 50
 
 
-def srgb_to_linear(c):
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+def linear_from_display(c):
+    """Undo the shoulder tone the engine and reference PNGs store (mesh::tone,
+    hdr_shoulder.glsl, trace.rs linear_from_display): linear to 0.64, then
+    0.64 + 0.14 e / (e + 1.1). Not sRGB."""
+    k = np.clip((c - 0.64) / 0.14, 0.0, 0.999)
+    return np.where(c <= 0.64, np.maximum(c, 0.0), 0.64 + 1.1 * k / (1.0 - k))
+
+
+# Shoulder ceiling: 0.64 + 0.14 = 0.78 (198.9/255). The PNG writers dither by
+# up to ~2/255, so anything within 3/255 of the ceiling is saturated: the tone
+# curve is flat there and the radiance that produced it is unrecoverable.
+SHOULDER_CEILING = 0.78
+CEILING_DITHER = 3.0 / 255.0
+
+
+def over_ceiling(rgb):
+    """Per-pixel mask: any channel at the shoulder ceiling (saturated)."""
+    return (rgb >= SHOULDER_CEILING - CEILING_DITHER).any(axis=-1)
 
 
 def load_rgb(path):
@@ -42,7 +58,7 @@ def load_rgb(path):
 
 
 def lin_luma(path):
-    return srgb_to_linear(load_rgb(path)) @ LUM
+    return linear_from_display(load_rgb(path)) @ LUM
 
 
 def distance(path):
@@ -55,11 +71,15 @@ def block(a, b=2):
     return a[:h, :w].reshape(h // b, b, w // b, b).mean(axis=(1, 3))
 
 
-def ref_error(live, ref, dist=None):
-    """(near-weighted, unweighted) share of the light that is wrong."""
+def ref_error(live, ref, dist=None, mask=None):
+    """(near-weighted, unweighted) share of the light that is wrong.
+    mask: pixels (at ref resolution) excluded from numerator and denominator,
+    i.e. saturated pixels, reported separately as over_ceiling_px."""
     if live.shape != ref.shape:
         from PIL import Image
         live = np.asarray(Image.fromarray(live).resize(ref.shape[::-1], Image.BILINEAR))
+    if mask is not None:
+        live, ref = np.where(mask, 0.0, live), np.where(mask, 0.0, ref)
     l, r = block(live), block(ref)
     d = np.abs(l - r)
     plain = float(d.sum() / (r.sum() + 1e-6))
@@ -119,18 +139,25 @@ def score(out):
             if not os.path.exists(ref):
                 continue
             dp = stem + "-depth.png"
-            near, plain = ref_error(lin_luma(lv), lin_luma(ref), distance(dp) if os.path.exists(dp) else None)
-            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
+            lrgb, rrgb = load_rgb(lv), load_rgb(ref)
+            oc_live = over_ceiling(lrgb)
+            m = oc_live | over_ceiling(rrgb) if oc_live.shape == rrgb.shape[:2] else over_ceiling(rrgb)
+            near, plain = ref_error(linear_from_display(lrgb) @ LUM, linear_from_display(rrgb) @ LUM,
+                                    distance(dp) if os.path.exists(dp) else None, mask=m)
+            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain, int(oc_live.sum())))
         if per:
             near = [p[1] for p in per]
             worst = max(per, key=lambda p: p[1])
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
-                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4))
+                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4),
+                     over_ceiling_px=max(p[3] for p in per))
+            # Saturated live pixels hide unbounded radiance: a live failure.
+            s["over_ceiling_ok"] = s["over_ceiling_px"] == 0
             if n == "switch":
                 settled = per[-1][1]
-                s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
-                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}
+                s["frames_to_ref"] = next((f for f, e, *_ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
+                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, *_ in per}
         res[n] = s
     return res
 
@@ -147,8 +174,30 @@ def self_test():
     same, _ = ref_error(ref, ref, dist)
     still = [ref, ref, ref]
     moving = [ref, ref * 1.2, ref * 1.44]
+    # Engine and reference PNGs store the shoulder tone (mesh::tone,
+    # hdr_shoulder.glsl), not sRGB: linear below 0.64, so 128/255 reads back
+    # as 128/255 and the shoulder undoes to the light that made it.
+    import tempfile
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as d:
+        Image.new("RGB", (2, 2), (128, 128, 128)).save(d + "/a.png")
+        Image.new("RGB", (2, 2), (180, 180, 180)).save(d + "/b.png")
+        la, lb = float(lin_luma(d + "/a.png").mean()), float(lin_luma(d + "/b.png").mean())
+    x = 180 / 255 - 0.64
+    tone_ok = abs(la - 128 / 255) < 1e-3 and abs(lb - (0.64 + 1.1 * x / (0.14 - x))) < 1e-2
+    print(json.dumps({"lin_luma_128": round(la, 4), "lin_luma_180": round(lb, 4)}))
+    # Pixels at the shoulder ceiling (0.78 = 198.9/255, +-dither) carry no
+    # recoverable radiance: they must be counted, not decoded to ~1100.
+    sat = np.full((4, 4, 3), 0.3, np.float32); sat[0, 0] = 198 / 255; sat[1, 1] = (199 / 255, 0.2, 0.2)
+    sat[2, 2] = 190 / 255  # bright but below the ceiling: still decoded
+    oc = over_ceiling(sat)
+    flat = np.full((4, 4), 0.3, np.float32)
+    hot = flat.copy(); hot[0, 0] = 1100.0
+    masked, _ = ref_error(hot, flat, None, mask=np.zeros((4, 4), bool) | (np.arange(16).reshape(4, 4) == 0))
+    ceil_ok = int(oc.sum()) == 2 and oc[0, 0] and oc[1, 1] and not oc[2, 2] and masked < 1e-6
+    print(json.dumps({"over_ceiling_px": int(oc.sum()), "masked_err": round(masked, 6)}))
     ok = (same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
-          and unchanged(still) == 1.0 and unchanged(moving) == 0.0)
+          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok and ceil_ok)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)]}))
     print("self-test", "ok" if ok else "FAIL")
