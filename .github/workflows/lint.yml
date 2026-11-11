@@ -115,3 +115,15 @@ jobs:
             -p genos-render --test gpu_budget --test shader_loops --test particle_resident \
             -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
             -- --test-threads=1
+
+  fill-knockout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools
+      - name: presented-frame fill gate, passes and goes red with cache_fill knocked out
+        run: ./scripts/ci-fill-knockout.sh

@@ -5005,7 +5005,14 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
         cap => cap,
     }
     .clamp(1, 999);
-    let toggles = settings.experiments.toggles;
+    let mut toggles = settings.experiments.toggles;
+    // Test-only. A shipping build's guard is always on, so this bit stays
+    // whatever the settings asked for. The knockout feature with
+    // GENOS_KNOCKOUT=cache_fill freezes cache value writes. The dispatches
+    // stay: dropping them faults lavapipe.
+    if !crate::gate::guard(crate::gate::CACHE_FILL) {
+        toggles |= genos_scene::LIGHTING_TOGGLE_FREEZE_CACHE;
+    }
     const GI_ESTIMATOR: u32 = 1 << 20;
     const SURFACE_CACHE_HOLD: u32 = 1 << 30;
     const SH_CELLS: u32 = 1 << 23;

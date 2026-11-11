@@ -253,6 +253,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_KNOCKOUT"
+kind = "test"
+detail = "harness only: cargo test --features knockout lists the guard to remove"
+
+[[var]]
 name = "OCC_DUMP"
 kind = "test"
 detail = "harness only"

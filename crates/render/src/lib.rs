@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod cooked_load;
+mod gate;
 mod fog;
 mod fog_budget;
 mod fog_pass;
