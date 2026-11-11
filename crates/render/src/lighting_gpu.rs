@@ -1555,8 +1555,7 @@ impl Gpu {
         self.idle_device();
         const WORD: usize = 24 + 57;
         self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
-            .map(|w| w[WORD])
-            .unwrap_or(0)
+            .map_or(0, |w| w[WORD])
     }
 
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
