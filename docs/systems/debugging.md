@@ -113,7 +113,7 @@ make lighting SCENE=sponza
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
-(the existing texels view: slots with fewer than four sets stay dim),
+(the existing texels view: own-mean luma, seed luma, and set count),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
 `--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
@@ -172,14 +172,16 @@ The ping is answered only inside the seat dispatch. A scene load runs on
 pipeline compiles keep a side thread answering pings, and that thread is joined
 before the next present. Quit is the app lifecycle in `crates/window`: it stops
 the script and the MCP listener without a blind join, polls GPU fences, destroys
-the device, unmaps the window, and then exits. Dropping the device outside that
+our GPU objects, unmaps the window, and then exits. It does not call
+`vkDestroyDevice` or `vkDestroyInstance`. Dropping the device outside that
 lifecycle panics and does not wait idle. The event thread dispatches the
 seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
 pump gap (a synchronous load, a device wait, or a teardown). A phase line at
-or above 100 ms names that shutdown step. The probes are the Perf row,
-`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_phase=`, and
+or above 100 ms names that shutdown step. `lifecycle_visible_quit_ms` at or
+above 100 ms means the process stayed up after the window was gone. The probes are the Perf row,
+`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_visible_quit_ms`, `lifecycle_phase=`, and
 `lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
 That test plants a 2000 ms fence inside the drain so lavapipe's instant fences
 cannot hide a blocked phase.

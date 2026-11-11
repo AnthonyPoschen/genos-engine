@@ -19,7 +19,7 @@ ADR 0039 still says the GI-on direct pass is 13.4–14.3 ms against 4.3 ms GI-of
 | 30 Oct 18:00, commit `ecd8efce`, `docs/systems/lighting/direct-bucket-breakdown.md` (absent on `d7f7bd2`) | 4070, 2560×1440 stress, `GENOS_LIGHTING_LAMP_PICK_DIAG=1`. `lamp_px` is 17.66M (~4.8 per pixel). Pixels are ~4.4 ms with GI on and with GI off (GI-off direct 4.27 ms). The GI-on extra ~9.8 ms is the kept/fill half of the same `pixels + 2×kept` dispatch: with direct off, those threads alone are `light_hit` 9.84 ms. Probe picks (`LIGHTING_PROBE_PICKS`) save ~1.5 ms. Kept-hit shadow rays are ~0.7M. |
 | PR #123, merged `fceaf77f` (30 Oct) | `shadows=` added every `B_DIRECT` and `B_HIT` time into `light=` a second time. The 30 Oct C5 table's "shadows 15.7 + initial …" counted that work twice. After the fix, `light_px` is pixels plus kept hits, and `light_hit` is cache-ray hits. |
 | PR #120 comment, 30 Oct 02:41, build `2469d274`; written up in PR #122 | Flag off `light=` 13.349 ms. Flag on 25.815 ms (initial 7.015 + temporal 0.466 + spatial 4.449). Lighting total 32.620 vs 45.276 ms. That run is before the shade replacement and before the 18:00 split. The same-day comment on `6866b41` reads the leftover ~13.9 ms as probe and cache hits plus suns. |
-| PR #167, merged `eca4827f` (5 Nov), ancestor of `d7f7bd2` | Off-screen probe hits stop walking every lamp. Lavapipe, 640×360, high: lamp entries 3.25M → 1.73M, hit lamp entries 1.88M → 0.37M. The PR states that pixel lamp rays were already the same with GI on and GI off. The PR body asked for a 4070 timing before merge. That timing is not in the PR. |
+| PR #167, merged `eca4827f` (5 Nov), ancestor of `d7f7bd2` | Probe hits outside the picture stop walking every lamp. Lavapipe, 640×360, high: lamp entries 3.25M → 1.73M, hit lamp entries 1.88M → 0.37M. The PR states that pixel lamp rays were already the same with GI on and GI off. The PR body asked for a 4070 timing before merge. That timing is not in the PR. |
 
 17.66M is the measured pixel shadow-ray count. It is the pixel half, which matches GI-off. It is not an unexplained GI-on ray blow-up.
 
@@ -81,11 +81,7 @@ The C5 head widens that test. At `67dfc320`, `restir_live.comp` sets `RESTIR_DEP
 
 ## Review choice 2 — shaded-colour mean
 
-**Unresolved.**
-
-At `67dfc320` the live shade stores a running mean of the shaded sample, cap `RESTIR_MEAN_CAP` 32, tag `LAMP_GEO_RESTIR_MEAN`, and that mean is the colour on screen (commit `af94ef8`; #120 comment, 30 Oct 23:25). The product mean on this tree (`LAMP_PICK_MEAN_CAP`, 4096) is the noise-gate bit only. The lighting README says production does not set that bit, and that the mean is the gate only.
-
-Porting the 32-frame mean must not make it the graded picture. Recommendation, pending Anthony: store the raw reservoir shade and the mean as two outputs. Near, turn, and `grid_worst` stay on the raw picture. An averaged diagnostic is not a pass of those gates.
+**Resolved.** The graded picture is the cumulative mean of the unbiased sample, cap 4096 (the same length as the noise-gate mean), frozen at the cap until the stored sample changes. It resets on a failed reprojection, any lamp change (restir header word 39), or a change in that sample's visibility or unshadowed target. A frozen mean still drops on that change. The 32-frame mean on `67dfc320` (commit `af94ef8`) was the frozen grain and is not this mean. The reservoir M cap and the per-frame candidates stay. The noise-gate hold-off bit is still its own mean and is not the product path.
 
 ## Gates, unchanged
 

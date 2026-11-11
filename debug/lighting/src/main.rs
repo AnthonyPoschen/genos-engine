@@ -172,7 +172,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --cooked DIR           load a glTF scene from a genos-cook directory (ADR 0035).
                          GENOS_COOKED applies only when this is omitted.
                          Unset keeps the glTF and PNG path
-  --unfilled             show the texels view (slots with fewer than 4 sets are dim)
+  --unfilled             show the texels view (red own mean, green seed, blue set count)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --denoise-launch hash|screen
@@ -374,6 +374,8 @@ struct Options {
 const MCP_PORT: u16 = 8766;
 
 fn main() {
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
     let code = match run() {
         Ok(code) => code,
         Err(err) => {

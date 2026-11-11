@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod cooked_load;
+mod gate;
 mod fog;
 mod fog_budget;
 mod fog_pass;
@@ -21,6 +22,7 @@ mod reflections;
 mod reflections_grade;
 mod restir_live;
 mod scene_mesh;
+mod shown_age;
 mod trace;
 mod unfilled;
 mod wire;

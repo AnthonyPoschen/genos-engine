@@ -24,10 +24,42 @@ const uint LAMP_PICK_EXACT_LIT = 8u;
 // Record kind in the geo word. A cleared slot is all ones, which is neither.
 const uint LAMP_GEO_RESTIR = 0u;
 const uint LAMP_GEO_EXACT = 2u;
-// Diagnostic mean of a ReSTIR DI sample. Not the colour on screen.
+// Mean of the unbiased ReSTIR DI sample. This is the graded colour.
 const uint LAMP_GEO_RESTIR_MEAN = 3u;
-// Frames in that mean. The graded picture stays the raw sample.
-const uint RESTIR_MEAN_CAP = 32u;
+// Samples in that mean. Past this the colour stays, so a still surface
+// converges, until the stored sample's visibility or target changes.
+// Same length as LAMP_PICK_MEAN_CAP. A 32-frame cap froze the grain.
+const uint RESTIR_MEAN_CAP = 4096u;
+// No stored lamp. A real lamp index still fits in the low 16 bits.
+const uint RESTIR_MEAN_NO_LAMP = 0xffffu;
+
+// 12-bit log luma. One code is 2^(1/64), about 1.1%. A still lamp
+// round-trips the same code. A wider ratio would keep a different integrand.
+const float RESTIR_MEAN_LUMA_FLOOR = 1.0e-8;
+const float RESTIR_MEAN_LOG_BIAS = 24.0;
+const float RESTIR_MEAN_LOG_SCALE = 64.0;
+const float RESTIR_MEAN_ROUND = 0.5;
+const float RESTIR_MEAN_LOG_MAX = 4095.0;
+
+uint restir_mean_quant(float luma) {
+    if (!(luma > RESTIR_MEAN_LUMA_FLOOR)) {
+        return 0u;
+    }
+    float q = (log2(luma) + RESTIR_MEAN_LOG_BIAS) * RESTIR_MEAN_LOG_SCALE;
+    return uint(clamp(floor(q + RESTIR_MEAN_ROUND), 1.0, RESTIR_MEAN_LOG_MAX));
+}
+
+bool restir_mean_target_moved(uint stored_q, float luma) {
+    return restir_mean_quant(luma) != stored_q;
+}
+
+// Lamp in 0..15, visibility in bit 16, 12-bit log luma in bits 17..28.
+// LAMP_ALL would wipe the reservoir, so a missing lamp stays RESTIR_MEAN_NO_LAMP.
+uint restir_mean_pack(uint lamp, bool vis, float luma) {
+    uint id = lamp < RESTIR_MEAN_NO_LAMP ? lamp : RESTIR_MEAN_NO_LAMP;
+    uint bit = vis ? 0x10000u : 0u;
+    return id | bit | (restir_mean_quant(luma) << 17u);
+}
 // Reject history when the depth gap is both over this fraction and over this many metres.
 const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;
@@ -173,7 +205,10 @@ float lamp_pick_depth(vec3 pos) {
 // Motion vector into the previous frame. The returned pixel is in bounds.
 // Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
 // A mover bound does not reject on its own. GI off has no last camera.
-bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_now) {
+// `only_px` of ~0u accepts any in-bounds pixel. Any other value returns
+// before the geo load when the pixel is not that one, so a one-slot mean
+// does not read a neighbour this dispatch is writing.
+bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixel, out float z_now) {
     hist_pixel = 0u;
     z_now = 0.0;
     if (!lighting_gi_on()) {
@@ -203,6 +238,9 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     hist_pixel = uint(floor(px.y)) * pc.dims.x + uint(floor(px.x));
+    if (only_px != ~0u && hist_pixel != only_px) {
+        return false;
+    }
     uvec4 geo = lamp_geo_load(hist_pixel, lamp_res_slot_prev());
     float z_prev = uintBitsToFloat(geo.x);
     if (!(z_prev > 0.0)) {
@@ -217,6 +255,10 @@ bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_no
         return false;
     }
     return true;
+}
+
+bool lamp_pick_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out float z_now) {
+    return lamp_pick_reproject_at(pos, nrm, ~0u, hist_pixel, z_now);
 }
 
 // Unshadowed point lamps and the flame. Suns stay out of this sum.
