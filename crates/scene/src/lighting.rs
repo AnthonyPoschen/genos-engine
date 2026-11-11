@@ -561,6 +561,10 @@ pub struct FillSettings {
     pub share_conf: f32,
     /// Distinct cells in the tile one sample may seed.
     pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High's default
+    /// is `warmup_rays`. Other seeds keep the 16-set handover. The ray cap
+    /// does not move.
+    pub share_handover: u32,
 }
 
 impl FillSettings {
@@ -588,7 +592,7 @@ impl FillSettings {
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
-            share: 1,
+            share: 0,
             share_min_hit: 2.0,
             share_cap: 32,
             share_plane: 0.02,
@@ -597,6 +601,7 @@ impl FillSettings {
             share_cos: 0.05,
             share_conf: 0.25,
             share_receivers: 3,
+            share_handover: 16,
         }
     }
 }
@@ -1150,6 +1155,7 @@ impl LightingSettings {
             0.25
         };
         fill.share_receivers = fill.share_receivers.min(8);
+        fill.share_handover = fill.share_handover.max(1);
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1514,6 +1520,7 @@ impl LightingSettings {
         let _ = writeln!(out, "surface_cache.fill_share_cos={}", num_text(fill.share_cos));
         let _ = writeln!(out, "surface_cache.fill_share_conf={}", num_text(fill.share_conf));
         let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
+        let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
         let _ = writeln!(
             out,
             "surface_cache.sh_cells={}",
@@ -1787,6 +1794,9 @@ impl LightingSettings {
             "surface_cache.fill_share_conf" => self.surface_cache.fill.share_conf = num_f32(value)?,
             "surface_cache.fill_share_receivers" => {
                 self.surface_cache.fill.share_receivers = num_u32(value)?;
+            }
+            "surface_cache.fill_share_handover" => {
+                self.surface_cache.fill.share_handover = num_u32(value)?;
             }
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
@@ -2107,6 +2117,10 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_FILL_SHARE_RECEIVERS",
                 "surface_cache.fill_share_receivers",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_HANDOVER",
+                "surface_cache.fill_share_handover",
             ),
         ];
         for (var, key) in keys {
