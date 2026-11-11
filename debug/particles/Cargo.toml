@@ -1,0 +1,19 @@
+[package]
+name = "genos-particles"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-particles"
+path = "src/main.rs"
+
+[dependencies]
+genos-debug = { path = "../../crates/debug" }
+genos-mcp = { path = "../../crates/mcp" }
+genos-render = { path = "../../crates/render" }
+genos-scene = { path = "../../crates/scene" }
+genos-window = { path = "../../crates/window" }

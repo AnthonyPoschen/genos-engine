@@ -80,7 +80,8 @@ use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ParticleSettings,
+    ReflectionSettings, Scene,
     Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
@@ -1266,19 +1267,21 @@ fn run() -> Result<i32, String> {
                 tools.quit_code().unwrap_or(0),
             ));
         }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
+        window.write_devices(&mut input, &gated);
         if opts.step && input.keyboard.pressed(InputCode::key_space) {
             tools.request_steps(1);
             dt = tools.scene_dt(bench::STEP);
         }
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
         if keys.pressed(&input, "unfilled_tint") {
             stage.unfilled_tint = !stage.unfilled_tint;
@@ -1407,6 +1410,7 @@ fn run() -> Result<i32, String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        renderer.set_particle_dt(dt);
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if opts.step && dt > 0.0 {
@@ -1499,6 +1503,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1573,7 +1578,10 @@ fn load_gltf_pumped(
             if frame.closing {
                 return genos_window::PumpStep::Close;
             }
-            let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            if !frame.minimized {
+                renderer.set_particle_dt(bench::STEP);
+                let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            }
             genos_window::PumpStep::Continue
         },
         move || bake_gltf(heavy, &models, cooked.as_deref(), bc),

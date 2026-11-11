@@ -164,14 +164,19 @@ impl Islands {
             }
         }
         for &id in &self.ids {
-            let Some(body) = bodies.get_mut(index_of(id)) else {
+            let index = index_of(id);
+            let Some(body) = bodies.get(index) else {
                 continue;
             };
             if !dynamic_live(body) || body.sleeping {
                 continue;
             }
             let held = !vehicles.is_empty()
-                && crate::vehicle::actuator_holds_awake(vehicles, index_of(id));
+                && (crate::vehicle::holds_awake(vehicles, body, index)
+                    || crate::vehicle::actuator_holds_awake(vehicles, index));
+            let Some(body) = bodies.get_mut(index) else {
+                continue;
+            };
             let calm = body.velocity.length() < linear
                 && body.angular_velocity.length() < angular
                 && !body.motor

@@ -33,14 +33,12 @@ layout(constant_id = 0) const bool COMPOSE_SC_WRITES = true;
 // the legacy shoulder with no extra buffers: declaring them here moved the
 // bounce between frames on lavapipe. `legacy_bytes` uses the plain compile.
 #ifdef GENOS_HDR_COMPOSE
-// Scene-referred radiance, before the display transform. w is eye distance in metres.
-layout(std430, set = 0, binding = 13) restrict buffer SceneReferred {
-    vec4 px[];
-} scene_lin;
+#include "hdr_scene.glsl"
 
-// x exposure (0 means 1), y display mode, z bloom intensity.
+// x exposure (0 means 1), y display mode, z bloom intensity. extra.w is the bloom divisor.
 layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
     vec4 v;
+    vec4 extra;
 } hdr;
 
 #include "hdr_display.glsl"
@@ -92,7 +90,7 @@ void main() {
 #ifdef GENOS_HDR_COMPOSE
         // The clear already wrote the toned sky. Keep those bytes. The grade
         // reads this linear sky and does not invert the shoulder.
-        scene_lin.px[index] = vec4(scene.sky.rgb, 1000.0);
+        scene_store(index, vec4(scene.sky.rgb, 1000.0));
 #endif
         return;
     }
@@ -217,8 +215,8 @@ void main() {
     // A zero fog header leaves the radiance alone. The scene image stores that result.
     c = froxel_compose(c, p, pc.dims.xy);
 #ifdef GENOS_HDR_COMPOSE
-    scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
-    c = add_bloom(c, index);
+    scene_store(index, vec4(c, length(pos - scene.eye.xyz)));
+    c = add_bloom(c, index, pc.dims.x, pc.dims.y);
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;

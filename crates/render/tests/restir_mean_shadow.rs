@@ -114,6 +114,7 @@ fn world(lamp_x: f32, box_x: f32) -> World {
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
     })
 }
 

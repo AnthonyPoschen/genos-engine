@@ -8,6 +8,8 @@ publish = false
 workspace = true
 
 [dependencies]
+genos-input = { path = "../input" }
+genos-load = { path = "../load" }
 genos-scene = { path = "../scene" }
 
 [dev-dependencies]

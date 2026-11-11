@@ -94,6 +94,7 @@ fn hall_walls(n: usize, walls: Vec<genos_scene::Wall>) -> World {
         hdr: genos_scene::HdrSettings::for_preset(LightingPreset::High),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
     })
 }
 

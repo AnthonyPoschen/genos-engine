@@ -15,8 +15,8 @@
 use genos_debug::{Host, Knob};
 use genos_load::{MaterialSettings, TextureQuality};
 use genos_scene::{
-    AmbientMode, FogInspect, FogSettings, LampPickMode, LightingPreset, LightingSettings, Scene,
-    ShadowFilter, SurfaceCacheBlend,
+    AmbientMode, FogInspect, FogSettings, LampPickMode, LightingPreset, LightingSettings,
+    ParticleSettings, Scene, ShadowFilter, SurfaceCacheBlend, HIGH_MAX_PARTICLES,
 };
 
 use crate::building::{self, Layout};
@@ -139,10 +139,14 @@ impl Host for Stage {
         knobs.extend(material_knobs(&self.materials));
         knobs.extend(lighting_knobs(lighting));
         knobs.extend(fog_knobs(&self.world.scene.fog));
+        knobs.extend(particle_knobs(&self.world.scene.particles));
         knobs
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
+        if apply_particle_knob(&mut self.world.scene.particles, name, v)? {
+            return Ok(());
+        }
         if apply_fog_knob(&mut self.world.scene.fog, name, v)? {
             return Ok(());
         }
@@ -858,6 +862,59 @@ pub fn apply_fog_knob(settings: &mut FogSettings, name: &str, v: f64) -> Result<
     Ok(true)
 }
 
+/// Stage-1 particle keys. Prefixed so they do not collide with fog's `enabled`.
+#[must_use]
+pub fn particle_knobs(settings: &ParticleSettings) -> Vec<Knob> {
+    vec![
+        Knob::switch("fx_enabled", "fx_enabled", settings.enabled),
+        Knob::number(
+            "fx_count",
+            "fx_count",
+            f64::from(settings.count),
+            (0.0, f64::from(settings.max_particles.max(1))),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "fx_max",
+            "fx_max",
+            f64::from(settings.max_particles),
+            (0.0, f64::from(HIGH_MAX_PARTICLES)),
+            1024.0,
+            "",
+        ),
+        Knob::number(
+            "fx_rate",
+            "fx_rate",
+            f64::from(settings.rate),
+            (0.0, 1000.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("fx_freeze", "fx_freeze", settings.freeze),
+    ]
+}
+
+/// Write one particle knob through [`ParticleSettings::set_key`].
+///
+/// Returns false when `name` is not a particle knob.
+pub fn apply_particle_knob(
+    settings: &mut ParticleSettings,
+    name: &str,
+    v: f64,
+) -> Result<bool, String> {
+    let switch = if v >= 0.5 { "on" } else { "off" };
+    match name {
+        "fx_enabled" => settings.set_key("enabled", switch)?,
+        "fx_count" => settings.set_key("count", &format!("{v:.0}"))?,
+        "fx_max" => settings.set_key("max_particles", &format!("{v:.0}"))?,
+        "fx_rate" => settings.set_key("rate", &format!("{v}"))?,
+        "fx_freeze" => settings.set_key("freeze", switch)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn choice_index(value: f64, len: usize) -> usize {
     let mut index = 0;
     let mut cursor = 0.0;
@@ -971,5 +1028,19 @@ mod tests {
         assert!(fog.history);
         assert_eq!(fog.inspect_line(), "weight=0");
         assert!(!apply_fog_knob(&mut fog, "lighting_gi", 1.0).expect("skip"));
+    }
+
+    #[test]
+    fn a_particle_knob_writes_the_budget_and_leaves_fog_alone() {
+        let mut particles = ParticleSettings::default();
+        assert!(apply_particle_knob(&mut particles, "fx_enabled", 1.0).expect("enabled"));
+        assert!(apply_particle_knob(&mut particles, "fx_count", 32.0).expect("count"));
+        assert!(apply_particle_knob(&mut particles, "fx_max", 128.0).expect("max"));
+        assert!(apply_particle_knob(&mut particles, "fx_freeze", 1.0).expect("freeze"));
+        assert!(particles.enabled);
+        assert_eq!(particles.count, 32);
+        assert_eq!(particles.max_particles, 128);
+        assert!(particles.freeze);
+        assert!(!apply_particle_knob(&mut particles, "enabled", 1.0).expect("skip"));
     }
 }

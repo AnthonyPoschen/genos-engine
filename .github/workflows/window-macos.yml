@@ -1,0 +1,16 @@
+name: window-macos
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  smoke:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cocoa window and GameController
+        run: |
+          cargo test -p genos-window -p genos-input --lib -- --test-threads=1
+          cargo test -p genos-window --test cocoa_smoke

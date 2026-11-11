@@ -1981,6 +1981,9 @@ impl Gpu {
             preserve_count: 0,
             preserve: std::ptr::null(),
         };
+        // Same masks as `Gpu::make_render_pass`. The composite pass begins on
+        // that framebuffer, and this layer rejects a dependency mismatch
+        // (VUID-VkRenderPassBeginInfo-renderPass-00904).
         let into = pass_sync::reflect_pass_in();
         let out = pass_sync::reflect_pass_out();
         let deps = [

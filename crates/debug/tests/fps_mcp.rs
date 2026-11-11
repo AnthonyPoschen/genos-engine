@@ -15,6 +15,7 @@ use genos_mcp::json::{self, Value};
 use genos_render::{Renderer, World};
 use genos_scene::{
     Camera, EngineSettings, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light,
+    ParticleSettings,
     MenuSettings, ReflectionSettings, Scene, Vec3,
 };
 use genos_window::Window;
@@ -51,6 +52,7 @@ fn room() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }

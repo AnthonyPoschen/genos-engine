@@ -7,7 +7,7 @@ outside, the same way every time: over the MCP port, from a script file, or head
 on a box. Lighting quality is judged against ground truth, not by eye alone.
 
 Every engine system ships a dedicated debug binary under `debug/<system>/`
-(`debug/lighting`, `debug/physics`, `debug/networking`, `debug/ui`,
+(`debug/lighting`, `debug/physics`, `debug/input`, `debug/networking`, `debug/ui`,
 `debug/assets`, and the same folder for any other system). The binary covers
 that system's features. The agent rubric scores this.
 
@@ -173,7 +173,10 @@ pipeline compiles keep a side thread answering pings, and that thread is joined
 before the next present. Quit is the app lifecycle in `crates/window`: it stops
 the script and the MCP listener without a blind join, polls GPU fences, destroys
 our GPU objects, unmaps the window, and then exits. It does not call
-`vkDestroyDevice` or `vkDestroyInstance`. Dropping the device outside that
+`vkDestroyDevice` or `vkDestroyInstance`, except when `--lifecycle-full-destroy`
+is set for the validation gate. Unix exit is `_exit`. Windows exit is
+`TerminateProcess`, so `DLL_PROCESS_DETACH` does not destroy the device after
+`lifecycle_visible_quit_ms` is printed. Dropping the device outside that
 lifecycle panics and does not wait idle. The event thread dispatches the
 seat between those steps. The old scene is dropped on `genos-retire`.
 
