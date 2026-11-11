@@ -35,12 +35,18 @@ const uint RESTIR_MEAN_NO_LAMP = 0xffffu;
 
 // 12-bit log luma. One code is 2^(1/64), about 1.1%. A still lamp
 // round-trips the same code. A wider ratio would keep a different integrand.
+const float RESTIR_MEAN_LUMA_FLOOR = 1.0e-8;
+const float RESTIR_MEAN_LOG_BIAS = 24.0;
+const float RESTIR_MEAN_LOG_SCALE = 64.0;
+const float RESTIR_MEAN_ROUND = 0.5;
+const float RESTIR_MEAN_LOG_MAX = 4095.0;
+
 uint restir_mean_quant(float luma) {
-    if (!(luma > 1.0e-8)) {
+    if (!(luma > RESTIR_MEAN_LUMA_FLOOR)) {
         return 0u;
     }
-    float q = (log2(luma) + 24.0) * 64.0;
-    return uint(clamp(floor(q + 0.5), 1.0, 4095.0));
+    float q = (log2(luma) + RESTIR_MEAN_LOG_BIAS) * RESTIR_MEAN_LOG_SCALE;
+    return uint(clamp(floor(q + RESTIR_MEAN_ROUND), 1.0, RESTIR_MEAN_LOG_MAX));
 }
 
 bool restir_mean_target_moved(uint stored_q, float luma) {

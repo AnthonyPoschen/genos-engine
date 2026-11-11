@@ -759,7 +759,7 @@ fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
         "the rejection must not read the quarter scratch"
     );
     assert!(screen.contains(
-        "if (!detail_kept && own_sets < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
+        "if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
     ));
     assert!(
         screen.contains("float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));"),

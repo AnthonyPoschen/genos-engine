@@ -1543,6 +1543,14 @@ const float LIGHTING_DN_MIN_SETS = 8.0;
 // Sets before a cell may count as resolved. The perceptual stop and the
 // A-SVGF resolved test both used to fire at LIGHTING_DN_MIN_SETS.
 const float LIGHTING_SC_FULL_SETS = 64.0;
+// Half a set. A count below this has no own sample. Floor tests use it so a
+// float count is the integer below.
+const float LIGHTING_SC_SET_HALF = 0.5;
+// Own-sample luma above this is a lit texel. Same floor as the edge test.
+const float LIGHTING_SC_LIT_LUMA = 1.0e-3;
+// The cache-ray origin sits this far along the stored normal. lighting_direct
+// uses the same lift.
+const float LIGHTING_RAY_LIFT = 0.02;
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -4119,14 +4127,15 @@ vec4 lighting_sc_debug_population(vec3 pos, vec3 n) {
     }
     vec3 tp;
     vec3 tn;
-    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * 0.02)) {
+    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * LIGHTING_RAY_LIFT)) {
         size += 1.0;
     }
     float gain = lighting_sc_sun_gain(s);
     vec3 own = max(cache.v[3u * s + 2u].rgb, vec3(0.0)) * gain;
-    float own_l = dot(own, vec3(0.2126, 0.7152, 0.0722));
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    float own_l = dot(own, lw);
     vec4 seed = lighting_sc_seed(s);
-    float seed_l = dot(max(seed.rgb, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722));
+    float seed_l = dot(max(seed.rgb, vec3(0.0)), lw);
     float sets = floor(max(cache.v[3u * s + 2u].w, 0.0));
     return vec4(size, sets, own_l, seed_l);
 }
@@ -4213,7 +4222,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             }
             continue;
         }
-        if (mode == 3u && bil > 0.0 && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - 0.5) {
+        if (mode == 3u && bil > 0.0 && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
             under_full = true;
         }
         // Last frame's winning pixel stores the seed before this frame publishes.
@@ -4314,7 +4323,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // which used to skip this fallback and leave the texel on whatever
         // pixel wrote SPARSE.y. The own-sample count is the populated test.
         float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-        if (!detail_kept && own_sets < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
+        if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
             // A detail candidate already took the neighbour read. That read
@@ -4374,17 +4383,18 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (!stale) {
             if (detail_kept) {
                 sc_trust = clamp(detail_trust, 0.0, 1.0);
-            } else if (sets >= LIGHTING_SC_FULL_SETS - 0.5) {
+            } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
                 // A full count, including a real zero, is the texel.
                 sc_trust = 1.0;
-            } else if (sets >= 0.5) {
+            } else if (sets >= LIGHTING_SC_SET_HALF) {
                 // Own samples, not the shown field. The field can be a
                 // neighbour filter while the samples are black. A zero-set
                 // corner never reaches here, so an unclaimed centre stays
                 // on the coarse cell.
                 vec3 own_rgb = max(cache.v[3u * slot + 2u].rgb, vec3(0.0)) * lighting_sc_sun_gain(slot);
-                float y_own = dot(own_rgb, vec3(0.2126, 0.7152, 0.0722));
-                sc_trust = y_own > 1.0e-3 ? 1.0 : 0.0;
+                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+                float y_own = dot(own_rgb, lw);
+                sc_trust = y_own > LIGHTING_SC_LIT_LUMA ? 1.0 : 0.0;
             }
         }
         if ((lighting_sc_flags() & 32u) != 0u) {
@@ -5257,8 +5267,8 @@ void lighting_svgf_push(uint slot) {
         // slot to snap. A short count with a bright target is the filter's
         // blotch, and the prior would hold the black field so the edge snap
         // below would never run.
-        bool no_samples = sets < 0.5;
-        if (sets < LIGHTING_SC_FULL_SETS - 0.5 && !any(greaterThan(prev, vec3(0.0))) && (no_samples || !(y_target > 1.0e-3))) {
+        bool no_samples = sets < LIGHTING_SC_SET_HALF;
+        if (sets < LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF && !any(greaterThan(prev, vec3(0.0))) && (no_samples || !(y_target > 1.0e-3))) {
 #ifdef GENOS_COMPOSE_NO_WALK
             vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
 #else

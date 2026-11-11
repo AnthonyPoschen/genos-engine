@@ -83,7 +83,7 @@ fn eight_zero_sets_are_not_resolved() {
     assert!(cache.contains("atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);"));
     assert!(cache.contains("clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0)"));
     assert!(
-        cache.contains("y_own > 1.0e-3"),
+        cache.contains("y_own > LIGHTING_SC_LIT_LUMA"),
         "a short lit texel is trust 1 from its own samples, not the shown field"
     );
     assert!(
@@ -125,7 +125,7 @@ fn eight_zero_sets_are_not_resolved() {
         "a seed must not drop the texel before the ray lists"
     );
     assert!(
-        cache.contains("own_sets < 0.5"),
+        cache.contains("own_sets < LIGHTING_SC_SET_HALF"),
         "the empty-corner fallback keys off the own-sample count"
     );
 
@@ -140,7 +140,7 @@ fn eight_zero_sets_are_not_resolved() {
     let pop = function_body(cache, "vec4 lighting_sc_debug_population(vec3 pos, vec3 n)");
     assert!(pop.contains("lighting_sc_seed(s)"), "the record keeps the seed apart from the mean");
     assert!(pop.contains("3u * s + 2u"), "the record reads the own-sample count");
-    assert!(pop.contains("scene_inside(tp + tn * 0.02)"), "the record flags a ray origin inside geometry");
+    assert!(pop.contains("scene_inside(tp + tn * LIGHTING_RAY_LIFT)"), "the record flags a ray origin inside geometry");
     let compose = include_str!("../shaders/lighting_compose.comp");
     let sun = include_str!("../shaders/lighting_sun_compose.comp");
     for src in [compose, sun] {
