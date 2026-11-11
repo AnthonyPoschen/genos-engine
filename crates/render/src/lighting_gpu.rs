@@ -3816,7 +3816,7 @@ impl Gpu {
         self.lighting.last_slot = slot;
         // What moved in the traced world since the last frame: the probes drop the
         // kept rays that cross it (lighting_gather.comp). Light needs nothing here: every
-        // kept hit is shaded again each frame.
+        // stored cache-ray hit is shaded again each frame.
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
