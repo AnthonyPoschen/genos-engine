@@ -6,9 +6,11 @@
 //! window or a device. The live cache is unchanged. `--tile-fill` defaults off.
 //!
 //! The resolve rule is the one the age-of-shown-mean runs measured
-//! (`MEASURED_COMMIT`). Those runs rejected a quarter hold: at 1M the shown
-//! mean is younger than flag off, not older. `HoldQuarters` stays as the
-//! comparison the measurement did not select.
+//! (`MEASURED_COMMIT`). On the axis-aligned red-box texels, 1M commits are
+//! younger than flag off, so those runs did not select a quarter hold.
+//! The yawed face is a different feeder (probes here, 25 cm cells on #265);
+//! that age is in the F1 experiment note and is not this rule. `HoldQuarters`
+//! stays as the comparison the axis-aligned measurement did not select.
 //!
 //! Departures from Lumen's World Cache fill and from `ReSTIR` GI (Ouyang et al.,
 //! HPG 2021), recorded in the lighting README:
@@ -131,6 +133,8 @@ fn faults_are_caught() -> bool {
         && starved
         && !deposit::own_excludes_shared(&broken)
         && share::unclamped_exceeds_cap()
+        && share::constant_weight_plane_error() >= 0.01
+        && share::firefly_bound_holds()
 }
 
 #[cfg(test)]

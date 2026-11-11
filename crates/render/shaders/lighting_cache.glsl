@@ -2734,8 +2734,110 @@ uint lighting_lamp_move_stamp(vec3 p) {
 const float LIGHTING_AGE_RED_NEAR = 6.0;
 const float LIGHTING_AGE_RED_MIN = 0.45;
 const float LIGHTING_AGE_RED_MAX = 0.35;
-// Near red-box pixels. diag[14..26] match crates/render/src/shown_age.rs.
-void lighting_shown_age_tally(vec3 pos, vec3 n, vec3 albedo, uint slot) {
+// Compose treats a probe match below this as a cache fallback (lighting_compose.comp).
+const float LIGHTING_AGE_PROBE_MIN = 0.05;
+const float LIGHTING_AGE_PARENT = 2.0;
+const float LIGHTING_AGE_TILE_BIAS = 0.5;
+const float LIGHTING_AGE_PLANE = 0.03;
+const float LIGHTING_AGE_PLANE_K = 0.01;
+const float LIGHTING_AGE_PROBE_ON = 0.5;
+const float LIGHTING_AGE_BIL_BIAS = 1.0e-3;
+const float LIGHTING_AGE_NORMAL_POW = 8.0;
+const float LIGHTING_AGE_WEIGHT_FLOOR = 1.0e-6;
+// Near red-box pixels. diag[14..37] match crates/render/src/shown_age.rs.
+// Commit frame of the 25 cm patch, or the 50 cm parent when that stamp is empty.
+uint lighting_shown_patch_commit(vec3 pos, vec3 n) {
+    uint commit = 0u;
+    float size = LIGHTING_SC_HIT;
+    [[dont_unroll]] for (uint level = 0u; level < 2u; level++) {
+        if (commit == 0u) {
+            uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+            if (s < LIGHTING_CACHE_SLOTS) {
+                if (ckeys.key[s] != 0u) {
+                    commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + s].x);
+                }
+            }
+        }
+        size *= LIGHTING_AGE_PARENT;
+    }
+    return commit;
+}
+// diag[base] is the count with a commit, then the age sum, predates, postdates,
+// and the count with no commit.
+void lighting_shown_feed_tally(uint commit, uint age, vec3 pos, uint base) {
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[base + 4u], 1u);
+        return;
+    }
+    atomicAdd(gstats.diag[base], 1u);
+    atomicAdd(gstats.diag[base + 1u], age);
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        return;
+    }
+    if (commit >= stamp) {
+        atomicAdd(gstats.diag[base + 3u], 1u);
+    } else {
+        atomicAdd(gstats.diag[base + 2u], 1u);
+    }
+}
+// What compose shows on a turned surface: the screen probes, unless their
+// weight is under LIGHTING_AGE_PROBE_MIN, in which case the 25 cm patch.
+// diag 27..31 is that source. diag 32..36 is the patch either way.
+void lighting_shown_feed_age(uvec2 px, vec3 pos, vec3 n) {
+    float tile = float(max(pc.params.y, 1u));
+    vec2 g = (vec2(px) + LIGHTING_AGE_TILE_BIAS) / tile - LIGHTING_AGE_TILE_BIAS;
+    ivec2 g0 = ivec2(floor(g));
+    vec2 f = g - vec2(g0);
+    float dist = length(pos - scene.eye.xyz);
+    float plane = LIGHTING_AGE_PLANE + LIGHTING_AGE_PLANE_K * dist;
+    float wsum = 0.0;
+    float best_w = 0.0;
+    uint best = ~0u;
+    ivec2 grid = ivec2(pc.dims.zw);
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        ivec2 c = g0 + ivec2(int(k & 1u), int(k >> 1u));
+        if (any(lessThan(c, ivec2(0))) || any(greaterThanEqual(c, grid))) {
+            continue;
+        }
+        uint probe = uint(c.y) * pc.dims.z + uint(c.x);
+        vec4 pp = work.v[lighting_probe_at(probe)];
+        if (pp.w < LIGHTING_AGE_PROBE_ON) {
+            continue;
+        }
+        vec3 pn = work.v[lighting_probe_at(probe) + 1u].xyz;
+        float bil = ((k & 1u) == 1u ? f.x : 1.0 - f.x) * ((k >> 1u) == 1u ? f.y : 1.0 - f.y);
+        float w = (bil + LIGHTING_AGE_BIL_BIAS) * pow(max(dot(pn, n), 0.0), LIGHTING_AGE_NORMAL_POW) * exp(-abs(dot(pp.xyz - pos, n)) / plane);
+        if (w <= LIGHTING_AGE_WEIGHT_FLOOR) {
+            continue;
+        }
+        wsum += w;
+        if (w > best_w) {
+            best_w = w;
+            best = probe;
+        }
+    }
+    uint cell_commit = lighting_shown_patch_commit(pos, n);
+    uint cell_age = 0u;
+    if (cell_commit != 0u && lighting_frame() >= cell_commit) {
+        cell_age = lighting_frame() - cell_commit;
+    }
+    lighting_shown_feed_tally(cell_commit, cell_age, pos, 32u);
+    if (wsum >= LIGHTING_AGE_PROBE_MIN && best < lighting_probes()) {
+        atomicAdd(gstats.diag[37], 1u);
+        uint commit = floatBitsToUint(work.v[lighting_shf_at(best) + 6u].w);
+        uint age = 0u;
+        if (commit != 0u && lighting_frame() >= commit) {
+            age = lighting_frame() - commit;
+        }
+        lighting_shown_feed_tally(commit, age, pos, 27u);
+        return;
+    }
+    // The patch is the compose source for this pixel. Its age is already in
+    // diag 32..36 with the other slanted patches. Mixing it into diag 27
+    // would report the probe age as a blend of a fresh probe and a stale cell.
+}
+void lighting_shown_age_tally(uvec2 px, vec3 pos, vec3 n, vec3 albedo, uint slot) {
     if (length(pos - scene.eye.xyz) >= LIGHTING_AGE_RED_NEAR) {
         return;
     }
@@ -2747,6 +2849,7 @@ void lighting_shown_age_tally(vec3 pos, vec3 n, vec3 albedo, uint slot) {
     // there, so no stamp below can describe what it shows.
     if (lighting_sc_slanted(n)) {
         atomicAdd(gstats.diag[26], 1u);
+        lighting_shown_feed_age(px, pos, n);
     }
     // A miss is ~0u. Nested so the cache index stays in range.
     if (slot >= LIGHTING_CACHE_SLOTS) {

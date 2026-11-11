@@ -30,7 +30,7 @@ fn reach(n) {
 }
 
 reach(5);
-shot("albedo", ["albedo"]);
+shot("albedo", ["albedo", "normal"]);
 reach(40);
 shot("still", ["full", "depth"]);
 reach(80);

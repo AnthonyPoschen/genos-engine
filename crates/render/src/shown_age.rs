@@ -38,6 +38,31 @@ pub const DIAG_NOSLOT: usize = 25;
 /// texels, so compose shows probes there and none of the age counters above
 /// describe what it shows. Every such pixel is also in `DIAG_NOSLOT`.
 pub const DIAG_SLANTED: usize = 26;
+/// `diag[27]`. Slanted pixels whose compose source has a commit.
+/// On this branch that source is the screen probes when their weight clears
+/// the compose fallback, and the 25 cm patch otherwise. On #265 it is the
+/// SH-cell blend.
+pub const DIAG_FEED_N: usize = 27;
+/// `diag[28]`. Sum of those ages.
+pub const DIAG_FEED_SUM: usize = 28;
+/// `diag[29]`. That commit is before the lamp-move stamp.
+pub const DIAG_FEED_PRE: usize = 29;
+/// `diag[30]`. That commit is at or after the lamp-move stamp.
+pub const DIAG_FEED_POST: usize = 30;
+/// `diag[31]`. Slanted pixels whose compose source has no commit stamp.
+pub const DIAG_FEED_NONE: usize = 31;
+/// `diag[32]`. Slanted pixels whose 25 cm patch (or 50 cm parent) has a commit.
+pub const DIAG_PATCH_N: usize = 32;
+/// `diag[33]`. Sum of those patch ages.
+pub const DIAG_PATCH_SUM: usize = 33;
+/// `diag[34]`. The patch commit predates the lamp-move stamp.
+pub const DIAG_PATCH_PRE: usize = 34;
+/// `diag[35]`. The patch commit postdates the lamp-move stamp.
+pub const DIAG_PATCH_POST: usize = 35;
+/// `diag[36]`. No 25 cm or 50 cm commit.
+pub const DIAG_PATCH_NONE: usize = 36;
+/// `diag[37]`. Slanted pixels compose showed from screen probes.
+pub const DIAG_FEED_PROBES: usize = 37;
 
 /// How the shown commit sits against the lamp-move stamp.
 ///
@@ -108,6 +133,17 @@ pub struct AgeHist {
     pub nostamp: u32,
     pub noslot: u32,
     pub slanted: u32,
+    pub feed_n: u32,
+    pub feed_sum: u32,
+    pub feed_pre: u32,
+    pub feed_post: u32,
+    pub feed_none: u32,
+    pub patch_n: u32,
+    pub patch_sum: u32,
+    pub patch_pre: u32,
+    pub patch_post: u32,
+    pub patch_none: u32,
+    pub feed_probes: u32,
 }
 
 impl AgeHist {
@@ -127,6 +163,17 @@ impl AgeHist {
             nostamp: at(DIAG_NOSTAMP),
             noslot: at(DIAG_NOSLOT),
             slanted: at(DIAG_SLANTED),
+            feed_n: at(DIAG_FEED_N),
+            feed_sum: at(DIAG_FEED_SUM),
+            feed_pre: at(DIAG_FEED_PRE),
+            feed_post: at(DIAG_FEED_POST),
+            feed_none: at(DIAG_FEED_NONE),
+            patch_n: at(DIAG_PATCH_N),
+            patch_sum: at(DIAG_PATCH_SUM),
+            patch_pre: at(DIAG_PATCH_PRE),
+            patch_post: at(DIAG_PATCH_POST),
+            patch_none: at(DIAG_PATCH_NONE),
+            feed_probes: at(DIAG_FEED_PROBES),
         }
     }
 
@@ -145,7 +192,7 @@ impl AgeHist {
 /// The `lightingage` line. `queue` is `frame` or `round`, as `lightingsc` uses.
 pub fn line(queue: &str, frame: u32, hist: &AgeHist) -> String {
     format!(
-        "lightingage {queue} frame {frame} red {} never {} age0 {} age1_3 {} age4_7 {} age8_15 {} age16 {} predates {} postdates {} sum_age {} nostamp {} noslot {} slanted {}",
+        "lightingage {queue} frame {frame} red {} never {} age0 {} age1_3 {} age4_7 {} age8_15 {} age16 {} predates {} postdates {} sum_age {} nostamp {} noslot {} slanted {} feed_n {} feed_sum {} feed_pre {} feed_post {} feed_none {} patch_n {} patch_sum {} patch_pre {} patch_post {} patch_none {} probes {}",
         hist.red,
         hist.never,
         hist.age0,
@@ -159,6 +206,17 @@ pub fn line(queue: &str, frame: u32, hist: &AgeHist) -> String {
         hist.nostamp,
         hist.noslot,
         hist.slanted,
+        hist.feed_n,
+        hist.feed_sum,
+        hist.feed_pre,
+        hist.feed_post,
+        hist.feed_none,
+        hist.patch_n,
+        hist.patch_sum,
+        hist.patch_pre,
+        hist.patch_post,
+        hist.patch_none,
+        hist.feed_probes,
     )
 }
 
@@ -193,7 +251,7 @@ mod tests {
 
     #[test]
     fn the_line_reads_the_diag_words_the_screen_pass_adds() {
-        let mut diag = [0u32; 32];
+        let mut diag = [0u32; 64];
         diag[DIAG_RED] = 100;
         diag[DIAG_NEVER] = 10;
         diag[DIAG_AGE0] = 20;
@@ -203,12 +261,17 @@ mod tests {
         diag[DIAG_SUM_AGE] = 270;
         diag[DIAG_NOSLOT] = 4;
         diag[DIAG_SLANTED] = 3;
+        diag[DIAG_FEED_N] = 7;
+        diag[DIAG_FEED_SUM] = 14;
+        diag[DIAG_FEED_PROBES] = 7;
+        diag[DIAG_PATCH_NONE] = 3;
         let hist = AgeHist::from_diag(&diag);
         let mean = hist.mean_age().unwrap_or(-1.0);
         assert!((mean - 3.0).abs() < 1.0e-9);
         let text = line("frame", 192, &hist);
         assert!(text.starts_with("lightingage frame frame 192 red 100 "));
         assert!(text.contains("predates 40 postdates 50 sum_age 270"));
-        assert!(text.ends_with("noslot 4 slanted 3"));
+        assert!(text.contains("noslot 4 slanted 3"));
+        assert!(text.ends_with("feed_n 7 feed_sum 14 feed_pre 0 feed_post 0 feed_none 0 patch_n 0 patch_sum 0 patch_pre 0 patch_post 0 patch_none 3 probes 7"));
     }
 }

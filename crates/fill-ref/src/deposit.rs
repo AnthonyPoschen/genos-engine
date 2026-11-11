@@ -10,6 +10,8 @@ pub struct Faults {
     pub t_min_off: bool,
     pub count_shared_as_own: bool,
     pub unclamped: bool,
+    /// Gate 4 off: the shared contribution is not held to the running upper estimate.
+    pub firefly_off: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

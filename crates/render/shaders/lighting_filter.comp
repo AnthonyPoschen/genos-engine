@@ -178,7 +178,14 @@ void main() {
     bool sh_diff = false;
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
         vec4 nw = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
-        sh_diff = sh_diff || any(notEqual(work.v[base + q], nw));
+        vec4 old = work.v[base + q];
+        // The last word's w is the frame this SH was written (the age tally).
+        // The coefficients are xyz. Comparing w would mark every probe dirty.
+        if (q == 6u) {
+            sh_diff = sh_diff || any(notEqual(old.xyz, nw.xyz));
+        } else {
+            sh_diff = sh_diff || any(notEqual(old, nw));
+        }
     }
     if (lighting_world_mode() == 2u) {
         float y[9];
@@ -198,7 +205,11 @@ void main() {
         lighting_world_add(pp.xyz, n, max(e, vec3(0.0)), changed);
     }
     [[dont_unroll]] for (uint q = 0u; q < 7u; q++) {
-        work.v[base + q] = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+        vec4 nw = vec4(c[4u * q], c[4u * q + 1u], c[4u * q + 2u], q == 6u ? 0.0 : c[4u * q + 3u]);
+        if (q == 6u) {
+            nw.w = uintBitsToFloat(max(pc.params.w, 1u));
+        }
+        work.v[base + q] = nw;
     }
     if (sh_diff) {
         lighting_compose_mark_probe(probe);

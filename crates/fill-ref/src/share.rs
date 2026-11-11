@@ -208,8 +208,7 @@ fn energies(origin: &ShareCell, other: &ShareCell, hit: &ShareHit, gate1_off: bo
     add_own(&mut src, hit.radiance);
     let mut dst = Deposit::default();
     if let Ok(w) = share_weight(origin, hit, other, &faults, 1) {
-        let capped = firefly(hit.radiance * w, other.firefly);
-        add_shared(&mut dst, capped, 1.0, faults);
+        deposit_shared(&mut dst, hit.radiance, w, other.firefly, faults);
     }
     Leak {
         source: mean_luma(&src),
@@ -217,13 +216,33 @@ fn energies(origin: &ShareCell, other: &ShareCell, hit: &ShareHit, gate1_off: bo
     }
 }
 
+fn luma_of(rgb: Vec3) -> f32 {
+    0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
+}
+
 fn firefly(rgb: Vec3, cap: f32) -> Vec3 {
-    let luma = 0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z;
+    let luma = luma_of(rgb);
     if luma > cap && luma > 0.0 {
         rgb * (cap / luma)
     } else {
         rgb
     }
+}
+
+/// Gate 4. The contribution is what is deposited, after the weight clamp.
+fn deposit_shared(dst: &mut Deposit, radiance: Vec3, weight: f32, cap: f32, faults: Faults) {
+    let contrib = radiance * weight;
+    let capped = if faults.firefly_off {
+        contrib
+    } else {
+        firefly(contrib, cap)
+    };
+    add_shared(dst, capped, 1.0, faults);
+}
+
+/// `0.1 + short mean + sigma * deviation`, the running upper estimate.
+fn running_upper(short_mean: f32, deviation: f32, sigma: f32) -> f32 {
+    0.1 + short_mean + sigma * deviation
 }
 
 /// The unclamped fault produces a weight above `W_CAP`. The real path clamps it.
@@ -253,45 +272,119 @@ pub fn unclamped_exceeds_cap() -> bool {
     matches!(held, Ok(w) if (w - W_CAP).abs() < 1.0e-4)
 }
 
-/// Relative error of the shared estimator against `pi`, for hits at or beyond `t_min`.
-#[must_use]
-pub fn plane_rel_error() -> f32 {
-    let n = 64_u16;
+/// Radiance of the ceiling at `hit`. It varies across the plane, so a
+/// constant weight is not the receiver's integral.
+fn ceiling_radiance(hit: Vec3) -> f32 {
+    (0.2 + 0.8 * hit.x).max(0.05)
+}
+
+/// Cosine-weighted irradiance of the ceiling, `pi` times the mean radiance.
+fn receiver_integral(recv: Vec3, samples: u16) -> f32 {
+    let mut sum = 0.0_f32;
+    for index in 0..samples {
+        let dir = cosine_dir(index, samples);
+        let t = 3.0 / dir.y.max(0.05);
+        sum += ceiling_radiance(recv + dir * t);
+    }
+    std::f32::consts::PI * sum / f32::from(samples)
+}
+
+/// Relative error of the shared estimator against a brute-force integral at
+/// the receiver. `constant_weight` replaces the Jacobian with 1.
+fn plane_error(constant_weight: bool) -> f32 {
+    let samples = 4096_u16;
     let origin = cell(Vec3::ZERO, Vec3::Y);
     let recv = cell(Vec3::new(0.2, 0.0, 0.0), Vec3::Y);
     let mut shared_w = 0.0_f32;
     let mut shared_l = 0.0_f32;
-    let mut own_l = 0.0_f32;
-    let count = f32::from(n);
-    for i in 0..n {
-        let dir = cosine_dir(i, n);
+    for index in 0..samples {
+        let dir = cosine_dir(index, samples);
         let t = 3.0 / dir.y.max(0.05);
+        if t < T_MIN {
+            continue;
+        }
+        let hit_at = origin.pos + dir * t;
         let hit = ShareHit {
-            point: origin.pos + dir * t,
-            normal: -dir,
+            point: hit_at,
+            normal: -Vec3::Y,
             radiance: Vec3::new(1.0, 1.0, 1.0),
             t,
         };
-        own_l += 1.0;
-        if hit.t < T_MIN {
-            continue;
-        }
         let faults = Faults::default();
-        if let Ok(w) = share_weight(&origin, &hit, &recv, &faults, 1) {
-            shared_w += w;
-            shared_l += w;
+        if let Ok(raw) = share_weight(&origin, &hit, &recv, &faults, 1) {
+            let weight = if constant_weight { 1.0 } else { raw };
+            let radiance = ceiling_radiance(hit_at);
+            shared_w += weight;
+            shared_l += weight * radiance;
         }
     }
-    let pi = std::f32::consts::PI;
-    let own = pi * own_l / count;
     let shared = if shared_w > 0.0 {
-        pi * shared_l / shared_w
+        std::f32::consts::PI * shared_l / shared_w
     } else {
         0.0
     };
-    let own_err = (own - pi).abs() / pi;
-    let shared_err = (shared - pi).abs() / pi;
-    own_err.max(shared_err)
+    let truth = receiver_integral(recv.pos, 8192);
+    (shared - truth).abs() / truth
+}
+
+/// Relative error of the Jacobian estimator against the receiver integral.
+#[must_use]
+pub fn plane_rel_error() -> f32 {
+    plane_error(false)
+}
+
+/// The same integral with every accepted weight forced to 1.
+#[must_use]
+pub fn constant_weight_plane_error() -> f32 {
+    plane_error(true)
+}
+
+/// Gate 4, and the reweight clamp at 2.
+///
+/// A bright hit whose raw weight exceeds 2 is deposited at weight 2, and that
+/// contribution's luma is held to `0.1 + short mean + sigma * deviation`.
+/// Removing either bound fails this check.
+#[must_use]
+pub fn firefly_bound_holds() -> bool {
+    let cap = running_upper(0.2, 0.05, 1.0);
+    let origin = cell(Vec3::ZERO, Vec3::Y);
+    let mut recv = cell(Vec3::new(-0.213_771_8, 0.0, 0.172_413_2), Vec3::Y);
+    recv.firefly = cap;
+    let hit = ShareHit {
+        point: Vec3::new(-1.204_053, 0.980_968_8, 1.260_142),
+        normal: Vec3::new(0.330_765_2, -0.609_517_2, 0.720_474_3),
+        radiance: Vec3::new(8.0, 8.0, 8.0),
+        t: 2.0,
+    };
+    let raw = Faults {
+        unclamped: true,
+        ..Faults::default()
+    };
+    let Ok(heavy) = share_weight(&origin, &hit, &recv, &raw, 1) else {
+        return false;
+    };
+    let Ok(held_w) = share_weight(&origin, &hit, &recv, &Faults::default(), 1) else {
+        return false;
+    };
+    if heavy <= W_CAP || (held_w - W_CAP).abs() > 1.0e-4 {
+        return false;
+    }
+    let mut held = Deposit::default();
+    deposit_shared(&mut held, hit.radiance, held_w, cap, Faults::default());
+    let mut open = Deposit::default();
+    deposit_shared(
+        &mut open,
+        hit.radiance,
+        held_w,
+        cap,
+        Faults {
+            firefly_off: true,
+            ..Faults::default()
+        },
+    );
+    let held_luma = mean_luma(&held);
+    let open_luma = mean_luma(&open);
+    held_luma <= cap + 1.0e-3 && open_luma > cap + 1.0
 }
 
 fn cosine_dir(index: u16, count: u16) -> Vec3 {
@@ -372,5 +465,21 @@ mod tests {
             Err(Reject::Stamp)
         );
         assert!(share_weight(&origin, &hit, &recv, &Faults::default(), 21).is_ok());
+    }
+
+    #[test]
+    fn an_unoccluded_plane_tracks_the_receiver_and_a_constant_weight_does_not() {
+        let err = plane_rel_error();
+        let broken = constant_weight_plane_error();
+        assert!(err < 0.01, "jacobian error {err}");
+        assert!(
+            broken >= 0.01,
+            "constant weight error {broken} still under 1%"
+        );
+    }
+
+    #[test]
+    fn the_firefly_bound_holds_the_contribution_and_the_weight_at_two() {
+        assert!(firefly_bound_holds());
     }
 }

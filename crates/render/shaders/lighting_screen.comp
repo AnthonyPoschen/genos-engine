@@ -138,7 +138,7 @@ uvec3 screen_gather(uvec2 p) {
         }
     }
     if (lighting_shown_age()) {
-        lighting_shown_age_tally(pos, n, albedo, age_slot);
+        lighting_shown_age_tally(p, pos, n, albedo, age_slot);
     }
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return uvec3(0u);

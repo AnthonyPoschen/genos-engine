@@ -15,7 +15,11 @@ MARK = re.compile(r"MARK (\w+) frame=(\d+)")
 AGE = re.compile(
     r"lightingage \S+ frame (\d+) red (\d+) never (\d+) age0 (\d+) "
     r"age1_3 (\d+) age4_7 (\d+) age8_15 (\d+) age16 (\d+) "
-    r"predates (\d+) postdates (\d+) sum_age (\d+) nostamp (\d+)(?: noslot (\d+) slanted (\d+))?"
+    r"predates (\d+) postdates (\d+) sum_age (\d+) nostamp (\d+)"
+    r"(?: noslot (\d+) slanted (\d+))?"
+    r"(?: feed_n (\d+) feed_sum (\d+) feed_pre (\d+) feed_post (\d+) feed_none (\d+)"
+    r" patch_n (\d+) patch_sum (\d+) patch_pre (\d+) patch_post (\d+) patch_none (\d+)"
+    r" probes (\d+))?"
 )
 
 
@@ -51,7 +55,20 @@ def ages(path):
                 "nostamp": n[11],
                 "noslot": n[12],
                 "slanted": n[13],
+                "feed_n": n[14],
+                "feed_sum": n[15],
+                "feed_pre": n[16],
+                "feed_post": n[17],
+                "feed_none": n[18],
+                "patch_n": n[19],
+                "patch_sum": n[20],
+                "patch_pre": n[21],
+                "patch_post": n[22],
+                "patch_none": n[23],
+                "probes": n[24],
                 "mean_age": (n[10] / committed) if committed else None,
+                "feed_mean": (n[15] / n[14]) if n[14] else None,
+                "patch_mean": (n[20] / n[19]) if n[19] else None,
             }
         )
     return rows
@@ -99,8 +116,61 @@ def print_ages(log_path):
             f"predates {share(row['predates'], committed)} "
             f"postdates {share(row['postdates'], committed)} "
             f"nostamp {share(row['nostamp'], committed)} never {row['never']} "
-            f"noslot {row['noslot']} slanted {row['slanted']}"
+            f"noslot {row['noslot']} slanted {row['slanted']} "
+            f"feed_n {row['feed_n']} feed_mean {row['feed_mean']} "
+            f"feed_pre {share(row['feed_pre'], row['feed_n'])} "
+            f"feed_post {share(row['feed_post'], row['feed_n'])} "
+            f"feed_none {row['feed_none']} probes {row['probes']} "
+            f"patch_n {row['patch_n']} patch_mean {row['patch_mean']} "
+            f"patch_pre {share(row['patch_pre'], row['patch_n'])} "
+            f"patch_none {row['patch_none']}"
         )
+
+
+def surface_masks(normal_path):
+    """Axis-aligned faces pack to 0 or 255 in one channel (n * 0.5 + 0.5)."""
+    from PIL import Image
+    import numpy as np
+
+    raw = np.asarray(Image.open(normal_path).convert("RGB"), dtype=np.int16)
+    peak = np.maximum(raw, 255 - raw).max(axis=-1)
+    axis = peak >= 254
+    return axis, ~axis
+
+
+def score_split(off, on, normal_path):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from fill_curve import codes_darker
+
+    axis, slanted = surface_masks(normal_path)
+
+    def find(directory, tag, kind):
+        hits = []
+        for name in os.listdir(directory):
+            if name.startswith(tag + "-") and name.endswith("-" + kind + ".png"):
+                hits.append(name)
+        if not hits:
+            return None
+        hits.sort()
+        return os.path.join(directory, hits[-1])
+
+    def albedo_of(directory):
+        for name in os.listdir(directory):
+            if name.startswith("albedo-") and name.endswith("-albedo.png"):
+                return os.path.join(directory, name)
+        return None
+
+    albedo = albedo_of(off)
+    for tag in ("mid", "stop", "after"):
+        a = find(off, tag, "full")
+        b = find(on, tag, "full")
+        depth = find(off, tag, "depth")
+        if not a or not b:
+            print(f"{tag} missing picture")
+            continue
+        for label, mask in (("axis", axis), ("slanted", slanted), ("all", None)):
+            row = codes_darker(a, b, depth, albedo, mask)
+            print(tag, label, row)
 
 
 def main(argv):
@@ -139,7 +209,10 @@ def main(argv):
             row = codes_darker(a, b, depth, albedo)
             print(tag, row)
         return 0
-    print("usage: shown_age.py ages LOG | pair OFF_DIR ON_DIR", file=sys.stderr)
+    if len(argv) == 5 and argv[1] == "split":
+        score_split(argv[2], argv[3], argv[4])
+        return 0
+    print("usage: shown_age.py ages LOG | pair OFF_DIR ON_DIR | split OFF_DIR ON_DIR NORMAL", file=sys.stderr)
     return 2
 
 
