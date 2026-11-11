@@ -2300,8 +2300,8 @@ impl Gpu {
         if let Ok(w) = self.read_stats16(memory) {
             if trace {
                 eprintln!(
-                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
-                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
+                    "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {} near {} full {}",
+                    self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23], w[24 + 56], w[24 + 57]
                 );
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
@@ -4965,9 +4965,9 @@ fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read
     probe_only || (world_mode == 3 && !counters_read)
 }
 
-// Defaults with no env set (S54K): GI, the surface cache, cap 64, the
+// Defaults with no env set (S54K): GI, the surface cache, cap 8, the
 // S49 flag set and object-local texels. Each env var still overrides.
-const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
+const LIGHTING_DEFAULT_SC_CAP: u32 = 8;
 
 /// The change-block words `lighting_passes` uploads from the settings.
 /// `flags` is the low 23 surface-cache bits (head z, above the probe-run bit).
@@ -5026,6 +5026,16 @@ pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> Lightin
     }
     if settings.surface_cache.sh_probe_retire {
         head_hi |= SH_PROBE_RETIRE;
+    }
+    // coverage_first and cap_fill are default-off experiment bits. head 3.w is
+    // stored as f32, so these stay at or below bit 23 (exact integer).
+    const COVERAGE_FIRST: u32 = 1 << 20;
+    const CAP_FILL: u32 = 1 << 21;
+    if settings.experiments.coverage_first {
+        head_hi |= COVERAGE_FIRST;
+    }
+    if settings.experiments.cap_fill {
+        head_hi |= CAP_FILL;
     }
     LightingChangeHead {
         flags: flags_all & ((1 << 23) - 1),
@@ -5832,6 +5842,18 @@ mod sun_step {
         settings.surface_cache.sh_cells = true;
         let on = super::lighting_change_head(&settings);
         assert_eq!(on.head_hi & 1, 1, "sh_cells did not set head_hi bit 0");
+        assert_eq!(on.mode_cap, 3 * 1000 + 8, "high set cap is 8");
+        assert_eq!(on.head_hi & (1 << 20), 0, "coverage_first defaults off");
+        assert_eq!(on.head_hi & (1 << 21), 0, "cap_fill defaults off");
+        let mut sixty_four = settings.clone();
+        sixty_four.experiments.world_cap = 64;
+        let explicit = super::lighting_change_head(&sixty_four);
+        assert_eq!(explicit.mode_cap, 3 * 1000 + 64, "an explicit cap is packed");
+        settings.experiments.coverage_first = true;
+        settings.experiments.cap_fill = true;
+        let both = super::lighting_change_head(&settings);
+        assert_eq!(both.head_hi & (1 << 20), 1 << 20);
+        assert_eq!(both.head_hi & (1 << 21), 1 << 21);
     }
 
     fn assert_spirv_1(name: &str, words: &[u8]) {

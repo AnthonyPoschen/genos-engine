@@ -582,9 +582,9 @@ const uint LIGHTING_WRC_SNAP_COL_AT = LIGHTING_WRC_BG_AT + 2048u;
 // pixels read that, interpolated, so what a pixel shows depends on where it is in
 // the world, not on where the probe grid fell this frame.
 #ifdef PROD_READONLY
-// High, bounce 2 or more, cap 64. The read-only rows all copy that head.
+// High, bounce 2 or more, cap 8. The read-only rows all copy that head.
 #define lighting_world_mode() 3u
-#define lighting_world_cap() 64.0
+#define lighting_world_cap() 8.0
 #else
 uint lighting_world_mode() {
     return (uint(work.v[lighting_change_at()].w) / 1000u) % 100u;
@@ -1656,13 +1656,13 @@ vec3 lighting_sc_regularise(uint slot, vec3 value) {
 // S72O history rectification (Anthony: a page's early noise locks in and the
 // squares drift): the stored mean itself moves toward its regularised value
 // (the edge-aware neighbourhood plus its own significant difference) by one
-// set's worth, 1 / (sets + 1), while it is short of 64 sets. Noise-level
+// set's worth, 1 / (sets + 1), while it is short of its set cap. Noise-level
 // offsets a region took early are pulled to the neighbourhood instead of being
 // averaged down at 1 / n; real steps are many standard errors and stay.
 void lighting_sc_rectify(uint slot, vec3 reg) {
     vec4 own = cache.v[3u * slot + 2u];
     float t = floor(max(own.w, 0.0));
-    if (!lighting_sc_decorrelate() || t < 0.5 || t >= 64.0 || fract(own.w) > 0.1 || cache.v[3u * slot + 1u].w > 0.2) {
+    if (!lighting_sc_decorrelate() || t < 0.5 || t >= lighting_sc_cap(slot) - 0.5 || fract(own.w) > 0.1 || cache.v[3u * slot + 1u].w > 0.2) {
         return;
     }
     cache.v[3u * slot + 2u].rgb = mix(own.rgb, reg, 1.0 / (t + 1.0));
@@ -3035,6 +3035,28 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
 bool lighting_wrc_scout_due();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
+// coverage_first hold word (head 3.w bit 20). 1 while the last round's
+// near-weighted mean was at least 16 sets and an on-screen texel was under 8.
+const uint LIGHTING_COVERAGE_HOLD_AT = LIGHTING_ARGS_AT + 15u;
+// coverage_first (head 3.w bit 20) and cap_fill (bit 21). Both default off.
+// head 3.w is a float, exact through bit 23.
+bool lighting_coverage_first() {
+    return (uint(work.v[lighting_change_at() + 3u].w) & 1048576u) != 0u;
+}
+bool lighting_coverage_hold() {
+    return lighting_coverage_first() && (ckeys.key[LIGHTING_COVERAGE_HOLD_AT] & 1u) != 0u;
+}
+bool lighting_cap_fill() {
+    return (uint(work.v[lighting_change_at() + 3u].w) & 2097152u) != 0u;
+}
+// Coverage asks for the 8-set minimum, but never for more sets than the cap.
+// At High's cap of 8 the minimum is the cap, and the hold mean is the cap.
+float lighting_coverage_sets() {
+    return min(LIGHTING_DN_MIN_SETS, max(lighting_world_cap(), 1.0));
+}
+float lighting_coverage_bar() {
+    return min(2.0 * lighting_coverage_sets(), max(lighting_world_cap(), 1.0));
+}
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
 // the listing's 0.1 floor and still clamps. The hold path does not read this.
@@ -3453,6 +3475,19 @@ bool lighting_sc_settled(uint slot, float t) {
         // A WRC cell: settled at its cap (or the window under changing light).
         return floor(t) >= LIGHTING_WRC_CAP - 0.5;
     }
+    // The set cap is the done bar. A texel that has taken that many sets is
+    // full even when the estimator is still noisy: another set is not allowed,
+    // so the noise is not a reason to stay due.
+    float cap = lighting_sc_cap(slot);
+    if (floor(t) >= cap - 0.5) {
+        return true;
+    }
+    // cap_fill (default off) turns the perceptual stop off, so a higher
+    // explicit cap is what the texel fills to. The cap return above is the
+    // settle. It does not put the texel on the trickle list.
+    if (lighting_cap_fill()) {
+        return false;
+    }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.
     vec2 nz = lighting_sc_noise(slot);
@@ -3502,6 +3537,12 @@ uint lighting_sc_interval(uint slot, float t) {
     bool mover;
     if (lighting_sc_local_change(slot, mover) || lighting_sc_lamp_touched(slot) || lighting_lamp_settling()) {
         return 0u;
+    }
+    // At the cap, leftover inconsistency is the noise the cap chose to keep.
+    // It does not shorten the interval. The compact pass does not list a
+    // quiet texel at the cap at all.
+    if (floor(t) >= lighting_sc_cap(slot) - 0.5 && lighting_sc_light_quiet() && !lighting_sc_stale(slot)) {
+        return uint(LIGHTING_SC_RATE_DORMANT);
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
     if ((lighting_sc_flags() & 1048576u) != 0u && t >= lighting_sc_cap(slot) - 0.5 && lighting_sc_dormant(slot)) {

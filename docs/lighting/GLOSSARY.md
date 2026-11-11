@@ -123,6 +123,12 @@ Role: SCHED · Literature: GIBS recycling heuristic (§1.4) · More detail: [`li
 **Trickle**: the lowest relight tier. Settled entries that are still slightly inconsistent get an occasional relight.
 Role: SCHED · Literature: GIBS variance-driven ray count (§1.12, partial) · More detail: S65A in [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp); S78H
 
+**Coverage-first** (`coverage_first`, default off): once the near-camera-weighted mean set count of on-screen fine texels reaches twice the coverage minimum, texels under that minimum are scheduled ahead of texels already there, until every on-screen fine texel has the minimum. A texel under the minimum takes one 16-ray quarter per round. Refinement of texels already at the minimum waits while any on-screen texel is still under it. The minimum is the 8-set perceptual floor, clamped to the set cap, so it never asks for more sets than the cap. At High's cap of 8 the minimum and the hold mean are the cap.
+Role: SCHED · Literature: Lumen page refinement (coverage before detail) · More detail: [../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md](../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md)
+
+**Cap fill** (`cap_fill`, default off): turns off the 8-set perceptual stop so an explicit `world_cap` is the only early settle. A texel at its set cap is full either way. While the light is quiet and nothing near it has moved, it takes no more rays. Residual estimator noise does not put it back on the trickle list, and reaching the cap does not free it or restart its sets. `world_cap` 0 keeps the mode default (8 sets on High).
+Role: SCHED · Literature: — · More detail: [../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md](../systems/lighting/experiments/integration-perf-and-grain-2026-11-11.md)
+
 **Pre-fill**: gives a newly seen entry a usable value on the frame it appears (coarse-to-fine), so the picture never shows missing light. Required by rule.
 Role: SCHED · Literature: — (GIBS shows holes and fills them by spawning; Lumen falls back to WRC) · More detail: experiments S72D, S73A
 
