@@ -381,6 +381,7 @@ fn rerun_shader_pieces() {
         "lighting_screen_probe.glsl",
         "lighting_pack.glsl",
         "lighting_cache.glsl",
+        "lighting_fill.glsl",
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",

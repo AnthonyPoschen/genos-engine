@@ -207,11 +207,11 @@ What the reconnection cannot see: visibility from the neighbour to `h`. That is 
 4. **Firefly bound.** The shared contribution is clamped to the receiving cell's running upper estimate (`0.1 + short mean + sigma x deviation`, the existing MSME clamp), so a shared bright hit cannot burn into many cells at once.
 5. **Change-aware.** A cell with a lamp-change stamp newer than its mean accepts shared samples only from paths traced after the change (the path's frame is after the ring entry). Old light cannot be shared into a cell that is draining.
 
-Shared samples carry a tag: they add to the cell's accumulator with the weight above and count toward `shared_count`, never toward `own_count`. The displayed value follows the same trust blend as a seed: `own_count` gates what counts as own. So a shared sample never makes a cell look converged, which keeps the 8-set minimum honest (the #265 failure mode: the minimum locking before the bounce exists).
+The weighted sample is stored with `lighting_sc_set_seed` at low confidence. It does not add a `shared_count` field and it does not increment the cell's own ray count. The displayed value follows the seed's trust blend, so a shared sample never makes a cell look converged (the #265 failure mode: the minimum locking before the bounce exists).
 
 ### 7.3 Which receivers
 
-Stage F4a: the cells and texels under the other pixels of the same 8x8 tile that pass the gates. At 3 m one tile spans about 2 cm, so it is inside one cell and sharing is moot (near cells are oversampled anyway, table in 5.2); at 50 m a tile spans about 40 cm, one to four cells. So tile-local sharing helps exactly the starved distance range, which is where it is needed. The cost is one atomic add per extra cell (at most 3 more), no extra rays.
+Stage F4a: the cells under the other pixels of the same 8x8 tile that pass the gates. At 3 m one tile spans about 2 cm, so it is inside one cell and sharing is moot (near cells are oversampled anyway, table in 5.2); at 50 m a tile spans about 40 cm, one to four cells. So tile-local sharing helps exactly the starved distance range, which is where it is needed. The cost is one seed write per extra cell (at most 3 more), no extra rays. The lookup does not create a cell.
 
 Stage F4b (only if F4a shows a gain): the 8 same-plane neighbour cells of the origin cell, if on screen and passing gate 1 against the pick. This spreads one sample over a 3x3 cell patch (75 cm square) and is the "every cell improves together" case for the mid range.
 
@@ -288,7 +288,7 @@ New, High at 2560x1440, tile 8 (**est**):
 | Deposit table, 230,400 records x 64 B | 14.7 MB |
 | Pick scratch (per tile: need max, pick count, histogram) 57,600 x 16 B + 64 buckets | 0.9 MB |
 | Virtual tile hits (4,096 x 32 B) | 0.13 MB |
-| Per-entry added fields (`shared_count`, fill stamp) | in existing spare words, 0 MB |
+| F4 seed | the existing low-confidence channel, no new field | 0 MB |
 | **Added** | **about 16 MB** |
 
 Removed: the due-list regions, histogram state and ring words that live in the key table (small, not counted as a saving). The cache table itself (368 MiB at 1M slots) is not touched by this design and is already over budget until ADR 0036's per-preset sizing lands; the fill must not make that worse beyond the 16 MB, and it does not need more slots than today (it touches fewer entries per frame).
@@ -386,7 +386,7 @@ Failure modes and the probe that exposes each, all on `debug/lighting` and the M
 | Far starvation | `fill_need` heat map, `fill_cells_under_target` counter by distance bucket |
 | Ceiling breached | `fill_rays`, `fill_paths`, `fill_threshold_bucket` per frame; test asserts <= ceiling |
 | Leak across a wall or edge | per-gate reject counts and a `fill_share` heat map |
-| Shared sample counted as own | `own_count` vs `shared_count` dump per cell |
+| Shared sample counted as own | own ray count stays put; `--unfilled` shows the seed; `gstats.rays` stays the budget |
 | Wired but no effect | presented-frame knockout (F0), `fill` pass in `LIGHTING_MS` |
 | Correlated blotch | spatial-correlation metric in the cache-only blotch view |
 
@@ -402,7 +402,7 @@ Each stage is a separate PR under about 400 lines, one concern, a gate command, 
 | F1 | CPU reference crate: pick, water-fill, deposit, resolve, share weight, gates | Unbiased plane test, leak tests, fault injections fail | No |
 | F2 | Always-on single-ray scheduler. `fill_budget` is spent every cache round (High 100000). One need-weighted pick per screen tile; the rest (`fill_offscreen_floor`) on a 360-degree clipmap. Every ray deposits that frame into MSME with an n-ray weight. Warm-up is 16 rays. World-mode due lists, the settle-every-cell listing, and the old refresh walks are deleted. `fill_check_rate` and the measured-change term wait for F3 | Rays per round <= `fill_budget`; off-screen rays cover every octant; the leash does not thrash; one ray moves the estimator. Frozen gates unchanged. 4070 frame time, still-hall error, and compile time are not measured here | Yes |
 | F3 | Same-seed check rays at `fill_check_rate`, a decaying per-cell lambda, priority = closeness × (remaining error + `fill_change_weight` × lambda) on screen and off screen, water-filling of `fill_budget`, and a shorter MSME window while lambda is high. Scouts stay until F6 | A moved cell gets more rays than a static one under the budget; rays ≤ budget; lambda decays on a static scene; check rays reuse the seed. Frozen gates unchanged. 4070 frame time is not measured here | Yes |
-| F4a | In-tile sharing with all gates | Leak test within 2%, blotch/correlation within noise, fill curve faster than F3 | Yes |
+| F4a | In-tile sharing with all gates, stored as a low-confidence seed. No `shared_count`. Ring sharing is F4b | CPU leak within 2%. Blotch, correlation, and a faster fill curve are not measured here | Yes |
 | F4b | Ring sharing (only if F4a gains) | Same | Yes |
 | F5 | Path vertices (up to 3 bounces, backward deposit) only if lamp-move lag needs it | Lamp-move lag gate; no energy gain beyond reference | Yes |
 | F6 | Flip default on High and Medium; delete the superseded code in the table of section 10, in separate PRs | Full gate list; Anthony tries it himself (cap 8 and any new default wait for his hands-on, as he asked) | Yes, and his own |
