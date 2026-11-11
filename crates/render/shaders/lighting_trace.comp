@@ -33,7 +33,11 @@ uint lighting_hit_glow(vec3 p) {
 
 void main() {
     uint ray = gl_GlobalInvocationID.x;
-    if (lighting_dense()) {
+    if (lighting_ray_fill_on()) {
+        if (ray >= lighting_fill_u(0)) {
+            return;
+        }
+    } else if (lighting_dense()) {
         if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
         }

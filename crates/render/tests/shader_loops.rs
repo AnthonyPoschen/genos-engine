@@ -7,7 +7,7 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 23] = [
+const SHADERS: [&str; 24] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
@@ -24,6 +24,7 @@ const SHADERS: [&str; 23] = [
     "lighting_cache.comp",
     "lighting_compact.comp",
     "lighting_cache.glsl",
+    "lighting_fill.glsl",
     "lighting_cache_slots.glsl",
     "lighting_lamp_pick.glsl",
     "media.glsl",
@@ -73,6 +74,25 @@ fn no_shader_loop_has_a_large_constant_bound() {
             }
         }
     }
+}
+
+#[test]
+fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
+    let fill = source("lighting_fill.glsl");
+    assert!(
+        fill.contains("n / (rays0 + n)"),
+        "the resolve must fold with an n-ray weight"
+    );
+    assert!(fill.contains("lighting_ray_fill_on"), "fill must be wired");
+    let compact = source("lighting_compact.comp");
+    assert!(
+        compact.contains("lighting_fill_visit"),
+        "world mode 3 must admit through the fill visit"
+    );
+    assert!(
+        !compact.contains("LIGHTING_WRC_SCOUT"),
+        "the old refresh walk must not be listed"
+    );
 }
 
 #[test]

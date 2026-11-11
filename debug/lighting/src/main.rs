@@ -164,7 +164,17 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
-                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
+                         World mode 3 does not use this ceiling. It spends
+                         surface_cache.fill_budget every cache round
+                         (GENOS_LIGHTING_FILL_BUDGET, High 100000, 0 traces none).
+                         The other fill knobs are surface_cache.fill_* and
+                         GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
+                         FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
+                         FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
+                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_WARMUP,
+                         FILL_RAY_CAP, FILL_FRAME_DT. fill_check_rate is unused
+                         until check rays are scheduled.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -320,6 +330,22 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
+    "lighting_fill_budget",
+    "lighting_fill_tile",
+    "lighting_fill_lod_near",
+    "lighting_fill_cell_max",
+    "lighting_fill_leash",
+    "lighting_fill_look_ahead",
+    "lighting_fill_far",
+    "lighting_fill_offscreen_floor",
+    "lighting_fill_error_target",
+    "lighting_fill_far_share",
+    "lighting_fill_prox_min",
+    "lighting_fill_change_weight",
+    "lighting_fill_check_rate",
+    "lighting_fill_warmup",
+    "lighting_fill_ray_cap",
+    "lighting_fill_frame_dt",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
