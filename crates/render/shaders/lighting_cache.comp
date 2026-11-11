@@ -119,6 +119,7 @@ void main() {
     if (lighting_sc_expired(last, shown)) {
         atomicAdd(gstats.freed, 1u);
         ckeys.key[slot] = 0u;
+        lighting_sc_forget(slot);
         cache.v[3u * slot + 1u] = vec4(0.0);
         cache.v[3u * slot + 2u] = vec4(0.0);
         return;
@@ -316,9 +317,20 @@ void main() {
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
         }
+        // The shown mean of a 25 cm or 50 cm patch is this write. The fine-texel
+        // stamp below is not reached. Compose does not read the word.
+        if (lighting_shown_age()) {
+            cache.v[LIGHTING_SC_SHOWN_AT + slot].x = uintBitsToFloat(max(lighting_frame(), 1u));
+        }
         return;
     }
     if (lighting_world_mode() == 3u) {
+        // The shown mean is committed on this path (a partial quarter returned
+        // above). The visit stamp in OBJ.y moved already; this frame is the
+        // commit. Off unless the age tally is on.
+        if (lighting_shown_age()) {
+            cache.v[LIGHTING_SC_SHOWN_AT + slot].x = uintBitsToFloat(lighting_frame());
+        }
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
         float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);

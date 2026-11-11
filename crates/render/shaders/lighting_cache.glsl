@@ -438,7 +438,11 @@ void lighting_compose_note_field(uint slot, uint packed) {
     uint now = packed + 1u;
     uint prev = ckeys.key[LIGHTING_COMPOSE_PACK + slot];
     ckeys.key[LIGHTING_COMPOSE_PACK + slot] = now;
-    if (prev != 0u && prev != now) {
+    // The first stored field is a change. A held picture was composed before
+    // that write, and leaving it unmarked kept the pre-field shade until the
+    // next pack change. A full frame cleared the rects, so the mark does
+    // nothing until a pixel has recorded coverage.
+    if (prev != now) {
         lighting_compose_mark_slot(slot);
     }
 }
@@ -833,6 +837,15 @@ float lighting_ls_ratio(uint f) {
 uint lighting_sc_updated(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].y);
 }
+// Shown-mean age (stage F1). The frame the fine texel's shown mean was last
+// committed. Region 23 is the SH-L1, so this stamp is region 26, past
+// LIGHTING_SH_C_AT. Compose does not read it. The visit stamp above moves
+// on a partial quarter; this one does not. The tally runs when the trace
+// enable (chg[31], GENOS_LIGHTING_SC_TRACE) is set.
+const uint LIGHTING_SC_SHOWN_AT = 26u * LIGHTING_CACHE_SLOTS;
+bool lighting_shown_age() {
+    return gstats.chg[31] != 0u;
+}
 // S69A (Anthony: night to day left hard black texels everywhere, cleaning up
 // slowly). A texel relit at night holds night light; the sun/sky share rescale
 // (S63A) cannot brighten it (share ~0, or a tiny value times a ratio capped at
@@ -914,6 +927,15 @@ vec3 lighting_sc_centre(vec3 pos, vec3 n, float size) {
     return q;
 }
 
+// The lit-from offer and the probe seed are decided by one atomic word each.
+// Bodies live with the key-buffer addresses (past the screen list).
+void lighting_sc_offer(uint slot, vec3 at, vec3 cell, vec3 n, float size);
+void lighting_sc_offer_apply(uint slot);
+void lighting_sc_forget(uint slot);
+void lighting_sc_seed_publish(uint slot, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf);
+void lighting_sc_seed_commit(uint slot, uint corner);
+void lighting_sc_seed_apply(uint slot);
+
 // Slot of the patch for (pos, n), claiming a free one when `claim`; ~0u if none.
 // The whole search window is checked for the key before anything is claimed: a
 // freed slot can sit in front of a live patch's slot, and claiming it would make a
@@ -950,9 +972,18 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             // rejected 2026-10-11.)
             if (lighting_world_mode() == 3u && (lighting_sc_flags() & 16384u) != 0u) {
                 at = lighting_sc_centre(pos, n, size);
+            } else if (lighting_world_mode() == 3u) {
+                // The key position sits in the cell. The election's offsets are
+                // relative to that cell's centre, so the stored point has to
+                // stay in the cell until compact installs the winning sample.
+                at = pos;
             }
             cache.v[3u * slot] = vec4(at, uintBitsToFloat(lighting_frame()));
-            cache.v[3u * slot + 1u] = vec4(n, size);
+            // The key is the axis, not the claimer's tilt. One claimer writes
+            // the slot, and that claimer is whichever invocation won the race,
+            // so the stored facing is the axis every time.
+            vec3 stored_n = lighting_world_mode() == 3u ? lighting_axis_vec(lighting_axis(n)) : n;
+            cache.v[3u * slot + 1u] = vec4(stored_n, size);
             cache.v[3u * slot + 2u] = vec4(0.0);
             cache.v[LIGHTING_WORLD_AT + slot] = vec4(length(at - lighting_sc_centre(pos, n, size)), 0.0, 0.0, 0.0);
             cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
@@ -980,39 +1011,27 @@ uint lighting_cache_find(vec3 pos, vec3 n, bool claim) {
     return lighting_cache_find_sized(pos, n, claim, lighting_cell_size(pos), pos);
 }
 
-// Surface cache: a reader at pos (a point on the texel's surface) moves the point
-// the texel is lit from to itself when it is nearer the cell's centre, so a texel
-// ends up lit from the surface point nearest its centre whoever claimed it first
-// (the centre itself can lie inside a wall at a corner).
-void lighting_sc_offer(uint slot, vec3 at, vec3 centre) {
+// Surface cache: a reader at `at` offers itself as the point the texel is lit
+// from. The atomic word's high bits are the distance and its low bits are the
+// tangent offsets, so the nearest offer wins and the word is the point.
+// Offsets are from the cell origin (the axis-aligned centre of `cell`), not
+// from the claimer's plane, so the winner does not depend on who claimed.
+// Compact is the only writer of the texel point. A 32-bit word is the Vulkan
+// 1.3 floor: this module is one SPIR-V 1.0 binary, and a 64-bit atomic would
+// require a capability devices on that floor do not have.
+uint lighting_sc_offer_word(uint slot);
+void lighting_sc_offer_publish(uint slot, vec3 at, vec3 cell, vec3 n, float size);
+void lighting_sc_offer(uint slot, vec3 at, vec3 cell, vec3 n, float size) {
     if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u) {
         return;
     }
-    // Flag 524288 (camera only orders updates): the point still moves toward the
-    // cell's centre (a fixed point of the geometry, as Lumen's card texels), but
-    // the sets taken so far are kept: a camera move never restarts a texel.
-    if ((lighting_sc_flags() & 16384u) != 0u) {
+    // Flag 524288 keeps the sets already taken. Flag 16384 never moves the point.
+    // Size and the normal are the caller's. The claimer's store is not visible
+    // to other invocations in this dispatch.
+    if ((lighting_sc_flags() & 16384u) != 0u || !(size > 0.0)) {
         return;
     }
-    bool keep_sets = (lighting_sc_flags() & 524288u) != 0u;
-    float d = length(at - centre);
-    if (d < cache.v[LIGHTING_WORLD_AT + slot].x - 1.0e-4) {
-        cache.v[LIGHTING_WORLD_AT + slot].x = d;
-        if (keep_sets) {
-            cache.v[3u * slot].xyz = at;
-            return;
-        }
-        // Lit from far from here so far: its sets start again (value kept).
-        float size = cache.v[3u * slot + 1u].w;
-        if ((lighting_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
-            float t = cache.v[3u * slot + 2u].w;
-            if (t > 1.5) {
-                atomicAdd(gstats.restarted, 1u);
-            }
-            cache.v[3u * slot + 2u].w = min(t, 1.0);
-        }
-        cache.v[3u * slot].xyz = at;
-    }
+    lighting_sc_offer_publish(slot, at, cell, n, size);
 }
 
 // Surface cache: the lit texel twice the size holding pos (the first fill of a
@@ -1528,11 +1547,22 @@ const float LIGHTING_SC_POOL_FULL = 24.0;
 // sigma = LIGHTING_DN_SIGMA * noise / target, 0.4 to 2 cells; each neighbour also
 // weighs exp(-|dL| / (LIGHTING_DN_LUM * the noise in luminance)), so shadow edges and
 // contact darkening (real luminance steps) stop it, noise does not.
-// Perceptual stop rule (lighting_sc_settled): a texel with at least LIGHTING_DN_MIN_SETS
-// sets whose relative noise is under LIGHTING_DN_STOP (looser in the dark: under
-// LIGHTING_DN_DARK luminance the target grows as LIGHTING_DN_DARK / L, at most 4x)
-// counts as settled.
+// Perceptual stop rule (lighting_sc_settled): only at LIGHTING_SC_FULL_SETS.
+// A zero mean has no relative error, so the old LIGHTING_DN_MIN_SETS stop
+// counted eight all-zero sets as settled. The dark-target scale
+// (LIGHTING_DN_DARK / L, at most 4x) still applies once the count is full.
 const float LIGHTING_DN_MIN_SETS = 8.0;
+// Sets before a cell may count as resolved. The perceptual stop and the
+// A-SVGF resolved test both used to fire at LIGHTING_DN_MIN_SETS.
+const float LIGHTING_SC_FULL_SETS = 64.0;
+// Half a set. A count below this has no own sample. Floor tests use it so a
+// float count is the integer below.
+const float LIGHTING_SC_SET_HALF = 0.5;
+// Own-sample luma above this is a lit texel. Same floor as the edge test.
+const float LIGHTING_SC_LIT_LUMA = 1.0e-3;
+// The cache-ray origin sits this far along the stored normal. lighting_direct
+// uses the same lift.
+const float LIGHTING_RAY_LIFT = 0.02;
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -1549,7 +1579,12 @@ vec2 lighting_sc_noise(uint slot) {
     }
     float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
     float sd = sqrt(max(a.w, 0.0) / max(b.w, 1.0));
-    return vec2(sd / max(lum, 1.0e-3), sd);
+    // A zero mean has no relative error. sd/max(lum, 1e-3) used to look quiet
+    // and the perceptual stop treated the cell as populated darkness.
+    if (!(lum > 0.0)) {
+        return vec2(-1.0, sd);
+    }
+    return vec2(sd / lum, sd);
 }
 float lighting_dn_target(uint slot) {
     float lum = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
@@ -2058,6 +2093,8 @@ void lighting_sc_clear_seed(uint slot) {
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
 }
+// Only the seed election's winner calls this. y and z land in one store, with
+// the sun fraction from the same payload, so two readers cannot split them.
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2068,8 +2105,9 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
         // of the confidence, written by the detail caller after this store.
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
     }
-    cache.v[LIGHTING_SC_SPARSE_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
-    cache.v[LIGHTING_SC_SPARSE_AT + slot].z = clamp(conf, 0.05, 1.0);
+    cache.v[LIGHTING_SC_SPARSE_AT + slot].yz = vec2(
+        uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))),
+        clamp(conf, 0.05, 1.0));
 }
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
@@ -2281,6 +2319,10 @@ struct LightingShField {
 // `claim` stamps a corner this read accepted. It does not allocate. The seed
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
+// Mean trust of the corners the last blend accepted, sets over
+// LIGHTING_SC_FULL_SETS. 0 when nothing was accepted. A black mean with
+// sets still counts; radiance is not the populated test.
+float lighting_sh_blend_trust = 0.0;
 // Compose compiles define GENOS_COMPOSE_NO_WALK and do not contain this walk.
 #ifndef GENOS_COMPOSE_NO_WALK
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
@@ -2295,6 +2337,7 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     vec3 fr = uv - g0;
     vec3 sum = vec3(0.0);
     float ws = 0.0;
+    float ev = 0.0;
     uint looks = 0u;
     uint accepted = 0u;
     float y_lo = 0.0;
@@ -2354,7 +2397,10 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         accepted += 1u;
         sum += w * lit;
         ws += w;
+        float sets = floor(max(v.w, 0.0));
+        ev += w * clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
     }
+    lighting_sh_blend_trust = ws > 0.0 ? ev / ws : 0.0;
     lighting_chg(CHG_SH_LOOKUPS, looks);
     LightingShField built;
     built.value = ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
@@ -2442,6 +2488,7 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
     vec3 fr = uv - floor(uv);
     vec3 sum = vec3(0.0);
     float ws = 0.0;
+    float ev = 0.0;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
         uint s = ids[k];
         if (s == ~0u || s >= LIGHTING_CACHE_SLOTS) {
@@ -2473,7 +2520,10 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
         float w = tri * facing;
         sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
         ws += w;
+        float sets = floor(max(v.w, 0.0));
+        ev += w * clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
     }
+    lighting_sh_blend_trust = ws > 0.0 ? ev / ws : 0.0;
     return ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0);
 }
 bool lighting_sh_lattice_load(vec3 p, vec3 n, out uint ids[8]) {
@@ -2768,7 +2818,8 @@ vec4 lighting_sc_shown(uint slot) {
     if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= 0.2) {
         vec3 field = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
         float sup = abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w);
-        bool have = any(greaterThan(field, vec3(0.0))) && sup > 0.0;
+        // Support is the populated flag. A filtered black is a value, not a miss.
+        bool have = sup > 0.0;
         float ls = lighting_sc_sun_gain(slot);
         vec4 sd = lighting_sc_seed_split() ? lighting_sc_seed(slot) : vec4(0.0);
         if (lighting_sc_svgf()) {
@@ -2802,10 +2853,10 @@ vec4 lighting_sc_shown(uint slot) {
             // keeps a field that was written, stamp or not. Detail off keeps
             // the two-frame drop.
             bool fresh = pf != 0u && (int(lighting_frame() - pf) <= 2 || lighting_view_held());
-            if (!fresh && lighting_sh_texel_detail_on() && any(greaterThan(field, vec3(0.0)))) {
+            if (!fresh && lighting_sh_texel_detail_on() && sup > 0.0) {
                 fresh = true;
             }
-            have = fresh && any(greaterThan(field, vec3(0.0)));
+            have = fresh && sup > 0.0;
             if (have) {
                 return vec4(field, 1.0);
             }
@@ -2879,7 +2930,9 @@ vec4 lighting_sc_own_shown(uint slot) {
     vec3 pooled = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
     vec4 own = cache.v[3u * slot + 2u];
     float ls = lighting_world_mode() == 3u ? lighting_sc_sun_gain(slot) : 1.0;
-    if (any(greaterThan(pooled, vec3(0.0)))) {
+    // Support is the populated flag. A filtered black is the estimate.
+    float sup = abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w);
+    if (sup > 0.0) {
         return vec4(pooled * ls, 1.0);
     }
     return own.w > 0.5 ? vec4(own.rgb * ls, 1.0) : vec4(0.0);
@@ -2949,11 +3002,10 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     if (LIGHTING_SC_WRITES) {
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
     }
-    lighting_bounce_path = 1u;
     // Flag 65536: hit patches stay lit from where they were claimed (as in the
     // other modes), no offer.
     if (lighting_world_mode() == 3u && !lighting_sc_slanted(n) && (lighting_sc_flags() & 65536u) == 0u) {
-        lighting_sc_offer(slot, pos, lighting_sc_centre(pos, n, hsize));
+        lighting_sc_offer(slot, pos, pos, n, hsize);
     }
     vec4 e = cache.v[3u * slot + 2u];
     // Not lit yet (claimed this round, params.z bit 7): the lit patches beside it
@@ -2987,13 +3039,20 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
             }
         }
         lighting_hit_sunfrac = sum.w > 0.0 ? fill_f / sum.w : 0.0;
-        lighting_bounce_path = 4u;
+        if (sum.w > 0.0) {
+            lighting_bounce_path = 4u;
+        }
         return sum.w > 0.0 ? sum.rgb / sum.w : vec3(0.0);
     }
     if (lighting_world_mode() == 3u) {
         lighting_hit_sunfrac = lighting_sc_sunfrac_now(slot);
         float keep = lighting_gather_keep(pos, slot);
         if (keep <= LIGHTING_KEEP_NONE) { lighting_hit_sunfrac = LIGHTING_KEEP_NONE; }
+        // A black mean with sets is light. A kept-none read and a cell with no
+        // sets leave the path at 2, so compose does not treat that zero as filled.
+        if (e.w >= LIGHTING_CACHE_HAS_W && keep > LIGHTING_KEEP_NONE) {
+            lighting_bounce_path = 1u;
+        }
         // ADR 0039 stage 2. A slanted hit reads the neighbour blend, then an
         // axis-aligned hit keeps the one owning cell. Compose leaves lighting_sc_display
         // set while it seeds a new texel, and that seed is the texel's history
@@ -3014,6 +3073,9 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
             return lighting_sh_tilt(slot, e.rgb, cache.v[3u * slot + 1u].xyz, n) * lighting_sc_sun_gain(slot) * keep;
         }
         return e.rgb * lighting_sc_sun_gain(slot) * keep;
+    }
+    if (e.w >= LIGHTING_CACHE_HAS_W) {
+        lighting_bounce_path = 1u;
     }
     return e.rgb;
 }
@@ -3430,7 +3492,6 @@ const uint LIGHTING_SC_QUARTERS = LIGHTING_SC_SET_RAYS / LIGHTING_CACHE_RAYS;
 // until LIGHTING_SC_FULL_SETS sets AND agreement within LIGHTING_SC_SETTLE_SD standard
 // deviations; an unsettled texel's priority is at least LIGHTING_SC_UNSETTLED_W times
 // a settled one's; dormancy needs the same agreement at the cap.
-const float LIGHTING_SC_FULL_SETS = 64.0;
 const float LIGHTING_SC_SETTLE_SD = 0.15;
 const float LIGHTING_SC_UNSETTLED_W = 4.0;
 const float LIGHTING_SC_FULL_INC = 1.0;
@@ -3444,6 +3505,12 @@ bool lighting_sc_settled(uint slot, float t) {
     if (cache.v[3u * slot + 1u].w > 0.2) {
         // A WRC cell: settled at its cap (or the window under changing light).
         return floor(t) >= LIGHTING_WRC_CAP - 0.5;
+    }
+    // Below a full set count the cell stays due. The perceptual stop used to
+    // fire at LIGHTING_DN_MIN_SETS when the relative error looked small, which
+    // a zero mean always does.
+    if (floor(t) < reach - 0.5) {
+        return false;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     // S62A perceptual stop: quiet enough to the eye counts as settled.
@@ -3690,6 +3757,17 @@ bool lighting_compact_hold_texel_rays(uint slot) {
     if (lighting_sh_lum_disagrees(field.hi, field.lo)) {
         return false;
     }
+    // Population is the set count. Two black reads fail
+    // lighting_sh_lum_disagrees (the ratio needs hi > 1e-3) and used to cut
+    // the rays, so a texel whose first sets were zero never reached a full
+    // count. Hold only once this texel and the live cell both have
+    // LIGHTING_SC_FULL_SETS. A full count of a real zero may then hold.
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - 0.5) {
+        return false;
+    }
+    if (lighting_sh_blend_trust < 1.0) {
+        return false;
+    }
     vec4 own = cache.v[3u * slot + 2u];
     if (own.w >= LIGHTING_CACHE_HAS_W) {
         const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
@@ -3764,6 +3842,129 @@ float lighting_lamp_keep(vec3 p, uint updated) {
     }
     return keep;
 }
+// Newest ring frame of a lamp that still reaches p, or 0. The shown-mean
+// tally compares the commit frame with this stamp (`shown_age::classify`:
+// a commit at or after the stamp postdates it).
+uint lighting_lamp_move_stamp(vec3 p) {
+    uint stamp = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        stamp = max(stamp, f);
+    }
+    return stamp;
+}
+// The fill-curve red box: albedo above RED_MIN in r, below RED_MAX in g and b,
+// within RED_NEAR metres of the eye.
+const float LIGHTING_AGE_RED_NEAR = 6.0;
+const float LIGHTING_AGE_RED_MIN = 0.45;
+const float LIGHTING_AGE_RED_MAX = 0.35;
+const float LIGHTING_AGE_PARENT = 2.0;
+// Near red-box pixels. diag[14..37] match crates/render/src/shown_age.rs.
+// Commit frame of the 25 cm patch, or the 50 cm parent when that stamp is empty.
+uint lighting_shown_patch_commit(vec3 pos, vec3 n) {
+    uint commit = 0u;
+    float size = LIGHTING_SC_HIT;
+    [[dont_unroll]] for (uint level = 0u; level < 2u; level++) {
+        if (commit == 0u) {
+            uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+            if (s < LIGHTING_CACHE_SLOTS) {
+                if (ckeys.key[s] != 0u) {
+                    commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + s].x);
+                }
+            }
+        }
+        size *= LIGHTING_AGE_PARENT;
+    }
+    return commit;
+}
+// diag[base] is the count with a commit, then the age sum, predates, postdates,
+// and the count with no commit.
+void lighting_shown_feed_tally(uint commit, uint age, vec3 pos, uint base) {
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[base + 4u], 1u);
+        return;
+    }
+    atomicAdd(gstats.diag[base], 1u);
+    atomicAdd(gstats.diag[base + 1u], age);
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        return;
+    }
+    if (commit >= stamp) {
+        atomicAdd(gstats.diag[base + 3u], 1u);
+    } else {
+        atomicAdd(gstats.diag[base + 2u], 1u);
+    }
+}
+// Compose shows the world-cache patch. diag 27..31 is that source. diag 32..36
+// is the same patch, so a turned surface reports one age in both.
+void lighting_shown_feed_age(vec3 pos, vec3 n) {
+    uint cell_commit = lighting_shown_patch_commit(pos, n);
+    uint cell_age = 0u;
+    if (cell_commit != 0u && lighting_frame() >= cell_commit) {
+        cell_age = lighting_frame() - cell_commit;
+    }
+    lighting_shown_feed_tally(cell_commit, cell_age, pos, 32u);
+    lighting_shown_feed_tally(cell_commit, cell_age, pos, 27u);
+}
+void lighting_shown_age_tally(vec3 pos, vec3 n, vec3 albedo, uint slot) {
+    if (length(pos - scene.eye.xyz) >= LIGHTING_AGE_RED_NEAR) {
+        return;
+    }
+    if (!(albedo.r > LIGHTING_AGE_RED_MIN && albedo.g < LIGHTING_AGE_RED_MAX && albedo.b < LIGHTING_AGE_RED_MAX)) {
+        return;
+    }
+    atomicAdd(gstats.diag[14], 1u);
+    // A turned surface (flag 2048) has no fine texel. Compose reads the
+    // world-cache patch, so the fine-texel stamp below does not describe it.
+    if (lighting_sc_slanted(n)) {
+        atomicAdd(gstats.diag[26], 1u);
+        lighting_shown_feed_age(pos, n);
+    }
+    // A miss is ~0u. Nested so the cache index stays in range.
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        atomicAdd(gstats.diag[15], 1u);
+        atomicAdd(gstats.diag[25], 1u);
+        return;
+    }
+    uint commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + slot].x);
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[15], 1u);
+        return;
+    }
+    uint age = lighting_frame() >= commit ? lighting_frame() - commit : 0u;
+    atomicAdd(gstats.diag[23], age);
+    if (age == 0u) {
+        atomicAdd(gstats.diag[16], 1u);
+    } else if (age <= 3u) {
+        atomicAdd(gstats.diag[17], 1u);
+    } else if (age <= 7u) {
+        atomicAdd(gstats.diag[18], 1u);
+    } else if (age <= 15u) {
+        atomicAdd(gstats.diag[19], 1u);
+    } else {
+        atomicAdd(gstats.diag[20], 1u);
+    }
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        atomicAdd(gstats.diag[24], 1u);
+    } else if (commit >= stamp) {
+        atomicAdd(gstats.diag[22], 1u);
+    } else {
+        atomicAdd(gstats.diag[21], 1u);
+    }
+}
+
 // The lamp buffer already holds this frame's lamps. The snapshot still holds
 // last frame's until lighting_wrc_note_lamps runs. Read-only, so a relight
 // in that same pass can see the change before the ring write is visible.
@@ -3995,6 +4196,9 @@ uint lighting_px_parent = 0u;
 const uint LIGHTING_DIAG_PROBE_SKIP = 0u;
 const uint LIGHTING_DIAG_PROBE_EVAL = 1u;
 const uint LIGHTING_DIAG_PROBE_READS = 2u;
+// Picture pixels whose fine read was under a full set count. Word 81.
+// Compact already writes diag[52] for a gradient-budget overflow.
+const uint LIGHTING_DIAG_UNDER_TRUSTED = 57u;
 // The SVGF arm of lighting_sc_shown, for the path dump only. 2 is the fresh
 // field, 6 is own samples after a stale field, 5 is a seed or an empty texel.
 // It does not call lighting_sh_read: a second neighbour read in this frame
@@ -4003,13 +4207,13 @@ const uint LIGHTING_DIAG_PROBE_READS = 2u;
 uint lighting_px_classify_shown(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     if (lighting_sc_layer2() && cache.v[3u * slot + 1u].w <= LIGHTING_WRC_CELL_SIZE && lighting_sc_svgf()) {
-        vec3 field = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float sup = abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w);
         uint pf = floatBitsToUint(cache.v[10u * LIGHTING_CACHE_SLOTS + slot].w);
         bool fresh = pf != 0u && (int(lighting_frame() - pf) <= 2 || lighting_view_held());
-        if (!fresh && lighting_sh_texel_detail_on() && any(greaterThan(field, vec3(0.0)))) {
+        if (!fresh && lighting_sh_texel_detail_on() && sup > 0.0) {
             fresh = true;
         }
-        if (fresh && any(greaterThan(field, vec3(0.0)))) {
+        if (fresh && sup > 0.0) {
             return own.w >= LIGHTING_CACHE_HAS_W ? 2u : 5u;
         }
         if (own.w > LIGHTING_CACHE_HAS_W) {
@@ -4068,6 +4272,33 @@ vec2 lighting_sc_debug_size(vec3 pos, vec3 n) {
     float size = lighting_cell_size(pos);
     uint s = lighting_cache_find_sized(pos, n, false, size, pos);
     return vec2(size, s == ~0u ? 0.0 : floor(max(cache.v[3u * s + 2u].w, 0.0)));
+}
+// The texels view's population record. x is the cell size in metres, plus 1
+// when the cache ray origin (the stored point plus 2 cm along the stored
+// normal, the same offset lighting_ray uses) is inside geometry. y is the
+// own set count (0 on a hash miss). z is that texel's own-mean luma. w is the
+// seed luma, 0 when lighting_sc_seed has nothing. A seed does not write the
+// own-sample count, so z and w stay apart: a texel living on a seed has y near
+// 0 and w above 0.
+vec4 lighting_sc_debug_population(vec3 pos, vec3 n) {
+    float size = lighting_cell_size(pos);
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u) {
+        return vec4(size, 0.0, 0.0, 0.0);
+    }
+    vec3 tp;
+    vec3 tn;
+    if (lighting_sc_texel_world(s, tp, tn) && scene_inside(tp + tn * LIGHTING_RAY_LIFT)) {
+        size += 1.0;
+    }
+    float gain = lighting_sc_sun_gain(s);
+    vec3 own = max(cache.v[3u * s + 2u].rgb, vec3(0.0)) * gain;
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    float own_l = dot(own, lw);
+    vec4 seed = lighting_sc_seed(s);
+    float seed_l = dot(max(seed.rgb, vec3(0.0)), lw);
+    float sets = floor(max(cache.v[3u * s + 2u].w, 0.0));
+    return vec4(size, sets, own_l, seed_l);
 }
 // Debug view "variance": short-term relative standard deviation of the cache
 // entry under the pixel. -1 is a missing or unallocated entry. 0 is quiet.
@@ -4128,6 +4359,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
     float wsum = 0.0;
     float trust = 0.0;
     float path_best = -1.0;
+    // A corner under a full set count. Display trust can be 1 for a short
+    // lit texel; this flag stays on the count, so that trust does not hide it.
+    bool under_full = false;
     // Finished sets, weighted like the bilinear corners. A missing corner counts
     // as zero finished sets. Only the compose display path tallies.
     float unfilled_cov = 0.0;
@@ -4144,8 +4378,16 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         uint slot = lighting_cache_find_sized(q, n, mode != 2u, size, pos);
         if (slot == ~0u) {
+            if (mode == 3u && bil > 0.0) {
+                under_full = true;
+            }
             continue;
         }
+        if (mode == 3u && bil > 0.0 && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
+            under_full = true;
+        }
+        // Last frame's winning pixel stores the seed before this frame publishes.
+        lighting_sc_seed_commit(slot, k);
         if (tally) {
             unfilled_sets += bil * floor(max(cache.v[3u * slot + 2u].w, 0.0));
         }
@@ -4168,12 +4410,14 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
+        float detail_trust = 0.0;
         if (detail_candidate) {
 #ifdef GENOS_COMPOSE_NO_WALK
             if (LIGHTING_SC_WRITES) {
                 lighting_sh_enqueue_texel(slot, q);
             }
             vec4 detail = lighting_sh_compose_lattice(q, n, false);
+            detail_trust = lighting_sh_blend_trust;
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 detail_rgb = detail.rgb;
                 detail_kept = true;
@@ -4183,6 +4427,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
             vec4 detail = lighting_sh_read(q, n, false);
+            detail_trust = lighting_sh_blend_trust;
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 if (detail_candidate && LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
@@ -4200,17 +4445,18 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             vec4 rs = lighting_sc_resample(q, n, size, slot);
             if (rs.w > 0.5 && split) {
                 // S72N: a seed beside the texel's own (empty) mean, confidence
-                // by the samples it came from (8 = whole).
-                lighting_sc_set_seed(slot, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac);
+                // by the samples it came from (8 = whole). The lowest pixel id
+                // wins; one later invocation stores rgb, confidence, and sun.
+                lighting_sc_seed_publish(slot, k, rs.rgb, min(rs.w / LIGHTING_WRC_SEED_SETS, 1.0), lighting_seed_sunfrac, true);
             } else if (rs.w > 0.5) {
                 // S62E: the seed is light as of now; stored in the slot's scale.
                 // S64B: the seed is light as of now, with its seeds' sun/sky share.
-                cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(lighting_seed_sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
-                cache.v[3u * slot + 2u] = rs;
+                // One pixel wins the election. Compact, or that pixel next frame, stores it.
+                lighting_sc_seed_publish(slot, k, rs.rgb, rs.w, lighting_seed_sunfrac, false);
             }
         }
         if (LIGHTING_SC_WRITES && mode == 3u) {
-            lighting_sc_offer(slot, pos, lighting_sc_centre(q, n, size));
+            lighting_sc_offer(slot, pos, q, n, size);
             cache.v[LIGHTING_WORLD_AT + slot].z = uintBitsToFloat(lighting_frame());
         }
         // The kept neighbour read is the pixel. lighting_sc_shown would gather
@@ -4234,35 +4480,41 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         }
         // The parent walk stays out of compose. A mover with its own sets is
         // the fine colour once flag 32 is off.
-        if (!detail_kept && v.w < 0.5 && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
+        // A seed is not samples. lighting_sc_shown returns that seed with w 1,
+        // which used to skip this fallback and leave the texel on whatever
+        // pixel wrote SPARSE.y. The own-sample count is the populated test.
+        float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
             // A detail candidate already took the neighbour read. That read
             // left out a stale, back-facing, or off-plane cell, and this hit
             // read does not apply those gates, so that miss must not put the
             // cell back. SH cells on with texel detail off is not that miss.
+            lighting_bounce_path = 2u;
             vec3 hc = detail_candidate ? vec3(0.0) : lighting_cache_irradiance(q, n);
-            if (any(greaterThan(hc, vec3(0.0)))) {
+            // Path leaves 2 only when the cell had sets. A zero mean is still that cell.
+            if (lighting_bounce_path != 2u) {
                 v = vec4(hc, 1.0);
                 corner_parent = lighting_bounce_path == 3u;
                 corner_path = corner_parent ? 4u : 7u;
                 if (split) {
-                    lighting_sc_set_seed(slot, hc, 0.25, lighting_hit_sunfrac);
+                    lighting_sc_seed_publish(slot, k, hc, 0.25, lighting_hit_sunfrac, true);
                 }
             } else if (!detail_candidate && lighting_sh_on() && split && !obj && cache.v[3u * slot + 2u].w < 0.5) {
                 // The screen-probe seed is removed. An empty fine texel that
                 // this setting does not already cover takes the SH-L1 cell
                 // when that read accepts a corner. A rejected read stays empty.
                 // Picture compose loads the lattice. The walk stays in maintenance.
+                // The lowest pixel id wins the seed election and one later
+                // invocation stores it.
 #ifdef GENOS_COMPOSE_NO_WALK
                 vec4 sh = lighting_sh_compose_lattice(q, n, false);
 #else
                 vec4 sh = lighting_sh_read(q, n, false);
 #endif
                 if (sh.w > LIGHTING_CACHE_HAS_W) {
-                    if (LIGHTING_SC_WRITES) {
-                        lighting_sc_set_seed(slot, sh.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
-                    }
+                    lighting_sc_seed_publish(slot, k, sh.rgb, LIGHTING_SH_DETAIL_CONF, 0.0, true);
                     v = vec4(sh.rgb, 1.0);
                 }
             }
@@ -4284,12 +4536,32 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // still shown (its short mean lags a little, as Lumen's surface cache does).
         bool est = (lighting_sc_flags() & 1048576u) != 0u;
         bool stale = mode == 3u && fract(own_w) > 0.1 && !est;
-        float sc_trust = stale ? 0.0 : 1.0;
+        // Populated is the set count. Eight zero sets used to take trust 1
+        // because the corner's w was above a half, and the coarse cell never
+        // mixed in. A full count of a real zero is trust 1.
+        float sets = floor(max(own_w, 0.0));
+        float sc_trust = 0.0;
+        if (!stale) {
+            if (detail_kept) {
+                sc_trust = clamp(detail_trust, 0.0, 1.0);
+            } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
+                // A full count, including a real zero, is the texel.
+                sc_trust = 1.0;
+            } else if (sets >= LIGHTING_SC_SET_HALF) {
+                // Own samples, not the shown field. The field can be a
+                // neighbour filter while the samples are black. A zero-set
+                // corner never reaches here, so an unclaimed centre stays
+                // on the coarse cell.
+                vec3 own_rgb = max(cache.v[3u * slot + 2u].rgb, vec3(0.0)) * lighting_sc_sun_gain(slot);
+                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+                float y_own = dot(own_rgb, lw);
+                sc_trust = y_own > LIGHTING_SC_LIT_LUMA ? 1.0 : 0.0;
+            }
+        }
         if ((lighting_sc_flags() & 32u) != 0u) {
             // Flag 32 only. It used to apply to every mover as well, so a
             // settled mover stayed at sets/(sets+6) and never reached trust 1.
-            float c = floor(max(own_w, 0.0));
-            sc_trust *= c / (c + LIGHTING_SC_TRUST_SETS);
+            sc_trust *= sets / (sets + LIGHTING_SC_TRUST_SETS);
         }
         trust += bil * (mode == 3u ? sc_trust : (mode != 2u ? 1.0 : min(v.w / 4.0, 1.0)));
     }
@@ -4311,6 +4583,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             lighting_px_unfilled = true;
         }
     }
+#ifndef GENOS_COMPOSE_MAINT
+    if (lighting_sc_display && mode == 3u && under_full) {
+        atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);
+    }
+#endif
     return vec4(wsum > 0.0 ? sum / wsum : vec3(0.0), trust);
 }
 
@@ -4634,6 +4911,18 @@ const uint LIGHTING_SCREEN_LIST_STAMP = LIGHTING_SCREEN_LIST_HDR;
 const uint LIGHTING_SCREEN_LIST_BASE0 = LIGHTING_SCREEN_LIST_HDR + 1u;
 const uint LIGHTING_SCREEN_LIST_BASE1 = LIGHTING_SCREEN_LIST_HDR + 2u;
 const uint LIGHTING_SCREEN_LIST_AT = LIGHTING_SCREEN_LIST_HDR + 3u;
+// One uint per slot. High bits are the distance, so atomicMin keeps the nearest
+// surface sample. The low bits are that sample's tangent offsets. 0 is unset.
+// Past the SH lattice. The seen words still start at the end of the screen
+// list, and a resolution-sized seed payload must not alias that table.
+const uint LIGHTING_SC_OFFER_AT = LIGHTING_SH_LATTICE_AT + LIGHTING_SH_LATTICE_CAP * LIGHTING_SH_LATTICE_STRIDE;
+// One uint per slot: 1 + (pixel << 2 | corner). 0 is unset. atomicMin elects
+// the lowest pixel id, then the lowest corner.
+const uint LIGHTING_SC_SEED_AT = LIGHTING_SC_OFFER_AT + LIGHTING_CACHE_SLOTS;
+// Eight uints per pixel after the election: four corners, each rgb9e5 then
+// weight and sun fraction. Only that pixel writes its corners. Compact reads
+// the winning corner.
+const uint LIGHTING_SC_SEED_PAY_AT = LIGHTING_SC_SEED_AT + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
 const uint LIGHTING_ATROUS_MODE_AT = LIGHTING_ATROUS_BIN_AT + 64u;
@@ -4842,9 +5131,16 @@ void lighting_svgf_variance(uint slot) {
     if (LIGHTING_DIRTY_ATROUS && !flip && !rebuild) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
+        // A one-frame step under LIGHTING_DIRTY_EPS still leaves the stored
+        // level behind the mean. The 16-set rebuild is that backstop. A mean
+        // that has already crossed the edge test is the same case earlier:
+        // the small emitter's cell stays in the held blur until then.
+        float y_now = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_old = dot(max(o.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        bool drifted = lighting_sh_lum_disagrees(max(y_now, y_old), min(y_now, y_old));
         // S78B: a spatial estimate is redone only when its value or one of its
         // 7 x 7 inputs moved (stamp 22.z), not every frame.
-        if (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo)) {
+        if (!drifted && (spatial ? (!lighting_svgf_moved(v, vo, o, vo) && !lighting_svgf_stamp_recent(slot, 2u)) : !lighting_svgf_moved(v, var, o, vo))) {
             return;
         }
         // S78X: noise-aware level 0 (Anthony: rewrite thresholds from the
@@ -5089,21 +5385,31 @@ void lighting_svgf_push(uint slot) {
     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
     // A lamp ring updates the field every frame. The idle skip would leave the
     // stored colour behind the filter for up to LIGHTING_PUSH_IDLE frames.
+    // The filter has left the stored field by more than the edge test. The
+    // idle skip would keep the pre-blotch shade until the hash comes around.
+    // One push stores the filter target and the held picture redraws it.
+    bool field_behind = false;
     if (LIGHTING_DIRTY_ATROUS && !lighting_lamp_settling() && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
         && ((lighting_hash(lighting_sc_id(slot) ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
-        // S72V10 trusts the field for two frames from this stamp. The idle skip
-        // does not rewrite the field, so while the camera is held the stamp stays
-        // current and compose keeps showing that field instead of dropping it
-        // for the WRC on a timer. A later push that writes a different field
-        // marks the blocks (lighting_compose_note_field).
-        if (lighting_view_held()) {
-            uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
-            if (pf != 0u && lighting_frame() - pf >= 2u) {
-                cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+        vec3 stored = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float y_filter = dot(max(f.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_stored = dot(max(stored, vec3(0.0)), LIGHTING_SVGF_LW);
+        field_behind = lighting_sh_lum_disagrees(max(y_filter, y_stored), min(y_filter, y_stored));
+        if (!field_behind) {
+            // S72V10 trusts the field for two frames from this stamp. The idle skip
+            // does not rewrite the field, so while the camera is held the stamp stays
+            // current and compose keeps showing that field instead of dropping it
+            // for the WRC on a timer. A later push that writes a different field
+            // marks the blocks (lighting_compose_note_field).
+            if (lighting_view_held()) {
+                uint pf = floatBitsToUint(cache.v[LIGHTING_SC_ATROUS_B + slot].w);
+                if (pf != 0u && lighting_frame() - pf >= 2u) {
+                    cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+                }
             }
+            return;
         }
-        return;
     }
     vec4 target = lighting_svgf_target(slot);
     // The first stored field is the filter target, so a fill shows at once.
@@ -5112,9 +5418,19 @@ void lighting_svgf_push(uint slot) {
     // a gap smaller than a percent still moves, and the stored field reaches
     // the target. Compose shows this same target when nothing is stored yet.
     vec3 outc = target.rgb;
-    if (lighting_sh_texel_detail_on()) {
+        if (lighting_sh_texel_detail_on()) {
         vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
-        if (!any(greaterThan(prev, vec3(0.0)))) {
+        float sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        float y_target = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
+        // A full count of a black field is dark. Below that, a black field
+        // with a dark target is not evidence, so the coarser cell is still
+        // the prior. No own samples stays on that prior too: a bright target
+        // there is the neighbours, and the 8,012 unclaimed centres have no
+        // slot to snap. A short count with a bright target is the filter's
+        // blotch, and the prior would hold the black field so the edge snap
+        // below would never run.
+        bool no_samples = sets < LIGHTING_SC_SET_HALF;
+        if (sets < LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF && !any(greaterThan(prev, vec3(0.0))) && (no_samples || !(y_target > 1.0e-3))) {
 #ifdef GENOS_COMPOSE_NO_WALK
             vec4 cell = lighting_sh_compose_lattice(cache.v[3u * slot].xyz, nb.xyz, false);
 #else
@@ -5135,7 +5451,14 @@ void lighting_svgf_push(uint slot) {
             // λ of 0 keeps the sixteenth. A lamp that left
             // (lighting_lamp_keep is 0) takes the target on this push.
             float catch_up = LIGHTING_FIELD_CATCH;
-            if (lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
+            float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
+            // A lamp that left, or a field the filter has left by the edge
+            // test, takes the target on this push. A quiet texel keeps the
+            // 1/16 step. The idle hash would otherwise show the old field
+            // for LIGHTING_PUSH_IDLE frames.
+            if (field_behind
+                || lighting_sh_lum_disagrees(max(y_target, y_prev), min(y_target, y_prev))
+                || lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
                 catch_up = 1.0;
             } else {
                 float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
@@ -5253,12 +5576,19 @@ bool lighting_sc_resolved(uint slot, float t, float lam) {
     }
     vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-    if (!(b.x > 0.0) || t < LIGHTING_DN_MIN_SETS - 0.5) {
+    // Evidence is the set count. `se < 0.05 * mean + 1e-4` is true for any
+    // standard error under 1e-4 when the mean is 0, so eight all-zero sets
+    // (the first bounce reads, before the neighbourhood has light) looked
+    // resolved and took no further rays. A full count of a real zero is dark.
+    if (!(b.x > 0.0) || t < LIGHTING_SC_FULL_SETS - 0.5) {
         return false;
     }
     float mean = dot(cache.v[3u * slot + 2u].rgb, vec3(0.2126, 0.7152, 0.0722));
+    if (!(mean > 0.0)) {
+        return true;
+    }
     float se = sqrt(max(a.w, 0.0) / max(t, 1.0));
-    return se < LIGHTING_ASVGF_SE * mean + 1.0e-4;
+    return se < LIGHTING_ASVGF_SE * mean;
 }
 // This round's pick of the texel's 3 x 3 block.
 bool lighting_sc_grad_rep(uint slot) {
@@ -5636,6 +5966,213 @@ uint lighting_gdirty_at() {
 }
 uint lighting_graw_at(uint probe, uint k) {
     return lighting_gdirty_at() + 2u * lighting_probes() + probe * lighting_rays() + k;
+}
+// Two vec4 per pixel, after the held-probe gather: corner rgb9e5, then corner meta.
+// Only the pixel that owns a corner writes it.
+uint lighting_seed_scratch_at() {
+    return lighting_gdirty_at() + 2u * lighting_probes() + lighting_probes() * lighting_rays();
+}
+
+// Tangent offsets are 10 bits on the cell (about 0.12 mm at 12.5 cm). Distance
+// is the next 10 bits, stored plus one so a real offer is never the unset 0.
+const float LIGHTING_SC_OFFER_SPAN = 1023.0;
+const float LIGHTING_SC_OFFER_HALF = 0.5;
+const float LIGHTING_SC_OFFER_EPS = 1.0e-4;
+const float LIGHTING_SC_SEED_SUN = 65535.0;
+
+uint lighting_sc_offer_word(uint slot) {
+    return LIGHTING_SC_OFFER_AT + slot;
+}
+uint lighting_sc_seed_word(uint slot) {
+    return LIGHTING_SC_SEED_AT + slot;
+}
+void lighting_sc_forget(uint slot) {
+    ckeys.key[lighting_sc_offer_word(slot)] = 0u;
+    ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+}
+// Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays
+// clear: glslc lowers atomicMin to a signed min, and a set sign bit would
+// keep the farther sample. The low bits are tangent offsets, so the word is
+// the whole offer. A 32-bit word is the Vulkan 1.3 floor: this module is one
+// SPIR-V 1.0 binary, and a 64-bit atomic would require a capability devices
+// on that floor do not have.
+uint lighting_sc_offer_hi(float d, float size) {
+    float dn = clamp(d / size, 0.0, 1.0);
+    uint dq = min(uint(dn * LIGHTING_SC_OFFER_SPAN), 1022u);
+    return (dq + 1u) << 21;
+}
+// Axis-aligned centre of the cell holding `pos`. Every publisher and compact
+// derive the same origin from the cell, not from the claimer's normal.
+vec3 lighting_sc_offer_origin(vec3 pos, vec3 n, float size) {
+    vec3 axis_n = lighting_axis_vec(lighting_axis(n));
+    vec3 inset = LIGHTING_SC_OFFER_HALF * axis_n;
+    return (floor(pos / size - inset) + vec3(LIGHTING_SC_OFFER_HALF) + inset) * size;
+}
+void lighting_sc_offer_publish(uint slot, vec3 at, vec3 cell, vec3 n, float size) {
+    vec3 origin = lighting_sc_offer_origin(cell, n, size);
+    float d = length(at - origin);
+    uint ax = lighting_axis(n) >> 1u;
+    uint a1 = (ax + 1u) % 3u;
+    uint a2 = (ax + 2u) % 3u;
+    float u = clamp((at[a1] - origin[a1]) / size + LIGHTING_SC_OFFER_HALF, 0.0, 1.0);
+    float v = clamp((at[a2] - origin[a2]) / size + LIGHTING_SC_OFFER_HALF, 0.0, 1.0);
+    // 1022 keeps the decoded point inside the cell, so the next frame's origin
+    // is the same cell.
+    uint uq = min(uint(u * LIGHTING_SC_OFFER_SPAN + LIGHTING_SC_OFFER_HALF), 1022u);
+    uint vq = min(uint(v * LIGHTING_SC_OFFER_SPAN + LIGHTING_SC_OFFER_HALF), 1022u);
+    uint mine = lighting_sc_offer_hi(d, size) | (uq << 11) | (vq << 1) | 1u;
+    // 0 is unset. The swap claims it; atomicMin (a signed min, bit 31 clear)
+    // then keeps the nearer word. One word is the whole offer, so only compact
+    // writes the point.
+    uint word = lighting_sc_offer_word(slot);
+    uint prev = atomicCompSwap(ckeys.key[word], 0u, mine);
+    if (prev != 0u) {
+        atomicMin(ckeys.key[word], mine);
+    }
+}
+vec3 lighting_sc_offer_hit(uint slot, uint packed) {
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    vec3 origin = lighting_sc_offer_origin(cache.v[3u * slot].xyz, n, size);
+    uint ax = lighting_axis(n) >> 1u;
+    uint a1 = (ax + 1u) % 3u;
+    uint a2 = (ax + 2u) % 3u;
+    float u = float((packed >> 11) & 1023u) / LIGHTING_SC_OFFER_SPAN - LIGHTING_SC_OFFER_HALF;
+    float v = float((packed >> 1) & 1023u) / LIGHTING_SC_OFFER_SPAN - LIGHTING_SC_OFFER_HALF;
+    vec3 at = origin;
+    at[a1] = origin[a1] + u * size;
+    at[a2] = origin[a2] + v * size;
+    return at;
+}
+// One compact thread writes the point the election picked. The word holds
+// the point, so nothing else has to be visible. Sets restart only when flag
+// 524288 is off and the point actually moves closer.
+void lighting_sc_offer_apply(uint slot) {
+    if (lighting_world_mode() != 3u || (lighting_sc_flags() & 16384u) != 0u) {
+        return;
+    }
+    uint packed = ckeys.key[lighting_sc_offer_word(slot)];
+    float size = cache.v[3u * slot + 1u].w;
+    if (packed == 0u || !(size > 0.0)) {
+        return;
+    }
+    vec3 at = lighting_sc_offer_hit(slot, packed);
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float d = length(at - lighting_sc_offer_origin(cache.v[3u * slot].xyz, n, size));
+    bool nearer = d < cache.v[LIGHTING_WORLD_AT + slot].x - 1.0e-4;
+    bool keep_sets = (lighting_sc_flags() & 524288u) != 0u;
+    if (nearer && !keep_sets && (lighting_sc_flags() & 64u) == 0u && length(at - cache.v[3u * slot].xyz) > 0.3 * size) {
+        float t = cache.v[3u * slot + 2u].w;
+        if (t > 1.5) {
+            atomicAdd(gstats.restarted, 1u);
+        }
+        cache.v[3u * slot + 2u].w = min(t, 1.0);
+    }
+    cache.v[LIGHTING_WORLD_AT + slot].x = d;
+    cache.v[3u * slot].xyz = at;
+}
+uint lighting_sc_seed_pixel() {
+    return lighting_compose_px.y * pc.dims.x + lighting_compose_px.x;
+}
+uint lighting_sc_seed_pay(uint pix, uint corner) {
+    return LIGHTING_SC_SEED_PAY_AT + (pix * 4u + corner) * 2u;
+}
+void lighting_sc_seed_store(uint pix, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf) {
+    // Split confidence is a 0..1 fraction. The own-mean weight is a sample count.
+    uint wq = as_conf
+        ? min(uint(clamp(weight, 0.0, 1.0) * LIGHTING_SC_SEED_SUN + LIGHTING_SC_OFFER_HALF), 65535u)
+        : min(uint(weight + LIGHTING_SC_OFFER_HALF), 65535u);
+    uint sq = min(uint(clamp(sunfrac, 0.0, 1.0) * LIGHTING_SC_SEED_SUN + LIGHTING_SC_OFFER_HALF), 65535u);
+    // Private to this pixel and corner, in the key buffer, so the next frame's
+    // compact reads the winner without sharing a slot.
+    uint at = lighting_sc_seed_pay(pix, corner);
+    ckeys.key[at] = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
+    ckeys.key[at + 1u] = (wq << 16) | sq;
+}
+bool lighting_sc_seed_load(uint pix, uint corner, out vec3 rgb, out float weight, out float sunfrac) {
+    rgb = vec3(0.0);
+    weight = 0.0;
+    sunfrac = 0.0;
+    if (pix >= pc.dims.x * pc.dims.y || corner > 3u) {
+        return false;
+    }
+    uint meta = ckeys.key[lighting_sc_seed_pay(pix, corner) + 1u];
+    weight = float(meta >> 16u);
+    if (weight < LIGHTING_SC_OFFER_HALF) {
+        return false;
+    }
+    sunfrac = float(meta & 65535u) / LIGHTING_SC_SEED_SUN;
+    rgb = lighting_unpack_rgb9e5(ckeys.key[lighting_sc_seed_pay(pix, corner)]);
+    return true;
+}
+void lighting_sc_seed_write(uint slot, vec3 rgb, float weight, float sunfrac) {
+    cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(sunfrac, max(lighting_ls_now(), 0.0), 0.0, 0.0);
+    cache.v[3u * slot + 2u] = vec4(rgb, weight);
+}
+void lighting_sc_seed_publish(uint slot, uint corner, vec3 rgb, float weight, float sunfrac, bool as_conf) {
+    if (!LIGHTING_SC_WRITES || !lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    if (lighting_compose_px.x >= pc.dims.x || lighting_compose_px.y >= pc.dims.y) {
+        return;
+    }
+    uint pix = lighting_sc_seed_pixel();
+    lighting_sc_seed_store(pix, corner, rgb, weight, sunfrac, as_conf);
+    uint mine = ((pix << 2) | (corner & 3u)) + 1u;
+    uint word = lighting_sc_seed_word(slot);
+    uint prev = atomicCompSwap(ckeys.key[word], 0u, mine);
+    if (prev != 0u) {
+        atomicMin(ckeys.key[word], mine);
+    }
+}
+void lighting_sc_seed_commit_from(uint slot, uint pix, uint corner) {
+    if (cache.v[3u * slot + 2u].w >= LIGHTING_SC_OFFER_HALF) {
+        ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+        return;
+    }
+    vec3 rgb;
+    float weight;
+    float sunfrac;
+    if (!lighting_sc_seed_load(pix, corner, rgb, weight, sunfrac)) {
+        ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+        return;
+    }
+    if (lighting_sc_seed_split()) {
+        lighting_sc_set_seed(slot, rgb, weight / LIGHTING_SC_SEED_SUN, sunfrac);
+    } else {
+        lighting_sc_seed_write(slot, rgb, weight, sunfrac);
+    }
+    ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+}
+void lighting_sc_seed_commit(uint slot, uint corner) {
+    // The picture compile does not write the cache. Maintenance publishes and
+    // commits; compact applies whatever that frame left.
+    if (!LIGHTING_SC_WRITES || !lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    if (lighting_compose_px.x >= pc.dims.x || lighting_compose_px.y >= pc.dims.y) {
+        return;
+    }
+    uint e = ckeys.key[lighting_sc_seed_word(slot)];
+    if (e == 0u) {
+        return;
+    }
+    uint idx = e - 1u;
+    if ((idx >> 2u) != lighting_sc_seed_pixel() || (idx & 3u) != corner) {
+        return;
+    }
+    lighting_sc_seed_commit_from(slot, idx >> 2u, idx & 3u);
+}
+void lighting_sc_seed_apply(uint slot) {
+    if (!lighting_gi_on() || lighting_world_mode() != 3u) {
+        return;
+    }
+    uint e = ckeys.key[lighting_sc_seed_word(slot)];
+    if (e == 0u) {
+        return;
+    }
+    uint idx = e - 1u;
+    lighting_sc_seed_commit_from(slot, idx >> 2u, idx & 3u);
 }
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());

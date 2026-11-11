@@ -1306,6 +1306,13 @@ impl Renderer {
         self.gpu.lighting_lamp_pick_counts()
     }
 
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. A real zero at that count is dark and is not
+    /// included. Waits for that frame.
+    pub fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.gpu.lighting_under_trusted_pixels()
+    }
+
     /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
     /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
     pub fn restir_spatial_bound(&self) -> u8 {
@@ -2708,6 +2715,9 @@ impl Gpu {
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
             block(|| gpu.make_lighting())?;
+            // Before the scene exists. Otherwise a potato launch still builds
+            // the High cache once, and lavapipe holds it through quit.
+            gpu.apply_launch_preset()?;
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();

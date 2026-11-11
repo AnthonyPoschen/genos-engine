@@ -23,7 +23,8 @@ pub use lifecycle::{
     gap_within_budget, parse_block_ms, parse_frames_presented, parse_quit_gap, parse_quit_phases,
     parse_quit_total, parse_visible_quit, phases_within_budget, release_driver_on_process_exit,
     Lifecycle, Phase, PhaseSample, ShutdownDevice, ShutdownPermit, ThreadStop, DRIVER_RELEASE_LINE,
-    PHASE_PREFIX, PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX, VISIBLE_QUIT_PREFIX,
+    PHASE_PREFIX,
+    PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX, VISIBLE_QUIT_PREFIX,
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,

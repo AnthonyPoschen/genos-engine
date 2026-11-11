@@ -40,8 +40,6 @@ use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::{Window, PUMP_BUDGET};
-
 /// The process is about to `_exit`. A [`Lifecycle`] drop then skips
 /// `vkDestroyDevice` and `vkDestroyInstance`, same as [`Lifecycle::quit`].
 static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
@@ -52,6 +50,8 @@ static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
 pub fn release_driver_on_process_exit() {
     RELEASE_DRIVER_ON_EXIT.store(true, Ordering::Relaxed);
 }
+
+use crate::{Window, PUMP_BUDGET};
 
 /// Printed on stdout when shutdown finishes. The quit-gap test reads it.
 pub const QUIT_GAP_PREFIX: &str = "lifecycle_quit_gap_ms=";
