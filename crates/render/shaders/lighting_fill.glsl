@@ -187,6 +187,11 @@ float lighting_fill_unit(float v) {
     return (v >= 0.0 && v <= 1.0) ? v : 0.0;
 }
 
+// Infinity compares equal to itself, so `x == x` does not reject it.
+bool lighting_fill_real(float v) {
+    return v == v && v <= 1.0e20 && v >= -1.0e20;
+}
+
 uint lighting_fill_seed(uint slot) {
     return max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
 }
@@ -382,12 +387,13 @@ void lighting_fill_note_check(uint slot, float l_now) {
         g.z = uintBitsToFloat(want);
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 0.0;
     }
-    bool have = cache.v[LIGHTING_SC_GRAD2_AT + slot].z > FILL_HALF && (g.y == g.y);
+    bool have = cache.v[LIGHTING_SC_GRAD2_AT + slot].z > FILL_HALF && lighting_fill_real(g.y);
     float lam = lighting_fill_unit(g.x);
     // A non-finite sample must not stick. The decayed lambda stays, and the
-    // stored luma stays only when it is a real number.
-    if (!(l_now == l_now)) {
-        if (!(g.y == g.y)) {
+    // stored luma stays only when it is a real number. min(1, NaN) is 1, so an
+    // infinite luma would raise lambda and then stick for the next check.
+    if (!lighting_fill_real(l_now)) {
+        if (!lighting_fill_real(g.y)) {
             g.y = 0.0;
             have = false;
         }

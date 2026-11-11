@@ -932,6 +932,11 @@ mod tests {
         assert!(cell.luma.is_finite());
         cell.note(1.0, 0.0);
         assert!(cell.lambda < 1.0e-5);
+        cell.note(f32::INFINITY, 0.0);
+        assert_eq!(cell.luma, 1.0, "an infinite sample must not replace the stored luma");
+        assert!(cell.lambda < 1.0e-5);
+        cell.note(1.0, 0.0);
+        assert!(cell.lambda < 1.0e-5, "the sample after an infinity is not a change");
     }
 
     #[test]
