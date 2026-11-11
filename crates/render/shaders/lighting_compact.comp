@@ -8,7 +8,14 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
 const bool LIGHTING_WRC_STALE_CHECK = true;
+shared uint sc_lamp_pend;
 void main() {
+    // One scan per group. The change frame's compact runs before the ring
+    // write, so this is the only signal that the lamps already differ.
+    if (gl_LocalInvocationIndex == 0u) {
+        sc_lamp_pend = lighting_lamps_pending() ? 1u : 0u;
+    }
+    barrier();
     uint slot = gl_GlobalInvocationID.x;
     // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
     // before that pass. The hash wavelet does not use these words.
@@ -135,6 +142,12 @@ void main() {
         // every round instead of a whole set one round in the turns: the bounce
         // chain through the cells moves one bounce a round, not one a cycle.
         bool settling = lighting_lamp_settling();
+        // The ring is written in the cache pass, after this list. On the
+        // change frame settling is still false and a relight would replace
+        // the stored ray before the check could read it.
+        if (!wrc && sc_lamp_pend != 0u && lighting_sc_settle_lambda(slot, true)) {
+            return;
+        }
         if (settling) {
             // Near-camera errors show first: the WRC cells (the bounce chain)
             // and the texels on screen go every round; the rest in turns.
@@ -143,6 +156,13 @@ void main() {
             atomicAdd(ckeys.key[LIGHTING_SETTLE_COUNT_AT], ms);
             if (first) {
                 atomicAdd(ckeys.key[LIGHTING_SETTLE_FIRST_AT], ms);
+            }
+            // The turn hash used to return before the same-seed check, so a
+            // noted lamp left λ at 0 for the whole change. The check runs
+            // first and that texel waits one round so the comparison still
+            // sees its stored ray. A drain without a note still waits its turn.
+            if (!wrc && sc_lamp_pend == 0u && lighting_lamp_noted() && lighting_sc_settle_lambda(slot, false)) {
+                return;
             }
             if (((lighting_hash(lighting_sc_id(slot) ^ 0x5bd1e995u) + lighting_round()) % lighting_settle_turns(first)) != 0u) {
                 atomicAdd(gstats.waiting, 1u);
