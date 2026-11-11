@@ -5,7 +5,9 @@
 //! ([`genos_load::image_spaces`]). Colour (base colour, emissive) is BC7 sRGB,
 //! other data is BC7 unorm and normals are BC5 (X and Y; Z is rebuilt). Each
 //! image is one KTX2. The encoder is `intel_tex_2` (Intel ISPC Texture
-//! Compressor, "basic" profile). Edges are padded to whole 4×4 blocks by
+//! Compressor). AVX2 and AVX-512 use the basic profile. The SSE2, SSE4 and
+//! AVX kernels of that profile miss a four-colour block, so a host without
+//! AVX2 uses the slow profile. Edges are padded to whole 4×4 blocks by
 //! repeating the last row and column.
 //!
 //! The record: `GTX1`, version, asset id, settings hash, inputs, then each
@@ -27,7 +29,8 @@ use crate::{inputs_match, inputs_of, map_by_cost, CookError, Input, Outcome, Thr
 
 pub const TEXTURE_MAGIC: &[u8; 4] = b"GTX1";
 pub const TEXTURE_VERSION: u32 = 1;
-const ENCODER: &str = "intel_tex_2 0.5 ispc bc7-basic bc5; genos_load mip_chain v1";
+const ENCODER: &str =
+    "intel_tex_2 0.5 ispc bc7-basic (slow below avx2) bc5; genos_load mip_chain v1";
 
 /// One cooked image.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +85,33 @@ fn padded(mip: &Mip, channels: usize) -> (Vec<u8>, u32, u32) {
     (out, pw, ph)
 }
 
+/// Hosts without AVX2 dispatch the SSE2, SSE4 or AVX kernel. Those three
+/// miss a four-colour block under the basic profile.
+fn bc7_basic_is_weak() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        !std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        false
+    }
+}
+
+fn bc7_settings(alpha: bool) -> bc7::EncodeSettings {
+    if bc7_basic_is_weak() {
+        if alpha {
+            bc7::alpha_slow_settings()
+        } else {
+            bc7::opaque_slow_settings()
+        }
+    } else if alpha {
+        bc7::alpha_basic_settings()
+    } else {
+        bc7::opaque_basic_settings()
+    }
+}
+
 fn encode_level(mip: &Mip, format: BlockFormat, alpha: bool) -> Vec<u8> {
     if format == BlockFormat::Bc5Unorm {
         let (data, width, height) = padded(mip, 2);
@@ -93,11 +123,7 @@ fn encode_level(mip: &Mip, format: BlockFormat, alpha: bool) -> Vec<u8> {
         });
     }
     let (data, width, height) = padded(mip, 4);
-    let settings = if alpha {
-        bc7::alpha_basic_settings()
-    } else {
-        bc7::opaque_basic_settings()
-    };
+    let settings = bc7_settings(alpha);
     bc7::compress_blocks(
         &settings,
         &RgbaSurface {

@@ -815,7 +815,6 @@ impl LightingSettings {
             }
             LightingPreset::Potato => {
                 clear_sh_product(&mut s.surface_cache);
-                s.direct.max_lights = 8;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -835,7 +834,6 @@ impl LightingSettings {
                 // passes are gone on every preset. The knobs can still turn
                 // the bits on.
                 clear_sh_product(&mut s.surface_cache);
-                s.direct.max_lights = 4;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
                 s.probes.enabled = false;
@@ -857,7 +855,6 @@ impl LightingSettings {
             LightingPreset::Medium => {
                 // High's directional product stays on: SH cells, texel detail,
                 // the ray cut, and probe retire.
-                s.direct.max_lights = 8;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
