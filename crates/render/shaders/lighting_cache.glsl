@@ -729,6 +729,14 @@ float lighting_ls_ratio(uint f) {
 uint lighting_sc_updated(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].y);
 }
+// Shown-mean age (stage F1). Word 23 is the frame the fine texel's shown mean
+// was last committed. Compose does not read it. The visit stamp above moves
+// on a partial quarter; this one does not. The tally runs when the trace
+// enable (chg[31], GENOS_LIGHTING_SC_TRACE) is set.
+const uint LIGHTING_SC_SHOWN_AT = 23u * LIGHTING_CACHE_SLOTS;
+bool lighting_shown_age() {
+    return gstats.chg[31] != 0u;
+}
 // S69A (Anthony: night to day left hard black texels everywhere, cleaning up
 // slowly). A texel relit at night holds night light; the sun/sky share rescale
 // (S63A) cannot brighten it (share ~0, or a tiny value times a ratio capped at
@@ -2699,6 +2707,69 @@ float lighting_lamp_delta(vec3 p, uint updated) {
         delta = max(delta, 0.0) + pw * abs(ib - ia);
     }
     return delta;
+}
+// Newest ring frame of a lamp that still reaches p, or 0. The shown-mean
+// tally compares the commit frame with this stamp (`shown_age::classify`:
+// a commit at or after the stamp postdates it).
+uint lighting_lamp_move_stamp(vec3 p) {
+    uint stamp = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        stamp = max(stamp, f);
+    }
+    return stamp;
+}
+// Near red-box pixels (albedo and 6 m, the fill-curve red box). diag[14..24]
+// match crates/render/src/shown_age.rs.
+void lighting_shown_age_tally(vec3 pos, vec3 albedo, uint slot) {
+    if (length(pos - scene.eye.xyz) >= 6.0) {
+        return;
+    }
+    if (!(albedo.r > 0.45 && albedo.g < 0.35 && albedo.b < 0.35)) {
+        return;
+    }
+    atomicAdd(gstats.diag[14], 1u);
+    // A miss is ~0u. Nested so the cache index stays in range.
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        atomicAdd(gstats.diag[15], 1u);
+        return;
+    }
+    uint commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + slot].x);
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[15], 1u);
+        return;
+    }
+    uint age = lighting_frame() >= commit ? lighting_frame() - commit : 0u;
+    atomicAdd(gstats.diag[23], age);
+    if (age == 0u) {
+        atomicAdd(gstats.diag[16], 1u);
+    } else if (age <= 3u) {
+        atomicAdd(gstats.diag[17], 1u);
+    } else if (age <= 7u) {
+        atomicAdd(gstats.diag[18], 1u);
+    } else if (age <= 15u) {
+        atomicAdd(gstats.diag[19], 1u);
+    } else {
+        atomicAdd(gstats.diag[20], 1u);
+    }
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        atomicAdd(gstats.diag[24], 1u);
+    } else if (commit >= stamp) {
+        atomicAdd(gstats.diag[22], 1u);
+    } else {
+        atomicAdd(gstats.diag[21], 1u);
+    }
 }
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).

@@ -245,6 +245,12 @@ void main() {
         return;
     }
     if (lighting_world_mode() == 3u) {
+        // The shown mean is committed on this path (a partial quarter returned
+        // above). The visit stamp in OBJ.y moved already; this frame is the
+        // commit. Off unless the age tally is on.
+        if (lighting_shown_age()) {
+            cache.v[LIGHTING_SC_SHOWN_AT + slot].x = uintBitsToFloat(lighting_frame());
+        }
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
         float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);
