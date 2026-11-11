@@ -1,6 +1,6 @@
 # Screen-tile fill: one system, always on (addendum)
 
-Status: **Proposed** (11 Nov 2026), addendum to [the screen-tile fill design](screen-tile-fill-design.md). Docs only. Origin: Anthony, 11 Nov 16:59, 17:03, 17:20–17:28, 17:43–17:45. Where this note and the design disagree, this note wins. Code read: `lighting_cache.glsl`, `lighting_cache_slots.glsl`, `lighting_screen.comp` and `shown_age.rs` on #252 (`03ab0952`).
+Status: **Proposed** (11 Nov 2026), addendum to [the screen-tile fill design](screen-tile-fill-design.md). Docs only. Origin: Anthony, 11 Nov 16:59, 17:03, 17:20–17:28, 17:43–17:46. Where this note and the design disagree, this note wins. Code read: `lighting_cache.glsl`, `lighting_cache_slots.glsl`, `lighting_screen.comp` and `shown_age.rs` on #252 (`03ab0952`).
 
 ## 1. One system, a scheduler, always on
 
@@ -10,7 +10,7 @@ A pick traces **one ray** (Lumen style), not a 16-ray quarter. The budget is spe
 
 `priority = closeness to the player × (remaining error + measured change)`, with the camera view raising priority.
 
-Around the player, F2 maintains a 360-degree set of world-cache cells in every direction, independent of the camera view. Cells are created by distance from the player. Level of detail is a clipmap: 25 cm within `fill_lod_near` (starting at 8 m), then 25 cm × 2^level, doubling outward to the far view distance (`fill_far`). There is no hard cutoff where GI stops; far cells are huge, coarse, cheap in rays and memory, and low priority. The set is smart: create cells ahead in the direction of motion (velocity look-ahead), and as cells get far they coarsen, then evict. Create more aggressively than drop — the drop/coarsen leash is further than the create/refine distance (hysteresis). The set is updated as the player moves. The view does not decide which cells exist; it only raises their priority. On screen: about one need-weighted pick per 8×8 tile (~57,600 at 1440p). The off-screen share is spent across the rest of the set by priority, so a fast turn or a move forward lands on built-up data.
+Around the player, F2 maintains a 360-degree set of world-cache cells in every direction, independent of the camera view. Cells are created by distance from the player. Level of detail is a clipmap: 25 cm within `fill_lod_near` (starting at 8 m), then 25 cm × 2^level, until the cell size reaches `fill_cell_max` (the coarsest LOD, starting at 4 m). Doubling stops there. Beyond that distance, cells stay at that size out to the view distance (`fill_far`), accepted as the minimum level of detail. Far cells are huge, coarse, cheap in rays and memory, and low priority; GI does not stop, it just stays at that floor. The set is smart: create cells ahead in the direction of motion (velocity look-ahead), and as cells get far they coarsen, then evict. Create more aggressively than drop — the drop/coarsen leash is further than the create/refine distance (hysteresis). The set is updated as the player moves. The view does not decide which cells exist; it only raises their priority. On screen: about one need-weighted pick per 8×8 tile (~57,600 at 1440p). The off-screen share is spent across the rest of the set by priority, so a fast turn or a move forward lands on built-up data.
 
 ## 2. Tunables
 
@@ -24,8 +24,9 @@ Every number is a named setting with a starting value. None of these are frozen;
 | `fill_lod_create` | 8 m at 25 cm, then doubles each level | Create/refine radius per LOD. Starting rule: the clipmap radii. |
 | `fill_lod_leash` | 1.5 × create radius at that level | Drop/coarsen radius per LOD. Must be further than create (hysteresis). |
 | `fill_look_ahead` | 0.5 s of player velocity | Extends the create envelope ahead of motion. |
-| `fill_far` | the far view distance | Outer bound of the clipmap. LOD keeps doubling out to here; no separate GI cutoff. |
-| `fill_lod_max` | derived from `fill_far` | Coarsest level. Far cells are huge and cheap. |
+| `fill_cell_max` | 4 m | Maximum cell size (coarsest LOD). Doubling stops here. |
+| `fill_lod_max` | derived from `fill_cell_max` | Level index of that coarsest size. |
+| `fill_far` | the far view distance | Cells at `fill_cell_max` continue out to here, accepted as the minimum detail. GI does not stop. |
 | `fill_far_share` | 0.05 of `fill_budget` | Minimum rays reserved for the coarsest/far levels. |
 | `fill_offscreen_floor` | 0.25 of `fill_budget` | Minimum share spent across the 360-degree set outside the view, so a hungry screen cannot take the whole budget. |
 | `fill_error_target` | 0.03 | A cell is sufficient when its MSME standard error over its mean is below this. Rays per cell then vary with the cell, not a fixed count. |
@@ -53,7 +54,7 @@ The 64-ray-set commit is removed. MSME used to update once per full set; #265 st
 | F2 deposit into cell SH-L1 and texel mean | existing entries, one writer in the resolve pass | 0 added | (a) |
 | F2 deposit records | per frame, hashed by slot, sized to the budget | a few MB of scratch at the 100k start | (b) |
 | F3 need weights, histogram, tile scratch | per frame, recomputed | about 1 MB | (b) |
-| F2 player-centred clipmap (360 degrees, doubling out to `fill_far`) | real entries in the existing hash table, created and LOD'd by distance from the player, with look-ahead and a drop leash, updated as the player moves; a short pick list | under 1 MB of scratch, one frame | (a) plus (b) |
+| F2 player-centred clipmap (360 degrees, capped at `fill_cell_max`, out to `fill_far`) | real entries in the existing hash table, created and LOD'd by distance from the player, with look-ahead and a drop leash, updated as the player moves; a short pick list | under 1 MB of scratch, one frame | (a) plus (b) |
 | F4 in-tile and ring sharing | a **seed** on the existing low-confidence channel (`lighting_sc_set_seed`); no `shared_count` field | 0 added | (a) |
 | F5 path vertices | backward deposit into the cells the vertices hit; a short per-path scratch | per frame | (a) plus (b) |
 | Lamp-change stamp | existing ring compared with `updated` | 0 added | (a) |
@@ -68,7 +69,7 @@ A turned box has no 12.5 cm texel; those pixels already read the 25 cm SH cells.
 
 ## 7. Stages
 
-F2 to F5 stay in the same order. F2 is: wire the always-on single-ray scheduler into the world cache with the tunables, maintain the clipmap-like 360-degree cell set around the player (look-ahead, hysteresis, doubling out to `fill_far`), spend the off-screen share across it by priority, fold each frame's deposits into MSME the same frame, leave the due lists and settle path unused when the flag is on, and measure remaining near error. Physical deletion of the old scheduler stays at F6, once the flag is default-on. F3 adds the full priority terms and check rays; it does not claim the off-screen set.
+F2 to F5 stay in the same order. F2 is: wire the always-on single-ray scheduler into the world cache with the tunables, maintain the clipmap-like 360-degree cell set around the player (look-ahead, hysteresis, cap at `fill_cell_max`, then that floor out to `fill_far`), spend the off-screen share across it by priority, fold each frame's deposits into MSME the same frame, leave the due lists and settle path unused when the flag is on, and measure remaining near error. Physical deletion of the old scheduler stays at F6, once the flag is default-on. F3 adds the full priority terms and check rays; it does not claim the off-screen set.
 
 The stage table in section 15 of the design is updated to match. Frozen quality gates (blotch 0.014, energy 0.9, linger, lag, turn 0.403) are unchanged. F2 also reports rays equal to the budget (always on) and yaw fps as a measurement, not a precomputed estimate.
 
