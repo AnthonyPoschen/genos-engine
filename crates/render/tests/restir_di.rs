@@ -100,6 +100,7 @@ fn world_from(spec: &RestirScene, wall: bool) -> World {
         hdr: genos_scene::HdrSettings::for_preset(LightingPreset::High),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
     })
 }
 

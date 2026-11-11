@@ -1,10 +1,10 @@
 mod aa;
 mod budget;
 mod cooked_load;
-mod gate;
 mod fog;
 mod fog_budget;
 mod fog_pass;
+mod gate;
 mod gltf_draw;
 mod gpu;
 mod hdr_output;
@@ -16,6 +16,7 @@ mod mesh;
 mod mesh_field;
 mod occ_grid;
 mod pack;
+mod particle_sim;
 mod particles;
 mod pool;
 mod reflections;
@@ -52,6 +53,7 @@ pub use fog_pass::{
     FogPointLamp, FOG_F2_REFERENCE, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
     FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW, YAW_FRAMES,
 };
+pub use gate::{guard as gate_guard, BOUNCE_IN_COMPOSE, DIRECT_IN_COMPOSE};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
@@ -73,8 +75,13 @@ pub use hdr_output::{
     legacy_display_channel, near_grade, nits_from_display, pack_f32, pick_hdr_output, pq_st2084,
     present_host, rec2020_from_rec709, rec709_y, resolve_swapchain, scene_luma, scene_peak_error,
     scene_read_from_rgba, scene_referred, scrgb_code, scrgb_from_display, step_exposure,
+    bytes_to_mib, mib_centi, mib_cents, mib_ceiling_bytes, align_device_bytes, device_size_matches,
+    post_chain, post_device_bytes, post_encode_resident, post_locks_sdr, bloom_divisor,
+    bloom_first_mode, bloom_modes,
+    bloom_level_count, bloom_passes, PostBuffer, PostChain, PostDevice,
+    agx_lut_linear, agx_lut_texel, AGX_LOG_MAX, AGX_LOG_MIN, AGX_LUT_N,
     still_pop_share, surface_choice, swapchain_format_code, swapchain_nits, swapchain_pair,
-    DisplayMode, HdrSwapchain, Image, ListedFormat, PresentHost, SceneRead, COLOR_SPACE_HDR10,
+    DisplayMode, DeckPanel, HdrSwapchain, Image, ListedFormat, PresentHost, SceneRead, COLOR_SPACE_HDR10,
     COLOR_SPACE_SCRGB, COLOR_SPACE_SRGB, FORMAT_A2B10, FORMAT_A2R10, FORMAT_BGRA8, FORMAT_R16F,
     FORMAT_RGBA8, GRAPHICS_WHITE_NITS, HDR_PEAK_NITS, SCRGB_NITS_PER_CODE,
 };
@@ -82,6 +89,10 @@ pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
+pub use particle_sim::{
+    buffer_bytes, two_flight_buffer_bytes, CpuParticles, ParticleFault, ParticleStats, StepInput,
+    LOW_VRAM_BYTES,
+};
 pub use particles::{
     card_quad, compose_fog, fire_radiance, fog_along, frame_at, height_fog_along, image_from_map,
     image_from_texture, medium, object_cards, phase_weight, shade_lit, Card, Emitter, FireLight,

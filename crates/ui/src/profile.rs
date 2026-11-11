@@ -527,6 +527,7 @@ fn compose(
                 w: 0.0,
                 h: 0.0,
                 color: BG,
+                alpha: 1.0,
             },
             plot: empty_plot,
             lines: Vec::new(),
@@ -549,6 +550,7 @@ fn compose(
         w: width,
         h: height,
         color: BG,
+        alpha: 1.0,
     };
     let mut paints = vec![background];
     let text_x = origin_x + 8.0;
@@ -562,6 +564,7 @@ fn compose(
                 w: 10.0,
                 h: 10.0,
                 color,
+                alpha: 1.0,
             });
             text_x + 16.0
         } else {
@@ -579,6 +582,7 @@ fn compose(
                 w: blot.w,
                 h: blot.h,
                 color: TEXT,
+                alpha: 1.0,
             });
         }
     }
@@ -593,6 +597,7 @@ fn compose(
                 w: blot.w,
                 h: blot.h,
                 color: PAUSED,
+                alpha: 1.0,
             });
         }
     }
@@ -621,6 +626,7 @@ fn compose(
             w: (left - right).abs().max(2.0),
             h: plot_h,
             color: SELECT,
+            alpha: 1.0,
         });
     }
     let mut prepared = Vec::new();

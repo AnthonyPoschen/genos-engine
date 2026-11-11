@@ -31,7 +31,9 @@
 //!
 //! Safe code cannot move the window or the device out. Both sit in
 //! [`ManuallyDrop`]. [`exit`] is the only way out of the process. It flushes
-//! and calls `_exit`, so the driver's atexit handler does not run.
+//! the visible-quit line, then terminates without running driver detach.
+//! Unix uses `_exit`. Windows uses `TerminateProcess`, because the CRT
+//! `_exit` is `ExitProcess` and that still runs `DLL_PROCESS_DETACH`.
 
 use std::io::Write;
 use std::mem::ManuallyDrop;
@@ -40,15 +42,35 @@ use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// The process is about to `_exit`. A [`Lifecycle`] drop then skips
+/// The process is about to terminate. A [`Lifecycle`] drop then skips
 /// `vkDestroyDevice` and `vkDestroyInstance`, same as [`Lifecycle::quit`].
 static RELEASE_DRIVER_ON_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// The validation gate asked for a real `vkDestroyDevice` and
+/// `vkDestroyInstance`, so object-leak reports still fire. This wins over
+/// [`RELEASE_DRIVER_ON_EXIT`].
+static FULL_DRIVER_DESTROY: AtomicBool = AtomicBool::new(false);
 
 /// Arm every later lifecycle drop in this process to leave the driver
 /// teardown for process exit. Call this from a binary whose `main` ends in
 /// [`exit`]. In-process tests do not, so a drop there still destroys the device.
 pub fn release_driver_on_process_exit() {
     RELEASE_DRIVER_ON_EXIT.store(true, Ordering::Relaxed);
+}
+
+/// Destroy the device and the instance on the way out.
+///
+/// [`release_driver_on_process_exit`] stays armed. This flag wins, so the
+/// Vulkan validation layer still sees `vkDestroyDevice` and `vkDestroyInstance`
+/// and can report objects that were left alive. The quit-gap run does not
+/// call this.
+pub fn request_full_driver_destroy() {
+    FULL_DRIVER_DESTROY.store(true, Ordering::Relaxed);
+}
+
+fn skip_driver_destroy() -> bool {
+    RELEASE_DRIVER_ON_EXIT.load(Ordering::Relaxed)
+        && !FULL_DRIVER_DESTROY.load(Ordering::Relaxed)
 }
 
 use crate::{Window, PUMP_BUDGET};
@@ -375,9 +397,9 @@ impl<D: ShutdownDevice> Lifecycle<D> {
     /// Producers registered with [`Self::add_stop`] run first. Our GPU objects
     /// are destroyed while the window is still mapped, with the seat dispatched
     /// between steps. The window is then unmapped. `vkDestroyDevice` and
-    /// `vkDestroyInstance` are not called: `_exit` reclaims them, and waiting
-    /// would keep the process up after the window is gone. The device is left
-    /// in place on purpose. `_exit` does not run its destructor.
+    /// `vkDestroyInstance` are not called unless [`request_full_driver_destroy`]
+    /// ran. The device is left in place on purpose. Process exit does not run
+    /// its destructor, and it does not run driver detach.
     pub fn quit(mut self, code: i32) -> ! {
         if !self.quit {
             self.exit_code = code;
@@ -386,7 +408,11 @@ impl<D: ShutdownDevice> Lifecycle<D> {
             self.exit_code = code;
         }
         let code = self.exit_code;
-        self.device.release_driver_at_exit();
+        // Quit leaves the driver for process exit. The validation gate asks
+        // for a full destroy, and that request wins.
+        if !FULL_DRIVER_DESTROY.load(Ordering::Relaxed) {
+            self.device.release_driver_at_exit();
+        }
         self.shutdown();
         unsafe {
             if self.window_alive {
@@ -475,7 +501,7 @@ impl<D: ShutdownDevice> Lifecycle<D> {
 
 impl<D: ShutdownDevice> Drop for Lifecycle<D> {
     fn drop(&mut self) {
-        if RELEASE_DRIVER_ON_EXIT.load(Ordering::Relaxed) {
+        if skip_driver_destroy() {
             self.device.release_driver_at_exit();
         }
         if !self.released {
@@ -603,6 +629,37 @@ pub fn close_early_flag(arg: &str) -> bool {
     arg == "--lifecycle-close-early"
 }
 
+/// `true` when the argument asks quit to call `vkDestroyDevice` and
+/// `vkDestroyInstance`. The validation gate uses this so leak reports fire.
+pub fn full_destroy_flag(arg: &str) -> bool {
+    arg == "--lifecycle-full-destroy"
+}
+
+/// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_FULL_DESTROY`
+/// set to `1` or `true`.
+///
+/// A value that is anything else is ignored. The flag wins when both are set,
+/// because the caller passes `true` only for the argument.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "GENOS_LIFECYCLE_FULL_DESTROY mirrors --lifecycle-full-destroy. The argument wins when cli is true. docs/LINT_RULES.md"
+)]
+pub fn full_destroy_mirror(cli: bool) -> bool {
+    full_destroy_from(
+        cli,
+        std::env::var("GENOS_LIFECYCLE_FULL_DESTROY")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn full_destroy_from(cli: bool, env: Option<&str>) -> bool {
+    if cli {
+        return true;
+    }
+    matches!(env, Some("1" | "true"))
+}
+
 /// `cli` when the flag was passed. Otherwise `GENOS_LIFECYCLE_CLOSE_EARLY`
 /// set to `1` or `true`.
 ///
@@ -643,17 +700,25 @@ pub fn block_ms_mirror(cli: Option<Duration>) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
+#[cfg(not(windows))]
 extern "C" {
     fn _exit(code: i32) -> !;
 }
 
 /// Leave the process. Binaries call this instead of `std::process::exit`.
 ///
-/// Rust buffers stdout, so this flushes first. The total line is the wall time
-/// from the quit request to this call, including drops after the window
-/// unmapped. `_exit` skips the Vulkan driver's atexit handler. That handler
-/// waits again after `vkDestroyInstance`, and on a real device the wait is the
-/// multi-second tail after the quit lines.
+/// Rust buffers stdout, so this flushes first. `lifecycle_visible_quit_ms` is
+/// the wall time from the window unmap to this flush. The terminating call
+/// is next, and it does not run driver teardown after the line:
+///
+/// - Unix `_exit` does not run `atexit` handlers or shared-library fini.
+/// - Windows CRT `_exit` is `ExitProcess`, which does run `DLL_PROCESS_DETACH`.
+///   The Vulkan loader would then destroy a live `VkDevice` after the line,
+///   and that wait would be unmeasured. This function calls `TerminateProcess`
+///   instead. Detach does not run. The kernel reclaims the process.
+///
+/// Time inside the terminating call is not in the number. The process is
+/// leaving, and no driver detach follows the flush.
 pub fn exit(code: i32) -> ! {
     if let Some(tail) = take_quit_tail() {
         let ms = duration_ms(tail);
@@ -666,9 +731,40 @@ pub fn exit(code: i32) -> ! {
     }
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    // SAFETY: stdout is flushed. The lifecycle has destroyed the device and
-    // unmapped the window before this call. `_exit` does not run atexit.
-    unsafe { _exit(code) }
+    end_process(code)
+}
+
+/// Stop the process without running driver detach.
+///
+/// Stdout and stderr are already flushed. A mapped window is already
+/// unmapped. The device may still be alive. Neither call below runs driver
+/// `atexit` or `DLL_PROCESS_DETACH`.
+fn end_process(code: i32) -> ! {
+    #[cfg(windows)]
+    {
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle.
+        // `TerminateProcess` accepts it and does not run `DLL_PROCESS_DETACH`.
+        // If the call returns, this thread must not call `ExitProcess`.
+        unsafe {
+            let status = u32::try_from(code).unwrap_or(u32::MAX);
+            let _ = TerminateProcess(GetCurrentProcess(), status);
+        }
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        // SAFETY: `_exit` does not run `atexit` or shared-library fini.
+        unsafe { _exit(code) }
+    }
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetCurrentProcess() -> *mut core::ffi::c_void;
+    fn TerminateProcess(process: *mut core::ffi::c_void, exit_code: u32) -> i32;
 }
 
 struct MachineStop {
@@ -1031,6 +1127,13 @@ mod tests {
         assert!(close_early_flag("--lifecycle-close-early"));
         assert!(!close_early_flag("--frames"));
         assert!(close_early_mirror(true));
+        assert!(full_destroy_flag("--lifecycle-full-destroy"));
+        assert!(!full_destroy_flag("--frames"));
+        assert!(full_destroy_from(true, Some("0")));
+        assert!(!full_destroy_from(false, Some("0")));
+        assert!(full_destroy_from(false, Some("1")));
+        assert!(full_destroy_from(false, Some("true")));
+        assert!(!full_destroy_from(false, None));
     }
 
     #[test]

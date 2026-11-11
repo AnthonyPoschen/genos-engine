@@ -1,22 +1,71 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::bool_to_int_with_if, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::bool_to_int_with_if,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::format_push_string,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
@@ -27,6 +76,7 @@ const SHOW_PARTICLES: bool = false;
 use genos_scene::{
     load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
     Floor, FogSettings, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings,
+    ParticleSettings,
     ReflectionSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
@@ -41,6 +91,24 @@ const BOX_LEG_SECONDS: f32 = 8.0;
 const FIRST_FRAME_SECONDS: f32 = 1.0 / 60.0;
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
+
+/// Wait until `duration` has passed. A condvar timeout is the wait, matching
+/// `wait_unpumped` in the renderer. A park can return at once if the token is set.
+fn wait_deadline(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
+    }
+}
 
 /// Elapsed seconds since `previous`. The first frame uses [`FIRST_FRAME_SECONDS`].
 fn frame_seconds(previous: Option<Instant>, now: Instant) -> f32 {
@@ -153,6 +221,7 @@ fn run() -> Result<i32, String> {
     let mut time_of_day = None;
     let mut block_ms = None;
     let mut close_early = false;
+    let mut full_destroy = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -286,6 +355,7 @@ fn run() -> Result<i32, String> {
                 )?);
             }
             "--lifecycle-close-early" => close_early = true,
+            "--lifecycle-full-destroy" => full_destroy = true,
             other if genos_window::block_ms_needs_value(other) == Some(false) => {
                 block_ms = Some(genos_window::parse_block_ms(other, None)?);
             }
@@ -295,6 +365,11 @@ fn run() -> Result<i32, String> {
 
     let block_ms = genos_window::block_ms_mirror(block_ms);
     let close_early = genos_window::close_early_mirror(close_early);
+    // The validation gate passes this so vkDestroyDevice and vkDestroyInstance
+    // still run and object-leak reports fire. The quit-gap run omits it.
+    if genos_window::full_destroy_mirror(full_destroy) {
+        genos_window::request_full_driver_destroy();
+    }
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
@@ -307,7 +382,8 @@ fn run() -> Result<i32, String> {
     if first.closing {
         return Ok(0);
     }
-    let (renderer, permit) = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = block_ms {
@@ -425,6 +501,12 @@ fn run() -> Result<i32, String> {
         if frame.closing {
             break;
         }
+        if frame.minimized {
+            // The window pump returns at once when the queue is empty. The same
+            // condvar deadline as `wait_unpumped` keeps the frame from spinning.
+            wait_deadline(Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
@@ -434,9 +516,7 @@ fn run() -> Result<i32, String> {
         let input_at = Instant::now();
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
@@ -447,13 +527,7 @@ fn run() -> Result<i32, String> {
             let stream = profile_stream
                 .as_mut()
                 .ok_or("detailed profile is missing its file")?;
-            publish_profile(
-                renderer,
-                &mut profile_pending,
-                &mut profile,
-                stream,
-                false,
-            )?;
+            publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
         }
         if graph_on && input.keyboard.pressed(InputCode::key_p) && !profile.is_paused() {
             // Wait for GPU times that were submitted before this key, then freeze.
@@ -663,6 +737,7 @@ fn run() -> Result<i32, String> {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
         }
+        renderer.set_particle_dt(if paused { 0.0 } else { dt });
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =
@@ -697,13 +772,7 @@ fn run() -> Result<i32, String> {
             // A paused present stays on screen and does not enter the held graph.
             let record = !paused;
             if let Some(gpu) = draw_gpu {
-                publish_profile(
-                    renderer,
-                    &mut profile_pending,
-                    &mut profile,
-                    stream,
-                    false,
-                )?;
+                publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
                 if !profile_pending.is_empty() {
                     return Err("profile gpu time arrived out of order".into());
                 }
@@ -714,13 +783,7 @@ fn run() -> Result<i32, String> {
                 }
             } else {
                 profile_pending.push_back(PendingProfile { open, record });
-                publish_profile(
-                    renderer,
-                    &mut profile_pending,
-                    &mut profile,
-                    stream,
-                    false,
-                )?;
+                publish_profile(renderer, &mut profile_pending, &mut profile, stream, false)?;
             }
         } else if graph_on && !paused {
             profile.remember(open.finish(Duration::ZERO));
@@ -775,13 +838,7 @@ fn run() -> Result<i32, String> {
         let stream = profile_stream
             .as_mut()
             .ok_or("detailed profile is missing its file")?;
-        publish_profile(
-            renderer,
-            &mut profile_pending,
-            &mut profile,
-            stream,
-            true,
-        )?;
+        publish_profile(renderer, &mut profile_pending, &mut profile, stream, true)?;
         if !profile_pending.is_empty() {
             return Err("profile frames are missing gpu time".into());
         }
@@ -863,6 +920,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -885,7 +943,9 @@ fn load_scene_pumped(
         if frame.closing {
             return Err("window closed during load".into());
         }
-        let _ = renderer.draw(&load_world, &camera, false);
+        if !frame.minimized {
+            let _ = renderer.draw(&load_world, &camera, false);
+        }
         match take_scene_load(&mut job)? {
             LoadPace::Ready => {
                 meter.mark();

@@ -1,4 +1,5 @@
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::float_cmp, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
 //! A checkbox reports the next on state and paints a mark only while it is on.
 
@@ -71,4 +72,47 @@ fn a_press_reports_the_next_state_and_the_mark_follows_on() {
     assert!(!mark_inside(&on, 2));
     let again = draw(&mut state, true, Pointer::at(x, y, true));
     assert_eq!(again.actions, vec![Action::Toggle { id: 1, on: false }]);
+}
+
+#[test]
+fn a_kind_checkbox_paints_an_inset_mark_and_emits_toggle() {
+    use genos_ui::{frame, theme_dark, Event, Kind, Node, Sizing, Space};
+    let theme = theme_dark();
+    let mut checked = Node::new(11);
+    checked.kind = Kind::Checkbox { checked: true };
+    checked.width = Sizing::fixed(16.0);
+    checked.height = Sizing::fixed(16.0);
+    let mut state = State::default();
+    state.theme = theme;
+    let on = frame(
+        &checked,
+        &mut state,
+        Space::Screen,
+        [40.0, 40.0],
+        None,
+        Pointer::at(4.0, 4.0, true),
+        0.0,
+        None,
+    );
+    assert_eq!(on.events, vec![Event::Toggle { id: 11, on: false }]);
+    assert!(on.paints.iter().any(|paint| {
+        paint.color == theme.accent && paint.x >= 4.0 && paint.w <= 8.0
+    }));
+    let mut clear = Node::new(11);
+    clear.kind = Kind::Checkbox { checked: false };
+    clear.width = Sizing::fixed(16.0);
+    clear.height = Sizing::fixed(16.0);
+    let mut state = State::default();
+    state.theme = theme;
+    let off = frame(
+        &clear,
+        &mut state,
+        Space::Screen,
+        [40.0, 40.0],
+        None,
+        Pointer::at(40.0, 40.0, false),
+        0.0,
+        None,
+    );
+    assert!(off.paints.iter().all(|paint| paint.color != theme.accent));
 }

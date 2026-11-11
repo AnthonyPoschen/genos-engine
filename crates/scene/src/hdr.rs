@@ -26,7 +26,8 @@ pub enum DisplayTransform {
     Legacy,
 }
 
-/// Swapchain choice. Potato and Low force [`OutputMode::Sdr`].
+/// Swapchain choice. Potato and Low force [`OutputMode::Sdr`] on desktop and on the Deck LCD.
+/// Low on the Deck OLED may take HDR10 when that pair is listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
     Auto,
@@ -166,6 +167,13 @@ impl HdrSettings {
                 settings.output = OutputMode::Auto;
             }
         }
+        settings
+    }
+
+    /// High plus the seventh bloom level. ADR 0027's Ultra. Not a lighting preset.
+    pub fn ultra() -> Self {
+        let mut settings = Self::for_preset(LightingPreset::High);
+        settings.bloom_levels = 7;
         settings
     }
 
@@ -559,6 +567,7 @@ mod tests {
         assert!(high.bloom);
         assert_eq!(high.bloom_intensity.to_bits(), 0.05_f64.to_bits());
         assert_eq!(high.bloom_levels, 6);
+        assert_eq!(HdrSettings::ultra().bloom_levels, 7);
         let low = HdrSettings::for_preset(LightingPreset::Low);
         assert!(low.bloom);
         assert_eq!(low.bloom_intensity.to_bits(), 0.05_f64.to_bits());

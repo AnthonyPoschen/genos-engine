@@ -125,11 +125,24 @@ pub fn run_script(run: &ScriptRun) -> bool {
     ok
 }
 
+fn rhai_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
 fn engine(run: &ScriptRun, report: Rc<RefCell<Report>>) -> Engine {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(128, 64);
     let trace = run.trace;
     for spec in crate::commands::specs() {
+        // Catalogue names such as fx.stats are MCP tools. Rhai identifiers have no dot.
+        if !rhai_name(&spec.name) {
+            continue;
+        }
         let name = spec.name.clone();
         let r = report.clone();
         engine.register_fn(

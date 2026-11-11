@@ -22,13 +22,11 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #include "froxel_compose.glsl"
 
 #ifdef GENOS_HDR_COMPOSE
-// Scene-referred radiance, before the display transform. w is eye distance in metres.
-layout(std430, set = 0, binding = 13) restrict buffer SceneReferred {
-    vec4 px[];
-} scene_lin;
+#include "hdr_scene.glsl"
 
 layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
     vec4 v;
+    vec4 extra;
 } hdr;
 
 #include "hdr_display.glsl"
@@ -70,7 +68,7 @@ void main() {
     uint index = p.y * pc.dims.x + p.x;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
 #ifdef GENOS_HDR_COMPOSE
-        scene_lin.px[index] = vec4(scene.sky.rgb, 1000.0);
+        scene_store(index, vec4(scene.sky.rgb, 1000.0));
 #endif
         return;
     }
@@ -196,8 +194,8 @@ void main() {
         : albedo * LAMBERT * (direct + bounce) + glow;
     c = froxel_compose(c, p, pc.dims.xy);
 #ifdef GENOS_HDR_COMPOSE
-    scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
-    c = add_bloom(c, index);
+    scene_store(index, vec4(c, length(pos - scene.eye.xyz)));
+    c = add_bloom(c, index, pc.dims.x, pc.dims.y);
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;

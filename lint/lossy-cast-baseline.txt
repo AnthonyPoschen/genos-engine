@@ -4,8 +4,8 @@
 # after the casts in that file are gone. See docs/LINT_RULES.md.
 crates/audio-check/tests/consumer.rs 5
 crates/audio/examples/submit.rs 3
-crates/audio/src/device.rs 3
-crates/audio/src/mix.rs 3
+crates/audio/src/device.rs 2
+crates/audio/src/mix.rs 2
 crates/audio/tests/mix_scene.rs 5
 crates/audio/tests/play.rs 3
 crates/bake/src/cards.rs 4

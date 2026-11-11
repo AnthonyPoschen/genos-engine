@@ -244,6 +244,7 @@ fn write_shader_glue(
     }
     append_hdr_compose(&mut glue_text, out);
     append_restir(&mut glue_text, out);
+    append_particles(&mut glue_text, out);
     std::fs::write(&glue, glue_text).unwrap();
 }
 
@@ -320,6 +321,42 @@ fn compile_restir_variant(src: &str, dest: &std::path::Path, defines: &[&str]) -
     dest.to_path_buf()
 }
 
+fn append_particles(glue_text: &mut String, out: &std::path::Path) {
+    let comp = compile("shaders/particles.comp", &out.join("particles.comp.spv"));
+    let emit = compile("shaders/particles_emit.comp", &out.join("particles_emit.comp.spv"));
+    let touch_read = compile(
+        "shaders/particles_touch_read.comp",
+        &out.join("particles_touch_read.comp.spv"),
+    );
+    let vert = compile("shaders/particles.vert", &out.join("particles.vert.spv"));
+    let frag = compile("shaders/particles.frag", &out.join("particles.frag.spv"));
+    let hdr = compile("shaders/particles_hdr.comp", &out.join("particles_hdr.comp.spv"));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_COMP_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        comp.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_EMIT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        emit.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_TOUCH_READ_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        touch_read.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_VERT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        vert.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        frag.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static PARTICLES_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        hdr.display()
+    ));
+}
+
 fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
     [
         ("REFLECTION_FRAME_SPV", "reflections_frame.comp"),
@@ -386,6 +423,11 @@ fn rerun_shader_pieces() {
         "hdr_agx.comp",
         "transmit.comp",
         "fxaa.comp",
+        "particles.comp",
+        "particles_touch_read.comp",
+        "particles.vert",
+        "particles.frag",
+        "particles_hdr.comp",
     ] {
         println!("cargo:rerun-if-changed=shaders/{piece}");
     }

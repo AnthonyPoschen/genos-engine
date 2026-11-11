@@ -83,11 +83,15 @@ use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, Vie
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
     DebugSettings, EventLoopSettings, Floor, FocusPolicy, FogCli, FogEnv, FogSettings,
-    FpsCounterSettings, Light, MenuSettings, ReflectionSettings, Scene, Sky, Vec3, PITCH_LIMIT,
+    FpsCounterSettings, Light, MenuSettings, ParticleCli, ParticleEnv, ParticlePreset,
+    ParticleSettings, ReflectionSettings, Scene, Sky, Vec3, PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
-use genos_stress::knobs::{apply_fog_knob, apply_lighting_knob, fog_knobs, lighting_knobs};
+use genos_stress::knobs::{
+    apply_fog_knob, apply_lighting_knob, apply_particle_knob, fog_knobs, lighting_knobs,
+    particle_knobs,
+};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
     button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
@@ -141,6 +145,12 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --fog-grid WxHxS       froxel columns, rows, and slices. 0 on an axis keeps
                          the preset (GENOS_FOG_GRID)
   --fog-samples N        cell budget. 0 dispatches the whole grid (GENOS_FOG_SAMPLES)
+  --fx-preset low|medium|high
+                         particle quality knobs (GENOS_FX_PRESET)
+  --fx-max N             particle buffer budget (GENOS_FX_MAX)
+  --fx-count N           live particle cap (GENOS_FX_COUNT)
+  --fx-freeze            hold positions; skip integrate and emit (GENOS_FX_FREEZE)
+  --fx-spawn X,Y,Z       place the stage-1 emitter and turn it on
   --lighting-direct-specular on|off
                          Appendix B shade on pixel direct (default off)
                          (GENOS_LIGHTING_DIRECT_SPECULAR; the argument wins)
@@ -368,6 +378,10 @@ struct Options {
     fog_cli: FogCli,
     /// Mirrors for the fog flags this launch left empty.
     fog_env: FogEnv,
+    /// `--fx-*`. Empty fields were omitted.
+    particle_cli: ParticleCli,
+    /// Mirrors for the particle flags this launch left empty.
+    particle_env: ParticleEnv,
 }
 
 /// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
@@ -412,7 +426,10 @@ fn run() -> Result<i32, String> {
     )?;
     app.fog_cli = opts.fog_cli.clone();
     app.fog_env = opts.fog_env;
+    app.particle_cli = opts.particle_cli.clone();
+    app.particle_env = opts.particle_env;
     app.overlay_fog();
+    app.overlay_particles();
     if opts.check {
         check_all(&mut app, &opts, &mut log)?;
         return Ok(0);
@@ -551,9 +568,14 @@ fn run() -> Result<i32, String> {
             }
         }
         app.overlay_fog();
+        app.overlay_particles();
         if frame.closing {
             let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
             return Ok(code);
+        }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -561,9 +583,7 @@ fn run() -> Result<i32, String> {
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         pull_menu(
             &mut app,
@@ -740,6 +760,7 @@ fn run() -> Result<i32, String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        renderer.set_particle_dt(dt);
         let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
@@ -835,8 +856,11 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         }
         let mut spins = 0u32;
         while app.loading() {
-            let _ = window.pump();
-            let _ = renderer.draw(&load_world, &camera, false);
+            let frame = window.pump();
+            if !frame.minimized {
+                renderer.set_particle_dt(STEP);
+                let _ = renderer.draw(&load_world, &camera, false);
+            }
             if let Err(err) = app.take_load() {
                 if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
                     let line = skip_line(name, &err);
@@ -866,6 +890,7 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
             let _ = window.pump();
             app.advance(STEP);
             let read = frame == 3;
+            renderer.set_particle_dt(STEP);
             pixels = renderer.draw(app.world(), &camera, read)?;
             checked_frames += 1;
         }
@@ -948,6 +973,10 @@ struct App {
     fog_cli: FogCli,
     /// Mirrors for the fog arguments this launch left empty.
     fog_env: FogEnv,
+    /// Launch particle arguments. Reapplied over each loaded scene.
+    particle_cli: ParticleCli,
+    /// Mirrors for the particle arguments this launch left empty.
+    particle_env: ParticleEnv,
 }
 
 enum Show {
@@ -971,6 +1000,8 @@ impl App {
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
             fog_env: FogEnv::default(),
+            particle_cli: ParticleCli::default(),
+            particle_env: ParticleEnv::default(),
         })
     }
 
@@ -981,6 +1012,15 @@ impl App {
         let env = self.fog_env;
         let scene = self.scene();
         scene.fog = scene.fog.resolve(&cli, &env);
+    }
+
+    /// Arguments win. An omitted argument keeps the scene value, or the mirror
+    /// when that variable was set.
+    fn overlay_particles(&mut self) {
+        let cli = self.particle_cli.clone();
+        let env = self.particle_env;
+        let scene = self.scene();
+        scene.particles = scene.particles.resolve(&cli, &env);
     }
 
     fn entry(&self) -> &Entry {
@@ -1075,6 +1115,7 @@ impl App {
         genos_window::retire(old);
         adopt_show(&mut self.show);
         self.overlay_fog();
+        self.overlay_particles();
         self.note(&format!("loaded {name}"));
     }
 }
@@ -1111,6 +1152,7 @@ impl Host for App {
             Show::Still(world) => {
                 let mut knobs = lighting_knobs(&world.scene.lighting);
                 knobs.extend(fog_knobs(&world.scene.fog));
+                knobs.extend(particle_knobs(&world.scene.particles));
                 knobs
             }
         }
@@ -1120,7 +1162,8 @@ impl Host for App {
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
-                if apply_fog_knob(&mut world.scene.fog, name, value)?
+                if apply_particle_knob(&mut world.scene.particles, name, value)?
+                    || apply_fog_knob(&mut world.scene.fog, name, value)?
                     || apply_lighting_knob(&mut world.scene.lighting, name, value)?
                 {
                     Ok(())
@@ -1156,6 +1199,7 @@ impl Host for App {
         self.scene().event_loop = event_loop;
         adopt_show(&mut self.show);
         self.overlay_fog();
+        self.overlay_particles();
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -1215,6 +1259,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1302,6 +1347,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 reflections: ReflectionSettings::default(),
                 hdr: genos_scene::HdrSettings::legacy_bytes(),
                 fog: FogSettings::default(),
+                particles: ParticleSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -2707,6 +2753,7 @@ fn options() -> Result<Options, String> {
     let mut block_ms = None;
     let mut close_early = false;
     let mut fog_cli = FogCli::default();
+    let mut particle_cli = ParticleCli::default();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
@@ -2795,6 +2842,9 @@ fn options() -> Result<Options, String> {
             | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid" | "--fog-samples" => {
                 take_fog(&mut fog_cli, &arg, &mut args)?;
             }
+            "--fx-preset" | "--fx-max" | "--fx-count" | "--fx-freeze" | "--fx-spawn" => {
+                take_particles(&mut particle_cli, &arg, &mut args)?;
+            }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
                     let parsed = parse_vec3(flag, value)?;
@@ -2827,6 +2877,8 @@ fn options() -> Result<Options, String> {
                     genos_render::check_gi_metrics_arg(other, next.as_deref())?;
                 } else if genos_scene::fog_flag_needs_value(other).is_some() {
                     take_fog(&mut fog_cli, other, &mut args)?;
+                } else if genos_scene::particle_flag_needs_value(other).is_some() {
+                    take_particles(&mut particle_cli, other, &mut args)?;
                 } else if genos_render::gpu_times_flag_needs_value(other).is_some() {
                     let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -2890,6 +2942,8 @@ fn options() -> Result<Options, String> {
         close_early: genos_window::close_early_mirror(close_early),
         fog_cli: fog_cli.clone(),
         fog_env: fog_env_from_process(&fog_cli)?,
+        particle_cli: particle_cli.clone(),
+        particle_env: particle_env_from_process(&particle_cli)?,
     })
 }
 
@@ -2901,6 +2955,38 @@ fn take_fog(
     let needs = genos_scene::fog_flag_needs_value(arg).unwrap_or(false);
     let next = needs.then(|| need_arg(args, arg)).transpose()?;
     genos_scene::apply_fog_arg(cli, arg, next.as_deref())
+}
+
+fn take_particles(
+    cli: &mut ParticleCli,
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let needs = genos_scene::particle_flag_needs_value(arg).unwrap_or(false);
+    let next = needs.then(|| need_arg(args, arg)).transpose()?;
+    genos_scene::apply_particle_arg(cli, arg, next.as_deref())
+}
+
+fn particle_env_from_process(cli: &ParticleCli) -> Result<ParticleEnv, String> {
+    Ok(ParticleEnv {
+        preset: mirror_preset(cli.preset.is_some())?,
+        max_particles: mirror_count(cli.max_particles.is_some(), "GENOS_FX_MAX", "max_particles")?,
+        count: mirror_count(cli.count.is_some(), "GENOS_FX_COUNT", "count")?,
+        freeze: mirror_switch(cli.freeze.is_some(), "GENOS_FX_FREEZE")?,
+    })
+}
+
+fn mirror_preset(argument_set: bool) -> Result<Option<ParticlePreset>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var("GENOS_FX_PRESET") {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => ParticlePreset::parse(value.trim())
+            .map(Some)
+            .ok_or_else(|| format!("GENOS_FX_PRESET is low, medium, or high, got {value}")),
+    }
 }
 
 fn fog_env_from_process(cli: &FogCli) -> Result<FogEnv, String> {
@@ -3056,6 +3142,8 @@ mod tests {
             close_early: false,
             fog_cli: genos_scene::FogCli::default(),
             fog_env: genos_scene::FogEnv::default(),
+            particle_cli: genos_scene::ParticleCli::default(),
+            particle_env: genos_scene::ParticleEnv::default(),
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();

@@ -278,6 +278,24 @@ pub fn look_direction(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(sy * cp, sp, -cy * cp)
 }
 
+/// Eye position, view direction, and view-capsule velocity.
+///
+/// The frame copies these three into the audio listener. This crate does not
+/// name that listener.
+#[must_use]
+pub fn listener_state(camera: &Camera) -> (Vec3, Vec3, Vec3) {
+    let velocity = camera
+        .physics
+        .bodies
+        .get(camera.view)
+        .map_or(Vec3::ZERO, |body| body.velocity);
+    (
+        camera.position,
+        look_direction(camera.yaw, camera.pitch),
+        velocity,
+    )
+}
+
 /// Vertical distance from a solid's scene position to its collider center.
 fn center_lift(solid: &Solid) -> f32 {
     match solid.shape {

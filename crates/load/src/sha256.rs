@@ -186,9 +186,14 @@ impl Sha256 {
     }
 }
 
+/// Content hash of an imported asset. 32 bytes, SHA-256 (FIPS 180-4).
+pub type AssetId = [u8; 32];
+
 /// SHA-256 of one byte string.
+///
+/// The 32 bytes are an [`AssetId`].
 #[must_use]
-pub fn sha256(data: &[u8]) -> [u8; 32] {
+pub fn sha256(data: &[u8]) -> AssetId {
     let mut h = Sha256::new();
     h.update(data);
     h.finish()

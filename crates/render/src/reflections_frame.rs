@@ -1981,6 +1981,12 @@ impl Gpu {
             preserve_count: 0,
             preserve: std::ptr::null(),
         };
+        // The composite pass begins on the scene framebuffer, so the
+        // attachments stay compatible with `Gpu::make_render_pass`
+        // (VUID-VkRenderPassBeginInfo-renderPass-00904). Compatibility is
+        // formats, samples, and layouts. These masks are the reflection
+        // helpers: they wait on the fragment-shader sample of the lit color,
+        // which the scene pass's transfer masks do not name.
         let into = pass_sync::reflect_pass_in();
         let out = pass_sync::reflect_pass_out();
         let deps = [

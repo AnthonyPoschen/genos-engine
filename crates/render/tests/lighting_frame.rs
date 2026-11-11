@@ -175,6 +175,7 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             reflections: genos_scene::ReflectionSettings::default(),
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             fog: genos_scene::FogSettings::default(),
+            particles: genos_scene::ParticleSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         });
         let mut lit = gltf.clone();
@@ -1257,6 +1258,7 @@ fn shadow_floor_world() -> World {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
@@ -1503,6 +1505,7 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1864,6 +1867,7 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     });
     world
@@ -1926,6 +1930,7 @@ fn white_lamps(n: usize) -> World {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     })
 }

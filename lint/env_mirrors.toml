@@ -18,6 +18,21 @@ kind = "mirror"
 detail = "--fps-hz"
 
 [[var]]
+name = "GENOS_JOBS_WORKERS"
+kind = "mirror"
+detail = "--jobs-workers"
+
+[[var]]
+name = "GENOS_JOBS_ORDER"
+kind = "mirror"
+detail = "--jobs-order"
+
+[[var]]
+name = "GENOS_JOBS_BUDGET_MS"
+kind = "mirror"
+detail = "--jobs-budget-ms"
+
+[[var]]
 name = "GENOS_MENU"
 kind = "mirror"
 detail = "--menu"
@@ -255,7 +270,7 @@ detail = "harness only"
 [[var]]
 name = "GENOS_KNOCKOUT"
 kind = "test"
-detail = "harness only: cargo test --features knockout lists the guard to remove"
+detail = "harness only"
 
 [[var]]
 name = "OCC_DUMP"
@@ -1361,6 +1376,36 @@ kind = "mirror"
 detail = "--fog-samples"
 
 [[var]]
+name = "GENOS_FX_PRESET"
+kind = "mirror"
+detail = "--fx-preset"
+
+[[var]]
+name = "GENOS_FX_MAX"
+kind = "mirror"
+detail = "--fx-max"
+
+[[var]]
+name = "GENOS_FX_COUNT"
+kind = "mirror"
+detail = "--fx-count"
+
+[[var]]
+name = "GENOS_FX_FREEZE"
+kind = "mirror"
+detail = "--fx-freeze"
+
+[[var]]
+name = "GENOS_FX_SYNC_CHILD"
+kind = "test"
+detail = "particles_gpu overlap child: clean, skip, or reflect"
+
+[[var]]
+name = "GENOS_FX_SYNC_SKIP"
+kind = "test"
+detail = "non-empty reason to skip the particle sync test when the validation layer cannot run"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"
@@ -1562,6 +1607,11 @@ kind = "mirror"
 detail = "--lifecycle-close-early"
 
 [[var]]
+name = "GENOS_LIFECYCLE_FULL_DESTROY"
+kind = "mirror"
+detail = "--lifecycle-full-destroy"
+
+[[var]]
 name = "GENOS_PBR_PARITY_DEVICE"
 kind = "test"
 detail = "harness only"
@@ -1572,9 +1622,9 @@ kind = "test"
 detail = "material_stream watchdog seconds"
 
 [[var]]
-name = "GENOS_RESTIR_OUT"
-kind = "mirror"
-detail = "--out"
+name = "GENOS_COMPOSE_MAINT"
+kind = "build"
+detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"
 
 [[var]]
 name = "GENOS_TEXEL_RO_DIR"

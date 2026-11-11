@@ -26,7 +26,8 @@ use genos_mcp::json::Value;
 use genos_render::{DebugView, MaterialStats, Renderer, SceneRead, ScreenRect, ViewMode};
 use genos_scene::{
     Camera, DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings, Light,
-    LightingPreset, LightingSettings, MenuSettings, OutputMode, ReflectionSettings, Scene, Vec3,
+    LightingPreset, LightingSettings, MenuSettings, OutputMode, ParticleSettings, ReflectionSettings,
+    Scene, Vec3,
     PITCH_LIMIT,
 };
 
@@ -1634,6 +1635,51 @@ impl Tools {
                 let settings = ctx.host.scene().hdr.effective()?;
                 reply(hdr_value(&settings, ctx.renderer))
             }
+            "get_particle_settings" => reply(particle_settings_value(&ctx.host.scene().particles)),
+            "set_particle_settings" => {
+                apply_particle_update(&mut ctx.host.scene().particles, args.0)?;
+                reply(particle_settings_value(&ctx.host.scene().particles))
+            }
+            "get_particle_stats" | "fx.stats" | "fx_stats" => {
+                reply(particle_stats_value(&ctx.host.scene().particles, ctx.renderer))
+            }
+            "fx.set" | "fx_set" => {
+                let param = args
+                    .str("param")?
+                    .ok_or_else(|| "fx.set needs param".to_string())?;
+                let value = args
+                    .str("value")?
+                    .ok_or_else(|| "fx.set needs value".to_string())?;
+                ctx.host.scene().particles.set_key(&param, &value)?;
+                reply(particle_settings_value(&ctx.host.scene().particles))
+            }
+            "fx.list" | "fx_list" => reply(obj(vec![(
+                "emitters",
+                list(vec![text("stage1")]),
+            )])),
+            "fx.spawn" | "fx_spawn" => {
+                let x = args
+                    .f64("x")?
+                    .ok_or_else(|| "fx.spawn needs x".to_string())?;
+                let y = args
+                    .f64("y")?
+                    .ok_or_else(|| "fx.spawn needs y".to_string())?;
+                let z = args
+                    .f64("z")?
+                    .ok_or_else(|| "fx.spawn needs z".to_string())?;
+                let particles = &mut ctx.host.scene().particles;
+                particles.set_key("origin", &format!("{x} {y} {z}"))?;
+                particles.set_key("enabled", "on")?;
+                if let Some(count) = args.f64("count")? {
+                    if count < 0.0 || count > f64::from(u32::MAX) || count.fract() != 0.0 {
+                        return Err("fx.spawn count is a whole number".into());
+                    }
+                    particles.set_key("count", &format!("{count:.0}"))?;
+                } else if particles.count == 0 {
+                    particles.set_key("count", &genos_scene::SPAWN_COUNT.to_string())?;
+                }
+                reply(particle_settings_value(particles))
+            }
             "get_fog_settings" => reply(fog_settings_value(&ctx.host.scene().fog)),
             "set_fog_settings" => {
                 apply_fog_update(&mut ctx.host.scene().fog, args.0)?;
@@ -2677,6 +2723,61 @@ fn fog_value_text(value: &Value) -> Result<String, String> {
         return Ok(format!("{n:?}"));
     }
     Err("a fog value is a string, number, or bool".into())
+}
+
+fn particle_settings_value(settings: &ParticleSettings) -> Value {
+    obj(vec![("text", text(settings.to_text()))])
+}
+
+fn apply_particle_update(settings: &mut ParticleSettings, args: &Value) -> Result<(), String> {
+    let Value::Object(pairs) = args else {
+        return Err("particle settings are an object".into());
+    };
+    if let Some(body) = args.get("text").and_then(|v| v.as_str()) {
+        for line in body.split(['\n', ';']) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = line.split_once('=') else {
+                return Err(format!("particle line needs key=value, got {line}"));
+            };
+            settings.set_key(key, value)?;
+        }
+    }
+    for (key, value) in pairs {
+        if key == "text" {
+            continue;
+        }
+        settings.set_key(key, &fog_value_text(value)?)?;
+    }
+    Ok(())
+}
+
+fn particle_stats_value(settings: &ParticleSettings, renderer: &Renderer) -> Value {
+    let stats = renderer.particle_stats();
+    obj(vec![
+        ("text", text(settings.to_text())),
+        ("line", text(stats.line())),
+        ("fx.sim_ms", num(stats.sim_ms)),
+        ("fx.sim_init_ms", num(stats.sim_init_ms)),
+        ("fx.sim_death_ms", num(stats.sim_death_ms)),
+        ("fx.sim_emit_ms", num(stats.sim_emit_ms)),
+        ("fx.sim_compact_ms", num(stats.sim_compact_ms)),
+        ("fx.sort_ms", num(stats.sort_ms)),
+        ("fx.draw_ms", num(stats.draw_ms)),
+        ("fx.alive", num(f64::from(stats.alive))),
+        ("fx.spawned", num(f64::from(stats.spawned))),
+        ("fx.overdraw_px", num(f64::from(stats.overdraw_px))),
+        ("fx.vram_mb", num(stats.vram_mb)),
+        ("max_particles", num(f64::from(stats.max_particles))),
+        ("count", num(f64::from(stats.count))),
+        ("draw_instances", num(f64::from(stats.draw_instances))),
+        (
+            "sim_ms_label",
+            text("lavapipe timestamp of the last compute step, or 0 before a frame. Not a desktop-GPU score. sort_ms and overdraw_px stay 0."),
+        ),
+    ])
 }
 
 fn fog_stats_value(scene: &Scene, renderer: &Renderer) -> Value {

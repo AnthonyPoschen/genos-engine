@@ -1,4 +1,4 @@
-//! Named production guards for picture gates.
+//! Named production guards for lighting and render picture gates.
 //!
 //! A shipping build never enables the `knockout` feature, so [`guard`] is
 //! always true. Tests that prove a gate grades the production behaviour run
@@ -12,6 +12,12 @@
 /// lavapipe. The freeze bit stops the value write, so the probe mix stays.
 /// There is no tile-fill pass yet.
 pub const CACHE_FILL: &str = "cache_fill";
+
+/// Include direct lamp and sun light in the presented compose.
+pub const DIRECT_IN_COMPOSE: &str = "direct_in_compose";
+
+/// Include bounce (indirect) light in the presented compose.
+pub const BOUNCE_IN_COMPOSE: &str = "bounce_in_compose";
 
 /// True when the named production guard is in force.
 #[must_use]
@@ -56,6 +62,8 @@ mod tests {
     #[test]
     fn a_named_guard_stays_on_in_the_shipping_build() {
         assert!(super::guard(super::CACHE_FILL));
+        assert!(super::guard(super::DIRECT_IN_COMPOSE));
+        assert!(super::guard(super::BOUNCE_IN_COMPOSE));
         assert!(super::guard("unknown_guard"));
     }
 }

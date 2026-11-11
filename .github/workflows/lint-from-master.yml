@@ -1,0 +1,92 @@
+name: lint-from-master
+
+# A repository ruleset should require this workflow from refs/heads/master
+# for every pull request, including ones whose base is a stacked feature
+# branch. GitHub then uses this YAML from master, not from the PR head.
+#
+# Ruleset limits (docs.github.com, "Troubleshooting ruleset workflows"):
+# - Only pull_request, pull_request_target, and merge_group are honoured.
+# - Path, branch, and type filters on those events are ignored. The
+#   workflow always runs on opened, synchronize, and reopened (and
+#   merge_group checks_requested).
+# - The workflow does not run on events triggered by GITHUB_TOKEN.
+# - A ruleset added while a PR is already open does not run until that
+#   PR is pushed to, updated, or reopened.
+#
+# Security: no secrets, no house runners, contents: read, and checkout of
+# the untrusted head SHA with persist-credentials: false. Install steps
+# are inlined here so a stale PR tree cannot skip the semgrep venv or apt
+# retries (the 10 Nov PEP 668 failure). lint.sh still comes from the PR.
+#
+# The job name is lint-from-master, not lint, so it does not collide with
+# the existing required check on master. Do not switch branch protection
+# over to this name until this job has been green on at least one PR, and
+# do not remove the old lint check until then.
+#
+# The apply payload is docs/ci/ruleset-lint-from-master.json. Do not
+# activate the ruleset until this file is on master. It targets only the
+# default branch and lighting-v3, never ~ALL: GitHub documents that a
+# workflows rule blocks direct pushes to the branches it targets, so it
+# must not cover feature branches that agents push to.
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-from-master:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: shader and Wayland tools
+        run: |
+          # Inlined from scripts/ci-apt.sh. The workflow file comes from
+          # master; the checked-out tree is the PR and may not have that script.
+          set -euo pipefail
+          packages=(
+            glslc glslang-tools wayland-protocols libwayland-dev
+            libxkbcommon-dev libvulkan-dev pkg-config build-essential
+            python3-pip python3-venv
+          )
+          for attempt in 1 2 3 4 5; do
+            if sudo apt-get update -o Acquire::Retries=5 \
+              && sudo apt-get install -y -o Acquire::Retries=5 "${packages[@]}"; then
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "apt failed after 5 attempts" >&2
+              exit 1
+            fi
+            echo "apt attempt ${attempt} failed" >&2
+            sleep $((attempt * 5))
+          done
+      - name: cargo-deny 0.20.2
+        run: |
+          curl -fsSL -o /tmp/cargo-deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          tar -xzf /tmp/cargo-deny.tgz -C /tmp
+          sudo install -m 755 /tmp/cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny /usr/local/bin/cargo-deny
+      - name: semgrep 1.184.0
+        run: |
+          # A venv, not the system pip: Ubuntu 24.04 rejects pip install (PEP 668).
+          python3 -m venv "${RUNNER_TEMP}/semgrep"
+          "${RUNNER_TEMP}/semgrep/bin/pip" install --disable-pip-version-check 'semgrep==1.184.0'
+          echo "${RUNNER_TEMP}/semgrep/bin" >> "$GITHUB_PATH"
+      - name: lint
+        run: |
+          if [ ! -x ./scripts/lint.sh ]; then
+            echo "lint-from-master: ./scripts/lint.sh is missing on this head" >&2
+            exit 1
+          fi
+          ./scripts/lint.sh
