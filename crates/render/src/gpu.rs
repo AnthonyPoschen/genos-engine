@@ -9166,9 +9166,9 @@ impl Gpu {
             }
             self.flight_live[slot] = false;
         }
-        // After the swapchain: a present may still be finishing, and
-        // vkDestroySwapchainKHR is what waits for it. The semaphore goes after.
-        self.destroy_present_sems();
+        // The present semaphore stays until after vkDestroySwapchainKHR.
+        // Destroying it here makes that call wait for a present that cannot
+        // finish, which is the teardown hang on a slow last frame.
     }
 
     /// Presentation images. The seat is dispatched around this call: the
@@ -9181,6 +9181,7 @@ impl Gpu {
         if self.device.is_null() || self.swapchain.is_null() {
             self.swapchain = std::ptr::null_mut();
             self.swap_images.clear();
+            self.destroy_present_sems();
             return;
         }
         let swapchain = self.swapchain;
@@ -9189,6 +9190,7 @@ impl Gpu {
             (self.fns.destroy_swapchain)(self.device, swapchain, std::ptr::null());
         }
         self.swap_images.clear();
+        self.destroy_present_sems();
     }
 
     fn destroy_image(&self, image: &mut Image) {
