@@ -323,6 +323,11 @@ kind = "mirror"
 detail = "--lighting-cache-picks (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_CAP_FILL"
+kind = "mirror"
+detail = "--lighting-cap-fill (stress), LightingSettings key cap_fill; MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_CATCH_UP"
 kind = "todo"
 detail = "no CLI argument yet"
@@ -331,6 +336,11 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_COMPOSE_REUSE"
 kind = "todo"
 detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_COVERAGE_FIRST"
+kind = "mirror"
+detail = "--lighting-coverage-first (stress), LightingSettings key coverage_first; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_DAWN_COLOR"
