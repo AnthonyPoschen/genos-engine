@@ -124,6 +124,26 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("lighting_fill_real"),
         "an infinite check luma must not be stored or raise lambda"
     );
+    assert!(
+        fill.contains("lighting_fill_share("),
+        "an in-tile sample must reach the share pass"
+    );
+    assert!(
+        fill.contains("lighting_sc_set_seed"),
+        "a shared sample must enter as a seed"
+    );
+    assert!(
+        !fill.contains("shared_count"),
+        "F4 must not add a shared_count field"
+    );
+    assert!(
+        fill.contains("lighting_fill_u(22)"),
+        "fill_share must be read"
+    );
+    assert!(
+        fill.contains("lighting_fill_f(23)"),
+        "a near hit must read fill_share_min_hit"
+    );
     let pick = source("lighting_lamp_pick.glsl");
     assert!(
         pick.contains("lighting_fill_check_u"),

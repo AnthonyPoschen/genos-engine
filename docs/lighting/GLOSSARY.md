@@ -451,7 +451,7 @@ Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/l
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
-**Shared sample**: a hit reconnected to a neighbour cell with the Jacobian weight. It never increments `own_count`.
+**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed` at low confidence. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample.
 Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
 
 **Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.

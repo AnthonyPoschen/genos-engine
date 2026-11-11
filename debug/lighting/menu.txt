@@ -61,6 +61,15 @@ GI | world | World cache | closed | lighting_fill_lambda_decay
 GI | world | World cache | closed | lighting_fill_window_floor
 GI | world | World cache | closed | lighting_fill_catchup_max
 GI | world | World cache | closed | lighting_fill_check_sigma
+GI | world | World cache | closed | lighting_fill_share
+GI | world | World cache | closed | lighting_fill_share_min_hit
+GI | world | World cache | closed | lighting_fill_share_cap
+GI | world | World cache | closed | lighting_fill_share_plane
+GI | world | World cache | closed | lighting_fill_share_normal
+GI | world | World cache | closed | lighting_fill_share_w_cap
+GI | world | World cache | closed | lighting_fill_share_cos
+GI | world | World cache | closed | lighting_fill_share_conf
+GI | world | World cache | closed | lighting_fill_share_receivers
 GI | world | World cache | closed | lighting_screen_verify
 GI | world | World cache | closed | lighting_world_verify
 Denoise | - | - | open | lighting_denoise_iters

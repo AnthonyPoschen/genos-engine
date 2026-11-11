@@ -1,13 +1,17 @@
-// Stages F2 and F3. The world cache is the only store. A cache round spends
+// Stages F2, F3, and F4a. The world cache is the only store. A cache round spends
 // fill_budget single rays. F3 water-fills them by priority and spends part of
-// the budget on one same-seed check ray per fill_check_rate block. The radii,
-// the weight, and the fold match crates/fill-ref/src/sched.rs.
+// the budget on one same-seed check ray per fill_check_rate block. F4a writes a
+// low-confidence seed into other cells of the same screen tile. The seed is not
+// an own sample and it does not add a ray. Ring sharing is not this stage.
+// The radii, the weight, the fold, and the share gates match crates/fill-ref.
 //
 // Param words, after the per-pixel seed payload:
 // 0 budget, 1 tile, 2 lod_near, 3 leash, 4 look_ahead, 5 cell_max, 6 far,
 // 7 far_share, 8 offscreen_floor, 9 error_target, 10 prox_min, 11 change_weight,
 // 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell, 16 check_rate,
-// 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma.
+// 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma,
+// 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
+// 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers.
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -37,8 +41,12 @@ const float FILL_CHANGE_SCALE = 1.0e6;
 const float FILL_BUCKET_BIAS = 16.0;
 const float FILL_BUCKET_SPAN = 18.0;
 const float FILL_BUCKET_STEPS = 62.0;
+const float FILL_T_EPS = 1.0e-3;
+const float FILL_Q10 = 1023.0;
+const float FILL_SHARE_COS0 = 0.05;
+const vec3 FILL_MSME = vec3(0.299, 0.587, 0.114);
 
-const uint LIGHTING_FILL_PARAMS = 22u;
+const uint LIGHTING_FILL_PARAMS = 31u;
 const uint LIGHTING_FILL_TILE_CAP = 262144u;
 const uint LIGHTING_FILL_TILE_AT = 2u * LIGHTING_CACHE_SLOTS - LIGHTING_FILL_TILE_CAP;
 const uint LIGHTING_FILL_PICK_AT = LIGHTING_CACHE_SLOTS + 1u;
@@ -783,6 +791,247 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     atomicAdd(gstats.relit, 1u);
 }
 
+// Newest lamp-change frame that still reaches p, or 0. Same reach test as
+// lighting_lamp_delta. A share whose frame is not after this stamp stays home.
+uint lighting_fill_stamp(vec3 p, uint updated) {
+    uint stamp = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        stamp = max(stamp, f);
+    }
+    return stamp;
+}
+
+float lighting_fill_view_depth(vec3 p) {
+    return max(dot(p - scene.eye.xyz, scene.view_forward.xyz), FILL_T_EPS);
+}
+
+float lighting_fill_share_cos(float v) {
+    float floor_c = lighting_fill_f(28);
+    if (!(floor_c > 0.0)) {
+        floor_c = FILL_SHARE_COS0;
+    }
+    return v <= floor_c ? floor_c : v;
+}
+
+// Reconnection weight, crates/fill-ref/src/share.rs jacobian. 0 rejects it.
+float lighting_fill_share_jacobian(vec3 origin, vec3 n_o, vec3 hit, vec3 n_h, float t, vec3 recv, vec3 n_j) {
+    vec3 to_o = hit - origin;
+    vec3 to_j = hit - recv;
+    float len_o = length(to_o);
+    float len_j = length(to_j);
+    if (len_o <= FILL_EPS || len_j <= FILL_EPS) {
+        return 0.0;
+    }
+    vec3 dir_o = to_o / len_o;
+    vec3 dir_j = to_j / len_j;
+    float cos_theta_o = lighting_fill_share_cos(dot(n_o, dir_o));
+    float cos_theta_j = lighting_fill_share_cos(dot(n_j, dir_j));
+    float cos_phi_o = lighting_fill_share_cos(dot(n_h, -dir_o));
+    float cos_phi_j = lighting_fill_share_cos(dot(n_h, -dir_j));
+    float t_hit = max(t, FILL_T_EPS);
+    float t2 = t_hit * t_hit;
+    float d2 = len_j * len_j;
+    return (cos_theta_j / cos_theta_o) * ((cos_phi_j / d2) / (cos_phi_o / t2));
+}
+
+// All five gates. A miss returns 0. The weight is already clamped.
+float lighting_fill_share_accept(uint origin_slot, uint recv, vec3 origin_p, vec3 n_o, vec3 hit, vec3 n_h, float t, vec3 recv_p, vec3 n_j) {
+    if (recv == ~0u || recv == origin_slot || recv >= LIGHTING_CACHE_SLOTS || ckeys.key[recv] == 0u) {
+        return 0.0;
+    }
+    float gap = abs(dot(n_o, recv_p - origin_p));
+    float depth = max(lighting_fill_view_depth(origin_p), lighting_fill_view_depth(recv_p));
+    if (gap >= lighting_fill_f(25) * depth) {
+        return 0.0;
+    }
+    if (dot(n_o, n_j) < lighting_fill_f(26)) {
+        return 0.0;
+    }
+    if (lighting_axis(n_o) != lighting_axis(n_j)) {
+        return 0.0;
+    }
+    if (t < lighting_fill_f(23)) {
+        return 0.0;
+    }
+    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
+    float own_cap = float(max(lighting_fill_u(24), 1u));
+    float scale = max(0.0, 1.0 - rays / own_cap);
+    if (!(scale > 0.0)) {
+        return 0.0;
+    }
+    uint updated = floatBitsToUint(cache.v[3u * recv].w);
+    uint stamp = lighting_fill_stamp(recv_p, updated);
+    if (stamp != 0u && lighting_frame() <= stamp) {
+        return 0.0;
+    }
+    float w = lighting_fill_share_jacobian(origin_p, n_o, hit, n_h, t, recv_p, n_j) * scale;
+    w = min(w, lighting_fill_f(27));
+    if (!(w > 0.0) || w > FILL_REAL_CAP) {
+        return 0.0;
+    }
+    return w;
+}
+
+// Higher weight wins. The same weight keeps the lower ray. Matches share_claim.
+uint lighting_fill_share_claim(float w, uint ray) {
+    float cap = lighting_fill_f(27);
+    if (!(cap > 0.0)) {
+        cap = 1.0;
+    }
+    uint q = uint(clamp(w / cap, 0.0, 1.0) * FILL_Q10);
+    uint pack = (q << 22u) | ((~ray) & 0x3FFFFFu);
+    return pack == 0u ? 1u : pack;
+}
+
+vec3 lighting_fill_share_rgb(uint recv, vec3 contrib) {
+    vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * recv];
+    float mean_l = dot(max(a.rgb, vec3(0.0)), FILL_MSME);
+    float dev = sqrt(max(a.w, 0.0));
+    float cap = FILL_FIRE_FLOOR + mean_l + lighting_sc_firefly_sigma() * dev;
+    float luma = dot(max(contrib, vec3(0.0)), FILL_MSME);
+    if (luma > cap && luma > 0.0) {
+        contrib *= cap / luma;
+    }
+    return max(contrib, vec3(0.0));
+}
+
+// phase 0 clears the receiver lock, phase 1 elects, phase 2 writes the seed.
+// The three passes recompute the same tile, so the winner does not need a store.
+void lighting_fill_share_pass(uint gid, uint phase) {
+    uint budget = lighting_fill_u(0);
+    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
+    uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
+    uint placed = min(checks + on, budget);
+    uint tile = max(lighting_fill_u(1), 1u);
+    uint cap_n = min(lighting_fill_u(30), 8u);
+    for (uint r = gid; r < budget; r += 64u) {
+        if (r < checks || r >= placed) {
+            continue;
+        }
+        uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
+        if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+            continue;
+        }
+        vec3 origin_p;
+        vec3 n_o;
+        if (!lighting_sc_texel_world(slot, origin_p, n_o)) {
+            continue;
+        }
+        uint px;
+        uint py;
+        if (!lighting_fill_pixel(origin_p, px, py)) {
+            continue;
+        }
+        uint work_ray = lighting_probe_rays() + r;
+        vec4 rad = work.v[lighting_rad_at(work_ray)];
+        if (lighting_ray_none(rad)) {
+            continue;
+        }
+        float t = uintBitsToFloat(ckeys.key[lighting_fill_hit_at() + r * 2u]);
+        if (!(t > 0.0)) {
+            continue;
+        }
+        vec3 dir = vec3(0.0, 1.0, 0.0);
+        vec3 ray_o;
+        vec3 ray_n;
+        if (!lighting_fill_ray(work_ray, ray_o, dir, ray_n)) {
+            continue;
+        }
+        vec3 n_h = lighting_unpack_normal(ckeys.key[lighting_fill_hit_at() + r * 2u + 1u]);
+        vec3 hit = ray_o + dir * t;
+        vec3 lk = lighting_ray_light(rad);
+        vec3 irr = lk * max(dot(dir, n_o), 0.0) * LIGHTING_TAU;
+        float size = cache.v[3u * slot + 1u].w;
+        uint x0 = (px / tile) * tile;
+        uint y0 = (py / tile) * tile;
+        uint x1 = min(x0 + tile, pc.dims.x);
+        uint y1 = min(y0 + tile, pc.dims.y);
+        uint nfound = 0u;
+        uint found[8];
+        float found_w[8];
+        for (uint s = 0u; s < 8u; s++) {
+            found[s] = 0u;
+            found_w[s] = 0.0;
+        }
+        bool stop = false;
+        [[dont_unroll]] for (uint y = y0; y < y1 && !stop; y++) {
+            [[dont_unroll]] for (uint x = x0; x < x1 && !stop; x++) {
+                vec3 recv_p;
+                vec3 n_j;
+                vec3 albedo;
+                bool two_sided;
+                if (!lighting_surface(uvec2(x, y), recv_p, n_j, albedo, two_sided)) {
+                    continue;
+                }
+                uint recv = lighting_cache_find_sized(recv_p, n_j, false, size, recv_p);
+                float w = lighting_fill_share_accept(slot, recv, origin_p, n_o, hit, n_h, t, recv_p, n_j);
+                if (!(w > 0.0)) {
+                    continue;
+                }
+                bool seen = false;
+                for (uint s = 0u; s < 8u; s++) {
+                    if (s < nfound && found[s] == recv) {
+                        seen = true;
+                    }
+                }
+                if (seen || nfound >= cap_n) {
+                    stop = nfound >= cap_n;
+                    continue;
+                }
+                found[nfound] = recv;
+                found_w[nfound] = w;
+                nfound++;
+            }
+        }
+        for (uint s = 0u; s < 8u; s++) {
+            if (s >= nfound) {
+                break;
+            }
+            uint lock = lighting_fill_lock_at() + found[s];
+            uint word = lighting_fill_share_claim(found_w[s], r);
+            if (phase == 0u) {
+                atomicExchange(ckeys.key[lock], 0u);
+            } else if (phase == 1u) {
+                atomicMax(ckeys.key[lock], word);
+            } else if (ckeys.key[lock] == word) {
+                vec3 rgb = lighting_fill_share_rgb(found[s], irr * found_w[s]);
+                if (dot(rgb, FILL_MSME) > 0.0) {
+                    lighting_sc_set_seed(found[s], rgb, lighting_fill_f(29), clamp(rad.w, 0.0, 1.0));
+                }
+            }
+        }
+    }
+}
+
+// In-tile seeds. Off, or a frozen cache, writes nothing. Every thread takes the
+// same branch, so the barriers below stay inside the workgroup.
+void lighting_fill_share(uint gid) {
+    if (lighting_fill_u(22) != 1u) {
+        return;
+    }
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
+    lighting_fill_share_pass(gid, 0u);
+    memoryBarrierBuffer();
+    barrier();
+    lighting_fill_share_pass(gid, 1u);
+    memoryBarrierBuffer();
+    barrier();
+    lighting_fill_share_pass(gid, 2u);
+}
+
 // One slot, one writer. Every ray that landed is on the list, then the head
 // folds them with weight n / (rays + n). The hit distance is the stash trace
 // wrote; direct has already overwritten the hit slot with radiance.
@@ -908,4 +1157,7 @@ void lighting_fill_resolve(uint gid) {
         }
         lighting_fill_commit(slot, sum_e * inv, count, sum_lk * inv, sum_x * inv, sum_y * inv, sum_z * inv, saw_on, sum_sun * inv);
     }
+    memoryBarrierBuffer();
+    barrier();
+    lighting_fill_share(gid);
 }
