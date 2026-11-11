@@ -2754,7 +2754,15 @@ impl Gpu {
         // 16777216 and up turned every lower flag on instead).
         // S78S debug isolate toggles (lighting_toggles): direct only rides on
         // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
-        let toggles = lighting_toggles();
+        let mut toggles = lighting_toggles();
+        // Test-only. A shipping build's guard is always on, so this bit stays
+        // whatever GENOS_LIGHTING_TOGGLES asked for. The knockout feature with
+        // GENOS_KNOCKOUT=cache_fill freezes cache value writes. The dispatches
+        // stay: dropping them faults lavapipe. The presented frame then stays
+        // on the probe mix, which is what the picture gate reads.
+        if !crate::gate::guard(crate::gate::CACHE_FILL) {
+            toggles |= LIGHTING_TOGGLE_FREEZE_CACHE;
+        }
         // Bit 20 is the estimator. Bit 30 selects the older hold path.
         // `surface_cache.blend` forces both, so GENOS_LIGHTING_SC_FLAGS cannot
         // override them.
