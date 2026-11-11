@@ -1588,6 +1588,12 @@ fn bytes_are_lighting_experiment(bytes: &[u8]) -> bool {
         || rest == b"GI_DEBUG"
         || rest == b"COMPOSE_SC_WRITES"
         || rest == b"RESTIR_DI"
+        || rest == b"RESTIR_SPATIAL_NEIGHBORS"
+        || rest == b"RESTIR_SPATIAL_RADIUS"
+        || rest == b"RESTIR_RESOLUTION_SCALE"
+        || rest == b"RESTIR_CANDIDATES"
+        || rest == b"RESTIR_SPATIAL_CHECKERBOARD"
+        || rest == b"RESTIR_SPLIT_PASSES"
 }
 
 fn capture_drops_env(name: &[u8]) -> bool {
@@ -1602,7 +1608,9 @@ fn lighting_experiment_env(name: &str) -> bool {
 /// Parent bindings the capture child keeps. Lighting catalogue names are
 /// dropped, including deprecated `GENOS_GI2_*` aliases and `GENOS_GI_DEBUG`.
 /// `GENOS_COMPOSE_SC_WRITES` is dropped because the renderer reads it outside
-/// that catalogue and it changes surface-cache compose writes.
+/// that catalogue and it changes surface-cache compose writes. The ReSTIR
+/// catalogue mirrors (`GENOS_RESTIR_DI` and the six pass-cost keys) are
+/// dropped with it: a parent value would change the capture shade.
 /// `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` is then set to `1`.
 /// `sh_path` also sets the three ADR 0039 detail keys to `1`. Off leaves
 /// them unset so the preset default stays off.
@@ -2973,6 +2981,12 @@ mod tests {
             ("GENOS_GI_DEBUG", "1"),
             ("GENOS_COMPOSE_SC_WRITES", "1"),
             ("GENOS_RESTIR_DI", "1"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "9"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "9"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "9"),
+            ("GENOS_RESTIR_CANDIDATES", "9"),
+            ("GENOS_RESTIR_SPATIAL_CHECKERBOARD", "1"),
+            ("GENOS_RESTIR_SPLIT_PASSES", "1"),
             ("GENOS_REFERENCE_GPU", "1"),
             ("PATH", "/usr/bin"),
             ("GENOS_REFERENCE_THREADS", "8"),
@@ -2992,6 +3006,20 @@ mod tests {
             assert!(
                 child.iter().all(|(key, _)| key != name),
                 "{name} leaked when --sh-path is off"
+            );
+        }
+        for name in [
+            "GENOS_RESTIR_DI",
+            "GENOS_RESTIR_SPATIAL_NEIGHBORS",
+            "GENOS_RESTIR_SPATIAL_RADIUS",
+            "GENOS_RESTIR_RESOLUTION_SCALE",
+            "GENOS_RESTIR_CANDIDATES",
+            "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+            "GENOS_RESTIR_SPLIT_PASSES",
+        ] {
+            assert!(
+                child.iter().all(|(key, _)| key != name),
+                "{name} leaked into the capture child"
             );
         }
         let on = capture_child_env(&parent, true);
