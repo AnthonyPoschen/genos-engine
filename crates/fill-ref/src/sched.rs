@@ -311,6 +311,9 @@ pub fn check_due_index(index: u32, frame: u32, tun: &Tunables) -> bool {
 /// the 2018 ratio.
 #[must_use]
 pub fn measure_lambda(now: f32, then: f32, sigma: f32) -> f32 {
+    if !now.is_finite() || !then.is_finite() || !sigma.is_finite() {
+        return 0.0;
+    }
     let denom = now.abs().max(then.abs()).max(1.0e-4);
     let delta = ((now - then).abs() / denom).min(1.0);
     (delta - 2.0 * sigma.max(0.0)).clamp(0.0, 1.0)
@@ -319,11 +322,103 @@ pub fn measure_lambda(now: f32, then: f32, sigma: f32) -> f32 {
 /// A fresh measurement replaces lambda. A skipped check decays it.
 #[must_use]
 pub fn step_lambda(previous: f32, measured: Option<f32>, tun: &Tunables) -> f32 {
-    let decay = tun.lambda_decay.clamp(0.0, 1.0);
-    let decayed = (previous.max(0.0) * decay).clamp(0.0, 1.0);
+    let decay = if tun.lambda_decay.is_finite() {
+        tun.lambda_decay.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let previous = if previous.is_finite() {
+        previous.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let decayed = (previous * decay).clamp(0.0, 1.0);
     match measured {
-        Some(value) => value.clamp(0.0, 1.0),
+        Some(value) if value.is_finite() => value.clamp(0.0, 1.0),
+        Some(_) => 0.0,
         None => decayed,
+    }
+}
+
+/// Rays this cell may still take. `max_picks` is per cell, so a second tile
+/// win does not grant another full set.
+#[must_use]
+pub fn cell_grant(already: u32, want: u32, max_picks: u32) -> u32 {
+    let cap = max_picks.max(1);
+    want.min(cap.saturating_sub(already.min(cap)))
+}
+
+/// Due indices admitted this frame. The walk starts at `phase` in a table of
+/// `span` slots and wraps, taking at most `cap`. The device uses
+/// `lighting_round()` as the phase (`checks_from_phase`).
+#[must_use]
+pub fn checks_from_phase(due: &[u32], span: u32, cap: u32, phase: u32) -> Vec<u32> {
+    if span == 0 || cap == 0 || due.is_empty() {
+        return Vec::new();
+    }
+    let phase = phase % span;
+    let mut taken = Vec::new();
+    for step in 0..span {
+        if u32::try_from(taken.len()).unwrap_or(u32::MAX) >= cap {
+            break;
+        }
+        let index = (phase + step) % span;
+        if due.binary_search(&index).is_ok() {
+            taken.push(index);
+        }
+    }
+    taken
+}
+
+/// Check state for one slot. A new key drops the previous occupant's lambda.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CheckCell {
+    pub key: u32,
+    pub lambda: f32,
+    pub luma: f32,
+    pub have: bool,
+}
+
+impl CheckCell {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            key: 0,
+            lambda: 0.0,
+            luma: 0.0,
+            have: false,
+        }
+    }
+
+    pub fn bind(&mut self, key: u32) {
+        if self.key != key {
+            *self = Self {
+                key,
+                lambda: 0.0,
+                luma: 0.0,
+                have: false,
+            };
+        }
+    }
+
+    pub fn note(&mut self, luma: f32, sigma: f32) {
+        if !luma.is_finite() {
+            self.lambda = if self.lambda.is_finite() {
+                self.lambda.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if !self.luma.is_finite() {
+                self.luma = 0.0;
+                self.have = false;
+            }
+            return;
+        }
+        if self.have && self.luma.is_finite() {
+            self.lambda = measure_lambda(luma, self.luma, sigma);
+        }
+        self.luma = luma;
+        self.have = true;
     }
 }
 
@@ -820,6 +915,73 @@ mod tests {
             lambda = step_lambda(lambda, None, &tun);
         }
         assert!(lambda < 1.0e-3);
+    }
+
+    #[test]
+    fn a_non_finite_sample_clears_lambda() {
+        let tun = high();
+        assert_eq!(measure_lambda(f32::NAN, 1.0, 0.0), 0.0);
+        assert_eq!(measure_lambda(1.0, f32::INFINITY, 0.0), 0.0);
+        assert_eq!(step_lambda(f32::NAN, None, &tun), 0.0);
+        assert_eq!(step_lambda(1.0, Some(f32::NAN), &tun), 0.0);
+        let mut cell = CheckCell::empty();
+        cell.bind(4);
+        cell.note(1.0, 0.0);
+        cell.note(f32::NAN, 0.0);
+        assert!(cell.lambda.is_finite());
+        assert!(cell.luma.is_finite());
+        cell.note(1.0, 0.0);
+        assert!(cell.lambda < 1.0e-5);
+    }
+
+    #[test]
+    fn a_reused_slot_drops_the_previous_lambda() {
+        let mut cell = CheckCell::empty();
+        cell.bind(1);
+        cell.note(1.0, 0.0);
+        cell.note(4.0, 0.0);
+        assert!(cell.lambda > 0.5);
+        cell.bind(2);
+        assert_eq!(cell.lambda, 0.0);
+        assert!(!cell.have);
+        cell.note(4.0, 0.0);
+        assert_eq!(cell.lambda, 0.0, "the first sample of a new key is not a change");
+        cell.note(4.0, 0.0);
+        assert!(cell.lambda < 1.0e-5);
+    }
+
+    #[test]
+    fn one_cell_cannot_spend_a_grant_per_tile() {
+        let max_picks = 4;
+        let mut already = 0;
+        let mut total = 0;
+        for _ in 0..3 {
+            let grant = cell_grant(already, max_picks, max_picks);
+            total += grant;
+            already += grant;
+        }
+        assert_eq!(total, max_picks);
+        assert_eq!(cell_grant(max_picks, max_picks, max_picks), 0);
+    }
+
+    #[test]
+    fn check_rays_reach_the_tail_of_the_table() {
+        let span = 30u32;
+        let due: Vec<u32> = (0..span).filter(|index| index % 3 == 0).collect();
+        let cap = 2u32;
+        let mut seen = vec![0u32; usize::try_from(span).unwrap_or(0)];
+        for phase in 0..span {
+            let taken = checks_from_phase(&due, span, cap, phase);
+            assert!(u32::try_from(taken.len()).unwrap_or(u32::MAX) <= cap);
+            for index in taken {
+                let at = usize::try_from(index).unwrap_or(0);
+                seen[at] += 1;
+            }
+        }
+        for index in due {
+            let at = usize::try_from(index).unwrap_or(0);
+            assert!(seen[at] > 0, "index {index} was never checked");
+        }
     }
 
     #[test]
