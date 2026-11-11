@@ -834,6 +834,15 @@ float lighting_ls_ratio(uint f) {
 uint lighting_sc_updated(uint slot) {
     return floatBitsToUint(cache.v[LIGHTING_SC_OBJ_AT + slot].y);
 }
+// Shown-mean age (stage F1). The frame the fine texel's shown mean was last
+// committed. Region 23 is the SH-L1, so this stamp is region 26, past
+// LIGHTING_SH_C_AT. Compose does not read it. The visit stamp above moves
+// on a partial quarter; this one does not. The tally runs when the trace
+// enable (chg[31], GENOS_LIGHTING_SC_TRACE) is set.
+const uint LIGHTING_SC_SHOWN_AT = 26u * LIGHTING_CACHE_SLOTS;
+bool lighting_shown_age() {
+    return gstats.chg[31] != 0u;
+}
 // S69A (Anthony: night to day left hard black texels everywhere, cleaning up
 // slowly). A texel relit at night holds night light; the sun/sky share rescale
 // (S63A) cannot brighten it (share ~0, or a tiny value times a ratio capped at
@@ -3772,6 +3781,129 @@ float lighting_lamp_keep(vec3 p, uint updated) {
     }
     return keep;
 }
+// Newest ring frame of a lamp that still reaches p, or 0. The shown-mean
+// tally compares the commit frame with this stamp (`shown_age::classify`:
+// a commit at or after the stamp postdates it).
+uint lighting_lamp_move_stamp(vec3 p) {
+    uint stamp = 0u;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
+        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+        uint f = ckeys.key[at + 8u];
+        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES)) {
+            continue;
+        }
+        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
+        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
+        float range = uintBitsToFloat(ckeys.key[at + 6u]);
+        if (min(length(p - a), length(p - b)) >= range) {
+            continue;
+        }
+        stamp = max(stamp, f);
+    }
+    return stamp;
+}
+// The fill-curve red box: albedo above RED_MIN in r, below RED_MAX in g and b,
+// within RED_NEAR metres of the eye.
+const float LIGHTING_AGE_RED_NEAR = 6.0;
+const float LIGHTING_AGE_RED_MIN = 0.45;
+const float LIGHTING_AGE_RED_MAX = 0.35;
+const float LIGHTING_AGE_PARENT = 2.0;
+// Near red-box pixels. diag[14..37] match crates/render/src/shown_age.rs.
+// Commit frame of the 25 cm patch, or the 50 cm parent when that stamp is empty.
+uint lighting_shown_patch_commit(vec3 pos, vec3 n) {
+    uint commit = 0u;
+    float size = LIGHTING_SC_HIT;
+    [[dont_unroll]] for (uint level = 0u; level < 2u; level++) {
+        if (commit == 0u) {
+            uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+            if (s < LIGHTING_CACHE_SLOTS) {
+                if (ckeys.key[s] != 0u) {
+                    commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + s].x);
+                }
+            }
+        }
+        size *= LIGHTING_AGE_PARENT;
+    }
+    return commit;
+}
+// diag[base] is the count with a commit, then the age sum, predates, postdates,
+// and the count with no commit.
+void lighting_shown_feed_tally(uint commit, uint age, vec3 pos, uint base) {
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[base + 4u], 1u);
+        return;
+    }
+    atomicAdd(gstats.diag[base], 1u);
+    atomicAdd(gstats.diag[base + 1u], age);
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        return;
+    }
+    if (commit >= stamp) {
+        atomicAdd(gstats.diag[base + 3u], 1u);
+    } else {
+        atomicAdd(gstats.diag[base + 2u], 1u);
+    }
+}
+// Compose shows the world-cache patch. diag 27..31 is that source. diag 32..36
+// is the same patch, so a turned surface reports one age in both.
+void lighting_shown_feed_age(vec3 pos, vec3 n) {
+    uint cell_commit = lighting_shown_patch_commit(pos, n);
+    uint cell_age = 0u;
+    if (cell_commit != 0u && lighting_frame() >= cell_commit) {
+        cell_age = lighting_frame() - cell_commit;
+    }
+    lighting_shown_feed_tally(cell_commit, cell_age, pos, 32u);
+    lighting_shown_feed_tally(cell_commit, cell_age, pos, 27u);
+}
+void lighting_shown_age_tally(vec3 pos, vec3 n, vec3 albedo, uint slot) {
+    if (length(pos - scene.eye.xyz) >= LIGHTING_AGE_RED_NEAR) {
+        return;
+    }
+    if (!(albedo.r > LIGHTING_AGE_RED_MIN && albedo.g < LIGHTING_AGE_RED_MAX && albedo.b < LIGHTING_AGE_RED_MAX)) {
+        return;
+    }
+    atomicAdd(gstats.diag[14], 1u);
+    // A turned surface (flag 2048) has no fine texel. Compose reads the
+    // world-cache patch, so the fine-texel stamp below does not describe it.
+    if (lighting_sc_slanted(n)) {
+        atomicAdd(gstats.diag[26], 1u);
+        lighting_shown_feed_age(pos, n);
+    }
+    // A miss is ~0u. Nested so the cache index stays in range.
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        atomicAdd(gstats.diag[15], 1u);
+        atomicAdd(gstats.diag[25], 1u);
+        return;
+    }
+    uint commit = floatBitsToUint(cache.v[LIGHTING_SC_SHOWN_AT + slot].x);
+    if (commit == 0u) {
+        atomicAdd(gstats.diag[15], 1u);
+        return;
+    }
+    uint age = lighting_frame() >= commit ? lighting_frame() - commit : 0u;
+    atomicAdd(gstats.diag[23], age);
+    if (age == 0u) {
+        atomicAdd(gstats.diag[16], 1u);
+    } else if (age <= 3u) {
+        atomicAdd(gstats.diag[17], 1u);
+    } else if (age <= 7u) {
+        atomicAdd(gstats.diag[18], 1u);
+    } else if (age <= 15u) {
+        atomicAdd(gstats.diag[19], 1u);
+    } else {
+        atomicAdd(gstats.diag[20], 1u);
+    }
+    uint stamp = lighting_lamp_move_stamp(pos);
+    if (stamp == 0u) {
+        atomicAdd(gstats.diag[24], 1u);
+    } else if (commit >= stamp) {
+        atomicAdd(gstats.diag[22], 1u);
+    } else {
+        atomicAdd(gstats.diag[21], 1u);
+    }
+}
+
 // Once a round (cache pass, thread 0): lamps that moved or changed range since
 // the last round go into the ring (suns are left to the light-change rule).
 void lighting_wrc_note_lamps() {

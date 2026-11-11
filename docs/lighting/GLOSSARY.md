@@ -428,6 +428,32 @@ Role: SCHED · Literature: `VK_EXT_memory_budget` heapBudget · More detail: [..
 **Dwell**: frames a mip that just became resident cannot be evicted, unless usage is over `heapBudget`.
 Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
+### Tile fill
+
+**Tile fill**: choosing screen tiles and tracing paths into the surface cache from the pixels that need samples. Off unless `fill-ref --tile-fill on`. The live cache does not run it yet.
+Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Pick**: one path from one pixel in a tile. The pixel is drawn by need, not uniformly.
+Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill budget**: the ray ceiling for a frame. It is a ceiling, not a target. The default in the checker is 1,000,000.
+Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+
+**Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
+Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
+
+**Shared sample**: a hit reconnected to a neighbour cell with the Jacobian weight. It never increments `own_count`.
+Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
+Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
+
+**Virtual tile**: an off-screen direction that stands in for a pixel so the same need applies behind the camera. The checker does not trace them; stage F3 does.
+Role: SCHED · Literature: the engine's scout rays · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
+
+**Need**: `prox * max(under, stale, disagree)`. It is how a pixel asks for picks.
+Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
 ### Historical (do not reuse)
 
 **residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.

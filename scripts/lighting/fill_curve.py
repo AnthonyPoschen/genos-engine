@@ -219,7 +219,7 @@ def still_summary(scored):
     }
 
 
-def codes_darker(live_path, other_path, depth_path, albedo_path):
+def codes_darker(live_path, other_path, depth_path, albedo_path, mask=None):
     """Share of near (<6 m) red-box pixels where live is >= 20 luma codes under other."""
     live = load_rgb(live_path)
     other = load_rgb(other_path)
@@ -246,6 +246,14 @@ def codes_darker(live_path, other_path, depth_path, albedo_path):
     else:
         red = (alb[..., 0] > 0.45) & (alb[..., 1] < 0.35) & (alb[..., 2] < 0.35)
     sel = near & red
+    if mask is not None:
+        use = mask
+        if use.shape != sel.shape:
+            from PIL import Image
+            use = np.asarray(
+                Image.fromarray(use.astype(np.uint8) * 255).resize(sel.shape[::-1], Image.NEAREST)
+            ) > 0
+        sel = sel & use
     n = int(sel.sum())
     hit = int((sel & darker).sum())
     return {

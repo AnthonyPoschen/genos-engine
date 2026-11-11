@@ -50,6 +50,7 @@ crates/ui/          package genos-ui
 crates/render/      package genos-render
 crates/lighting-ref/ package genos-lighting-ref
 crates/restir-ref/  package genos-restir-ref
+crates/fill-ref/    package genos-fill-ref
 crates/restir-gpu/  package genos-restir-gpu
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
@@ -61,6 +62,8 @@ examples/camera/    package genos-camera
 `genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device. The plan keeps that mix as the only DSP and keeps each device output as a write of the finished buffer ([ADR 0041](adr/0041-one-audio-mix-device-outputs-only.md), [audio design](systems/audio-design.md)).
 
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
+
+`genos-fill-ref` is the CPU checker for screen-tile fill (stage F1). It does not open a window or a Vulkan device. The binary is `fill-ref`. `--tile-fill` defaults off. A run writes `./genos-debug/fill-ref/metrics.json`. `--out` overrides that directory. `GENOS_FILL_REF_OUT` applies only when `--out` was omitted. `GENOS_FILL_TILE` mirrors `--tile-fill` and applies only when the argument was omitted. The live cache does not read the flag.
 
 `genos-restir-ref` is the CPU checker for ReSTIR direct (ADR 0022 stage C). It does not open a window or a Vulkan device. The binary is `restir-ref`. A run writes `./genos-debug/restir/metrics.json` and `reference.json`. `--out` overrides that directory. `GENOS_RESTIR_OUT` applies only when `--out` was omitted. `genos-restir-gpu` (`restir-gpu`) is stage C1: initial candidates on lavapipe, off unless `--initial` is set. `GENOS_RESTIR_INITIAL` mirrors that flag. It writes `candidate.json` in the same schema. The GPU stages are [the ReSTIR DI plan](systems/lighting/restir-di-plan.md).
 

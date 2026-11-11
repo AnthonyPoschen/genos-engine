@@ -22,6 +22,7 @@ mod reflections;
 mod reflections_grade;
 mod restir_live;
 mod scene_mesh;
+mod shown_age;
 mod trace;
 mod unfilled;
 mod wire;

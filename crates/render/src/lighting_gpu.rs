@@ -40,8 +40,15 @@ const LIGHTING_CACHE_RAYS: u32 = 16;
 /// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
 /// or fp32 (48 B). lighting_cache_slots.glsl `LIGHTING_SH_HALF` has the same value.
 const LIGHTING_SH_HALF: bool = true;
-/// Cache bytes a slot: 23 vec4 regions plus the SH-L1 (1.5 vec4 at fp16, 3 at fp32).
-const LIGHTING_CACHE_SLOT_BYTES: u64 = 368 + if LIGHTING_SH_HALF { 24 } else { 48 };
+/// Cache bytes a slot: 23 vec4 regions, the SH-L1 (1.5 vec4 at fp16, 3 at
+/// fp32), padding so the shown-age word is region 26 in both layouts, then
+/// that word. Compose does not read the age. It must not share region 23
+/// with the SH.
+const LIGHTING_CACHE_SLOT_BYTES: u64 = {
+    let sh = if LIGHTING_SH_HALF { 24 } else { 48 };
+    let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+    23 * 16 + sh + pad + 16
+};
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
@@ -2317,6 +2324,8 @@ impl Gpu {
                     "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
+                let hist = crate::shown_age::AgeHist::from_diag(&w[24..88]);
+                eprintln!("{}", crate::shown_age::line(queue, self.lighting.frame, &hist));
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
@@ -5932,8 +5941,10 @@ mod sh_knob_tests {
             .find(|l| l.starts_with("const bool LIGHTING_SH_HALF"))
             .expect("LIGHTING_SH_HALF in lighting_cache_slots.glsl");
         assert_eq!(line.contains("true"), LIGHTING_SH_HALF, "{line}");
-        let sh_bytes = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
-        assert_eq!(sh_bytes, if LIGHTING_SH_HALF { 24 } else { 48 });
+        let tail = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
+        let sh_bytes = if LIGHTING_SH_HALF { 24 } else { 48 };
+        let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+        assert_eq!(tail, sh_bytes + pad + 16);
         let rays = glsl
             .lines()
             .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
