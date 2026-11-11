@@ -1084,7 +1084,20 @@ impl Renderer {
         self.gpu.unfilled_eye = [camera.position.x, camera.position.y, camera.position.z];
         self.gpu.unfilled_yaw = camera.yaw;
         self.gpu.unfilled_pitch = camera.pitch;
+        let saved_debug_view = self.debug.view;
+        if !crate::gate::guard(crate::gate::BOUNCE_IN_COMPOSE) {
+            self.debug.view = crate::DebugView {
+                mode: crate::ViewMode::Direct,
+                lamp: saved_debug_view.lamp,
+            };
+        } else if !crate::gate::guard(crate::gate::DIRECT_IN_COMPOSE) {
+            self.debug.view = crate::DebugView {
+                mode: crate::ViewMode::Bounce,
+                lamp: saved_debug_view.lamp,
+            };
+        }
         self.debug.apply(&mut pack);
+        self.debug.view = saved_debug_view;
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.gpu.note_vertex_count(world_dynamic);

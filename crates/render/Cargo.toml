@@ -24,3 +24,8 @@ genos-window = { path = "../window" }
 [[test]]
 name = "hdr_output_gate"
 harness = false
+
+[features]
+default = []
+# Test-only. Named production guards stay on unless GENOS_KNOCKOUT lists them.
+knockout = []

@@ -1,0 +1,44 @@
+name: gate-knockout
+
+# Prove the presented-frame gates: they pass with production guards on,
+# and go red when those guards are knocked out. Lavapipe is enough.
+# This is not a required check yet.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - lighting-v3
+
+permissions:
+  contents: read
+
+jobs:
+  gate-knockout:
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe and a headless Weston
+        run: |
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools build-essential python3-pip
+      - name: presented-frame gates and knockout
+        run: |
+          runtime="${RUNNER_TEMP}/genos-runtime"
+          mkdir -p "$runtime"
+          chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR="$runtime"
+          weston --backend=headless --socket=genos-test >/tmp/weston.log 2>&1 &
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -S "$runtime/genos-test" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+          test -S "$runtime/genos-test"
+          export WAYLAND_DISPLAY=genos-test
+          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+          bash scripts/ci-gate-knockout.sh
