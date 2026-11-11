@@ -137,15 +137,15 @@ void main() {
             float d = length(lighting_sc_texel_pos(slot) - scene.eye.xyz);
             if (d < LIGHTING_WRC_NEAR) {
                 atomicAdd(gstats.diag[11], 1u);
-                if (t >= lighting_sc_cap(slot) - 0.5) {
+                if (t >= lighting_sc_cap(slot) - LIGHTING_SC_HALF) {
                     atomicAdd(gstats.diag[12], 1u);
                 }
             }
             if (lighting_coverage_first()) {
                 float wt = 1.0 / (1.0 + d);
-                atomicAdd(gstats.diag[8], uint(wt * 1000.0 + 0.5));
-                atomicAdd(gstats.diag[9], uint(t * wt * 1000.0 + 0.5));
-                if (t < lighting_coverage_sets() - 0.5) {
+                atomicAdd(gstats.diag[8], uint(wt * LIGHTING_COVERAGE_SCALE + LIGHTING_SC_HALF));
+                atomicAdd(gstats.diag[9], uint(t * wt * LIGHTING_COVERAGE_SCALE + LIGHTING_SC_HALF));
+                if (t < lighting_coverage_sets() - LIGHTING_SC_HALF) {
                     atomicAdd(gstats.diag[10], 1u);
                 }
             }
@@ -177,11 +177,11 @@ void main() {
             if (lighting_coverage_first() && !wrc) {
                 // Under the minimum: one quarter, not a whole 64-ray set.
                 // At the minimum while coverage is short: yield this round.
-                if (lighting_coverage_hold() && t >= lighting_coverage_sets() - 0.5 && !near) {
+                if (lighting_coverage_hold() && t >= lighting_coverage_sets() - LIGHTING_SC_HALF && !near) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
-                if (t < lighting_coverage_sets() - 0.5) {
+                if (t < lighting_coverage_sets() - LIGHTING_SC_HALF) {
                     ms = 1u;
                 }
             }
@@ -322,7 +322,7 @@ void main() {
             // freed or restarted by reaching it. A nearby change, a moved
             // lamp, or light that is still changing falls through and relights.
             bool cap_mover;
-            if (!wrc && t >= lighting_sc_cap(slot) - 0.5 && !near
+            if (!wrc && t >= lighting_sc_cap(slot) - LIGHTING_SC_HALF && !near
                 && lighting_sc_light_quiet()
                 && !lighting_sc_stale(slot)
                 && !lighting_sc_lamp_touched(slot)
@@ -416,7 +416,7 @@ void main() {
                 // S72K: a smooth bar across pages (lighting_sc_page_bar); edge
                 // (promoted) texels are held per texel only, not to the pages.
                 float pm = lighting_sc_promoted(slot) ? -1.0 : lighting_sc_page_bar(slot);
-                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < lighting_sc_cap(slot) - 0.5) {
+                if (pm >= 0.0 && tf > pm + LIGHTING_SC_PAGE_LEAD && tf < lighting_sc_cap(slot) - LIGHTING_SC_HALF) {
                     atomicAdd(gstats.waiting, 1u);
                     return;
                 }
@@ -500,13 +500,13 @@ void main() {
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
             // coverage_first: texels under the coverage minimum go on the young list, one quarter
             // each. Texels already at 8 wait while any on-screen texel is short.
-            if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - 0.5) {
+            if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - LIGHTING_SC_HALF) {
                 atomicAdd(gstats.due, 1u);
                 uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], 1u);
                 ckeys.key[2u * LIGHTING_CACHE_SLOTS - at] = slot;
                 return;
             }
-            if (lighting_coverage_hold() && !wrc && t >= lighting_coverage_sets() - 0.5 && !near) {
+            if (lighting_coverage_hold() && !wrc && t >= lighting_coverage_sets() - LIGHTING_SC_HALF && !near) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }
@@ -544,10 +544,10 @@ void main() {
         }
         bool young = young_now;
         uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
-        if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - 0.5) {
+        if (lighting_coverage_first() && !wrc && t < lighting_coverage_sets() - LIGHTING_SC_HALF) {
             m = 1u;
         }
-        if (lighting_coverage_hold() && !wrc && !near && t >= lighting_coverage_sets() - 0.5) {
+        if (lighting_coverage_hold() && !wrc && !near && t >= lighting_coverage_sets() - LIGHTING_SC_HALF) {
             atomicAdd(gstats.waiting, 1u);
             return;
         }

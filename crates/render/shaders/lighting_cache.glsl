@@ -1530,6 +1530,12 @@ const float LIGHTING_SC_POOL_FULL = 24.0;
 // LIGHTING_DN_DARK luminance the target grows as LIGHTING_DN_DARK / L, at most 4x)
 // counts as settled.
 const float LIGHTING_DN_MIN_SETS = 8.0;
+// Half a count, so a float compare sits on the integer boundary.
+const float LIGHTING_SC_HALF = 0.5;
+// Fixed-point scale for the coverage-first weighted set mean.
+const float LIGHTING_COVERAGE_SCALE = 1000.0;
+// Hold refinement once that mean reaches twice the minimum.
+const float LIGHTING_COVERAGE_HOLD_SETS = 2.0 * LIGHTING_DN_MIN_SETS;
 const float LIGHTING_DN_STOP = 0.015;
 const float LIGHTING_DN_DARK = 0.05;
 const float LIGHTING_DN_SIGMA = 0.6;
@@ -3042,7 +3048,7 @@ float lighting_coverage_sets() {
     return min(LIGHTING_DN_MIN_SETS, max(lighting_world_cap(), 1.0));
 }
 float lighting_coverage_bar() {
-    return min(2.0 * lighting_coverage_sets(), max(lighting_world_cap(), 1.0));
+    return min(LIGHTING_COVERAGE_HOLD_SETS, max(lighting_world_cap(), 1.0));
 }
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
@@ -3466,7 +3472,7 @@ bool lighting_sc_settled(uint slot, float t) {
     // full even when the estimator is still noisy: another set is not allowed,
     // so the noise is not a reason to stay due.
     float cap = lighting_sc_cap(slot);
-    if (floor(t) >= cap - 0.5) {
+    if (floor(t) >= cap - LIGHTING_SC_HALF) {
         return true;
     }
     // cap_fill (default off) turns the perceptual stop off, so a higher
@@ -3528,7 +3534,7 @@ uint lighting_sc_interval(uint slot, float t) {
     // At the cap, leftover inconsistency is the noise the cap chose to keep.
     // It does not shorten the interval. The compact pass does not list a
     // quiet texel at the cap at all.
-    if (floor(t) >= lighting_sc_cap(slot) - 0.5 && lighting_sc_light_quiet() && !lighting_sc_stale(slot)) {
+    if (floor(t) >= lighting_sc_cap(slot) - LIGHTING_SC_HALF && lighting_sc_light_quiet() && !lighting_sc_stale(slot)) {
         return uint(LIGHTING_SC_RATE_DORMANT);
     }
     float iv = LIGHTING_SC_RATE_SLOW / (1.0 + LIGHTING_SC_RATE_K * max(b.y, 0.0));
