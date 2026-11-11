@@ -3,7 +3,8 @@
 #
 # Do not run this with enforcement: active until
 # .github/workflows/lint-from-master.yml is on refs/heads/master. A ruleset
-# pointing at a missing file would block merges on every branch (~ALL).
+# pointing at a missing file would block merges on the branches it targets
+# (the default branch and lighting-v3).
 #
 # After the first lint-from-master check is green on a PR, keep the existing
 # branch-protection "lint" context until you are ready to switch. The command

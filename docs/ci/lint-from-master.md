@@ -18,8 +18,13 @@ remove the old `lint` context until then.
   workflows`. See [REST API endpoints for rules](https://docs.github.com/en/rest/repos/rules).
 - The workflow file is taken from the `ref` in the rule (`refs/heads/master`
   here), not from the PR head or from a mid-stack base.
-- `~ALL` in `conditions.ref_name.include` means a PR into any branch
-  (including `cursor/lighting-integration`) must pass this workflow.
+- The payload targets `~DEFAULT_BRANCH` and `refs/heads/lighting-v3`, not
+  `~ALL`. GitHub documents that a `workflows` rule blocks direct pushes
+  to every branch it targets, because the workflow runs as part of the
+  pull request. `~ALL` would reject every push to a feature branch. The
+  cost is that a PR stacked on a feature branch (for example
+  `cursor/lighting-integration`) is not covered; retarget it to
+  `lighting-v3` or master (see `rebase-after-239.md`).
 - Supported events are `pull_request`, `pull_request_target`, and
   `merge_group`. Path, branch, and type filters on those events are
   ignored. The workflow always runs on `opened`, `synchronize`, and
@@ -28,10 +33,12 @@ remove the old `lint` context until then.
   is pushed to, updated, or reopened.
 - `evaluate` enforcement is GitHub Enterprise only. This repo uses
   `active` once the file is on master.
-- This repository is public and user-owned. The repo ruleset API
-  documents the `workflows` rule; if GitHub rejects it on a user
-  account, the exact error is the signal to apply it from the UI or an
-  admin token.
+- GitHub documents ruleset workflows at the organization and enterprise
+  level. This repository is public and user-owned, so the `workflows`
+  rule may be rejected (422) on a user account. If it is, there is no
+  ruleset route here: either move the repository into an organization
+  that can use it, or keep the in-tree `lint` job and rebase stacks as
+  `rebase-after-239.md` describes.
 
 ## Security
 

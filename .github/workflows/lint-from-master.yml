@@ -24,7 +24,10 @@ name: lint-from-master
 # do not remove the old lint check until then.
 #
 # The apply payload is docs/ci/ruleset-lint-from-master.json. Do not
-# activate the ruleset until this file is on master.
+# activate the ruleset until this file is on master. It targets only the
+# default branch and lighting-v3, never ~ALL: GitHub documents that a
+# workflows rule blocks direct pushes to the branches it targets, so it
+# must not cover feature branches that agents push to.
 
 on:
   pull_request:
@@ -36,6 +39,7 @@ permissions:
 jobs:
   lint-from-master:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
