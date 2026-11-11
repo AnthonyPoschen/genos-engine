@@ -125,9 +125,16 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
 /// slot follows them (`lighting_fill.glsl`).
 const FILL_PARAM_WORDS: u64 = 16;
 const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
+/// Header, then two hit words and two link words per cache-ray slot.
+const FILL_TAIL_PER_RAY: u64 = 4;
 
 fn lighting_fill_param_words(pixels: u64) -> u64 {
     lighting_sh_keys_words() + pixels * 8
+}
+
+pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
+    let rays = (LIGHTING_CACHE_BATCH as u64) * (LIGHTING_CACHE_RAYS as u64);
+    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS + 4 + rays * FILL_TAIL_PER_RAY
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -373,6 +380,12 @@ pub(crate) struct Lighting {
     catch_left: u32,
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
+    /// Pixel count the key buffer was sized for. A larger frame rebuilds it
+    /// so the fill tail is not written past the allocation.
+    cache_key_pixels: u64,
+    /// Previous frame's submit, for the look-ahead step. Empty on the first frame.
+    fill_clock: Option<std::time::Instant>,
+    fill_dt: f32,
     /// Last buffer class. A live edit rebuilds only when this changes.
     alloc_key: (u32, u32, u32, u32, u32, u32, u32),
     /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
@@ -671,6 +684,9 @@ impl Default for Lighting {
             lamp_moving: false,
             catch_left: 0,
             cache_full: false,
+            cache_key_pixels: 0,
+            fill_clock: None,
+            fill_dt: 0.0,
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
@@ -1300,7 +1316,8 @@ impl Gpu {
             self.write_buffer(&self.lighting.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
         let want_cache = settings.allocates_cache();
-        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+        let keys_small = want_cache && self.lighting.cache_full && pixels > self.lighting.cache_key_pixels;
+        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() || keys_small {
             let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
             let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
             self.destroy_buffer(&mut keys);
@@ -1313,7 +1330,7 @@ impl Gpu {
                 // election (lighting_sh_keys_words). Eight words per pixel
                 // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS) * 4,
+                    lighting_fill_keys_words(pixels) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1336,6 +1353,7 @@ impl Gpu {
                 self.lighting.cache_clear = false;
             }
             self.lighting.cache_full = want_cache;
+            self.lighting.cache_key_pixels = if want_cache { pixels } else { 0 };
         }
         if want_cache && self.lighting.compose_host.buffer.is_null() {
             // One word: the dirty-compose list length, copied after the passes.
@@ -4236,6 +4254,17 @@ impl Gpu {
                     &drain_sigma.to_ne_bytes(),
                 )?;
                 let fill = self.lighting.settings.surface_cache.fill;
+                let now = std::time::Instant::now();
+                let measured = self.lighting.fill_clock.map_or(0.0, |then| {
+                    now.saturating_duration_since(then).as_secs_f32()
+                });
+                self.lighting.fill_clock = Some(now);
+                self.lighting.fill_dt = measured;
+                let frame_dt = if measured > 1.0e-4 && measured < 0.5 {
+                    measured
+                } else {
+                    fill.frame_dt
+                };
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),
@@ -4251,7 +4280,7 @@ impl Gpu {
                     fill.change_weight.to_bits(),
                     fill.warmup_rays,
                     fill.ray_cap,
-                    fill.frame_dt.to_bits(),
+                    frame_dt.to_bits(),
                     self.lighting.settings.world_cache.cell_metres.to_bits(),
                 ];
                 let frame_pixels =

@@ -37,6 +37,15 @@ void main() {
         lighting_fill_resolve(gid);
         return;
     }
+    // World mode 3 has no second scheduler. Budget 0 traces nothing.
+    if (lighting_world_mode() == 3u) {
+        if (gid == 0u) {
+            gstats.live = lighting_live_count();
+            lighting_wrc_note_lamps();
+            lighting_ls_note();
+        }
+        return;
+    }
     // The neighbour walk is the gather dispatch before compose, not this
     // relight. This pass does not touch the bin lists or the lattice table.
     if (gid >= LIGHTING_CACHE_BATCH) {

@@ -44,6 +44,20 @@ uint lighting_fill_param_at() {
 uint lighting_fill_lock_at() {
     return lighting_fill_param_at() + LIGHTING_FILL_PARAMS;
 }
+// Four words, then two hit words per cache ray (distance, packed normal), then
+// two link words per ray (next, slot + 1). The host sizes the same tail.
+uint lighting_fill_header_at() {
+    return lighting_fill_lock_at() + LIGHTING_CACHE_SLOTS;
+}
+uint lighting_fill_hit_at() {
+    return lighting_fill_header_at() + 4u;
+}
+uint lighting_fill_rays_max() {
+    return LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
+}
+uint lighting_fill_link_at() {
+    return lighting_fill_hit_at() + lighting_fill_rays_max() * 2u;
+}
 uint lighting_fill_u(uint i) {
     return ckeys.key[lighting_fill_param_at() + i];
 }
@@ -75,9 +89,7 @@ float lighting_fill_create(uint level) {
     return lighting_fill_f(2) * exp2(float(level));
 }
 float lighting_fill_leash(uint level) {
-    if (level >= lighting_fill_lod_max()) {
-        return lighting_fill_f(6);
-    }
+    // Coarsest level included. fill_far alone would create and drop on a jitter.
     return lighting_fill_f(3) * lighting_fill_create(level);
 }
 uint lighting_fill_level_of_size(float size) {
@@ -108,9 +120,34 @@ vec3 lighting_fill_fibonacci(uint i, uint n) {
 void lighting_fill_free(uint slot) {
     atomicAdd(gstats.freed, 1u);
     ckeys.key[slot] = 0u;
+    ckeys.key[lighting_fill_lock_at() + slot] = 0u;
     lighting_sc_forget(slot);
     cache.v[3u * slot + 1u] = vec4(0.0);
     cache.v[3u * slot + 2u] = vec4(0.0);
+}
+
+// The fine cell is past its leash and a coarser cell still covers the point.
+// Copy into an empty parent, then drop the fine one. A failed claim keeps it.
+void lighting_fill_coarsen(uint slot, vec3 p, vec3 n, uint target) {
+    float size = lighting_fill_cell_size(target);
+    uint parent = lighting_cache_find_sized(p, n, true, size, p);
+    if (parent == ~0u || parent == slot) {
+        return;
+    }
+    if (cache.v[3u * parent + 2u].w < FILL_HALF) {
+        cache.v[3u * parent + 2u] = cache.v[3u * slot + 2u];
+        cache.v[LIGHTING_SC_EST_AT + 2u * parent] = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+        cache.v[LIGHTING_SC_EST_AT + 2u * parent + 1u] = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+        if (lighting_sh_on()) {
+            vec3 c0;
+            vec3 cx;
+            vec3 cy;
+            vec3 cz;
+            lighting_sh_get(slot, c0, cx, cy, cz);
+            lighting_sh_put(parent, c0, cx, cy, cz);
+        }
+    }
+    lighting_fill_free(slot);
 }
 
 bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
@@ -131,9 +168,21 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
+uint lighting_fill_q(uint slot, float d) {
+    vec4 shown_v = cache.v[3u * slot + 2u];
+    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    float mean = max(dot(shown_v.rgb, FILL_LUMA), FILL_TINY);
+    float dev = sqrt(max(est.w, 0.0));
+    float err = max(0.0, dev / mean - lighting_fill_f(9));
+    float close = 1.0 / max(d, lighting_fill_f(10));
+    // lambda is 0 until F3. change_weight is uploaded and not read here.
+    float pri = close * err;
+    return uint(clamp(pri * FILL_PRI_SCALE, 1.0, FILL_PRI_MAX));
+}
+
 // Drop a clipmap cell past its leash. 12.5 cm detail stays; the screen stage
 // owns that size (S57). A stored cell inside the leash is kept, so the create
-// edge does not thrash.
+// edge does not thrash. Past the leash, coarsen, then evict.
 void lighting_fill_visit(uint slot) {
     vec3 p;
     vec3 n;
@@ -145,10 +194,21 @@ void lighting_fill_visit(uint slot) {
     uint last = floatBitsToUint(cache.v[3u * slot].w);
     uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
     float d = length(p - scene.eye.xyz);
+    float extra = length(lighting_fill_look());
     if (size >= base * FILL_CELL_KEEP) {
         uint level = lighting_fill_level_of_size(size);
-        if (d > lighting_fill_leash(level) || d > lighting_fill_f(6)) {
-            lighting_fill_free(slot);
+        float keep = lighting_fill_leash(level) + extra;
+        if (d > keep) {
+            uint target = level;
+            uint cap = lighting_fill_lod_max();
+            while (target < cap && d > lighting_fill_leash(target) + extra) {
+                target++;
+            }
+            if (target > level && d <= lighting_fill_leash(target) + extra) {
+                lighting_fill_coarsen(slot, p, n, target);
+            } else if (d > lighting_fill_leash(target) + extra) {
+                lighting_fill_free(slot);
+            }
             return;
         }
     } else if (lighting_sc_expired(last, shown)) {
@@ -160,7 +220,11 @@ void lighting_fill_visit(uint slot) {
     }
     uint px;
     uint py;
+    uint q = lighting_fill_q(slot, d);
+    uint level = lighting_fill_level_of_size(size);
     if (!lighting_fill_pixel(p, px, py)) {
+        // Bit 31 marks a ranked off-screen cell. A list head never sets it.
+        ckeys.key[lighting_fill_lock_at() + slot] = 0x80000000u | (q << 16u) | (level << 8u) | 1u;
         return;
     }
     uint tile = max(lighting_fill_u(1), 1u);
@@ -169,15 +233,8 @@ void lighting_fill_visit(uint slot) {
     if (ti >= LIGHTING_FILL_TILE_CAP) {
         return;
     }
-    vec4 shown_v = cache.v[3u * slot + 2u];
-    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-    float mean = max(dot(shown_v.rgb, FILL_LUMA), FILL_TINY);
-    float dev = sqrt(max(est.w, 0.0));
-    float err = max(0.0, dev / mean - lighting_fill_f(9));
-    float close = 1.0 / max(d, lighting_fill_f(10));
-    // lambda is 0 until F3. change_weight is uploaded and not read here.
-    float pri = close * err;
-    uint q = uint(clamp(pri * FILL_PRI_SCALE, 1.0, FILL_PRI_MAX));
+    // On-screen cells are the tile pick, not also an off-screen candidate.
+    ckeys.key[lighting_fill_lock_at() + slot] = 0u;
     uint packed = (q << 21u) | (slot + 1u);
     atomicMax(ckeys.key[LIGHTING_FILL_TILE_AT + ti], packed);
 }
@@ -246,6 +303,134 @@ void lighting_fill_dispatch() {
         ckeys.key[LIGHTING_FILL_PICK_AT + n] = (w & 2097151u) - 1u;
         n++;
     }
+    uint off = budget - n;
+    uint far_n = min(uint(ceil(float(budget) * lighting_fill_f(7))), off);
+    uint near_n = off - far_n;
+    uint hist_far[64];
+    uint hist_near[64];
+    for (uint i = 0u; i < 64u; i++) {
+        hist_far[i] = 0u;
+        hist_near[i] = 0u;
+    }
+    uint n_far = 0u;
+    uint n_near = 0u;
+    uint lod_max = lighting_fill_lod_max();
+    uint guard = LIGHTING_CACHE_SLOTS;
+    for (uint s = 0u; s < guard; s++) {
+        uint w = ckeys.key[lighting_fill_lock_at() + s];
+        if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
+            continue;
+        }
+        uint q = min((w >> 16u) & 63u, 63u);
+        uint level = (w >> 8u) & 255u;
+        if (level == lod_max) {
+            hist_far[q]++;
+            n_far++;
+        } else {
+            hist_near[q]++;
+            n_near++;
+        }
+    }
+    uint far_take = min(n_far, far_n);
+    uint near_take = min(n_near, near_n);
+    uint pick_cap = LIGHTING_FILL_TILE_AT - LIGHTING_FILL_PICK_AT;
+    uint room = pick_cap - min(n, pick_cap);
+    if (far_take + near_take > room) {
+        if (far_take > room) {
+            far_take = room;
+            near_take = 0u;
+        } else {
+            near_take = room - far_take;
+        }
+    }
+    uint far_cut = 0u;
+    uint far_of = far_take;
+    if (n_far > far_take) {
+        uint left = far_take;
+        for (int q = 63; q >= 0; q--) {
+            uint hq = hist_far[uint(q)];
+            if (hq >= left) {
+                far_cut = uint(q);
+                far_of = left;
+                break;
+            }
+            left -= hq;
+        }
+    }
+    uint near_cut = 0u;
+    uint near_of = near_take;
+    if (n_near > near_take) {
+        uint left = near_take;
+        for (int q = 63; q >= 0; q--) {
+            uint hq = hist_near[uint(q)];
+            if (hq >= left) {
+                near_cut = uint(q);
+                near_of = left;
+                break;
+            }
+            left -= hq;
+        }
+    }
+    uint ranked = 0u;
+    uint far_got = 0u;
+    uint near_got = 0u;
+    uint far_at = 0u;
+    uint near_at = 0u;
+    for (uint s = 0u; s < guard; s++) {
+        uint w = ckeys.key[lighting_fill_lock_at() + s];
+        if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
+            continue;
+        }
+        uint q = min((w >> 16u) & 63u, 63u);
+        uint level = (w >> 8u) & 255u;
+        bool take = false;
+        if (level == lod_max) {
+            if (far_got < far_take) {
+                if (n_far > far_take) {
+                    if (q < far_cut) {
+                        take = false;
+                    } else if (q == far_cut) {
+                        if (far_at < far_of) {
+                            far_at++;
+                            take = true;
+                        }
+                    } else {
+                        take = true;
+                    }
+                } else {
+                    take = true;
+                }
+                if (take) {
+                    far_got++;
+                }
+            }
+        } else if (near_got < near_take) {
+            if (n_near > near_take) {
+                if (q < near_cut) {
+                    take = false;
+                } else if (q == near_cut) {
+                    if (near_at < near_of) {
+                        near_at++;
+                        take = true;
+                    }
+                } else {
+                    take = true;
+                }
+            } else {
+                take = true;
+            }
+            if (take) {
+                near_got++;
+            }
+        }
+        if (!take || n + ranked >= pick_cap) {
+            continue;
+        }
+        ckeys.key[LIGHTING_FILL_PICK_AT + n + ranked] = s;
+        ranked++;
+    }
+    ckeys.key[lighting_fill_header_at()] = ranked;
+    ckeys.key[lighting_fill_header_at() + 1u] = far_n - far_got;
     ckeys.key[LIGHTING_ARGS_AT + 15u] = n;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
@@ -277,7 +462,8 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         return false;
     }
     uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
-    if (r < on) {
+    uint ranked = ckeys.key[lighting_fill_header_at()];
+    if (r < on + ranked) {
         uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             return false;
@@ -292,12 +478,25 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         dir = lighting_dir(rk, n, stratum, 64u);
         return true;
     }
-    uint off = max(budget - on, 1u);
-    uint i = (r - on + lighting_round()) % off;
-    dir = lighting_fill_fibonacci(i, off);
+    uint disc = max(budget - min(on + ranked, budget), 1u);
+    uint i = (r - on - ranked + lighting_round()) % disc;
+    dir = lighting_fill_fibonacci(i, disc);
     origin = scene.eye.xyz;
     n = dir;
     return true;
+}
+
+// Trace writes the hit here. Direct then stores radiance in the hit slot.
+void lighting_fill_stash(uint ray, float t, uint packed_n) {
+    if (!lighting_ray_fill_on() || ray < lighting_probe_rays()) {
+        return;
+    }
+    uint r = ray - lighting_probe_rays();
+    if (r >= lighting_fill_u(0)) {
+        return;
+    }
+    ckeys.key[lighting_fill_hit_at() + r * 2u] = floatBitsToUint(t);
+    ckeys.key[lighting_fill_hit_at() + r * 2u + 1u] = packed_n;
 }
 
 float lighting_fill_shown(uint rays, uint slot) {
@@ -308,18 +507,13 @@ float lighting_fill_shown(uint rays, uint slot) {
     return min(sets, lighting_sc_cap(slot));
 }
 
-void lighting_fill_commit(uint slot, vec3 lk, float cos_theta, vec3 sample_dir, bool on_screen, float sun_luma) {
-    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
-        return;
-    }
-    uint mark = lighting_frame() + 1u;
-    uint prev = atomicExchange(ckeys.key[lighting_fill_lock_at() + slot], mark);
-    if (prev == mark) {
+// `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
+// calls this, after every ray into the slot has been summed.
+void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
+    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || n <= 0.0) {
         return;
     }
     vec4 old = cache.v[3u * slot + 2u];
-    float n = 1.0;
-    vec3 e = lk * cos_theta * LIGHTING_TAU / n;
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float rays0 = max(b.w, 0.0);
     uint warmup = max(lighting_fill_u(12), 1u);
@@ -359,11 +553,11 @@ void lighting_fill_commit(uint slot, vec3 lk, float cos_theta, vec3 sample_dir, 
     float rays_after = min(rays0 + n, max(cap, float(warmup)));
     cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(b.xyz, rays_after);
     if (cell && lighting_sh_on()) {
-        float wr = LIGHTING_TAU / n;
-        vec3 n0 = lk * (wr * LIGHTING_SH_Y0);
-        vec3 nx = lk * sample_dir.x * (wr * LIGHTING_SH_Y1);
-        vec3 ny = lk * sample_dir.y * (wr * LIGHTING_SH_Y1);
-        vec3 nz = lk * sample_dir.z * (wr * LIGHTING_SH_Y1);
+        float wr = LIGHTING_TAU;
+        vec3 n0 = lk_mean * (wr * LIGHTING_SH_Y0);
+        vec3 nx = shx * (wr * LIGHTING_SH_Y1);
+        vec3 ny = shy * (wr * LIGHTING_SH_Y1);
+        vec3 nz = shz * (wr * LIGHTING_SH_Y1);
         if (old.w >= LIGHTING_CACHE_HAS_W) {
             vec3 o0;
             vec3 ox;
@@ -378,7 +572,7 @@ void lighting_fill_commit(uint slot, vec3 lk, float cos_theta, vec3 sample_dir, 
         }
         lighting_sh_put(slot, n0, nx, ny, nz);
     }
-    float el = dot(lk, FILL_LUMA);
+    float el = dot(lk_mean, FILL_LUMA);
     float fe = el > FILL_EPS ? clamp(sun_luma / el, 0.0, 1.0) : 0.0;
     float fo = old.w > FILL_HALF ? lighting_sc_sunfrac_now(slot) : fe;
     float fnew = mix(fo, fe, max(k, 1.0 / FILL_SUN_DEN));
@@ -412,54 +606,120 @@ void lighting_fill_commit(uint slot, vec3 lk, float cos_theta, vec3 sample_dir, 
     atomicAdd(gstats.relit, 1u);
 }
 
+// One slot, one writer. Every ray that landed is on the list, then the head
+// folds them with weight n / (rays + n). The hit distance is the stash trace
+// wrote; direct has already overwritten the hit slot with radiance.
 void lighting_fill_resolve(uint gid) {
     if (gid >= 64u) {
         return;
     }
     uint budget = lighting_fill_u(0);
     uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
+    uint ranked = ckeys.key[lighting_fill_header_at()];
+    uint placed = min(on + ranked, budget);
+    uint far_disc = ckeys.key[lighting_fill_header_at() + 1u];
+    uint lod_max = lighting_fill_lod_max();
     for (uint r = gid; r < budget; r += 64u) {
+        ckeys.key[lighting_fill_link_at() + r * 2u] = 0u;
+        ckeys.key[lighting_fill_link_at() + r * 2u + 1u] = 0u;
         uint work_ray = lighting_probe_rays() + r;
         vec4 rad = work.v[lighting_rad_at(work_ray)];
         if (lighting_ray_none(rad)) {
             continue;
         }
-        vec3 lk = lighting_ray_light(rad);
-        if (r < on) {
-            uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
-            vec3 p;
-            vec3 n;
-            if (slot >= LIGHTING_CACHE_SLOTS || !lighting_sc_texel_world(slot, p, n)) {
+        uint slot = ~0u;
+        if (r < placed) {
+            slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
+        } else {
+            float t = uintBitsToFloat(ckeys.key[lighting_fill_hit_at() + r * 2u]);
+            if (t < 0.0) {
                 continue;
             }
-            uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
-            uint stratum = (lighting_hash(rk) + lighting_round()) % 64u;
-            vec3 dir = lighting_dir(rk, n, stratum, 64u);
-            lighting_fill_commit(slot, lk, max(dot(dir, n), 0.0), dir, true, rad.w);
+            vec3 dir;
+            vec3 origin;
+            vec3 nn;
+            if (!lighting_fill_ray(lighting_probe_rays() + r, origin, dir, nn)) {
+                continue;
+            }
+            vec3 pos = origin + dir * t;
+            vec3 hn = lighting_unpack_normal(ckeys.key[lighting_fill_hit_at() + r * 2u + 1u]);
+            float d = length(pos - (scene.eye.xyz + lighting_fill_look()));
+            if (d > lighting_fill_f(6)) {
+                continue;
+            }
+            uint level = lighting_fill_level(d);
+            if ((r - placed) < far_disc && level < lod_max) {
+                continue;
+            }
+            slot = lighting_cache_find_sized(pos, hn, true, lighting_fill_cell_size(level), pos);
+        }
+        if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             continue;
         }
-        vec4 hit = work.v[lighting_hit_at(work_ray)];
-        if (hit.x < 0.0) {
+        uint prev = atomicExchange(ckeys.key[lighting_fill_lock_at() + slot], r + 1u);
+        if ((prev & 0x80000000u) != 0u) {
+            prev = 0u;
+        }
+        ckeys.key[lighting_fill_link_at() + r * 2u] = prev;
+        ckeys.key[lighting_fill_link_at() + r * 2u + 1u] = slot + 1u;
+    }
+    memoryBarrierBuffer();
+    barrier();
+    for (uint r = gid; r < budget; r += 64u) {
+        uint slot1 = ckeys.key[lighting_fill_link_at() + r * 2u + 1u];
+        if (slot1 == 0u) {
             continue;
         }
-        vec3 dir;
-        vec3 origin;
-        vec3 nn;
-        if (!lighting_fill_ray(work_ray, origin, dir, nn)) {
+        uint slot = slot1 - 1u;
+        if (ckeys.key[lighting_fill_lock_at() + slot] != r + 1u) {
             continue;
         }
-        vec3 pos = origin + dir * hit.x;
-        vec3 n = lighting_unpack_normal(floatBitsToUint(hit.y));
-        float d = length(pos - (scene.eye.xyz + lighting_fill_look()));
-        if (d > lighting_fill_f(6)) {
-            continue;
+        vec3 sum_e = vec3(0.0);
+        vec3 sum_lk = vec3(0.0);
+        vec3 sum_x = vec3(0.0);
+        vec3 sum_y = vec3(0.0);
+        vec3 sum_z = vec3(0.0);
+        float sum_sun = 0.0;
+        float count = 0.0;
+        bool saw_on = false;
+        uint cur = r;
+        uint steps = 0u;
+        while (steps < budget) {
+            uint work_ray = lighting_probe_rays() + cur;
+            vec4 rad = work.v[lighting_rad_at(work_ray)];
+            vec3 lk = lighting_ray_light(rad);
+            vec3 dir = vec3(0.0, 1.0, 0.0);
+            vec3 origin;
+            vec3 nn;
+            bool aimed = lighting_fill_ray(work_ray, origin, dir, nn);
+            float cos_t = 0.0;
+            if (aimed && cur < placed) {
+                cos_t = max(dot(dir, nn), 0.0);
+            } else if (aimed) {
+                vec3 hn = lighting_unpack_normal(ckeys.key[lighting_fill_hit_at() + cur * 2u + 1u]);
+                cos_t = max(dot(-dir, hn), 0.0);
+                dir = -dir;
+            }
+            if (aimed) {
+                sum_e += lk * cos_t * LIGHTING_TAU;
+                sum_lk += lk;
+                sum_x += lk * dir.x;
+                sum_y += lk * dir.y;
+                sum_z += lk * dir.z;
+                sum_sun += rad.w;
+                count += 1.0;
+                if (cur < on) {
+                    saw_on = true;
+                }
+            }
+            uint nxt = ckeys.key[lighting_fill_link_at() + cur * 2u];
+            steps++;
+            if (nxt == 0u) {
+                break;
+            }
+            cur = nxt - 1u;
         }
-        float size = lighting_fill_cell_size(lighting_fill_level(d));
-        uint slot = lighting_cache_find_sized(pos, n, true, size, pos);
-        if (slot == ~0u) {
-            continue;
-        }
-        vec3 sample_dir = -dir;
-        lighting_fill_commit(slot, lk, max(dot(sample_dir, n), 0.0), sample_dir, false, rad.w);
+        float inv = 1.0 / max(count, 1.0);
+        lighting_fill_commit(slot, sum_e * inv, count, sum_lk * inv, sum_x * inv, sum_y * inv, sum_z * inv, saw_on, sum_sun * inv);
     }
 }

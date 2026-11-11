@@ -132,13 +132,11 @@ pub fn create_radius(level: u32, tun: &Tunables) -> f32 {
     }
 }
 
+/// Drop radius. Always `leash_scale` times the create radius, including the
+/// coarsest level, so a jitter at `fill_far` does not create and drop.
 #[must_use]
 pub fn leash_radius(level: u32, tun: &Tunables) -> f32 {
-    if level >= tun.lod_max() {
-        tun.far
-    } else {
-        tun.leash_scale * create_radius(level, tun)
-    }
+    tun.leash_scale * create_radius(level, tun)
 }
 
 /// Level of a stored cell from its size. A texel finer than the base cell is level 0.
@@ -154,10 +152,15 @@ pub fn level_of_size(size: f32, tun: &Tunables) -> u32 {
 pub enum Residency {
     Create { level: u32 },
     Keep,
+    /// The stored cell is finer than the distance still allows. The survivor is
+    /// `level` (coarser). Evict only past the coarsest leash.
+    Coarsen { level: u32 },
     Drop,
 }
 
-/// Create ahead of `velocity * look_ahead`. Drop from the player, at the leash.
+/// Create ahead of `velocity * look_ahead`. A stored cell stays while it is
+/// inside its leash plus that same look distance, so the leading edge is not
+/// freed on the next visit. Past the leash it coarsens, then drops.
 #[must_use]
 pub fn residency(
     player: Vec3,
@@ -166,18 +169,23 @@ pub fn residency(
     stored: Option<u32>,
     tun: &Tunables,
 ) -> Residency {
+    let look = velocity * tun.look_ahead;
+    let extra = look.length();
     let d_player = (point - player).length();
-    if d_player > tun.far {
-        return Residency::Drop;
-    }
     if let Some(level) = stored {
-        if d_player > leash_radius(level, tun) {
+        let mut target = level.min(tun.lod_max());
+        let cap = tun.lod_max();
+        while target < cap && d_player > leash_radius(target, tun) + extra {
+            target += 1;
+        }
+        if d_player > leash_radius(target, tun) + extra {
             Residency::Drop
+        } else if target > level {
+            Residency::Coarsen { level: target }
         } else {
             Residency::Keep
         }
     } else {
-        let look = velocity * tun.look_ahead;
         let d_create = (point - (player + look)).length();
         if d_create > tun.far {
             Residency::Drop
@@ -217,12 +225,27 @@ pub struct TileNeed {
     pub lambda: f32,
 }
 
+/// A resident clipmap cell the off-screen share can spend a ray on.
+#[derive(Clone, Copy, Debug)]
+pub struct CellNeed {
+    pub distance: f32,
+    pub level: u32,
+    pub mean: f32,
+    pub deviation: f32,
+    pub lambda: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct RayPick {
     pub on_screen: bool,
+    /// Reserved for a cell at `lod_max`, or a discovery ray that may only
+    /// deposit in that band.
     pub far: bool,
+    /// No resident cell took this ray. The direction discovers a surface.
+    pub discovery: bool,
     pub dir: Vec3,
     pub tile: Option<usize>,
+    pub cell: Option<usize>,
 }
 
 fn offscreen_floor_rays(tun: &Tunables) -> u32 {
@@ -245,54 +268,99 @@ pub fn fibonacci(i: u32, n: u32) -> Vec3 {
     Vec3::new(r * phi.cos(), y, r * phi.sin())
 }
 
+fn rank_by_priority(score_of: impl Fn(usize) -> f32, n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| score_of(b).total_cmp(&score_of(a)).then(a.cmp(&b)));
+    order
+}
+
+fn cell_score(cell: &CellNeed, tun: &Tunables) -> f32 {
+    priority(cell.distance, cell.mean, cell.deviation, cell.lambda, tun)
+}
+
 /// Spend the budget. On-screen picks are the highest priorities that fit in
-/// `budget - ceil(budget * offscreen_floor)`. The rest are clipmap directions.
-/// The last `ceil(budget * far_share)` of those are the far bin.
+/// `budget - ceil(budget * offscreen_floor)`. The off-screen share ranks
+/// resident cells by the same priority. `ceil(budget * far_share)` of it is
+/// reserved for cells at `lod_max`. Rays the resident set does not take
+/// discover surfaces on a Fibonacci sphere.
 #[must_use]
-pub fn schedule(tun: &Tunables, tiles: &[TileNeed]) -> Vec<RayPick> {
+pub fn schedule(tun: &Tunables, tiles: &[TileNeed], cells: &[CellNeed]) -> Vec<RayPick> {
     let budget = tun.budget;
     if budget == 0 {
         return Vec::new();
     }
     let floor = offscreen_floor_rays(tun);
     let on_cap = budget.saturating_sub(floor);
-    let mut order: Vec<usize> = (0..tiles.len()).collect();
-    order.sort_by(|&a, &b| {
-        let pa = priority(
-            tiles[a].distance,
-            tiles[a].mean,
-            tiles[a].deviation,
-            tiles[a].lambda,
-            tun,
-        );
-        let pb = priority(
-            tiles[b].distance,
-            tiles[b].mean,
-            tiles[b].deviation,
-            tiles[b].lambda,
-            tun,
-        );
-        pb.total_cmp(&pa).then(a.cmp(&b))
-    });
-    let on = u32::try_from(order.len()).unwrap_or(u32::MAX).min(on_cap);
+    let tile_order = rank_by_priority(
+        |i| {
+            priority(
+                tiles[i].distance,
+                tiles[i].mean,
+                tiles[i].deviation,
+                tiles[i].lambda,
+                tun,
+            )
+        },
+        tiles.len(),
+    );
+    let on = u32::try_from(tile_order.len()).unwrap_or(u32::MAX).min(on_cap);
     let off = budget - on;
     let far_n = far_rays(tun).min(off);
+    let near_n = off - far_n;
+    let cell_order = rank_by_priority(|i| cell_score(&cells[i], tun), cells.len());
+    let mut chosen = vec![false; cells.len()];
+    let mut far_ids = Vec::new();
+    for &i in &cell_order {
+        if cells[i].level != tun.lod_max() {
+            continue;
+        }
+        far_ids.push(i);
+        chosen[i] = true;
+        if u32::try_from(far_ids.len()).unwrap_or(u32::MAX) >= far_n {
+            break;
+        }
+    }
+    let mut near_ids = Vec::new();
+    for &i in &cell_order {
+        if chosen[i] {
+            continue;
+        }
+        near_ids.push(i);
+        if u32::try_from(near_ids.len()).unwrap_or(u32::MAX) >= near_n {
+            break;
+        }
+    }
     let mut picks = Vec::with_capacity(u_usize(budget));
     for i in 0..on {
         picks.push(RayPick {
             on_screen: true,
             far: false,
+            discovery: false,
             dir: Vec3::ZERO,
-            tile: Some(order[u_usize(i)]),
+            tile: Some(tile_order[u_usize(i)]),
+            cell: None,
         });
     }
-    for i in 0..off {
-        let far = i >= off - far_n;
+    for id in far_ids.iter().chain(near_ids.iter()) {
         picks.push(RayPick {
             on_screen: false,
-            far,
-            dir: fibonacci(i, off),
+            far: cells[*id].level == tun.lod_max(),
+            discovery: false,
+            dir: Vec3::ZERO,
             tile: None,
+            cell: Some(*id),
+        });
+    }
+    let disc = budget.saturating_sub(u32::try_from(picks.len()).unwrap_or(budget));
+    let far_disc = far_n.saturating_sub(u32::try_from(far_ids.len()).unwrap_or(0));
+    for i in 0..disc {
+        picks.push(RayPick {
+            on_screen: false,
+            far: i < far_disc,
+            discovery: true,
+            dir: fibonacci(i, disc),
+            tile: None,
+            cell: None,
         });
     }
     picks
@@ -365,7 +433,7 @@ mod tests {
                 lambda: 0.0,
             })
             .collect();
-        let picks = schedule(&tun, &tiles);
+        let picks = schedule(&tun, &tiles, &[]);
         assert!(picks.len() <= u_usize(tun.budget));
         assert_eq!(picks.len(), u_usize(tun.budget));
         let on = picks.iter().filter(|p| p.on_screen).count();
@@ -378,7 +446,7 @@ mod tests {
     #[test]
     fn an_empty_screen_still_spends_the_budget_off_screen() {
         let tun = high();
-        let picks = schedule(&tun, &[]);
+        let picks = schedule(&tun, &[], &[]);
         assert_eq!(picks.len(), u_usize(tun.budget));
         assert!(picks.iter().all(|p| !p.on_screen));
     }
@@ -387,14 +455,14 @@ mod tests {
     fn a_zero_budget_traces_nothing() {
         let mut tun = high();
         tun.budget = 0;
-        assert!(schedule(&tun, &[]).is_empty());
+        assert!(schedule(&tun, &[], &[]).is_empty());
     }
 
     #[test]
     fn off_screen_rays_cover_every_octant() {
         let mut tun = high();
         tun.budget = 256;
-        let picks = schedule(&tun, &[]);
+        let picks = schedule(&tun, &[], &[]);
         let mut seen = [false; 8];
         for pick in &picks {
             let d = pick.dir;
@@ -410,7 +478,7 @@ mod tests {
     #[test]
     fn the_far_bin_is_the_reserved_share() {
         let tun = high();
-        let picks = schedule(&tun, &[]);
+        let picks = schedule(&tun, &[], &[]);
         let far = picks.iter().filter(|p| p.far).count();
         let want = u_usize(whole_u32((u_f32(tun.budget) * tun.far_share).ceil()));
         assert_eq!(far, want);
@@ -435,7 +503,7 @@ mod tests {
                 lambda: 0.0,
             },
         ];
-        let picks = schedule(&tun, &tiles);
+        let picks = schedule(&tun, &tiles, &[]);
         let on: Vec<_> = picks.iter().filter(|p| p.on_screen).collect();
         assert_eq!(on.len(), 1);
         assert_eq!(on[0].tile, Some(1));
@@ -449,6 +517,7 @@ mod tests {
         let mut stored = Some(0u32);
         let mut creates = 0u32;
         let mut drops = 0u32;
+        let mut coarsens = 0u32;
         for i in 0..32 {
             let shift = if i % 2 == 0 { 0.0 } else { 0.4 };
             let player = Vec3::new(-shift, 0.0, 0.0);
@@ -461,16 +530,21 @@ mod tests {
                     drops += 1;
                     stored = None;
                 }
+                Residency::Coarsen { level } => {
+                    coarsens += 1;
+                    stored = Some(level);
+                }
                 Residency::Keep => {}
             }
         }
         assert_eq!(creates, 0);
         assert_eq!(drops, 0);
+        assert_eq!(coarsens, 0);
         assert_eq!(stored, Some(0));
         let past = Vec3::new(-5.0, 0.0, 0.0);
         assert_eq!(
             residency(past, Vec3::ZERO, point, Some(0), &tun),
-            Residency::Drop
+            Residency::Coarsen { level: 1 }
         );
         assert_eq!(
             residency(Vec3::new(-0.4, 0.0, 0.0), Vec3::ZERO, point, None, &tun),
@@ -540,6 +614,131 @@ mod tests {
         let with = priority(1.0, 1.0, 0.25, measured_change(), &tun);
         let without = priority(1.0, 1.0, 0.25, 0.0, &tun);
         assert!((with - without).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn the_far_share_picks_coarse_cells() {
+        let mut tun = high();
+        tun.budget = 8;
+        tun.far_share = 0.5;
+        tun.offscreen_floor = 1.0;
+        let mut cells = vec![CellNeed {
+            distance: 2.0,
+            level: 0,
+            mean: 1.0,
+            deviation: 1.0,
+            lambda: 0.0,
+        }];
+        let coarse = tun.lod_max();
+        for i in 0..3u32 {
+            cells.push(CellNeed {
+                distance: 80.0 + u_f32(i),
+                level: coarse,
+                mean: 1.0,
+                deviation: 0.05,
+                lambda: 0.0,
+            });
+        }
+        let picks = schedule(&tun, &[], &cells);
+        let far: Vec<_> = picks.iter().filter(|p| p.far && !p.discovery).collect();
+        assert_eq!(far.len(), 3);
+        assert!(far.iter().all(|p| matches!(p.cell, Some(i) if cells[i].level == coarse)));
+        assert!(picks.iter().any(|p| matches!(p.cell, Some(0))));
+        assert!(picks.iter().filter(|p| p.far).count() >= 3);
+    }
+
+    #[test]
+    fn off_screen_rays_prefer_the_closer_cell() {
+        let mut tun = high();
+        tun.budget = 4;
+        tun.offscreen_floor = 1.0;
+        tun.far_share = 0.0;
+        let cells = [
+            CellNeed {
+                distance: 30.0,
+                level: 2,
+                mean: 1.0,
+                deviation: 0.5,
+                lambda: 0.0,
+            },
+            CellNeed {
+                distance: 1.0,
+                level: 0,
+                mean: 1.0,
+                deviation: 0.5,
+                lambda: 0.0,
+            },
+        ];
+        let picks = schedule(&tun, &[], &cells);
+        let cells_picked: Vec<_> = picks.iter().filter_map(|p| p.cell).collect();
+        assert_eq!(cells_picked.first().copied(), Some(1));
+    }
+
+    #[test]
+    fn the_far_edge_does_not_create_and_drop() {
+        let tun = high();
+        let level = tun.lod_max();
+        let point = Vec3::new(tun.far, 0.0, 0.0);
+        let mut stored = Some(level);
+        let mut creates = 0u32;
+        let mut drops = 0u32;
+        for i in 0..32 {
+            let shift = if i % 2 == 0 { 0.0 } else { 0.4 };
+            let player = Vec3::new(-shift, 0.0, 0.0);
+            match residency(player, Vec3::ZERO, point, stored, &tun) {
+                Residency::Create { .. } => {
+                    creates += 1;
+                    stored = Some(level);
+                }
+                Residency::Drop => {
+                    drops += 1;
+                    stored = None;
+                }
+                Residency::Coarsen { level: to } => {
+                    stored = Some(to);
+                }
+                Residency::Keep => {}
+            }
+        }
+        assert_eq!(creates, 0);
+        assert_eq!(drops, 0);
+        assert_eq!(stored, Some(level));
+        let outside = Vec3::new(tun.far + 0.4, 0.0, 0.0);
+        assert!(matches!(
+            residency(Vec3::ZERO, Vec3::ZERO, outside, None, &tun),
+            Residency::Drop
+        ));
+        assert!((leash_radius(level, &tun) - tun.leash_scale * tun.far).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn look_ahead_keeps_the_cell_it_just_created() {
+        let tun = high();
+        let point = Vec3::new(13.0, 0.0, 0.0);
+        let velocity = Vec3::new(16.0, 0.0, 0.0);
+        assert_eq!(
+            residency(Vec3::ZERO, velocity, point, None, &tun),
+            Residency::Create { level: 0 }
+        );
+        assert_eq!(
+            residency(Vec3::ZERO, velocity, point, Some(0), &tun),
+            Residency::Keep
+        );
+    }
+
+    #[test]
+    fn a_fine_cell_past_its_leash_coarsens_before_it_drops() {
+        let tun = high();
+        let point = Vec3::new(13.0, 0.0, 0.0);
+        assert_eq!(
+            residency(Vec3::ZERO, Vec3::ZERO, point, Some(0), &tun),
+            Residency::Coarsen { level: 1 }
+        );
+        let gone = Vec3::new(tun.far * tun.leash_scale + 1.0, 0.0, 0.0);
+        assert_eq!(
+            residency(Vec3::ZERO, Vec3::ZERO, gone, Some(tun.lod_max()), &tun),
+            Residency::Drop
+        );
     }
 
     #[test]

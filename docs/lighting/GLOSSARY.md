@@ -445,7 +445,7 @@ Role: STORE · Literature: clipmap LOD · More detail: [../systems/lighting/scre
 **Fill leash**: a stored cell stays until the player is `fill_leash` times its create radius past it. New cells use the create radius, shifted ahead by `fill_look_ahead`. The two radii stop a boundary from creating and dropping the same cell.
 Role: SCHED · Literature: hysteresis band · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
-**Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. Unused screen budget is spent on the clipmap as well. The last `fill_far_share` of those rays are the far bin.
+**Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. That share ranks resident clipmap cells by closeness times remaining error. `fill_far_share` of the budget is reserved for cells at `fill_cell_max`. Rays the resident set does not take discover surfaces.
 Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
