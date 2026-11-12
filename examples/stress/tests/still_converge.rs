@@ -6,13 +6,16 @@
 //! Path-reference error at frame 2N is lower than at frame N, and the surface
 //! cache is still tracing rays. A resolved cell used to take no rays for 900
 //! frames, and a low-change cell past 64 sets left on a 4096-entry trickle
-//! list whose overflow got zero rays, so a still picture froze.
+//! list whose overflow got zero rays. The host settle bit then cancelled the
+//! cache round for the rest of the run, which is what a 1440p still hall hits
+//! once the relit change goes quiet. Lavapipe leaves that change at its cap,
+//! so this test arms the same bit with `sc_settle`.
 
 use std::sync::Mutex;
 
 use genos_debug::image::{pixel_luminance, Image};
 use genos_render::Renderer;
-use genos_scene::{Camera, Vec3};
+use genos_scene::{Camera, LightingPreset, LightingSettings, Vec3};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
 use genos_window::Window;
@@ -131,26 +134,37 @@ fn a_still_hall_keeps_converging() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    renderer.apply_lighting_preset("high").expect("high preset");
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    // Lavapipe leaves the relit max-change at its cap, so the change-counter
+    // settle never fires here. `sc_settle` arms the same host bit a 1440p
+    // 4070 reaches when that counter drops (about frame 94). That bit used
+    // to cancel the cache round for the rest of the run.
+    settings.experiments.sc_settle = 64;
+    renderer.set_lighting_settings(settings);
     renderer.reset_lighting_cache();
     let (stage, camera) = hall();
     let reference = reference_plane(renderer.width() as usize, renderer.height() as usize);
     let mut early_picture = Vec::new();
     let mut late_picture = Vec::new();
     let mut rays = Vec::new();
+    let mut saw_settled = false;
     for frame in 0..N * 2 {
         let pixels = draw(window, renderer, &stage.world, &camera);
         let stats = renderer.settle_stats();
+        if stats.settled {
+            saw_settled = true;
+        }
         if frame + 1 >= RAY_FROM {
             rays.push(stats.cache_rays);
         }
         if frame + 1 == N || frame + 1 == N * 2 || (frame + 1) % 64 == 0 {
             let err = error_vs_reference(&pixels, &reference);
             eprintln!(
-                "still converge frame {} error {err:.4} cache_rays {} round_entries {}",
+                "still converge frame {} error {err:.4} cache_rays {} round_entries {} settled {}",
                 frame + 1,
                 stats.cache_rays,
-                stats.round_entries
+                stats.round_entries,
+                stats.settled
             );
         }
         if frame + 1 == N {
@@ -171,6 +185,10 @@ fn a_still_hall_keeps_converging() {
         late_error < early_error - MIN_DROP,
         "a still hall stopped converging (error {early_error:.4} at {N} to {late_error:.4} at {}, need a drop of {MIN_DROP})",
         N * 2
+    );
+    assert!(
+        saw_settled,
+        "the host never called the still hall settled, so the zero-ray stop was not tested"
     );
     assert!(
         min_rays > MIN_LATE_RAYS,

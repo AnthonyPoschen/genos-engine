@@ -284,11 +284,13 @@ void main() {
             if (used <= 0 && int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK)) {
                 used = 1;
             }
-            if (used <= 0) {
+            if (used <= 0 && !on_screen) {
                 // S62E (a): resident but unread, and the global light moved more
                 // than 10 % since its relight: a whole set from the WRC
                 // background list (within the WRC refresh cap). Shown rescaled
-                // meanwhile (lighting_ls_ratio).
+                // meanwhile (lighting_ls_ratio). An on-screen cell stays in the
+                // ranking: a still compose stops rewriting blocks, the read
+                // stamp goes stale, and this return then traced nothing.
                 if (abs(lighting_ls_ratio(lighting_sc_updated(slot)) - 1.0) > 0.1) {
                     uint at = atomicAdd(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], 1u);
                     if (at < LIGHTING_WRC_REFRESH_CELLS) {
@@ -296,6 +298,9 @@ void main() {
                     }
                 }
                 return;
+            }
+            if (used <= 0) {
+                used = 1;
             }
             // S74A A-SVGF (lighting_cache.glsl): the gradient checks alone decide
             // the rays of a resolved texel; lambda sets the rate of a changing one.
@@ -417,8 +422,11 @@ void main() {
                     return;
                 }
             }
-            // S64A: relit only once due (the budget is a ceiling).
-            if (int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {
+            // S64A: off screen, relit only once due (the budget is a ceiling).
+            // On screen, a cell that is not due still joins the ranking, so a
+            // still frame spends the leftover budget on the highest remaining
+            // error instead of tracing zero rays.
+            if (!on_screen && int(lighting_frame() - updated) < int(lighting_sc_interval(slot, t))) {
                 atomicAdd(gstats.waiting, 1u);
                 return;
             }

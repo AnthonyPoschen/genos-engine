@@ -1910,15 +1910,24 @@ impl Gpu {
         // the cache meanwhile. It is one word of this slot's stats ring buffer,
         // whose fence the frame loop already waited (frames in flight), so the
         // value is a few frames old and nothing waits on the GPU for it.
-        if self.lighting.stats_round[slot] && self.lighting.settings.world_mode() == 3 {
-            if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
-                self.lighting.draining = flag != 0;
-            }
-            if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
-                self.lighting.round_entries = e;
-            }
-            if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
-                self.lighting.cache_rays = rays;
+        if self.lighting.settings.world_mode() == 3 {
+            if self.lighting.stats_round[slot] {
+                if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
+                    self.lighting.draining = flag != 0;
+                }
+                if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
+                    self.lighting.round_entries = e;
+                }
+                if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
+                    self.lighting.cache_rays = rays;
+                }
+            } else if !self.lighting.async_on {
+                // That slot did not dispatch a cache round. The stats buffer was
+                // cleared and never counted, so the probe is zero, not the
+                // previous round's leftover. The async queue reports its own
+                // round from poll_lighting_world.
+                self.lighting.cache_rays = 0;
+                self.lighting.round_entries = 0;
             }
         }
         let read = lighting_stats_wanted(
@@ -4319,16 +4328,21 @@ impl Gpu {
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
-        // Settled (frozen above): the probes and the light cache hold their light,
-        // and only the pixels' direct light and the final pass run, so a still
-        // scene draws the same picture every frame (no residual cache drift) and
-        // idles cheaply.
+        // `frozen` is the host settle bit (32 still frames, then either the
+        // change counter or `sc_settle`, and the drain flag). It used to cancel
+        // the cache round. A 1440p still hall hits that bit around frame 94,
+        // and every later frame traced zero cache rays. The surface cache
+        // keeps its budget; probe-only still idles.
         self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
         // A light cache round is due (`experiments.cache_hz` caps them per second). On
         // the async queue (`experiments.cache_async`) it goes there, else into this frame;
         // a frame without one runs the picture's passes only (lighting_mode 1).
         let cache_hz = f64::from(self.lighting.settings.experiments.cache_hz);
-        let due = !frozen
+        let surface_budget = self.lighting.settings.world_mode() == 3
+            && self.lighting.settings.world_cache.enabled
+            && self.lighting.settings.gi.enabled
+            && self.lighting.settings.bounce.count >= 2;
+        let due = (surface_budget || !frozen)
             && (cache_hz <= 0.0
                 || self
                     .lighting
