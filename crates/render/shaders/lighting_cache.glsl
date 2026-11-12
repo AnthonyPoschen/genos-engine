@@ -265,6 +265,10 @@ const uint LIGHTING_DIAG_SCREEN_LIST_FINE = 41u;
 const uint LIGHTING_DIAG_SCREEN_CHANGED = 61u;
 const uint LIGHTING_DIAG_SCREEN_FINE = 62u;
 const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
+// Variance kernels that did not take the dirty early-out. A still frame
+// counts the texels whose mean moved, plus every plain texel on the
+// 32-frame backstop. The host reads it as LightingAtrousStats::filter_heavy.
+const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
 bool lighting_diag_reserved(uint i) {
     return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
         || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
@@ -334,6 +338,13 @@ bool lighting_view_held() {
     return all(equal(right.xyz, scene.view_right.xyz)) && right.w == scene.view_right.w
         && all(equal(up.xyz, scene.view_up.xyz))
         && all(equal(fwd.xyz, scene.view_forward.xyz)) && fwd.w == scene.view_forward.w;
+}
+// A held camera rebuilds the wavelet, the pushed field, and the compose list
+// on this period. The frames in between keep the last result. A moving camera
+// does not take the hold (lighting_view_held is false).
+const uint LIGHTING_STILL_REFRESH = 32u;
+bool lighting_still_refresh() {
+    return lighting_frame() != 0u && (lighting_frame() % LIGHTING_STILL_REFRESH) == 0u;
 }
 // A pixel showed this texel within `window` frames, or the camera has not moved
 // since a pixel showed it. Compose skips redraws while the camera is held, so
@@ -2209,6 +2220,14 @@ uint lighting_sh_half2(float a, float b) {
 }
 // Same cut as `size > 0.2`: a texel is at most 0.125, a world cell is larger.
 const float LIGHTING_HIT_PATCH = 0.2;
+// Held camera, world cell, not the 32-frame backstop. The caller keeps the
+// stored value and skips the screen-rect mark.
+bool lighting_compose_world_held(uint slot) {
+    return slot < LIGHTING_CACHE_SLOTS
+        && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
+        && lighting_view_held()
+        && !lighting_still_refresh();
+}
 // A stored coefficient moved by at least one shared-exponent bucket.
 // Negative harmonics pack the positive and negative parts separately.
 bool lighting_sh_stored_moved(vec3 a, vec3 b) {
@@ -2249,6 +2268,13 @@ void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
     vec3 aftery;
     vec3 afterz;
     lighting_sh_get(slot, after0, afterx, aftery, afterz);
+    // A world cell covers a screen rect. A bucket change every round used to
+    // put that rect on the compose list every frame, so maintenance and
+    // compose walked the picture on a still camera. The cell still stores the
+    // new coefficients. The picture reads them on the 32-frame backstop.
+    if (lighting_compose_world_held(slot)) {
+        return;
+    }
     if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
         && (lighting_sh_stored_moved(before0, after0) || lighting_sh_stored_moved(beforex, afterx)
             || lighting_sh_stored_moved(beforey, aftery) || lighting_sh_stored_moved(beforez, afterz))) {
@@ -4848,6 +4874,21 @@ const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
 // are held until they add up past it (bounded 1 % lag).
 const bool LIGHTING_DIRTY_ATROUS = true;
 const float LIGHTING_DIRTY_EPS = 0.01;
+// A still camera's direct sample flickers inside one percent. Marking the
+// block on that flicker redrew the picture. A larger step, a signature
+// change, and a moving camera still mark. The 32-frame backstop marks too.
+bool lighting_compose_direct_moved(uint packed, uint prev) {
+    if (packed == prev) {
+        return false;
+    }
+    if (!(lighting_view_held() && !lighting_still_refresh())) {
+        return true;
+    }
+    vec3 a = max(lighting_unpack_rgb9e5(packed), vec3(0.0));
+    vec3 b = max(lighting_unpack_rgb9e5(prev), vec3(0.0));
+    float scale = max(max(max(a.r, a.g), a.b), max(max(b.r, b.g), b.b));
+    return any(greaterThan(abs(a - b), vec3(LIGHTING_DIRTY_EPS * max(scale, 1.0e-4))));
+}
 const bool LIGHTING_DIRTY_NOISE = false; // S78X: off (lum a 0.348 -> 0.345, a lag toward darker)
 const float LIGHTING_DIRTY_SE = 2.0;
 const uint LIGHTING_SC_LVL_AT = 15u * LIGHTING_CACHE_SLOTS;
@@ -5113,19 +5154,43 @@ void lighting_svgf_inactive(uint slot) {
         lighting_svgf_scatter(slot, 0u);
     }
 }
+// A texel with 16 sets used to rerun variance and every a-trous level on
+// every frame, so the dirty early-out never fired once the set count closed.
+// That is the steady filter: five 5x5 kernels on the whole screen list.
+// The dirty test still reruns a texel whose mean moved. LIGHTING_STILL_REFRESH
+// is the backstop for a drift under that test.
+bool lighting_svgf_plain_rebuild(uint slot) {
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
+        return false;
+    }
+    // A moving camera keeps the every-frame rebuild. The hold is the still
+    // picture: the same texels were the 5x5 that would not go idle.
+    return lighting_still_refresh() || !lighting_view_held();
+}
 void lighting_svgf_variance(uint slot) {
+    // A texel that has closed its set count used to rerun the 7x7 and then
+    // scatter every frame, because a new sample still moves the mean by more
+    // than LIGHTING_DIRTY_EPS. On a held camera that is the steady filter:
+    // the same texels, five 5x5 levels, every frame. The mean is applied on
+    // the 32-frame backstop. A texel that has never been filtered still runs.
+    // The dirty test below does not catch this: the mean keeps crossing one
+    // percent, so the early-out never fires and the kernel stays the picture.
+    float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_view_held() && !lighting_still_refresh()) {
+        return;
+    }
     float var;
     vec4 v = lighting_svgf_in(slot, var);
     bool spatial = var < 0.0;
     bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
-    bool rebuild = floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_SC_PLAIN_SETS;
+    bool rebuild = lighting_svgf_plain_rebuild(slot);
     if (LIGHTING_DIRTY_ATROUS && !flip && !rebuild) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
-        // A one-frame step under LIGHTING_DIRTY_EPS still leaves the stored
-        // level behind the mean. The 16-set rebuild is that backstop. A mean
-        // that has already crossed the edge test is the same case earlier:
-        // the small emitter's cell stays in the held blur until then.
+        // A step under LIGHTING_DIRTY_EPS leaves the stored level behind the
+        // mean until LIGHTING_STILL_REFRESH. A mean that has already crossed
+        // the edge test is the same case earlier: the small emitter's cell
+        // stays in the held blur until then.
         float y_now = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
         float y_old = dot(max(o.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
         bool drifted = lighting_sh_lum_disagrees(max(y_now, y_old), min(y_now, y_old));
@@ -5147,6 +5212,7 @@ void lighting_svgf_variance(uint slot) {
             }
         }
     }
+    atomicAdd(gstats.diag[LIGHTING_DIAG_FILTER_HEAVY], 1u);
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -5215,8 +5281,7 @@ void lighting_svgf_iter(uint slot, uint it) {
         }
     }
 #endif
-    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)
-        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u) && !lighting_svgf_plain_rebuild(slot)) {
         return;
     }
     uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
@@ -5365,6 +5430,13 @@ float lighting_sc_lambda(uint slot);
 void lighting_svgf_push(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {
+        return;
+    }
+    // The wavelet hold leaves this field where the last rebuild wrote it.
+    // Pushing the raw mean on the frames in between was the frame-to-frame
+    // step. A moving camera still pushes.
+    float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_view_held() && !lighting_still_refresh()) {
         return;
     }
     float varp = 0.0;

@@ -357,6 +357,9 @@ pub(crate) struct Lighting {
     compose_kind: u8,
     /// Compose dispatches recorded for that frame. The sun path is one.
     compose_dispatches: u32,
+    /// Maintenance and the lattice drain ran this frame. A held camera skips
+    /// both except on frame 32. The picture compile still runs.
+    maint_ran: bool,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
@@ -456,6 +459,18 @@ pub struct LightingAtrousStats {
     pub coarse_pixels: u32,
     /// Fine pixels whose input moved more than 2% from the stored field.
     pub changed_pixels: u32,
+    /// Variance kernels that did not take the dirty early-out. A held camera
+    /// leaves a texel with 16 sets out of this count until the 32-frame
+    /// backstop. The count is the texels still being filtered.
+    pub filter_heavy: u32,
+    /// Screen-list cells written by a full rebuild this frame. Zero when the
+    /// held list was reused.
+    pub list_rebuilt: u32,
+    /// Cells appended onto a reused screen list this frame.
+    pub list_appended: u32,
+    /// Pixels whose compose walked the world cache (`diag[0]`). A held frame
+    /// reuses the stored bounce and this stays near zero.
+    pub cache_walks: u32,
 }
 
 /// Shadow rays traced last frame, and how pixels shaded.
@@ -519,6 +534,13 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         changed_pixels: w[85],
         screen_pixels: w[86],
         coarse_pixels: w[87],
+        // diag[60] is word 84 (diag[0] is word 24).
+        filter_heavy: w[84],
+        // diag[40] and diag[41]: the screen list rebuilt this frame, and the cells appended.
+        list_rebuilt: w[64],
+        list_appended: w[65],
+        // diag[0] is word 24.
+        cache_walks: w[24],
     }
 }
 
@@ -663,6 +685,7 @@ impl Default for Lighting {
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
+            maint_ran: false,
             lamp_key: None,
             lamp_moving: false,
             catch_left: 0,
@@ -1830,6 +1853,7 @@ impl Gpu {
             compose: self.lighting.compose_kind,
             dispatches: self.lighting.compose_dispatches,
             blocks: self.read_compose_blocks(),
+            maint_ran: self.lighting.maint_ran,
         }
     }
 
@@ -2206,11 +2230,22 @@ impl Gpu {
     /// The sun path and the compose-writes kill switch leave this empty.
     /// The gather stays on the cache timestamp, not in compose.
     fn dispatch_sh_prep(&mut self, sun_compose: bool, compose_full: bool, gx: u32, gy: u32) {
+        self.lighting.maint_ran = false;
         let maint = self.lighting.compose_maint_pipe;
         let drain = self.lighting.sh_drain_pipe;
         if sun_compose || maint.is_null() || drain.is_null() {
             return;
         }
+        // The walk is four world-cache finds per pixel of every dirty block,
+        // and the colour is thrown away. The drain then fills the lattice the
+        // picture compile reads. On a held camera that lattice is already
+        // filled. Frame 32 (and a camera move, which takes the full grid)
+        // requests it again.
+        let refresh = self.lighting.frame != 0 && self.lighting.frame % 32 == 0;
+        if self.lighting.still > 0 && !compose_full && !refresh {
+            return;
+        }
+        self.lighting.maint_ran = true;
         const BINS: u64 = 16;
         const LATTICE_CAP: u32 = 16384;
         // SAFETY: the command buffer, the key buffer, and both pipelines are the
@@ -5610,6 +5645,9 @@ pub struct LightingSunStats {
     /// count. Zero when the key table was not copied. A full compose can still
     /// report the marks it did not use.
     pub blocks: u32,
+    /// Maintenance and the lattice drain were recorded. False on a held frame
+    /// that is not the 32-frame backstop.
+    pub maint_ran: bool,
 }
 
 #[derive(Clone, Copy, Default)]

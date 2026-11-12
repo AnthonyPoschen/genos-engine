@@ -136,10 +136,74 @@ No shader change in this fix. Every cut below changes the picture or the varianc
 
 | Cut | What it is | Expected save on this 4070 frame | Quality risk against `REF_ERR` 0.05 |
 |---|---|---|---|
-| sh prep, stop walking every pixel | Pass 9. Clear 16 distance bins, then the maintenance compile of compose, then a drain of 16,384 threads. On this opening frame `compose_full` is set, so maintenance is one 8×8 group per block: 320×180 groups, 3.69 million pixels. Each pixel loads the surface and runs `lighting_screen_probe_indirect` (four world-cache corner finds, coverage atomics, an enqueue of an empty 12.5 cm texel, a lattice request). The colour is thrown away. The drain then fills the lattice slots and stores detail seeds. The drain is per cell. The 10.4 ms is the per-pixel walk. Compose does the same walk again, after the drain, to store the pixel. The drain has to sit between those two, so they cannot be one dispatch. A still frame with `still > 0`, compose reuse on, and 57,600 blocks under the 65,535 cap should switch both to the dirty block list. If the new rows keep sh prep near 10 ms, the list is still covering the picture and the cut is to skip a block whose texels did not change. | Up to about 10 ms on a full frame, and little once the dirty list is actually small. The corner finds are most of the cost; dropping only the discarded blend saves less than the whole 10.4. | A skipped block that did change keeps the old shade (`lighting_compose_cover`). That misses the picture gate. Not implemented. |
-| compose 6.2 ms | The picture store. Same full grid on this opening frame, same world-cache read, then the shoulder and the write. It has to run after the drain, because it loads the lattice the drain just filled. | Same shape as sh prep: up to about 6 ms while the frame is full, less on a real dirty list. | Skipping a dirty block fails the picture. Not implemented. |
+| sh prep, stop walking every pixel | Pass 9. Clear 16 distance bins, then the maintenance compile of compose, then a drain of 16,384 threads. On this opening frame `compose_full` is set, so maintenance is one 8×8 group per block: 320×180 groups, 3.69 million pixels. Each pixel loads the surface and runs `lighting_screen_probe_indirect` (four world-cache corner finds, coverage atomics, an enqueue of an empty 12.5 cm texel, a lattice request). The colour is thrown away. The drain then fills the lattice slots and stores detail seeds. The drain is per cell. The 10.4 ms is the per-pixel walk. Compose does the same walk again, after the drain, to store the pixel. The drain has to sit between those two, so they cannot be one dispatch. A still frame with `still > 0`, compose reuse on, and 57,600 blocks under the 65,535 cap should switch both to the dirty block list. If the new rows keep sh prep near 10 ms, the list is still covering the picture and the cut is to skip a block whose texels did not change. | Up to about 10 ms on a full frame, and little once the dirty list is actually small. The corner finds are most of the cost; dropping only the discarded blend saves less than the whole 10.4. | A skipped block that did change keeps the old shade (`lighting_compose_cover`). The steady-state hold is the next section. The opening frame stays a full walk. |
+| compose 6.2 ms | The picture store. Same full grid on this opening frame, same world-cache read, then the shoulder and the write. It has to run after the drain, because it loads the lattice the drain just filled. | Same shape as sh prep: up to about 6 ms while the frame is full, less on a real dirty list. | Skipping a dirty block fails the picture. The steady-state hold is the next section. The opening frame stays a full walk. |
 | direct, fewer candidates | `RESTIR_CANDIDATES` is 4. The 2.17 ms stamp is the initial pass with temporal fused into it. | About 1 ms if the candidate trace is most of that stamp. Temporal reuse does not shrink with the candidate count. | Variance goes up. Not measured against 0.05. Not implemented. |
 | direct, half-res reservoirs | `restir_resolution_scale` 2. Shade and its visibility ray stay at full resolution (2.94 ms). | Candidates plus spatial are 4.54 ms. A quarter of the reservoir pixels would take that toward about 1 ms, about 3 ms saved, if the cost scales. | Already measured. Resolution scale 2 missed the picture gate at 0.073. Not implemented. |
 | direct, cheaper spatial | Spatial is 2.37 ms and does not trace. One neighbour was the trial. | About 1 ms. Not the whole 2.37. | One neighbour missed the shadow row at 0.063. Not implemented. |
 | direct, visibility reuse | The shade dispatch is 2.94 ms and traces one visibility ray per pixel. | Some of that 2.94. The ray and the shade math are one stamp, so the split is not known. | The reservoir sample changes as history grows, so a reused bit is not the same picture. Not implemented. |
 | cache round once the cache is busy | The 52.6 ms spike and the 2–4 ms that remain in the steady band. In-frame, not async. | The steady band has about 3 ms over the opening span. The spike is larger and then goes away. The new CSV names the column. | Fewer rays or a smaller batch slows convergence and moves a still picture. Not implemented until the rows show which column grew. |
+
+## Steady filter, prep, and compose
+
+`ce55cd49` on the 4070, 2560×1440, High, still, p50 of frames 30–90. Lighting span 29.7 ms. The opening filter (frame 3 of the earlier run) was 0.68 ms, which is eight dispatches over an empty list.
+
+| Pass | p50 ms |
+|---|---:|
+| filter | 8.891 |
+| sh prep | 4.135 |
+| shade + visibility | 3.839 |
+| compose | 2.617 |
+| candidates | 2.457 |
+| cache-hit shading | 2.102 |
+| spatial | 1.987 |
+| cache rays | 1.266 |
+| cache round | 1.210 |
+| compact | 0.363 |
+
+### Why the filter is 8.9 ms
+
+It is not the iteration count, the format, or the resolution by itself. Preset high launches the screen wavelet: one gather, one commit, five iterations, one push. Once a texel has 16 sets, the old code set `rebuild` every frame. That disabled the dirty early-out, so the 7×7 variance and the five 5×5 iterations ran on the whole screen list every frame. A new sample still moves the mean by more than one percent, so the dirty test would not have idled those texels anyway. Frame 3 is cheap because the list is empty. After the cells fill, the list is the picture.
+
+A held camera now skips that kernel for a texel that already has 16 sets and has been filtered. Frame 32 runs it again and applies the mean the skip left behind. A moving camera does not take the hold. Young texels still run, so the opening frames stay expensive. That is the fill.
+
+`examples/stress/tests/still_idle.rs`, 320×180, draws 40–47: `filter_heavy` 24–77 of 54,922 screen pixels. The picture moved 87 codes from draw 2 to draw 47. The list was not rebuilt (`list_rebuilt` 0).
+
+### Why prep stayed at 4.1 ms, and compose at 2.6
+
+The dirty list was already on. It did not get small. A world cell marks its whole screen rect when a coefficient bucket changes, and that happens every round. Maintenance then walks every pixel of those blocks (four cache finds, colour thrown away) and compose walks them again. Lavapipe compose at 480×270 was already 0.06 ms, so a compose millisecond on this machine cannot prove a 4070 cut. The walk count can.
+
+A held camera does not mark a world cell until frame 32. A direct sample within one percent of the stored pixel does not mark its block. Maintenance is not recorded on those frames (`LightingSunStats::maint_ran` is false; the same test). Compose adds the new direct to the bounce it stored on the last full walk, and does not call `lighting_screen_probe_indirect`. The same test: `cache_walks` 0. Frame 32 marks the cells, runs maintenance, and stores a new bounce. A camera move does not take the hold.
+
+A narrow changed-texel dispatch, a stage-0 gather skip, and skipping compose marks outright were tried earlier. Each of them moved the screen wavelet off the hash wavelet (still p99 about 74–94 against a floor near 9). They are not in this tree. The hold is in the kernel both launches share. `screen_hall` on lavapipe: still closer 0.000/0.000 against floor 3.000, flicker 0.357/3.000. Moving closer 0.000/0.000 against floor 46.000.
+
+### Lavapipe proxy, 480×270, High, still
+
+Not a 4070 millisecond. Same command as below with `--size 480x270 --frames 48`. Median of the named rows.
+
+| Pass | before, frames 12–16 | after, frames 40–48 |
+|---|---:|---:|
+| filter | 616 | 83 |
+| sh prep | 36 | 1.7 |
+| compose | 0.06 | 0.06 |
+| lighting span | 1058 | 468 |
+
+Frames 12–16 after are still in the fill (filter median 584). The drop is the settled frames. CSV row 32 is the backstop: filter 571, and one nearby prep row is 32, which is the maintenance walk coming back. One spike per 32 frames.
+
+The filter's heavy kernels fell from about ten thousand texels to a few dozen. Lavapipe time fell 7×, not 200×, because an early-out thread is still scheduled. On the 4070 the 8.9 ms is that kernel, and the empty-list launch was 0.68 ms. Prep's dispatch is not recorded on a held frame, so the 4.1 ms walk should leave. Compose's cache walks are 0. Lavapipe compose was already at the noise floor, so the 2.6 ms has to be read on the 4070. The corner finds were the cost.
+
+### Gates
+
+`restir_di`: `restir_di_matches_brute_direct_on_the_gate_scenes`, `restir_di_matches_brute_with_eight_spatial_neighbours`, and `the_same_seed_renders_the_same_picture_twice` pass. `REF_ERR` stays 0.05. `restir_merge_oracle::fixed_reservoirs_match_balance_list_on_both_spatial_pipelines` still fails on this branch and on `lighting-v3`.
+
+`fill_knockout`: early-to-late 86.8 codes, error 0.7259 → 0.0829. `MIN_ERROR_GAIN` stays 0.03. `MIN_DELTA_CODES` stays 4.
+
+A lamp change on a still camera waits up to 32 frames for the wavelet, the world-cell rect, and a new bounce. Direct that moves by more than one percent still redraws, added to the stored bounce.
+
+### Not cut
+
+Direct is still the 4070's candidates 2.5, spatial 2.0, and shade 3.8. Half-res reservoirs (picture error 0.073) and one spatial neighbour (shadow row 0.063) stay rejected. Fewer candidates stays a variance proposal. `REF_ERR` was not loosened.
+
+```
+cargo run --release -p genos-stress -- --proof --size 2560x1440 --preset high --frames 90 --still-boxes --freeze-sun --dynamic 0 --profile-passes ./genos-debug/passes.csv
+```

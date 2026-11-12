@@ -165,7 +165,30 @@ void main() {
     vec3 bounce = vec3(0.0);
     bool gi = (gstats.ctrl_bits & 4u) != 0u;
     if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
+#ifdef GENOS_COMPOSE_MAINT
+        // Maintenance has to walk. It enqueues the lattice. The picture
+        // compile below reuses that result on a held frame.
         bounce = indirect(p, pos, n);
+#else
+        // The sun band owns the linear-bounce slice. Every other held frame
+        // reuses the bounce stored on the last full walk (frame 1, a camera
+        // move, or frame 32). Direct still updates. The walk is four cache
+        // finds per pixel; it was the steady compose.
+        uint pixels = pc.dims.x * pc.dims.y;
+        uint slices = 2u + (gstats.ctrl_history != 0u ? 1u : 0u);
+        uint at = slices * pixels + index;
+        // This compile is not the sun shader, so the linear-bounce slice is free.
+        bool reuse_bounce = mode == 0u && lighting_view_held() && !lighting_still_refresh();
+        uint stored = outc.px[at];
+        if (reuse_bounce && stored != 0u) {
+            bounce = lighting_unpack_rgb9e5(stored - 1u);
+        } else {
+            bounce = indirect(p, pos, n);
+            if (mode == 0u) {
+                outc.px[at] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
+            }
+        }
+#endif
     }
 #ifdef GENOS_COMPOSE_MAINT
     return;
