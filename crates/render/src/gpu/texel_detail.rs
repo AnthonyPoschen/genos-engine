@@ -17,7 +17,7 @@ use std::ffi::c_void;
 
 use super::{Buffer, Gpu, Handle, Memory, check, read_f32s};
 
-const SLOTS: u64 = 1_048_576;
+const SLOTS: u64 = 262_144;
 const CACHE_BYTES: u64 = SLOTS * 392;
 // One retired grid slot shifts the change block past the cache-ray region. The
 // extra words keep that head inside the buffer.
@@ -105,7 +105,7 @@ fn ckeys_bytes() -> u64 {
     // (`lighting_gpu`). This dispatch is 1x1 (`dims` in the push constant),
     // and a published corner writes eight words at pixel 0.
     const PIXELS: u64 = 1;
-    (super::lighting_sh_keys_words() + PIXELS * 8) * 4
+    (super::lighting_sh_keys_words(SLOTS) + PIXELS * 8) * 4
 }
 
 impl Gpu {

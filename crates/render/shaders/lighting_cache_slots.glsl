@@ -1,5 +1,8 @@
 // GI light cache sizes (lighting_cache.glsl); lighting_gpu.rs mirrors them.
-const uint LIGHTING_CACHE_SLOTS = 1048576u;
+// Specialization constant 1. 0 in surface_cache.slots keeps this default:
+// four rounds of LIGHTING_SC_BASE_BATCH (65536). Texels stay one size.
+// Pipeline creation overrides it with the resolved slot count.
+layout(constant_id = 1) const uint LIGHTING_CACHE_SLOTS = 262144u;
 const uint LIGHTING_CACHE_SEARCH = 16u;
 // Patches relit per frame, and rays per patch (a square; 16 left each patch a
 // fixed error of its own that probes carried onto the walls they light as

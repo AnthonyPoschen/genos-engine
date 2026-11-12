@@ -96,6 +96,9 @@ Role: STORE · Literature: GIBS surfel; Lumen card texel; DDGI probe (loosely) �
 **Slot**: the storage index of an entry. Do not use it for the entry itself.
 Role: STORE · Literature: GIBS free-stack index (§1.4)
 
+**Cache slots**: how many hash slots the surface light cache allocates. `surface_cache.slots` of 0 is 262144, four rounds of the 65536-entry base batch. Texels stay one size; this count is residency, not a camera-distance band. Any other value rounds up to a power of two from 4096 to 1048576. `--surface-cache-slots` wins; `GENOS_LIGHTING_SURFACE_CACHE_SLOTS` applies only when that argument was omitted.
+Role: STORE · Literature: GIBS surfel capacity · More detail: `lighting_cache_slots.glsl` specialization constant 1
+
 **Cache cell size**: the world size of an entry: 25 cm near the eye, doubling with distance.
 Role: STORE · Literature: GIBS screen-relative surfel size (§1.6); Lumen card resolution · More detail: `world_cell`
 

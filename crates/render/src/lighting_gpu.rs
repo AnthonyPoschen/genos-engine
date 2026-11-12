@@ -33,8 +33,10 @@ fn lighting_tile(height: u32) -> u32 {
 
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
 pub(crate) const LIGHTING_RAYS: u32 = 64;
-/// Light cache sizes; lighting_cache_slots.glsl has the same numbers.
-const LIGHTING_CACHE_SLOTS: u64 = 1048576;
+/// Light cache sizes; lighting_cache_slots.glsl has the same default.
+/// Specialization constant 1. `surface_cache.slots` of 0 keeps this count:
+/// four rounds of the 65,536-entry base batch. Texels stay one size.
+const LIGHTING_CACHE_SLOTS: u64 = 262_144;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
 /// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
@@ -53,9 +55,13 @@ const LIGHTING_CACHE_SLOT_BYTES: u64 = {
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
-const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+fn lighting_wrc_counts_at(slots: u64) -> u64 {
+    2 * slots + 2 + 66
+}
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
-const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
+fn lighting_drain_flag_at(slots: u64) -> u64 {
+    2 * slots + 2 + 82
+}
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -76,8 +82,8 @@ const LIGHTING_SETTLE_CHANGE: u32 = 2000;
 const LIGHTING_COMPOSE_CAP: u64 = 65535;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
-fn lighting_compose_at() -> u64 {
-    2 * LIGHTING_CACHE_SLOTS
+fn lighting_compose_at(slots: u64) -> u64 {
+    2 * slots
         + 2
         + 17600
         + 16
@@ -85,44 +91,69 @@ fn lighting_compose_at() -> u64 {
         + 1024
         + 32768
         + 16
-        + 5 * LIGHTING_CACHE_SLOTS
+        + 5 * slots
         + 5 * 65537
         + 6 * 65536
         + 16
 }
 
-fn lighting_ckeys_words() -> u64 {
+fn lighting_ckeys_words(slots: u64) -> u64 {
     // count, y, z, full flag, stamps, list, field packs, four rect words.
-    lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
+    lighting_compose_at(slots) + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * slots
 }
 
 /// Words through the lattice table, then one lit-from offer word and one
 /// probe-seed election word per slot. Matches `LIGHTING_SH_LATTICE_AT` and
 /// `LIGHTING_SC_SEED_AT` in `lighting_cache.glsl`. The per-pixel seed payload
 /// is not included: its size is the picture.
-pub(super) fn lighting_sh_bin_count_at() -> u64 {
-    lighting_atrous_ppm_at()
+pub(super) fn lighting_sh_bin_count_at(slots: u64) -> u64 {
+    lighting_atrous_ppm_at(slots)
         + LIGHTING_ATROUS_META_WORDS
         + LIGHTING_SUN_WORDS
-        + LIGHTING_CACHE_SLOTS
+        + slots
         + 3
-        + LIGHTING_CACHE_SLOTS
-        + LIGHTING_CACHE_SLOTS
+        + slots
+        + slots
 }
 
-pub(super) fn lighting_sh_keys_words() -> u64 {
+pub(super) fn lighting_sh_keys_words(slots: u64) -> u64 {
     const STORE_BINS: u64 = 16;
     const STORE_CAP: u64 = 8192;
     const LATTICE_CAP: u64 = 16384;
     const STRIDE: u64 = 14;
-    let lists = lighting_sh_bin_count_at() + STORE_BINS;
+    let lists = lighting_sh_bin_count_at(slots) + STORE_BINS;
     let lattice = lists + STORE_BINS * STORE_CAP;
     // Lit-from offer and probe-seed election, one word per slot, past the lattice.
-    lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
+    lattice + LATTICE_CAP * STRIDE + 2 * slots
 }
 
-fn lighting_compose_minx() -> u64 {
-    lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
+fn lighting_compose_minx(slots: u64) -> u64 {
+    lighting_compose_at(slots) + 4 + 2 * LIGHTING_COMPOSE_CAP + slots
+}
+
+/// ReSTIR reservoir bytes, then a 256-aligned window for the visibility mean.
+/// That mean used to be a second buffer. It is three full floats per slot;
+/// the direct shade writes it on the reuse path. Returns
+/// `(total, mean_at, mean_bytes)`. `mean_bytes` is 0 when reuse is off, and
+/// that window is not part of the total.
+pub(crate) fn restir_with_mean(
+    pixels: u64,
+    restir_di: bool,
+    reuse: bool,
+    two_slots: bool,
+) -> (u64, u64, u64) {
+    let reservoirs = if restir_di {
+        crate::restir_live::buffer_bytes(pixels)
+    } else {
+        256
+    };
+    if !reuse {
+        return (reservoirs, 0, 0);
+    }
+    let ping = if two_slots { 2 } else { 1 };
+    let mean = pixels.saturating_mul(32 * ping).max(64);
+    let mean_at = reservoirs.saturating_add(255) & !255;
+    (mean_at.saturating_add(mean), mean_at, mean)
 }
 
 pub(crate) struct Lighting {
@@ -362,18 +393,28 @@ pub(crate) struct Lighting {
     lamp_key: Option<u64>,
     lamp_moving: bool,
     catch_left: u32,
-    /// The million-slot cache is allocated. Off, a small dummy stands in.
+    /// The surface-cache hash table is allocated. Off, a small dummy stands in.
     cache_full: bool,
+    /// Hash slots the cache and key buffers were sized for. The shader's
+    /// specialization constant 1 is the same count.
+    cache_slots: u64,
+    /// Slot count baked into the lighting compute pipelines. A change recreates them.
+    pipe_slots: u32,
     /// Last buffer class. A live edit rebuilds only when this changes.
-    alloc_key: (u32, u32, u32, u32, u32, u32, u32),
-    /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
+    alloc_key: (u32, u32, u32, u32, u32, u32, u32, u32),
+    /// 64-byte stand-in for binding 12 when the visibility mean is off.
+    /// The mean itself is a window of `restir_buf`.
     lamp_res: Buffer,
     /// Fill the reservoir with empty lamps once, not every frame.
     lamp_res_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
-    /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
+    /// ReSTIR DI reservoirs, plus the visibility-mean window when reuse is on.
     restir_buf: Buffer,
+    /// Byte offset of the visibility mean inside `restir_buf`. 0 when reuse is off.
+    restir_mean_at: u64,
+    /// Bytes of that window. 0 when reuse is off. Not a second allocation.
+    restir_mean_bytes: u64,
     restir_pipe: Handle,
     /// Product spatial pass. Four neighbours, scalar slots, no light tree.
     restir_spatial_pipe: Handle,
@@ -667,11 +708,15 @@ impl Default for Lighting {
             lamp_moving: false,
             catch_left: 0,
             cache_full: false,
-            alloc_key: (0, 0, 0, 0, 0, 0, 0),
+            cache_slots: LIGHTING_CACHE_SLOTS,
+            pipe_slots: 0,
+            alloc_key: (0, 0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             shade_gate: LampShadeGate::Product,
             restir_buf: Buffer::empty(),
+            restir_mean_at: 0,
+            restir_mean_bytes: 0,
             restir_pipe: std::ptr::null_mut(),
             restir_spatial_pipe: std::ptr::null_mut(),
             restir_spatial_wide: std::ptr::null_mut(),
@@ -716,17 +761,25 @@ const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
-const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
+fn lighting_args_at(slots: u64) -> u64 {
+    2 * slots + 2 + 17600
+}
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
-/// word is `lighting_atrous_ppm_at()`; the meta words follow it.
-const LIGHTING_CHECK_P_AT: u64 = LIGHTING_ARGS_AT + 16 + 3 * 65536 + 1024 + 32768;
+/// word is `lighting_atrous_ppm_at`; the meta words follow it.
+fn lighting_check_p_at(slots: u64) -> u64 {
+    lighting_args_at(slots) + 16 + 3 * 65536 + 1024 + 32768
+}
 const LIGHTING_ATROUS_LIST_CAP: u64 = 65536;
-const LIGHTING_ATROUS_MARK_AT: u64 = LIGHTING_CHECK_P_AT + 16;
-const LIGHTING_ATROUS_LIST_AT: u64 = LIGHTING_ATROUS_MARK_AT + 5 * LIGHTING_CACHE_SLOTS;
+fn lighting_atrous_mark_at(slots: u64) -> u64 {
+    lighting_check_p_at(slots) + 16
+}
+fn lighting_atrous_list_at(slots: u64) -> u64 {
+    lighting_atrous_mark_at(slots) + 5 * slots
+}
 /// Sits after the compose words (`lighting_ckeys_words`); it used to start where
 /// `LIGHTING_COMPOSE_AT` starts, so the two regions aliased.
-fn lighting_atrous_ppm_at() -> u64 {
-    lighting_ckeys_words()
+fn lighting_atrous_ppm_at(slots: u64) -> u64 {
+    lighting_ckeys_words(slots)
 }
 /// ppm, previous fraction, 64 filtered-texel bins, 5 level modes, 5 * 64 dense recount bins.
 const LIGHTING_ATROUS_META_WORDS: u64 = 1 + 1 + 64 + 5 + 5 * 64;
@@ -758,8 +811,8 @@ const LIGHTING_SUN_SLICE_WORD: usize = 143;
 /// `gstats.diag[0]` is stats word 24. `diag[3]` counts sun-compose world-cache walks.
 const LIGHTING_SUN_WALK: usize = 27;
 
-fn lighting_sun_at() -> u64 {
-    lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
+fn lighting_sun_at(slots: u64) -> u64 {
+    lighting_atrous_ppm_at(slots) + LIGHTING_ATROUS_META_WORDS
 }
 const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compact",
@@ -940,57 +993,7 @@ impl Gpu {
             self.lighting.world_set = sets[2];
         }
         self.make_lighting_world()?;
-        let codes: [&[u8]; 9] = [
-            LIGHTING_COMPACT_SPV,
-            LIGHTING_PLACE_SPV,
-            LIGHTING_TRACE_SPV,
-            LIGHTING_DIRECT_SPV,
-            LIGHTING_GATHER_SPV,
-            LIGHTING_FILTER_SPV,
-            LIGHTING_CACHE_SPV,
-            LIGHTING_COMPOSE_SPV,
-            LIGHTING_ATROUS_SPV,
-        ];
-        for (k, code) in codes.iter().enumerate() {
-            let start = Instant::now();
-            // Pass 7 is compose. Specialization constant 0 is the surface-cache
-            // writes. The picture compile stays read-only unless
-            // GENOS_COMPOSE_SC_WRITES=1. Maintenance requests the lattice and
-            // enqueues texels; the drain fills them before this compile loads.
-            let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
-            self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
-            self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
-        }
-        if !self.lighting.compose_writes {
-            let start = Instant::now();
-            self.lighting.compose_maint_pipe = self.make_compute_pipe(
-                LIGHTING_COMPOSE_MAINT_SPV,
-                self.lighting.layout,
-                "compose-maint",
-            )?;
-            self.note_pipeline_time("compose-maint", start);
-            let start = Instant::now();
-            self.lighting.sh_drain_pipe = self.make_compute_pipe(
-                LIGHTING_SH_DRAIN_SPV,
-                self.lighting.layout,
-                "sh-drain",
-            )?;
-            self.note_pipeline_time("sh-drain", start);
-        }
-        let start = Instant::now();
-        self.lighting.atrous_plain = self.make_compute_pipe(
-            LIGHTING_ATROUS_PLAIN_SPV,
-            self.lighting.layout,
-            "atrous-plain",
-        )?;
-        self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.screen_pipe = self.make_compute_pipe(
-            LIGHTING_SCREEN_SPV,
-            self.lighting.layout,
-            "screen-denoise",
-        )?;
-        self.note_pipeline_time("screen-denoise", start);
+        self.ensure_cache_slot_pipes()?;
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
@@ -1083,6 +1086,109 @@ impl Gpu {
         self.lighting.world_busy = false;
     }
 
+    /// Recreate the lighting compute pipelines when the slot count changes.
+    /// Lazy pipelines are dropped so the next frame builds them with constant 1.
+    fn ensure_cache_slot_pipes(&mut self) -> Result<(), String> {
+        let slots = u32::try_from(self.lighting.cache_slots).unwrap_or(u32::MAX);
+        if self.lighting.pipe_slots == slots && !self.lighting.pipes[0].is_null() {
+            return Ok(());
+        }
+        if !self.lighting.pipes[0].is_null() {
+            self.destroy_slot_pipes();
+        }
+        self.make_core_lighting_pipes()?;
+        self.lighting.pipe_slots = slots;
+        Ok(())
+    }
+
+    fn destroy_slot_pipes(&mut self) {
+        unsafe {
+            for pipe in self
+                .lighting
+                .pipes
+                .iter_mut()
+                .chain(std::iter::once(&mut self.lighting.atrous_plain))
+                .chain(std::iter::once(&mut self.lighting.screen_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
+                .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
+                .chain(std::iter::once(&mut self.lighting.restir_direct))
+                .chain(std::iter::once(&mut self.lighting.sun_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
+                .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
+            {
+                if !pipe.is_null() {
+                    (self.fns.destroy_pipeline)(self.device, *pipe, std::ptr::null());
+                    *pipe = std::ptr::null_mut();
+                }
+            }
+        }
+        self.lighting.restir_spatial_bound = 0;
+    }
+
+    fn make_core_lighting_pipes(&mut self) -> Result<(), String> {
+        let codes: [&[u8]; 9] = [
+            LIGHTING_COMPACT_SPV,
+            LIGHTING_PLACE_SPV,
+            LIGHTING_TRACE_SPV,
+            LIGHTING_DIRECT_SPV,
+            LIGHTING_GATHER_SPV,
+            LIGHTING_FILTER_SPV,
+            LIGHTING_CACHE_SPV,
+            LIGHTING_COMPOSE_SPV,
+            LIGHTING_ATROUS_SPV,
+        ];
+        for (k, code) in codes.iter().enumerate() {
+            let start = Instant::now();
+            // Pass 7 is compose. Specialization constant 0 is the surface-cache
+            // writes. The picture compile stays read-only unless
+            // GENOS_COMPOSE_SC_WRITES=1. Maintenance requests the lattice and
+            // enqueues texels; the drain fills them before this compile loads.
+            // Constant 1, the slot count, is passed for every lighting pipe.
+            let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
+            self.lighting.pipes[k] = self.make_compute_pipe_spec(
+                code,
+                self.lighting.layout,
+                LIGHTING_PASS_NAMES[k],
+                spec,
+            )?;
+            self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
+        }
+        if !self.lighting.compose_writes {
+            let start = Instant::now();
+            self.lighting.compose_maint_pipe = self.make_compute_pipe(
+                LIGHTING_COMPOSE_MAINT_SPV,
+                self.lighting.layout,
+                "compose-maint",
+            )?;
+            self.note_pipeline_time("compose-maint", start);
+            let start = Instant::now();
+            self.lighting.sh_drain_pipe = self.make_compute_pipe(
+                LIGHTING_SH_DRAIN_SPV,
+                self.lighting.layout,
+                "sh-drain",
+            )?;
+            self.note_pipeline_time("sh-drain", start);
+        }
+        let start = Instant::now();
+        self.lighting.atrous_plain = self.make_compute_pipe(
+            LIGHTING_ATROUS_PLAIN_SPV,
+            self.lighting.layout,
+            "atrous-plain",
+        )?;
+        self.note_pipeline_time("atrous-plain", start);
+        let start = Instant::now();
+        self.lighting.screen_pipe = self.make_compute_pipe(
+            LIGHTING_SCREEN_SPV,
+            self.lighting.layout,
+            "screen-denoise",
+        )?;
+        self.note_pipeline_time("screen-denoise", start);
+        Ok(())
+    }
+
     fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
         self.make_compute_pipe_spec(code, layout, what, None)
     }
@@ -1104,19 +1210,27 @@ impl Gpu {
             size: usize,
             data: *const c_void,
         }
-        let value = spec.unwrap_or(0);
-        let entry = MapEntry { id: 0, offset: 0, size: 4 };
-        let spec_info = SpecInfo {
-            count: 1,
-            entries: &entry,
-            size: 4,
-            data: &value as *const u32 as *const c_void,
-        };
-        let spec_ptr = if spec.is_some() {
-            &spec_info as *const SpecInfo as *const c_void
+        // Constant 0 is the compose-writes bool, passed only when `spec` is set.
+        // Constant 1 is the surface-cache slot count. Shaders that do not declare
+        // it ignore the map entry.
+        let slots = u32::try_from(self.lighting.cache_slots).unwrap_or(u32::MAX);
+        let words = [spec.unwrap_or(0), slots];
+        let entries = [
+            MapEntry { id: 0, offset: 0, size: 4 },
+            MapEntry { id: 1, offset: 4, size: 4 },
+        ];
+        let entry_slice: &[MapEntry] = if spec.is_some() {
+            &entries
         } else {
-            std::ptr::null()
+            &entries[1..]
         };
+        let spec_info = SpecInfo {
+            count: u32::try_from(entry_slice.len()).unwrap_or(0),
+            entries: entry_slice.as_ptr(),
+            size: 8,
+            data: words.as_ptr() as *const c_void,
+        };
+        let spec_ptr = &spec_info as *const SpecInfo as *const c_void;
         #[repr(C)]
         struct Stage {
             s_type: i32,
@@ -1173,7 +1287,7 @@ impl Gpu {
     /// Size the first buffers from the process launch, not from the High default.
     ///
     /// Device creation runs before a scene exists. The High default would
-    /// allocate the million-slot cache and free it once the launch preset is
+    /// allocate the default slot table and free it once the launch preset is
     /// potato. lavapipe keeps those pages until `vkDestroyDevice`, and that
     /// release misses the quit budget. `--preset` wins over
     /// `GENOS_LIGHTING_PRESET`.
@@ -1241,7 +1355,6 @@ impl Gpu {
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
             + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
-            + pixels * 6 // probe-seed scratch, two vec4 per pixel, stride 6
         } else {
             0
         };
@@ -1297,20 +1410,26 @@ impl Gpu {
             self.write_buffer(&self.lighting.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
         let want_cache = settings.allocates_cache();
-        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+        let desired_slots = u64::from(settings.surface_cache.resolved_slots());
+        let slot_changed = self.lighting.cache_slots != desired_slots;
+        self.lighting.cache_slots = desired_slots;
+        if want_cache != self.lighting.cache_full
+            || self.lighting.cache.buffer.is_null()
+            || (want_cache && slot_changed)
+        {
             let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
             let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
             self.destroy_buffer(&mut keys);
             self.destroy_buffer(&mut cache);
             if want_cache {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
-                assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
-                assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
+                assert!(lighting_compose_at(self.lighting.cache_slots) >= lighting_atrous_list_at(self.lighting.cache_slots) + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
+                assert!(lighting_atrous_ppm_at(self.lighting.cache_slots) >= lighting_compose_minx(self.lighting.cache_slots) + 4 * self.lighting.cache_slots);
                 // Through the lattice, then the lit-from offer and the seed
                 // election (lighting_sh_keys_words). Eight words per pixel
                 // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_sh_keys_words() + pixels * 8) * 4,
+                    (lighting_sh_keys_words(self.lighting.cache_slots) + pixels * 8) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1318,7 +1437,7 @@ impl Gpu {
                 // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1
                 // (LIGHTING_SH_AT.. in lighting_cache.glsl, LIGHTING_SH_HALF).
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_SLOT_BYTES,
+                    self.lighting.cache_slots * LIGHTING_CACHE_SLOT_BYTES,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -1404,31 +1523,28 @@ impl Gpu {
         self.lighting.meter_ev = None;
         self.lighting.still_pop = 0.0;
         self.lighting.histogram_counts.clear();
-        let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
-        self.destroy_buffer(&mut lamp_res);
+        if self.lighting.lamp_res.buffer.is_null() {
+            // Binding 12 needs a buffer when the visibility mean is off.
+            self.lighting.lamp_res =
+                self.make_buffer_queues(64, 0x20 | 0x2, Memory::Device, &share)?;
+        }
         let reuse = settings.lamp_pick.reuse();
-        // 32 bytes a pixel: the reservoir and the geo record (depth, normal,
-        // exact/trusted kind, shaded direct). Spatial reuse keeps the previous
-        // frame. Temporal only (radius 0) keeps one slot. Off binds a dummy so
-        // binding 12 is valid.
-        let slots = if settings.lamp_pick.radius > 0 { 2 } else { 1 };
-        let lamp_bytes = if reuse {
-            pixels.saturating_mul(32 * slots).max(64)
-        } else {
-            64
-        };
-        self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        // The visibility mean shares the ReSTIR buffer. Binding 12 is a
+        // 256-aligned window at the end, so the old lamp_res allocation is gone.
         // ReSTIR reservoirs are sized here, after the frames in flight have
         // finished. A resize inside a recording frame is not this path.
         let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
         self.destroy_buffer(&mut restir_old);
-        let restir_bytes = if settings.restir_di {
-            crate::restir_live::buffer_bytes(pixels)
-        } else {
-            256
-        };
+        let (restir_bytes, mean_at, mean_bytes) = restir_with_mean(
+            pixels,
+            settings.restir_di,
+            reuse,
+            settings.lamp_pick.radius > 0,
+        );
         self.lighting.restir_buf = self.make_buffer(restir_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
+        self.lighting.restir_mean_at = mean_at;
+        self.lighting.restir_mean_bytes = mean_bytes;
         self.lighting.restir_w = if settings.restir_di { w } else { 0 };
         self.lighting.restir_h = if settings.restir_di { h } else { 0 };
         self.lighting.restir_clear = true;
@@ -1441,6 +1557,7 @@ impl Gpu {
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
+        self.ensure_cache_slot_pipes()?;
         self.write_raster_sets()?;
         self.write_lighting_sets()
     }
@@ -1484,35 +1601,44 @@ impl Gpu {
             if set.is_null() {
                 continue;
             }
+            let (mean_buf, mean_off, mean_range) = if self.lighting.restir_mean_bytes > 0 {
+                (
+                    self.lighting.restir_buf.buffer,
+                    self.lighting.restir_mean_at,
+                    self.lighting.restir_mean_bytes,
+                )
+            } else {
+                (self.lighting.lamp_res.buffer, 0, u64::MAX)
+            };
             let buffers = [
-                (0u32, scene),
-                (5, self.mesh_field.buffer),
-                (6, self.lighting.gbuf.buffer),
-                (7, self.lighting.work.buffer),
-                (8, self.lighting.out.buffer),
-                (13, self.lighting.scene_lin.buffer),
-                (14, self.lighting.hdr_params.buffer),
-                (16, self.bound_or_standin(&self.lighting.bloom)),
-                (17, self.bound_or_standin(&self.lighting.hdr_encode)),
-                (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }),
-                (9, self.lighting.cache_keys.buffer),
-                (10, self.lighting.cache.buffer),
-                (11, stats),
-                (12, self.lighting.lamp_res.buffer),
-                (19, self.lighting.restir_buf.buffer),
+                (0u32, scene, 0u64, u64::MAX),
+                (5, self.mesh_field.buffer, 0, u64::MAX),
+                (6, self.lighting.gbuf.buffer, 0, u64::MAX),
+                (7, self.lighting.work.buffer, 0, u64::MAX),
+                (8, self.lighting.out.buffer, 0, u64::MAX),
+                (13, self.lighting.scene_lin.buffer, 0, u64::MAX),
+                (14, self.lighting.hdr_params.buffer, 0, u64::MAX),
+                (16, self.bound_or_standin(&self.lighting.bloom), 0, u64::MAX),
+                (17, self.bound_or_standin(&self.lighting.hdr_encode), 0, u64::MAX),
+                (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }, 0, u64::MAX),
+                (9, self.lighting.cache_keys.buffer, 0, u64::MAX),
+                (10, self.lighting.cache.buffer, 0, u64::MAX),
+                (11, stats, 0, u64::MAX),
+                (12, mean_buf, mean_off, mean_range),
+                (19, self.lighting.restir_buf.buffer, 0, u64::MAX),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
-                .map(|(_, b)| BufInfo {
+                .map(|(_, b, offset, range)| BufInfo {
                     buffer: *b,
-                    offset: 0,
-                    range: u64::MAX,
+                    offset: *offset,
+                    range: *range,
                 })
                 .collect();
             let writes: Vec<Write> = buffers
                 .iter()
                 .zip(&infos)
-                .map(|((binding, _), info)| Write {
+                .map(|((binding, _, _, _), info)| Write {
                     s_type: 35,
                     next: std::ptr::null(),
                     set,
@@ -1536,6 +1662,50 @@ impl Gpu {
             }
         }
         Ok(())
+    }
+
+    /// One line per lighting buffer: name, then bytes. `restir_mean` is a window
+    /// inside `restir` and is not added into `total`.
+    pub(crate) fn lighting_vram_report(&self) -> String {
+        let l = &self.lighting;
+        let rows = [
+            ("gbuf", l.gbuf.size, true),
+            ("work", l.work.size, true),
+            ("out", l.out.size, true),
+            ("scene_lin", l.scene_lin.size, true),
+            ("scene_host", l.scene_host.size, true),
+            ("hdr_params", l.hdr_params.size, true),
+            ("hdr_encode", l.hdr_encode.size, true),
+            ("bloom", l.bloom.size, true),
+            (
+                "meter_dev",
+                l.meter_dev[0].size.saturating_add(l.meter_dev[1].size),
+                true,
+            ),
+            (
+                "meter_host",
+                l.meter_host[0].size.saturating_add(l.meter_host[1].size),
+                true,
+            ),
+            ("cache", l.cache.size, true),
+            ("cache_keys", l.cache_keys.size, true),
+            ("restir", l.restir_buf.size, true),
+            ("restir_mean", l.restir_mean_bytes, false),
+            ("lamp_standin", l.lamp_res.size, true),
+        ];
+        let mut lines = String::from("lighting-vram\n");
+        let mut total = 0u64;
+        for (name, bytes, physical) in rows {
+            if bytes == 0 {
+                continue;
+            }
+            let _ = std::fmt::Write::write_fmt(&mut lines, format_args!("{name} {bytes}\n"));
+            if physical {
+                total = total.saturating_add(bytes);
+            }
+        }
+        let _ = std::fmt::Write::write_fmt(&mut lines, format_args!("total {total}\n"));
+        lines
     }
 
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
@@ -2039,17 +2209,18 @@ impl Gpu {
                 (self.fns.cmd_fill_buffer)(
                     self.cmd,
                     self.lighting.cache_keys.buffer,
-                    lighting_compose_at() * 4,
+                    lighting_compose_at(self.lighting.cache_slots) * 4,
                     4,
                     0,
                 );
                 let cmd = self.cmd;
                 let dst = self.lighting.cache_keys.buffer;
-                self.write_device(cmd, dst, (lighting_compose_at() + 1) * 4, pod_bytes(&yz))?;
+                self.write_device(cmd, dst, (lighting_compose_at(self.lighting.cache_slots) + 1) * 4, pod_bytes(&yz))?;
             }
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world && self.lighting.cache_full {
-                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
+                let slots = self.lighting.cache_slots;
+                for at in [slots, 2 * slots + 1, lighting_wrc_counts_at(slots), lighting_wrc_counts_at(slots) + 1, lighting_wrc_counts_at(slots) + 4, lighting_wrc_counts_at(slots) + 5, lighting_wrc_counts_at(slots) + 6, lighting_wrc_counts_at(slots) + 7] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
@@ -2058,18 +2229,18 @@ impl Gpu {
             // on a flag a few frames old, and the GPU may have re-armed it since;
             // left set, every pixel's direct pass keeps gathering strictly at rest.
             if self.lighting.cache_full && self.lighting.settings.world_mode() == 3 && self.lighting_stats().settled {
-                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, LIGHTING_DRAIN_FLAG_AT * 4, 4, 0);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, lighting_drain_flag_at(self.lighting.cache_slots) * 4, 4, 0);
             }
             let cmd = self.cmd;
             let dst = self.lighting.gbuf.buffer;
             self.write_device(cmd, dst, 0, pod_bytes(&header))?;
-            if self.lighting.lamp_res_clear && !self.lighting.lamp_res.buffer.is_null() {
+            if self.lighting.lamp_res_clear && self.lighting.restir_mean_bytes > 0 {
                 self.lighting.lamp_res_clear = false;
                 (self.fns.cmd_fill_buffer)(
                     self.cmd,
-                    self.lighting.lamp_res.buffer,
-                    0,
-                    self.lighting.lamp_res.size,
+                    self.lighting.restir_buf.buffer,
+                    self.lighting.restir_mean_at,
+                    self.lighting.restir_mean_bytes,
                     u32::MAX,
                 );
             }
@@ -2220,7 +2391,7 @@ impl Gpu {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
                 self.lighting.cache_keys.buffer,
-                lighting_sh_bin_count_at() * 4,
+                lighting_sh_bin_count_at(self.lighting.cache_slots) * 4,
                 BINS * 4,
                 0,
             );
@@ -2232,7 +2403,7 @@ impl Gpu {
                 (self.fns.cmd_dispatch_indirect)(
                     self.cmd,
                     self.lighting.cache_keys.buffer,
-                    lighting_compose_at() * 4,
+                    lighting_compose_at(self.lighting.cache_slots) * 4,
                 );
             }
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
@@ -2285,7 +2456,7 @@ impl Gpu {
         }
         let rays = LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS;
         let groups = [
-            (0usize, (LIGHTING_CACHE_SLOTS as u32).div_ceil(64)),
+            (0usize, (self.lighting.cache_slots as u32).div_ceil(64)),
             (2, rays.div_ceil(64)),
             (3, rays.div_ceil(64)),
             (6, LIGHTING_CACHE_BATCH.div_ceil(64)),
@@ -2304,14 +2475,14 @@ impl Gpu {
             let dst = self.lighting.world_stats.buffer;
             self.write_device(cmd, dst, LIGHTING_CTRL_WORD * 4, &ctrl)?;
             // The mature and young counts, rebuilt by the compact pass.
-            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, self.lighting.cache_slots * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
-            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_WRC_COUNTS_AT * 4, 8, 0);
-            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 4) * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, lighting_wrc_counts_at(self.lighting.cache_slots) * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (lighting_wrc_counts_at(self.lighting.cache_slots) + 4) * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.lighting.cache_keys.buffer,
-                (2 * LIGHTING_CACHE_SLOTS + 1) * 4,
+                (2 * self.lighting.cache_slots + 1) * 4,
                 4,
                 0,
             );
@@ -4196,7 +4367,7 @@ impl Gpu {
                 self.write_device(
                     cmd,
                     keys,
-                    lighting_atrous_ppm_at() * 4,
+                    lighting_atrous_ppm_at(self.lighting.cache_slots) * 4,
                     &atrous_ppm.to_ne_bytes(),
                 )?;
                 // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
@@ -4211,25 +4382,25 @@ impl Gpu {
                 self.write_device(
                     cmd,
                     keys,
-                    (LIGHTING_ARGS_AT + 11) * 4,
+                    (lighting_args_at(self.lighting.cache_slots) + 11) * 4,
                     &ray_budget.to_ne_bytes(),
                 )?;
                 self.write_device(
                     cmd,
                     keys,
-                    (LIGHTING_ARGS_AT + 12) * 4,
+                    (lighting_args_at(self.lighting.cache_slots) + 12) * 4,
                     &dormant_rays.to_ne_bytes(),
                 )?;
                 self.write_device(
                     cmd,
                     keys,
-                    (LIGHTING_ARGS_AT + 13) * 4,
+                    (lighting_args_at(self.lighting.cache_slots) + 13) * 4,
                     &firefly_sigma.to_ne_bytes(),
                 )?;
                 self.write_device(
                     cmd,
                     keys,
-                    (LIGHTING_ARGS_AT + 14) * 4,
+                    (lighting_args_at(self.lighting.cache_slots) + 14) * 4,
                     &drain_sigma.to_ne_bytes(),
                 )?;
             }
@@ -4505,15 +4676,15 @@ impl Gpu {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
                 self.lighting.cache_keys.buffer,
-                (lighting_compose_at() + 3) * 4,
+                (lighting_compose_at(self.lighting.cache_slots) + 3) * 4,
                 4,
                 u32::from(compose_full),
             );
             if compose_full {
                 // Empty rects (min > max) so this frame's compose records who reads
                 // each texel. The next held frame marks only those blocks.
-                let words = LIGHTING_CACHE_SLOTS * 2;
-                let minx = lighting_compose_minx();
+                let words = self.lighting.cache_slots * 2;
+                let minx = lighting_compose_minx(self.lighting.cache_slots);
                 (self.fns.cmd_fill_buffer)(
                     self.cmd,
                     self.lighting.cache_keys.buffer,
@@ -4530,7 +4701,7 @@ impl Gpu {
                 );
             }
                 let keys = self.lighting.cache_keys.buffer;
-                self.write_device(cmd, keys, lighting_sun_at() * 4, pod_bytes(&sun_words))?;
+                self.write_device(cmd, keys, lighting_sun_at(self.lighting.cache_slots) * 4, pod_bytes(&sun_words))?;
             }
             // The sun words are read by compute and as indirect args: the
             // indirect read needs the draw-indirect stage
@@ -4738,7 +4909,7 @@ impl Gpu {
                         (self.fns.cmd_dispatch_indirect)(
                             self.cmd,
                             self.lighting.cache_keys.buffer,
-                            lighting_compose_at() * 4,
+                            lighting_compose_at(self.lighting.cache_slots) * 4,
                         );
                     }
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
@@ -4773,12 +4944,12 @@ impl Gpu {
                     (self.fns.cmd_dispatch_indirect)(
                         self.cmd,
                         self.lighting.cache_keys.buffer,
-                        lighting_compose_at() * 4,
+                        lighting_compose_at(self.lighting.cache_slots) * 4,
                     );
                 } else {
                     match kind {
                         LIGHTING_DENSE_RAYS | LIGHTING_DENSE_ENTRIES => {
-                            let at = (LIGHTING_ARGS_AT + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
+                            let at = (lighting_args_at(self.lighting.cache_slots) + if kind == LIGHTING_DENSE_RAYS { 0 } else { 3 }) * 4;
                             (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, at);
                         }
                         _ => (self.fns.cmd_dispatch)(self.cmd, gx.max(1), if kind != 0 { 1 } else { gy.max(1) }, 1),
@@ -4912,7 +5083,7 @@ impl Gpu {
             // The dirty-list length. The same barrier covers the compute writes.
             // One host buffer: read it only after the device is idle.
             if self.lighting.cache_full && !self.lighting.compose_host.buffer.is_null() {
-                let list = Region { src: lighting_compose_at() * 4, dst: 0, size: 4 };
+                let list = Region { src: lighting_compose_at(self.lighting.cache_slots) * 4, dst: 0, size: 4 };
                 (self.fns.cmd_copy_buffer)(
                     self.cmd,
                     self.lighting.cache_keys.buffer,
@@ -5043,7 +5214,7 @@ impl Gpu {
             let d = self.lighting.dims;
             let json = format!(
                 "{{\"frame\": {f}, \"width\": {}, \"height\": {}, \"probes_x\": {}, \"probes_y\": {}, \"rays\": {}, \"strata\": {}, \"cache_slots\": {}}}\n",
-                d[0], d[1], d[2], d[3], LIGHTING_RAYS, LIGHTING_STRATA, LIGHTING_CACHE_SLOTS
+                d[0], d[1], d[2], d[3], LIGHTING_RAYS, LIGHTING_STRATA, self.lighting.cache_slots
             );
             let _ = std::fs::write(format!("{dir}/f{f}_layout.json"), json);
             eprintln!("lighting dump: frame {f} written to {dir}");
@@ -6266,7 +6437,7 @@ impl Gpu {
             return Err("surface cache is not allocated".to_string());
         }
         self.idle_device();
-        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
+        let key_bytes = self.lighting.cache_slots.saturating_mul(4);
         if self.lighting.cache_keys.size < key_bytes || self.lighting.cache_keys.buffer.is_null() {
             return Err("cache key table is shorter than the slot count".to_string());
         }
@@ -6276,7 +6447,11 @@ impl Gpu {
         let mut regions = Vec::new();
         for query in queries {
             let key = crate::cache_probe::cache_key(query.position, query.normal, query.size);
-            let hit = crate::cache_probe::classify_window(&keys, key);
+            let hit = crate::cache_probe::classify_window(
+                &keys,
+                key,
+                u32::try_from(self.lighting.cache_slots).unwrap_or(u32::MAX),
+            );
             if let Some(slot) = hit.slot {
                 let base = regions.len();
                 self.push_cell_regions(slot, &mut regions)?;
@@ -6416,14 +6591,17 @@ impl Gpu {
         let stride = u64::from(count).saturating_mul(32);
         let mut best_m = 0u32;
         let mut found = false;
+        if self.lighting.restir_mean_bytes > 0 {
         for slot in 0..2u32 {
-            let at = u64::from(slot)
-                .saturating_mul(stride)
+            let at = self
+                .lighting
+                .restir_mean_at
+                .saturating_add(u64::from(slot).saturating_mul(stride))
                 .saturating_add(u64::from(pixel).saturating_mul(32));
-            if at.saturating_add(32) > self.lighting.lamp_res.size {
+            if at.saturating_add(32) > self.lighting.restir_buf.size {
                 break;
             }
-            let bytes = self.copy_device_range(self.lighting.lamp_res.buffer, at, 32)?;
+            let bytes = self.copy_device_range(self.lighting.restir_buf.buffer, at, 32)?;
             let words = u32_words(&bytes);
             if words.len() < 8 {
                 continue;
@@ -6452,12 +6630,13 @@ impl Gpu {
                 f32::from_bits(words[7]),
             ];
         }
+        }
         Ok(sample)
     }
 
     fn push_cell_regions(&self, slot: u32, regions: &mut Vec<(u64, u64)>) -> Result<(), String> {
         let slot_u = u64::from(slot);
-        let slots = LIGHTING_CACHE_SLOTS;
+        let slots = self.lighting.cache_slots;
         let indices = [
             slot_u.saturating_mul(3),
             slot_u.saturating_mul(3).saturating_add(1),
@@ -6700,5 +6879,36 @@ mod sh_knob_tests {
             .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
         assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
         assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
+        let slots = glsl
+            .lines()
+            .find(|l| l.contains("LIGHTING_CACHE_SLOTS ="))
+            .expect("LIGHTING_CACHE_SLOTS in lighting_cache_slots.glsl");
+        assert!(
+            slots.contains("constant_id = 1") && slots.contains("262144u"),
+            "{slots}"
+        );
+        let cache = include_str!("lighting_gpu.rs");
+        let scratch = concat!("two vec4 per pixel, ", "stride 6");
+        assert!(!cache.contains(scratch), "probe seed scratch is still allocated");
+        let shade = include_str!("../shaders/lighting_cache.glsl");
+        let helper = concat!("lighting_seed_", "scratch_at");
+        assert!(!shade.contains(helper), "probe seed scratch helper is still in the shader");
+    }
+
+    #[test]
+    fn restir_mean_is_a_window_of_the_reservoir_buffer() {
+        let pixels = 2560u64 * 1440;
+        let (total, at, mean) = restir_with_mean(pixels, true, true, true);
+        assert_eq!(mean, pixels * 64);
+        assert_eq!(at % 256, 0);
+        assert!(at >= crate::restir_live::buffer_bytes(pixels));
+        assert_eq!(total, at + mean);
+        let (only, at0, mean0) = restir_with_mean(pixels, true, false, true);
+        assert_eq!(only, crate::restir_live::buffer_bytes(pixels));
+        assert_eq!(at0, 0);
+        assert_eq!(mean0, 0);
+        let cache = LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_SLOT_BYTES;
+        let old = 1_048_576u64 * LIGHTING_CACHE_SLOT_BYTES;
+        assert_eq!(old, cache * 4);
     }
 }

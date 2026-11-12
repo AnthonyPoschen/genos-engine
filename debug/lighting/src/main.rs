@@ -165,6 +165,12 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
                          (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-slots N
+                         hash slots. 0 is 262144. Any other value rounds up
+                         to a power of two from 4096 to 1048576
+                         (GENOS_LIGHTING_SURFACE_CACHE_SLOTS). The argument wins
+  --vram-report          print one lighting buffer per line, name then bytes
+                         (GENOS_VRAM_REPORT). restir_mean is inside restir
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -319,6 +325,7 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_budget_shift",
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
+    "lighting_surface_cache_slots",
     "lighting_surface_cache_dormant_rays",
     "lighting_world_stale",
     "lighting_denoise_iters",
@@ -374,6 +381,8 @@ struct Options {
     block_ms: Option<std::time::Duration>,
     /// `--lifecycle-close-early`. The mirror applies when this stays false.
     close_early: bool,
+    /// `--vram-report`. The mirror applies when this stays false.
+    vram_report: bool,
     /// `--fog*`. Empty fields were omitted.
     fog_cli: FogCli,
     /// Mirrors for the fog flags this launch left empty.
@@ -540,6 +549,7 @@ fn run() -> Result<i32, String> {
     let controls = character_controller();
     let keys = debug_keys()?;
     let mut menu_open = app.scene().menu.effective().visible;
+    let mut vram_said = false;
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps_overlay = FpsOverlay::new();
@@ -764,6 +774,10 @@ fn run() -> Result<i32, String> {
         let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
+        if !vram_said && opts.vram_report {
+            vram_said = true;
+            eprintln!("{}", renderer.lighting_vram_report());
+        }
         tools.after_draw(
             renderer,
             pixels.as_deref(),
@@ -2752,6 +2766,7 @@ fn options() -> Result<Options, String> {
     let mut mcp_port = None;
     let mut block_ms = None;
     let mut close_early = false;
+    let mut vram_report = false;
     let mut fog_cli = FogCli::default();
     let mut particle_cli = ParticleCli::default();
     while let Some(arg) = args.next() {
@@ -2775,6 +2790,7 @@ fn options() -> Result<Options, String> {
             "--script" => script = Some(PathBuf::from(need_arg(&mut args, "--script")?)),
             "--report" => report = Some(PathBuf::from(need_arg(&mut args, "--report")?)),
             "--lighting-debug" => lighting_debug = true,
+            "--vram-report" => vram_report = true,
             "--cooked" => {
                 COOKED
                     .set(PathBuf::from(need_arg(&mut args, "--cooked")?))
@@ -2940,11 +2956,22 @@ fn options() -> Result<Options, String> {
         mcp_port,
         block_ms: genos_window::block_ms_mirror(block_ms),
         close_early: genos_window::close_early_mirror(close_early),
+        vram_report: vram_report || vram_report_mirror(),
         fog_cli: fog_cli.clone(),
         fog_env: fog_env_from_process(&fog_cli)?,
         particle_cli: particle_cli.clone(),
         particle_env: particle_env_from_process(&particle_cli)?,
     })
+}
+
+fn vram_report_mirror() -> bool {
+    match std::env::var("GENOS_VRAM_REPORT") {
+        Ok(flag) => {
+            let flag = flag.trim();
+            flag == "1" || flag.eq_ignore_ascii_case("on")
+        }
+        Err(_) => false,
+    }
 }
 
 fn take_fog(
@@ -3140,6 +3167,7 @@ mod tests {
             mcp_port: None,
             block_ms: None,
             close_early: false,
+            vram_report: false,
             fog_cli: genos_scene::FogCli::default(),
             fog_env: genos_scene::FogEnv::default(),
             particle_cli: genos_scene::ParticleCli::default(),

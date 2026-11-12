@@ -54,7 +54,9 @@ Plan for moving lamps and moving assets (not yet built; measurement first): [dyn
 
 The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
 
-The device sizes that table from the launch preset before a scene exists. `--preset` wins, and `GENOS_LIGHTING_PRESET` applies only when that argument was omitted. A potato launch does not allocate the million-slot table. lavapipe keeps a freed High table until `vkDestroyDevice`, and that release misses the 100 ms quit budget.
+The device sizes that table from `surface_cache.slots` before a scene exists. `0` is 262144 slots, four rounds of the 65536-entry base batch. Texels stay one size. `--surface-cache-slots` wins, and `GENOS_LIGHTING_SURFACE_CACHE_SLOTS` applies only when that argument was omitted. `--preset` still wins over `GENOS_LIGHTING_PRESET` the same way. A potato launch does not allocate the table. lavapipe keeps a freed table until `vkDestroyDevice`, and that release misses the 100 ms quit budget. The visibility mean that used to be a second `lamp_res` buffer is a 256-aligned window at the end of the ReSTIR buffer. The probe-seed scratch in the work buffer is gone. `--vram-report` (and `--profile-passes`) prints each lighting buffer's name and byte size. `restir_mean` is that window and is not added into the total.
+
+- Surface-cache slot capacity. Replicated state: none (the table stays on the client that shades). Authority: that client. Prediction / rollback: none. Determinism: the same slot count and the same keys hash to the same slots. Headless server: does not allocate the table.
 
 ## Deviations from the papers (summary)
 

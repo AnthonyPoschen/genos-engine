@@ -628,6 +628,21 @@ kind = "mirror"
 detail = "--surface-cache-ray-budget"
 
 [[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SLOTS"
+kind = "mirror"
+detail = "--surface-cache-slots"
+
+[[var]]
+name = "GENOS_VRAM_REPORT"
+kind = "mirror"
+detail = "--vram-report"
+
+[[var]]
+name = "GENOS_PROFILE_PASSES"
+kind = "mirror"
+detail = "--profile-passes"
+
+[[var]]
 name = "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS"
 kind = "mirror"
 detail = "surface_cache.sh_cells (stress knob lighting_surface_cache_sh_cells); MCP set_lighting_settings"

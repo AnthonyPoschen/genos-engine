@@ -185,6 +185,11 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --surface-cache-ray-budget N
                             cap on cache-round rays; 0 keeps the existing lists
                             (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+  --surface-cache-slots N   hash slots in the surface light cache. 0 is 262144,
+                            four rounds of the 65536 base batch. Any other
+                            value rounds up to a power of two from 4096 to
+                            1048576 (GENOS_LIGHTING_SURFACE_CACHE_SLOTS).
+                            The argument wins
   --surface-cache-dormant-rays N
                             fresh rays per frame for a dormant cache entry, 0..16.
                             0 keeps one sweep in eight. 1..16 traces one new
@@ -212,7 +217,12 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             collected timestamp frame, one frame behind the
                             draw. The first two draws have no sample. Shade
                             includes its visibility ray. Lavapipe milliseconds
-                            are not a 4070 result
+                            are not a 4070 result. Also prints the lighting
+                            VRAM lines
+  --vram-report             print one lighting buffer per line, name then bytes
+                            (GENOS_VRAM_REPORT). restir_mean is inside restir
+                            and is not in the total. --profile-passes prints
+                            the same lines
   --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
@@ -357,6 +367,9 @@ struct Options {
     gpu_times: Option<String>,
     /// `--profile-passes`. The mirror applies when this stays empty.
     profile_passes: Option<PathBuf>,
+    /// `--vram-report`. The mirror applies when this stays false.
+    /// `--profile-passes` prints the same lines.
+    vram_report: bool,
     lamp_pick: Option<String>,
     lamp_pick_samples: Option<String>,
     lamp_pick_rays: Option<String>,
@@ -518,6 +531,7 @@ fn options() -> Result<Options, String> {
         denoise_screen: None,
         gpu_times: None,
         profile_passes: None,
+        vram_report: false,
         lamp_pick: None,
         lamp_pick_samples: None,
         lamp_pick_rays: None,
@@ -639,6 +653,7 @@ fn options() -> Result<Options, String> {
             "--denoise-launch" => opts.denoise_launch = Some(value()?),
             "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
+            "--vram-report" => opts.vram_report = true,
             "--profile-passes" => opts.profile_passes = Some(PathBuf::from(value()?)),
             arg if arg.starts_with("--profile-passes=") => {
                 let path = arg.trim_start_matches("--profile-passes=").trim();
@@ -779,6 +794,14 @@ fn options() -> Result<Options, String> {
             let path = path.trim();
             if !path.is_empty() {
                 opts.profile_passes = Some(PathBuf::from(path));
+            }
+        }
+    }
+    if !opts.vram_report {
+        if let Ok(flag) = std::env::var("GENOS_VRAM_REPORT") {
+            let flag = flag.trim();
+            if flag == "1" || flag.eq_ignore_ascii_case("on") {
+                opts.vram_report = true;
             }
         }
     }
@@ -1259,6 +1282,7 @@ fn run() -> Result<i32, String> {
     let keys = debug_keys()?;
     let controls = character_controller();
     let mut drawn = 0u32;
+    let mut vram_said = false;
     let mut profile = opts
         .profile_passes
         .as_ref()
@@ -1450,6 +1474,10 @@ fn run() -> Result<i32, String> {
         renderer.set_particle_dt(dt);
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        if !vram_said && (opts.vram_report || opts.profile_passes.is_some()) {
+            vram_said = true;
+            eprintln!("{}", renderer.lighting_vram_report());
+        }
         if let Some(profile) = profile.as_mut() {
             let samples = renderer.lighting_pass_samples();
             if samples != profile.samples {

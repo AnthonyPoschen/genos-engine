@@ -5958,12 +5958,6 @@ uint lighting_gdirty_at() {
 uint lighting_graw_at(uint probe, uint k) {
     return lighting_gdirty_at() + 2u * lighting_probes() + probe * lighting_rays() + k;
 }
-// Two vec4 per pixel, after the held-probe gather: corner rgb9e5, then corner meta.
-// Only the pixel that owns a corner writes it.
-uint lighting_seed_scratch_at() {
-    return lighting_gdirty_at() + 2u * lighting_probes() + lighting_probes() * lighting_rays();
-}
-
 // Tangent offsets are 10 bits on the cell (about 0.12 mm at 12.5 cm). Distance
 // is the next 10 bits, stored plus one so a real offer is never the unset 0.
 const float LIGHTING_SC_OFFER_SPAN = 1023.0;
