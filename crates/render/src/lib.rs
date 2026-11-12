@@ -1,5 +1,6 @@
 mod aa;
 mod budget;
+mod cache_probe;
 mod cooked_load;
 mod fog;
 mod fog_budget;
@@ -31,6 +32,7 @@ mod world;
 
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
+pub use cache_probe::{offer_origin, CacheQuery, StoredCell};
 pub use cooked_load::{CookedReport, RenderSettings};
 pub use fog::{
     apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,

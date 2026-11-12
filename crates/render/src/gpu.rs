@@ -1234,6 +1234,22 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Read the surface-cache cells a still picture would hash at `queries`.
+    ///
+    /// The device must be idle. The read copies the key table and the stored
+    /// records. It does not change the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cache is not allocated, a query list is longer
+    /// than 32, or the device rejects the copy.
+    pub fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        self.gpu.read_cache_cells(queries)
+    }
+
     /// Five closed forms from `media_check.comp`. The parity test compares them
     /// with `genos_math::media`. This does not present.
     pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {

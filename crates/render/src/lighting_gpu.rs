@@ -6137,6 +6137,276 @@ fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
 
 include!("lighting_dispatch.rs");
 
+impl Gpu {
+    /// Hash lookup of the surface-cache cells under `queries`, after the device is idle.
+    pub(crate) fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        if queries.len() > 32 {
+            return Err("cache cell read is limited to 32 points".to_string());
+        }
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+            return Err("surface cache is not allocated".to_string());
+        }
+        self.idle_device();
+        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
+        if self.lighting.cache_keys.size < key_bytes || self.lighting.cache_keys.buffer.is_null() {
+            return Err("cache key table is shorter than the slot count".to_string());
+        }
+        let raw_keys = self.copy_device_range(self.lighting.cache_keys.buffer, 0, key_bytes)?;
+        let keys = u32_words(&raw_keys);
+        let mut hits = Vec::with_capacity(queries.len());
+        let mut regions = Vec::new();
+        for query in queries {
+            let key = crate::cache_probe::cache_key(query.position, query.normal, query.size);
+            let hit = crate::cache_probe::classify_window(&keys, key);
+            if let Some(slot) = hit.slot {
+                let base = regions.len();
+                self.push_cell_regions(slot, &mut regions)?;
+                hits.push((query, hit, Some(base)));
+            } else {
+                hits.push((query, hit, None));
+            }
+        }
+        let packed = if regions.is_empty() {
+            Vec::new()
+        } else {
+            self.copy_device_regions(self.lighting.cache.buffer, &regions)?
+        };
+        let words = f32_vec4s(&packed);
+        let mut out = Vec::with_capacity(hits.len());
+        for (query, hit, base) in hits {
+            let records = base.and_then(|at| seven_vec4s(&words, at));
+            out.push(crate::cache_probe::stored_cell(*query, hit, records));
+        }
+        Ok(out)
+    }
+
+    fn push_cell_regions(&self, slot: u32, regions: &mut Vec<(u64, u64)>) -> Result<(), String> {
+        let slot_u = u64::from(slot);
+        let slots = LIGHTING_CACHE_SLOTS;
+        let indices = [
+            slot_u.saturating_mul(3),
+            slot_u.saturating_mul(3).saturating_add(1),
+            slot_u.saturating_mul(3).saturating_add(2),
+            slots.saturating_mul(3).saturating_add(slot_u),
+            slots.saturating_mul(6).saturating_add(slot_u),
+            slots.saturating_mul(8).saturating_add(slot_u),
+            slots.saturating_mul(10).saturating_add(slot_u),
+        ];
+        for index in indices {
+            let offset = index.saturating_mul(16);
+            if offset.saturating_add(16) > self.lighting.cache.size {
+                return Err("cache cell record sits past the cache buffer".to_string());
+            }
+            regions.push((offset, 16));
+        }
+        Ok(())
+    }
+
+    fn copy_device_range(&self, src: Handle, offset: u64, size: u64) -> Result<Vec<u8>, String> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        self.copy_device_regions(src, &[(offset, size)])
+    }
+
+    fn copy_device_regions(&self, src: Handle, regions: &[(u64, u64)]) -> Result<Vec<u8>, String> {
+        let mut total = 0u64;
+        for (_, size) in regions {
+            total = total.saturating_add(*size);
+        }
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let mut dst = self.make_buffer(total, 0x2, Memory::Readback)?;
+        let copied = self.record_region_copy(src, dst.buffer, regions);
+        let bytes = match copied {
+            Ok(()) => map_buffer_bytes(self, &dst, total),
+            Err(err) => Err(err),
+        };
+        self.destroy_buffer(&mut dst);
+        bytes
+    }
+
+    fn record_region_copy(&self, src: Handle, dst: Handle, regions: &[(u64, u64)]) -> Result<(), String> {
+        let pool = self.cache_copy_pool()?;
+        let cmd = match self.cache_copy_cmd(pool) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                self.drop_copy_pool(pool);
+                return Err(err);
+            }
+        };
+        self.oracle_barrier(cmd, 0x1_0000, 0x1000, 0x1_8000, 0x800);
+        let mut copies = Vec::with_capacity(regions.len());
+        let mut dst_at = 0u64;
+        for (src_at, size) in regions {
+            copies.push(BufferCopy {
+                src: *src_at,
+                dst: dst_at,
+                size: *size,
+            });
+            dst_at = dst_at.saturating_add(*size);
+        }
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                cmd,
+                src,
+                dst,
+                u32::try_from(copies.len()).unwrap_or(0),
+                copies.as_ptr().cast::<u8>(),
+            );
+        }
+        self.oracle_barrier(cmd, 0x1000, 0x4000, 0x1000, 0x2000);
+        let ended = unsafe { check((self.fns.end_cmd)(cmd), "end cache-cell copy") };
+        let submitted = ended.and_then(|()| self.oracle_submit(cmd));
+        self.drop_copy_pool(pool);
+        submitted
+    }
+
+    fn cache_copy_pool(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool_info = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 1,
+            family: self.queue_family,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "cache-cell command pool",
+            )?;
+        }
+        Ok(pool)
+    }
+
+    fn cache_copy_cmd(&self, pool: Handle) -> Result<Handle, String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool,
+            level: 0,
+            count: 1,
+        };
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 1,
+            inherit: std::ptr::null(),
+        };
+        let mut cmd = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
+                "cache-cell command",
+            )?;
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cache-cell copy",
+            )?;
+        }
+        Ok(cmd)
+    }
+
+    fn drop_copy_pool(&self, pool: Handle) {
+        unsafe {
+            (self.fns.destroy_pool)(self.device, pool, std::ptr::null());
+        }
+    }
+}
+
+#[repr(C)]
+struct BufferCopy {
+    src: u64,
+    dst: u64,
+    size: u64,
+}
+
+fn u32_words(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut lane = [0u8; 4];
+            lane.copy_from_slice(chunk);
+            u32::from_le_bytes(lane)
+        })
+        .collect()
+}
+
+fn f32_vec4s(bytes: &[u8]) -> Vec<[f32; 4]> {
+    let mut out = Vec::new();
+    for chunk in bytes.chunks_exact(16) {
+        let mut word = [0.0f32; 4];
+        for (lane, value) in word.iter_mut().enumerate() {
+            let at = lane.saturating_mul(4);
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(&chunk[at..at + 4]);
+            *value = f32::from_le_bytes(raw);
+        }
+        out.push(word);
+    }
+    out
+}
+
+fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
+    let mut records = [[0.0f32; 4]; 7];
+    for (i, record) in records.iter_mut().enumerate() {
+        *record = *words.get(at.saturating_add(i))?;
+    }
+    Some(records)
+}
+
+fn map_buffer_bytes(gpu: &Gpu, buffer: &Buffer, size: u64) -> Result<Vec<u8>, String> {
+    if size > buffer.size {
+        return Err("cache cell copy does not fit".to_string());
+    }
+    let len = usize::try_from(size).unwrap_or(0);
+    let mut out = vec![0u8; len];
+    unsafe {
+        let mut mapped = std::ptr::null_mut();
+        check(
+            (gpu.fns.map_mem)(gpu.device, buffer.memory, 0, size, 0, &mut mapped),
+            "map cache cell",
+        )?;
+        std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), out.as_mut_ptr(), len);
+        (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod sh_knob_tests {
     use super::*;
@@ -6160,5 +6430,6 @@ mod sh_knob_tests {
             .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
             .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
         assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
+        assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
     }
 }

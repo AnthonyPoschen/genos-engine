@@ -6033,6 +6033,13 @@ vec3 lighting_sc_offer_hit(uint slot, uint packed) {
     vec3 at = origin;
     at[a1] = origin[a1] + u * size;
     at[a2] = origin[a2] + v * size;
+    // The offer word stores the two tangent offsets only. The origin is the
+    // cell centre, up to half a cell off the face along the axis. Leaving the
+    // axis there puts the sample inside the solid when the centre falls behind
+    // the face, and the rays from there come back black. The claim stored the
+    // face (lighting_sc_centre keeps that plane). The election moves on it.
+    vec3 stored = cache.v[3u * slot].xyz;
+    at[ax] = stored[ax];
     return at;
 }
 // One compact thread writes the point the election picked. The word holds
