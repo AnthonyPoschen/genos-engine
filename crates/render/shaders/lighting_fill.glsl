@@ -35,8 +35,6 @@ const float FILL_CHANGE_SCALE = 1.0e6;
 
 const uint LIGHTING_FILL_PARAMS = 16u;
 const uint LIGHTING_FILL_TILE_CAP = 262144u;
-const uint LIGHTING_FILL_TILE_AT = 2u * LIGHTING_CACHE_SLOTS - LIGHTING_FILL_TILE_CAP;
-const uint LIGHTING_FILL_PICK_AT = LIGHTING_CACHE_SLOTS + 1u;
 
 uint lighting_fill_param_at() {
     return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u;
@@ -57,6 +55,14 @@ uint lighting_fill_rays_max() {
 }
 uint lighting_fill_link_at() {
     return lighting_fill_hit_at() + lighting_fill_rays_max() * 2u;
+}
+// Tiles and picks sit past the link words. They used to share the young/mature
+// list range, which aliases once the table is LIGHTING_FILL_TILE_CAP slots.
+uint lighting_fill_tile_at() {
+    return lighting_fill_link_at() + lighting_fill_rays_max() * 2u;
+}
+uint lighting_fill_pick_at() {
+    return lighting_fill_tile_at() + LIGHTING_FILL_TILE_CAP;
 }
 uint lighting_fill_u(uint i) {
     return ckeys.key[lighting_fill_param_at() + i];
@@ -236,7 +242,7 @@ void lighting_fill_visit(uint slot) {
     // On-screen cells are the tile pick, not also an off-screen candidate.
     ckeys.key[lighting_fill_lock_at() + slot] = 0u;
     uint packed = (q << 21u) | (slot + 1u);
-    atomicMax(ckeys.key[LIGHTING_FILL_TILE_AT + ti], packed);
+    atomicMax(ckeys.key[lighting_fill_tile_at() + ti], packed);
 }
 
 void lighting_fill_dispatch() {
@@ -258,7 +264,7 @@ void lighting_fill_dispatch() {
         if (t >= tiles) {
             continue;
         }
-        uint w = ckeys.key[LIGHTING_FILL_TILE_AT + t];
+        uint w = ckeys.key[lighting_fill_tile_at() + t];
         if (w == 0u) {
             continue;
         }
@@ -283,8 +289,8 @@ void lighting_fill_dispatch() {
     uint n = 0u;
     uint at_cut = 0u;
     for (uint t = 0u; t < limit; t++) {
-        uint w = t < tiles ? ckeys.key[LIGHTING_FILL_TILE_AT + t] : 0u;
-        ckeys.key[LIGHTING_FILL_TILE_AT + t] = 0u;
+        uint w = t < tiles ? ckeys.key[lighting_fill_tile_at() + t] : 0u;
+        ckeys.key[lighting_fill_tile_at() + t] = 0u;
         if (w == 0u || n >= on) {
             continue;
         }
@@ -300,7 +306,7 @@ void lighting_fill_dispatch() {
                 at_cut++;
             }
         }
-        ckeys.key[LIGHTING_FILL_PICK_AT + n] = (w & 2097151u) - 1u;
+        ckeys.key[lighting_fill_pick_at() + n] = (w & 2097151u) - 1u;
         n++;
     }
     uint off = budget - n;
@@ -314,10 +320,14 @@ void lighting_fill_dispatch() {
     }
     uint n_far = 0u;
     uint n_near = 0u;
+    uint live = 0u;
     uint lod_max = lighting_fill_lod_max();
     uint guard = LIGHTING_CACHE_SLOTS;
     for (uint s = 0u; s < guard; s++) {
         uint w = ckeys.key[lighting_fill_lock_at() + s];
+        if (ckeys.key[s] != 0u && cache.v[3u * s + 1u].w > 0.0) {
+            live++;
+        }
         if ((w & 0x80000000u) == 0u || ckeys.key[s] == 0u) {
             continue;
         }
@@ -333,7 +343,7 @@ void lighting_fill_dispatch() {
     }
     uint far_take = min(n_far, far_n);
     uint near_take = min(n_near, near_n);
-    uint pick_cap = LIGHTING_FILL_TILE_AT - LIGHTING_FILL_PICK_AT;
+    uint pick_cap = lighting_fill_rays_max();
     uint room = pick_cap - min(n, pick_cap);
     if (far_take + near_take > room) {
         if (far_take > room) {
@@ -426,11 +436,12 @@ void lighting_fill_dispatch() {
         if (!take || n + ranked >= pick_cap) {
             continue;
         }
-        ckeys.key[LIGHTING_FILL_PICK_AT + n + ranked] = s;
+        ckeys.key[lighting_fill_pick_at() + n + ranked] = s;
         ranked++;
     }
     ckeys.key[lighting_fill_header_at()] = ranked;
     ckeys.key[lighting_fill_header_at() + 1u] = far_n - far_got;
+    ckeys.key[lighting_fill_header_at() + 2u] = live;
     ckeys.key[LIGHTING_ARGS_AT + 15u] = n;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
@@ -464,7 +475,7 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
     uint ranked = ckeys.key[lighting_fill_header_at()];
     if (r < on + ranked) {
-        uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
+        uint slot = ckeys.key[lighting_fill_pick_at() + r];
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             return false;
         }
@@ -629,7 +640,7 @@ void lighting_fill_resolve(uint gid) {
         }
         uint slot = ~0u;
         if (r < placed) {
-            slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
+            slot = ckeys.key[lighting_fill_pick_at() + r];
         } else {
             float t = uintBitsToFloat(ckeys.key[lighting_fill_hit_at() + r * 2u]);
             if (t < 0.0) {
