@@ -30,7 +30,7 @@ jobs:
         with:
           components: clippy
       - name: shader and Wayland tools
-        run: bash scripts/ci-apt.sh glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config build-essential python3-pip python3-venv
+        run: bash scripts/ci-apt.sh glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev pkg-config build-essential python3-pip python3-venv
       - name: cargo-deny 0.20.2
         run: |
           curl -fsSL -o /tmp/cargo-deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
@@ -87,7 +87,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Wayland, Weston, and lavapipe
         run: |
-          bash scripts/ci-apt.sh glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev pkg-config mesa-vulkan-drivers weston build-essential python3-pip
+          bash scripts/ci-apt.sh glslc glslang-tools wayland-protocols libwayland-dev libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev pkg-config mesa-vulkan-drivers weston build-essential python3-pip
       - name: build the windowed binaries
         run: cargo build -p genos-camera -p genos-stress -p genos-lighting
       - name: quit gap under headless Weston
@@ -100,7 +100,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: lavapipe and a headless Weston
         run: |
-          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
       - name: s7 at 96x54
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
@@ -128,7 +128,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: lavapipe and a headless Weston
         run: |
-          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev pkg-config glslc glslang-tools libasound2-dev build-essential python3-pip
       - name: cargo test (workspace, lavapipe)
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"

@@ -12,9 +12,9 @@ The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass.
 
 The first program is `examples/camera`. The execution goal is [MVP scene](goals/mvp-scene.md). See [ADR 0010](adr/0010-first-proof-is-the-lit-scripted-scene.md).
 
-Linux on Wayland is the first machine for this proof. Windows opens a Win32 window (`crates/window/src/win32_shim.c`) and reads XInput. macOS opens a Cocoa window (`crates/window/src/cocoa_shim.m`) and reads GameController. The X11 window waits until an X11 session is a target.
+Linux on Wayland is the first machine for this proof. Windows opens a Win32 window (`crates/window/src/win32_shim.c`) and reads XInput. macOS opens a Cocoa window (`crates/window/src/cocoa_shim.m`) and reads GameController. Linux opens an X11 window (`crates/window/src/x11_shim.c`) when the session is X11, and when a `WAYLAND_DISPLAY` connect fails. A named Wayland display does not fall back.
 
-On Wayland, Win32, and Cocoa, the camera moves only while the window has keyboard focus. Those windows clear their keys when focus leaves. X11 is not in this tree yet. `input-zig` polls that keyboard globally.
+On Wayland, Win32, Cocoa, and X11, the camera moves only while the window has keyboard focus. Those windows clear their keys when focus leaves. X11 reads the X queue, not a global keyboard poll. Linux gamepads stay on `/dev/input/jsN`, the same poll Wayland uses.
 
 ## Frame
 
@@ -74,7 +74,7 @@ examples/camera/    package genos-camera
 
 `genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
 
-`genos-input` does not depend on the window or the renderer. Each pump records resize, focus, unfocus, cursor lock, and fullscreen changes. `Window::on` delivers those facts to widgets. `lock_cursor` hides and confines the pointer, and `unlock_cursor` frees it. `set_mode` asks for fullscreen or a normal window. The compositor confirms the mode on a later pump. On Wayland, input maps seat events to input codes. On X11, Windows, and macOS, input polls the system. The renderer takes a surface from the window. The renderer does not open a window.
+`genos-input` does not depend on the window or the renderer. Each pump records resize, focus, unfocus, cursor lock, and fullscreen changes. `Window::on` delivers those facts to widgets. `lock_cursor` hides and confines the pointer, and `unlock_cursor` frees it. `set_mode` asks for fullscreen or a normal window. The compositor confirms the mode on a later pump. On Wayland, input maps seat events to input codes. On Win32, Cocoa, and X11, the window pumps the platform queue and writes those devices. It does not poll the keyboard outside the window. The renderer takes a surface from the window. The renderer does not open a window.
 
 A later `crates/editor` package can depend on these crates. These crates do not depend on the editor. See [ADR 0002](adr/0002-runtime-and-editor-share-one-repository.md).
 

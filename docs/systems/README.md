@@ -20,7 +20,7 @@ Each record uses these headings:
 ## Records
 
 - [Input](input.md) owns the keyboard, the mouse, the gamepad slots, the touch points, and the action maps.
-- [Window](window.md) owns the Wayland seat, focus, pointer lock, and fullscreen.
+- [Window](window.md) owns the Wayland seat, the X11 fallback, focus, pointer lock, and fullscreen.
 - [Math](math.md) owns positions, directions, matrices, quaternions, the headless exposure curves, and the proposed bloom chain.
 - [Physics](physics.md) owns the collision step, including mass, friction, springs, capsule, box, and mesh shapes, and the fracture hot-swap. The next pipeline is [physics/plan.md](physics/plan.md).
 - [Fracture](fracture.md) owns the offline Voronoi cook and the `.gfract` asset. The step does not cook.
