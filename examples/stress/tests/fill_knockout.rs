@@ -221,7 +221,7 @@ fn the_presented_frame_moves_when_the_cache_fills() {
         "fill scheduler serial work {serial} is a slot-table scan or did not run"
     );
     assert!(
-        hist_threads >= 16_384 && hist_threads < 1_048_576,
+        (16_384..1_048_576).contains(&hist_threads),
         "fill histogram covers {hist_threads} threads; the slot table is 1048576"
     );
     assert!(
