@@ -1,0 +1,955 @@
+diff --git a/crates/render/shaders/lighting_cache.comp b/crates/render/shaders/lighting_cache.comp
+index 3b0231b..d03cd12 100644
+--- a/crates/render/shaders/lighting_cache.comp
++++ b/crates/render/shaders/lighting_cache.comp
+@@ -18,6 +18,14 @@ void lighting_tex_put(uint slot, vec4 v) {
+     }
+     cache.v[3u * slot + 2u] = v;
+ }
++// ADR 0037 debug counters, on with the trace. Round 10: only diag words no shader
++// writes outside lighting_dg (LIGHTING_DIAG is off): 0 1 5 6 8 13 14 18 21-27 60.
++// Round 9 used 56-63, which lighting_direct (57-59) and lighting_screen (61-63) also use.
++void dbg_cnt(uint i, uint v) {
++    if (gstats.chg[31] != 0u) {
++        atomicAdd(gstats.diag[i], v);
++    }
++}
+ void main() {
+     uint gid = gl_GlobalInvocationID.x;
+     if (gid >= LIGHTING_CACHE_BATCH) {
+@@ -220,7 +228,9 @@ void main() {
+         vec3 cp = lighting_sc_texel_pos(slot);
+         // S62D (Anthony): no history drop under a change; an exponential
+         // average with a responsive floor tracks it (local change faster).
+-        bool local3 = (urgent3 && lighting_near_change(cp)) || lighting_wrc_lamp_changed(cp, prev_updated);
++        // Round 15 fix: under EVT=3 a lamp change shortens history only through lambda below.
++        bool evt3 = (lighting_dbg2() & 4194304u) != 0u;
++        bool local3 = (urgent3 && lighting_near_change(cp)) || (!evt3 && lighting_wrc_lamp_changed(cp, prev_updated));
+         float add = float(run);
+         float wa = add / (t + add);
+         // S72N dark fill (Anthony: dark occluded rooms fill disproportionately
+@@ -236,7 +246,102 @@ void main() {
+         } else if (!lighting_sc_light_quiet()) {
+             wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
+         }
++        // ADR 0037 hooks (debug, env-gated, default = shipped): head 3.w bits 16-17 mean
++        // mode (GENOS_DBG_MEAN: 1 exponential, 2 count reset), bits 18-23 reset % (GENOS_DBG_RESET_PCT, 0 = 10).
++        uint dbg_hw = uint(work.v[lighting_change_at() + 3u].w);
++        uint dbg_mean = (dbg_hw >> 16u) & 3u;
++        // Round 9: bits 18-22 are the reset % (modes 1-2) or k (mode 3: two-sided reset,
++        // |sample - mean| > max(10 %, k sigma)); bit 23 GENOS_DBG_LAMPOFF.
++        uint dbg_v = (dbg_hw >> 18u) & 31u;
++        // Round 10, mode 3: k is bits 18-20 only; bit 21 GENOS_DBG_TEXOFF, bit 22 GENOS_DBG_SIGCAP.
++        if (dbg_mean == 3u) { dbg_v &= 7u; }
++        float dbg_x = dbg_v == 0u ? 0.10 : float(dbg_v) / 100.0;
++        if (!evt3 && ((dbg_hw >> 23u) & 1u) != 0u && lighting_wrc_lamp_changed(cp, prev_updated)) { t = min(t, 1.0); wa = add / (t + add); dbg_cnt(39u, 1u); }
++        // Round 14 (GENOS_DBG_EVT, dbg2 bit 8; bits 9-20 budget / 16): a cell inside a
++        // switched lamp's range restarts from zero samples. Restarts per frame are capped
++        // (diag[42] counts them); cells within 6 m of the eye may use the whole budget,
++        // farther ones only half (nearest first, approximately). Over budget: cleared to 0.
++        if ((lighting_dbg2() & 256u) != 0u && old.w >= 0.5 && lighting_wrc_lamp_changed(cp, prev_updated)) {
++            uint bud = ((lighting_dbg2() >> 9u) & 2047u) * 16u;
++            bool near = length(cp - work.v[lighting_change_at() + 1u].xyz) < 6.0;
++            uint k = atomicAdd(gstats.diag[42], 1u);
++            // GENOS_DBG_EVT=2 (dbg2 bit 21): proportional A-SVGF-style drop instead of a hard
++            // clear: lambda = |e - old| / max (this pass's sample, not an old-seed re-trace),
++            // count scaled by (1 - lambda). Texels, gather/filter and compose as EVT=1.
++            bool prop = (lighting_dbg2() & 2097152u) != 0u;
++            float lam = clamp(abs(dot(e - old.rgb, vec3(0.2126, 0.7152, 0.0722))) / max(max(dot(e, vec3(0.2126, 0.7152, 0.0722)), dot(old.rgb, vec3(0.2126, 0.7152, 0.0722))), 1.0e-4), 0.0, 1.0);
++            bool evp = (lighting_dbg2() & 4194304u) != 0u;
++            if (evp) { lam = lighting_lamp_lambda(cp, prev_updated); }
++            if (prop || evp) { t = t * (1.0 - lam); wa = add / (t + add); }
++            else if (bud == 0u || k < (near ? bud : bud / 2u)) { t = 0.0; wa = 1.0; }
++            else { lighting_tex_put(slot, vec4(0.0)); atomicAdd(gstats.diag[43], 1u); return; }
++        }
++        if (dbg_mean == 1u) { wa = max(add / (t + add), (t < 64.0 ? 0.125 : 0.03125) * add); }
++        if (dbg_mean == 2u && old.w >= 0.5) {
++            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
++            float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
++            if (le > lo * (1.0 + dbg_x)) { t = min(t, 4.0); wa = add / (t + add); }
++        }
++        // Round 11 (GENOS_DBG_HIST, scene grid_at.w bit 29): the sample-noise bins
++        // (d 0 1 5 6 8 13) count relit cells by their count before any reset instead:
++        // <= 4, <= 8, <= 16, <= 32, <= 64, > 64; d[32] mode-3 resets, d[34] new cells.
++        bool dbg_hist = ((scene.grid_at.w >> 29u) & 1u) != 0u;
++        if (dbg_hist) {
++            if (old.w < 0.5) { dbg_cnt(34u, 1u); }
++            else { dbg_cnt(t <= 4.0 ? 0u : t <= 8.0 ? 1u : t <= 16.0 ? 5u : t <= 32.0 ? 6u : t <= 64.0 ? 8u : 13u, 1u); }
++        }
++        float dbg_sig = sqrt(clamp(cache.v[LIGHTING_SC_GRAD2_AT + slot].w, 0.0, lighting_wrc_sigma_max() * lighting_wrc_sigma_max()));
++        if (dbg_mean == 3u && old.w >= 0.5) {
++            float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
++            float lo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
++            float band = max(0.10, float(dbg_v == 0u ? 3u : dbg_v) * dbg_sig);
++            // Round 11 (GENOS_DBG_RESET, scene grid_at.w bits 30-31): 0 drops the count to 4,
++            // 1 halves it, 2 halves it and widens the band floor to 20 %.
++            uint dbg_rs = (scene.grid_at.w >> 30u) & 3u;
++            if (dbg_rs == 2u) { band = max(band, 0.20); }
++            // Round 12 (GENOS_DBG_RUN): 1 no band reset (lamp-change record only), M = 2 or 3
++            // resets only on M out-of-band samples in a row (run in EST b.z, unused by WRC cells).
++            uint dbg_run = (lighting_dbg2() >> 2u) & 3u;
++            bool dbg_out = abs(le - lo) > band * max(lo, 1.0e-4);
++            bool dbg_fire = dbg_out && dbg_run == 0u;
++            if (dbg_run >= 2u) {
++                float rn = dbg_out ? cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z + 1.0 : 0.0;
++                dbg_fire = rn >= float(dbg_run);
++                cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z = dbg_fire ? 0.0 : rn;
++            }
++            if (dbg_fire) {
++                if (dbg_hist) { dbg_cnt(32u, 1u); }
++                t = dbg_rs == 0u ? min(t, 4.0) : max(floor(0.5 * t), 4.0);
++                wa = add / (t + add);
++            }
++        }
+         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
++        // ADR 0037 convergence counters (GENOS_LIGHTING_SC_TRACE, in the unused diag words
++        // 56-63 of lightingdg lines): d[56] cells relit, d[57] stored value moved > 1 %, d[58] > 0.5 %.
++        if (old.w >= 0.5) {
++            float ma = dot(mean, vec3(0.2126, 0.7152, 0.0722));
++            float mo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
++            float r = abs(ma - mo) / max(max(ma, mo), 1.0e-4);
++            dbg_cnt(21u, 1u);
++            if (r > 0.01) dbg_cnt(22u, 1u);
++            if (r > 0.005) dbg_cnt(23u, 1u);
++            // Round 9: noise-relative change, d[59] |dmean| > 3 sigma / sqrt(n),
++            // d[60] > 1 sigma / sqrt(n); d[61] sum of stored luma x 1000 (round mean).
++            float sn = dbg_sig / sqrt(max(t + add, 1.0));
++            if (r > 3.0 * sn) dbg_cnt(24u, 1u);
++            if (r > sn) dbg_cnt(25u, 1u);
++            dbg_cnt(26u, uint(clamp(ma, 0.0, 1000.0) * 1000.0));
++            // Round 10: signed relative step x 1e6, d[14] up, d[18] down (trend term).
++            float sr = clamp((ma - mo) / max(mo, 1.0e-4), -1.0, 1.0);
++            if (sr > 0.0) dbg_cnt(14u, uint(sr * 1.0e6)); else dbg_cnt(18u, uint(-sr * 1.0e6));
++            // Round 10: per-sample relative deviation |e - old| / max for cells with 8+
++            // sets (what GRAD2.w estimates), bins < .05 .1 .2 .4 .8 >= .8 in d 0 1 5 6 8 13.
++            if (t >= 8.0 && !dbg_hist) {
++                float le = dot(e, vec3(0.2126, 0.7152, 0.0722));
++                float dv = min(1.0, abs(le - mo) / max(max(le, mo), 1.0e-3));
++                dbg_cnt(dv < 0.05 ? 0u : dv < 0.1 ? 1u : dv < 0.2 ? 5u : dv < 0.4 ? 6u : dv < 0.8 ? 8u : 13u, 1u);
++            }
++        }
+         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
+         // S76B: a refresh is the cell's check (lighting_wrc_check_take).
+         if (old.w >= 0.5) {
+@@ -244,6 +349,20 @@ void main() {
+         }
+         return;
+     }
++    // Round 10 (GENOS_DBG_TEXOFF, head bit 21 with mean mode 3): a surface-cache texel
++    // inside a switched on/off lamp's range sphere restarts its mean from this set.
++    uint dbg_hw2 = uint(work.v[lighting_change_at() + 3u].w);
++    if (lighting_world_mode() == 3u && ((((dbg_hw2 >> 16u) & 3u) == 3u && ((dbg_hw2 >> 21u) & 1u) != 0u) || (lighting_dbg2() & 256u) != 0u) && old.w >= 0.5 && lighting_sc_lamp_touched(slot)
++        && ((lighting_dbg2() & 4194304u) == 0u || lighting_lamp_lambda(lighting_sc_texel_pos(slot), lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot)) >= 0.5)) {
++        old.w = 0.0;
++        dbg_cnt(38u, 1u);
++    }
++    // Round 10 diagnostics: d[32] texels in a lamp sphere ignoring light_quiet, d[34] texels seen.
++    if (lighting_world_mode() == 3u && ((dbg_hw2 >> 21u) & 1u) != 0u && ((scene.grid_at.w >> 29u) & 1u) == 0u && old.w >= 0.5 && cache.v[3u * slot + 1u].w <= 0.2) {
++        dbg_cnt(34u, 1u);
++        uint dupd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
++        if (lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), dupd)) dbg_cnt(32u, 1u);
++    }
+     if (lighting_world_mode() == 3u) {
+         // Surface cache: the running mean of the sets so far (a short one under
+         // change); w counts them, held at the cap once there.
+@@ -418,6 +537,13 @@ void main() {
+         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+         bool mover3;
+         bool stale = lighting_sc_local_change(slot, mover3);
++        if (old.w >= 0.5) {
++            float ma = dot(mean, vec3(0.2126, 0.7152, 0.0722));
++            float mo = dot(old.rgb, vec3(0.2126, 0.7152, 0.0722));
++            float r = abs(ma - mo) / max(max(ma, mo), 1.0e-4);
++            dbg_cnt(27u, 1u);
++            if (r > 0.01) dbg_cnt(60u, 1u);
++        }
+         lighting_tex_put(slot, vec4(mean, next + (stale ? 0.25 : 0.0)));
+         return;
+     }
+diff --git a/crates/render/shaders/lighting_cache.glsl b/crates/render/shaders/lighting_cache.glsl
+index 4b3d7f5..98d2c2f 100644
+--- a/crates/render/shaders/lighting_cache.glsl
++++ b/crates/render/shaders/lighting_cache.glsl
+@@ -493,6 +493,10 @@ uint lighting_sc_base_room() {
+ }
+ const uint LIGHTING_WRC_RING_HEAD_AT = LIGHTING_SC_HIST_AT + 69u;
+ const uint LIGHTING_WRC_RING = 16u;
++// ADR 0037 round 16 (GENOS_DBG_RING32, EVT=3 only): 32 entries; the 17600-word block has
++// room up to 33 (17300 + 9 * 32 = 17588). 32 lamps switching in one round overwrote half
++// of a 16-entry ring, so those lamps' cells were never told.
++uint lighting_wrc_ring_n();
+ // S65C: 9 words an entry (old place, new place, range, brightest channel,
+ // frame), past the trickle list.
+ const uint LIGHTING_WRC_RING_AT = LIGHTING_SC_HIST_AT + 17300u;
+@@ -1271,6 +1275,7 @@ bool lighting_sc_local_change(uint slot, out bool mover) {
+ }
+ // The lamps' change at slot relative to the light it shows (0 when none).
+ float lighting_lamp_delta(vec3 p, uint updated);
++float lighting_lamp_lambda(vec3 p, uint updated);
+ float lighting_sc_lamp_change(uint slot) {
+     if (lighting_sc_light_quiet()) {
+         return 0.0;
+@@ -1285,6 +1290,37 @@ float lighting_sc_lamp_change(uint slot) {
+     // the ratio is what matters.
+     return d / (lum + 0.02);
+ }
++// ADR 0037 round 12 hooks (debug, 0 shipped): the head's last-eye w is 1 + 2 * bits
++// when set (its readers only test > 0.5). Bit 0 GENOS_DBG_FIELD, bit 1 GENOS_DBG_PROBE,
++// bits 2-3 GENOS_DBG_RUN.
++uint lighting_dbg2() {
++    float w = work.v[lighting_change_at() + 1u].w;
++    return w > 0.5 ? (uint(w) >> 1u) : 0u;
++}
++// Round 16 hooks (EVT=3 only, dbg2 bits 9-14): spread frames and the 32-entry ring.
++uint lighting_evt_spread() {
++    uint d = lighting_dbg2();
++    return (d & 4194304u) != 0u ? (d >> 9u) & 31u : 0u;
++}
++uint lighting_wrc_ring_n() {
++    uint d = lighting_dbg2();
++    return ((d & 4194304u) != 0u && ((d >> 14u) & 1u) != 0u) ? 32u : LIGHTING_WRC_RING;
++}
++// Frames since the newest ring entry reaching p that is newer than `updated` (~0u: none).
++uint lighting_lamp_age(vec3 p, uint updated);
++// Spread (round 16): a cell or texel a lamp change reaches waits for its turn,
++// hash(slot) % S frames after the change, so each relights once over S frames, near
++// the eye (6 m) first. Pending ones keep their old light meanwhile (not cleared) and stay
++// flagged until relit (the ring keeps changes LIGHTING_WRC_CHANGE_FRAMES).
++bool lighting_spread_wait(uint slot, vec3 p, uint updated) {
++    uint s = lighting_evt_spread();
++    if (s <= 1u) return false;
++    uint age = lighting_lamp_age(p, updated);
++    if (age == ~0u || age >= s) return false;
++    bool nearp = length(p - work.v[lighting_change_at() + 1u].xyz) < 6.0;
++    uint turn = nearp ? 0u : 1u + lighting_hash(slot ^ 0x9e3779b9u) % (s - 1u);
++    return age < turn;
++}
+ bool lighting_sc_lamp_touched(uint slot) {
+     uint upd = lighting_sc_upd_override != ~0u ? lighting_sc_upd_override : lighting_sc_updated(slot);
+     return !lighting_sc_light_quiet() && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), upd);
+@@ -1961,6 +1997,19 @@ vec4 lighting_sc_shown(uint slot) {
+     // S72N: the texel's seed (lighting_sc_seed) joins the prior by its
+     // confidence, in the same handover.
+     vec4 own = cache.v[3u * slot + 2u];
++    // ADR 0037 round 11 hook (GENOS_DBG_LAYER): 3 skips the pushed a-trous field
++    // (WRC as of now), 4 shows the texel's own mean.
++    uint dbg_layer = (scene.grid_at.w >> 26u) & 7u;
++    if (dbg_layer == 4u && lighting_world_mode() == 3u) {
++        return own.w > 0.5 ? vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0) : vec4(0.0);
++    }
++    if (dbg_layer == 3u && lighting_world_mode() == 3u) {
++        vec4 pb = lighting_sc_wrc_now(cache.v[3u * slot].xyz, cache.v[3u * slot + 1u].xyz);
++        if (pb.w > 0.5) {
++            return pb;
++        }
++        return own.w > 0.5 ? vec4(own.rgb * lighting_sc_sun_gain(slot), 1.0) : vec4(0.0);
++    }
+     // Denoiser off: the a-trous push never writes the display field, so compose
+     // fell through to parent and world-cache walks on every pixel and got
+     // slower than with the filter on. The texel's own mean is one load.
+@@ -1996,6 +2045,14 @@ vec4 lighting_sc_shown(uint slot) {
+             // picture that nothing else changed.
+             bool fresh = pf != 0u && (int(lighting_frame() - pf) <= 2 || lighting_view_held());
+             have = fresh && any(greaterThan(field, vec3(0.0)));
++            // ADR 0037 round 12 (GENOS_DBG_FIELD2, debug bit 4): inside a switched lamp's
++            // range for the change window, show the WRC as of now, not the pushed field.
++            if ((lighting_dbg2() & 16u) != 0u && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), lighting_frame() - LIGHTING_WRC_CHANGE_FRAMES)) {
++                vec4 pbn = lighting_sc_wrc_now(cache.v[3u * slot].xyz, cache.v[3u * slot + 1u].xyz);
++                if (pbn.w > 0.5) {
++                    return vec4(pbn.rgb, 1.0);
++                }
++            }
+             if (have) {
+                 return vec4(field, 1.0);
+             }
+@@ -2679,9 +2736,9 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
+ // light's delta in power and place at that point (Anthony, item 3).
+ float lighting_lamp_delta(vec3 p, uint updated) {
+     float delta = -1.0;
+-    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_WRC_RING; i++) {
++    [[dont_unroll]] for (uint i = 0u; i < lighting_wrc_ring_n(); i++) {
+         uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
+-        uint f = ckeys.key[at + 8u];
++        uint f = ckeys.key[at + 8u] & 0x00ffffffu;
+         if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
+             continue;
+         }
+@@ -2691,6 +2748,14 @@ float lighting_lamp_delta(vec3 p, uint updated) {
+         float pw = uintBitsToFloat(ckeys.key[at + 7u]);
+         float da = length(p - a);
+         float db = length(p - b);
++        // ADR 0037 round 13 (GENOS_DBG_FOOT, debug bits 5-7): grow the change sphere
++        // by the lamp's bounce footprint; 7 = every cell (perfect-invalidation oracle).
++        uint dbg_foot = (lighting_dbg2() >> 5u) & 7u;
++        if (dbg_foot == 7u) {
++            delta = max(delta, 0.0) + pw;
++            continue;
++        }
++        range += float(dbg_foot);
+         if (min(da, db) >= range) {
+             continue;
+         }
+@@ -2700,6 +2765,50 @@ float lighting_lamp_delta(vec3 p, uint updated) {
+     }
+     return delta;
+ }
++uint lighting_lamp_age(vec3 p, uint updated) {
++    uint best = ~0u;
++    [[dont_unroll]] for (uint i = 0u; i < lighting_wrc_ring_n(); i++) {
++        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
++        uint f = ckeys.key[at + 8u] & 0x00ffffffu;
++        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
++            continue;
++        }
++        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
++        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
++        float range = uintBitsToFloat(ckeys.key[at + 6u]);
++        if (min(length(p - a), length(p - b)) >= range) {
++            continue;
++        }
++        best = min(best, lighting_frame() - f);
++    }
++    return best;
++}
++// ADR 0037 round 15 (EVT=3): the history fraction to drop at p for lamps changed since
++// `updated`: max over ring entries reaching p of lambda, weighted by the lamp's falloff
++// inside its range (full inside half the range, down to 0.25 at the edge); a switch
++// (lambda 1) is a hard clear over the whole range. 0 when none reaches p.
++float lighting_lamp_lambda(vec3 p, uint updated) {
++    float lam = 0.0;
++    [[dont_unroll]] for (uint i = 0u; i < lighting_wrc_ring_n(); i++) {
++        uint at = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * i;
++        uint fw = ckeys.key[at + 8u];
++        uint f = fw & 0x00ffffffu;
++        if (f == 0u || int(lighting_frame() - f) > int(LIGHTING_WRC_CHANGE_FRAMES) || int(updated - f) >= 0) {
++            continue;
++        }
++        vec3 a = vec3(uintBitsToFloat(ckeys.key[at]), uintBitsToFloat(ckeys.key[at + 1u]), uintBitsToFloat(ckeys.key[at + 2u]));
++        vec3 b = vec3(uintBitsToFloat(ckeys.key[at + 3u]), uintBitsToFloat(ckeys.key[at + 4u]), uintBitsToFloat(ckeys.key[at + 5u]));
++        float range = uintBitsToFloat(ckeys.key[at + 6u]);
++        float d = min(length(p - a), length(p - b));
++        if (d >= range) {
++            continue;
++        }
++        float li = float(fw >> 24u) / 255.0;
++        float fall = li >= 0.999 ? 1.0 : mix(1.0, 0.25, smoothstep(0.5 * range, range, d));
++        lam = max(lam, li * fall);
++    }
++    return lam;
++}
+ // Once a round (cache pass, thread 0): lamps that moved or changed range since
+ // the last round go into the ring (suns are left to the light-change rule).
+ void lighting_wrc_note_lamps() {
+@@ -2712,11 +2821,32 @@ void lighting_wrc_note_lamps() {
+                       uintBitsToFloat(ckeys.key[at + 2u]), uintBitsToFloat(ckeys.key[at + 3u]));
+         bool fresh = i >= had;
+         bool moved = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3 || abs(o.w - l.color.w) > 1.0e-3;
+-        if (moved && l.color.w > 0.0) {
++        // ADR 0037 round 9 hook (GENOS_DBG_LAMPOFF, head 3.w bit 23): a lamp switching
++        // off goes in the ring with its old sphere and power.
++        bool dbg_off = ((uint(work.v[lighting_change_at() + 3u].w) >> 23u) & 1u) != 0u;
++        bool was_lit = dbg_off && !fresh && o.w > 0.0;
++        if (moved && (l.color.w > 0.0 || was_lit)) {
+             vec3 a = fresh ? l.pos.xyz : o.xyz;
+-            uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % LIGHTING_WRC_RING;
+-            ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
+-            uint ra = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * h;
++            uint ra = ~0u;
++            // Round 16 ring fix (GENOS_DBG_RING32): a lamp that only moved reuses its
++            // own entry (the one ending where it was), so 3 moving lamps no longer push
++            // a lamp step out of the ring within ~5 rounds (its cells then never
++            // learnt of it: the lamp-off linger).
++            if (lighting_wrc_ring_n() > LIGHTING_WRC_RING && !fresh && abs(o.w - l.color.w) <= 1.0e-3) {
++                for (uint k = 0u; k < lighting_wrc_ring_n(); k++) {
++                    uint rk = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * k;
++                    vec3 bk = vec3(uintBitsToFloat(ckeys.key[rk + 3u]), uintBitsToFloat(ckeys.key[rk + 4u]), uintBitsToFloat(ckeys.key[rk + 5u]));
++                    if ((ckeys.key[rk + 8u] & 0x00ffffffu) != 0u && length(bk - o.xyz) < 1.0e-4) {
++                        ra = rk;
++                        break;
++                    }
++                }
++            }
++            if (ra == ~0u) {
++                uint h = ckeys.key[LIGHTING_WRC_RING_HEAD_AT] % lighting_wrc_ring_n();
++                ckeys.key[LIGHTING_WRC_RING_HEAD_AT] = h + 1u;
++                ra = LIGHTING_WRC_RING_AT + LIGHTING_WRC_RING_W * h;
++            }
+             ckeys.key[ra] = floatBitsToUint(a.x);
+             ckeys.key[ra + 1u] = floatBitsToUint(a.y);
+             ckeys.key[ra + 2u] = floatBitsToUint(a.z);
+@@ -2725,8 +2855,17 @@ void lighting_wrc_note_lamps() {
+             ckeys.key[ra + 5u] = floatBitsToUint(l.pos.z);
+             ckeys.key[ra + 6u] = floatBitsToUint(max(l.color.w, o.w));
+             // A new lamp: all of its light is new (the old place is far away).
+-            ckeys.key[ra + 7u] = floatBitsToUint(max(max(l.color.r, l.color.g), l.color.b));
+-            ckeys.key[ra + 8u] = max(lighting_frame(), 1u);
++            float peak_now = max(max(l.color.r, l.color.g), l.color.b);
++            float peak_was = was_lit ? o.w * o.w * (0.5 / 255.0) / (72.0 * 0.8 / 3.14159265) : 0.0;
++            ckeys.key[ra + 7u] = floatBitsToUint(max(peak_now, peak_was));
++            // ADR 0037 round 15 (EVT=3): the lamp's power change, lambda = |P_new - P_old| /
++            // max(P_new, P_old), P ~ range^2 (peak_was above), in the frame word's top 8 bits.
++            // A new or moved lamp counts as a full change.
++            bool movd = fresh || length(o.xyz - l.pos.xyz) > 1.0e-3;
++            float pn = l.color.w * l.color.w;
++            float po = o.w * o.w;
++            float lam_p = movd ? 1.0 : abs(pn - po) / max(max(pn, po), 1.0e-6);
++            ckeys.key[ra + 8u] = (max(lighting_frame(), 1u) & 0x00ffffffu) | (uint(clamp(lam_p, 0.0, 1.0) * 255.0 + 0.5) << 24u);
+         }
+         ckeys.key[at] = floatBitsToUint(l.pos.x);
+         ckeys.key[at + 1u] = floatBitsToUint(l.pos.y);
+@@ -3501,6 +3640,20 @@ void lighting_svgf_inactive(uint slot) {
+     }
+ }
+ void lighting_svgf_variance(uint slot) {
++    // Round 12 (GENOS_DBG_FIELD): a texel inside a switched lamp's range that has not
++    // been relit since the switch restarts from the WRC as of now (count 1, noise
++    // estimate cleared, relit stamp now), so its levels and the pushed field repaint.
++    if ((lighting_dbg2() & 1u) != 0u && lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w <= 0.2
++        && cache.v[3u * slot + 2u].w >= 0.5 && lighting_sc_lamp_touched(slot)) {
++        vec4 pb = lighting_sc_wrc_now(cache.v[3u * slot].xyz, cache.v[3u * slot + 1u].xyz);
++        if (pb.w > 0.5) {
++            cache.v[3u * slot + 2u] = vec4(pb.rgb / max(lighting_sc_sun_gain(slot), 1.0e-4), 1.0);
++            cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(0.0);
++            cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
++            cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
++            if (gstats.chg[31] != 0u) { atomicAdd(gstats.diag[38], 1u); }
++        }
++    }
+     float var;
+     vec4 v = lighting_svgf_in(slot, var);
+     bool spatial = var < 0.0;
+@@ -3623,6 +3776,13 @@ void lighting_svgf_iter(uint slot, uint it) {
+     }
+     gv = gw > 0.0 ? gv / gw : varp;
+     float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
++    // ADR 0037 round 15g (GENOS_DBG_EVTF, dbg2 bit 20): a texel with a short history
++    // (EVT=3 cuts it in proportion to the lamp change) filters harder: the
++    // edge-stop widens up to 4x as the count falls from 8 to 1. 0 shipped.
++    if ((lighting_dbg2() & 1048576u) != 0u) {
++        float th = floor(max(cache.v[3u * slot + 2u].w, 0.0));
++        phi *= 1.0 + 3.0 * clamp((8.0 - th) / 7.0, 0.0, 1.0);
++    }
+     const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
+     vec3 sum = vec3(0.0);
+     float wm = 0.0;
+@@ -3707,7 +3867,9 @@ void lighting_svgf_push(uint slot) {
+     // neighbour's) moved, when it leans on the WRC (W < 1: the cells change
+     // without telling their texels), and otherwise one frame in
+     // LIGHTING_PUSH_IDLE by hash (the +-4 R clamp, a texel just shown).
+-    if (LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
++    // ADR 0037 round 12 (GENOS_DBG_FIELD2): no idle skip inside a switched lamp's range.
++    bool dbg_f2 = (lighting_dbg2() & 16u) != 0u && lighting_wrc_lamp_changed(lighting_sc_texel_pos(slot), lighting_frame() - LIGHTING_WRC_CHANGE_FRAMES);
++    if (!dbg_f2 && LIGHTING_DIRTY_ATROUS && W >= 0.999 && !lighting_svgf_stamp_recent(slot, 3u)
+         && cache.v[LIGHTING_SC_ATROUS_B + slot].w != 0.0
+         && ((lighting_hash(slot ^ 0x7f4a7c15u) + lighting_frame()) % LIGHTING_PUSH_IDLE) != 0u) {
+         // S72V10 trusts the field for two frames from this stamp. The idle skip
+@@ -3759,6 +3921,14 @@ void lighting_svgf_push(uint slot) {
+     } else {
+         outc = vec3(0.0);
+     }
++    // ADR 0037 round 12 (GENOS_DBG_FIELD2): the field pushed inside a switched lamp's
++    // range is the WRC as of now, so it holds the new light when the window ends.
++    if (dbg_f2) {
++        vec4 pbn = lighting_sc_wrc_now(p, n);
++        if (pbn.w > 0.5) {
++            outc = pbn.rgb;
++        }
++    }
+     uint field_pack = lighting_pack_rgb9e5(outc);
+     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(field_pack);
+     cache.v[LIGHTING_SC_ATROUS_B + slot].w = uintBitsToFloat(lighting_frame());
+@@ -4120,13 +4290,18 @@ uint lighting_lamps_sig(uint seed, LampList list) {
+ // refresh waits twice as long (LIGHTING_CHECK_MIN..MAX frames); otherwise the
+ // cell is refreshed again next frame while nominated.
+ const float LIGHTING_WRC_SIGMA_MAX = 0.2;
++// ADR 0037 round 10 (GENOS_DBG_SIGCAP, head bit 22 with mean mode 3): cap 1 (d is <= 1).
++float lighting_wrc_sigma_max() {
++    uint hw = uint(work.v[lighting_change_at() + 3u].w);
++    return (((hw >> 16u) & 3u) == 3u && ((hw >> 22u) & 1u) != 0u) ? 1.0 : LIGHTING_WRC_SIGMA_MAX;
++}
+ void lighting_wrc_check_take(uint slot, vec3 e, vec3 old) {
+     float a = dot(e, vec3(0.2126, 0.7152, 0.0722));
+     float b = dot(old, vec3(0.2126, 0.7152, 0.0722));
+     float d = min(1.0, abs(a - b) / max(max(a, b), 1.0e-3));
+     vec4 g2 = cache.v[LIGHTING_SC_GRAD2_AT + slot];
+-    float n2 = clamp(g2.w, 0.0, LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
+-    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), LIGHTING_WRC_SIGMA_MAX * LIGHTING_WRC_SIGMA_MAX);
++    float n2 = clamp(g2.w, 0.0, lighting_wrc_sigma_max() * lighting_wrc_sigma_max());
++    cache.v[LIGHTING_SC_GRAD2_AT + slot].w = min(mix(n2, d * d, 0.125), lighting_wrc_sigma_max() * lighting_wrc_sigma_max());
+     // S77A: escalated (GRAD.x = 1): its next refresh is a whole set.
+     cache.v[LIGHTING_SC_GRAD_AT + slot].x = 0.0;
+     if (d < 2.0 * sqrt(n2) + LIGHTING_ASVGF_EPS) {
+diff --git a/crates/render/shaders/lighting_compact.comp b/crates/render/shaders/lighting_compact.comp
+index 6544c38..d3ab806 100644
+--- a/crates/render/shaders/lighting_compact.comp
++++ b/crates/render/shaders/lighting_compact.comp
+@@ -135,7 +135,14 @@ void main() {
+             }
+             uint updated = lighting_sc_updated(slot);
+             vec3 cp = lighting_sc_texel_pos(slot);
+-            if (near || lighting_wrc_lamp_changed(cp, updated)) {
++            // Round 15 fix: under EVT=3 a lamp change nominates a cell only when its lambda is
++            // at least 1/4; milder ones fall to the background refresh.
++            bool lamp_hit = (lighting_dbg2() & 4194304u) != 0u ? lighting_lamp_lambda(cp, updated) >= 0.25 : lighting_wrc_lamp_changed(cp, updated);
++            // Round 16 spread: a lamp-hit cell not yet at its turn waits (stays hit).
++            if (lamp_hit && lighting_spread_wait(slot, cp, updated)) {
++                return;
++            }
++            if (near || lamp_hit) {
+                 // S76B: nominated; refreshed only when its check is due.
+                 if (!lighting_sc_check_due(slot)) {
+                     lighting_dg(46u, 1u);
+@@ -234,6 +241,10 @@ void main() {
+                 }
+                 return;
+             }
++            // Round 16 spread: a lamp-touched texel waits for its turn.
++            if (lighting_evt_spread() > 1u && lighting_sc_lamp_touched(slot) && lighting_spread_wait(slot, lighting_sc_texel_pos(slot), updated)) {
++                return;
++            }
+             // S74A A-SVGF (lighting_cache.glsl): the gradient checks alone decide
+             // the rays of a resolved texel; lambda sets the rate of a changing one.
+             if (asvgf) {
+diff --git a/crates/render/shaders/lighting_compose.comp b/crates/render/shaders/lighting_compose.comp
+index f83f966..55d8cc5 100644
+--- a/crates/render/shaders/lighting_compose.comp
++++ b/crates/render/shaders/lighting_compose.comp
+@@ -95,19 +95,106 @@ vec3 indirect(uvec2 p, vec3 pos, vec3 n) {
+         lighting_px_probes = wsum > CACHE_WEIGHT + 1.0e-4 ? probes : vec3(-1.0);
+         vec4 world = lighting_world_irradiance(pos, n);
+         lighting_sc_display = false;
++        // ADR 0037 round 11 hook (GENOS_DBG_LAYER): 1 probes only, 2 world only,
++        // 5 probes only with no held probe gather or filter, 6 the picture with no hold.
++        uint dbg_layer = (scene.grid_at.w >> 26u) & 7u;
++        if (dbg_layer == 1u || dbg_layer == 5u) {
++            return probes;
++        }
++        if (dbg_layer == 2u) {
++            return world.rgb;
++        }
+         return mix(probes, world.rgb, clamp(world.w, 0.0, 1.0));
+     }
+     lighting_sc_display = false;
+     return probes;
+ }
+ 
++// ADR 0037 round 17 hook (GENOS_DBG_ASVGF_PX, dbg2 bit 15): per-pixel A-SVGF on the
++// quiet picture. The grid covers every block; one pixel per 3x3 tile (rotating) re-shades
++// and writes its relative change to the tile word; the tile's gradient, maxed over the
++// neighbour tiles and decayed by half a frame, redraws unlisted pixels and sets the
++// blend toward the new value (alpha 0.3 + 20 g) instead of a hard reset.
++// Mode (bits 15-16): 1 the hook, 2 every pixel shades at alpha 1, 3 listed pixels only
++// at alpha 1 (should match no hook: checks the grid dispatch and the listed test).
++uint asv_mode() {
++    return (lighting_dbg2() >> 15u) & 3u;
++}
++bool asv_on() {
++    return (lighting_dbg2() & 4194304u) != 0u && asv_mode() != 0u;
++}
++uint asv_at() {
++    // The last slice of the buffer (lighting_gpu.rs appends it under the hook).
++    return uint(outc.px.length()) - pc.dims.x * pc.dims.y;
++}
++vec3 asv_unpack(uint w) {
++    vec3 c = vec3(float(w & 255u), float((w >> 8u) & 255u), float((w >> 16u) & 255u)) / 255.0;
++    return (pc.params.z & 1u) == 1u ? c.bgr : c;
++}
++float asv_lum(vec3 c) {
++    return dot(c, vec3(0.2126, 0.7152, 0.0722));
++}
++
+ void main() {
+     lighting_px_unfilled = false;
+     uvec2 p;
++    bool asv = false;
++    bool asv_sample = false;
++    bool asv_listed = true;
++    float asv_g = 1.0;
++    uint asv_tile = 0u;
++    bool reuse0 = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
++    uint asv_tw = (pc.dims.x + 2u) / 3u;
++    uint asv_marks = asv_at() + asv_tw * ((pc.dims.y + 2u) / 3u);
++    if (reuse0 && ckeys.key[LIGHTING_COMPOSE_FULL] == 0u && asv_on() && gl_NumWorkGroups.y == 1u) {
++        // Round 17 hook, list dispatch: mark the block as composed this frame.
++        uint bw = (pc.dims.x + 7u) / 8u;
++        uint block = ckeys.key[LIGHTING_COMPOSE_LIST + gl_WorkGroupID.x];
++        if (gl_LocalInvocationIndex == 0u) {
++            outc.px[asv_marks + block] = lighting_frame() + 1u;
++        }
++    }
++    if (reuse0 && ckeys.key[LIGHTING_COMPOSE_FULL] == 0u && asv_on() && gl_NumWorkGroups.y > 1u) {
++        asv = true;
++        p = gl_GlobalInvocationID.xy;
++        if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
++            return;
++        }
++        uint bw = (pc.dims.x + 7u) / 8u;
++        if (outc.px[asv_marks + (p.y / 8u) * bw + p.x / 8u] == lighting_frame() + 1u) {
++            return;
++        }
++        asv_listed = false;
++        uint tw = asv_tw;
++        uint th = (pc.dims.y + 2u) / 3u;
++        uvec2 t = p / 3u;
++        asv_tile = t.y * tw + t.x;
++        uint o = lighting_frame() % 9u;
++        asv_sample = (p.x % 3u) == o % 3u && (p.y % 3u) == o / 3u;
++        float g = 0.0;
++        for (int dy = -1; dy <= 1; dy++) {
++            for (int dx = -1; dx <= 1; dx++) {
++                ivec2 q = ivec2(t) + ivec2(dx, dy);
++                if (q.x < 0 || q.y < 0 || q.x >= int(tw) || q.y >= int(th)) continue;
++                float v = uintBitsToFloat(outc.px[asv_at() + uint(q.y) * tw + uint(q.x)]);
++                g = max(g, (v >= 0.0 && v <= 1.0) ? v : 0.0);
++            }
++        }
++        asv_g = g;
++        // Unlisted pixels have no fresh direct light: they need the direct history.
++        if (asv_mode() == 2u) {
++            g = 1.0;
++        }
++        if (!asv_listed && (asv_mode() == 3u || gstats.ctrl_history == 0u || (!asv_sample && g < 0.02))) {
++            return;
++        }
++    }
++
+     // GI off, or compose reuse off, covers the image and does not read the key
+     // table. The table is a dummy while GI is off.
+     bool reuse = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
+-    if (!reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
++    if (asv) {
++    } else if (!reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+         p = gl_GlobalInvocationID.xy;
+     } else {
+         uint bw = (pc.dims.x + 7u) / 8u;
+@@ -146,7 +233,8 @@ void main() {
+         uint emitted = gbuf.px[index].w;
+         glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
+     } else {
+-        if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
++        // Round 14 (GENOS_DBG_EVT): no compose history during a lamp-change window.
++        if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u && ((asv && !asv_listed) || !((lighting_dbg2() & 256u) != 0u && !lighting_sc_light_quiet()))) {
+             direct = lighting_unpack_rgb9e5(outc.px[pc.dims.x * pc.dims.y * 2u + sindex]);
+         }
+         // The light pass left the pixel's emitted light past the picture.
+@@ -230,5 +318,16 @@ void main() {
+     if (lighting_px_unfilled && lighting_unfilled_tint()) {
+         shown = mix(shown, vec3(1.0, 0.0, 1.0), 0.75);
+     }
++    if (asv) {
++        vec3 old = asv_unpack(outc.px[index]);
++        if (asv_sample) {
++            float g = abs(asv_lum(shown) - asv_lum(old)) / max(max(asv_lum(shown), asv_lum(old)), 0.02);
++            float prev = uintBitsToFloat(outc.px[asv_at() + asv_tile]);
++            prev = (prev >= 0.0 && prev <= 1.0) ? prev : 0.0;
++            outc.px[asv_at() + asv_tile] = floatBitsToUint(max(g, 0.5 * prev));
++        } else {
++            shown = asv_mode() == 1u ? mix(old, shown, clamp(0.3 + 20.0 * asv_g, 0.3, 1.0)) : shown;
++        }
++    }
+     outc.px[index] = pack_rgb(dither8(shown, p));
+ }
+diff --git a/crates/render/shaders/lighting_direct.comp b/crates/render/shaders/lighting_direct.comp
+index 8c13844..4d2f0e5 100644
+--- a/crates/render/shaders/lighting_direct.comp
++++ b/crates/render/shaders/lighting_direct.comp
+@@ -213,7 +213,10 @@ void main() {
+         uint s = (h / lighting_rays()) % LIGHTING_STRATA;
+         uint cur = lighting_stratum();
+         bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+-        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
++        // ADR 0037 round 12 (GENOS_DBG_PROBE): a kept hit a switched lamp reaches is relit
++        // every frame for the change window.
++        bool dbg_lamp = (lighting_dbg2() & 2u) != 0u && lighting_wrc_lamp_changed(pos, lighting_frame() - LIGHTING_WRC_CHANGE_FRAMES);
++        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos)) && !dbg_lamp) {
+             return;
+         }
+         // S78D: the halfway relight only where the light should have moved: a
+@@ -242,7 +245,7 @@ void main() {
+         // After a point lamp stops, a few frames shade every kept stratum so the
+         // corner is not waiting on the halfway relight. The word is 0 otherwise,
+         // and this is the S69C skip.
+-        if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
++        if (!dbg_lamp && !lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
+             uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
+             if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                 return;
+@@ -960,7 +963,8 @@ void main() {
+         e_sun += lighting_hit_sunfrac * bounce;
+         if (fill_hit) {
+             lighting_put_fill_light(h, reflectance * e + glow);
+-        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
++        } else if (probe_hit && !((lighting_dbg2() & 2u) != 0u && lighting_wrc_lamp_changed(pos, lighting_frame() - LIGHTING_WRC_CHANGE_FRAMES))
++            && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
+             lighting_chg(CHG_KEPT_HELD, 1u);
+         } else if (probe_hit) {
+             lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+diff --git a/crates/render/shaders/lighting_filter.comp b/crates/render/shaders/lighting_filter.comp
+index c757be7..e7e75cf 100644
+--- a/crates/render/shaders/lighting_filter.comp
++++ b/crates/render/shaders/lighting_filter.comp
+@@ -35,6 +35,13 @@ void main() {
+     bool last = round == 2u;
+     vec4 pp = work.v[lighting_probe_at(probe)];
+     bool fhold = LIGHTING_FILTER_HOLD && LIGHTING_GATHER_HOLD && lighting_world_mode() != 2u;
++    // ADR 0037 round 11 hook (GENOS_DBG_LAYER 5 or 6): no held filter.
++    uint dbg_layer = (scene.grid_at.w >> 26u) & 7u;
++    fhold = fhold && dbg_layer != 5u && dbg_layer != 6u;
++    // Round 13 (GENOS_DBG_FOOT): no held filter during a lamp-change window.
++    fhold = fhold && !(((lighting_dbg2() >> 5u) & 7u) != 0u && !lighting_sc_light_quiet());
++    // Round 14 (GENOS_DBG_EVT): no held filter during a lamp-change window.
++    fhold = fhold && !((lighting_dbg2() & 256u) != 0u && !lighting_sc_light_quiet());
+     uint gdb = lighting_gdirty_at() + 2u * probe;
+     if (pp.w < 0.5) {
+         if (fhold && last) {
+diff --git a/crates/render/shaders/lighting_gather.comp b/crates/render/shaders/lighting_gather.comp
+index c6708e2..b3ecd73 100644
+--- a/crates/render/shaders/lighting_gather.comp
++++ b/crates/render/shaders/lighting_gather.comp
+@@ -79,7 +79,10 @@ void gather_bin() {
+             for (uint s = 0u; s < LIGHTING_STRATA; s++) { own += lighting_pick(probe, s) == probe + 1u ? 1u : 0u; }
+             lighting_chg(CHG_G_PICKS, own == LIGHTING_STRATA ? 0u : 1u);
+         }
+-        bool same = floatBitsToUint(gd.x) != lighting_frame() && all(equal(floatBitsToUint(gp.xyz), floatBitsToUint(pp.xyz)))
++        // ADR 0037 round 11 hook (GENOS_DBG_LAYER 5 or 6): no held gather.
++        uint dbg_layer = (scene.grid_at.w >> 26u) & 7u;
++        // Round 14 (GENOS_DBG_EVT): no held gather during a lamp-change window.
++        bool same = dbg_layer != 5u && dbg_layer != 6u && !((lighting_dbg2() & 256u) != 0u && !lighting_sc_light_quiet()) && floatBitsToUint(gd.x) != lighting_frame() && all(equal(floatBitsToUint(gp.xyz), floatBitsToUint(pp.xyz)))
+             && work.v[lighting_change_at()].y < 0.5;
+         [[dont_unroll]] for (uint s = 0u; s < LIGHTING_STRATA && same; s++) {
+             same = lighting_pick(probe, s) == probe + 1u;
+diff --git a/crates/render/src/debug_view.rs b/crates/render/src/debug_view.rs
+index cccdcdf..02e536c 100644
+--- a/crates/render/src/debug_view.rs
++++ b/crates/render/src/debug_view.rs
+@@ -104,6 +104,14 @@ impl DebugState {
+         if self.unfilled.tint {
+             word |= 1 << 25;
+         }
++        // ADR 0037 round 11 hook: GENOS_DBG_LAYER (bits 26-28, 0 shipped) picks
++        // which bounce layer compose shows (lighting_compose.comp, lighting_sc_shown).
++        let layer = std::env::var("GENOS_DBG_LAYER").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0) & 7;
++        word |= layer << 26;
++        // Round 11: GENOS_DBG_HIST (bit 29) count histogram; GENOS_DBG_RESET (bits 30-31)
++        // mean-mode-3 reset variant (lighting_cache.comp). Both 0 shipped.
++        let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
++        word |= ((env("GENOS_DBG_HIST") & 1) << 29) | ((env("GENOS_DBG_RESET") & 3) << 30);
+         pack.debug_view = word;
+     }
+ }
+diff --git a/crates/render/src/lighting_gpu.rs b/crates/render/src/lighting_gpu.rs
+index f1de68b..dfa6618 100644
+--- a/crates/render/src/lighting_gpu.rs
++++ b/crates/render/src/lighting_gpu.rs
+@@ -1099,7 +1099,8 @@ impl Gpu {
+         // Hash keeps the GI buffer. Preset high uses the screen slices.
+         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
+         self.lighting.out = self.make_buffer(
+-            pixels * (12 + 4 * hist + 32 * screen),
++            // Round 17 hook: one word a pixel (3x3 tile gradients) after the history slice.
++            pixels * (12 + 4 * hist + 32 * screen + 4 * u64::from(dbg_asvgf_px() && screen == 0)),
+             0x20 | 0x1 | 0x2,
+             Memory::Device,
+         )?;
+@@ -2008,6 +2009,7 @@ impl Gpu {
+                 );
+                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
++                dbg_conv_note(self.lighting.frame, &w[24..88]);
+             }
+             let mode_word = w[LIGHTING_ATROUS_STAT + 1];
+             let mode = match mode_word {
+@@ -2718,7 +2720,15 @@ impl Gpu {
+             self.mesh_field_key.hash(&mut hasher);
+             hasher.finish()
+         };
+-        let frozen = self.lighting_stats().settled;
++        // ADR 0037 hook: GENOS_DBG_NOFREEZE never freezes (debug).
++        // Round 9: GENOS_DBG_CONV (1 noise-relative, 2 round-mean drift) also waits for
++        // the convergence test (dbg_conv_note, needs GENOS_LIGHTING_SC_TRACE).
++        if self.lighting.still == 0 || self.lighting.light_quiet == 0 {
++            dbg_conv_reset();
++        }
++        let frozen = self.lighting_stats().settled
++            && std::env::var_os("GENOS_DBG_NOFREEZE").is_none()
++            && (dbg_conv_mode() == 0 || DBG_CONV_PASSED.load(std::sync::atomic::Ordering::Relaxed));
+         let had = !self.lighting.kept_bytes.is_empty() && key == self.lighting.kept_key;
+         let changes = if had {
+             lighting_changes(&self.lighting.kept_bytes, &self.frame_bytes)
+@@ -2836,13 +2846,41 @@ impl Gpu {
+                     block[4 * v + c] = f(at + 4 * c);
+                 }
+             }
+-            block[4 + 3] = 1.0;
++            // ADR 0037 round 12 hooks: 1 + 2 * bits (readers test > 0.5). Bit 0
++            // GENOS_DBG_FIELD, bit 1 GENOS_DBG_PROBE, bits 2-3 GENOS_DBG_RUN, bit 4 GENOS_DBG_FIELD2. 0 shipped.
++            let e2 = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
++            let dbg2 = (e2("GENOS_DBG_FIELD") & 1) | ((e2("GENOS_DBG_PROBE") & 1) << 1) | ((e2("GENOS_DBG_RUN") & 3) << 2)
++                | ((e2("GENOS_DBG_FIELD2") & 1) << 4)
++                // Round 13: bits 5-7 GENOS_DBG_FOOT (extra lamp-change radius in metres,
++                // 7 = every cell, the perfect-invalidation oracle). 0 shipped.
++                | ((e2("GENOS_DBG_FOOT") & 7) << 5)
++                // Round 14: bit 8 GENOS_DBG_EVT (clear every history in a switched lamp's
++                // range), bits 9-20 GENOS_DBG_EVT_BUDGET / 16 (cells per frame, 0 = no cap).
++                | (((e2("GENOS_DBG_EVT") != 0) as u32) << 8) | (((e2("GENOS_DBG_EVT") == 2) as u32) << 21) | (((e2("GENOS_DBG_EVT") == 3) as u32) << 22)
++                // Round 16: under EVT=3 the budget field (unused there) carries
++                // GENOS_DBG_EVT_SPREAD (bits 9-13, frames to spread a lamp change's relight
++                // over, 0 = off) and GENOS_DBG_RING32 (bit 14, 32-entry lamp-change ring).
++                | (if e2("GENOS_DBG_EVT") == 3 {
++                    ((e2("GENOS_DBG_EVT_SPREAD").min(31)) | ((e2("GENOS_DBG_RING32") & 1) << 5) | ((if dbg_asvgf_px() { e2("GENOS_DBG_ASVGF_PX") & 3 } else { 0 }) << 6)) << 9
++                } else {
++                    ((e2("GENOS_DBG_EVT_BUDGET") / 16).min(2047)) << 9
++                })
++                // Round 15g: bit 20 GENOS_DBG_EVTF (a-trous luminance edge-stop widened on
++                // texels whose history the lamp change cut, A-SVGF style). 0 shipped.
++                | ((e2("GENOS_DBG_EVTF") & 1) << 20);
++            block[4 + 3] = 1.0 + 2.0 * dbg2 as f32;
+         }
+         // The camera up's w (head 3.w) is unread: the flags' high bits.
+         // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
+         // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
+         let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
+-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
++        // ADR 0037 hooks: bits 16-17 GENOS_DBG_MEAN (0 shipped), 18-23 GENOS_DBG_RESET_PCT.
++        let dbg_env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
++        let dbg_mean = dbg_env("GENOS_DBG_MEAN") & 3;
++        // Round 9: bits 18-22 reset % (modes 1-2) or k (mode 3, GENOS_DBG_K), bit 23 GENOS_DBG_LAMPOFF.
++        let dbg_v = if dbg_mean == 3 { dbg_env("GENOS_DBG_K") } else { dbg_env("GENOS_DBG_RESET_PCT") } & 31;
++        let dbg_bits = (dbg_mean << 16) | (dbg_v << 18) | ((dbg_env("GENOS_DBG_LAMPOFF") & 1) << 23);
++        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12) | dbg_bits) as f32;
+         // A frame drawn from held light runs no probes: what it saw is still what
+         // the probes last ran on.
+         if !frozen {
+@@ -2964,7 +3002,8 @@ impl Gpu {
+         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
+         // round that relights nothing has nothing left to converge.
+         let sc = self.lighting.settings.world_mode() == 3;
+-        let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
++        // ADR 0037 hook: GENOS_DBG_NO_YOUNG keeps full rounds (debug).
++        let young_only = if sc { self.lighting.light_quiet >= 2 && (std::env::var_os("GENOS_DBG_NO_YOUNG").is_none() || (dbg_conv_mode() != 0 && DBG_CONV_PASSED.load(std::sync::atomic::Ordering::Relaxed))) } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
+         self.lighting.stats_light[slot] = tracked;
+         self.lighting.stats_young[slot] = young_only || sc;
+         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
+@@ -3369,6 +3408,18 @@ impl Gpu {
+                         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                     }
+                     (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
++                } else if pass == 7 && !compose_full && dbg_asvgf_px() && !(self.lighting.settings.denoiser.enabled && self.lighting.settings.denoiser.screen) {
++                    // Round 17 hook (GENOS_DBG_ASVGF_PX): the whole grid; unlisted blocks
++                    // re-shade one pixel per 3x3 tile and redraw where it changed.
++                    // First the dirty list as usual (it stamps its blocks in the hook's
++                    // scratch), then the whole grid for the unlisted blocks.
++                    (self.fns.cmd_dispatch_indirect)(
++                        self.cmd,
++                        self.lighting.cache_keys.buffer,
++                        lighting_compose_at() * 4,
++                    );
++                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
++                    (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1).max(2), 1);
+                 } else if pass == 7 && !compose_full {
+                     (self.fns.cmd_dispatch_indirect)(
+                         self.cmd,
+@@ -4529,3 +4580,103 @@ mod sun_step {
+ }
+ 
+ include!("lighting_dispatch.rs");
++
++// ADR 0037 round 9 debug hook: the convergence test (GENOS_DBG_CONV; 0 = shipped,
++// off). Mode 1: 8 rounds in a row with under 1 % of relit cells moving more than
++// 3 sigma / sqrt(n) (d[59] / d[56]). Mode 2: round-mean luma (d[61] / d[56])
++// within 0.5 % of the value 8 rounds earlier, 8 rounds in a row.
++static DBG_CONV_PASSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++static DBG_CONV_HIST: std::sync::Mutex<(Vec<f64>, u32, Vec<f64>, Vec<(f64, f64, f64)>, f64)> = std::sync::Mutex::new((Vec::new(), 0, Vec::new(), Vec::new(), 0.0));
++#[allow(clippy::disallowed_methods, reason = "ADR 0037 debug hook")]
++fn dbg_conv_mode() -> u32 {
++    std::env::var("GENOS_DBG_CONV").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
++}
++fn dbg_conv_reset() {
++    if DBG_CONV_PASSED.swap(false, std::sync::atomic::Ordering::Relaxed) {
++        eprintln!("dbgconv reset");
++    }
++    if let Ok(mut h) = DBG_CONV_HIST.lock() {
++        h.0.clear();
++        h.1 = 0;
++        h.2.clear();
++        h.3.clear();
++        h.4 = 0.0;
++    }
++}
++fn dbg_conv_note(frame: u32, c: &[u32]) {
++    // Round 10: counters moved to diag 21-27 (21 relit, 24 > 3 sigma / sqrt(n), 26 luma sum),
++    // 14 / 18 signed step up / down x 1e6. Mode 3: mode 1 plus at least GENOS_DBG_CONV_MIN
++    // rounds (default 64) and a summed signed step over the last 16 rounds under 0.5 %.
++    let mode = dbg_conv_mode();
++    if mode == 0 || c[21] == 0 || DBG_CONV_PASSED.load(std::sync::atomic::Ordering::Relaxed) {
++        return;
++    }
++    let Ok(mut h) = DBG_CONV_HIST.lock() else { return };
++    let n_relit = f64::from(c[21]);
++    let mean = f64::from(c[26]) / 1000.0 / n_relit;
++    let step = (f64::from(c[14]) - f64::from(c[18])) / 1.0e6 / n_relit;
++    h.0.push(mean);
++    h.2.push(step);
++    let n = h.0.len();
++    let noise_ok = f64::from(c[24]) / n_relit < 0.01;
++    let ok = match mode {
++        1 => noise_ok,
++        3 => {
++            let min = std::env::var("GENOS_DBG_CONV_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64);
++            let drift: f64 = h.2.iter().rev().take(16).sum();
++            noise_ok && n >= min && n >= 16 && drift.abs() < 0.005
++        }
++        4 => {
++            // Round 13: drift tolerance relative to noise: no significant trend in the
++            // per-round mean step over the last 16 rounds (|sum| < 2 sigma sqrt(16)).
++            let min = std::env::var("GENOS_DBG_CONV_MIN").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(64);
++            let last: Vec<f64> = h.2.iter().rev().take(16).copied().collect();
++            let m = last.iter().sum::<f64>() / last.len().max(1) as f64;
++            let sd = (last.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / last.len().max(2) as f64).sqrt();
++            let drift: f64 = last.iter().sum();
++            noise_ok && n >= min && n >= 16 && drift.abs() < (0.005f64).max(2.0 * sd * 4.0)
++        }
++        5 => {
++            // Round 15: mode 4 passed the closed box at round 83 while still rising (its
++            // rounds alternate two cell sets, so the per-round step sd, and the tolerance,
++            // is large) and missed the hall's short quiet window (one noisy cell in a
++            // 3-cell round fails < 1 %). Pool instead: over the last 32 rounds, noisy cells
++            // under 1 % of relit cells or of the peak round; and the pooled mean of the last
++            // 32 rounds within 0.5 % of the 32 before (both windows mix the same sets).
++            let w = 32usize;
++            h.3.push((f64::from(c[21]), f64::from(c[24]), f64::from(c[26]) / 1000.0));
++            h.4 = h.4.max(f64::from(c[21]));
++            let k = h.3.len();
++            // Round 15b: also a minimum frame (GENOS_DBG_CONV_MINF, default 400) and a
++            // slow-rise check: the last 32 rounds' pooled mean within 1 % of the 32 that
++            // ended 96 rounds earlier (the box climbs < 0.5 % per 32 rounds at f320).
++            let minf = std::env::var("GENOS_DBG_CONV_MINF").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(400);
++            if k < 4 * w || frame < minf {
++                false
++            } else {
++                let sum = |a: &[(f64, f64, f64)]| a.iter().fold((0.0, 0.0, 0.0), |s, x| (s.0 + x.0, s.1 + x.1, s.2 + x.2));
++                let (r1, b1, l1) = sum(&h.3[k - w..]);
++                let (r0, _, l0) = sum(&h.3[k - 2 * w..k - w]);
++                let m1 = l1 / r1.max(1.0);
++                let m0 = l0 / r0.max(1.0);
++                let quiet = b1 < 0.01 * r1 || b1 < 0.01 * h.4;
++                let (rf, _, lf) = sum(&h.3[k - 4 * w..k - 3 * w]);
++                let mf = lf / rf.max(1.0);
++                quiet && (m1 - m0).abs() <= 0.005 * m1.max(m0).max(1e-6) && (m1 - mf).abs() <= 0.01 * m1.max(mf).max(1e-6)
++            }
++        }
++        _ => n > 8 && (mean - h.0[n - 9]).abs() <= 0.005 * mean.max(1e-6),
++    };
++    h.1 = if ok { h.1 + 1 } else { 0 };
++    if h.1 >= if mode == 5 { 1 } else { 8 } {
++        DBG_CONV_PASSED.store(true, std::sync::atomic::Ordering::Relaxed);
++        eprintln!("dbgconv pass mode {mode} round {n} frame {frame} mean {mean:.5}");
++    }
++}
++
++// ADR 0037 round 17 debug hook: GENOS_DBG_ASVGF_PX (EVT=3 only), per-pixel A-SVGF on the
++// quiet picture. 0 shipped.
++fn dbg_asvgf_px() -> bool {
++    let e = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
++    e("GENOS_DBG_EVT") == 3 && e("GENOS_DBG_ASVGF_PX") != 0
++}
