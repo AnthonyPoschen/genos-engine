@@ -13,6 +13,7 @@ mod animation;
 mod bin;
 mod cache;
 mod cooked;
+mod cooked_material;
 mod emitters;
 mod error;
 mod gltf;
@@ -39,14 +40,19 @@ pub use cooked::{
     cooked_path, decode_geometry, decode_images, textures_path, CookedError, CookedGeometry,
     CookedImage, CookedImages, Package,
 };
+pub use cooked_material::{
+    decode_materials, encode_materials, load_covered, load_covered_or_source, materials_path,
+    CookedMaterials, CoveredAsset, CoveredFallback, PrimitiveShade, MATERIAL_MAGIC,
+    MATERIAL_VERSION,
+};
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
 pub use error::LoadError;
 pub use gltf::{
-    image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
-    PbrMaterial, Primitive, Sampler, TextureSlot,
+    image_spaces, importer_entries, reset_importer_entries, transform_point, AlphaMode, GltfMesh,
+    GltfScene, LoadPhases, MeshInstance, PbrMaterial, Primitive, Sampler, TextureSlot,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use material::Material;

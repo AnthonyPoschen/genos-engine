@@ -349,3 +349,44 @@ fn place_kind(
             .place(image),
     )
 }
+
+#[cfg(test)]
+mod shade_record {
+    #![expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")]
+
+    use std::path::Path;
+
+    use genos_load::{decode_materials, encode_materials, load_gltf_file, CookedMaterials};
+
+    use crate::gltf_draw::surface_mean;
+
+    /// The shade stored for a later cook is the mean the draw uses today.
+    #[test]
+    fn stored_shade_is_the_renderer_mean() {
+        let scene =
+            load_gltf_file(Path::new(env!("CARGO_MANIFEST_DIR")).join("../load/fixtures/tri.gltf"))
+                .unwrap();
+        let mut primitive_shade = Vec::new();
+        for mesh in &scene.meshes {
+            for primitive in &mesh.primitives {
+                let material = &scene.materials[primitive.material.unwrap()];
+                let (mean, emission) = surface_mean(material, &scene.images, primitive);
+                primitive_shade.push(genos_load::PrimitiveShade { mean, emission });
+            }
+        }
+        assert_eq!(primitive_shade.len(), 1);
+        let record = CookedMaterials {
+            asset_id: [9; 32],
+            image_size: scene
+                .images
+                .iter()
+                .map(|image| [image.width, image.height])
+                .collect(),
+            materials: scene.materials.clone(),
+            primitive_shade: primitive_shade.clone(),
+        };
+        let loaded = decode_materials(&encode_materials(&record).unwrap()).unwrap();
+        assert_eq!(loaded.primitive_shade, primitive_shade);
+        assert_eq!(loaded.materials, scene.materials);
+    }
+}
