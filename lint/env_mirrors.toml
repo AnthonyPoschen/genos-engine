@@ -538,6 +538,56 @@ kind = "mirror"
 detail = "surface_cache.fill_ray_cap (stress knob lighting_fill_ray_cap); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_SHARE"
+kind = "mirror"
+detail = "surface_cache.fill_share (stress knob lighting_fill_share); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_share_cap (stress knob lighting_fill_share_cap); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_CONF"
+kind = "mirror"
+detail = "surface_cache.fill_share_conf (stress knob lighting_fill_share_conf); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_COS"
+kind = "mirror"
+detail = "surface_cache.fill_share_cos (stress knob lighting_fill_share_cos); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_HANDOVER"
+kind = "mirror"
+detail = "surface_cache.fill_share_handover (stress knob lighting_fill_share_handover); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_MIN_HIT"
+kind = "mirror"
+detail = "surface_cache.fill_share_min_hit (stress knob lighting_fill_share_min_hit); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_NORMAL"
+kind = "mirror"
+detail = "surface_cache.fill_share_normal (stress knob lighting_fill_share_normal); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_PLANE"
+kind = "mirror"
+detail = "surface_cache.fill_share_plane (stress knob lighting_fill_share_plane); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_RECEIVERS"
+kind = "mirror"
+detail = "surface_cache.fill_share_receivers (stress knob lighting_fill_share_receivers); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_W_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_share_w_cap (stress knob lighting_fill_share_w_cap); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_TILE"
 kind = "mirror"
 detail = "surface_cache.fill_tile (stress knob lighting_fill_tile); MCP set_lighting_settings"

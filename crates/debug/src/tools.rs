@@ -1551,6 +1551,13 @@ impl Tools {
                 "pixels",
                 num(f64::from(ctx.renderer.lighting_under_trusted_pixels())),
             )])),
+            "lighting_fill_compact_work" => {
+                let work = ctx.renderer.lighting_fill_compact_work();
+                reply(obj(vec![
+                    ("serial", num(f64::from(work[0]))),
+                    ("hist_groups", num(f64::from(work[1]))),
+                ]))
+            }
             "set_lighting_settings" => {
                 let scene = ctx.host.scene();
                 apply_lighting_update(&mut scene.lighting, args.0)?;

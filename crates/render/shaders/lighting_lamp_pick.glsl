@@ -348,7 +348,7 @@ float lamp_pick_u(uint idx, uint pixels, uint kept, bool fill_hit, bool reuse_pi
         if (lighting_ray_fill_on()) {
             uint r = ray - lighting_probe_rays();
             uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-            uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
+            uint on = ckeys.key[lighting_fill_header_at()];
             if (r < checks) {
                 return lighting_fill_check_u(ckeys.key[LIGHTING_FILL_PICK_AT + r]);
             }

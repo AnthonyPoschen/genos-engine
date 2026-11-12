@@ -189,6 +189,7 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_FILL_BUDGET, High 100000). 0 traces
                             no cache rays. The other fill knobs are
                             surface_cache.fill_* with GENOS_LIGHTING_FILL_*.
+                            fill_share 1 seeds the rest of the tile. 0 is off.
   --surface-cache-dormant-rays N
                             fresh rays per frame for a dormant cache entry, 0..16.
                             0 keeps one sweep in eight. 1..16 traces one new

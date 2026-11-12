@@ -84,6 +84,26 @@ pub struct Tunables {
     pub warmup_rays: u32,
     pub ray_cap: u32,
     pub frame_dt: f32,
+    /// 0 off, 1 in-tile. Ring is not a value this stage acts on.
+    pub share: u32,
+    /// First-hit distance below which a sample stays on its origin cell.
+    pub share_min_hit: f32,
+    /// Own paths after which a cell stops taking a shared seed.
+    pub share_cap: u32,
+    /// Relative depth of the same-surface plane test.
+    pub share_plane: f32,
+    /// Minimum normal dot of the same-surface test.
+    pub share_normal: f32,
+    /// Highest reconnection weight a neighbour may take.
+    pub share_w_cap: f32,
+    /// Cosine floor in the reconnection weight.
+    pub share_cos: f32,
+    /// Confidence of the shared seed. Below 1, so it is not an own sample.
+    pub share_conf: f32,
+    /// Distinct cells in the tile one sample may seed.
+    pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High matches warmup.
+    pub share_handover: u32,
 }
 
 impl Tunables {
@@ -112,6 +132,16 @@ impl Tunables {
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
+            share: 0,
+            share_min_hit: 2.0,
+            share_cap: 32,
+            share_plane: 0.02,
+            share_normal: 0.99,
+            share_w_cap: 2.0,
+            share_cos: 0.05,
+            share_conf: 0.25,
+            share_receivers: 3,
+            share_handover: 16,
         }
     }
 
@@ -693,6 +723,24 @@ mod tests {
 
     fn high() -> Tunables {
         Tunables::high()
+    }
+
+    #[test]
+    fn the_share_knobs_match_the_high_limits() {
+        let tun = high();
+        let limits = crate::ShareLimits::high();
+        assert_eq!(tun.share, 0);
+        assert!((tun.share_min_hit - limits.t_min).abs() < 1.0e-6);
+        assert_eq!(tun.share_cap, limits.share_cap);
+        assert!((tun.share_plane - limits.plane).abs() < 1.0e-6);
+        assert!((tun.share_normal - limits.normal_min).abs() < 1.0e-6);
+        assert!((tun.share_w_cap - limits.w_cap).abs() < 1.0e-6);
+        assert!((tun.share_cos - limits.cos_floor).abs() < 1.0e-6);
+        assert!((tun.share_conf - limits.confidence).abs() < 1.0e-6);
+        assert_eq!(tun.share_receivers, limits.receivers);
+        assert_eq!(tun.share_handover, tun.warmup_rays);
+        assert_eq!(tun.share_handover, limits.handover);
+        assert!(limits.enabled);
     }
 
     #[test]

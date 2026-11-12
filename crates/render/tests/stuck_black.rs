@@ -1,4 +1,3 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 
 //! A zero mean is not evidence that a world-cache cell is populated.
@@ -79,13 +78,18 @@ fn eight_zero_sets_are_not_resolved() {
         !compact.contains("LIGHTING_SC_TRICKLE_COUNT_AT"),
         "a low-change cell must not leave on the capped trickle list"
     );
-    assert!(compact.contains("nz.x / lighting_dn_target(slot)"));
-    assert!(compact.contains(
-        "t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_local_change(slot, mover_ic)"
-    ));
-    assert!(compact.contains(
-        "t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_promoted(slot)"
-    ));
+    assert!(
+        compact.contains("lighting_fill_visit(slot)"),
+        "world mode 3 admits through the fill, not a due list"
+    );
+    assert!(
+        !compact.contains("nz.x / lighting_dn_target(slot)"),
+        "the due-list rank is gone; the fill visit orders the cells"
+    );
+    assert!(
+        !compact.contains("bool sparse_c"),
+        "the fine due lists are gone"
+    );
     assert!(cache.contains("const uint LIGHTING_DIAG_UNDER_TRUSTED = 57u;"));
     assert!(cache.contains("atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);"));
     assert!(cache.contains("clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0)"));
@@ -122,15 +126,6 @@ fn eight_zero_sets_are_not_resolved() {
     );
     assert!(!hold.contains("lighting_sc_has_seed"));
     assert!(!hold.contains("lighting_sc_seed("));
-    let call = compact
-        .find("if (lighting_compact_hold_texel_rays(slot))")
-        .expect("compact calls the hold");
-    let lists = compact.find("bool sparse_c").expect("fine lists follow the hold");
-    let window = &compact[call..lists];
-    assert!(
-        !window.contains("lighting_sc_seed") && !window.contains("lighting_sc_has_seed"),
-        "a seed must not drop the texel before the ray lists"
-    );
     assert!(
         cache.contains("own_sets < LIGHTING_SC_SET_HALF"),
         "the empty-corner fallback keys off the own-sample count"

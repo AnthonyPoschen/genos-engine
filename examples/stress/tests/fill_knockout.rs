@@ -34,11 +34,14 @@ const LATE: usize = 40;
 /// `cache_fill` knocked out, 1.8 with one cache slot in eight written.
 const MIN_DELTA_CODES: f64 = 4.0;
 /// The relative luminance error against the path reference must fall by this
-/// much from EARLY to LATE. Measured: 0.594 to 0.534 (0.060, repeatable to
-/// 0.0002) with the fill running, 0.000 knocked out. A fill that writes four
-/// times too bright moves the picture 71 codes, which the delta check alone
-/// passes, and the error rises from 0.18 to 1.07.
+/// much from EARLY to LATE. With the parallel scheduler on lavapipe the hall
+/// moves about 0.62 to 0.48. Knockout stays on the probe mix (delta 0). A fill
+/// that writes four times too bright moves the picture the wrong way and the
+/// error rises. The due-list on master, same harness, falls to 0.193.
 const MIN_ERROR_GAIN: f64 = 0.03;
+/// Late path-reference error of the due-list scheduler on this harness
+/// (master, lavapipe, 40 frames, 320×180). Re-measure if the harness changes.
+const BASE_LATE_ERROR: f64 = 0.1930;
 /// Prefix of every assertion message. `scripts/ci-fill-knockout.sh` requires it
 /// in the knocked-out run, so a build failure does not count as red.
 const RED: &str = "fill gate red:";
@@ -202,5 +205,27 @@ fn the_presented_frame_moves_when_the_cache_fills() {
         gain >= MIN_ERROR_GAIN,
         "{RED} the presented frame moved but not toward the path reference (error {early_error:.4} to {late_error:.4}, \
          need a fall of {MIN_ERROR_GAIN})"
+    );
+    // The due-list path on master, same harness, lavapipe. Fill schedules into
+    // the same cache, so the late error stays within this of that run.
+    let [serial, hist_groups] = renderer.lighting_fill_compact_work();
+    let split = renderer.lighting_fill_ray_split();
+    let hist_threads = hist_groups.saturating_mul(64);
+    eprintln!(
+        "fill compact work: serial {serial} hist_threads {hist_threads} late {late_error:.4} \
+         rays {} on {} rest {} checks {} relit {} live {}",
+        split[0], split[1], split[2], split[3], split[4], split[5]
+    );
+    assert!(
+        serial > 0 && serial < 4096,
+        "fill scheduler serial work {serial} is a slot-table scan or did not run"
+    );
+    assert!(
+        (16_384..1_048_576).contains(&hist_threads),
+        "fill histogram covers {hist_threads} threads; the slot table is 1048576"
+    );
+    assert!(
+        late_error <= BASE_LATE_ERROR + 0.02,
+        "{RED} fill late error {late_error:.4} is past the due-list late error {BASE_LATE_ERROR:.4} plus 0.02"
     );
 }

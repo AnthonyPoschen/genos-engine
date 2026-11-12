@@ -174,8 +174,14 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
                          FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_MAX_PICKS,
                          FILL_LAMBDA_DECAY, FILL_WINDOW_FLOOR, FILL_CATCHUP_MAX,
-                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT.
+                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT,
+                         FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
+                         FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
+                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
+                         FILL_SHARE_HANDOVER.
                          Check rays are one same-seed ray per fill_check_rate block.
+                         fill_share 1 seeds other cells in the same tile.
+                         0 turns that off. Ring is not a value here.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -352,6 +358,16 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_fill_warmup",
     "lighting_fill_ray_cap",
     "lighting_fill_frame_dt",
+    "lighting_fill_share",
+    "lighting_fill_share_min_hit",
+    "lighting_fill_share_cap",
+    "lighting_fill_share_plane",
+    "lighting_fill_share_normal",
+    "lighting_fill_share_w_cap",
+    "lighting_fill_share_cos",
+    "lighting_fill_share_conf",
+    "lighting_fill_share_receivers",
+    "lighting_fill_share_handover",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
