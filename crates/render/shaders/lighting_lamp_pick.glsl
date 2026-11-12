@@ -7,12 +7,11 @@
 // labelled exact sum walks every point lamp. This file does not trace.
 // The shade loop's one trace_occluded is the only shadow ray.
 //
-// Each slot is two uvec4s: the reservoir, then depth along that frame's
-// forward, the packed normal, the record kind, and the shaded direct.
-// Kind 2 is the exact sum, kind 0 a noise-gate sample, kind 3 the stored
-// ReSTIR mean. The sample count is the low 24 bits of `m`. Deviations from
-// the papers are listed in docs/systems/lighting/README.md. The CPU twin
-// of the checker merge stays in crates/render/src/lamp_pick.rs.
+// Each slot is six uints (24 bytes). Kind 2 is the exact sum, kind 0 a
+// noise-gate sample, kind 3 the stored ReSTIR mean. The sample count is the
+// low 24 bits of `m`; the kind is the top byte. Deviations from the papers
+// are listed in docs/systems/lighting/README.md. The CPU twin of the checker
+// merge stays in crates/render/src/lamp_pick.rs.
 
 // At this many positive point lamps, or fewer, the noise-gate reuse row
 // shades the sum. Production pixels do not: they take the ReSTIR sample.
@@ -62,10 +61,6 @@ const float LAMP_PICK_DEPTH_REL = 0.02;
 const float LAMP_PICK_DEPTH_ABS = 0.05;
 // Reject history when the normal dot is below this.
 const float LAMP_PICK_NORMAL_MIN = 0.9;
-
-layout(std430, set = 0, binding = 12) buffer LampReservoirs {
-    uvec4 v[];
-} lamp_res;
 
 struct LampReservoir {
     uint lamp;
@@ -143,22 +138,29 @@ bool lamp_pick_broken() {
 
 // Running mean of fresh unbiased samples while the hold is off. Past this the
 // picture stays put and the pixel keeps tracing, so the grade sees a settled
-// integral and a non-zero ray count. The mean is three full floats (the
-// reservoir weight, the target, and the geo colour word). Packing it to
-// rgb9e5 every frame truncated the tail and the average went dark.
+// integral and a non-zero ray count. R and G stay full floats: the step at a
+// few thousand samples is under an fp16 ulp, and an rgb9e5 mean went dark.
+// Blue is fp16 (about 7% of luminance). View depth is fp16. The normal stays
+// packSnorm2x16. Two slots stay when a neighbour can be reprojected.
 const uint LAMP_PICK_MEAN_CAP = 4096u;
+// lamp, f32 weight, M|kind, f32 target, fp16 depth|fp16 blue, snorm16 normal.
+const uint LAMP_RES_WORDS = 6u;
+
+layout(std430, set = 0, binding = 12) buffer LampReservoirs {
+    uint w[];
+} lamp_res;
 
 uint lamp_res_index(uint pixel, uint slot) {
-    return (slot * pc.dims.x * pc.dims.y + pixel) * 2u;
+    return (slot * pc.dims.x * pc.dims.y + pixel) * LAMP_RES_WORDS;
 }
 
 LampReservoir lamp_res_load(uint pixel, uint slot) {
-    uvec4 w = lamp_res.v[lamp_res_index(pixel, slot)];
+    uint base = lamp_res_index(pixel, slot);
     LampReservoir r;
-    r.lamp = w.x;
-    r.w_sum = uintBitsToFloat(w.y);
-    r.m = w.z;
-    r.target = uintBitsToFloat(w.w);
+    r.lamp = lamp_res.w[base];
+    r.w_sum = uintBitsToFloat(lamp_res.w[base + 1u]);
+    r.m = lamp_res.w[base + 2u] & 0x00ffffffu;
+    r.target = uintBitsToFloat(lamp_res.w[base + 3u]);
     // A cleared slot is all ones. Lamp 0 is a real lamp, so empty is LAMP_ALL,
     // and a leftover M must not enter the merge.
     if (r.lamp == LAMP_ALL) {
@@ -170,16 +172,35 @@ LampReservoir lamp_res_load(uint pixel, uint slot) {
 }
 
 void lamp_res_store(uint pixel, uint slot, LampReservoir r) {
-    lamp_res.v[lamp_res_index(pixel, slot)] =
-        uvec4(r.lamp, floatBitsToUint(r.w_sum), r.m, floatBitsToUint(r.target));
+    uint base = lamp_res_index(pixel, slot);
+    uint kind = lamp_res.w[base + 2u] & 0xff000000u;
+    lamp_res.w[base] = r.lamp;
+    lamp_res.w[base + 1u] = floatBitsToUint(r.w_sum);
+    lamp_res.w[base + 2u] = (r.m & 0x00ffffffu) | kind;
+    lamp_res.w[base + 3u] = floatBitsToUint(r.target);
+}
+
+// Blue is a float for the product mean and for the hold-off mean. The exact
+// path and the non-hold sample store rgb9e5 there, and nothing reads it back.
+bool lamp_geo_blue_is_float(uint kind) {
+    return kind == LAMP_GEO_RESTIR_MEAN || (kind == LAMP_GEO_RESTIR && lamp_pick_hold_off());
 }
 
 uvec4 lamp_geo_load(uint pixel, uint slot) {
-    return lamp_res.v[lamp_res_index(pixel, slot) + 1u];
+    uint base = lamp_res_index(pixel, slot);
+    vec2 db = unpackHalf2x16(lamp_res.w[base + 4u]);
+    uint kind = lamp_res.w[base + 2u] >> 24u;
+    return uvec4(floatBitsToUint(db.x), lamp_res.w[base + 5u], kind, floatBitsToUint(db.y));
 }
 
 void lamp_geo_store(uint pixel, uint slot, uvec4 geo) {
-    lamp_res.v[lamp_res_index(pixel, slot) + 1u] = geo;
+    uint base = lamp_res_index(pixel, slot);
+    float depth = uintBitsToFloat(geo.x);
+    float blue = lamp_geo_blue_is_float(geo.z) ? uintBitsToFloat(geo.w) : 0.0;
+    lamp_res.w[base + 4u] = packHalf2x16(vec2(depth, blue));
+    lamp_res.w[base + 5u] = geo.y;
+    uint m = lamp_res.w[base + 2u] & 0x00ffffffu;
+    lamp_res.w[base + 2u] = m | ((geo.z & 255u) << 24u);
 }
 
 float lamp_res_w(LampReservoir r) {

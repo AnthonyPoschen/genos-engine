@@ -4911,8 +4911,11 @@ const uint LIGHTING_SC_OFFER_AT = LIGHTING_SH_LATTICE_AT + LIGHTING_SH_LATTICE_C
 // the lowest pixel id, then the lowest corner.
 const uint LIGHTING_SC_SEED_AT = LIGHTING_SC_OFFER_AT + LIGHTING_CACHE_SLOTS;
 // Eight uints per pixel after the election: four corners, each rgb9e5 then
-// weight and sun fraction. Only that pixel writes its corners. Compact reads
-// the winning corner.
+// a 16-bit weight and a 16-bit sun fraction. Only that pixel writes its
+// corners. Compact is a later dispatch and reads the winning corner, so the
+// payload has to stay until then. A store into the slot from the winning
+// pixel races a beaten pixel's store. Recomputing the seed there is a later
+// cache, not the value this frame published.
 const uint LIGHTING_SC_SEED_PAY_AT = LIGHTING_SC_SEED_AT + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;

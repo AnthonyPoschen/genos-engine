@@ -57,17 +57,12 @@ uint screen_pixels() {
     return pc.dims.x * pc.dims.y;
 }
 
+// Two planes of one uint, after picture, glow, bounce, and the optional
+// stored direct. Slice 0 is the claimed slot. Slice 1 is the compact cell
+// list. The colour, variance, and mask words were never stored.
 uint screen_at(uint slice, uint index) {
     uint hist = gstats.ctrl_history != 0u ? 1u : 0u;
-    return ((3u + hist) + slice * 4u) * screen_pixels() + index * 4u;
-}
-
-void screen_store(uint slice, uint index, vec3 rgb, float var, float mask, uint slot) {
-    uint at = screen_at(slice, index);
-    outc.px[at] = lighting_pack_rgb9e5(max(rgb, vec3(0.0)));
-    outc.px[at + 1u] = floatBitsToUint(var);
-    outc.px[at + 2u] = floatBitsToUint(mask);
-    outc.px[at + 3u] = slot;
+    return (3u + hist + slice) * screen_pixels() + index;
 }
 
 // Hash stage: 0 variance, 1..5 an iteration, anything else the push.
@@ -114,10 +109,7 @@ void screen_run(uint slot, uint step) {
 uvec3 screen_gather(uvec2 p) {
     uint index = p.y * pc.dims.x + p.x;
     uint at = screen_at(0u, index);
-    outc.px[at] = 0u;
-    outc.px[at + 1u] = 0u;
-    outc.px[at + 2u] = 0u;
-    outc.px[at + 3u] = ~0u;
+    outc.px[at] = ~0u;
     vec3 pos;
     vec3 n;
     vec3 albedo;
@@ -146,7 +138,7 @@ uvec3 screen_gather(uvec2 p) {
     if (ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0) || cache.v[3u * slot + 1u].w > 0.2) {
         return uvec3(0u);
     }
-    outc.px[at + 3u] = slot;
+    outc.px[at] = slot;
     return uvec3(lighting_svgf_active(slot) ? 1u : 0u, 0u, 0u);
 }
 
@@ -285,7 +277,7 @@ void main() {
         uint slot = ~0u;
         if (inside) {
             bits = screen_gather(p);
-            slot = outc.px[screen_at(0u, p.y * pc.dims.x + p.x) + 3u];
+            slot = outc.px[screen_at(0u, p.y * pc.dims.x + p.x)];
         }
         uint fine = screen_wg_sum(bits.x);
         uint coarse = screen_wg_sum(bits.y);

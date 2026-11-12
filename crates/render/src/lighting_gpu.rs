@@ -105,7 +105,9 @@ fn lighting_ckeys_words(slots: u64) -> u64 {
 /// Words through the lattice table, then one lit-from offer word and one
 /// probe-seed election word per slot. Matches `LIGHTING_SH_LATTICE_AT` and
 /// `LIGHTING_SC_SEED_AT` in `lighting_cache.glsl`. The per-pixel seed payload
-/// is not included: its size is the picture.
+/// is not included: its size is the picture. It is already rgb9e5 plus a
+/// 16-bit weight and a 16-bit sun fraction, four corners per pixel, and it
+/// stays. Compact reads the winning corner in a later dispatch.
 pub(super) fn lighting_sh_bin_count_at(slots: u64) -> u64 {
     lighting_atrous_ppm_at(slots)
         + LIGHTING_ATROUS_META_WORDS
@@ -131,11 +133,23 @@ fn lighting_compose_minx(slots: u64) -> u64 {
     lighting_compose_at(slots) + 4 + 2 * LIGHTING_COMPOSE_CAP + slots
 }
 
+/// Visibility-mean record. Matches `LAMP_RES_WORDS` in `lighting_lamp_pick.glsl`:
+/// lamp, f32 weight (mean R), M with the kind in the top byte, f32 target
+/// (mean G), fp16 depth and fp16 blue, snorm16 normal.
+pub(crate) const MEAN_RECORD_BYTES: u64 = 24;
+
+/// Picture, glow, and bounce, plus one stored direct uint when refresh is
+/// slower than every frame, plus two uint planes when the screen wavelet is
+/// on (the claimed slot and the compact cell list).
+pub(crate) fn lighting_out_bytes(pixels: u64, hist: u64, screen: u64) -> u64 {
+    pixels.saturating_mul(12 + 4 * hist + 8 * screen)
+}
+
 /// ReSTIR reservoir bytes, then a 256-aligned window for the visibility mean.
-/// That mean used to be a second buffer. It is three full floats per slot;
-/// the direct shade writes it on the reuse path. Returns
-/// `(total, mean_at, mean_bytes)`. `mean_bytes` is 0 when reuse is off, and
-/// that window is not part of the total.
+/// That mean used to be a second buffer. R and G stay full floats; blue and
+/// the view depth are fp16. The direct shade writes it on the reuse path.
+/// Returns `(total, mean_at, mean_bytes)`. `mean_bytes` is 0 when reuse is
+/// off, and that window is not part of the total.
 pub(crate) fn restir_with_mean(
     pixels: u64,
     restir_di: bool,
@@ -151,7 +165,7 @@ pub(crate) fn restir_with_mean(
         return (reservoirs, 0, 0);
     }
     let ping = if two_slots { 2 } else { 1 };
-    let mean = pixels.saturating_mul(32 * ping).max(64);
+    let mean = pixels.saturating_mul(MEAN_RECORD_BYTES * ping).max(64);
     let mean_at = reservoirs.saturating_add(255) & !255;
     (mean_at.saturating_add(mean), mean_at, mean)
 }
@@ -1461,16 +1475,17 @@ impl Gpu {
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every
-        // frame) one stored direct value per pixel. High stays at pixels * 8.
+        // frame) one stored direct value per pixel. High stays at pixels * 12
+        // until the screen wavelet adds two uint planes.
         let hist = u64::from(settings.direct.refresh_frames > 1);
         // One extra slice holds linear bounce for a sun direct-patch. The
         // default compose does not write it. High (refresh every frame) is
-        // picture + glow + that slice. The screen wavelet appends two vec4
-        // slices (32 bytes a pixel) after that, so it does not alias the bounce.
-        // Hash keeps the GI buffer. Preset high uses the screen slices.
+        // picture + glow + that slice. The screen wavelet appends two uint
+        // planes (the claimed slot and the compact list) after that.
+        // Hash keeps the GI buffer. Preset high uses the screen planes.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
-            pixels * (12 + 4 * hist + 32 * screen),
+            lighting_out_bytes(pixels, hist, screen),
             0x20 | 0x1 | 0x2,
             Memory::Device,
         )?;
@@ -6588,7 +6603,7 @@ impl Gpu {
                 }
             }
         }
-        let stride = u64::from(count).saturating_mul(32);
+        let stride = u64::from(count).saturating_mul(MEAN_RECORD_BYTES);
         let mut best_m = 0u32;
         let mut found = false;
         if self.lighting.restir_mean_bytes > 0 {
@@ -6597,23 +6612,33 @@ impl Gpu {
                 .lighting
                 .restir_mean_at
                 .saturating_add(u64::from(slot).saturating_mul(stride))
-                .saturating_add(u64::from(pixel).saturating_mul(32));
-            if at.saturating_add(32) > self.lighting.restir_buf.size {
+                .saturating_add(u64::from(pixel).saturating_mul(MEAN_RECORD_BYTES));
+            if at.saturating_add(MEAN_RECORD_BYTES) > self.lighting.restir_buf.size {
                 break;
             }
-            let bytes = self.copy_device_range(self.lighting.restir_buf.buffer, at, 32)?;
+            let bytes = self.copy_device_range(
+                self.lighting.restir_buf.buffer,
+                at,
+                MEAN_RECORD_BYTES,
+            )?;
             let words = u32_words(&bytes);
-            if words.len() < 8 {
+            if words.len() < 6 {
                 continue;
             }
-            let kind = words[6];
+            if words[0] == u32::MAX {
+                if !found {
+                    sample.mean_kind = u32::MAX;
+                }
+                continue;
+            }
+            let kind = words[2] >> 24;
             if kind != LAMP_GEO_RESTIR_MEAN {
                 if !found {
                     sample.mean_kind = kind;
                 }
                 continue;
             }
-            let mean_m = words[2];
+            let mean_m = words[2] & 0x00ff_ffff;
             if found && mean_m < best_m {
                 continue;
             }
@@ -6624,10 +6649,11 @@ impl Gpu {
             sample.mean_m = mean_m;
             sample.mean_lamp = pack & 0xffff;
             sample.mean_vis = (pack & 0x1_0000) != 0;
+            let (_depth, blue) = crate::lighting_sh::unpack_half_2x16(words[4]);
             sample.mean_rgb = [
                 f32::from_bits(words[1]),
                 f32::from_bits(words[3]),
-                f32::from_bits(words[7]),
+                blue,
             ];
         }
         }
@@ -6899,7 +6925,23 @@ mod sh_knob_tests {
     fn restir_mean_is_a_window_of_the_reservoir_buffer() {
         let pixels = 2560u64 * 1440;
         let (total, at, mean) = restir_with_mean(pixels, true, true, true);
-        assert_eq!(mean, pixels * 64);
+        assert_eq!(mean, pixels * MEAN_RECORD_BYTES * 2);
+        assert_eq!(lighting_out_bytes(pixels, 0, 1), pixels * 20);
+        let pick = include_str!("../shaders/lighting_lamp_pick.glsl");
+        assert!(
+            pick.contains("const uint LAMP_RES_WORDS = 6u;"),
+            "the mean record and the allocation drifted"
+        );
+        assert!(!pick.contains("uvec4 v[];"), "the mean record is still two uvec4s");
+        let screen = include_str!("../shaders/lighting_screen.comp");
+        assert!(
+            !screen.contains("void screen_store"),
+            "the unused screen colour store is still allocated"
+        );
+        assert!(screen.contains("return (3u + hist + slice) * screen_pixels() + index;"));
+        let live = include_str!("../shaders/restir_live.comp");
+        assert!(live.contains("uint restir_pack_lamp_m"));
+        assert!(live.contains("void restir_store_hist"));
         assert_eq!(at % 256, 0);
         assert!(at >= crate::restir_live::buffer_bytes(pixels));
         assert_eq!(total, at + mean);

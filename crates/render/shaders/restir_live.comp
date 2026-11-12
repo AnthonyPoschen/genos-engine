@@ -350,6 +350,8 @@ bool restir_lamp_changed(uint lamp) {
     return ((restir_words[restir_hdr(38u) + lamp / 32u] >> (lamp % 32u)) & 1u) != 0u;
 }
 
+// Scratch, four unpacked words. The shade reads this. History is
+// restir_store_hist / restir_load_hist and is not this layout.
 void restir_store4(uint at, uint lamp, float w_sum, uint m, float target) {
     if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
         restir_words[at] = LAMP_EMPTY;
@@ -369,6 +371,100 @@ void restir_load4(uint at, out uint lamp, out float w_sum, out uint m, out float
     w_sum = uintBitsToFloat(restir_words[at + 1u]);
     m = restir_words[at + 2u];
     target = uintBitsToFloat(restir_words[at + 3u]);
+    if (is_empty(lamp, m) || target <= 0.0 || w_sum <= 0.0) {
+        store_empty(lamp, w_sum, m, target);
+    }
+}
+
+// History word 0. Empty is 0xffff so a real lamp index (at most 4095) stays.
+// M is the high half. The stored cap is at most 640.
+uint restir_pack_lamp_m(uint lamp, uint m) {
+    uint lamp16 = lamp == LAMP_EMPTY ? 0xffffu : lamp;
+    return (lamp16 & 0xffffu) | ((m & 0xffffu) << 16u);
+}
+
+void restir_unpack_lamp_m(uint packed, out uint lamp, out uint m) {
+    uint lamp16 = packed & 0xffffu;
+    lamp = lamp16 == 0xffffu ? LAMP_EMPTY : lamp16;
+    m = packed >> 16u;
+}
+
+// glslang has no packSnorm2x8. Low 8 bits are x, the next 8 are y.
+uint restir_float_to_snorm8(float c) {
+    int q = int(round(clamp(c, -1.0, 1.0) * 127.0));
+    if (q < 0) {
+        return uint(q + 256);
+    }
+    return uint(q);
+}
+
+float restir_snorm8_to_float(uint bits) {
+    uint b = bits & 0xffu;
+    int q = int(b);
+    if (b >= 128u) {
+        q -= 256;
+    }
+    return clamp(float(q) / 127.0, -1.0, 1.0);
+}
+
+uint restir_pack_snorm2x8(vec2 e) {
+    return restir_float_to_snorm8(e.x) | (restir_float_to_snorm8(e.y) << 8u);
+}
+
+vec2 restir_unpack_snorm2x8(uint bits) {
+    return vec2(restir_snorm8_to_float(bits), restir_snorm8_to_float(bits >> 8u));
+}
+
+// History word 3. Depth is fp16 (the reject is 2% and 5 cm). The normal is
+// an octahedral snorm8 (the reject is a 0.9 dot). Weight and target stay f32.
+uint restir_pack_geo(float depth, vec3 n) {
+    float len = abs(n.x) + abs(n.y) + abs(n.z);
+    if (len > 0.0) {
+        n /= len;
+    } else {
+        n = vec3(0.0, 1.0, 0.0);
+    }
+    vec2 e = n.z >= 0.0 ? n.xy : lighting_oct_wrap(n.xy);
+    uint depth16 = packHalf2x16(vec2(depth, 0.0)) & 0xffffu;
+    uint normal8 = restir_pack_snorm2x8(e) & 0xffffu;
+    return depth16 | (normal8 << 16u);
+}
+
+float restir_hist_depth(uint packed) {
+    return unpackHalf2x16(packed & 0xffffu).x;
+}
+
+vec3 restir_unpack_oct8(uint bits) {
+    vec2 e = restir_unpack_snorm2x8(bits);
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = lighting_oct_wrap(n.xy);
+    }
+    return normalize(n);
+}
+
+void restir_unpack_geo(uint packed, out float depth, out vec3 n) {
+    depth = restir_hist_depth(packed);
+    n = restir_unpack_oct8(packed >> 16u);
+}
+
+void restir_store_hist(uint at, uint lamp, float w_sum, uint m, float target, float depth, vec3 nrm) {
+    if (m == 0u || lamp == LAMP_EMPTY || target <= 0.0 || w_sum <= 0.0) {
+        restir_words[at] = restir_pack_lamp_m(LAMP_EMPTY, 0u);
+        restir_words[at + 1u] = floatBitsToUint(0.0);
+        restir_words[at + 2u] = floatBitsToUint(0.0);
+    } else {
+        restir_words[at] = restir_pack_lamp_m(lamp, m);
+        restir_words[at + 1u] = floatBitsToUint(w_sum);
+        restir_words[at + 2u] = floatBitsToUint(target);
+    }
+    restir_words[at + 3u] = restir_pack_geo(depth, nrm);
+}
+
+void restir_load_hist(uint at, out uint lamp, out float w_sum, out uint m, out float target) {
+    restir_unpack_lamp_m(restir_words[at], lamp, m);
+    w_sum = uintBitsToFloat(restir_words[at + 1u]);
+    target = uintBitsToFloat(restir_words[at + 2u]);
     if (is_empty(lamp, m) || target <= 0.0 || w_sum <= 0.0) {
         store_empty(lamp, w_sum, m, target);
     }
@@ -462,8 +558,9 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
         }
         uint cand = uint(q.y) * width + uint(q.x);
         uint geo = prev + cand * stride;
-        float z_prev = uintBitsToFloat(restir_words[geo + 4u]);
-        vec3 n_prev = lighting_unpack_normal(restir_words[geo + 5u]);
+        float z_prev;
+        vec3 n_prev;
+        restir_unpack_geo(restir_words[geo + 3u], z_prev, n_prev);
         uvec2 sp = restir_screen_px(cand);
         vec2 centre = vec2(sp) + RESTIR_NDC_HALF;
         vec2 ndc_h = vec2(centre.x / (RESTIR_NDC_HALF * float(proj_w)) - 1.0, 1.0 - centre.y / (RESTIR_NDC_HALF * float(proj_h)));
@@ -517,7 +614,7 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
     uint h_m;
     float h_target;
     if (reuse) {
-        restir_load4(prev + hist_pixel * stride, h_lamp, h_w, h_m, h_target);
+        restir_load_hist(prev + hist_pixel * stride, h_lamp, h_w, h_m, h_target);
     } else {
         store_empty(h_lamp, h_w, h_m, h_target);
     }
@@ -571,15 +668,13 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
     }
     uint next = restir_hdr(20u) == 0u ? restir_hdr(5u) : restir_hdr(4u);
     uint at = next + pixel * stride;
-    restir_store4(at, out_lamp, out_w, out_m, out_target);
     float depth = 0.0;
-    uint packed = lighting_pack_normal(vec3(0.0, 1.0, 0.0));
+    vec3 stored_n = vec3(0.0, 1.0, 0.0);
     if (surfaced) {
         depth = dot(pos - scene.eye.xyz, scene.view_forward.xyz);
-        packed = lighting_pack_normal(nrm);
+        stored_n = nrm;
     }
-    restir_words[at + 4u] = floatBitsToUint(depth);
-    restir_words[at + 5u] = packed;
+    restir_store_hist(at, out_lamp, out_w, out_m, out_target, depth, stored_n);
 }
 
 void restir_temporal(uint pixel) {
@@ -593,7 +688,7 @@ void restir_temporal(uint pixel) {
 #endif
 
 void restir_canon_at(uint at, out uint lamp, out float w, out uint m, out float target) {
-    restir_load4(at, lamp, w, m, target);
+    restir_load_hist(at, lamp, w, m, target);
     if (is_empty(lamp, m)) {
         lamp = LAMP_EMPTY;
         m = RESTIR_CANDIDATES;
@@ -608,7 +703,7 @@ float restir_slot_mass(uint lamp, float w, uint m, float target, float tq) {
 }
 
 bool restir_neighbor_ok(uint source, uint next, uint stride, float z_here, vec3 nrm) {
-    float z_stored = uintBitsToFloat(restir_words[next + source * stride + 4u]);
+    float z_stored = restir_hist_depth(restir_words[next + source * stride + 3u]);
     if (!(z_here > 0.0) || !(z_stored > 0.0)) {
         return false;
     }
@@ -948,7 +1043,7 @@ void restir_spatial(uint pixel) {
     float w_sum;
     uint m;
     float target;
-    restir_load4(next + pixel * stride, lamp, w_sum, m, target);
+    restir_load_hist(next + pixel * stride, lamp, w_sum, m, target);
     uint out_lamp = lamp;
     float out_w = w_sum;
     uint out_m = m;
@@ -1032,7 +1127,7 @@ void restir_spatial(uint pixel) {
     float w_sum;
     uint m;
     float target;
-    restir_load4(next + pixel * stride, lamp, w_sum, m, target);
+    restir_load_hist(next + pixel * stride, lamp, w_sum, m, target);
     uint out_lamp = lamp;
     float out_w = w_sum;
     uint out_m = m;
@@ -1072,15 +1167,15 @@ void restir_spatial(uint pixel) {
             in_tq[0] = phat_at(pixel, lamp, n);
             for (uint s = 0u; s < nbor; s++) {
                 uint source = picked[s];
-                // The temporal pass stored this frame's view depth in the same
-                // buffer. A depth miss fails the live test too, so the gbuffer
-                // fetch and p-hat are skipped. A depth hit still uses the live
-                // surface, including its full-precision normal.
+                // The temporal pass stored this frame's view depth (fp16) in
+                // the history word. A depth miss fails the live test too, so
+                // the gbuffer fetch and p-hat are skipped. A depth hit still
+                // uses the live surface, including its full-precision normal.
                 if (!restir_neighbor_ok(source, next, stride, z_here, nrm)) {
                     continue;
                 }
                 src_recv[nslots] = source;
-                restir_load4(next + source * stride, in_lamp[nslots], in_w[nslots], in_m[nslots], in_target[nslots]);
+                restir_load_hist(next + source * stride, in_lamp[nslots], in_w[nslots], in_m[nslots], in_target[nslots]);
                 if (is_empty(in_lamp[nslots], in_m[nslots])) {
                     in_lamp[nslots] = LAMP_EMPTY;
                     in_m[nslots] = RESTIR_CANDIDATES;
