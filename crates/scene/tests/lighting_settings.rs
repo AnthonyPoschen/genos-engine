@@ -698,6 +698,8 @@ fn fill_budgets_follow_the_preset_and_round_trip() {
     assert_eq!(high.surface_cache.fill.budget, 100_000);
     assert_eq!(high.surface_cache.fill.tile, 8);
     assert_eq!(high.surface_cache.fill.warmup_rays, 16);
+    assert_eq!(high.surface_cache.fill.check_rate, 9);
+    assert_eq!(high.surface_cache.fill.max_picks, 4);
     let medium = LightingSettings::preset(LightingPreset::Medium);
     assert_eq!(medium.surface_cache.fill.budget, 50_000);
     assert_eq!(medium.surface_cache.fill.tile, 16);
@@ -706,7 +708,9 @@ fn fill_budgets_follow_the_preset_and_round_trip() {
     assert_eq!(low.surface_cache.fill.tile, 32);
     let mut edited = high;
     edited.set_key("surface_cache.fill_budget", "1000").unwrap();
+    edited.set_key("surface_cache.fill_lambda_decay", "0.5").unwrap();
     let parsed = LightingSettings::parse(&edited.to_text()).unwrap();
     assert_eq!(parsed.surface_cache.fill.budget, 1000);
     assert!((parsed.surface_cache.fill.lod_near - 8.0).abs() < 1.0e-4);
+    assert!((parsed.surface_cache.fill.lambda_decay - 0.5).abs() < 1.0e-4);
 }

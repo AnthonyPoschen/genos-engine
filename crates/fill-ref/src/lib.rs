@@ -3,7 +3,9 @@
 //! Stage F1 estimators live in the other modules: need-weighted picks,
 //! water-filling, a fixed-point deposit, one writer at resolve, and the
 //! reconnection weight. Stage F2 is [`sched`]: the always-on budget, the
-//! clipmap, and the single-ray fold the GPU scheduler mirrors. Nothing here
+//! clipmap, and the single-ray fold the GPU scheduler mirrors. Stage F3 adds
+//! the check ray, the decaying lambda, and the water-fill of that budget.
+//! Nothing here
 //! opens a window or a device. `--tile-fill` defaults off; that flag is the
 //! F1 checker, not the live F2 scheduler.
 //!

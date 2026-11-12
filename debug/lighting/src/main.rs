@@ -172,9 +172,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
                          FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
                          FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
-                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_WARMUP,
-                         FILL_RAY_CAP, FILL_FRAME_DT. fill_check_rate is unused
-                         until check rays are scheduled.
+                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_MAX_PICKS,
+                         FILL_LAMBDA_DECAY, FILL_WINDOW_FLOOR, FILL_CATCHUP_MAX,
+                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT.
+                         Check rays are one same-seed ray per fill_check_rate block.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -343,6 +344,11 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_fill_prox_min",
     "lighting_fill_change_weight",
     "lighting_fill_check_rate",
+    "lighting_fill_max_picks",
+    "lighting_fill_lambda_decay",
+    "lighting_fill_window_floor",
+    "lighting_fill_catchup_max",
+    "lighting_fill_check_sigma",
     "lighting_fill_warmup",
     "lighting_fill_ray_cap",
     "lighting_fill_frame_dt",

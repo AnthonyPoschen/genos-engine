@@ -100,6 +100,40 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "a second ray into a slot must be summed, not dropped"
     );
     assert!(fill.contains("lighting_ray_fill_on"), "fill must be wired");
+    assert!(
+        fill.contains("cache.v[LIGHTING_SC_GRAD_AT + slot] = vec4(0.0)"),
+        "freeing a slot must drop the previous occupant's check state"
+    );
+    assert!(
+        fill.contains("lighting_fill_seed"),
+        "a reused slot must not keep a seed from another key"
+    );
+    assert!(
+        fill.contains("prior >= max_picks"),
+        "fill_max_picks is per cell, including a cell that wins several tiles"
+    );
+    assert!(
+        fill.contains("lighting_round() % tiles"),
+        "check rays must rotate through the screen, not rescan the same prefix"
+    );
+    assert!(
+        fill.contains("lighting_round() & (guard - 1u)"),
+        "off-screen checks must rotate through the slot table"
+    );
+    assert!(
+        fill.contains("lighting_fill_real"),
+        "an infinite check luma must not be stored or raise lambda"
+    );
+    let pick = source("lighting_lamp_pick.glsl");
+    assert!(
+        pick.contains("lighting_fill_check_u"),
+        "a check ray's lamp pick must use the stored seed"
+    );
+    let direct = source("lighting_direct.comp");
+    assert!(
+        direct.contains("lighting_fill_check_u"),
+        "a texel-direct check must not mix the frame into a fill check ray"
+    );
     let compact = source("lighting_compact.comp");
     assert!(
         compact.contains("lighting_fill_visit"),

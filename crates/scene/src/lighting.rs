@@ -493,10 +493,11 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
-/// Always-on fill (stage F2). Every cache round spends `budget` rays.
+/// Always-on fill (stages F2 and F3). Every cache round spends `budget` rays.
 ///
 /// Keep [`FillSettings::high`] in step with `Tunables::high` in `genos-fill-ref`.
-/// `check_rate` is named and unused until F3 schedules check rays.
+/// F3 schedules one same-seed check ray per `check_rate` block and water-fills
+/// the rest of the budget by priority.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FillSettings {
     /// Rays traced in one cache round. High starts at 100_000. `0` traces none.
@@ -521,10 +522,20 @@ pub struct FillSettings {
     pub error_target: f32,
     /// Metres. Closeness is `1 / max(distance, prox_min)`.
     pub prox_min: f32,
-    /// Weight of the measured-change term. The term is 0 until F3.
+    /// Weight of the measured-change term.
     pub change_weight: f32,
-    /// Texels per check ray. F2 does not trace them.
+    /// Cells per check block. 9 is one same-seed ray in each 3×3 block.
     pub check_rate: u32,
+    /// Most fill rays one cell takes in a round.
+    pub max_picks: u32,
+    /// Per-frame multiply on a lambda that was not re-measured.
+    pub lambda_decay: f32,
+    /// Fraction of the ray history kept when lambda is 1.
+    pub window_floor: f32,
+    /// Highest blend weight the shortened window may use.
+    pub catchup_max: f32,
+    /// Noise subtracted, times two, from a check ray's relative delta.
+    pub check_sigma: f32,
     /// Rays of plain mean before the MSME catch-up.
     pub warmup_rays: u32,
     /// Averaging window, in rays.
@@ -550,6 +561,11 @@ impl FillSettings {
             prox_min: 0.5,
             change_weight: 1.0,
             check_rate: 9,
+            max_picks: 4,
+            lambda_decay: 0.8,
+            window_floor: 0.25,
+            catchup_max: 0.5,
+            check_sigma: 0.0,
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
@@ -1061,6 +1077,27 @@ impl LightingSettings {
             1.0
         };
         fill.check_rate = fill.check_rate.max(1);
+        fill.max_picks = fill.max_picks.clamp(1, 8);
+        fill.lambda_decay = if fill.lambda_decay.is_finite() {
+            fill.lambda_decay.clamp(0.0, 1.0)
+        } else {
+            0.8
+        };
+        fill.window_floor = if fill.window_floor.is_finite() {
+            fill.window_floor.clamp(0.0, 1.0)
+        } else {
+            0.25
+        };
+        fill.catchup_max = if fill.catchup_max.is_finite() {
+            fill.catchup_max.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        fill.check_sigma = if fill.check_sigma.is_finite() {
+            fill.check_sigma.max(0.0)
+        } else {
+            0.0
+        };
         fill.warmup_rays = fill.warmup_rays.max(1);
         fill.ray_cap = fill.ray_cap.max(fill.warmup_rays);
         fill.frame_dt = finite_pos(fill.frame_dt, 1.0 / 60.0);
@@ -1411,6 +1448,11 @@ impl LightingSettings {
         let _ = writeln!(out, "surface_cache.fill_prox_min={}", num_text(fill.prox_min));
         let _ = writeln!(out, "surface_cache.fill_change_weight={}", num_text(fill.change_weight));
         let _ = writeln!(out, "surface_cache.fill_check_rate={}", fill.check_rate);
+        let _ = writeln!(out, "surface_cache.fill_max_picks={}", fill.max_picks);
+        let _ = writeln!(out, "surface_cache.fill_lambda_decay={}", num_text(fill.lambda_decay));
+        let _ = writeln!(out, "surface_cache.fill_window_floor={}", num_text(fill.window_floor));
+        let _ = writeln!(out, "surface_cache.fill_catchup_max={}", num_text(fill.catchup_max));
+        let _ = writeln!(out, "surface_cache.fill_check_sigma={}", num_text(fill.check_sigma));
         let _ = writeln!(out, "surface_cache.fill_warmup={}", fill.warmup_rays);
         let _ = writeln!(out, "surface_cache.fill_ray_cap={}", fill.ray_cap);
         let _ = writeln!(out, "surface_cache.fill_frame_dt={}", num_text(fill.frame_dt));
@@ -1650,6 +1692,11 @@ impl LightingSettings {
             "surface_cache.fill_prox_min" => self.surface_cache.fill.prox_min = num_f32(value)?,
             "surface_cache.fill_change_weight" => self.surface_cache.fill.change_weight = num_f32(value)?,
             "surface_cache.fill_check_rate" => self.surface_cache.fill.check_rate = num_u32(value)?,
+            "surface_cache.fill_max_picks" => self.surface_cache.fill.max_picks = num_u32(value)?,
+            "surface_cache.fill_lambda_decay" => self.surface_cache.fill.lambda_decay = num_f32(value)?,
+            "surface_cache.fill_window_floor" => self.surface_cache.fill.window_floor = num_f32(value)?,
+            "surface_cache.fill_catchup_max" => self.surface_cache.fill.catchup_max = num_f32(value)?,
+            "surface_cache.fill_check_sigma" => self.surface_cache.fill.check_sigma = num_f32(value)?,
             "surface_cache.fill_warmup" => self.surface_cache.fill.warmup_rays = num_u32(value)?,
             "surface_cache.fill_ray_cap" => self.surface_cache.fill.ray_cap = num_u32(value)?,
             "surface_cache.fill_frame_dt" => self.surface_cache.fill.frame_dt = num_f32(value)?,
@@ -1953,6 +2000,11 @@ impl LightingSettings {
             ("GENOS_LIGHTING_FILL_PROX_MIN", "surface_cache.fill_prox_min"),
             ("GENOS_LIGHTING_FILL_CHANGE_WEIGHT", "surface_cache.fill_change_weight"),
             ("GENOS_LIGHTING_FILL_CHECK_RATE", "surface_cache.fill_check_rate"),
+            ("GENOS_LIGHTING_FILL_MAX_PICKS", "surface_cache.fill_max_picks"),
+            ("GENOS_LIGHTING_FILL_LAMBDA_DECAY", "surface_cache.fill_lambda_decay"),
+            ("GENOS_LIGHTING_FILL_WINDOW_FLOOR", "surface_cache.fill_window_floor"),
+            ("GENOS_LIGHTING_FILL_CATCHUP_MAX", "surface_cache.fill_catchup_max"),
+            ("GENOS_LIGHTING_FILL_CHECK_SIGMA", "surface_cache.fill_check_sigma"),
             ("GENOS_LIGHTING_FILL_WARMUP", "surface_cache.fill_warmup"),
             ("GENOS_LIGHTING_FILL_RAY_CAP", "surface_cache.fill_ray_cap"),
             ("GENOS_LIGHTING_FILL_FRAME_DT", "surface_cache.fill_frame_dt"),
