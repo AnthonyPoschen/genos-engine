@@ -23,6 +23,7 @@ const STRIDE: usize = 17;
 const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
+const STEP: usize = 14;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -81,7 +82,7 @@ fn motion_slant() -> [f32; 3] {
 }
 
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER + PARITY
+    8 + ROWS * STRIDE + TRAILER + PARITY + STEP
 }
 
 #[expect(
@@ -94,6 +95,10 @@ fn words_len() -> usize {
 )]
 fn head_float_bits(word: u32) -> u32 {
     (word as f32).to_bits()
+}
+
+fn rec709(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
 fn near(got: [f32; 3], want: [f32; 3]) -> bool {
@@ -155,6 +160,65 @@ fn readonly_fixture_head_matches_the_folded_shader_constant() {
     assert_eq!((head.head_hi >> 12) & 31, 0, "no isolate toggles");
     assert_ne!(head.head_hi & DETAIL_BIT, 0, "detail on");
     assert_eq!(sc_flags, 14_395_658);
+}
+
+#[test]
+fn a_mover_does_not_step_across_a_world_cell() {
+    // High's picture reads the world lattice. Two queries 5 mm either side of
+    // the half-cell plane gate used to drop the only corner and step from the
+    // cell to black. Two queries 1 cm either side of a tangent boundary must
+    // stay a small fraction of the gap between the two cells.
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
+    assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+    let words = renderer
+        .texel_detail_prod()
+        .expect("production compose indirect");
+    assert_eq!(words.len(), words_len());
+    let step_at = 8 + ROWS * STRIDE + TRAILER + PARITY;
+    let step = &words[step_at..step_at + STEP];
+    let red = [8.0, 0.0, 0.0];
+    let gate_on = [step[0], step[1], step[2]];
+    let gate_past = [step[4], step[5], step[6]];
+    assert!(
+        (step[3] - 1.0).abs() <= ABS && (step[7] - 1.0).abs() <= ABS,
+        "the cell stays accepted across the half-cell gate, trust {} then {}, colours {gate_on:?} {gate_past:?}",
+        step[3],
+        step[7]
+    );
+    assert!(
+        near(gate_on, red) && near(gate_past, red),
+        "gate colours {gate_on:?} {gate_past:?}, wanted {red:?}"
+    );
+    let gate_gap = rec709(red);
+    let gate_jump = (rec709(gate_on) - rec709(gate_past)).abs();
+    assert!(
+        gate_jump <= 0.05 * gate_gap,
+        "GI stepped {gate_jump} across the half-cell gate; the cell is {gate_gap}"
+    );
+    let before = [step[8], step[9], step[10]];
+    let after = [step[11], step[12], step[13]];
+    let want_before = [4.32, 0.0, 3.22];
+    let want_after = [3.68, 0.0, 3.78];
+    assert!(
+        near(before, want_before) && near(after, want_after),
+        "tangent colours {before:?} {after:?}, wanted {want_before:?} {want_after:?}"
+    );
+    let cell_gap = (rec709(red) - rec709([0.0, 0.0, 7.0])).abs();
+    let tangent_jump = (rec709(before) - rec709(after)).abs();
+    assert!(
+        tangent_jump < 0.25 * cell_gap,
+        "GI stepped {tangent_jump} across 2 cm of a cell boundary; the two cells differ by {cell_gap}"
+    );
+    // Row 32: the far corner is 0.1875 m off the plane. Smoothstep weight is
+    // 0.5, so it tints the near cell and does not replace it.
+    let plane = row(&words, 32);
+    let faded = [48.0 / 7.0, 6.0 / 7.0, 0.0];
+    assert!(
+        near(plane.shown, faded),
+        "off-plane corner showed {:?}, wanted {faded:?}",
+        plane.shown
+    );
 }
 
 #[test]
@@ -742,12 +806,16 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((mover_face.cell_same - 1.0).abs() <= ABS);
 
     let mover_plane = &rows[32];
+    // Near corner tri 0.421875 at full weight. Far corner tri 0.140625 at
+    // plane 0.1875 m, smoothstep weight 0.5. The near cell still leads.
+    let faded = [48.0 / 7.0, 6.0 / 7.0, 0.0];
     assert!(
-        near(mover_plane.shown, red),
-        "a mover rejected the off-plane corner, showed {:?}, wanted red, not {leak:?}",
+        near(mover_plane.shown, faded),
+        "a mover faded the off-plane corner, showed {:?}, wanted {faded:?}, not pure red and not {leak:?}",
         mover_plane.shown
     );
     assert!(!near(mover_plane.shown, leak));
+    assert!(!near(mover_plane.shown, red));
     assert!(mover_plane.reads.abs() <= ABS);
     assert!((mover_plane.skipped - 1.0).abs() <= ABS);
     assert!((mover_plane.cell_same - 1.0).abs() <= ABS);
@@ -904,11 +972,54 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "this dispatch presents nothing"
     );
     assert_eq!(
-        skip, 43,
+        skip, 47,
         "every indirect call skips the removed screen-probe read"
     );
 
-    let parity = &words[8 + ROWS * STRIDE + TRAILER..];
+    let step_at = 8 + ROWS * STRIDE + TRAILER + PARITY;
+    let step = &words[step_at..step_at + STEP];
+    let gate_on = [step[0], step[1], step[2]];
+    let gate_past = [step[4], step[5], step[6]];
+    assert!(
+        (step[3] - 1.0).abs() <= ABS && (step[7] - 1.0).abs() <= ABS,
+        "the cell stays accepted across the half-cell gate, trust {} then {}",
+        step[3],
+        step[7]
+    );
+    assert!(
+        near(gate_on, red),
+        "on the cell the mover showed {gate_on:?}, wanted {red:?}"
+    );
+    assert!(
+        near(gate_past, red),
+        "5 mm past the half-cell gate the mover showed {gate_past:?}, wanted {red:?}"
+    );
+    let gate_gap = rec709(red);
+    let gate_jump = (rec709(gate_on) - rec709(gate_past)).abs();
+    assert!(
+        gate_jump <= 0.05 * gate_gap,
+        "GI stepped {gate_jump} across the half-cell gate; the cell is {gate_gap}"
+    );
+    let before = [step[8], step[9], step[10]];
+    let after = [step[11], step[12], step[13]];
+    let want_before = [4.32, 0.0, 3.22];
+    let want_after = [3.68, 0.0, 3.78];
+    assert!(
+        near(before, want_before),
+        "1 cm before the cell boundary showed {before:?}, wanted {want_before:?}"
+    );
+    assert!(
+        near(after, want_after),
+        "1 cm after the cell boundary showed {after:?}, wanted {want_after:?}"
+    );
+    let cell_gap = (rec709(red) - rec709([0.0, 0.0, 7.0])).abs();
+    let tangent_jump = (rec709(before) - rec709(after)).abs();
+    assert!(
+        tangent_jump < 0.25 * cell_gap,
+        "GI stepped {tangent_jump} across 2 cm of a cell boundary; the two cells differ by {cell_gap}"
+    );
+
+    let parity = &words[8 + ROWS * STRIDE + TRAILER..8 + ROWS * STRIDE + TRAILER + PARITY];
     assert_eq!(parity.len(), PARITY);
     let stored = [parity[0], parity[1], parity[2]];
     let live = [parity[3], parity[4], parity[5]];

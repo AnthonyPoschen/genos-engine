@@ -14,6 +14,17 @@ const uint PROD_STRIDE = 17u;
 const uint PROD_MOTION_AT = 33u;
 const uint PROD_TRAILER_AT = 8u + PROD_ROWS * 17u;
 const uint PROD_TRAILER = 40u;
+const uint PROD_PARITY = 32u;
+// 14 floats after the parity block: gate colour and trust, then the tangent pair.
+const uint PROD_STEP_AT = PROD_TRAILER_AT + PROD_TRAILER + PROD_PARITY;
+// Two on-plane cells one 25 cm step apart, and the queries 1 cm either side
+// of the boundary between them. The gate cell is a third, and the second
+// query is 5 mm past the half-cell plane cut.
+const vec3 PROD_STEP_A = vec3(2000.125, 0.0, 2000.125);
+const vec3 PROD_STEP_B = vec3(2000.125, 0.0, 2000.375);
+const vec3 PROD_STEP_BEFORE = vec3(2000.125, 0.0, 2000.24);
+const vec3 PROD_STEP_AFTER = vec3(2000.125, 0.0, 2000.26);
+const vec3 PROD_STEP_GATE = vec3(2000.125, 0.0, 3000.125);
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
 const uint PROD_FRAME = 10u;
@@ -633,6 +644,53 @@ void prod_motion() {
     prod_f(at + 16u, decoy_same);
 }
 
+// A mover crosses a 25 cm cell. The tangent pair is two on-plane colours.
+// The gate pair is the same cell read on its plane and 5 mm past the
+// half-cell cut, which used to drop the corner and step the picture to black.
+void prod_cell_step() {
+    prod_head(0u);
+    gstats.ctrl_bits = PROD_DENOISE;
+    gstats.ctrl_bounce = 0u;
+    vec3 n = PROD_UP;
+    prod_owner(PROD_STEP_A, n, PROD_RED, PROD_CELL_N);
+    prod_owner(PROD_STEP_B, n, PROD_BLUE, PROD_CELL_N);
+    prod_owner(PROD_STEP_GATE, n, PROD_RED, PROD_CELL_N);
+    vec3 past = PROD_STEP_GATE + vec3(0.0, LIGHTING_CELL_HALF * LIGHTING_SH_CELL + 0.005, 0.0);
+    vec3 shown[4];
+    float trust[4];
+    [[dont_unroll]] for (uint step = 0u; step < 4u; step++) {
+        vec3 pos = PROD_STEP_BEFORE;
+        if (step == 0u) {
+            prod_mover(vec3(PROD_STEP_A.x, 0.0, 0.5 * (PROD_STEP_A.z + PROD_STEP_B.z)));
+        } else if (step == 1u) {
+            pos = PROD_STEP_AFTER;
+        } else if (step == 2u) {
+            prod_mover(PROD_STEP_GATE);
+            pos = PROD_STEP_GATE;
+        } else {
+            prod_mover(past);
+            pos = past;
+        }
+        shown[step] = prod_shade(pos, n);
+        trust[step] = lighting_px_world_w;
+    }
+    uint at = PROD_STEP_AT;
+    prod_f(at, shown[2].r);
+    prod_f(at + 1u, shown[2].g);
+    prod_f(at + 2u, shown[2].b);
+    prod_f(at + 3u, trust[2]);
+    prod_f(at + 4u, shown[3].r);
+    prod_f(at + 5u, shown[3].g);
+    prod_f(at + 6u, shown[3].b);
+    prod_f(at + 7u, trust[3]);
+    prod_f(at + 8u, shown[0].r);
+    prod_f(at + 9u, shown[0].g);
+    prod_f(at + 10u, shown[0].b);
+    prod_f(at + 11u, shown[1].r);
+    prod_f(at + 12u, shown[1].g);
+    prod_f(at + 13u, shown[1].b);
+}
+
 #endif
 
 void prod_read_row(uint id, vec3 pos, vec3 n, vec3 q, uint cell) {
@@ -1142,6 +1200,7 @@ void main() {
         prod_f(at + 15u, mean_after.b);
         prod_f(at + 16u, texel == ~0u ? 0.0 : (cache.v[LIGHTING_SC_SPARSE_AT + texel].z < 0.0 ? 1.0 : 0.0));
     }
+    prod_cell_step();
     prod_store_parity();
     prod_frame_contract();
     } else {

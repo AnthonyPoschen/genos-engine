@@ -2312,8 +2312,10 @@ struct LightingShField {
 // stored under. The tilt uses n, not that axis. A corner is left out when it
 // is missing, has no samples, is stale, faces away (dot <= 0, the other side
 // of a thin wall), or its stored point is more than half a cell off the query
-// plane. Left-out corners add no weight, so they do not darken the blend. A
-// black mean with samples is light and does. w is 1 when any corner remains.
+// plane. A mover's display read fades that last corner out from half a cell
+// to one cell instead of cutting it off. Left-out corners add no weight, so
+// they do not darken the blend. A black mean with samples is light and does.
+// w is 1 when any corner remains.
 // `claim` stamps a corner this read accepted. It does not allocate. The seed
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
@@ -2321,6 +2323,14 @@ struct LightingShField {
 // LIGHTING_SC_FULL_SETS. 0 when nothing was accepted. A black mean with
 // sets still counts; radiance is not the populated test.
 float lighting_sh_blend_trust = 0.0;
+// Mover display (texel detail on) fades a corner past the half-cell plane
+// gate. Static gathers and the ray-cut walk leave this false and keep the cut.
+// Weight is 1 on the gate and 0 one cell off the plane.
+bool lighting_sh_smooth_mover = false;
+float lighting_sh_mover_plane_w(float plane, float limit) {
+    float t = clamp((plane - limit) / max(limit, 1.0e-4), 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);
+}
 // Compose compiles define GENOS_COMPOSE_NO_WALK and do not contain this walk.
 #ifndef GENOS_COMPOSE_NO_WALK
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
@@ -2365,8 +2375,15 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
             continue;
         }
         float plane = abs(dot(cache.v[3u * s].xyz - p, n));
+        float plane_w = 1.0;
         if (plane > LIGHTING_CELL_HALF * cs) {
-            continue;
+            if (!lighting_sh_smooth_mover) {
+                continue;
+            }
+            plane_w = lighting_sh_mover_plane_w(plane, LIGHTING_CELL_HALF * cs);
+            if (!(plane_w > 0.0)) {
+                continue;
+            }
         }
         vec4 v = cache.v[3u * s + 2u];
         if (v.w < LIGHTING_CACHE_HAS_W) {
@@ -2381,7 +2398,7 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         if (claim && LIGHTING_SC_WRITES) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
         }
-        float w = tri * facing;
+        float w = tri * facing * plane_w;
         vec3 lit = lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
         float y = dot(max(lit, vec3(0.0)), lw);
         if (!y_set) {
@@ -2508,14 +2525,21 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
             continue;
         }
         float plane = abs(dot(cache.v[3u * s].xyz - p, n));
+        float plane_w = 1.0;
         if (plane > LIGHTING_CELL_HALF * cs) {
-            continue;
+            if (!lighting_sh_smooth_mover) {
+                continue;
+            }
+            plane_w = lighting_sh_mover_plane_w(plane, LIGHTING_CELL_HALF * cs);
+            if (!(plane_w > 0.0)) {
+                continue;
+            }
         }
         vec4 v = cache.v[3u * s + 2u];
         if (v.w < LIGHTING_CACHE_HAS_W || lighting_sc_stale(s)) {
             continue;
         }
-        float w = tri * facing;
+        float w = tri * facing * plane_w;
         sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
         ws += w;
         float sets = floor(max(v.w, 0.0));
@@ -4228,12 +4252,17 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     // false. That call does not enter the object-local texel loop.
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
     // Detail on: a mover shows the world-cell read at this world position and
-    // true normal. It does not enter the object-local texel loop, does not
-    // seed, and does not stamp (claim stays false). An empty read has w = 0,
-    // so a coarse miss keeps the fine world colour. Detail off still uses the object frame below.
+    // true normal. One store, salt 0. It does not enter the object-local texel
+    // loop, does not seed, and does not stamp (claim stays false). A corner
+    // past the half-cell plane gate fades out across the next half cell, so
+    // the 25 cm grid does not step as the surface crosses it. An empty read
+    // has w = 0, so a coarse miss keeps the fine world colour. Detail off
+    // still uses the object frame below.
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         lighting_obj_salt = 0.0;
+        lighting_sh_smooth_mover = true;
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
+        lighting_sh_smooth_mover = false;
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
             return vec4(sh.rgb, 1.0);
         }

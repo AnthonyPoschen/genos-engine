@@ -304,6 +304,11 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     );
     assert!(read.contains("if (facing <= 0.0)"));
     assert!(read.contains("if (plane > LIGHTING_CELL_HALF * cs)"));
+    assert!(
+        read.contains("if (!lighting_sh_smooth_mover)"),
+        "a static gather still cuts a corner past the half-cell plane gate"
+    );
+    assert!(read.contains("lighting_sh_mover_plane_w"));
     assert!(read.contains("if (lighting_sc_stale(s))"));
     assert!(
         read.contains("ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0)"),
@@ -315,6 +320,26 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
         "the screen read is the gather's value, including an empty read"
     );
     precedes(read, "if (plane > LIGHTING_CELL_HALF * cs)", "if (claim && LIGHTING_SC_WRITES)");
+    let blend = function_body(
+        &text,
+        "vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n)",
+    );
+    assert!(
+        blend.contains("lighting_sh_mover_plane_w"),
+        "compose's corner blend fades a mover the same way the gather does"
+    );
+    assert!(blend.contains("if (!lighting_sh_smooth_mover)"));
+    let world = function_body(&text, "vec4 lighting_world_irradiance(vec3 pos, vec3 n)");
+    precedes(
+        world,
+        "lighting_sh_smooth_mover = true",
+        "lighting_sh_compose_lattice(pos, n, false)",
+    );
+    precedes(
+        world,
+        "lighting_sh_compose_lattice(pos, n, false)",
+        "lighting_sh_smooth_mover = false",
+    );
     let screen = function_body(
         &text,
         "vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj)",

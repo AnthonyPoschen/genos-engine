@@ -181,7 +181,9 @@ pub struct NeighbourCorner {
 /// The weight is the trilinear weight times `dot(stored normal, query normal)`.
 /// Equal stored normals make that dot a common factor, so it cancels. Two
 /// stored normals that both face the query do not: the larger dot weighs more.
-/// That is not a pure trilinear blend.
+/// That is not a pure trilinear blend. A mover's display read fades a corner
+/// from half a cell to one cell in the shader. This function keeps the hard
+/// cut used by static reads and the ray-cut walk.
 #[must_use]
 pub fn neighbour_corner_weight(normal: [f32; 3], cell: f32, corner: &NeighbourCorner) -> f32 {
     if corner.weight <= 0.0 || !corner.present || corner.samples < 0.5 || corner.stale {
