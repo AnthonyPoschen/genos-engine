@@ -3002,6 +3002,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     return lighting_cache_irradiance(pos, n);
 }
 
+bool lighting_ray_fill_on();
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     if (!lighting_bounce_ok()) {
@@ -3034,7 +3035,11 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // new cells is not black until the next round relights it.
     // Flag 32768 (surface cache): every round, not only the round that claimed it.
     bool fill_any = lighting_world_mode() == 3u && (lighting_sc_flags() & 32768u) != 0u;
-    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
+    // The tile fill leaves the 12.5 cm texel empty on purpose. A bounce that
+    // stopped at that texel would stay on the direct light. The parent is the
+    // world cell the rays deposit into.
+    bool fill_parent = lighting_world_mode() == 3u && lighting_ray_fill_on();
+    if (e.w < 0.5 && (fill_any || fill_parent || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {
             vec4 up = lighting_sc_parent(pos, n, hsize);

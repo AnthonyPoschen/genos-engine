@@ -42,6 +42,10 @@ const float FILL_CHANGE_SCALE = 1.0e6;
 const float FILL_BUCKET_BIAS = 16.0;
 const float FILL_BUCKET_SPAN = 18.0;
 const float FILL_BUCKET_STEPS = 62.0;
+// Commits a world cell still takes before it can lose the tile to a neighbour.
+// One commit freezes the first direct-only sample; dark-fill needs the later
+// ones, which read a cache that already holds a bounce.
+const float FILL_OPEN_SETS = 48.0;
 const float FILL_T_EPS = 1.0e-3;
 const float FILL_Q10 = 1023.0;
 const float FILL_SHARE_COS0 = 0.05;
@@ -230,6 +234,25 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
+// An empty cell outranks one that already has samples. A moving mean holds
+// lambda at 1, which ties the empty cell's error of 1, and the slot id then
+// pins the same cell in the tile. Bit 27 is that open-cell rank. The bucket
+// stays in bits 21..26 and the slot stays in the low 21 bits.
+uint lighting_fill_pack(uint slot, uint q) {
+    float shown = cache.v[3u * slot + 2u].w;
+    uint open = shown < FILL_OPEN_SETS ? 1u : 0u;
+    // Fewer commits outrank more, so a tile walks every young cell before
+    // one of them takes a second set. An equal count breaks on the slot id
+    // for one frame; the winner is then ahead and yields.
+    uint behind = shown >= FILL_OPEN_SETS ? 0u : min(uint(FILL_OPEN_SETS - shown), 63u);
+    uint rank = open == 1u ? behind : (q & 63u);
+    return (open << 27u) | (rank << 21u) | (slot + 1u);
+}
+
+uint lighting_fill_packed_q(uint w) {
+    return (w >> 21u) & 63u;
+}
+
 uint lighting_fill_bucket(float pri) {
     if (!(pri > 0.0)) {
         return 0u;
@@ -284,9 +307,10 @@ void lighting_fill_decay(uint slot) {
     cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
 }
 
-// Drop a clipmap cell past its leash. 12.5 cm detail stays; the screen stage
-// owns that size (S57). A stored cell inside the leash is kept, so the create
-// edge does not thrash. Past the leash, coarsen, then evict.
+// Drop a clipmap cell past its leash. A stored cell inside the leash is kept,
+// so the create edge does not thrash. Past the leash, coarsen, then evict.
+// A slot finer than the base world cell does not take a ray: the visit claims
+// that cell and returns. Compose reads the cell while the screen texel is empty.
 void lighting_fill_visit(uint slot) {
     vec3 p;
     vec3 n;
@@ -304,20 +328,33 @@ void lighting_fill_visit(uint slot) {
         uint level = lighting_fill_level_of_size(size);
         float keep = lighting_fill_leash(level) + extra;
         if (d > keep) {
-            uint target = level;
-            uint cap = lighting_fill_lod_max();
-            while (target < cap && d > lighting_fill_leash(target) + extra) {
-                target++;
+            // Compose reads the base world cell on screen, including past the
+            // clipmap leash. Coarsen and evict only the off-screen copy.
+            uint px_keep;
+            uint py_keep;
+            if (!lighting_fill_pixel(p, px_keep, py_keep)) {
+                uint target = level;
+                uint cap = lighting_fill_lod_max();
+                while (target < cap && d > lighting_fill_leash(target) + extra) {
+                    target++;
+                }
+                if (target > level && d <= lighting_fill_leash(target) + extra) {
+                    lighting_fill_coarsen(slot, p, n, target);
+                } else if (d > lighting_fill_leash(target) + extra) {
+                    lighting_fill_free(slot);
+                }
+                return;
             }
-            if (target > level && d <= lighting_fill_leash(target) + extra) {
-                lighting_fill_coarsen(slot, p, n, target);
-            } else if (d > lighting_fill_leash(target) + extra) {
-                lighting_fill_free(slot);
-            }
-            return;
         }
     } else if (lighting_sc_expired(last, shown)) {
         lighting_fill_free(slot);
+        return;
+    }
+    // The world cell is the only store. A 12.5 cm screen texel outranks its
+    // parent while it is young, so the parent stays empty and compose shows a
+    // direct-only mean. Claim the parent; its own visit schedules the rays.
+    if (size < base) {
+        lighting_cache_find_sized(p, n, true, base, p);
         return;
     }
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
@@ -332,7 +369,7 @@ void lighting_fill_visit(uint slot) {
         // does not pin the same cell.
         uint cap = lighting_fill_off_cap();
         uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-        uint packed = (q << 21u) | (slot + 1u);
+        uint packed = lighting_fill_pack(slot, q);
         atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
         uint rate = max(lighting_fill_u(16), 1u);
         uint block = slot / rate;
@@ -348,10 +385,15 @@ void lighting_fill_visit(uint slot) {
     if (ti >= LIGHTING_FILL_TILE_CAP) {
         return;
     }
-    // On-screen cells are the tile pick, not also an off-screen candidate.
+    // The tile keeps one cell. The same cell is also a ranked candidate, so
+    // the cells that lose that slot still take rays from the off-screen share.
+    // The lock caps the two emits together.
     ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-    uint packed = (q << 21u) | (slot + 1u);
+    uint packed = lighting_fill_pack(slot, q);
     atomicMax(ckeys.key[LIGHTING_FILL_TILE_AT + ti], packed);
+    uint cap = lighting_fill_off_cap();
+    uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
+    atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
 }
 
 void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
@@ -557,7 +599,7 @@ void lighting_fill_hist(uint gid) {
     if (gid < tiles) {
         uint w = ckeys.key[LIGHTING_FILL_TILE_AT + gid];
         if (w != 0u) {
-            uint q = min(w >> 21u, 63u);
+            uint q = lighting_fill_packed_q(w);
             if (q > 0u) {
                 atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
             }
@@ -584,7 +626,7 @@ void lighting_fill_hist(uint gid) {
     if (gid < cap) {
         uint w = ckeys.key[lighting_fill_off_at() + gid];
         if (w != 0u) {
-            uint q = min(w >> 21u, 63u);
+            uint q = lighting_fill_packed_q(w);
             uint slot = (w & 2097151u) - 1u;
             if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
                 uint level = lighting_fill_level_of_size(cache.v[3u * slot + 1u].w);
@@ -622,7 +664,7 @@ void lighting_fill_emit_on(uint gid) {
         uint w = ckeys.key[LIGHTING_FILL_TILE_AT + gid];
         ckeys.key[LIGHTING_FILL_TILE_AT + gid] = 0u;
         if (w != 0u) {
-            uint q = min(w >> 21u, 63u);
+            uint q = lighting_fill_packed_q(w);
             slot = (w & 2097151u) - 1u;
             uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
             if (q > 0u && slot < LIGHTING_CACHE_SLOTS) {
@@ -678,7 +720,7 @@ void lighting_fill_emit_off(uint gid) {
     if (gid < cap) {
         uint w = ckeys.key[lighting_fill_off_at() + gid];
         if (w != 0u) {
-            uint q = min(w >> 21u, 63u);
+            uint q = lighting_fill_packed_q(w);
             slot = (w & 2097151u) - 1u;
             uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
             if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {

@@ -269,6 +269,37 @@ fn the_scene_ray_loops_are_kept_rolled() {
     }
 }
 
+/// The tile fill rays the world cell. A finer screen texel claims that cell
+/// and returns, so it cannot win the tile.
+#[test]
+fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
+    let fill = source("lighting_fill.glsl");
+    let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
+    let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
+    let tile = visit.find("atomicMax");
+    match (claim, tile) {
+        (Some(claim_at), Some(tile_at)) => assert!(
+            claim_at < tile_at,
+            "the screen texel must return before the tile pick"
+        ),
+        (None, _) => panic!("a screen texel must claim the world cell under it"),
+        (Some(_), None) => panic!("a world cell must still enter the tile"),
+    }
+    assert!(
+        visit.contains("if (size < base)"),
+        "only a slot finer than the base world cell skips the ray"
+    );
+    assert!(
+        visit.contains("lighting_fill_pack(slot, q)"),
+        "an empty world cell must outrank one that already has samples"
+    );
+    let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
+    assert!(
+        pack.contains("open << 27u"),
+        "the open-cell rank sits above the priority bucket"
+    );
+}
+
 /// The picture compose used to compile `scene_candidates_skip` (the occluder
 /// grid, `dont_unroll`) into the pass that shades every pixel. The NVIDIA
 /// compiler did not drop that call. Compose then took tens of milliseconds and
