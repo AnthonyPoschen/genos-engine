@@ -135,7 +135,7 @@ fn lighting_compose_minx(slots: u64) -> u64 {
 
 /// Visibility-mean record. Matches `LAMP_RES_WORDS` in `lighting_lamp_pick.glsl`:
 /// lamp, f32 weight (mean R), M with the kind in the top byte, f32 target
-/// (mean G), fp16 depth and fp16 blue, snorm16 normal.
+/// (mean G), f32 blue, fp16 depth and an snorm8 normal.
 pub(crate) const MEAN_RECORD_BYTES: u64 = 24;
 
 /// Picture, glow, and bounce, plus one stored direct uint when refresh is
@@ -146,8 +146,9 @@ pub(crate) fn lighting_out_bytes(pixels: u64, hist: u64, screen: u64) -> u64 {
 }
 
 /// ReSTIR reservoir bytes, then a 256-aligned window for the visibility mean.
-/// That mean used to be a second buffer. R and G stay full floats; blue and
-/// the view depth are fp16. The direct shade writes it on the reuse path.
+/// That mean used to be a second buffer. R, G, and blue stay full floats;
+/// the view depth is fp16 and the normal is snorm8. The direct shade writes
+/// it on the reuse path.
 /// Returns `(total, mean_at, mean_bytes)`. `mean_bytes` is 0 when reuse is
 /// off, and that window is not part of the total.
 pub(crate) fn restir_with_mean(
@@ -6227,9 +6228,12 @@ mod sun_step {
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
         // record, and the shown-mean age tally sit in this pass. Compose is
-        // 236_816 bytes. 240_000 still rejects a second occluder walk.
+        // 241_596 bytes. The slot count is specialization constant 1, so the
+        // compiler no longer folds LIGHTING_CACHE_SLOTS; that is the 4.8 KB
+        // over the 236_816-byte folded compile. 245_000 still rejects a
+        // second occluder walk.
         assert!(
-            LIGHTING_COMPOSE_SPV.len() < 240_000,
+            LIGHTING_COMPOSE_SPV.len() < 245_000,
             "compose SPIR-V is {} bytes",
             LIGHTING_COMPOSE_SPV.len()
         );
@@ -6649,11 +6653,10 @@ impl Gpu {
             sample.mean_m = mean_m;
             sample.mean_lamp = pack & 0xffff;
             sample.mean_vis = (pack & 0x1_0000) != 0;
-            let (_depth, blue) = crate::lighting_sh::unpack_half_2x16(words[4]);
             sample.mean_rgb = [
                 f32::from_bits(words[1]),
                 f32::from_bits(words[3]),
-                blue,
+                f32::from_bits(words[4]),
             ];
         }
         }
@@ -6931,6 +6934,10 @@ mod sh_knob_tests {
         assert!(
             pick.contains("const uint LAMP_RES_WORDS = 6u;"),
             "the mean record and the allocation drifted"
+        );
+        assert!(
+            pick.contains("lamp_res.w[base + 4u] = geo.w;"),
+            "blue must stay the caller's bits"
         );
         assert!(!pick.contains("uvec4 v[];"), "the mean record is still two uvec4s");
         let screen = include_str!("../shaders/lighting_screen.comp");

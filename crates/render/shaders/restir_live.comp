@@ -390,8 +390,10 @@ void restir_unpack_lamp_m(uint packed, out uint lamp, out uint m) {
 }
 
 // glslang has no packSnorm2x8. Low 8 bits are x, the next 8 are y.
+const float RESTIR_SNORM8_SCALE = 127.0;
+
 uint restir_float_to_snorm8(float c) {
-    int q = int(round(clamp(c, -1.0, 1.0) * 127.0));
+    int q = int(round(clamp(c, -1.0, 1.0) * RESTIR_SNORM8_SCALE));
     if (q < 0) {
         return uint(q + 256);
     }
@@ -404,7 +406,7 @@ float restir_snorm8_to_float(uint bits) {
     if (b >= 128u) {
         q -= 256;
     }
-    return clamp(float(q) / 127.0, -1.0, 1.0);
+    return clamp(float(q) / RESTIR_SNORM8_SCALE, -1.0, 1.0);
 }
 
 uint restir_pack_snorm2x8(vec2 e) {

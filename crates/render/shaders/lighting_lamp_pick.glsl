@@ -138,13 +138,15 @@ bool lamp_pick_broken() {
 
 // Running mean of fresh unbiased samples while the hold is off. Past this the
 // picture stays put and the pixel keeps tracing, so the grade sees a settled
-// integral and a non-zero ray count. R and G stay full floats: the step at a
-// few thousand samples is under an fp16 ulp, and an rgb9e5 mean went dark.
-// Blue is fp16 (about 7% of luminance). View depth is fp16. The normal stays
-// packSnorm2x16. Two slots stay when a neighbour can be reprojected.
+// integral and a non-zero ray count. R, G, and blue stay full floats: the
+// step at a few thousand samples is under an fp16 ulp, an rgb9e5 mean went
+// dark, and fp16 blue missed the noise-gate mean. View depth is fp16. The
+// normal is an octahedral snorm8, expanded back to snorm16 on load. Two
+// slots stay when a neighbour can be reprojected.
 const uint LAMP_PICK_MEAN_CAP = 4096u;
-// lamp, f32 weight, M|kind, f32 target, fp16 depth|fp16 blue, snorm16 normal.
+// lamp, f32 weight, M|kind, f32 target, f32 blue (or rgb9e5 bits), fp16 depth|snorm8 normal.
 const uint LAMP_RES_WORDS = 6u;
+const float LAMP_SNORM8_SCALE = 127.0;
 
 layout(std430, set = 0, binding = 12) buffer LampReservoirs {
     uint w[];
@@ -180,25 +182,66 @@ void lamp_res_store(uint pixel, uint slot, LampReservoir r) {
     lamp_res.w[base + 3u] = floatBitsToUint(r.target);
 }
 
-// Blue is a float for the product mean and for the hold-off mean. The exact
-// path and the non-hold sample store rgb9e5 there, and nothing reads it back.
-bool lamp_geo_blue_is_float(uint kind) {
-    return kind == LAMP_GEO_RESTIR_MEAN || (kind == LAMP_GEO_RESTIR && lamp_pick_hold_off());
+// glslang has no packSnorm2x8. Low 8 bits are x, the next 8 are y.
+uint lamp_float_to_snorm8(float c) {
+    int q = int(round(clamp(c, -1.0, 1.0) * LAMP_SNORM8_SCALE));
+    if (q < 0) {
+        return uint(q + 256);
+    }
+    return uint(q);
+}
+
+float lamp_snorm8_to_float(uint bits) {
+    uint b = bits & 0xffu;
+    int q = int(b);
+    if (b >= 128u) {
+        q -= 256;
+    }
+    return clamp(float(q) / LAMP_SNORM8_SCALE, -1.0, 1.0);
+}
+
+uint lamp_pack_snorm2x8(vec2 e) {
+    return lamp_float_to_snorm8(e.x) | (lamp_float_to_snorm8(e.y) << 8u);
+}
+
+vec3 lamp_unpack_oct8(uint bits) {
+    vec2 e = vec2(lamp_snorm8_to_float(bits), lamp_snorm8_to_float(bits >> 8u));
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        n.xy = lighting_oct_wrap(n.xy);
+    }
+    return normalize(n);
+}
+
+// Word 5. Depth is fp16 (the reject is 2% and 5 cm). The normal is an
+// octahedral snorm8 (the reject is a 0.9 dot).
+uint lamp_pack_geo_word(float depth, vec3 n) {
+    float len = abs(n.x) + abs(n.y) + abs(n.z);
+    if (len > 0.0) {
+        n /= len;
+    } else {
+        n = vec3(0.0, 1.0, 0.0);
+    }
+    vec2 e = n.z >= 0.0 ? n.xy : lighting_oct_wrap(n.xy);
+    uint depth16 = packHalf2x16(vec2(depth, 0.0)) & 0xffffu;
+    uint normal8 = lamp_pack_snorm2x8(e) & 0xffffu;
+    return depth16 | (normal8 << 16u);
 }
 
 uvec4 lamp_geo_load(uint pixel, uint slot) {
     uint base = lamp_res_index(pixel, slot);
-    vec2 db = unpackHalf2x16(lamp_res.w[base + 4u]);
+    uint packed = lamp_res.w[base + 5u];
+    float depth = unpackHalf2x16(packed & 0xffffu).x;
     uint kind = lamp_res.w[base + 2u] >> 24u;
-    return uvec4(floatBitsToUint(db.x), lamp_res.w[base + 5u], kind, floatBitsToUint(db.y));
+    // Callers still unpack a snorm16 normal. Word 4 is the caller's bits:
+    // a full float for both means, rgb9e5 for the exact path.
+    return uvec4(floatBitsToUint(depth), lighting_pack_normal(lamp_unpack_oct8(packed >> 16u)), kind, lamp_res.w[base + 4u]);
 }
 
 void lamp_geo_store(uint pixel, uint slot, uvec4 geo) {
     uint base = lamp_res_index(pixel, slot);
-    float depth = uintBitsToFloat(geo.x);
-    float blue = lamp_geo_blue_is_float(geo.z) ? uintBitsToFloat(geo.w) : 0.0;
-    lamp_res.w[base + 4u] = packHalf2x16(vec2(depth, blue));
-    lamp_res.w[base + 5u] = geo.y;
+    lamp_res.w[base + 4u] = geo.w;
+    lamp_res.w[base + 5u] = lamp_pack_geo_word(uintBitsToFloat(geo.x), lighting_unpack_normal(geo.y));
     uint m = lamp_res.w[base + 2u] & 0x00ffffffu;
     lamp_res.w[base + 2u] = m | ((geo.z & 255u) << 24u);
 }
