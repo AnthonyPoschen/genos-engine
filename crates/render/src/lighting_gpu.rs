@@ -275,6 +275,8 @@ pub(crate) struct Lighting {
     draining: bool,
     /// The last read cache round's batch entries, 16 rays each (stats word 147).
     round_entries: u32,
+    /// Cache rays that round actually traced (stats word 16). Scouts are not in this.
+    cache_rays: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -513,6 +515,9 @@ pub struct SettleStats {
     pub draining: bool,
     /// The last read cache round's batch entries (16 rays each), a few frames old.
     pub round_entries: u32,
+    /// Cache rays traced that round (texels and world cells, not scouts), a few
+    /// frames old. Zero means the round dispatched no cache rays.
+    pub cache_rays: u32,
 }
 
 impl Default for Lighting {
@@ -596,6 +601,7 @@ impl Default for Lighting {
             light_quiet: 0,
             draining: false,
             round_entries: 0,
+            cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -1547,6 +1553,7 @@ impl Gpu {
             still_frames: self.lighting.still,
             draining: self.lighting.draining,
             round_entries: self.lighting.round_entries,
+            cache_rays: self.lighting.cache_rays,
         }
     }
 
@@ -1910,6 +1917,9 @@ impl Gpu {
             if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
                 self.lighting.round_entries = e;
             }
+            if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
+                self.lighting.cache_rays = rays;
+            }
         }
         let read = lighting_stats_wanted(
             self.lighting.settings.world_mode(),
@@ -2111,6 +2121,7 @@ impl Gpu {
             head.copy_from_slice(&words[..8]);
             self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
             self.lighting.round_entries = words[LIGHTING_DRAIN_WORD + 3];
+            self.lighting.cache_rays = words[LIGHTING_CACHE_RAYS_WORD];
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -5269,9 +5280,12 @@ const LIGHTING_UNFILLED_MASK_AT: usize = 148;
 /// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
 /// Word 147: the round's batch entries (16 rays each).
 const LIGHTING_DRAIN_WORD: usize = 144;
+/// Word 16: cache rays traced this round (`CacheStats.rays`). Scouts are word 19.
+const LIGHTING_CACHE_RAYS_WORD: usize = 16;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
+const _: () = assert!(LIGHTING_CACHE_RAYS_WORD < LIGHTING_STATS_WORDS);
 const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == LIGHTING_UNFILLED_WORD);
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 

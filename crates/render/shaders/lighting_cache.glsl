@@ -520,13 +520,11 @@ const uint LIGHTING_WRC_LAMPS_AT = LIGHTING_SC_HIST_AT + 68u;
 // the most a round may burst (each takes 4 entries).
 const uint LIGHTING_WRC_BURST_COUNT_AT = LIGHTING_SC_HIST_AT + 70u;
 const uint LIGHTING_WRC_BURST_MAX = 2048u;
-// S65A two-tier updates (Anthony): a due texel whose light changes little (the
-// estimator's inconsistency under LIGHTING_SC_TRICKLE_THR standard deviations, with
-// its own history, no local change) takes a trickle of one 16-ray entry (the smallest the batch
-// holds; its quarters add up to a set over updates, Lumen's few rays per texel
-// accumulated temporally) from its own list of at most LIGHTING_SC_TRICKLE entries a
-// round. The rest are ranked by how much their light changes and take whole sets
-// from the main batch, so a big change syncs in a few rounds. Both are ceilings.
+// A matched cell whose change is under LIGHTING_SC_TRICKLE_THR takes one 16-ray
+// entry on the main list when it is due. The side list below stays in the
+// buffer layout and is not filled: a 4096 cap gave the overflow zero rays.
+// An unmatched cell stays on the main list at a whole set, ranked by its
+// remaining error, up to the same batch ceiling.
 const float LIGHTING_SC_TRICKLE_THR = 0.173;
 const float LIGHTING_SC_LAMP_K = 1.0;
 // S65C anti-lag (ReBLUR / A-SVGF): a set further than LIGHTING_SC_ANTILAG_SD standard
@@ -3495,30 +3493,25 @@ const uint LIGHTING_SC_QUARTERS = LIGHTING_SC_SET_RAYS / LIGHTING_CACHE_RAYS;
 const float LIGHTING_SC_SETTLE_SD = 0.15;
 const float LIGHTING_SC_UNSETTLED_W = 4.0;
 const float LIGHTING_SC_FULL_INC = 1.0;
-// Settled (S59D, Anthony: "settling too soon ... splotchy"): LIGHTING_SC_FULL_SETS
-// whole sets in its mean (or, while the light changes, the whole window) AND the
-// GIBS estimator running with its short-term mean within 0.3 standard deviations
-// of the long-term one (the dormancy test's agreement). Under changing light the
-// estimator restarts every relight, so nothing settles: whole sets throughout.
+// Settled only at a full set count, with the estimator agreeing and the
+// relative noise under the denoise target. A real zero has no relative error
+// and matches on agreement. Eight quiet sets used to count as settled and the
+// cell then stopped taking rays while the picture was still blotchy.
 bool lighting_sc_settled(uint slot, float t) {
     float reach = LIGHTING_SC_FULL_SETS;
     if (cache.v[3u * slot + 1u].w > 0.2) {
         // A WRC cell: settled at its cap (or the window under changing light).
         return floor(t) >= LIGHTING_WRC_CAP - 0.5;
     }
-    // Below a full set count the cell stays due. The perceptual stop used to
-    // fire at LIGHTING_DN_MIN_SETS when the relative error looked small, which
-    // a zero mean always does.
     if (floor(t) < reach - 0.5) {
         return false;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-    // S62A perceptual stop: quiet enough to the eye counts as settled.
-    vec2 nz = lighting_sc_noise(slot);
-    if (lighting_sc_light_quiet() && floor(t) >= LIGHTING_DN_MIN_SETS && nz.x >= 0.0 && nz.x < lighting_dn_target(slot) && b.y < LIGHTING_SC_SETTLE_SD) {
-        return true;
+    if (!(b.x > 0.0) || !(b.y < LIGHTING_SC_SETTLE_SD)) {
+        return false;
     }
-    return floor(t) >= reach - 0.5 && b.x > 0.0 && b.y < LIGHTING_SC_SETTLE_SD;
+    vec2 nz = lighting_sc_noise(slot);
+    return nz.x < 0.0 || nz.x < lighting_dn_target(slot);
 }
 // S64A rate-based scheduling (Anthony: "the budget is a ceiling, not a target").
 // A texel is relit only once it is due: its interval (frames) comes from how
@@ -3551,10 +3544,8 @@ uint lighting_sc_interval(uint slot, float t) {
         return 0u;
     }
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-    // S64C: not yet settled (lighting_sc_settled: the perceptual stop or the full
-    // sets with agreement) = due every round. S64A asked for LIGHTING_SC_FULL_SETS
-    // sets as well, which texels the perceptual stop settles early never
-    // reach: nothing ever waited (stats: waiting 0).
+    // Not settled (full sets, agreement, and noise under the denoise target)
+    // means due every round.
     if (!lighting_sc_settled(slot, t) || lighting_sc_stale(slot)) {
         return 0u;
     }

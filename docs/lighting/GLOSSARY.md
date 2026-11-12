@@ -120,7 +120,7 @@ Role: SAMPLE · Literature: GIBS surfel rays; DDGI probe rays
 **Compact**: rebuilds the live-entry list each round and frees entries nobody has read.
 Role: SCHED · Literature: GIBS recycling heuristic (§1.4) · More detail: [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp)
 
-**Trickle**: the lowest relight tier. Settled entries that are still slightly inconsistent get an occasional relight.
+**Trickle**: an occasional relight of a matched cell whose change is under the trickle threshold. It is one 16-ray entry on the main list when that cell is due. A cell that has not matched is not on this tier.
 Role: SCHED · Literature: GIBS variance-driven ray count (§1.12, partial) · More detail: S65A in [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp); S78H
 
 **Pre-fill**: gives a newly seen entry a usable value on the frame it appears (coarse-to-fine), so the picture never shows missing light. Required by rule.

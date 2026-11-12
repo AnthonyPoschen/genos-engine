@@ -327,8 +327,8 @@ void main() {
                                 ckeys.key[LIGHTING_GRAD_LIST_AT + at] = slot;
                             }
                         }
-                        atomicAdd(gstats.waiting, 1u);
-                        return;
+                        // A resolved cell used to take no rays for LIGHTING_ASVGF_AGE
+                        // frames. That baked the blotch. It stays on the main list.
                     }
                 } else if (lam >= LIGHTING_ASVGF_EPS && !lighting_sc_lambda_fresh(slot)) {
                     // Spent: its rays are out; wait for the next check.
@@ -365,7 +365,7 @@ void main() {
             // the lighting changes). Under a moving sun texels relit at different
             // rounds held light of different moments and the luminance stop kept
             // those groups apart (dawn camouflage).
-            if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_local_change(slot, mover_ic)) {
+            if (!wrc && lighting_sc_svgf() && lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE && !near && lighting_sc_settled(slot, t) && t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_local_change(slot, mover_ic)) {
                 uint per = lighting_ic_period(slot);
                 if (per > 1u && ((lighting_hash(lighting_sc_id(slot) ^ 0x68e31da4u) + lighting_round()) % per) != 0u) {
                     lighting_dg(31u, 1u);
@@ -405,7 +405,7 @@ void main() {
             bool mover_l2;
             // S72V3: under SVGF a settled IC site (a record, Ward 1988: kept
             // until the light changes) is relit one round in 4 [inferred rate].
-            if (!wrc && lighting_sc_layer2() && (!lighting_sc_svgf() || lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE) && !near && t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
+            if (!wrc && lighting_sc_layer2() && (!lighting_sc_svgf() || lighting_sc_global_change(slot) < LIGHTING_IC_GLOBAL_STALE) && !near && lighting_sc_settled(slot, t) && t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_promoted(slot) && !lighting_sc_local_change(slot, mover_l2)) {
                 float sup = lighting_sc_svgf() ? LIGHTING_SC_L2_FLAT : cache.v[LIGHTING_SC_SPARSE_AT + slot].w;
                 uint lv = lighting_sc_level(slot);
                 uint every = lighting_sc_svgf() ? 4u : (lv == 0u ? 4u : (lv == 1u ? 2u : 1u));
@@ -427,19 +427,6 @@ void main() {
             // S65C: the change is the larger of the estimator's measure and the
             // moved lamps' delta at the texel (LIGHTING_SC_LAMP_K per unit ratio).
             float chg = est.x > 0.0 ? max(max(max(est.y, 0.0), LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot)), lighting_sc_global_change(slot)) : 1.0e9;
-            bool mover_t;
-            // Eligible once it has its own history (LIGHTING_DN_MIN_SETS sets and the
-            // estimator running), settled or not: the threshold alone splits.
-            if (est.x > 0.0 && t >= LIGHTING_SC_FULL_SETS - 0.5 && chg < LIGHTING_SC_TRICKLE_THR && !lighting_sc_local_change(slot, mover_t)) {
-                // S65A trickle tier.
-                uint at = atomicAdd(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], 1u);
-                if (at < LIGHTING_SC_TRICKLE) {
-                    ckeys.key[LIGHTING_SC_TRICKLE_AT + at] = slot;
-                    atomicAdd(gstats.pad2, 1u);
-                    lighting_dg(15u, 1u);
-                }
-                return;
-            }
             float cap = lighting_sc_cap(slot);
             // Hit patches taking each relight whole (flag 131072) hold at most
             // LIGHTING_CACHE_MATURE sets: they weigh against that, not the pixel cap
@@ -452,10 +439,15 @@ void main() {
                 w *= d < LIGHTING_WRC_NEAR ? 2.0 : 0.5;
             }
             if (!settled_now) {
-                // Not settled: never below twice a settled texel's priority.
+                // Not settled: never below an unsettled texel's floor, then by
+                // remaining error (relative noise over the denoise target).
+                // A missing estimator ranks with the young cells.
                 w = max(w, LIGHTING_SC_UNSETTLED_W);
+                vec2 nz = lighting_sc_noise(slot);
+                float err = nz.x >= 0.0 ? nz.x / max(lighting_dn_target(slot), 1.0e-6) : 4.0;
+                w *= 1.0 + err;
             } else {
-                // S65A: settled above the trickle threshold, ranked by its change.
+                // Matched: ranked by its change. One entry when the change is low.
                 w *= 1.0 + LIGHTING_SC_RATE_K * min(chg, 8.0);
             }
             if ((lighting_sc_flags() & 1048576u) != 0u && t >= cap - 0.5 && lighting_sc_dormant(slot)) {

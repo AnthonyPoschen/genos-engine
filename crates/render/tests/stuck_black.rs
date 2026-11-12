@@ -68,11 +68,18 @@ fn eight_zero_sets_are_not_resolved() {
 
     let settled = function_body(cache, "bool lighting_sc_settled(uint slot, float t)");
     assert!(settled.contains("floor(t) < reach - 0.5"));
+    assert!(
+        !settled.contains("LIGHTING_DN_MIN_SETS"),
+        "eight sets must not settle a cell"
+    );
+    assert!(settled.contains("lighting_dn_target(slot)"));
 
     let compact = include_str!("../shaders/lighting_compact.comp");
-    assert!(compact.contains(
-        "t >= LIGHTING_SC_FULL_SETS - 0.5 && chg < LIGHTING_SC_TRICKLE_THR"
-    ));
+    assert!(
+        !compact.contains("LIGHTING_SC_TRICKLE_COUNT_AT"),
+        "a low-change cell must not leave on the capped trickle list"
+    );
+    assert!(compact.contains("nz.x / max(lighting_dn_target(slot)"));
     assert!(compact.contains(
         "t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_local_change(slot, mover_ic)"
     ));

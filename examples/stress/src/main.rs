@@ -1024,10 +1024,11 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.settle_stats();
     format!(
-        "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+        "stable: {}\nstill_frames: {}\npicture_settled: {}\ncache_rays: {}\n",
         stats.settled,
         stats.still_frames,
         renderer.picture_settled(),
+        stats.cache_rays,
     )
 }
 
