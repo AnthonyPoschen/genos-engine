@@ -581,6 +581,28 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+    /// Metres from the player inside which a 12.5 cm texel is created for a
+    /// surface the world cache already hit, on screen or not.
+    /// `0` creates none. Key `surface_cache.fine_lod_create`.
+    pub fine_lod_create: f32,
+    /// Metres past which an off-screen 12.5 cm texel is dropped. Farther than
+    /// `fine_lod_create`, so a surface is not created and destroyed on the
+    /// same edge. `0` does not drop by distance. Key `surface_cache.fine_lod_drop`.
+    pub fine_lod_drop: f32,
+    /// Metres the create and drop distances stretch ahead of the player's
+    /// motion and turn. `0` keeps the band centred on the player.
+    /// Key `surface_cache.fine_lod_lookahead`.
+    pub fine_lod_lookahead: f32,
+    /// Share of the fixed texel ray room reserved for off-screen fine texels
+    /// inside the drop distance. `0` reserves none. Clamped to `0.5`.
+    /// Key `surface_cache.fine_budget_share`.
+    pub fine_budget_share: f32,
+    /// Priority multiplier for a fine texel a pixel is showing. `1` is no boost.
+    /// Key `surface_cache.fine_screen_boost`.
+    pub fine_screen_boost: f32,
+    /// How strongly closeness raises priority. `0` leaves ranking to remaining
+    /// error and measured change. Key `surface_cache.fine_close_boost`.
+    pub fine_close_boost: f32,
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -887,6 +909,12 @@ impl LightingSettings {
                 sh_texel_ray_cut: true,
                 sh_probe_retire: true,
                 drain_sigma: 4.0,
+                fine_lod_create: 6.0,
+                fine_lod_drop: 8.0,
+                fine_lod_lookahead: 2.0,
+                fine_budget_share: 0.10,
+                fine_screen_boost: 1.5,
+                fine_close_boost: 0.25,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -964,6 +992,18 @@ impl LightingSettings {
         } else {
             4.0
         };
+        self.surface_cache.fine_lod_create = finite_nonneg(self.surface_cache.fine_lod_create, 6.0).min(64.0);
+        self.surface_cache.fine_lod_drop = finite_nonneg(self.surface_cache.fine_lod_drop, 8.0)
+            .max(self.surface_cache.fine_lod_create)
+            .min(96.0);
+        self.surface_cache.fine_lod_lookahead =
+            finite_nonneg(self.surface_cache.fine_lod_lookahead, 2.0).min(32.0);
+        self.surface_cache.fine_budget_share =
+            finite_nonneg(self.surface_cache.fine_budget_share, 0.10).min(0.5);
+        self.surface_cache.fine_screen_boost =
+            finite_nonneg(self.surface_cache.fine_screen_boost, 1.5).clamp(1.0, 8.0);
+        self.surface_cache.fine_close_boost =
+            finite_nonneg(self.surface_cache.fine_close_boost, 0.25).min(8.0);
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1322,6 +1362,36 @@ impl LightingSettings {
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_create={}",
+            num_text(self.surface_cache.fine_lod_create)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_drop={}",
+            num_text(self.surface_cache.fine_lod_drop)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_lookahead={}",
+            num_text(self.surface_cache.fine_lod_lookahead)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_budget_share={}",
+            num_text(self.surface_cache.fine_budget_share)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_screen_boost={}",
+            num_text(self.surface_cache.fine_screen_boost)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_close_boost={}",
+            num_text(self.surface_cache.fine_close_boost)
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1536,6 +1606,28 @@ impl LightingSettings {
                     ));
                 }
                 self.surface_cache.drain_sigma = sigma;
+            }
+            "surface_cache.fine_lod_create" => {
+                self.surface_cache.fine_lod_create = nonneg_f32("surface_cache.fine_lod_create", value)?;
+            }
+            "surface_cache.fine_lod_drop" => {
+                self.surface_cache.fine_lod_drop = nonneg_f32("surface_cache.fine_lod_drop", value)?;
+            }
+            "surface_cache.fine_lod_lookahead" => {
+                self.surface_cache.fine_lod_lookahead =
+                    nonneg_f32("surface_cache.fine_lod_lookahead", value)?;
+            }
+            "surface_cache.fine_budget_share" => {
+                self.surface_cache.fine_budget_share =
+                    nonneg_f32("surface_cache.fine_budget_share", value)?;
+            }
+            "surface_cache.fine_screen_boost" => {
+                self.surface_cache.fine_screen_boost =
+                    nonneg_f32("surface_cache.fine_screen_boost", value)?;
+            }
+            "surface_cache.fine_close_boost" => {
+                self.surface_cache.fine_close_boost =
+                    nonneg_f32("surface_cache.fine_close_boost", value)?;
             }
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
@@ -1806,6 +1898,30 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
                 "surface_cache.sh_probe_retire",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_CREATE",
+                "surface_cache.fine_lod_create",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_DROP",
+                "surface_cache.fine_lod_drop",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_LOOKAHEAD",
+                "surface_cache.fine_lod_lookahead",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_BUDGET_SHARE",
+                "surface_cache.fine_budget_share",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_SCREEN_BOOST",
+                "surface_cache.fine_screen_boost",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_CLOSE_BOOST",
+                "surface_cache.fine_close_boost",
             ),
         ];
         for (var, key) in keys {
@@ -2445,6 +2561,22 @@ fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
         Ok(sigma)
     } else {
         Err(format!("expected a non-negative number, got {value}"))
+    }
+}
+
+fn nonneg_f32(key: &str, value: &str) -> Result<f32, String> {
+    let n = num_f32(value)?;
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("{key} is a non-negative number, got {value}"));
+    }
+    Ok(n)
+}
+
+fn finite_nonneg(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
     }
 }
 

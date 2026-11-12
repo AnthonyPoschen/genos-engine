@@ -63,7 +63,7 @@ void main() {
     if (LIGHTING_COMPACT_LIST && lighting_world_mode() == 3u && !(cache.v[3u * slot + 1u].w > 0.2)) {
         uint last0 = floatBitsToUint(cache.v[3u * slot].w);
         bool due0 = lighting_sc_check_next(slot) != 0u && lighting_sc_check_due(slot);
-        if (int(lighting_frame() - last0) > 60 && !due0 && ((lighting_hash(lighting_sc_id(slot) ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
+        if (int(lighting_frame() - last0) > 60 && !due0 && !lighting_fine_keep_visiting(slot) && ((lighting_hash(lighting_sc_id(slot) ^ 0x2545f491u) + lighting_round()) % LIGHTING_COMPACT_IDLE) != 0u) {
             return;
         }
     }
@@ -123,6 +123,9 @@ void main() {
         // LIGHTING_WRC_YOUNG sets are the reveal burst: young, whole sets. New fine
         // texels start from the WRC (lighting_sc_resample) and take their turn.
         bool wrc = cache.v[3u * slot + 1u].w > 0.2;
+        if (wrc) {
+            lighting_fine_spawn(slot);
+        }
         // S62B: the burst ends at what the cell can hold now (under changing
         // light lighting_sc_count keeps it to the light window, 8 samples, which never
         // reached LIGHTING_WRC_YOUNG = 16: every needed cell stayed a burst and took
@@ -142,6 +145,9 @@ void main() {
         // every round instead of a whole set one round in the turns: the bounce
         // chain through the cells moves one bounce a round, not one a cycle.
         bool settling = lighting_lamp_settling();
+        if (lighting_fine_schedule(slot, t, on_screen)) {
+            return;
+        }
         // The ring is written in the cache pass, after this list. On the
         // change frame settling is still false and a relight would replace
         // the stored ray before the check could read it.
@@ -349,7 +355,7 @@ void main() {
                     cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
                     lighting_sc_check_soon(slot);
                     lighting_dg(2u, 1u); lighting_dg(3u, mm);
-                    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], mm);
+                    uint at = lighting_young_at(mm);
                     for (uint i = 0u; i < mm; i++) {
                         ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
                     }
@@ -464,6 +470,20 @@ void main() {
             if (sparse_c && t < LIGHTING_DN_MIN_SETS - 0.5) {
                 w *= lvl == 2u ? 4.0 : (lvl == 1u ? 2.0 : 1.0);
             }
+            if (!wrc) {
+                float boost = lighting_fine_word(LIGHTING_FINE_BOOST_AT);
+                if (boost > 1.0 && on_screen) {
+                    w *= boost;
+                }
+                float close = lighting_fine_word(LIGHTING_FINE_CLOSE_AT);
+                float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
+                if (close > 0.0 && drop > 0.0) {
+                    float reach = lighting_fine_reach(lighting_sc_texel_pos(slot));
+                    if (reach < drop) {
+                        w *= 1.0 + close * (1.0 - clamp(reach / drop, 0.0, 1.0));
+                    }
+                }
+            }
             uint b = uint(clamp(log2(1.0 + float(used) * w) * 4.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
             // Whole 64-ray sets until settled, and above the trickle threshold.
             bool full = !settled_now || chg >= LIGHTING_SC_TRICKLE_THR || (est.x > 0.0 && est.y > LIGHTING_SC_FULL_INC);
@@ -502,7 +522,7 @@ void main() {
         uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
-            uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
+            uint at = lighting_young_at(m);
             for (uint i = 0u; i < m; i++) {
                 ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
             }
@@ -516,7 +536,7 @@ void main() {
     }
     uint m = lighting_sc_entries(slot, true);
     if (near || t < LIGHTING_CACHE_MATURE - 0.5) {
-        uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
+        uint at = lighting_young_at(m);
         for (uint i = 0u; i < m; i++) {
             ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
         }
