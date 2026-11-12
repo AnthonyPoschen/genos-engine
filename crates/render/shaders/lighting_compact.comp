@@ -444,7 +444,7 @@ void main() {
                 // A missing estimator ranks with the young cells.
                 w = max(w, LIGHTING_SC_UNSETTLED_W);
                 vec2 nz = lighting_sc_noise(slot);
-                float err = nz.x >= 0.0 ? nz.x / max(lighting_dn_target(slot), 1.0e-6) : 4.0;
+                float err = nz.x >= 0.0 ? nz.x / lighting_dn_target(slot) : LIGHTING_SC_UNSETTLED_W;
                 w *= 1.0 + err;
             } else {
                 // Matched: ranked by its change. One entry when the change is low.

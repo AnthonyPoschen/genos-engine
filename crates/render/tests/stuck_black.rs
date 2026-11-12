@@ -79,7 +79,7 @@ fn eight_zero_sets_are_not_resolved() {
         !compact.contains("LIGHTING_SC_TRICKLE_COUNT_AT"),
         "a low-change cell must not leave on the capped trickle list"
     );
-    assert!(compact.contains("nz.x / max(lighting_dn_target(slot)"));
+    assert!(compact.contains("nz.x / lighting_dn_target(slot)"));
     assert!(compact.contains(
         "t >= LIGHTING_SC_FULL_SETS - 0.5 && !lighting_sc_local_change(slot, mover_ic)"
     ));
