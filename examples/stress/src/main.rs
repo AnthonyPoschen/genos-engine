@@ -210,8 +210,9 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             The argument wins. When --gpu-times was omitted
                             this turns timestamps on every frame. One row per
                             collected timestamp frame, one frame behind the
-                            draw. Shade includes its visibility ray. Lavapipe
-                            milliseconds are not a 4070 result
+                            draw. The first two draws have no sample. Shade
+                            includes its visibility ray. Lavapipe milliseconds
+                            are not a 4070 result
   --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
@@ -1522,7 +1523,7 @@ fn open_pass_profile(path: &std::path::Path) -> Result<std::io::BufWriter<std::f
     let mut out = std::io::BufWriter::new(file);
     writeln!(
         out,
-        "frame,candidates_ms,temporal_ms,spatial_ms,prepare_ms,shade_visibility_ms,cache_hit_shading_ms,cache_round_ms,sh_prep_ms,cache_rays_ms,compose_ms,filter_ms,direct_ms"
+        "frame,candidates_ms,temporal_ms,spatial_ms,prepare_ms,shade_visibility_ms,cache_hit_shading_ms,cache_round_ms,sh_prep_ms,cache_rays_ms,compose_ms,filter_ms,direct_ms,compact_ms,lighting_span_ms"
     )
     .map_err(|err| format!("--profile-passes: {err}"))?;
     Ok(out)
@@ -1536,15 +1537,17 @@ fn write_pass_row(
     // One frame behind this draw. Shade is the direct dispatch, so its
     // visibility ray is inside shade_visibility_ms. cache_round_ms is pass 6,
     // the relight (the `cache` column of LIGHTING_MS). sh_prep_ms is pass 9;
-    // the cache bucket counts it with the relight. cache_rays_ms is the ray
-    // dispatch. filter_ms is the a-trous wavelet. direct_ms is the direct
-    // bucket (the `light_px` column: candidates, temporal, spatial, and shade).
+    // the nine-wide LIGHTING_MS total leaves it out. compact_ms is pass 0.
+    // cache_rays_ms is the ray dispatch. filter_ms is the a-trous wavelet.
+    // direct_ms is the direct bucket (the `light_px` column: candidates,
+    // temporal, spatial, and shade). lighting_span_ms is the GPU_MS lighting
+    // column for this collected frame.
     let restir = renderer.lighting_restir_last_ms();
     let pass = renderer.lighting_pass_ms();
     let id = renderer.lighting_pass_id_ms();
     writeln!(
         out,
-        "{frame},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+        "{frame},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
         restir[0],
         restir[1],
         restir[2],
@@ -1557,6 +1560,8 @@ fn write_pass_row(
         pass[7],
         pass[8],
         pass[3],
+        id[0],
+        renderer.lighting_span_ms(),
     )
     .map_err(|err| format!("--profile-passes: {err}"))?;
     out.flush()

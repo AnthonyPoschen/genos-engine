@@ -692,6 +692,15 @@ impl Renderer {
         self.gpu.lighting.pass_id_ms
     }
 
+    /// Bottom-of-pipe lighting span of the last collected frame, milliseconds.
+    ///
+    /// The `lighting` column of `GPU_MS` for that frame. Pass 9 (SH prep) and
+    /// the prepare stamp are inside this span and outside the nine-wide
+    /// `LIGHTING_MS` total. One frame behind the draw that just returned.
+    pub fn lighting_span_ms(&self) -> f64 {
+        self.gpu.lighting_span_ms()
+    }
+
     /// Surface-cache counters from the latest world round, or the frame copy
     /// when that round has not written yet.
     ///
@@ -4334,9 +4343,15 @@ impl Gpu {
         if got != 0 {
             return;
         }
+        let mut lighting_span = 0.0;
         if times.print {
             for (k, w) in raw.windows(2).enumerate() {
-                times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                // Span 2 is gbuffer bottom to lighting bottom: the GPU_MS lighting column.
+                if k == 2 {
+                    lighting_span = ms;
+                }
+                times.frame[k] += ms;
             }
             times
                 .frame_spans
@@ -4470,6 +4485,7 @@ impl Gpu {
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
                 self.lighting.pass_id_ms = pass_id_ms;
+                self.lighting.span_ms = lighting_span;
                 self.lighting.pass_samples = self.lighting.pass_samples.saturating_add(1);
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
@@ -4588,28 +4604,7 @@ impl Gpu {
             let [local, all] = self.upload_local.get();
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
-        let pool = times.pool;
-        let lighting_pool = times.lighting_pool;
-        let print = times.print;
-        let record = times.record;
-        let samples = std::mem::take(&mut times.samples);
-        let recorded = times.recorded;
-        let pending_world_rays = times.pending_world_rays;
-        let pending_world_relit = times.pending_world_relit;
-        **times = GpuTimes {
-            pool,
-            lighting_pool,
-            written: times.written,
-            every: times.every,
-            placed: true,
-            print,
-            record,
-            samples,
-            recorded,
-            pending_world_rays,
-            pending_world_relit,
-            ..GpuTimes::default()
-        };
+        roll_printed_times(times);
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -10395,6 +10390,40 @@ const RESTIR_PREPARE_AT: u32 = 36;
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
 
+/// Drop the printed sums. The other flight slot's pass list is still unread.
+///
+/// A print every frame used to replace `lighting_ids` with two empty vecs.
+/// The slot that had not been collected yet then had no pass list, the
+/// lighting queries were skipped, and `pass_samples` moved once per run.
+fn roll_printed_times(times: &mut GpuTimes) {
+    let pool = times.pool;
+    let lighting_pool = times.lighting_pool;
+    let written = times.written;
+    let every = times.every;
+    let print = times.print;
+    let record = times.record;
+    let samples = std::mem::take(&mut times.samples);
+    let recorded = times.recorded;
+    let pending_world_rays = times.pending_world_rays;
+    let pending_world_relit = times.pending_world_relit;
+    let lighting_ids = std::mem::take(&mut times.lighting_ids);
+    *times = GpuTimes {
+        pool,
+        lighting_pool,
+        written,
+        every,
+        placed: true,
+        print,
+        record,
+        samples,
+        recorded,
+        pending_world_rays,
+        pending_world_relit,
+        lighting_ids,
+        ..GpuTimes::default()
+    };
+}
+
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
     let mut total = 0.0;
@@ -10478,6 +10507,26 @@ mod pass_time_tests {
         let nonlight = 0.20 + 1.50 + 0.30 + 0.15 + 0.15;
         assert!((times.nonlight - nonlight).abs() < 1e-9);
         assert!((times.frame - (nonlight + 8.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_print_keeps_the_unread_slot_pass_list() {
+        let mut times = super::GpuTimes::default();
+        times.every = 1;
+        times.lighting_ids[1] = vec![3, 9, 7];
+        let _taken = std::mem::take(&mut times.lighting_ids[0]);
+        super::roll_printed_times(&mut times);
+        assert!(
+            times.lighting_ids[0].is_empty(),
+            "the slot just collected stays empty until the next record"
+        );
+        assert_eq!(
+            times.lighting_ids[1],
+            vec![3, 9, 7],
+            "the other slot's pass list is read on the next frame"
+        );
+        assert!(times.placed);
+        assert_eq!(times.every, 1);
     }
 }
 

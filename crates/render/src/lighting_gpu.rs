@@ -419,8 +419,13 @@ pub(crate) struct Lighting {
     /// How many frames have written `last_ms`. The CSV writes one row per step.
     pass_samples: u32,
     /// Last collected frame by dispatch pass id. Index 6 is the cache relight,
-    /// index 9 is the SH prep. The cache bucket sums both.
+    /// index 9 is the SH prep. The cache bucket sums both. The `LIGHTING_MS`
+    /// line is nine pass ids, so pass 9 is not in that total.
     pass_id_ms: [f64; 10],
+    /// Bottom-of-pipe lighting span of the last collected frame, the `lighting`
+    /// column of `GPU_MS`. Pass 9 and the prepare stamp sit in this span and
+    /// outside the nine-wide `LIGHTING_MS` total.
+    span_ms: f64,
     /// Flight slot whose host stats were copied on the last submitted frame.
     stats_slot: usize,
     /// Bloom plus the display pass. Zero when timestamps are off.
@@ -696,6 +701,7 @@ impl Default for Lighting {
             restir_ms_last: [0.0; 5],
             pass_samples: 0,
             pass_id_ms: [0.0; 10],
+            span_ms: 0.0,
             stats_slot: 0,
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
@@ -6299,6 +6305,14 @@ impl Gpu {
     /// frame lands. Shade includes that dispatch's visibility ray.
     pub(crate) fn lighting_restir_last_ms(&self) -> [f64; 5] {
         self.lighting.restir_ms_last
+    }
+
+    /// Bottom-of-pipe lighting span of the last collected frame.
+    ///
+    /// The same window as the `lighting` column of `GPU_MS`. One frame behind
+    /// the draw that just returned.
+    pub(crate) fn lighting_span_ms(&self) -> f64 {
+        self.lighting.span_ms
     }
 
     /// Mean of the collected ReSTIR stamps. Zeros until a timestamped frame lands.

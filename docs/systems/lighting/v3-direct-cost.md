@@ -98,8 +98,48 @@ The 25 cm cells are already filled off-screen, and the ray budget is already sat
 
 ## 4070 pass profile
 
-Lavapipe milliseconds are not a 4070 result. `--profile-passes FILE` writes one CSV row per collected timestamp frame from the same GPU timestamps. A draw with no new sample does not add a row. The row is one frame behind the draw. `shade_visibility_ms` is the direct shade dispatch and includes its visibility ray. `cache_hit_shading_ms` is the hit-light dispatch. `cache_round_ms` is pass 6, the relight, the same work as the `cache` column of `LIGHTING_MS`. `sh_prep_ms` is pass 9. The cache bucket counts that prep with the relight, so the bucket is the sum of those two columns. `cache_rays_ms` is the ray dispatch of the round. `filter_ms` is a-trous. `direct_ms` is the direct bucket, the `light_px` column (candidates, temporal, spatial, and shade). Temporal is fused into the candidate stamp unless the passes are split, so that column stays near empty. An omitted `--gpu-times` turns timestamps on every frame. `GENOS_PROFILE_PASSES` is the path only when the argument was omitted.
+Lavapipe milliseconds are not a 4070 result. `--profile-passes FILE` writes one CSV row per collected timestamp frame from the same GPU timestamps. A draw with no new sample adds nothing. The first two draws have no sample, because each flight slot is read on its second use. The row is one frame behind the draw. `shade_visibility_ms` is the direct shade dispatch and includes its visibility ray. `cache_hit_shading_ms` is the hit-light dispatch. `cache_round_ms` is pass 6, the relight, the same work as the `cache` column of `LIGHTING_MS`. `sh_prep_ms` is pass 9. The nine-wide `LIGHTING_MS` total leaves pass 9 out, so that line's total is not the lighting span. The cache bucket counts the prep with the relight. `cache_rays_ms` is the ray dispatch of the round. `filter_ms` is a-trous. `direct_ms` is the direct bucket, the `light_px` column (candidates, temporal, spatial, and shade). `compact_ms` is pass 0. `lighting_span_ms` is the `lighting` column of `GPU_MS` for that collected frame. Temporal is fused into the candidate stamp unless the passes are split, so that column stays near empty. An omitted `--gpu-times` turns timestamps on every frame. `GENOS_PROFILE_PASSES` is the path only when the argument was omitted.
+
+A print every frame used to replace the timestamp record with a fresh one and drop `lighting_ids`. The other flight slot's pass list had not been read yet, so the next collect skipped the lighting queries. `fd9bb4de` on the 4070 wrote one CSV row, frame 3, out of 90 draws. The print now keeps that unread list. The same run's `GPU_MS` lines were already one per frame. An 8-frame lavapipe run at 320×180 wrote rows 3 through 8, and `lighting_span_ms` matched that frame's `GPU_MS` lighting column. A 90-frame run writes 88 rows. The first two draws have nothing to read, and the last submission of each slot is still in flight when the process exits.
 
 ```
 cargo run --release -p genos-stress -- --proof --size 2560x1440 --preset high --frames 90 --still-boxes --freeze-sun --dynamic 0 --profile-passes ./genos-debug/passes.csv
 ```
+
+### Frame 3 on the 4070, 2560×1440, High, still
+
+`fd9bb4de`, the one collected row. It is the first frame's GPU work (the first time slot 0 was read). `compose_valid` starts false, so maintenance and compose cover the whole picture. The cache is empty: `cache_rays` 0.040 ms, relight 0.010 ms.
+
+| Column | ms |
+|---|---:|
+| candidates (4 per pixel; temporal is fused into this stamp) | 2.170 |
+| temporal | 0.000 |
+| spatial | 2.370 |
+| prepare | 0.486 |
+| shade + visibility | 2.940 |
+| direct (candidates + temporal + spatial + shade) | 7.480 |
+| cache-hit shading | 0.432 |
+| cache round (pass 6, relight) | 0.010 |
+| sh prep (pass 9) | 10.385 |
+| cache rays | 0.040 |
+| compose | 6.201 |
+| filter (a-trous) | 0.682 |
+| compact (`LIGHTING_MS`, not in that CSV) | 0.035 |
+
+`LIGHTING_MS` total on that print is 14.881. Pass 9 is not one of its nine slots, so that total leaves out the 10.385 ms of sh prep. 14.881 + 10.385 + prepare 0.486 = 25.752. The same print's `GPU_MS` lighting span is 26.646. The 0.9 ms left is the full-frame image copy into the lighting buffer, the copy back out, the compose-rect fills, and the barriers.
+
+Later `GPU_MS` lighting, same run, no per-pass rows: the second printed frame is 52.6 ms, then 41.8, 36.7, 37.8, 34.3, and the band after that is 28.3–30.7 ms with the frame at about 30–31 ms. The opening span is already 26.6. Steady state sits 2–4 ms above it. The early spike is the in-frame cache round once cells exist. High leaves `cache_async` off and `cache_hz` at 0, so a due round runs inside the frame. The batch is 98,304 entries by 16 rays (1,572,864 rays) plus the relight. The opening frame dispatched an empty list. Those milliseconds will show up in `cache_rays_ms`, `cache_hit_shading_ms`, and `cache_round_ms` on the rows this fix writes. Pre-v3 master direct was 1.3 ms and the basic scene held 114 fps. This still hall is about 33 fps, and the lighting span is the frame.
+
+### Cuts, biggest first
+
+No shader change in this fix. Every cut below changes the picture or the variance. `REF_ERR` stays 0.05. Half-res reservoirs and one spatial neighbour already missed that gate on lavapipe (0.073 and 0.063).
+
+| Cut | What it is | Expected save on this 4070 frame | Quality risk against `REF_ERR` 0.05 |
+|---|---|---|---|
+| sh prep, stop walking every pixel | Pass 9. Clear 16 distance bins, then the maintenance compile of compose, then a drain of 16,384 threads. On this opening frame `compose_full` is set, so maintenance is one 8×8 group per block: 320×180 groups, 3.69 million pixels. Each pixel loads the surface and runs `lighting_screen_probe_indirect` (four world-cache corner finds, coverage atomics, an enqueue of an empty 12.5 cm texel, a lattice request). The colour is thrown away. The drain then fills the lattice slots and stores detail seeds. The drain is per cell. The 10.4 ms is the per-pixel walk. Compose does the same walk again, after the drain, to store the pixel. The drain has to sit between those two, so they cannot be one dispatch. A still frame with `still > 0`, compose reuse on, and 57,600 blocks under the 65,535 cap should switch both to the dirty block list. If the new rows keep sh prep near 10 ms, the list is still covering the picture and the cut is to skip a block whose texels did not change. | Up to about 10 ms on a full frame, and little once the dirty list is actually small. The corner finds are most of the cost; dropping only the discarded blend saves less than the whole 10.4. | A skipped block that did change keeps the old shade (`lighting_compose_cover`). That misses the picture gate. Not implemented. |
+| compose 6.2 ms | The picture store. Same full grid on this opening frame, same world-cache read, then the shoulder and the write. It has to run after the drain, because it loads the lattice the drain just filled. | Same shape as sh prep: up to about 6 ms while the frame is full, less on a real dirty list. | Skipping a dirty block fails the picture. Not implemented. |
+| direct, fewer candidates | `RESTIR_CANDIDATES` is 4. The 2.17 ms stamp is the initial pass with temporal fused into it. | About 1 ms if the candidate trace is most of that stamp. Temporal reuse does not shrink with the candidate count. | Variance goes up. Not measured against 0.05. Not implemented. |
+| direct, half-res reservoirs | `restir_resolution_scale` 2. Shade and its visibility ray stay at full resolution (2.94 ms). | Candidates plus spatial are 4.54 ms. A quarter of the reservoir pixels would take that toward about 1 ms, about 3 ms saved, if the cost scales. | Already measured. Resolution scale 2 missed the picture gate at 0.073. Not implemented. |
+| direct, cheaper spatial | Spatial is 2.37 ms and does not trace. One neighbour was the trial. | About 1 ms. Not the whole 2.37. | One neighbour missed the shadow row at 0.063. Not implemented. |
+| direct, visibility reuse | The shade dispatch is 2.94 ms and traces one visibility ray per pixel. | Some of that 2.94. The ray and the shade math are one stamp, so the split is not known. | The reservoir sample changes as history grows, so a reused bit is not the same picture. Not implemented. |
+| cache round once the cache is busy | The 52.6 ms spike and the 2–4 ms that remain in the steady band. In-frame, not async. | The steady band has about 3 ms over the opening span. The spike is larger and then goes away. The new CSV names the column. | Fewer rays or a smaller batch slows convergence and moves a still picture. Not implemented until the rows show which column grew. |
