@@ -33,11 +33,11 @@ pub fn specs() -> Vec<CommandSpec> {
         spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),
         spec("camera", "Set position [x,y,z], yaw, pitch, look_at [x,y,z], or path [[x,y,z,yaw,pitch],..] over frames. Returns the pose."),
         spec("time", "pause (bool), fixed_dt (s; 0 or real_time: true for wall time)."),
-        spec("step", "Advance a paused scene by frames (default 1) and reply after them. accepted is the present count when the step was taken. frame is accepted plus frames."),
-        spec("wait", "Reply after frames (default 1). Scene time runs unless paused. accepted is the present count when the wait was taken. frame is accepted plus frames. A status read from the previous command is one present behind accepted: that command returned while the next present was already open, and take() had already run."),
+        spec("step", "Advance a paused scene by frames (default 1) and reply after them."),
+        spec("wait", "Reply after frames (default 1). Scene time runs unless paused."),
         spec(
             "wait_settled",
-            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms, still_frames, frame, and settled_frame. frames counts presents until settle and does not include then_frames. then_frames (optional) draws that many presents after the settle present before replying; with path, width, and height it saves the last of those presents. settled_frame is the settle present. frame is the saved present, so the pixels and the id are that same present. A capture command sent after this reply cannot name that present: it has already been drawn.",
+            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms and still_frames.",
         ),
         spec(
             "view",
@@ -45,7 +45,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "capture",
-            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays. frame (optional) is a present index still to be drawn. The saved pixels are that present and the reply's frame is the same index. A frame already presented is an error. The targeted present with no pixels is an error and is not replaced by a later present.",
+            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays."),
         spec("luminance", "Mean, min and max linear luminance and black share of region [x,y,w,h] (0..1) in mode."),
@@ -112,7 +112,6 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
-    .chain(under_trusted_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
@@ -120,13 +119,6 @@ pub fn specs() -> Vec<CommandSpec> {
     .chain(host_specs())
     .chain(material_specs())
     .collect()
-}
-
-fn under_trusted_specs() -> Vec<CommandSpec> {
-    vec![spec(
-        "lighting_under_trusted",
-        "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
-    )]
 }
 
 fn reflection_specs() -> Vec<CommandSpec> {

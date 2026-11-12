@@ -219,60 +219,17 @@ fn emission_adds_and_is_not_reflected() {
     assert_eq!(shade(&m, c, [10.0; 3]), [4.0, 2.0, 1.0]);
 }
 
-/// The cases are unit vectors. f32 is the shader input. Normal numbers round
-/// the way a numeric cast does. Subnormals flush to signed zero, so this is
-/// not a bit-identical conversion. The bits stay off the lossy-cast ceiling:
-/// that ceiling is counted per file, and this file is new on the lighting-v3
-/// merge.
+/// The cases are unit vectors. f32 is the shader input.
+#[allow(
+    clippy::as_conversions,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the shader-form cases are f32; these vectors are already unit length"
+)]
 fn unit_f32(v: [f64; 3]) -> [f32; 3] {
-    [narrow_f32(v[0]), narrow_f32(v[1]), narrow_f32(v[2])]
-}
-
-fn narrow_f32(x: f64) -> f32 {
-    let bits = x.to_bits();
-    let Ok(sign) = u32::try_from((bits >> 63) & 1) else {
-        return 0.0;
-    };
-    let exp = (bits >> 52) & 0x7ff;
-    let frac = bits & ((1_u64 << 52) - 1);
-    if exp == 0 {
-        return f32::from_bits(sign << 31);
-    }
-    if exp == 0x7ff {
-        let payload = u32::try_from(frac >> 29).unwrap_or(0);
-        let quiet = if frac == 0 { 0 } else { payload | 0x0040_0000 };
-        return f32::from_bits((sign << 31) | (0xff << 23) | quiet);
-    }
-    let Ok(exp_i) = i32::try_from(exp) else {
-        return 0.0;
-    };
-    let exp32 = exp_i - 1023 + 127;
-    if exp32 >= 0xff {
-        return f32::from_bits((sign << 31) | (0xff << 23));
-    }
-    if exp32 <= 0 {
-        return f32::from_bits(sign << 31);
-    }
-    let Ok(mut exp_u) = u32::try_from(exp32) else {
-        return 0.0;
-    };
-    let Ok(mut mant) = u32::try_from(frac >> 29) else {
-        return 0.0;
-    };
-    let rest = frac & ((1_u64 << 29) - 1);
-    let halfway = 1_u64 << 28;
-    let round_up = rest > halfway || (rest == halfway && (mant & 1) == 1);
-    if round_up {
-        mant += 1;
-        if mant == 0x0080_0000 {
-            mant = 0;
-            exp_u += 1;
-            if exp_u >= 0xff {
-                return f32::from_bits((sign << 31) | (0xff << 23));
-            }
-        }
-    }
-    f32::from_bits((sign << 31) | (exp_u << 23) | mant)
+    [v[0] as f32, v[1] as f32, v[2] as f32]
 }
 
 /// f32 Filament / glTF shade, the same arithmetic as `pbr_brdf.glsl`:

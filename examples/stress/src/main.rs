@@ -216,27 +216,6 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
-  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). On by default. Off is the exact sum.
-                            The argument wins. The picture is the mean of the unbiased sample.
-  --restir-spatial-neighbors N
-                            spatial reservoirs merged per pixel, 0..16 (GENOS_RESTIR_SPATIAL_NEIGHBORS).
-                            0 skips the spatial pass. Default 4
-  --restir-spatial-radius N
-                            Chebyshev radius of that window, in reservoir pixels, 0..8
-                            (GENOS_RESTIR_SPATIAL_RADIUS). Default 2
-  --restir-resolution-scale N
-                            screen pixels along one edge of a reservoir cell, 1..4
-                            (GENOS_RESTIR_RESOLUTION_SCALE). Default 1 is one reservoir per pixel.
-                            2 is one reservoir per 2×2. Each screen pixel still traces its own shadow ray
-  --restir-candidates N     initial candidates per reservoir, 1..32 (GENOS_RESTIR_CANDIDATES).
-                            Default 4
-  --restir-spatial-checkerboard 0|1
-                            odd reservoir pixels copy the even neighbour's spatial sample
-                            (GENOS_RESTIR_SPATIAL_CHECKERBOARD). Default 0
-  --restir-split-passes 0|1 keep initial and temporal as two dispatches so each GPU stamp
-                            is one pass (GENOS_RESTIR_SPLIT_PASSES). Default 0 runs temporal
-                            in the initial invocation. restir_temporal is then empty and
-                            restir_initial is both passes
   --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
   --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)
   --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
@@ -246,8 +225,8 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
   --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
   --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
-                            freeze_probes, cells_only, none (GENOS_LIGHTING_TOGGLES)
-  --lighting-probe-tile N   deprecated alias, pixels 4..64, 0 auto (GENOS_LIGHTING_TILE)
+                            freeze_probes, none (GENOS_LIGHTING_TOGGLES)
+  --lighting-probe-tile N   screen probe tile pixels, 4..64, 0 auto (GENOS_LIGHTING_TILE)
   --lighting-denoise-dirty F  a-trous work-list fraction, 0..1 (GENOS_LIGHTING_ATROUS_DIRTY)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
@@ -355,13 +334,6 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
-    restir_di: Option<String>,
-    restir_spatial_neighbors: Option<String>,
-    restir_spatial_radius: Option<String>,
-    restir_resolution_scale: Option<String>,
-    restir_candidates: Option<String>,
-    restir_spatial_checkerboard: Option<String>,
-    restir_split_passes: Option<String>,
     /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
     block_ms: Option<Duration>,
     /// `--lifecycle-close-early`. The mirror applies when this stays false.
@@ -515,13 +487,6 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
-        restir_di: None,
-        restir_spatial_neighbors: None,
-        restir_spatial_radius: None,
-        restir_resolution_scale: None,
-        restir_candidates: None,
-        restir_spatial_checkerboard: None,
-        restir_split_passes: None,
         block_ms: None,
         close_early: false,
         lighting_experiments: Vec::new(),
@@ -636,13 +601,6 @@ fn options() -> Result<Options, String> {
             "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
             "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
             "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
-            "--restir-di" => opts.restir_di = Some(value()?),
-            "--restir-spatial-neighbors" => opts.restir_spatial_neighbors = Some(value()?),
-            "--restir-spatial-radius" => opts.restir_spatial_radius = Some(value()?),
-            "--restir-resolution-scale" => opts.restir_resolution_scale = Some(value()?),
-            "--restir-candidates" => opts.restir_candidates = Some(value()?),
-            "--restir-spatial-checkerboard" => opts.restir_spatial_checkerboard = Some(value()?),
-            "--restir-split-passes" => opts.restir_split_passes = Some(value()?),
             flag if lighting_experiment_flag(flag).is_some() => {
                 if let Some(i) = lighting_experiment_flag(flag) {
                     opts.lighting_experiments.push((i, value()?));
@@ -969,37 +927,6 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             "lamp_pick_unbiased",
             "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
         ),
-        (opts.restir_di.as_deref(), "restir_di", "GENOS_RESTIR_DI"),
-        (
-            opts.restir_spatial_neighbors.as_deref(),
-            "restir_spatial_neighbors",
-            "GENOS_RESTIR_SPATIAL_NEIGHBORS",
-        ),
-        (
-            opts.restir_spatial_radius.as_deref(),
-            "restir_spatial_radius",
-            "GENOS_RESTIR_SPATIAL_RADIUS",
-        ),
-        (
-            opts.restir_resolution_scale.as_deref(),
-            "restir_resolution_scale",
-            "GENOS_RESTIR_RESOLUTION_SCALE",
-        ),
-        (
-            opts.restir_candidates.as_deref(),
-            "restir_candidates",
-            "GENOS_RESTIR_CANDIDATES",
-        ),
-        (
-            opts.restir_spatial_checkerboard.as_deref(),
-            "restir_spatial_checkerboard",
-            "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
-        ),
-        (
-            opts.restir_split_passes.as_deref(),
-            "restir_split_passes",
-            "GENOS_RESTIR_SPLIT_PASSES",
-        ),
     ];
     for (value, key, var) in keys {
         if let Some(value) = value {
@@ -1034,10 +961,6 @@ fn lighting_text(renderer: &Renderer) -> String {
 fn run() -> Result<i32, String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
         gi_check::run(std::env::args().skip(2))?;
-        return Ok(0);
-    }
-    if std::env::args().nth(1).as_deref() == Some("room-blotch") {
-        gi_check::room_blotch::run(std::env::args().skip(2))?;
         return Ok(0);
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {

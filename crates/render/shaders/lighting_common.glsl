@@ -158,6 +158,12 @@ uint lighting_fill_at(uint h) {
 uint lighting_fill_light_at() {
     return lighting_fill_at(lighting_kept_hits());
 }
+void lighting_put_fill_light(uint h, vec3 light) {
+    work.v[lighting_fill_light_at() + h / 4u][h % 4u] = uintBitsToFloat(lighting_pack_rgb9e5(light));
+}
+vec3 lighting_fill_light(uint h) {
+    return lighting_unpack_rgb9e5(floatBitsToUint(work.v[lighting_fill_light_at() + h / 4u][h % 4u]));
+}
 // The views block the gather writes this frame (its picks), 0 or 1.
 uint lighting_view_next() {
     return 1u - (uint(work.v[lighting_change_at()].z) & 1u);
@@ -183,6 +189,13 @@ uint lighting_hit_at(uint ray) {
 uint lighting_rad_at(uint ray) {
     return lighting_hit_at(ray);
 }
+void lighting_put_kept_light(uint h, vec3 light) {
+    work.v[lighting_kept_light_at() + h / 4u][h % 4u] = uintBitsToFloat(lighting_pack_rgb9e5(light));
+}
+vec3 lighting_kept_light(uint h) {
+    return lighting_unpack_rgb9e5(floatBitsToUint(work.v[lighting_kept_light_at() + h / 4u][h % 4u]));
+}
+
 // A ray slot that already holds its final light: a miss takes the sky (x is -1 - r)
 // and a ray with no source is dark (x -0.5).
 // w: the share of the light from the suns and the sky, as luminance (S63A; a
@@ -381,6 +394,9 @@ uint lighting_cell_of(vec3 pos, vec3 n, vec3 d) {
 // (miss/hit, 2 % of its distance, its normal) marks the probe for full traces
 // over the next LIGHTING_STRATA frames (probe normal w = until frame).
 const bool LIGHTING_HOLD_STRATA = true;
+bool lighting_stratum_held(uint probe) {
+    return LIGHTING_HOLD_STRATA && work.v[lighting_stratum_at(probe, lighting_stratum())].w > 1.5;
+}
 uint lighting_hold_check_k(uint probe) {
     return lighting_hash(probe ^ lighting_hash(pc.params.w)) % lighting_rays();
 }
@@ -415,16 +431,37 @@ bool lighting_held_crosses(vec3 origin, vec3 dir, float t) {
     }
     return false;
 }
+bool lighting_stratum_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
+    vec4 sp = work.v[lighting_stratum_at(probe, s)];
+    n = work.v[lighting_stratum_at(probe, s) + 1u].xyz;
+    origin = sp.xyz + n * 0.02;
+    dir = lighting_stratum_dir(sp.xyz, n, k, s);
+    return sp.w > 0.5;
+}
 
-// Ray `ray`'s origin (just off its surface) and direction: this frame's light
-// cache rays. Probe rays are gone, so that range has no source. False when the
-// ray has no live source.
+// Ray k of probe's stratum s traced from its place now (a fill), when that stratum
+// is filled this frame.
+bool lighting_fill_ray(uint probe, uint s, uint k, out vec3 origin, out vec3 dir, out vec3 n) {
+    vec4 pp = work.v[lighting_probe_at(probe)];
+    n = work.v[lighting_probe_at(probe) + 1u].xyz;
+    origin = pp.xyz + n * 0.02;
+    dir = vec3(0.0, 1.0, 0.0);
+    if (!lighting_fill_on() || pp.w < 0.5 || s == lighting_stratum() || lighting_pick(probe, s) != 0u) {
+        return false;
+    }
+    dir = lighting_stratum_dir(pp.xyz, n, k, s);
+    return true;
+}
+
+// Ray `ray`'s origin (just off its surface) and direction: probe rays first, then
+// this frame's light cache rays. False when the ray has no live source.
 bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = vec3(0.0);
     dir = vec3(0.0, 1.0, 0.0);
     n = vec3(0.0, 1.0, 0.0);
     if (ray < lighting_probe_rays()) {
-        return false;
+        uint rays = lighting_rays();
+        return lighting_stratum_ray(ray / rays, lighting_stratum(), ray % rays, origin, dir, n);
     }
     uint r = ray - lighting_probe_rays();
     uint entry = r / LIGHTING_CACHE_RAYS;
@@ -475,4 +512,31 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     return true;
 }
 
+// Real SH, bands 0-2, at unit direction d.
+void lighting_sh9(vec3 d, out float y[9]) {
+    y[0] = 0.282095;
+    y[1] = 0.488603 * d.y;
+    y[2] = 0.488603 * d.z;
+    y[3] = 0.488603 * d.x;
+    y[4] = 1.092548 * d.x * d.y;
+    y[5] = 1.092548 * d.y * d.z;
+    y[6] = 0.315392 * (3.0 * d.z * d.z - 1.0);
+    y[7] = 1.092548 * d.x * d.z;
+    y[8] = 0.546274 * (d.x * d.x - d.y * d.y);
+}
 
+float lighting_sh_coef(uint probe, uint j, uint c) {
+    uint f = 3u * j + c;
+    return work.v[lighting_shf_at(probe) + f / 4u][f % 4u];
+}
+
+// Irradiance at normal n from probe's filtered (already cosine-convolved) SH.
+vec3 lighting_probe_irradiance(uint probe, vec3 n) {
+    float y[9];
+    lighting_sh9(n, y);
+    vec3 e = vec3(0.0);
+    [[dont_unroll]] for (uint j = 0u; j < 9u; j++) {
+        e += y[j] * vec3(lighting_sh_coef(probe, j, 0u), lighting_sh_coef(probe, j, 1u), lighting_sh_coef(probe, j, 2u));
+    }
+    return max(e, vec3(0.0));
+}

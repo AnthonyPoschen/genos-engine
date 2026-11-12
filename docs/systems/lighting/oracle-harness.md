@@ -24,16 +24,15 @@ JSON, one object per scenario) plus the pictures it scored.
 | `spin` | The box nearest the hall spinning at 2 rad/s, lamps on, at night | 240 |
 | `switch` | Dark room at midnight (lamps off for 10 s first), every lamp turns on in one frame | 8 dark + 120 |
 | `turn` | Camera turns 90 degrees in one second, then holds | 90 |
-| `slant`, `slant-day` | The box nearest the hall turned 0.6 rad (34 degrees) and held, seen close, lamps on at 22:00 (`slant`) or sky at 12:00 (`slant-day`). Traced 30, 120 and 300 frames after the turn (ADR 0039 stage 2: slanted surfaces). The scored middle half has more ground-plane pixels than turned faces; that count is not the share of the error | 120 |
 | `lamps-spin` | `lamps` profile: `spin` with 32 lamps in the hall section, a quarter of them moving | 240 |
 | `lamps-switch` | `lamps` profile: half of the 32 lamps lit for 10 s, then the other half turns on in one frame, a quarter moving | 8 + 120 |
 
-The main scene has 5 point lamps. Production pixels shade the ReSTIR reservoir
-at that count and at every other count (`restir_di` on). `LAMP_PICK_EXACT_LIT`
-(8) is the noise-gate few-lamp row, not a product fallback, so `spin` and
-`switch` grade the reservoir. The `lamps` profile raises the count. Its script
-logs `LAMP_COVER`, the number of lamps whose reach holds the subject. That
-number is an upper bound on `point_lit`. The script fails if it is 8 or less.
+The main scene has 5 point lamps. Every pixel then has at most 5 lit lamps and
+shades the exact sum (`LAMP_PICK_EXACT_LIT` is 8), so `spin` and `switch` never
+grade the random lamp path. The `lamps` profile exists to grade that path. Its
+script logs `LAMP_COVER`, the number of lamps whose reach holds the subject.
+That number is an upper bound on `point_lit`. The script fails if it is 8 or
+less.
 
 The `sun_speed` knob tops out at x64, so the script freezes the sun and steps
 `time_of_day` itself, one step per frame. Camera paths and the fixed 1/60 s
@@ -85,38 +84,6 @@ number is unchanged and `grid_worst` stays reported.
   per-texel count.
 * `switch` only: `frames_to_ref`, the first frame after the switch within
   1.1x of the settled error.
-* `blotch_mean`, `blotch_worst`: the gi-check still-frame blotch
-  (`gi_check/metrics.rs` `blotch`) on each traced frame: the error band blurred
-  s px minus blurred 6 s px, relative to the reference blurred s px plus 5% of
-  its mean. s is 4 px per 320 px of width (2 px at 160x90). It compares only
-  arm against arm at one size; the gi-check room numbers are 320x180 of a
-  640x360 run. With `GENOS_LIGHTING_TOGGLES=cells_only` it scores the 25 cm
-  cells alone (ADR 0039's cache-only blotch gate).
-* `energy_mean`, `energy_min`: the live picture's summed linear luminance over
-  the reference's, per traced frame (1.0 is no light lost or gained). Direct
-  light is in both, so it moves less than a bounce-only ratio. This is a
-  separate report from ADR 0039's cell-energy gate. That gate, and the lamp
-  timeline, are `examples/stress/tests/cache_energy.rs`: cell energy is the
-  summed 25 cm irradiance over the CPU bounce irradiance, and the bounce
-  picture over the bounce reference, at least 0.9. Linger is that bounce on
-  the 120th draw after the lamps go out, at most 0.05 of the lit bounce. Lag
-  is the same ratio on the 300th draw after the lamps come on, at least 0.9.
-  The picture and the cell dump are that draw. The test sets
-  `surface_cache.sh_cells` and checks it after `apply_env`. A trace above
-  0.02 noise is blocked. A trace stopped by the 600 s or 4096 spp cap is a
-  pass when the noise is already at or under 0.02.
-* `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`. For each traced
-  frame, crop the middle half, average 2×2 blocks, and take
-  `sum(|live - ref|) / (sum(ref) + 1e-6)` on sRGB-decoded Rec.709 luma of
-  `f*-live.png` and `f*-reference.png`. The mean of those frames, rounded to
-  4 decimals, is the gate. `proxy_abs_mean` in
-  `scripts/lighting/slant_mid_split.py` is the mean absolute luma.
-  `compare_linear` grades the path tracer's float radiance and is a separate
-  grade. Most pixels in that half are the ground plane around the box. That
-  figure is a pixel count. The split script recomputes the gate and attributes
-  its numerator. With the saved depth PNG, a wall is `other`. The pose
-  projection is the fallback when depth is missing, and a downward miss there
-  is class `floor`.
 * `lighting_ms_p50_lavapipe`: lavapipe timing, only useful run against run on
   the same machine.
 

@@ -131,15 +131,6 @@ uvec3 screen_gather(uvec2 p) {
     uint slot = lighting_cache_find_sized(pos, key_n, false, LIGHTING_SC_TEXEL, pos);
     // Nested, not `||`: a miss is ~0u, and the other side would index the cache
     // with it. glslc does not leave that read out.
-    uint age_slot = ~0u;
-    if (slot < LIGHTING_CACHE_SLOTS) {
-        if (ckeys.key[slot] != 0u && cache.v[3u * slot + 1u].w > 0.0) {
-            age_slot = slot;
-        }
-    }
-    if (lighting_shown_age()) {
-        lighting_shown_age_tally(pos, n, albedo, age_slot);
-    }
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return uvec3(0u);
     }

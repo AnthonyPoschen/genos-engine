@@ -180,44 +180,6 @@ fn turn(pass, hist, every) {
     }
 }
 
-// Slanted surfaces (ADR 0039 stage 2): the box nearest the lit hall, turned
-// 0.6 rad (34 degrees) and held, so its side faces are off every axis. Seen
-// close, at night under the hall lamps ("slant") and at noon under the sky
-// ("slant-day"). Measured 30, 120 and 300 frames after the turn.
-// slant_mid_err is the middle half of that picture. At this pose the half is
-// mostly the axis-aligned floor around the box; the turned faces are the
-// smaller part (scripts/lighting/slant_mid_split.py).
-fn slant(pass, dir, hour) {
-    knob("time_of_day", hour);
-    knob("sun", "freeze");
-    lamps_on(hour > 18.0 || hour < 6.0);
-    let boxes = objects().filter(|o| o.height <= 1.2 && o.size <= 1.5);
-    require(boxes.len() > 0, "the scene has a box");
-    let b = boxes[0];
-    let best = 1e9;
-    for o in boxes {
-        let dx = o.position[0] - 12.5;
-        let dz = o.position[2] - 20.0;
-        if dx * dx + dz * dz < best { best = dx * dx + dz * dz; b = o; }
-    }
-    let p = b.position;
-    camera(#{ position: [p[0] + 1.4, p[1] + 1.3, p[2] + 2.0], look_at: [p[0], p[1] + 0.35, p[2]] });
-    object(#{ index: b.index, yaw: 0.0, spin: 0.0 });
-    wait(120);
-    object(#{ index: b.index, yaw: 0.6, spin: 0.0 });
-    if pass == "temporal" {
-        frames(dir, 120, 1);
-    } else {
-        let at = 0;
-        for k in [30, 120, 300] {
-            wait(k - at);
-            at = k;
-            measure(dir, k);
-        }
-    }
-    object(#{ index: b.index, yaw: 0.0, spin: 0.0 });
-}
-
 let speeds = if PROFILE == "full" { [100.0, 10.0, 1.0] } else { [100.0, 10.0] };
 for speed in speeds {
     let name = `sun-x${speed.to_int()}`;
@@ -228,6 +190,4 @@ for speed in speeds {
 if ONLY.len() == 0 || "spin" in ONLY { spin(PASS, HIST, if "spin" in EVERY_FRAME { 1 } else { REF_EVERY }); }
 if ONLY.len() == 0 || "switch" in ONLY { light_switch(PASS); }
 if ONLY.len() == 0 || "turn" in ONLY { turn(PASS, HIST, if "turn" in EVERY_FRAME { 1 } else { REF_EVERY }); }
-if ONLY.len() == 0 || "slant" in ONLY { slant(PASS, "slant", 22.0); }
-if ONLY.len() == 0 || "slant-day" in ONLY { slant(PASS, "slant-day", 12.0); }
 log(`lighting_oracle ${PASS} ${PROFILE} done`);

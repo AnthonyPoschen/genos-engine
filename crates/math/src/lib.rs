@@ -17,7 +17,7 @@ mod vec;
 
 pub use mat::{Mat3, Mat4};
 pub use media::{
-    f32_from_f64, height_fog_density, height_fog_density_f32, height_optical_depth, height_optical_depth_f32,
+    height_fog_density, height_fog_density_f32, height_optical_depth, height_optical_depth_f32,
     homogeneous_inscatter, homogeneous_inscatter_f32, phase_hg, phase_hg_f32, transmittance,
     transmittance_f32, HEIGHT_FOG_HORIZONTAL_COS,
 };

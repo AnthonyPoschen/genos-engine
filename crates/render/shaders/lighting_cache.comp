@@ -11,25 +11,15 @@ void lighting_tex_put(uint slot, vec4 v) {
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
         return;
     }
-    vec4 o = cache.v[3u * slot + 2u];
     if (gstats.chg[31] != 0u) {
+        vec4 o = cache.v[3u * slot + 2u];
         lighting_chg(CHG_TEX_WRITE, 1u);
         lighting_chg(CHG_TEX_D0 + lighting_chg_bin(o.rgb, v.rgb), 1u);
     }
     cache.v[3u * slot + 2u] = v;
-    // A 25 cm world cell never reaches the SVGF push (that push returns when
-    // size > 0.2), and a direct light that stays zero never marks the pixel.
-    // Compose already recorded the blocks that read this slot. Mark those
-    // when the packed irradiance the picture shows has changed.
-    if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
-        && lighting_pack_rgb9e5(o.rgb) != lighting_pack_rgb9e5(v.rgb)) {
-        lighting_compose_mark_slot(slot);
-    }
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    // The neighbour walk is the gather dispatch before compose, not this
-    // relight. This pass does not touch the bin lists or the lattice table.
     if (gid >= LIGHTING_CACHE_BATCH) {
         return;
     }
@@ -119,7 +109,6 @@ void main() {
     if (lighting_sc_expired(last, shown)) {
         atomicAdd(gstats.freed, 1u);
         ckeys.key[slot] = 0u;
-        lighting_sc_forget(slot);
         cache.v[3u * slot + 1u] = vec4(0.0);
         cache.v[3u * slot + 2u] = vec4(0.0);
         return;
@@ -137,15 +126,6 @@ void main() {
     vec3 e = vec3(0.0);
     float es = 0.0;
     float el = 0.0;
-    // ADR 0039 stage 2 (lighting_sh_on): a 25 cm cell's SH-L1 from the same
-    // rays, unweighted by the cosine: sum L (band 0) and sum L dir (band 1).
-    bool sh = wrc_cell && lighting_sh_on();
-    vec3 s0 = vec3(0.0);
-    vec3 sx = vec3(0.0);
-    vec3 sy = vec3(0.0);
-    vec3 sz = vec3(0.0);
-    float best_l = -1.0;
-    uint best_k = 0u;
     [[dont_unroll]] for (uint k = 0u; k < run * LIGHTING_CACHE_RAYS; k++) {
         vec4 v = work.v[lighting_rad_at(first + k)];
         if (lighting_ray_none(v)) {
@@ -154,26 +134,15 @@ void main() {
         vec3 dir = lone ? lighting_dir(rkey, n, k % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS) : lighting_dir(rkey, n, lighting_sc_stratum(rkey, q0 * LIGHTING_CACHE_RAYS + k, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
         float c = max(dot(dir, n), 0.0);
         vec3 lk = lighting_ray_light(v);
-        // The check re-traces this seed. A rotating dark miss hides a lamp
-        // change, so the seed is the brightest ray of the relight.
-        float lum = dot(lk, vec3(0.2126, 0.7152, 0.0722));
-        if (LIGHTING_SC_ASVGF && !wrc_cell && lighting_world_mode() == 3u && lum >= best_l) {
-            best_l = lum;
-            best_k = k;
+        // S74A: the ray a later gradient check re-traces (same seed): one of
+        // the last quarter's, turning with the rounds.
+        if (LIGHTING_SC_ASVGF && !wrc_cell && lighting_world_mode() == 3u && k == (run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS) {
+            uint qk = (q0 + run - 1u) * LIGHTING_CACHE_RAYS + lighting_round() % LIGHTING_CACHE_RAYS;
+            cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(dot(lk, vec3(0.2126, 0.7152, 0.0722)), uintBitsToFloat(rkey), uintBitsToFloat(qk));
         }
         e += lk * c;
-        if (sh) {
-            s0 += lk;
-            sx += lk * dir.x;
-            sy += lk * dir.y;
-            sz += lk * dir.z;
-        }
         el += dot(lk, vec3(0.2126, 0.7152, 0.0722)) * c;
         es += min(max(v.w, 0.0), dot(lk, vec3(0.2126, 0.7152, 0.0722))) * c;
-    }
-    if (best_l >= 0.0) {
-        uint qk = q0 * LIGHTING_CACHE_RAYS + best_k;
-        cache.v[LIGHTING_SC_GRAD_AT + slot].yzw = vec3(best_l, uintBitsToFloat(rkey), uintBitsToFloat(qk));
     }
     float rays = float(run * LIGHTING_CACHE_RAYS);
     if (run > 1u) {
@@ -206,8 +175,6 @@ void main() {
     }
     e *= LIGHTING_TAU / rays;
     vec4 old = cache.v[3u * slot + 2u];
-    // The held harmonics follow the held mean's sun/sky rescale (ls below).
-    float sh_ls = 1.0;
     if (lighting_world_mode() == 3u) {
         // S63A: carry the history's sun/sky share to the sun and sky of now,
         // then blend this set's share into it.
@@ -222,7 +189,6 @@ void main() {
         float now = lighting_ls_now();
         cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);
         if (old.w > 0.5 && abs(ls - 1.0) > 1.0e-3) {
-            sh_ls = ls;
             old.rgb *= ls;
             cache.v[3u * slot + 2u].rgb = old.rgb;
             vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
@@ -282,55 +248,23 @@ void main() {
         } else if (!lighting_sc_light_quiet()) {
             wa = max(wa, LIGHTING_WRC_CHANGE_ALPHA * add);
         }
-        // A noted lamp (moved, recoloured, or out): each round's set carries
-        // the change one bounce further, so the cell takes that set whole.
-        // An average with the sets before keeps the old light. The drain flag
-        // is not a note. It also arms on a still cache, and one sample there
-        // is the cell blotch the world cache is read for.
-        if (lighting_lamp_noted()) {
+        // While a lamp change settles, each round's sets carry the change one
+        // bounce further and the old light leaves one bounce per round
+        // (lighting_lamp_settling): a cell takes the round's set whole. An
+        // average with the sets before keeps the old light at its weight, a
+        // gain near 1 per round where the light has gone.
+        if (lighting_lamp_settling()) {
             wa = 1.0;
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
-        if (sh) {
-            // Same weights as the mean (2 pi / rays a ray), same blend alpha.
-            float wr = LIGHTING_TAU / rays;
-            vec3 n0 = s0 * (wr * LIGHTING_SH_Y0);
-            vec3 nx = sx * (wr * LIGHTING_SH_Y1);
-            vec3 ny = sy * (wr * LIGHTING_SH_Y1);
-            vec3 nz = sz * (wr * LIGHTING_SH_Y1);
-            if (old.w >= LIGHTING_CACHE_HAS_W) {
-                vec3 o0;
-                vec3 ox;
-                vec3 oy;
-                vec3 oz;
-                lighting_sh_get(slot, o0, ox, oy, oz);
-                float a = min(wa, 1.0);
-                n0 = mix(o0 * sh_ls, n0, a);
-                nx = mix(ox * sh_ls, nx, a);
-                ny = mix(oy * sh_ls, ny, a);
-                nz = mix(oz * sh_ls, nz, a);
-            }
-            lighting_sh_put(slot, n0, nx, ny, nz);
-        }
         // S76B: a refresh is the cell's check (lighting_wrc_check_take).
         if (old.w >= 0.5) {
             lighting_wrc_check_take(slot, e, old.rgb);
         }
-        // The shown mean of a 25 cm or 50 cm patch is this write. The fine-texel
-        // stamp below is not reached. Compose does not read the word.
-        if (lighting_shown_age()) {
-            cache.v[LIGHTING_SC_SHOWN_AT + slot].x = uintBitsToFloat(max(lighting_frame(), 1u));
-        }
         return;
     }
     if (lighting_world_mode() == 3u) {
-        // The shown mean is committed on this path (a partial quarter returned
-        // above). The visit stamp in OBJ.y moved already; this frame is the
-        // commit. Off unless the age tally is on.
-        if (lighting_shown_age()) {
-            cache.v[LIGHTING_SC_SHOWN_AT + slot].x = uintBitsToFloat(lighting_frame());
-        }
         // Surface cache: the running mean of the sets so far (a short one under
         // change); w counts them, held at the cap once there.
         float t = old.w < 0.5 ? 0.0 : lighting_sc_count(slot);
@@ -375,16 +309,10 @@ void main() {
                 // and its own clamp of 8; it does not read
                 // surface_cache.firefly_sigma. A newborn starts at short = mean,
                 // inconsistency 1, vbbr 1, variance (0.15 * luma)^2 (S72T; the
-                // listing has no init, and variance 0 makes catch-up 1). While
-                // t < 16, k is at most 1/(t+1). The short mean and the long
-                // mean integrate the set. The listing's clamp dropped a small
-                // emitter's rare hits from the short mean, rho treated that
-                // as a change, and catch-up spent the long mean on one later
-                // set. The clamp still limits the stored variance. Catch-up
-                // divides by the open deviation, so that gap is not a change.
-                // A mover raises k to at least 0.5 and a lamp delta is capped
-                // at 0.9, on the A-SVGF path as well. A noted lamp takes the
-                // set whole after lambda. The drain flag is not a note.
+                // listing has no init, and variance 0 makes catch-up 1); while
+                // t < 16, k is at most 1/(t+1); a mover raises k to at least
+                // 0.5 and a lamp delta is capped at 0.9; A-SVGF mixes lambda
+                // when that path is on.
                 const vec3 msmel = vec3(0.299, 0.587, 0.114);
                 if (b.x <= 0.0) {
                     a = vec4(old.rgb, pow(0.15 * dot(old.rgb, msmel), 2.0) + 1.0e-8);
@@ -393,19 +321,10 @@ void main() {
                 float dev0 = sqrt(max(1.0e-5, a.w));
                 float sigma = lighting_sc_firefly_sigma();
                 vec3 y = e - max(e - (0.1 + a.rgb + sigma * dev0), vec3(0.0));
-                // The short mean learns the set. The clamp stays on the stored
-                // variance, so one spike does not set it. Catch-up uses the
-                // wider of that moment and the set's own, or a clamped miss
-                // looks like a change and the next set replaces the long mean.
-                float sb = 0.08;
-                float vr = 0.04;
-                vec3 sm = mix(a.rgb, e, sb);
-                float open_m = dot((e - a.rgb) * (e - sm), msmel);
-                vec3 ys = mix(a.rgb, y, sb);
-                float clip_m = dot((y - a.rgb) * (y - ys), msmel);
-                // Store the wider moment. The clamped one forgets a small
-                // emitter, and the next miss then looks like many deviations.
-                float var = mix(a.w, max(open_m, max(clip_m, 0.0)), vr);
+                vec3 d1 = y - a.rgb;
+                vec3 sm = mix(a.rgb, y, 0.08);
+                vec3 d2 = y - sm;
+                float var = mix(a.w, dot(d1 * d2, msmel), 0.04);
                 float dev = sqrt(max(1.0e-5, var));
                 float rho = dot(abs(old.rgb - sm), msmel) / max(1.0e-5, dev);
                 float inc = mix(b.y, rho, 0.08);
@@ -413,33 +332,31 @@ void main() {
                 float vb = mix(b.x, clamp(dot(msmel, 0.5 * sm / vec3(max(1.0e-5, dev))), 1.0 / 32.0, 1.0), 0.1);
                 float hint = mover2 ? 0.5 : 0.0;
                 hint = max(hint, LIGHTING_SC_LAMP_K * lighting_sc_lamp_change(slot));
-                // The drain flag is not a lamp change. It keeps the cache
-                // relighting. It does not discard a still texel's mean.
-                if (lighting_lamp_noted()) {
+                // Settling (as the cells above): the round's set whole.
+                if (lighting_lamp_settling()) {
                     hint = 1.0;
                 }
-                // S72T: the first 16 sets are at most the plain mean 1/(n+1).
-                // After that the listing's catch-up keeps integrating. The
-                // mover hint still raises k, including on the A-SVGF path.
-                bool young = t < 16.0;
-                bool noted = lighting_lamp_noted();
-                if (young) {
+                // S72T: while young (under 16 sets) never faster than the plain
+                // mean 1 / (n + 1), the least-noise estimate of a still signal
+                // (the hint still overrides it).
+                if (t < 16.0) {
                     k = min(k, 1.0 / (t + 1.0));
                 }
                 if (LIGHTING_SC_ASVGF) {
-                    // S74A: alpha' = (1 - lambda) alpha + lambda (A-SVGF).
+                    // S74A: alpha' = (1 - lambda) alpha + lambda (A-SVGF); the
+                    // hints only nominate checks (lighting_compact.comp).
                     float lam = lighting_sc_lambda(slot);
                     k = (1.0 - lam) * k + lam;
-                    if (young) {
-                        k = min(k, 1.0 / (t + 1.0));
+                    // Settling: the round's set whole here too. A-SVGF's lambda
+                    // ignored the hint, so a texel kept ~all its old light per
+                    // round and every WRC sample reading it drained ~2.5 %.
+                    if (hint >= 1.0) {
+                        k = 1.0;
                     }
-                }
-                if (noted) {
-                    k = 1.0;
                 } else {
                     k = max(k, hint >= 1.0 ? 1.0 : min(hint, 0.9));
                 }
-                vec3 m = mix(old.rgb, e, clamp(k, 0.0, 1.0));
+                vec3 m = mix(old.rgb, y, clamp(k, 0.0, 1.0));
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
                 cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(vb, inc, k, min(t + 1.0, 256.0));
                 lighting_tex_put(slot, vec4(m, min(t + 1.0, cap)));
@@ -517,11 +434,7 @@ void main() {
         if (hold && t >= cap - 0.5) {
             w = 1.0 / (k + 1.0);
         }
-        vec3 mean = old.rgb + (e - old.rgb) * w;
-        if (old.w < 0.5) {
-            vec4 sd = lighting_sc_seed_split() ? lighting_sc_seed(slot) : vec4(0.0);
-            mean = sd.w > 0.0 ? mix(sd.rgb, e, LIGHTING_SC_SEED_PRIOR) : e;
-        }
+        vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * w;
         float next = min(t + 1.0, hold ? LIGHTING_SC_HOLD * cap : cap);
         // Second pass: the first time a texel reaches the cap its sets drop to a
         // quarter (value kept), so the sets taken while the cache around it was

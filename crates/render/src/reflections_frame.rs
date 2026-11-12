@@ -67,9 +67,7 @@ struct ReflectionGpu {
     portal_layout: Handle,
     portal_set_layout: Handle,
     portal_pool: Handle,
-    /// One set per frame in flight. `upload_portal_link` rewrites binding 1 to
-    /// that flight's instance buffer; the other flight may still be drawing.
-    portal_sets: [Handle; 2],
+    portal_set: Handle,
     composite_pipe: Handle,
     composite_layout: Handle,
     composite_set_layout: Handle,
@@ -136,7 +134,7 @@ impl ReflectionGpu {
             portal_layout: std::ptr::null_mut(),
             portal_set_layout: std::ptr::null_mut(),
             portal_pool: std::ptr::null_mut(),
-            portal_sets: [std::ptr::null_mut(); 2],
+            portal_set: std::ptr::null_mut(),
             composite_pipe: std::ptr::null_mut(),
             composite_layout: std::ptr::null_mut(),
             composite_set_layout: std::ptr::null_mut(),
@@ -359,7 +357,7 @@ impl Gpu {
                     self.reflection.portal_layout,
                     0,
                     1,
-                    &self.reflection.portal_sets[self.flight],
+                    &self.reflection.portal_set,
                     0,
                     std::ptr::null(),
                 );
@@ -768,7 +766,7 @@ impl Gpu {
         self.update_buffer(dst, &bytes)?;
         self.buffer_barrier(self.reflection.link_buf.buffer, 0x1000, 0x8, 0x1000, 0x20);
         self.write_storage(
-            self.reflection.portal_sets[self.flight],
+            self.reflection.portal_set,
             1,
             &self.instance_bufs[self.flight],
         );
@@ -1288,19 +1286,12 @@ impl Gpu {
     fn make_portal_pipeline(&mut self) -> Result<(), String> {
         self.reflection.portal_set_layout = self.two_storage_layout(0x1)?;
         self.reflection.portal_layout = self.set_only_layout(self.reflection.portal_set_layout)?;
-        // Two sets, two storage buffers each.
-        self.reflection.portal_pool = self.desc_pool_sets(7, 4, 2)?;
-        for slot in 0..2 {
-            self.reflection.portal_sets[slot] = self.alloc_one(
-                self.reflection.portal_pool,
-                self.reflection.portal_set_layout,
-            )?;
-            self.write_storage(
-                self.reflection.portal_sets[slot],
-                0,
-                &self.reflection.link_buf,
-            );
-        }
+        self.reflection.portal_pool = self.desc_pool_kind(7, 2)?;
+        self.reflection.portal_set = self.alloc_one(
+            self.reflection.portal_pool,
+            self.reflection.portal_set_layout,
+        )?;
+        self.write_storage(self.reflection.portal_set, 0, &self.reflection.link_buf);
         self.reflection.portal_pipe = self.make_reflect_raster(
             self.reflection.portal_layout,
             self.reflection.clear_pass,
@@ -1671,49 +1662,6 @@ impl Gpu {
         Ok(handle)
     }
 
-    /// `descriptors` is the number of descriptors of `kind`. `sets` is `maxSets`.
-    fn desc_pool_sets(&self, kind: u32, descriptors: u32, sets: u32) -> Result<Handle, String> {
-        #[repr(C)]
-        struct Size {
-            kind: u32,
-            count: u32,
-        }
-        #[repr(C)]
-        struct PoolInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            max_sets: u32,
-            size_count: u32,
-            sizes: *const Size,
-        }
-        let size = Size {
-            kind,
-            count: descriptors,
-        };
-        let pool = PoolInfo {
-            s_type: 33,
-            next: std::ptr::null(),
-            flags: 0,
-            max_sets: sets,
-            size_count: 1,
-            sizes: &size,
-        };
-        let mut handle = std::ptr::null_mut();
-        unsafe {
-            check(
-                (self.fns.create_desc_pool)(
-                    self.device,
-                    &pool as *const PoolInfo as *const u8,
-                    std::ptr::null(),
-                    &mut handle,
-                ),
-                "reflection descriptor pool",
-            )?;
-        }
-        Ok(handle)
-    }
-
     fn desc_pool_mixed(&self) -> Result<Handle, String> {
         #[repr(C)]
         struct Size {
@@ -1981,31 +1929,27 @@ impl Gpu {
             preserve_count: 0,
             preserve: std::ptr::null(),
         };
-        // The composite pass begins on the scene framebuffer, so the
-        // attachments stay compatible with `Gpu::make_render_pass`
-        // (VUID-VkRenderPassBeginInfo-renderPass-00904). Compatibility is
-        // formats, samples, and layouts. These masks are the reflection
-        // helpers: they wait on the fragment-shader sample of the lit color,
-        // which the scene pass's transfer masks do not name.
-        let into = pass_sync::reflect_pass_in();
-        let out = pass_sync::reflect_pass_out();
+        // Same masks as `Gpu::make_render_pass`. The composite pass begins on
+        // that framebuffer, and this layer rejects a dependency mismatch
+        // (VUID-VkRenderPassBeginInfo-renderPass-00904). Depth write stays on
+        // a fragment-test stage, which is the stage that supports it.
         let deps = [
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: into.src_stage,
-                dst_stage: into.dst_stage,
-                src_access: into.src_access,
-                dst_access: into.dst_access,
+                src_stage: 0x1000 | 0x400 | 0x200 | 0x100,
+                dst_stage: 0x400 | 0x100,
+                src_access: 0x800 | 0x100 | 0x400 | 0x200,
+                dst_access: 0x80 | 0x100 | 0x200 | 0x400,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: out.src_stage,
-                dst_stage: out.dst_stage,
-                src_access: out.src_access,
-                dst_access: out.dst_access,
+                src_stage: 0x400 | 0x200,
+                dst_stage: 0x1000 | 0x100 | 0x400,
+                src_access: 0x100 | 0x400,
+                dst_access: 0x800 | 0x400 | 0x100,
                 flags: 0,
             },
         ];

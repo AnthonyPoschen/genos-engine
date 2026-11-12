@@ -167,19 +167,19 @@ fn presets_and_feature_off_skip_their_passes() {
             LightingPreset::Gi1Bounce.name(),
             LightingSettings::preset(LightingPreset::Gi1Bounce),
             [
-                "direct", "shadows", "compose", "compact", "cache", "cache_rays", "hit_light",
+                "direct", "shadows", "compose", "place", "trace", "gather", "filter",
             ]
             .as_slice(),
-            ["place", "trace", "gather", "filter", "atrous"].as_slice(),
+            ["compact", "cache", "cache_rays", "atrous", "hit_light"].as_slice(),
         ),
         (
             LightingPreset::Low.name(),
             LightingSettings::preset(LightingPreset::Low),
             [
-                "direct", "shadows", "compose", "compact", "cache", "cache_rays", "atrous", "hit_light",
+                "direct", "shadows", "compose", "place", "trace", "gather", "filter",
             ]
             .as_slice(),
-            ["place", "trace", "gather", "filter"].as_slice(),
+            ["atrous"].as_slice(),
         ),
         (
             LightingPreset::Medium.name(),
@@ -188,13 +188,17 @@ fn presets_and_feature_off_skip_their_passes() {
                 "direct",
                 "shadows",
                 "compose",
+                "place",
+                "trace",
+                "gather",
+                "filter",
                 "cache",
                 "cache_rays",
                 "atrous",
                 "hit_light",
             ]
             .as_slice(),
-            ["place", "trace", "gather", "filter"].as_slice(),
+            [].as_slice(),
         ),
         (
             LightingPreset::High.name(),
@@ -204,13 +208,17 @@ fn presets_and_feature_off_skip_their_passes() {
                 "shadows",
                 "compose",
                 "compact",
+                "place",
+                "trace",
+                "gather",
+                "filter",
                 "cache",
                 "atrous",
                 "cache_rays",
                 "hit_light",
             ]
             .as_slice(),
-            ["place", "trace", "gather", "filter"].as_slice(),
+            [].as_slice(),
         ),
     ];
     for (name, settings, run, zero) in cases {
@@ -235,8 +243,8 @@ fn presets_and_feature_off_skip_their_passes() {
         &world,
         &mut camera,
         "direct off",
-        &["compose", "hit_light", "cache", "cache_rays"],
-        &["direct", "place", "trace", "gather", "filter"],
+        &["compose", "place", "hit_light"],
+        &["direct"],
     );
 
     let mut off = LightingSettings::preset(LightingPreset::High);
@@ -287,8 +295,8 @@ fn presets_and_feature_off_skip_their_passes() {
         &world,
         &mut camera,
         "bounces 1",
-        &["direct", "shadows", "compose", "compact", "cache", "cache_rays", "atrous", "hit_light"],
-        &["place", "trace", "gather", "filter"],
+        &["direct", "shadows", "compose", "place", "trace", "gather", "filter"],
+        &["compact", "cache", "cache_rays", "atrous", "hit_light"],
     );
 
     let mut two = LightingSettings::preset(LightingPreset::High);
@@ -305,12 +313,16 @@ fn presets_and_feature_off_skip_their_passes() {
             "shadows",
             "compose",
             "compact",
+            "place",
+            "trace",
+            "gather",
+            "filter",
             "cache",
             "cache_rays",
             "atrous",
             "hit_light",
         ],
-        &["place", "trace", "gather", "filter"],
+        &[],
     );
 
     let mut off = LightingSettings::preset(LightingPreset::High);
@@ -335,8 +347,8 @@ fn presets_and_feature_off_skip_their_passes() {
         &world,
         &mut camera,
         "world cache off",
-        &["direct", "shadows", "compose"],
-        &["place", "trace", "gather", "filter", "cache", "cache_rays", "atrous", "hit_light", "compact"],
+        &["direct", "compose", "place", "cache_rays"],
+        &["atrous"],
     );
 
     let mut off = LightingSettings::preset(LightingPreset::High);
@@ -742,10 +754,6 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
         levels[i] = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
         dispatches[i] = saw.iter().sum();
     }
-    eprintln!(
-        "shadow luminance bounce 0/1/2 {:?} dispatches {:?}",
-        levels, dispatches
-    );
     assert!(
         levels[0] + 1.0 < levels[1] && levels[1] + 1.0 < levels[2],
         "shadow luminance bounce 0/1/2 {:?} dispatches {:?}",
@@ -753,8 +761,8 @@ fn bounce_counts_brighten_the_shadow_and_skip_work() {
         dispatches
     );
     assert!(
-        dispatches[0] < dispatches[1] && dispatches[1] <= dispatches[2],
-        "dispatches bounce 0/1/2 {:?} luminance {:?}. Bounce 2 reads the cache inside the same passes",
+        dispatches[0] < dispatches[1] && dispatches[1] < dispatches[2],
+        "dispatches bounce 0/1/2 {:?} luminance {:?}",
         dispatches,
         levels
     );
