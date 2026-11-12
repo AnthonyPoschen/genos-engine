@@ -63,6 +63,43 @@ A full shadow's direct light is stably black, so grain that remains there is the
 
 ## Probes
 
-`Renderer::read_cache_cells` is the cell table. `Renderer::read_cache_round` is live, claimed, the scheduler threshold, rays, due, waiting, and scouts. `Renderer::read_direct_samples` is the scratch reservoir and the visibility mean for up to eight pixels. `Renderer::lighting_restir_ms` is the five-pass split when `GENOS_GPU_TIMES` is on. Replicated state: none (the copies stay on the machine that shades). Authority: that machine. Prediction / rollback: none. Determinism: the same pose and the same frame count produce the same cells. Headless server: a server that does not shade leaves them uncomputed.
+`Renderer::read_cache_cells` is the cell table. `Renderer::read_cache_round` is live, claimed, the scheduler threshold, rays, due, waiting, and scouts. `Renderer::read_direct_samples` is the scratch reservoir and the visibility mean for up to eight pixels. `Renderer::lighting_restir_ms` is the five-pass mean when `GENOS_GPU_TIMES` is on. `Renderer::lighting_restir_last_ms` is the last collected frame of that split. `StoredCell::seed` and `seed_weight` are the texel's seed, apart from its own mean. Replicated state: none (the copies stay on the machine that shades). Authority: that machine. Prediction / rollback: none. Determinism: the same pose and the same frame count produce the same cells. Headless server: a server that does not shade leaves them uncomputed.
 
-Tests: `nearby_offscreen_world_cells_hold_samples_before_they_are_seen` and `shadow_and_lit_pixels_keep_a_visibility_mean` in `examples/stress/tests/offscreen_cells.rs`.
+Tests: `nearby_offscreen_world_cells_hold_samples_before_they_are_seen` and `shadow_and_lit_pixels_keep_a_visibility_mean` in `examples/stress/tests/offscreen_cells.rs`. `shadow_and_penumbra_pixels_trace_the_cache` and `a_turn_seeds_fine_texels_from_the_world_cell` in `examples/stress/tests/cache_grain.rs`.
+
+## Cache grain on a still hall
+
+Same pose, High, 320×180, 36 still frames. The presented picture is the measurement. `read_scene` returned a 320×180 buffer of zeros on every frame; the presented image did not, so the zeros are that readback and not the shade.
+
+Full shadow is pixel 31000, the wall at `(19.29, 2.19, 8.15)` facing +Z. Three lamps face it and all three are blocked. Penumbra is pixel 2568, the ceiling at `(11.81, 3.0, 22.29)` facing down. Five lamps face it, three visible and two blocked. The CPU path tracer (`radiance`, six bounces) is 0.176 at the shadow pixel and 1.536 at the penumbra pixel.
+
+The 12.5 cm texel is claimed on frame 0. Its stored point plus `0.02 * normal` is in front of the face (`z` 8.17 against the wall at 8.15) on every frame. It is not inside the wall, and neither is the stored point. The same is true of the ceiling texel. No ray deposit in this trace starts inside geometry. The still texels never store a seed: their own samples arrive first, so the seed record stays zero. The 25 cm cell is filled as well.
+
+The picture does not go black. At frame 16 every one of the 57600 pixels is above 0.05, and none of them falls below a fifth of that value over the next 19 frames.
+
+Settled picture, frames 12 through 35 (population variance):
+
+| Pixel | Presented mean | Presented variance | Min | Max | Path tracer | Own-mean variance |
+|---|---:|---:|---:|---:|---:|---:|
+| shadow 31000 | 0.215 | 0.000137 | 0.184 | 0.227 | 0.176 | 0.0097 |
+| penumbra 2568 | 1.542 | 0 | 1.542 | 1.542 | 1.536 | 0.024 |
+
+The penumbra picture matches the path tracer and does not move. The shadow picture is 22% above the path tracer and still climbing a few thousandths a frame; that climb is the variance, not a pixel dropping out. The texel's own mean moves more than the picture (0.69 at frame 12, 1.02 at frame 32, 0.93 at frame 35). The filtered field is what the pixel shows, and it holds the picture still. Nothing in this trace is a black deposit, a flipped normal, or a 12.5 cm texel swapping to an empty 25 cm cell.
+
+No shader change. A still frame on lavapipe does not contain the black flicker. The `|f640-f320|×8` speckle is this residual: the own mean is still moving after the picture has settled, and a later push of that mean is a small per-texel step.
+
+## Seed on the turn
+
+16 still frames, then the camera turns to the centroid of the 32 off-screen surfaces from the earlier fill check. 9 of the 32 land on screen. After 4 frames, 7 of those 9 have a 12.5 cm texel seeded from the parent (confidence −0.25, the detail mark). After 20 more frames those seven have weight 12. Two on-screen points never get a fine texel; their 25 cm cells stay at about 0.5.
+
+Among the seven that filled, the largest gap between the seed and the texel's own mean is 0.255 of the larger of the two (seed 2.37, own 1.89). The largest gap between the 25 cm cell and that own mean is 0.439 (cell 3.71, seed 2.98, own 2.08). The bilinear seed is closer to the fine texel than the single parent cell is. Replacing the seed with the parent cell would make the pop larger, not smaller.
+
+The 25 cm cells are already filled off-screen, and the ray budget is already saturated (threshold 63 in the earlier run). Creating 12.5 cm texels for every nearby surface in all directions, and tracing them before they are seen, is the way a turn would show no change. It is not a small change: those texels have to come out of the same ray ceiling, or the on-screen texels lose the samples that hold this picture still. Left as a proposal. The budget is unchanged.
+
+## 4070 pass profile
+
+Lavapipe milliseconds are not a 4070 result. `--profile-passes FILE` writes one CSV row per collected timestamp frame from the same GPU timestamps. A draw with no new sample does not add a row. The row is one frame behind the draw. `shade_visibility_ms` is the direct shade dispatch and includes its visibility ray. `cache_hit_shading_ms` is the hit-light dispatch. `cache_round_ms` is pass 6, the relight, the same work as the `cache` column of `LIGHTING_MS`. `sh_prep_ms` is pass 9. The cache bucket counts that prep with the relight, so the bucket is the sum of those two columns. `cache_rays_ms` is the ray dispatch of the round. `filter_ms` is a-trous. `direct_ms` is the direct bucket, the `light_px` column (candidates, temporal, spatial, and shade). Temporal is fused into the candidate stamp unless the passes are split, so that column stays near empty. An omitted `--gpu-times` turns timestamps on every frame. `GENOS_PROFILE_PASSES` is the path only when the argument was omitted.
+
+```
+cargo run --release -p genos-stress -- --proof --size 2560x1440 --preset high --frames 90 --still-boxes --freeze-sun --dynamic 0 --profile-passes ./genos-debug/passes.csv
+```

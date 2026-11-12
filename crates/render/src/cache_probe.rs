@@ -49,6 +49,10 @@ pub struct StoredCell {
     pub field_support: f32,
     /// Frame the filtered field was last pushed.
     pub field_stamp: u32,
+    /// Seed irradiance (`LIGHTING_SC_SPARSE_AT` `.y`, rgb9e5). Not the texel's own samples.
+    pub seed: [f32; 3],
+    /// Seed confidence (`SPARSE_AT` `.z`). Negative marks a detail seed. Zero means none.
+    pub seed_weight: f32,
 }
 
 /// What the hash window held for one [`CacheQuery`].
@@ -145,6 +149,8 @@ pub fn stored_cell(query: CacheQuery, hit: CacheHit, records: Option<[[f32; 4]; 
             field: [0.0; 3],
             field_support: 0.0,
             field_stamp: 0,
+            seed: [0.0; 3],
+            seed_weight: 0.0,
         };
     };
     StoredCell {
@@ -161,6 +167,8 @@ pub fn stored_cell(query: CacheQuery, hit: CacheHit, records: Option<[[f32; 4]; 
         field: unpack_rgb9e5(words[3][1].to_bits()),
         field_support: words[5][3],
         field_stamp: words[6][3].to_bits(),
+        seed: unpack_rgb9e5(words[5][1].to_bits()),
+        seed_weight: words[5][2],
     }
 }
 

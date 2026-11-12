@@ -667,6 +667,31 @@ impl Renderer {
         self.gpu.lighting_restir_ms()
     }
 
+    /// Last collected ReSTIR frame, in milliseconds.
+    ///
+    /// Same order as [`Self::lighting_restir_ms`]. One frame behind the draw
+    /// that just returned. Shade includes that dispatch's visibility ray.
+    pub fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_last_ms()
+    }
+
+    /// How many lighting timestamp frames have been collected.
+    ///
+    /// A profile row is one of these. The draw that observes a new count is
+    /// one frame behind the GPU work.
+    pub fn lighting_pass_samples(&self) -> u32 {
+        self.gpu.lighting.pass_samples
+    }
+
+    /// Last collected frame by dispatch pass id, in milliseconds.
+    ///
+    /// Index 6 is the cache relight (the `cache` column of `LIGHTING_MS`).
+    /// Index 9 is the SH prep, which the cache bucket counts with the relight.
+    /// One frame behind the draw that just returned.
+    pub fn lighting_pass_id_ms(&self) -> [f64; 10] {
+        self.gpu.lighting.pass_id_ms
+    }
+
     /// Surface-cache counters from the latest world round, or the frame copy
     /// when that round has not written yet.
     ///
@@ -4347,8 +4372,12 @@ impl Gpu {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
                 }
                 let mut shade_ms = 0.0;
+                let mut pass_id_ms = [0.0f64; 10];
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                    if pass < pass_id_ms.len() {
+                        pass_id_ms[pass] += ms;
+                    }
                     if times.print && pass < times.lighting.len() {
                         times.lighting[pass] += ms;
                     }
@@ -4412,6 +4441,7 @@ impl Gpu {
                             0.0
                         };
                         let frame_parts = [parts[0], parts[1], parts[2], prepare_ms, shade_ms];
+                        self.lighting.restir_ms_last = frame_parts;
                         for (i, ms) in frame_parts.into_iter().enumerate() {
                             self.lighting.restir_ms_sum[i] += ms;
                         }
@@ -4439,6 +4469,8 @@ impl Gpu {
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                self.lighting.pass_id_ms = pass_id_ms;
+                self.lighting.pass_samples = self.lighting.pass_samples.saturating_add(1);
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);

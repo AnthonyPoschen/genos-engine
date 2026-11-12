@@ -414,6 +414,13 @@ pub(crate) struct Lighting {
     /// dispatch, so its visibility ray is inside that number.
     restir_ms_sum: [f64; 5],
     restir_ms_frames: u32,
+    /// Last collected frame, same order as `restir_ms_sum`. Zero until one lands.
+    restir_ms_last: [f64; 5],
+    /// How many frames have written `last_ms`. The CSV writes one row per step.
+    pass_samples: u32,
+    /// Last collected frame by dispatch pass id. Index 6 is the cache relight,
+    /// index 9 is the SH prep. The cache bucket sums both.
+    pass_id_ms: [f64; 10],
     /// Flight slot whose host stats were copied on the last submitted frame.
     stats_slot: usize,
     /// Bloom plus the display pass. Zero when timestamps are off.
@@ -686,6 +693,9 @@ impl Default for Lighting {
             last_dispatches: [0; BUCKETS],
             restir_ms_sum: [0.0; 5],
             restir_ms_frames: 0,
+            restir_ms_last: [0.0; 5],
+            pass_samples: 0,
+            pass_id_ms: [0.0; 10],
             stats_slot: 0,
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
@@ -6281,6 +6291,14 @@ impl Gpu {
             out.push(crate::cache_probe::stored_cell(*query, hit, records));
         }
         Ok(out)
+    }
+
+    /// Last collected ReSTIR frame, same order as [`Self::lighting_restir_ms`].
+    ///
+    /// One frame behind the draw that just returned. Zeros until a timestamped
+    /// frame lands. Shade includes that dispatch's visibility ray.
+    pub(crate) fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.lighting.restir_ms_last
     }
 
     /// Mean of the collected ReSTIR stamps. Zeros until a timestamped frame lands.

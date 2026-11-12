@@ -77,6 +77,12 @@ On the existing command catalogue. `genos-lighting` binds port 8766. `--mcp-port
 
 GPU times need `--gpu-times N` (or `GENOS_GPU_TIMES` when that argument was omitted) before the renderer opens. The names are `compact`, `place`, `trace`, `direct`, `gather`, `filter`, `cache`, `compose`, `atrous`, `cache_rays`, `hit_light`, `shadows`.
 
+`--profile-passes FILE` writes that breakdown as CSV, one row per collected timestamp frame. A draw that has no new sample adds nothing. `GENOS_PROFILE_PASSES` is the same path and applies only when the argument was omitted. When `--gpu-times` was also omitted, the flag turns timestamps on every frame. Columns: `candidates_ms`, `temporal_ms`, `spatial_ms`, `prepare_ms`, `shade_visibility_ms` (the direct shade dispatch, visibility ray included), `cache_hit_shading_ms`, `cache_round_ms` (pass 6, the relight, the `cache` column of `LIGHTING_MS`), `sh_prep_ms` (pass 9; the cache bucket is the relight plus this prep), `cache_rays_ms`, `compose_ms`, `filter_ms` (a-trous), `direct_ms` (the direct bucket, the `light_px` column: candidates, temporal, spatial, and shade). The row is one frame behind the draw. Lavapipe milliseconds are not a 4070 result.
+
+```
+cargo run --release -p genos-stress -- --proof --size 2560x1440 --preset high --frames 90 --still-boxes --freeze-sun --dynamic 0 --profile-passes ./genos-debug/passes.csv
+```
+
 ## Owner commands
 
 Run these on the owner machine (RTX 4070, 1920×1080, the moving stress scene). They are not the lavapipe check. A flag wins over the matching `GENOS_LIGHTING_*` variable. An omitted flag leaves that variable in effect. `make stress` is `cargo run --release -p genos-stress`. The `atrous` column is the one that should move. Lavapipe does not time the GPU. High's kernel is the full-resolution scalar wavelet, launched over the picture.
