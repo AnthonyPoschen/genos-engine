@@ -1,5 +1,4 @@
 #![cfg_attr(test, expect(clippy::as_conversions, reason = "pixel index is width * height * 4"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "a mean over the frame"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
 //! A still hall keeps converging.
@@ -136,8 +135,8 @@ fn a_still_hall_keeps_converging() {
     renderer.reset_lighting_cache();
     let (stage, camera) = hall();
     let reference = reference_plane(renderer.width() as usize, renderer.height() as usize);
-    let mut at_n = Vec::new();
-    let mut at_2n = Vec::new();
+    let mut early_picture = Vec::new();
+    let mut late_picture = Vec::new();
     let mut rays = Vec::new();
     for frame in 0..N * 2 {
         let pixels = draw(window, renderer, &stage.world, &camera);
@@ -155,22 +154,22 @@ fn a_still_hall_keeps_converging() {
             );
         }
         if frame + 1 == N {
-            at_n = pixels;
+            early_picture = pixels;
         } else if frame + 1 == N * 2 {
-            at_2n = pixels;
+            late_picture = pixels;
         }
     }
-    let error_n = error_vs_reference(&at_n, &reference);
-    let error_2n = error_vs_reference(&at_2n, &reference);
+    let early_error = error_vs_reference(&early_picture, &reference);
+    let late_error = error_vs_reference(&late_picture, &reference);
     let min_rays = rays.iter().copied().min().unwrap_or(0);
     eprintln!(
-        "still converge: error at {N} {error_n:.4} at {} {error_2n:.4} drop {:.4} min cache rays {min_rays}",
+        "still converge: error at {N} {early_error:.4} at {} {late_error:.4} drop {:.4} min cache rays {min_rays}",
         N * 2,
-        error_n - error_2n
+        early_error - late_error
     );
     assert!(
-        error_2n < error_n - MIN_DROP,
-        "a still hall stopped converging (error {error_n:.4} at {N} to {error_2n:.4} at {}, need a drop of {MIN_DROP})",
+        late_error < early_error - MIN_DROP,
+        "a still hall stopped converging (error {early_error:.4} at {N} to {late_error:.4} at {}, need a drop of {MIN_DROP})",
         N * 2
     );
     assert!(
